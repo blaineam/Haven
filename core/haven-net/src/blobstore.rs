@@ -226,12 +226,11 @@ impl BlobServer {
     /// is the local directory blobs live in (created if missing).
     pub async fn spawn(secret: [u8; 32], root: PathBuf) -> Result<Arc<Self>> {
         std::fs::create_dir_all(&root).map_err(|e| anyhow!("create store {}: {e}", root.display()))?;
+        // Stock transport (see Node::spawn): IP transport ENABLED so a same-LAN peer fetches blobs
+        // over a direct local path instead of bouncing through the DERP cloud.
         let endpoint = Endpoint::builder(N0)
             .secret_key(SecretKey::from_bytes(&secret))
             .alpns(vec![BLOB_ALPN.to_vec()])
-            .path_selector(std::sync::Arc::new(crate::RelayPreferringSelector))
-            // RELAY-ONLY (see Node::spawn): no IP transport → no hole-punch → no dropped blob datagrams.
-            .clear_ip_transports()
             .bind()
             .await
             .ah()?;
@@ -553,10 +552,9 @@ impl BlobClient {
         let endpoint = Endpoint::builder(N0)
             .secret_key(SecretKey::from_bytes(&secret))
             .alpns(vec![])
-            // Enable QUIC multipath (min 13) — without it iroh's path manager drops datagrams over a relay
-            // path (MultipathNotNegotiated), the cross-network relay-GET timeout. Matches Node::spawn.
+            // Multipath on so a connection can hold a relay + a direct path at once. IP transport left
+            // ENABLED (no clear_ip_transports) so a same-LAN blob fetch takes the direct local path.
             .transport_config(iroh::endpoint::QuicTransportConfig::builder().max_concurrent_multipath_paths(16).build())
-            .path_selector(std::sync::Arc::new(crate::RelayPreferringSelector))
             .bind()
             .await
             .ah()?;

@@ -15,48 +15,9 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use data_encoding::BASE32_NOPAD;
 use iroh::{
-    endpoint::{
-        presets::N0,
-        transports::{PathSelection, PathSelectionContext, PathSelector},
-        Connection, Endpoint,
-    },
+    endpoint::{presets::N0, Connection, Endpoint},
     EndpointAddr, EndpointId, SecretKey,
 };
-
-/// A [`PathSelector`] that PINS a connection to its relay (DERP) path whenever one is open, overriding
-/// iroh's default "prefer the lowest-RTT direct path" policy. Two peers behind ONE NAT on isolated subnets
-/// (e.g. a router's main + guest SSIDs, or many cellular/CGNAT setups) can reach each other ONLY via the
-/// DERP relay: every direct hole-punch candidate — cross-subnet LAN, the hairpin public IP, a Tailscale
-/// address — is unreachable. iroh still TRIES to upgrade the working relay path to a direct one; the upgrade
-/// fails and, because multipath isn't negotiated, it tears the WHOLE connection down as TimedOut mid-stream
-/// (tiny messaging streams finish before the ~2s hole-punch, so they survive; a blob/video transfer needs
-/// the path to live longer, so it dies — exactly the "posts sync but videos don't" symptom, proven by an
-/// iroh connection trace showing path::open Relay → do_holepunching → conn::closed TimedOut). Pinning to the
-/// relay path keeps the connection on the transport that actually works. Falls back to lowest-RTT when no
-/// relay path is open (e.g. genuine same-LAN peers). Trades some direct-path speed for cross-NAT reliability.
-#[derive(Debug)]
-pub(crate) struct RelayPreferringSelector;
-
-impl PathSelector for RelayPreferringSelector {
-    fn select(&self, ctx: &PathSelectionContext<'_>) -> PathSelection {
-        let mut selection = PathSelection::none();
-        // First choice: a relay path, if any is open — never flap off it to a doomed direct candidate.
-        if let Some(p) = ctx.paths().find(|p| p.network_path().is_relay()) {
-            selection.set(&p);
-            return selection;
-        }
-        // No relay path: fall back to the lowest-RTT open path (paths without stats are still forming).
-        if let Some(p) = ctx
-            .paths()
-            .filter_map(|p| p.stats().map(|s| (p, s.rtt)))
-            .min_by_key(|(_, rtt)| *rtt)
-            .map(|(p, _)| p)
-        {
-            selection.set(&p);
-        }
-        selection
-    }
-}
 
 pub mod blobstore;
 pub mod httprelay;
@@ -119,20 +80,21 @@ impl Node {
         // relay path. That made every cross-network relay GET 30s-time-out (proven by iroh trace) even though
         // the DERP relay was forwarding both ways. Enabling multipath (min 13) lets path negotiation succeed
         // so the blob request actually goes out. Both peers must enable it — they do, via this one spawn path.
+        // Stock iroh transport: the IP/UDP transport is ENABLED, so peers on the same LAN connect
+        // DIRECTLY (fast, no cloud round-trip), and iroh's default path selector prefers the
+        // lowest-RTT path (the direct LAN one when it exists), falling back to the DERP relay only
+        // when no direct path can form. We previously forced relay-only (`clear_ip_transports` +
+        // a relay-pinning PathSelector) to dodge the noq/iroh multipath datagram-drop between two
+        // devices on ISOLATED subnets — but that also disabled direct LAN for EVERY pair, so two
+        // phones on the same wifi still bounced through a DERP relay in the cloud (and Android↔iOS,
+        // which can't use Apple's Multipeer LAN mesh, had NO local path at all). Media no longer
+        // rides this path (it uses the relay HTTP / S3 transports), so cross-NAT reliability no
+        // longer depends on suppressing direct paths — keep them, and let the LAN be the LAN.
+        // Multipath stays on (min 13) so a connection can hold a relay + a direct path at once.
         let endpoint = Endpoint::builder(N0)
             .secret_key(SecretKey::from_bytes(&secret))
             .alpns(vec![ALPN.to_vec(), blobstore::BLOB_ALPN.to_vec()])
             .transport_config(iroh::endpoint::QuicTransportConfig::builder().max_concurrent_multipath_paths(16).build())
-            .path_selector(std::sync::Arc::new(RelayPreferringSelector))
-            // RELAY-ONLY: remove the IP/UDP transport entirely. Two peers behind one NAT on isolated subnets
-            // can only reach each other via DERP; iroh would otherwise open the working relay path, try to
-            // hole-punch a direct path to unreachable candidates, fail multipath negotiation, and DROP the
-            // outbound blob datagrams (`RemoteStateActor inbox dropped message msg=SendDatagram` +
-            // `MultipathNotNegotiated`, proven by trace) — so posts (tiny streams) sync but videos die. With
-            // no IP transport there are NO direct candidates, NO hole-punch, NO multipath churn: every packet
-            // rides the DERP relay (a separate transport that stays up). Nearby self-sync uses the Multipeer
-            // mesh, not this, so LAN speed is unaffected. Trades direct-path speed for cross-NAT reliability.
-            .clear_ip_transports()
             .bind()
             .await
             .ah()?;

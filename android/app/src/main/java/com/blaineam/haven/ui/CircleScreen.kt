@@ -847,20 +847,41 @@ private fun CircleSwitcher(activeId: String, circlesVersion: Int) {
     }
 }
 
-/** Live connection status: online (iroh) + relay (mailbox) dots, like the iOS connection chips. */
+/** Live connection status: online (iroh) + every active transport (relay / nearby) + a live "syncing"
+ *  pulse when media is actively transferring. Tap to open the sync-activity detail sheet. Mirrors the
+ *  iOS connection chips but surfaces nearby + active sync, which were previously invisible. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ConnectionDot() {
     val online by HavenNet.internetActive
     val started by HavenNet.started
     val relay by HavenNet.relayActive
+    val nearby = SyncMetrics.nearbyPeers.intValue
+    val pending = SyncMetrics.mediaPending.intValue
+    var showDetail by remember { mutableStateOf(false) }
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
-        modifier = Modifier.padding(end = 8.dp)) {
+        modifier = Modifier.clip(RoundedCornerShape(50)).clickable { showDetail = true }.padding(start = 6.dp, end = 8.dp, top = 4.dp, bottom = 4.dp)) {
         // The node being up == connected to the iroh network; "Connecting" only during startup.
         val color = if (started) Color(0xFF34D399) else Color(0xFFF59E0B)
         Box(Modifier.size(8.dp).clip(CircleShape).background(color))
-        Text(if (started) (if (online || relay) "Connected" else "Online") else "Connecting",
+        Text(if (started) (if (online || relay || nearby > 0) "Connected" else "Online") else "Connecting",
             color = HavenTheme.textSecondary, fontSize = 11.sp)
         if (relay) Text("· Relay", color = Color(0xFF34D399), fontSize = 11.sp)
+        if (nearby > 0) Text("· Nearby", color = Color(0xFF34D399), fontSize = 11.sp)
+        // LIVE active-sync indicator — a small spinner + count whenever media is still transferring.
+        if (pending > 0) {
+            androidx.compose.material3.CircularProgressIndicator(
+                color = Color(0xFFF59E0B), strokeWidth = 1.5.dp,
+                modifier = Modifier.size(11.dp))
+            Text("Syncing $pending", color = Color(0xFFF59E0B), fontSize = 11.sp)
+        }
+    }
+    if (showDetail) {
+        ModalBottomSheet(
+            onDismissRequest = { showDetail = false },
+            sheetState = rememberModalBottomSheetState(),
+            containerColor = HavenTheme.card,
+        ) { SyncDetailContent() }
     }
 }
 
@@ -918,11 +939,20 @@ private fun SyncDetailContent() {
     val out = SyncMetrics.mediaOut.intValue
     val inn = SyncMetrics.mediaIn.intValue
     val pending = SyncMetrics.mediaPending.intValue
-    val nearby = HavenNet.nearbyActive()
+    val nearbyPeers = SyncMetrics.nearbyPeers.intValue
+    val relay by HavenNet.relayActive
+    val online by HavenNet.internetActive
+    val nearbyState = HavenNet.nearbyState()
     Column(
         Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp, top = 4.dp),
     ) {
         Text("Sync activity", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.size(6.dp))
+        // The live headline: are we actively moving media right now, or idle/synced?
+        Text(
+            if (pending > 0) "Syncing $pending item${if (pending == 1) "" else "s"}…" else "Up to date",
+            color = if (pending > 0) Color(0xFFF59E0B) else Color(0xFF34D399), fontSize = 13.sp,
+        )
         Spacer(Modifier.size(14.dp))
         SyncDetailRow(Icons.Filled.ArrowUpward, "$out media sent")
         Spacer(Modifier.size(10.dp))
@@ -932,15 +962,31 @@ private fun SyncDetailContent() {
         Spacer(Modifier.size(14.dp))
         androidx.compose.material3.HorizontalDivider(color = HavenTheme.cardBorder)
         Spacer(Modifier.size(14.dp))
+        Text("Transports", color = HavenTheme.textSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.size(8.dp))
+        // Which paths are actually carrying this device's sync right now.
         SyncDetailRow(
-            if (nearby) Icons.Filled.Wifi else Icons.Filled.WifiOff,
-            if (nearby) "Nearby devices: connected" else "Nearby devices: not connected",
-            tint = if (nearby) HavenTheme.pink else HavenTheme.textSecondary,
-            valueColor = if (nearby) Color.White else HavenTheme.textSecondary,
+            if (online || relay) Icons.Filled.Wifi else Icons.Filled.WifiOff,
+            when { relay -> "Relay / mailbox: active"; online -> "Internet (iroh): connected"; else -> "Internet: connecting…" },
+            tint = if (online || relay) HavenTheme.pink else HavenTheme.textSecondary,
+            valueColor = if (online || relay) Color.White else HavenTheme.textSecondary,
+        )
+        Spacer(Modifier.size(10.dp))
+        val (nearbyIcon, nearbyText) = when (nearbyState) {
+            HavenNet.NearbyState.CONNECTED -> Icons.Filled.Wifi to "Nearby: connected ($nearbyPeers device${if (nearbyPeers == 1) "" else "s"})"
+            HavenNet.NearbyState.SEARCHING -> Icons.Filled.Wifi to "Nearby: searching… (Android-to-Android on this network)"
+            HavenNet.NearbyState.NO_PERMISSION -> Icons.Filled.WifiOff to "Nearby: needs Bluetooth/Nearby permission"
+            HavenNet.NearbyState.OFF -> Icons.Filled.WifiOff to "Nearby: off (enable in You ▸ Settings)"
+        }
+        SyncDetailRow(
+            nearbyIcon, nearbyText,
+            tint = if (nearbyState == HavenNet.NearbyState.CONNECTED) HavenTheme.pink else HavenTheme.textSecondary,
+            valueColor = if (nearbyState == HavenNet.NearbyState.CONNECTED) Color.White else HavenTheme.textSecondary,
         )
         Spacer(Modifier.size(14.dp))
         Text(
-            "Updates live while your devices and circles sync.",
+            "Nearby is a direct phone-to-phone link between Android devices; iPhone/Mac use their own " +
+            "nearby system, so cross-platform sync goes over the relay. Updates live.",
             color = HavenTheme.textSecondary, fontSize = 12.sp,
         )
     }

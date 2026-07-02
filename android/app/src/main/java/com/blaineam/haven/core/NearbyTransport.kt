@@ -70,6 +70,7 @@ object NearbyTransport {
     fun stop() {
         client?.apply { stopAdvertising(); stopDiscovery(); stopAllEndpoints() }
         endpoints.clear()
+        SyncMetrics.setNearbyPeers(0)
         active = false
         client = null
     }
@@ -95,10 +96,14 @@ object NearbyTransport {
         override fun onConnectionResult(endpointId: String, resolution: ConnectionResolution) {
             if (resolution.status.isSuccess) {
                 endpoints.add(endpointId)
+                SyncMetrics.setNearbyPeers(endpoints.size)   // observable → the connection chip lights up
                 HavenNet.onNearbyConnected()   // say hello over the new link
             }
         }
-        override fun onDisconnected(endpointId: String) { endpoints.remove(endpointId) }
+        override fun onDisconnected(endpointId: String) {
+            endpoints.remove(endpointId)
+            SyncMetrics.setNearbyPeers(endpoints.size)
+        }
     }
 
     private val payloads = object : PayloadCallback() {

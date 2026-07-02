@@ -46,10 +46,17 @@ object SyncMetrics {
     val mediaOut = mutableIntStateOf(0)       // media items served/pushed to a requester
     val mediaIn = mutableIntStateOf(0)        // media items fully received + stored
     val mediaPending = mutableIntStateOf(0)   // media refs still missing locally
+    val nearbyPeers = mutableIntStateOf(0)    // connected nearby-mesh peers (Android↔Android)
+    // Bumped on any sync I/O so the UI can show a LIVE "syncing now" pulse even between the
+    // coarse pending/in/out counters — the "something is actively happening" signal.
+    val lastActivityMs = mutableStateOf(0L)
 
-    fun incOut() { mediaOut.intValue += 1 }
-    fun incIn() { mediaIn.intValue += 1 }
+    fun incOut() { mediaOut.intValue += 1; poke() }
+    fun incIn() { mediaIn.intValue += 1; poke() }
     fun setPending(n: Int) { mediaPending.intValue = n }
+    fun setNearbyPeers(n: Int) { nearbyPeers.intValue = n }
+    /** Mark that sync I/O just happened (a put/get/list/chunk) — drives the live activity pulse. */
+    fun poke() { lastActivityMs.value = System.currentTimeMillis() }
 }
 
 /**
@@ -854,6 +861,15 @@ object HavenNet : InboundListener {
     fun nearbyActive(): Boolean = NearbyTransport.active
     /** The user's persisted intent — default ON for a P2P app. */
     fun nearbyWanted(): Boolean = nearbyPrefs().getBoolean("on", true)
+
+    /** Honest nearby-mesh state for the sync UI, so the user knows WHY it is / isn't connected. */
+    enum class NearbyState { CONNECTED, SEARCHING, NO_PERMISSION, OFF }
+    fun nearbyState(): NearbyState = when {
+        SyncMetrics.nearbyPeers.intValue > 0 -> NearbyState.CONNECTED
+        !nearbyWanted() -> NearbyState.OFF
+        !NearbyTransport.hasPermissions(appContext) -> NearbyState.NO_PERMISSION
+        else -> NearbyState.SEARCHING
+    }
     /** On launch: auto-start Nearby if wanted (default) and the perms are already granted. */
     fun restoreNearbyIfWanted() {
         if (nearbyWanted() && NearbyTransport.hasPermissions(appContext)) runCatching { NearbyTransport.start(appContext) }

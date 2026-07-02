@@ -31,6 +31,21 @@ path; S3 stays as the rarely-needed BYO-bucket option (iOS/macOS, Android, deskt
   the zero-config default so most users never touch S3.
 
 ### Fixed
+- **Stop re-uploading media a relay already has.** The periodic (~2 min) media backfill re-enqueued
+  every blob a device holds and, on Apple, only deduped via a live `has()`/`head()` network round-trip
+  — which fails over a flaky transport and triggered a full re-upload every cycle; Android had no
+  dedup at all and re-`put` every blob unconditionally. Now a **persistent per-(relay, ref) ledger**
+  (`MediaBackupLedger` on Apple, a prefs-backed set on Android) records confirmed uploads. Since media
+  keys are content-addressed (`haven/media/<ref>`) a blob never changes, so a confirmed upload is
+  permanent — `backup()`/`uploadMedia()` now skip a blob for a relay it's already on, *before* reading
+  and re-sealing the file. Cleared for a relay only when it's erased (so a wiped+re-added relay
+  re-mirrors). This is "why does my phone constantly send media the relay already has."
+- **Nearby mesh now actually starts + is visible (Android).** Nearby is default-on but its runtime
+  permissions were only requested when the user toggled the (already-on) switch, so they were never
+  granted and the mesh never ran. Request them once on launch; the connection chip now shows `· Nearby`
+  when peers connect, a live "Syncing N" indicator during transfers, and a tappable detail with the
+  active transports + honest nearby state. (Nearby bridges Android↔Android only — iPhone/Mac use
+  Apple's incompatible nearby system, so cross-platform sync rides the relay.)
 - **Android launch crash (OOM) on a large synced video.** Once cross-NAT sync started delivering
   big videos, the feed's `MediaImage` thumbnail read the *entire* decrypted file into a `ByteArray`
   for **every** media ref — including videos — so a ~423 MB video blew the Nokia's ~512 MB heap the

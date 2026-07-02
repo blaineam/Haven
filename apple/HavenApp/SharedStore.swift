@@ -66,6 +66,31 @@ final class MediaBackupQueue {
     }
 }
 
+/// Records which media blobs we've CONFIRMED are on which destination (relay node id, or "s3"), so
+/// the every-2-min backfill stops re-uploading — or even re-reading/re-sealing — a blob the relay
+/// already has. Media keys are content-addressed (`haven/media/<ref>`), so a blob never changes: once
+/// it's on a relay it's there for good, making this a permanent, staleness-free cache. Before this,
+/// the ONLY dedup was a live `has()`/`head()` round-trip, which fails over a flaky transport and made
+/// the device re-upload the whole blob every cycle — "the iPhone constantly sends media the relay
+/// already possesses." Keyed "dest|ref".
+@MainActor
+enum MediaBackupLedger {
+    private static let defaultsKey = "haven.media.backedUp"
+    private static var set: Set<String> = Set(UserDefaults.standard.stringArray(forKey: defaultsKey) ?? [])
+    static func has(_ dest: String, _ ref: String) -> Bool { set.contains("\(dest)|\(ref)") }
+    static func mark(_ dest: String, _ ref: String) {
+        guard set.insert("\(dest)|\(ref)").inserted else { return }
+        if set.count > 20_000 { set = Set(set.suffix(20_000)) }
+        UserDefaults.standard.set(Array(set), forKey: defaultsKey)
+    }
+    /// Forget a destination's confirmations (e.g. a relay was wiped/forgotten) so we re-mirror to it.
+    static func forgetDest(_ dest: String) {
+        let before = set.count
+        set = set.filter { !$0.hasPrefix("\(dest)|") }
+        if set.count != before { UserDefaults.standard.set(Array(set), forKey: defaultsKey) }
+    }
+}
+
 @MainActor
 enum SharedStore {
     /// The bucket to use for the circle's mailbox: the shared relay if one was set,
@@ -139,6 +164,14 @@ enum SharedStore {
     /// Seal a locally-held media blob to the circle and store it in the circle's mailbox
     /// (relay if set, else S3) — idempotent.
     static func backup(ref: String, circleId: String, social: HavenSocial) async {
+        // Skip entirely if this blob is already confirmed on EVERY destination — before the expensive
+        // file read + seal. Content-addressed keys never change, so a confirmed upload is permanent.
+        // This is what stops the periodic backfill from re-sending media the relay already has.
+        let destNodes = relayNodes(circleId).filter { !$0.hasPrefix("s3:") }
+        let s3Configured = mediaS3(for: circleId) != nil
+        let allConfirmed = destNodes.allSatisfy { MediaBackupLedger.has($0, ref) }
+            && (!s3Configured || MediaBackupLedger.has("s3", ref))
+        if allConfirmed && (!destNodes.isEmpty || s3Configured) { return }
         // Read the file + seal (encrypt MBs) OFF the main thread — doing it on the main actor janked the UI
         // (the serial backup queue runs these back-to-back). The engine + file read are thread-safe.
         guard let url = MediaStore.shared.storagePath(for: ref) else { return }
@@ -156,27 +189,28 @@ enum SharedStore {
         //    pure-relay cross-NAT path (noq/iroh fork bug), so blob transfers that must cross a NAT
         //    stall and die while messaging on the same relay path works. The bucket leg used to be
         //    gated on "no relays configured" — now it always runs when a bucket is configured.
-        if let s3 = mediaS3(for: circleId) {
-            if await s3.headObject(key: key(ref)) { landed = true }
+        if let s3 = mediaS3(for: circleId), !MediaBackupLedger.has("s3", ref) {
+            if await s3.headObject(key: key(ref)) { MediaBackupLedger.mark("s3", ref); landed = true }
             else {
                 do {
                     try await putMedia(ref: ref, sealed: sealed) { try await s3.putObject(key: $0, data: $1) }
                     HavenLog.sync("backup s3-put OK ref=\(ref) size=\(sealed.count) chunked=\(chunked)")
-                    landed = true
+                    MediaBackupLedger.mark("s3", ref); landed = true
                 }
                 catch { HavenLog.sync("backup s3-put FAIL ref=\(ref): \(error.localizedDescription)") }
             }
-        }
+        } else if mediaS3(for: circleId) != nil { landed = true }
         // 2) Mirror to every relay (redundancy + the LAN/hosted fast-path). Content-addressed
         //    key → idempotent re-puts; a relay in backoff is skipped (RelayClients is health-aware).
         //    "s3:" pseudo-entries are the bucket handled above — dialing them can only fail.
         //    Per relay: its plain-HTTP interface is tried FIRST (the reliable cross-NAT path); the
         //    iroh blob dial is the fallback/fast-path when no HTTP interface is known/reachable.
         for node in nodes where !node.hasPrefix("s3:") {
+            if MediaBackupLedger.has(node, ref) { landed = true; continue }   // already confirmed on this relay
             // Our OWN hosted relay: store the media directly in the local mailbox (no iroh self-dial).
             if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
                 try? await putMedia(ref: ref, sealed: sealed) { _ = RelayHost.shared.localPut($0, $1) }
-                landed = true
+                MediaBackupLedger.mark(node, ref); landed = true
                 continue
             }
             if let http = RelayMailboxStore.shared.httpInterface(node) {
@@ -196,16 +230,16 @@ enum SharedStore {
                 if put {
                     RelayMailboxStore.shared.markSeen(node)
                     HavenLog.sync("backup http-put OK ref=\(ref) relay=\(node.prefix(8))")
-                    landed = true
+                    MediaBackupLedger.mark(node, ref); landed = true
                     continue   // the iroh path serves the SAME store — done with this relay
                 }
             }
             guard let c = await RelayClients.client(node) else { continue }
-            if await c.has(key: key(ref)) { RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node); landed = true; continue }
+            if await c.has(key: key(ref)) { RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node); MediaBackupLedger.mark(node, ref); landed = true; continue }
             do {
                 try await putMedia(ref: ref, sealed: sealed) { try await c.put(key: $0, data: $1) }
                 RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
-                landed = true
+                MediaBackupLedger.mark(node, ref); landed = true
             }
             catch { RelayHealth.shared.recordFailure(node); RelayClients.forget(node) }
         }

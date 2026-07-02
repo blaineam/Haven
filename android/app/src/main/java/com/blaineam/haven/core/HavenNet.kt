@@ -1196,6 +1196,7 @@ object HavenNet : InboundListener {
             if (defaultRelayHex == hex) defaultRelayHex = ""
             relayEntries.remove(hex)
             suppressedRelays.add(hex)
+            forgetBackedUp(hex)   // relay gone for good → re-mirror if a relay with this id ever returns
             saveRelayNodes()
             relayMutex.withLock {
                 runCatching { relayClients.remove(hex)?.close() }
@@ -1935,12 +1936,42 @@ object HavenNet : InboundListener {
     }
 
     /** Mirror a sealed media blob to EVERY circle relay (HTTP first — see mediaRelaysFor). */
+    // Persistent "already uploaded this blob here" ledger — content-addressed media keys never change,
+    // so a confirmed upload is permanent (no staleness). Stops the every-cycle backfill from re-reading
+    // + re-uploading blobs a relay already holds ("the phone constantly sends media the relay has").
+    private val backedUp = HashSet<String>()
+    private var backedUpLoaded = false
+    private fun ensureLedger() {
+        if (backedUpLoaded) return
+        runCatching { backedUp.addAll(appContext.getSharedPreferences("haven.mediabackup", Context.MODE_PRIVATE).getStringSet("done", emptySet()) ?: emptySet()) }
+        backedUpLoaded = true
+    }
+    private fun isBackedUp(node: String, ref: String): Boolean { ensureLedger(); return backedUp.contains("$node|$ref") }
+    private fun markBackedUp(node: String, ref: String) {
+        ensureLedger()
+        if (backedUp.add("$node|$ref")) {
+            while (backedUp.size > 20_000) { val it = backedUp.iterator(); it.next(); it.remove() }
+            runCatching { appContext.getSharedPreferences("haven.mediabackup", Context.MODE_PRIVATE).edit().putStringSet("done", HashSet(backedUp)).apply() }
+        }
+    }
+    /** Forget a relay's upload confirmations (it was forgotten/erased) so we re-mirror if it returns. */
+    private fun forgetBackedUp(node: String) {
+        ensureLedger()
+        if (backedUp.removeAll { it.startsWith("$node|") }) {
+            runCatching { appContext.getSharedPreferences("haven.mediabackup", Context.MODE_PRIVATE).edit().putStringSet("done", HashSet(backedUp)).apply() }
+        }
+    }
+
     suspend fun uploadMedia(circleId: String, ref: String) {
+        // Skip entirely if every destination already has this blob (before the expensive rawSealed read).
+        val dests = mediaRelaysFor(circleId)
+        if (dests.isNotEmpty() && dests.all { isBackedUp(it, ref) }) return
         val blob = LocalMedia.rawSealed(ref) ?: return
         val key = mediaKey(ref)
         val chunked = blob.size > mediaChunkBytes
         val hostedHex = runCatching { relayHost?.nodeIdHex() }.getOrNull()
-        for (nodeHex in mediaRelaysFor(circleId)) {
+        for (nodeHex in dests) {
+            if (isBackedUp(nodeHex, ref)) continue   // already confirmed on this relay
             // S3-BUCKET relay: put via the S3 FFI (relayClientFor can't dial an "s3:" pseudo-node).
             if (nodeHex.startsWith("s3:")) {
                 val cfg = StorageStore.s3Config(appContext) ?: continue
@@ -1953,7 +1984,7 @@ object HavenNet : InboundListener {
                     } else {
                         uniffi.haven_ffi.s3Put(cfg, key, blob)
                     }
-                }.onSuccess { markRelaySeen(nodeHex) }
+                }.onSuccess { markRelaySeen(nodeHex); markBackedUp(nodeHex, ref) }
                     .onFailure { android.util.Log.d(TAG, "s3 media put failed ($nodeHex): ${it.message}") }
                 continue
             }
@@ -1968,7 +1999,7 @@ object HavenNet : InboundListener {
                     } else {
                         relayHost?.localPut(key, blob)
                     }
-                }
+                }.onSuccess { markBackedUp(nodeHex, ref) }
                 continue
             }
             // Relay HTTP interface — the DEFAULT cross-NAT path. Success = done for this relay
@@ -1976,7 +2007,7 @@ object HavenNet : InboundListener {
             val entry = relayEntries[nodeHex]
             if (entry != null && httpUrlsFor(entry).isNotEmpty()) {
                 if (httpUploadMedia(entry, ref, key, blob, chunked)) {
-                    markRelaySeen(nodeHex)
+                    markRelaySeen(nodeHex); markBackedUp(nodeHex, ref)
                     android.util.Log.i("MediaSync", "HTTP uploaded ref=$ref to ${nodeHex.take(8)}")
                     continue
                 }
@@ -1992,7 +2023,7 @@ object HavenNet : InboundListener {
                     client.put(key, blob)
                 }
             }
-                .onSuccess { markRelayOk(nodeHex) }
+                .onSuccess { markRelayOk(nodeHex); markBackedUp(nodeHex, ref) }
                 .onFailure { relayFailed(nodeHex) }
         }
     }

@@ -523,6 +523,7 @@ final class RelayMailboxStore: ObservableObject {
         UserDefaults.standard.set(relaysByCircle, forKey: key)
         UserDefaults.standard.set(Array(suppressed), forKey: suppressedKey)
         persistEntries()
+        MediaBackupLedger.forgetDest(hex)   // relay gone for good → re-mirror if this id ever returns
         RelayClients.forget(hex)
         RelayHealth.shared.forget(hex)
         objectWillChange.send()

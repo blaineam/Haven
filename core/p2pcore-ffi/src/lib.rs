@@ -1994,6 +1994,53 @@ impl HavenSocial {
             .or_else(|| open_bytes(&st.me, &sender_pub, &env).ok())
     }
 
+    /// Decrypt a circle-sealed media blob from a FILE and write the plaintext to another FILE, doing
+    /// the whole decryption in NATIVE memory. A large video (hundreds of MB) sealed to the circle
+    /// would OOM a phone's small managed heap (Android's ART heap is capped ~512 MB) if it went
+    /// through `open_circle_media` as a byte array — but the sealed blob + plaintext live here in
+    /// native (off-heap) memory, which is bound only by the device's physical RAM, so the video
+    /// decrypts and a player can then stream it from `out_path`. Returns whether it succeeded.
+    /// Tries `circle_id` first; on failure tries every known circle (media may be tagged to another).
+    pub fn open_circle_media_file(&self, circle_id: String, sealed_path: String, out_path: String) -> bool {
+        let Ok(sealed) = std::fs::read(&sealed_path) else { return false };
+        let plaintext: Option<Vec<u8>> = (|| {
+            let st = self.state.lock().unwrap();
+            let env = SealedEnvelope::from_bytes(&sealed).ok()?;
+            let sender_hex = env.sender_hex();
+            let me_hex = hex(&st.me.public().node_id_bytes());
+            // The circle the media is tagged to (passed) first, then any other circle we're in.
+            let ordered = std::iter::once(circle_id.as_str())
+                .chain(st.circles.iter().map(|c| c.id.as_str()).filter(|id| *id != circle_id));
+            for cid in ordered {
+                let Some(circle) = st.circles.iter().find(|c| c.id == cid) else { continue };
+                let sender_pub = if sender_hex == me_hex {
+                    st.me.public()
+                } else {
+                    match circle.members.iter().find(|m| hex(&m.node_id_bytes()) == sender_hex) {
+                        Some(m) => m.clone(),
+                        None => continue,
+                    }
+                };
+                if let Some(p) = st.device.as_ref().and_then(|d| open_bytes(d, &sender_pub, &env).ok())
+                    .or_else(|| open_bytes(&st.me, &sender_pub, &env).ok())
+                {
+                    return Some(p);
+                }
+            }
+            None
+        })();
+        drop(sealed); // free the sealed bytes before writing the (equally large) plaintext
+        let Some(plaintext) = plaintext else { return false };
+        let tmp = format!("{out_path}.part");
+        let ok = std::fs::write(&tmp, &plaintext)
+            .and_then(|_| std::fs::rename(&tmp, &out_path))
+            .is_ok();
+        if !ok {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        ok
+    }
+
     /// Serialize all circles (members + events) for on-disk persistence.
     pub fn export_state(&self) -> Vec<u8> {
         let st = self.state.lock().unwrap();

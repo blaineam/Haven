@@ -95,14 +95,20 @@ object LocalMedia {
         return runCatching { HavenNet.engine.openCircleMedia(circleId, stored) }.getOrNull() ?: stored
     }
 
-    /** Decrypt a video ref to a cache file VideoView/MediaPlayer can read; null if missing or too
-     *  large to decrypt in RAM on this device (a huge video is skipped rather than OOM-crashing). */
+    /** Decrypt a video ref to a cache file VideoView/MediaPlayer can read; null if missing/undecodable.
+     *  Decryption runs in NATIVE memory (openCircleMediaFile) straight to the cache file, so a
+     *  hundreds-of-MB video that would OOM the ~512 MB Java heap (via [load]) decrypts fine — native
+     *  allocations aren't bound by the managed-heap cap, only by physical RAM. The player then streams
+     *  from the file, so the whole video is never held in the app's heap at once. */
     fun videoFile(circleId: String, ref: String): File? {
         val out = File(dir.parentFile, "vid_${bareId(ref)}.mp4")
         if (out.exists()) return out
-        val bytes = load(circleId, ref) ?: return null   // load() enforces the in-memory size guard
-        runCatching { out.writeBytes(bytes) }
-        return if (out.exists()) out else null
+        val sealed = File(dir, bareId(ref))
+        if (!sealed.exists()) return null
+        val ok = runCatching {
+            HavenNet.engine.openCircleMediaFile(circleId, sealed.absolutePath, out.absolutePath)
+        }.getOrDefault(false)
+        return if (ok && out.exists()) out else null
     }
 
     /** Decode a stored IMAGE ref to a DOWNSAMPLED bitmap (long edge ≤ [reqDim]) so even a large
@@ -122,11 +128,13 @@ object LocalMedia {
         }.getOrNull()
     }
 
-    /** A poster frame for a VIDEO ref, read memory-safely via MediaMetadataRetriever from the
-     *  decrypted cache file. Null when the video is too large to decrypt on this device (the caller
-     *  then shows a play-glyph tile with no still) or a frame can't be read. */
+    /** A poster frame for a VIDEO ref, read via MediaMetadataRetriever — but ONLY from an already
+     *  decrypted cache file (i.e. a video that's been opened/played once). We deliberately do NOT
+     *  trigger a full decrypt just to draw a feed thumbnail (a 600 MB video would be needless heavy
+     *  work per feed item); an un-played video shows the play-glyph tile until it's opened. */
     fun videoPoster(circleId: String, ref: String): Bitmap? {
-        val file = videoFile(circleId, ref) ?: return null   // size-guarded via load()
+        val file = File(dir.parentFile, "vid_${bareId(ref)}.mp4")
+        if (!file.exists()) return null
         val mmr = android.media.MediaMetadataRetriever()
         return runCatching {
             mmr.setDataSource(file.absolutePath)

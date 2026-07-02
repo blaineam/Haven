@@ -1042,6 +1042,23 @@ fun VideoTile(circleId: String, ref: String, modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
                     android.view.TextureView(ctx).apply {
+                        val tv = this
+                        // A TextureView STRETCHES the video to its bounds by default, squishing a 16:9 clip
+                        // on a tall phone. Apply a transform that scales the video to FIT (letterbox) so its
+                        // aspect ratio is preserved. Needs both the view size and the video size, so we call
+                        // it once both are known (on prepared + on every size change).
+                        fun applyAspect() {
+                            val mp = player.value ?: return
+                            val vw = mp.videoWidth; val vh = mp.videoHeight
+                            val w = tv.width; val h = tv.height
+                            if (vw <= 0 || vh <= 0 || w <= 0 || h <= 0) return
+                            val scale = minOf(w.toFloat() / vw, h.toFloat() / vh)
+                            // Correct the default stretch (view/video) back to a uniform `scale`, pivot center.
+                            val m = android.graphics.Matrix()
+                            m.setScale(scale * vw / w, scale * vh / h, w / 2f, h / 2f)
+                            tv.setTransform(m)
+                            tv.invalidate()
+                        }
                         surfaceTextureListener = object : android.view.TextureView.SurfaceTextureListener {
                             override fun onSurfaceTextureAvailable(st: android.graphics.SurfaceTexture, w: Int, h: Int) {
                                 val mp = android.media.MediaPlayer()
@@ -1053,8 +1070,11 @@ fun VideoTile(circleId: String, ref: String, modifier: Modifier = Modifier) {
                                         val vol = if (profile.videoSoundOn) 1f else 0f
                                         it.setVolume(vol, vol)
                                         it.start()   // autoplay (iOS parity)
+                                        applyAspect()   // video dimensions are known now → fix the squish
                                         android.util.Log.i("VideoTile", "playing ref=$ref ${it.videoWidth}x${it.videoHeight}")
                                     }
+                                    // Some codecs report the real size only after the first frame decodes.
+                                    mp.setOnVideoSizeChangedListener { _, _, _ -> applyAspect() }
                                     mp.setOnErrorListener { _, what, extra ->
                                         android.util.Log.e("VideoTile", "error what=$what extra=$extra ref=$ref path=${f.absolutePath}")
                                         false
@@ -1066,7 +1086,7 @@ fun VideoTile(circleId: String, ref: String, modifier: Modifier = Modifier) {
                                     runCatching { mp.release() }
                                 }
                             }
-                            override fun onSurfaceTextureSizeChanged(st: android.graphics.SurfaceTexture, w: Int, h: Int) {}
+                            override fun onSurfaceTextureSizeChanged(st: android.graphics.SurfaceTexture, w: Int, h: Int) { applyAspect() }
                             override fun onSurfaceTextureDestroyed(st: android.graphics.SurfaceTexture): Boolean {
                                 runCatching { player.value?.release() }; player.value = null; return true
                             }

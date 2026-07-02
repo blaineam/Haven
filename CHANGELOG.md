@@ -7,12 +7,32 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased] — 2026-07-02
+## [0.1.0-beta.11] — 2026-07-02
 
-Media-transport wave: the Haven relay gains a plain-HTTP interface as the DEFAULT cross-NAT media
-path; S3 stays as the rarely-needed BYO-bucket option (iOS/macOS, Android, desktop, `haven-relay`).
+Media-transport + LAN wave: direct local connections restored, large videos play on low-heap
+Android, media stops re-uploading, and the relay gains a plain-HTTP interface.
 
 ### Added
+- **Direct LAN connections restored.** The iroh transport had been forced *relay-only*
+  (`clear_ip_transports` + a relay-pinning path selector) to dodge a cross-NAT datagram-drop — but
+  that routed *every* connection through the n0 DERP cloud, so two devices on the same wifi never
+  talked directly and Android↔iOS had no local path at all (Apple's Multipeer LAN mesh doesn't
+  bridge to Android's Nearby Connections). Reverted to stock iroh (IP transport on, lowest-RTT path
+  selection): same-subnet peers, including Android↔iOS, now connect **directly over the LAN**
+  (verified: a direct `Ip(...)` path forms). Media rides the relay-HTTP/S3 transports now, so
+  cross-NAT reliability no longer needs direct paths suppressed. (Note: a peer behind macOS firewall
+  *stealth mode* stays on the relay path until it's allowed / stealth is off.)
+
+### Fixed
+- **Large videos play on low-heap Android.** A 250–650 MB video sealed to the circle couldn't be
+  decrypted on a phone whose managed (ART) heap is capped ~512 MB — the whole plaintext came back as
+  a `ByteArray` and OOM'd. Decryption now runs in **native (off-heap) memory** via a file-based FFI
+  (`open_circle_media_file`) and writes the plaintext to a file the player streams from; bounded by
+  physical RAM, not the heap cap. Verified playing at 1080p.
+- **Squished video playback.** The player's `TextureView` stretched clips to its bounds; it now
+  applies an aspect-fit transform so a 16:9 video is letterboxed instead of distorted.
+
+### Added (relay HTTP)
 - **Relay HTTP media interface — the default cross-NAT media transport.** The in-app relay host
   (and the standalone `haven-relay` daemon) now serves its blob store over ordinary HTTP/1.1
   (`core/haven-net/src/httprelay.rs`), alongside the iroh blob ALPN. Because plain HTTP traverses

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Permit cleartext (plain-HTTP) traffic. Haven fetches media over a RELAY's plain-HTTP interface
+  (see core/haven-net httprelay.rs), which members reach at a LAN / Tailscale / user-configured
+  address — often plain http:// since it's a user-run box on a private network, not a public TLS
+  host. Android 9+ blocks cleartext by default, which silently broke the HTTP relay media path
+  ("Cleartext HTTP traffic to <relay-ip> not permitted"). This is acceptable here because every
+  media/mailbox payload is END-TO-END SEALED to the circle BEFORE it touches the wire — the relay,
+  and anyone on the path, only ever sees ciphertext. Expose a relay to the public internet behind
+  TLS (reverse proxy / tunnel) for transport privacy on top of the E2E sealing.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

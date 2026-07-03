@@ -58,12 +58,24 @@ struct RelayCfg {
     http: Option<Arc<httprelay::HttpRelay>>,
 }
 
+/// Per-peer dial backoff after failed connects. Without it the app's 20s sync loop re-dials every
+/// unreachable id (a friend's pre-multidevice ACCOUNT id resolves to NO node — kept in the dial set
+/// by design; offline devices; stale relay entries) forever, keeping ~10 doomed handshakes in flight
+/// at all times. That constant path churn floods our own home-relay connection so badly that INBOUND
+/// relay-path handshakes never complete (proven: a quiet scratch node accepts relay dials in ~200ms
+/// while the churning app times out every dial at 30s), on top of the CPU/battery/warn-spam cost.
+struct DialGate {
+    fails: u32,
+    until: std::time::Instant,
+}
+
 /// A peer-to-peer node.
 pub struct Node {
     endpoint: Endpoint,
     conns: Conns,
     handler: InboundHandler,
     relay: Arc<Mutex<Option<RelayCfg>>>,
+    dial_gate: Arc<Mutex<HashMap<EndpointId, DialGate>>>,
     secret: [u8; 32], // this node's key — also the in-process relay's identity (one shared node)
 }
 
@@ -105,7 +117,7 @@ impl Node {
         let h = handler.clone();
         let r = relay.clone();
         tokio::spawn(async move { accept_loop(ep, c, h, r).await });
-        Ok(Self { endpoint, conns, handler, relay, secret })
+        Ok(Self { endpoint, conns, handler, relay, dial_gate: Arc::new(Mutex::new(HashMap::new())), secret })
     }
 
     /// This node's id (== the owning identity's `node_id_bytes`), as hex.
@@ -121,6 +133,16 @@ impl Node {
         let bytes = decode_hex32(node_hex)?;
         let id = EndpointId::from_bytes(&bytes).map_err(|e| anyhow!("{e:?}"))?;
         crate::blobstore::BlobClient::over_endpoint(self.endpoint.clone(), self.dial_addr(id))
+    }
+
+    /// Diagnostic-only: a blob client that dials `node_hex` at an explicit `ip:port` direct
+    /// address (no relay, no discovery) — used to bisect identity vs routing failures.
+    pub fn blob_client_direct(&self, node_hex: &str, direct: &str) -> Result<crate::blobstore::BlobClient> {
+        let bytes = decode_hex32(node_hex)?;
+        let id = EndpointId::from_bytes(&bytes).map_err(|e| anyhow!("{e:?}"))?;
+        let sock: std::net::SocketAddr = direct.parse().map_err(|e| anyhow!("bad DIAG_DIRECT: {e}"))?;
+        let addr = EndpointAddr::new(id).with_ip_addr(sock);
+        crate::blobstore::BlobClient::over_endpoint(self.endpoint.clone(), addr)
     }
 
     /// Build a dial address for `id` that includes OUR home relay, so the outbound connection can use the
@@ -226,7 +248,11 @@ impl Node {
     /// into our store (idempotent set-union). No-op if we don't host a relay. Returns blobs pulled.
     pub async fn relay_sync_from(&self, peer_node_hex: &str) -> usize {
         let Some(root) = lock(&self.relay).as_ref().map(|c| c.root.clone()) else { return 0 };
-        let Ok(client) = blobstore::BlobClient::connect(self.secret, peer_node_hex).await else { return 0 };
+        // Reuse THIS node's endpoint — a fresh `BlobClient::connect(self.secret, …)` endpoint shares
+        // our node id, so it STEALS our DERP relay registration every mesh tick (home-relay flap) and
+        // refuses all inbound handshakes while it lives. That single line made relay-path INBOUND to
+        // any relay-hosting device effectively dead (dials timed out at 30s; direct dials took ~5ms).
+        let Ok(client) = self.blob_client(peer_node_hex) else { return 0 };
         let mut pulled = 0usize;
         let peer_keys = client.list(blobstore::SYNC_PREFIX).await.unwrap_or_default();
         for key in blobstore::keys_to_pull(&root, &peer_keys) {
@@ -282,13 +308,42 @@ impl Node {
                 return Ok(c);
             }
         }
-        let conn = self.endpoint.connect(addr, ALPN).await.ah()?;
-        lock(&self.conns).insert(id, conn.clone());
-        let c = self.conns.clone();
-        let h = self.handler.clone();
-        let cc = conn.clone();
-        tokio::spawn(async move { read_loop(cc, c, h).await });
-        Ok(conn)
+        // Per-peer backoff: an id that just failed to connect is NOT redialed until its cooldown
+        // expires (30s doubling to 10min). A live connection resets it; ids that are permanently
+        // dead (account ids under device-seed transport) settle at one cheap attempt per 10min
+        // instead of a continuous handshake storm that drowns our own relay path.
+        {
+            let gate = lock(&self.dial_gate);
+            if let Some(g) = gate.get(&id) {
+                if std::time::Instant::now() < g.until {
+                    anyhow::bail!("dial backoff: {} unreachable, retry later", hex(id.as_bytes()));
+                }
+            }
+        }
+        match self.endpoint.connect(addr, ALPN).await.ah() {
+            Ok(conn) => {
+                lock(&self.dial_gate).remove(&id);
+                lock(&self.conns).insert(id, conn.clone());
+                let c = self.conns.clone();
+                let h = self.handler.clone();
+                let cc = conn.clone();
+                tokio::spawn(async move { read_loop(cc, c, h).await });
+                Ok(conn)
+            }
+            Err(e) => {
+                let mut gate = lock(&self.dial_gate);
+                let g = gate.entry(id).or_insert(DialGate { fails: 0, until: std::time::Instant::now() });
+                g.fails = g.fails.saturating_add(1);
+                let secs = (30u64 << (g.fails.min(5) - 1)).min(600); // 30s, 60s, … capped at 10min
+                g.until = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+                if gate.len() > 512 {
+                    // Bound the map (stale entries for ids we no longer dial).
+                    let now = std::time::Instant::now();
+                    gate.retain(|_, g| g.until > now);
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Send a sealed payload to `final_dest` **via a relay**: wrap it in a mesh-relay

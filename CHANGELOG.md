@@ -7,6 +7,39 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.13] — 2026-07-03
+
+THE internet-reliability fix. Every relay-hosting device was unreachable over pure-relay
+(cross-NAT) paths — proven by dialing the Mac relay: a direct-addressed dial completed in ~5ms
+while the identical relay-path dial timed out at 30s, every time.
+
+### Fixed
+- **Relay mesh sync no longer knocks its own node offline.** `sync_pull_from` /
+  `relay_sync_from` (the ~20s mesh anti-entropy tick) built its client with
+  `BlobClient::connect(self.secret, …)` — binding a FRESH iroh endpoint under the node's OWN id.
+  Each tick that ephemeral clone (a) **stole the node's DERP relay registration** (the home-relay
+  flapped true→false every cycle, ~2,000 times in one session log), (b) **refused every inbound
+  handshake** while it lived (its ALPN list is empty), and (c) died ungracefully after dialing —
+  usually a stale, undialable relay entry, burning a 30s timeout. Net effect: inbound relay-path
+  connections to any relay-hosting device were a lottery that almost always lost — friends across
+  the internet could not fetch posts, media, or call invites from a hosted relay. Mesh sync now
+  reuses the node's long-lived endpoint (`BlobClient::over_endpoint`); `BlobClient::close()`
+  learned endpoint ownership so a borrowed shared endpoint is never shut down. Verified: relay-path
+  blob LIST against the Mac app went from 100% 30s-timeout to ~190ms, zero registration flaps.
+- **Per-peer dial backoff at the transport chokepoint.** The 20s sync loop re-dialed every
+  unreachable id (friends' pre-multidevice account ids — undialable by design — plus offline
+  devices) forever, keeping ~10 doomed handshakes permanently in flight and spamming
+  `MultipathNotNegotiated` path-close warnings (~3,300 log lines / 30s). Failed dials now back off
+  30s → doubling → 10min cap, reset on success.
+- **Standalone `haven-relay` daemon negotiates QUIC multipath** (parity with the in-app node) — a
+  multipath-enabled client dialing a non-multipath relay died with `MultipathNotNegotiated` on
+  cross-network paths.
+
+### Added
+- `haven-net examples/diag.rs` — transport diagnostic (home relay, n0 DNS publish check, timed
+  blob dial by node id, `DIAG_DIRECT=ip:port` direct-address bisection) — the tool that isolated
+  the ephemeral-endpoint bug.
+
 ## [0.1.0-beta.12] — 2026-07-03
 
 Device-id reachability wave: every send site now dials friends by their DEVICE node ids, closing

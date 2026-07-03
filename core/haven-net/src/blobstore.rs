@@ -231,6 +231,9 @@ impl BlobServer {
         let endpoint = Endpoint::builder(N0)
             .secret_key(SecretKey::from_bytes(&secret))
             .alpns(vec![BLOB_ALPN.to_vec()])
+            // Multipath on (parity with Node::spawn / connect_addr): without it a multipath-enabled
+            // client's dial to this relay dies with MultipathNotNegotiated on cross-network paths.
+            .transport_config(iroh::endpoint::QuicTransportConfig::builder().max_concurrent_multipath_paths(16).build())
             .bind()
             .await
             .ah()?;
@@ -268,7 +271,16 @@ impl BlobServer {
     /// mesh: any relay can join (one pass makes it a full replica) or leave (peers already have
     /// copies) freely, making the circle's mailbox far more resilient.
     pub async fn sync_pull_from(self: &Arc<Self>, peer_node_hex: &str) -> Result<usize> {
-        let client = BlobClient::connect(self.secret, peer_node_hex).await?;
+        // Reuse THIS relay's existing endpoint — NEVER bind a fresh one with the same secret.
+        // `BlobClient::connect(self.secret, …)` created an ephemeral endpoint under our OWN node id
+        // every mesh tick: it STOLE our DERP relay registration (home-relay flapped true→false every
+        // ~20s), refused every inbound handshake meanwhile (its ALPN list is empty), and died
+        // ungracefully after the dial — so relay-path INBOUND to this node was effectively dead
+        // (a friend's dial timed out at 30s while a direct-addressed dial worked in ~5ms).
+        let client = BlobClient::over_endpoint(
+            self.endpoint.clone(),
+            EndpointAddr::new(parse_node_id(peer_node_hex)?),
+        )?;
         let mut pulled = 0usize;
         let peer_keys = client.list(SYNC_PREFIX).await.unwrap_or_default();
         for key in keys_to_pull(&self.root, &peer_keys) {
@@ -537,6 +549,10 @@ pub struct BlobClient {
     /// (failing) hole-punch machinery. That connection storm is what made cross-NAT media sync collapse
     /// under load (early fetches succeed, later ones TimedOut). Reuse keeps it to one connection per relay.
     conn: Arc<tokio::sync::Mutex<Option<Connection>>>,
+    /// Whether WE bound `endpoint` (cold `connect_addr`) or borrowed a long-lived one
+    /// (`over_endpoint`). `close()` must never shut down a borrowed endpoint — closing the
+    /// node's shared messaging endpoint kills the whole transport.
+    owns_endpoint: bool,
 }
 
 impl BlobClient {
@@ -564,7 +580,7 @@ impl BlobClient {
         if endpoint.id() == dest.id {
             anyhow::bail!("refusing to dial our own node id (blob self-connect guard)");
         }
-        Ok(Self { endpoint, dest, conn: Arc::new(tokio::sync::Mutex::new(None)) })
+        Ok(Self { endpoint, dest, conn: Arc::new(tokio::sync::Mutex::new(None)), owns_endpoint: true })
     }
 
     /// Reuse an EXISTING, warm endpoint (the messaging node's) instead of binding a fresh one. The
@@ -576,7 +592,7 @@ impl BlobClient {
         if endpoint.id() == dest.id {
             anyhow::bail!("refusing to dial our own node id (blob self-connect guard)");
         }
-        Ok(Self { endpoint, dest, conn: Arc::new(tokio::sync::Mutex::new(None)) })
+        Ok(Self { endpoint, dest, conn: Arc::new(tokio::sync::Mutex::new(None)), owns_endpoint: false })
     }
 
     /// Return the ONE warm connection to `dest`, reusing it if still open, else dialing (and caching) a
@@ -654,7 +670,14 @@ impl BlobClient {
     }
 
     pub async fn close(self) {
-        self.endpoint.close().await;
+        if let Some(c) = self.conn.lock().await.take() {
+            c.close(0u32.into(), b"done");
+        }
+        // Only shut down an endpoint WE bound. A borrowed (shared messaging) endpoint must
+        // keep running — closing it would kill the node's whole transport.
+        if self.owns_endpoint {
+            self.endpoint.close().await;
+        }
     }
 }
 

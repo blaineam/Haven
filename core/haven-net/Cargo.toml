@@ -16,5 +16,6 @@ data-encoding = "2.11.0"
 rand = "0.8"
 
 [dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # Content-addressing in the blob-store integration test (mailbox key = hash of ciphertext).
 blake3 = "1"

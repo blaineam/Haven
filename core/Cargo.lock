@@ -1524,6 +1524,7 @@ dependencies = [
  "rustls",
  "serde_json",
  "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -113,6 +113,20 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// Escape a key component for on-disk storage: `%` → `%25`, `:` → `%3A`. Colons are illegal in
+/// NTFS names (alternate data streams) and used to be REJECTED outright here — which silently made
+/// every DM mailbox key (`haven/mailbox/dm:<a>-<b>/<hash>`) unstorable on EVERY platform: DMs
+/// never landed on any relay, so an offline recipient only ever saw the push banner, never the
+/// message. Keys keep their colons on the wire; only the disk mapping is escaped.
+pub(crate) fn encode_comp(comp: &str) -> String {
+    comp.replace('%', "%25").replace(':', "%3A")
+}
+
+/// Reverse of [`encode_comp`] (order matters: `%3A` first, then `%25`).
+pub(crate) fn decode_comp(name: &str) -> String {
+    name.replace("%3A", ":").replace("%25", "%")
+}
+
 pub(crate) fn safe_path(root: &Path, key: &str) -> Result<PathBuf> {
     if key.is_empty() || key.len() > MAX_KEY {
         bail!("bad key length");
@@ -120,16 +134,17 @@ pub(crate) fn safe_path(root: &Path, key: &str) -> Result<PathBuf> {
     if key.contains('\0') || key.starts_with('/') || key.starts_with('\\') {
         bail!("illegal key");
     }
+    // A LIST prefix legitimately ends in "/" ("haven/mailbox/<circle>/"); the empty trailing
+    // component must not fail the whole key.
+    let key = key.strip_suffix('/').or_else(|| key.strip_suffix('\\')).unwrap_or(key);
     let mut out = root.to_path_buf();
     for comp in key.split(['/', '\\']) {
         if comp.is_empty() || comp == "." || comp == ".." {
             bail!("illegal key component");
         }
-        // Reject Windows drive / device-ish components defensively.
-        if comp.contains(':') {
-            bail!("illegal key component");
-        }
-        out.push(comp);
+        // Store components escaped (`:`/`%` → percent form) so keys like `dm:<a>-<b>` are
+        // representable on every filesystem, Windows included.
+        out.push(encode_comp(comp));
     }
     // Final guard: the resolved path must remain under root once we strip non-existent
     // tail components (we can't canonicalize a not-yet-created file).
@@ -530,7 +545,13 @@ fn collect_keys(root: &Path, dir: &Path, out: &mut Vec<String>) {
                 continue; // skip in-progress writes
             }
             if let Ok(rel) = path.strip_prefix(root) {
-                out.push(rel.to_string_lossy().replace('\\', "/"));
+                // Decode each on-disk component back to its wire form (see encode_comp).
+                let key = rel
+                    .components()
+                    .map(|c| decode_comp(&c.as_os_str().to_string_lossy()))
+                    .collect::<Vec<_>>()
+                    .join("/");
+                out.push(key);
             }
         }
     }
@@ -719,6 +740,30 @@ mod tests {
         assert!(safe_path(root, "ok").is_ok());
         let resolved = safe_path(root, "mailbox/fam/abc123").unwrap();
         assert!(resolved.starts_with(root));
+    }
+
+    #[test]
+    fn dm_circle_keys_store_and_list() {
+        // DM circle ids contain a colon ("dm:<a>-<b>") — previously REJECTED by safe_path, which
+        // silently made every DM mailbox key unstorable on every relay. Keys keep the colon on the
+        // wire; the disk mapping escapes it (Windows-safe).
+        let root = Path::new("/store");
+        let p = safe_path(root, "haven/mailbox/dm:aaa-bbb/hash1").unwrap();
+        assert!(p.to_string_lossy().contains("dm%3Aaaa-bbb"));
+        assert!(!p.to_string_lossy().contains(':'));
+        // Round-trip through a real store: put under a dm key, list it back with the colon intact.
+        let dir = std::env::temp_dir().join(format!("haven-dmkey-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        local_put(&dir, "haven/mailbox/dm:aaa-bbb/hash1", b"sealed").unwrap();
+        let keys = local_list(&dir, "haven/mailbox/dm:aaa-bbb/");
+        assert_eq!(keys, vec!["haven/mailbox/dm:aaa-bbb/hash1".to_string()]);
+        // A trailing-slash LIST prefix must also work for ordinary circles.
+        local_put(&dir, "haven/mailbox/fam/hash2", b"sealed").unwrap();
+        assert_eq!(local_list(&dir, "haven/mailbox/fam/"), vec!["haven/mailbox/fam/hash2".to_string()]);
+        // Escape round-trip sanity.
+        assert_eq!(decode_comp(&encode_comp("dm:a%3Ab")), "dm:a%3Ab");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

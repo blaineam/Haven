@@ -7,6 +7,43 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.12] — 2026-07-03
+
+Device-id reachability wave: every send site now dials friends by their DEVICE node ids, closing
+the gaps that made calls, media, and internet delivery unreliable after the device-seed transport
+flip (an account id no longer resolves to any node, so an unexpanded send silently reached nobody).
+
+### Fixed
+- **Android call signaling reaches the caller again.** `sendFrame` (which `sendCallFrame` and the
+  media request/chunk paths ride) sent directly to the given hex with no account→device-id
+  expansion — so a call ACCEPT/ICE/hangup addressed to the caller's *account* id was dropped at the
+  iroh layer, even on the same LAN (iPhone rang Android, but Android's accept never came back).
+  `sendFrame` now expands to the contact's authorized device ids at the transport edge, exactly
+  like iOS `sendIroh` (identity for already-expanded/device-id inputs, so `dialTargets` callers
+  stay correct).
+- **Desktop dials device ids everywhere.** `send_frame` (posts, DMs, hellos, relay announces, call
+  frames, media) gained the same transport-edge expansion; `authorize_membership` now authorizes
+  circle members by their device ids too (a friend's device-seed phone was "forbidden" at a
+  desktop-hosted relay).
+
+### Changed
+- **Desktop moved to the device-seed transport.** The Tauri app bound its iroh node to the ACCOUNT
+  master seed (identity == transport address, the pre-flip design). It now mints/binds a per-device
+  seed (`use_device_identity` + `register_device`, parity with iOS/Android), announces its signed
+  device roster (frame 27) to contacts + circle relays every greet cycle, ingests contacts' rosters
+  (re-authorizing its hosted relay), and dials relays over the **warm** long-lived endpoint instead
+  of a cold per-fetch endpoint (the cross-NAT 30s-timeout class). The cold fallback and self-dial
+  guards now use device ids (never the account id).
+
+### Added
+- **Invite links carry device-id dial hints (`?d=`).** The roster-bootstrap deadlock: a friend can
+  only reach you after holding your signed device roster, but the roster itself travels over a path
+  that needs a dialable id. Invite QR/links now embed the inviter's device node id(s) as a query
+  placed *before* the `#` fragment (old parsers read only the fragment, so links stay compatible).
+  The scanner stores the hints and dials them at every transport edge until the real signed roster
+  arrives and supersedes them. Implemented on iOS/macOS (`InviteHints.swift`), Android
+  (`InviteHints.kt`), and desktop.
+
 ## [0.1.0-beta.11] — 2026-07-02
 
 Media-transport + LAN wave: direct local connections restored, large videos play on low-heap

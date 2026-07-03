@@ -273,6 +273,42 @@ final class FeedStore: ObservableObject {
         for a in social.contactNodeIds(circleId: circleId) {
             add(a)                                              // account id (contact handle; reaches old-build peers)
             for d in social.deviceNodeIdsFor(accountHex: a) { add(d) }   // their device node ids (actual reach)
+            for h in deviceHints(for: a) { add(h) }             // invite-link hints (until their roster lands)
+        }
+        return out
+    }
+
+    // MARK: - Invite device-id hints (roster-bootstrap bridge)
+
+    /// Device ids learned from a contact's INVITE LINK (`?d=` — see InviteHints). They are the only
+    /// dialable ids for a device-seed friend until their signed roster (frame 27) arrives, which the
+    /// hint itself makes possible: without it neither side can deliver anything to the other.
+    private let deviceHintsKey = "haven.contact.deviceHints"
+    private var contactDeviceHints: [String: [String]] {
+        get { (UserDefaults.standard.dictionary(forKey: deviceHintsKey) as? [String: [String]]) ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: deviceHintsKey) }
+    }
+    func recordDeviceHints(accountHex: String, deviceIds: [String]) {
+        guard !deviceIds.isEmpty else { return }
+        let key = accountHex.lowercased()
+        var m = contactDeviceHints
+        var cur = m[key] ?? []
+        for d in deviceIds.map({ $0.lowercased() }) where d.count == 64 && !cur.contains(d) { cur.append(d) }
+        m[key] = Array(cur.suffix(8))
+        contactDeviceHints = m
+    }
+    private func deviceHints(for accountHex: String) -> [String] {
+        contactDeviceHints[accountHex.lowercased()] ?? []
+    }
+    /// My own device ids to ride an invite link (this device first) — what a scanner dials to
+    /// reach me before holding my signed roster.
+    func inviteDeviceIds() -> [String] {
+        guard let social else { return [] }
+        let acct = social.myNodeHex().lowercased()
+        var out = [social.myDeviceNodeHex()]
+        for d in social.deviceNodeIdsFor(accountHex: acct)
+        where d.lowercased() != acct && !out.contains(where: { $0.lowercased() == d.lowercased() }) {
+            out.append(d)
         }
         return out
     }
@@ -1148,7 +1184,12 @@ final class FeedStore: ObservableObject {
             // sendIroh fires dozens of times; doing it (and the send) on a background Task keeps the feed
             // scroll smooth. (Per-send logging was removed: building those strings on every send was itself
             // measurable main-thread churn during sync.)
-            let targets = self?.social?.deviceNodeIdsFor(accountHex: nodeHex) ?? [nodeHex]
+            var targets = self?.social?.deviceNodeIdsFor(accountHex: nodeHex) ?? [nodeHex]
+            // Invite-link dial hints bridge the roster bootstrap: until this contact's signed
+            // roster lands, their account id resolves to no node — the hint is the only real id.
+            if let hints = self?.deviceHints(for: nodeHex) {
+                for h in hints where !targets.contains(where: { $0.lowercased() == h }) { targets.append(h) }
+            }
             var anyOk = false
             var lastErr: String?
             for t in targets {

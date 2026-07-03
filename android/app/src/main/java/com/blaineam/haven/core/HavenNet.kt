@@ -194,6 +194,7 @@ object HavenNet : InboundListener {
         DmPins.init(appContext)
         restoreState()
         loadContacts()
+        loadDeviceHints()
         loadBlocked()
         loadRelayNodes()
         purgeStaleRelays()   // erase relays inactive AND unseen > 7 days (config else survives)
@@ -267,7 +268,18 @@ object HavenNet : InboundListener {
     }
 
     val nodeIdHex: String get() = core.nodeIdHex
-    fun inviteUri(): String = core.inviteUri()
+
+    /** The shareable invite link, carrying my device node id(s) as `?d=` dial hints — the scanner's
+     *  only reachable ids for me until my signed roster arrives (device-seed transport bootstrap). */
+    fun inviteUri(): String {
+        val acct = nodeIdHex.lowercase()
+        val mine = LinkedHashSet<String>()
+        runCatching { mine.add(social.myDeviceNodeHex()) }
+        for (d in runCatching { social.deviceNodeIdsFor(acct) }.getOrDefault(emptyList())) {
+            if (d.lowercase() != acct) mine.add(d)
+        }
+        return InviteHints.embed(core.inviteUri(), mine.toList())
+    }
 
     // ---- Multi-circle ----
 
@@ -562,11 +574,47 @@ object HavenNet : InboundListener {
 
     /** Begin a connect from a scanned/pasted haven:// invite. */
     fun connectByLink(uri: String): Boolean {
-        val info = runCatching { parseLink(uri.trim()) }.getOrNull() ?: return false
+        val trimmed = uri.trim()
+        val info = runCatching { parseLink(trimmed) }.getOrNull() ?: return false
+        // Store the invite's device-id hints BEFORE the hello, so the very first dial can reach
+        // their device (their account id resolves to no node post-device-seed).
+        recordDeviceHints(info.idHex, InviteHints.extract(trimmed))
         initiated[info.idHex] = info.verificationHex
         sendHello(DEFAULT_CIRCLE, info.idHex)
         return true
     }
+
+    // ---- Invite device-id hints (roster-bootstrap bridge) --------------------------------
+
+    /** Device ids learned from a contact's INVITE LINK (`?d=` — see InviteHints). The only dialable
+     *  ids for a device-seed friend until their signed roster (frame 27) arrives — which the hint
+     *  itself makes possible. Keyed by lowercased account hex; persisted as JSON. */
+    private val deviceHints = HashMap<String, List<String>>()
+    private fun loadDeviceHints() {
+        val raw = prefs.getString("deviceHints", null) ?: return
+        runCatching {
+            val o = org.json.JSONObject(raw)
+            for (k in o.keys()) {
+                val arr = o.getJSONArray(k)
+                deviceHints[k] = (0 until arr.length()).map { arr.getString(it) }
+            }
+        }
+    }
+    private fun saveDeviceHints() {
+        val o = org.json.JSONObject()
+        for ((k, v) in deviceHints) o.put(k, JSONArray(v))
+        prefs.edit().putString("deviceHints", o.toString()).apply()
+    }
+    fun recordDeviceHints(accountHex: String, ids: List<String>) {
+        if (ids.isEmpty()) return
+        val key = accountHex.lowercase()
+        val cur = LinkedHashSet(deviceHints[key] ?: emptyList())
+        for (d in ids.map { it.lowercase() }) if (d.length == 64) cur.add(d)
+        deviceHints[key] = cur.toList().takeLast(8)
+        saveDeviceHints()
+    }
+    private fun deviceHintsFor(accountHex: String): List<String> =
+        deviceHints[accountHex.lowercase()] ?: emptyList()
 
     /** Approve a pending request: add them, persist, and Hello back so they auto-accept us. */
     fun approve(req: PendingRequest) {
@@ -679,6 +727,7 @@ object HavenNet : InboundListener {
         for (a in runCatching { social.contactNodeIds(circleId) }.getOrDefault(emptyList())) {
             add(a)
             for (d in runCatching { social.deviceNodeIdsFor(a) }.getOrDefault(emptyList())) add(d)
+            for (h in deviceHintsFor(a)) add(h)   // invite-link hints (until their roster lands)
         }
         return out.toList()
     }
@@ -2221,8 +2270,27 @@ object HavenNet : InboundListener {
         val n = node ?: return
         val frame = Wire.frame(type, payload)
         scope.launch {
-            runCatching { n.sendToNode(toNodeHex, frame) }
-                .onFailure { Log.d(TAG, "send type=$type to ${toNodeHex.take(8)} failed: ${it.message}") }
+            // Transport edge (parity with iOS sendIroh): callers address an ACCOUNT id so the
+            // social/allow logic stays on account ids; expand to that account's authorized DEVICE
+            // ids here — under device-seed transport the account id alone resolves to NO node, so
+            // an unexpanded send (calls' accept/ICE, media requests) silently reaches nobody.
+            // deviceNodeIdsFor is identity for an unknown/device-id input, so pre-expanded callers
+            // (dialTargets) stay correct.
+            val targets = LinkedHashSet(
+                runCatching { social.deviceNodeIdsFor(toNodeHex) }
+                    .getOrNull()?.takeIf { it.isNotEmpty() } ?: listOf(toNodeHex)
+            )
+            // Invite-link dial hints bridge the roster bootstrap: until this contact's signed
+            // roster lands, their account id resolves to no node — the hint is the only real id.
+            targets.addAll(deviceHintsFor(toNodeHex))
+            var lastErr: String? = null
+            var anyOk = false
+            for (t in targets) {
+                runCatching { n.sendToNode(t, frame) }
+                    .onSuccess { anyOk = true }
+                    .onFailure { lastErr = it.message }
+            }
+            if (!anyOk) Log.d(TAG, "send type=$type to ${toNodeHex.take(8)} failed: $lastErr")
         }
     }
 

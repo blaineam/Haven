@@ -133,6 +133,16 @@ impl Engine {
         let media = LocalMedia::new(paths.media_dir());
         let scheduled = crate::scheduled::ScheduledStore::load(&paths.scheduled_file());
         let roster = crate::roster::DeviceRoster::load(&paths);
+        // Engine acts under this device's UNIQUE transport identity (parity with iOS configure() /
+        // Android init): the account id stays the sealing/trust anchor + the contact handle friends
+        // pin; friends resolve it to this device's node id via the signed roster (frame 27), so any
+        // number of devices can run under one account without colliding on iroh discovery.
+        let _ = social.use_device_identity(roster.device_seed.clone());
+        let _ = social.register_device(
+            roster.device_bundle(),
+            crate::roster::DeviceRoster::device_name(),
+            now_ms() / 1000,
+        );
         Ok(Arc::new(Self {
             seed,
             social,
@@ -191,15 +201,90 @@ impl Engine {
     }
 
     pub fn invite_uri(&self) -> String {
-        Account::from_seed(self.seed.to_vec())
+        let base = Account::from_seed(self.seed.to_vec())
             .map(|a| a.haven_uri())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        self.embed_invite_hints(base)
     }
 
     pub fn invite_link(&self, domain: &str) -> String {
-        Account::from_seed(self.seed.to_vec())
+        let base = Account::from_seed(self.seed.to_vec())
             .map(|a| a.haven_link(domain.to_string()))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        self.embed_invite_hints(base)
+    }
+
+    // ---- invite device-id hints (roster-bootstrap bridge) --------------------------------
+    //
+    // Under the device-seed transport a friend's ACCOUNT id resolves to no node, and their signed
+    // roster (frame 27) can only arrive over a path that itself needs a device id — the bootstrap
+    // deadlock. The invite link therefore carries my device node id(s) as a `?d=` query BEFORE the
+    // `#` fragment (an old parser reads only the fragment, so the link stays compatible); the
+    // scanner dials the hints until the real roster supersedes them. Mirrors iOS/Android.
+
+    /// Insert `?d=<my device ids>` before the link's `#` fragment.
+    fn embed_invite_hints(&self, link: String) -> String {
+        let acct = self.social.my_node_hex().to_lowercase();
+        let mut ids: Vec<String> = vec![self.social.my_device_node_hex()];
+        for d in self.social.device_node_ids_for(acct.clone()) {
+            let l = d.to_lowercase();
+            if l != acct && !ids.iter().any(|i| i.to_lowercase() == l) {
+                ids.push(d);
+            }
+        }
+        ids.retain(|i| i.len() == 64);
+        ids.truncate(4);
+        let Some(hash) = link.find('#') else { return link };
+        if ids.is_empty() || link.contains('?') {
+            return link;
+        }
+        format!("{}?d={}{}", &link[..hash], ids.join(","), &link[hash..])
+    }
+
+    /// The `d=` device ids from a pasted/scanned link (empty when absent). Only 64-hex ids pass.
+    fn extract_invite_hints(link: &str) -> Vec<String> {
+        let Some(q_start) = link.find('?') else { return vec![] };
+        let end = link.find('#').unwrap_or(link.len());
+        if q_start >= end {
+            return vec![];
+        }
+        for pair in link[q_start + 1..end].split('&') {
+            let Some((k, v)) = pair.split_once('=') else { continue };
+            if k != "d" {
+                continue;
+            }
+            return v
+                .split(',')
+                .map(|s| s.to_lowercase())
+                .filter(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()))
+                .take(4)
+                .collect();
+        }
+        vec![]
+    }
+
+    /// Remember a contact's invite-hint device ids (dialed until their signed roster lands).
+    fn record_device_hints(&self, account_hex: &str, ids: Vec<String>) {
+        if ids.is_empty() {
+            return;
+        }
+        let key = account_hex.to_lowercase();
+        let mut p = self.prefs.lock().unwrap();
+        let cur = p.device_hints.entry(key).or_default();
+        for d in ids {
+            if !cur.contains(&d) {
+                cur.push(d);
+            }
+        }
+        let excess = cur.len().saturating_sub(8);
+        if excess > 0 {
+            cur.drain(..excess);
+        }
+        let _ = p.save(&self.paths);
+    }
+
+    fn device_hints_for(&self, account_hex: &str) -> Vec<String> {
+        self.prefs.lock().unwrap().device_hints.get(&account_hex.to_lowercase()).cloned().unwrap_or_default()
     }
 
     pub fn get_profile(&self) -> Profile {
@@ -311,7 +396,10 @@ impl Engine {
         let listener: Arc<dyn InboundListener> = Arc::new(NodeListener {
             engine: Arc::downgrade(self),
         });
-        match HavenNode::start(self.seed.to_vec(), listener).await {
+        // Bind the transport to the per-DEVICE seed (unique node/relay id per install, parity with
+        // iOS/Android device-seed transport) — never the account id, which is identity-only.
+        let device_seed = self.roster.lock().unwrap().device_seed.clone();
+        match HavenNode::start(device_seed, listener).await {
             Ok(node) => {
                 *self.node.lock().unwrap() = Some(node);
                 self.dyn_state.lock().unwrap().started = true;
@@ -880,10 +968,14 @@ impl Engine {
     // ---- connect / handshake ------------------------------------------------------------
 
     pub fn connect_by_link(self: &Arc<Self>, uri: String) -> bool {
-        let info = match parse_link(uri.trim().to_string()) {
+        let trimmed = uri.trim().to_string();
+        let info = match parse_link(trimmed.clone()) {
             Ok(i) => i,
             Err(_) => return false,
         };
+        // Store the invite's device-id hints BEFORE the hello, so the very first dial can reach
+        // their device (their account id resolves to no node post-device-seed).
+        self.record_device_hints(&info.id_hex, Self::extract_invite_hints(&trimmed));
         self.dyn_state
             .lock()
             .unwrap()
@@ -1053,8 +1145,32 @@ impl Engine {
 
     pub fn sync_with_contacts(self: &Arc<Self>) {
         let ids: Vec<String> = self.prefs.lock().unwrap().contacts.iter().map(|c| c.id_hex.clone()).collect();
-        for id_hex in ids {
-            self.send_hello(DEFAULT_CIRCLE, &id_hex);
+        for id_hex in &ids {
+            self.send_hello(DEFAULT_CIRCLE, id_hex);
+        }
+        // Proactively announce MY device roster (frame 27) every greet cycle — under device-id
+        // transport a friend can only dial + authorize this desktop once they hold its signed
+        // roster (iOS/Android parity; small, signed, receiver version-checks + dedups).
+        let roster_wire = self.social.my_device_roster_wire();
+        if !roster_wire.is_empty() {
+            for id_hex in &ids {
+                self.send_frame(wire::DEVICE_ROSTER, &roster_wire, id_hex);
+            }
+            // Bootstrap the device-id exchange over the RELAY too: when a friend flips to the
+            // per-device transport their account id stops resolving, so a direct send can't carry
+            // my roster — but their relay node IS reachable. Never announce to ourselves (a
+            // self-dial sends iroh path discovery into the runaway loop).
+            let my_acct = self.social.my_node_hex().to_lowercase();
+            let my_dev = self.social.my_device_node_hex().to_lowercase();
+            for c in self.social.circles() {
+                for relay_hex in self.relays_for(&c.id) {
+                    let h = relay_hex.to_lowercase();
+                    if h == my_acct || h == my_dev || h.starts_with("s3:") {
+                        continue;
+                    }
+                    self.send_frame(wire::DEVICE_ROSTER, &roster_wire, &relay_hex);
+                }
+            }
         }
         // Re-emit our own relay id whenever we re-greet contacts, so a peer that just came online surfaces
         // our relay instead of missing the one-shot announce.
@@ -1065,12 +1181,31 @@ impl Engine {
         let node = self.node.lock().unwrap().clone();
         let Some(node) = node else { return };
         let frame = wire::frame(t, payload);
-        let to = to_node_hex.to_string();
-        tauri::async_runtime::spawn(async move {
-            if let Err(e) = node.send_to_node(to.clone(), frame).await {
-                log::debug!("send type={t} to {} failed: {e}", &to.chars().take(8).collect::<String>());
+        // Transport edge (parity with iOS sendIroh / Android sendFrame): callers address an ACCOUNT
+        // id so the social/allow logic stays on account ids; expand to that account's authorized
+        // DEVICE ids here — under device-seed transport the account id alone resolves to NO node.
+        // device_node_ids_for is identity for an unknown/device-id input, so pre-expanded callers
+        // stay correct.
+        let mut targets = self.social.device_node_ids_for(to_node_hex.to_string());
+        if targets.is_empty() {
+            targets.push(to_node_hex.to_string());
+        }
+        // Invite-link dial hints bridge the roster bootstrap: until this contact's signed roster
+        // lands, their account id resolves to no node — the hint is the only real id.
+        for h in self.device_hints_for(to_node_hex) {
+            if !targets.iter().any(|t| t.eq_ignore_ascii_case(&h)) {
+                targets.push(h);
             }
-        });
+        }
+        for to in targets {
+            let node = node.clone();
+            let frame = frame.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = node.send_to_node(to.clone(), frame).await {
+                    log::debug!("send type={t} to {} failed: {e}", &to.chars().take(8).collect::<String>());
+                }
+            });
+        }
     }
 
     // ---- inbound dispatch ---------------------------------------------------------------
@@ -1103,6 +1238,7 @@ impl Engine {
                 | wire::SDP_OFFER | wire::SDP_ANSWER | wire::ICE => me.handle_call(t, &body),
                 wire::DEVICE_ENROLL => me.handle_enrollment_request(&body),
                 wire::DEVICE_GRANT => me.handle_device_grant(&body),
+                wire::DEVICE_ROSTER => me.handle_device_roster_announce(&body),
                 _ => log::debug!("ignoring frame type {t} (not yet handled)"),
             }
             me.emit_changed();
@@ -1352,6 +1488,16 @@ impl Engine {
         hex.as_bytes().to_vec()
     }
 
+    /// A contact's signed device roster (frame 27): learn which DEVICE ids to dial/seal for them,
+    /// then re-authorize our hosted relay so those devices can read their mailboxes (iOS/Android
+    /// parity — without this a friend's device-seed phone stays "forbidden" at this relay).
+    fn handle_device_roster_announce(self: &Arc<Self>, body: &[u8]) {
+        if self.social.ingest_roster_wire(body.to_vec()) {
+            self.persist();
+            self.authorize_membership();
+        }
+    }
+
     /// Push current circle membership to the in-process relay so each circle's mailbox is served ONLY
     /// to its members (+ sibling relays for mesh sync) — a stranger who learns the relay id gets
     /// nothing (audit transport-F4). Idempotent; call on host start and whenever membership changes.
@@ -1359,9 +1505,24 @@ impl Engine {
         let Some(handle) = self.relay_host.lock().unwrap().clone() else { return };
         let me = self.social.my_node_hex();
         for c in self.social.circles() {
-            let mut members = self.social.contact_node_ids(c.id.clone());
-            if !me.is_empty() && !members.contains(&me) {
-                members.push(me.clone());
+            let mut accounts = self.social.contact_node_ids(c.id.clone());
+            if !me.is_empty() && !accounts.contains(&me) {
+                accounts.push(me.clone());
+            }
+            // Authorize each member at the TRANSPORT layer by their DEVICE ids (peers connect as
+            // their device under device-seed transport), keeping the account id too for any
+            // pre-multidevice peer. Includes MY OWN device ids so a sibling device can read this
+            // host's mailbox. De-duplicated. Parity with iOS circleMemberships().
+            let mut members: Vec<String> = Vec::new();
+            for a in &accounts {
+                if !members.contains(a) {
+                    members.push(a.clone());
+                }
+                for d in self.social.device_node_ids_for(a.clone()) {
+                    if !members.contains(&d) {
+                        members.push(d);
+                    }
+                }
             }
             let relays = self.relays_for(&c.id);
             handle.authorize_circle(c.id.clone(), members, relays);
@@ -1722,12 +1883,13 @@ impl Engine {
                 return Some(c.clone());
             }
         }
-        // NEVER dial our OWN account node id. Relays now share the account node id, and same-account
-        // sibling devices share it too — so dialing it is a self-dial, which sends iroh's path discovery
-        // into a tight loop (open_path_on_all_conns), exploding memory by tens of GB — THE runaway leak.
-        // We never need a client to ourselves. (Was guarded ONLY while hosting, so a non-hosting device —
-        // or a second device — still self-dialed.) Same root cause + fix as iOS/macOS.
-        if self.social.my_node_hex().eq_ignore_ascii_case(node_hex) {
+        // NEVER dial our OWN node ids (account id — a pre-device-seed leftover in a relay list — or
+        // our device id). A self-dial sends iroh's path discovery into a tight loop
+        // (open_path_on_all_conns), exploding memory by tens of GB — THE runaway leak. We never need
+        // a client to ourselves. Same root cause + fix as iOS/macOS.
+        if self.social.my_node_hex().eq_ignore_ascii_case(node_hex)
+            || self.social.my_device_node_hex().eq_ignore_ascii_case(node_hex)
+        {
             return None;
         }
         if let Some(h) = self.relay_host.lock().unwrap().as_ref() {
@@ -1739,9 +1901,22 @@ impl Engine {
         if !self.relay_available(node_hex) {
             return None;
         }
-        match RelayClient::connect(self.seed.to_vec(), node_hex.to_string()).await {
+        // Warm path (parity with iOS): dial over the messaging node's LONG-LIVED, DERP-established
+        // endpoint instead of RelayClient::connect binding a fresh endpoint per client — the cold
+        // endpoint restarts DERP discovery every time, which is exactly the cross-NAT 30s timeout
+        // while messaging on the same relay path works.
+        let warm = self.node.lock().unwrap().clone().and_then(|n| n.relay_client(node_hex.to_string()).ok());
+        let res = match warm {
+            Some(c) => Ok(c),
+            // No messaging node yet → cold connect under the DEVICE seed (never the account seed:
+            // the account id is identity-only and must not appear as a transport node).
+            None => {
+                let device_seed = self.roster.lock().unwrap().device_seed.clone();
+                RelayClient::connect(device_seed, node_hex.to_string()).await
+            }
+        };
+        match res {
             Ok(c) => {
-                self.mark_relay_ok(node_hex);
                 self.relay_clients.lock().await.insert(node_hex.to_string(), c.clone());
                 Some(c)
             }

@@ -40,6 +40,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.blaineam.haven.core.HavenCore
+import com.blaineam.haven.core.HavenNet
 import com.blaineam.haven.core.ProfileStore
 import uniffi.haven_ffi.SelfTestReport
 
@@ -118,7 +119,7 @@ fun YouScreen(onAddFriend: () -> Unit) {
             BrandButton(text = "Add a friend") { onAddFriend() }
             Spacer(Modifier.height(8.dp))
             Text("Share invite link", color = HavenTheme.pink, fontSize = 13.sp,
-                modifier = Modifier.clickable { shareInvite(context, core.inviteUri()) }.padding(6.dp))
+                modifier = Modifier.clickable { shareInvite(context, HavenNet.inviteUri()) }.padding(6.dp))
 
             // Your posts — this screen is your profile, like iOS.
             if (myPosts.isNotEmpty()) {

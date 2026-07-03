@@ -18,6 +18,7 @@ struct ConnectView: View {
     @State private var mode = 0
     @State private var pasted = ""
     @State private var found: LinkInfo?
+    @State private var foundHints: [String] = []
     @State private var friendName = ""
     @State private var problem: String?
     @State private var addedName: String?
@@ -82,6 +83,13 @@ struct ConnectView: View {
 
     // MARK: - Invite
 
+    /// The shareable link, carrying my device node id(s) as `?d=` dial hints — the scanner's only
+    /// reachable ids for me until my signed roster arrives (device-seed transport bootstrap).
+    private var inviteLink: String {
+        InviteHints.embed(in: account.havenLink(domain: HavenSite.inviteDomain),
+                          deviceIds: FeedStore.shared.inviteDeviceIds())
+    }
+
     private var invite: some View {
         VStack(spacing: 16) {
             Text("Invite someone you trust")
@@ -90,7 +98,7 @@ struct ConnectView: View {
                 .font(.subheadline).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
-            if let qr = QRCode.image(from: account.havenLink(domain: HavenSite.inviteDomain)) {
+            if let qr = QRCode.image(from: inviteLink) {
                 Image(platformImage: qr)
                     .interpolation(.none).resizable().scaledToFit()
                     .frame(width: 210, height: 210)
@@ -99,7 +107,7 @@ struct ConnectView: View {
                     .shadow(color: HavenTheme.violet.opacity(0.25), radius: 16, y: 8)
             }
 
-            if let url = URL(string: account.havenLink(domain: HavenSite.inviteDomain)) {
+            if let url = URL(string: inviteLink) {
                 ShareLink(item: url) {
                     Label("Share invite link", systemImage: "square.and.arrow.up")
                 }
@@ -172,6 +180,9 @@ struct ConnectView: View {
                 let trimmed = friendName.trimmingCharacters(in: .whitespaces)
                 let name = trimmed.isEmpty ? "Friend" : trimmed
                 contacts.add(name: name, idHex: f.idHex, verificationHex: f.verificationHex)
+                // Store the invite's device-id hints BEFORE the hello, so the very first dial
+                // can reach their device (their account id resolves to no node post-device-seed).
+                FeedStore.shared.recordDeviceHints(accountHex: f.idHex, deviceIds: foundHints)
                 FeedStore.shared.syncWithContacts()   // say hello over the network
                 withAnimation(HavenTheme.bouncy) { addedName = name }
             }
@@ -216,7 +227,9 @@ struct ConnectView: View {
     private func lookup() {
         problem = nil
         do {
-            let info = try parseLink(s: pasted.trimmingCharacters(in: .whitespacesAndNewlines))
+            let trimmed = pasted.trimmingCharacters(in: .whitespacesAndNewlines)
+            let info = try parseLink(s: trimmed)
+            foundHints = InviteHints.extract(from: trimmed)
             withAnimation(HavenTheme.bouncy) { found = info }
         } catch {
             problem = "That doesn't look like a Haven invite link. Double-check and try again."

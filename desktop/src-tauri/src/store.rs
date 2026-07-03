@@ -184,6 +184,11 @@ pub struct Prefs {
     /// Mirrors iOS `haven.relay.default`.
     #[serde(default)]
     pub default_relay: String,
+    /// Device ids learned from a contact's INVITE LINK (`?d=` dial hints), keyed by lowercased
+    /// account hex. The only dialable ids for a device-seed friend until their signed roster
+    /// (frame 27) arrives — which the hint itself makes possible. Mirrors iOS/Android.
+    #[serde(default)]
+    pub device_hints: std::collections::HashMap<String, Vec<String>>,
     /// Retention window in seconds for the viewer's own auto-prune (None = keep all).
     #[serde(default)]
     pub retention_secs: Option<u64>,

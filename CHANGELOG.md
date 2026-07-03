@@ -7,6 +7,17 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.14] — 2026-07-03
+
+### Fixed
+- **Call accept works cross-NAT ("it rang her but she couldn't accept").** Call signaling
+  (invite/accept/hangup/SDP/ICE) was DIRECT-only: the push notification rings the callee, but her
+  ACCEPT needed a working direct dial back to the caller, with no fallback. Call frames now also
+  hop LIVE through up to 3 adopted circle relays as a frame-9 forward (the relay host unwraps the
+  inner frame and sends it onward over its own connections). Android and desktop additionally
+  learned to process + forward frame 9 (previously iOS/macOS-only, so a phone- or desktop-hosted
+  relay couldn't forward at all). Duplicate-tolerant handlers + msgId dedup guard loops.
+
 ## [0.1.0-beta.13] — 2026-07-03
 
 THE internet-reliability fix. Every relay-hosting device was unreachable over pure-relay

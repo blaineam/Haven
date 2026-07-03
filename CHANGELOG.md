@@ -7,6 +7,19 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.15] — 2026-07-03
+
+### Fixed
+- **Haven no longer hijacks your music.** Post songs play through the SYSTEM-side application
+  music player, which (a) keeps playing even when Haven isn't on screen and (b) steals playback
+  focus from the user's own Apple Music session the moment it starts. A background LAUNCH (bg
+  fetch / silent push after the app was terminated) builds the feed with no scenePhase change ever
+  firing, so the existing "don't auto-play while backgrounded" flag stayed false — the top post's
+  song could start playing on the nightstand at 3am, and background refreshes could repeatedly
+  yank playback focus from CarPlay (music "self-pausing" mid-drive). Every playback-issuing path
+  in `MusicPlayback` (play/resume/unduck, iOS + macOS) is now hard-gated on the app actually being
+  frontmost, and the backgrounded flag initializes from the real application state.
+
 ## [0.1.0-beta.14] — 2026-07-03
 
 ### Fixed

@@ -5,6 +5,9 @@ import MusicKit
 #if canImport(AppKit)
 import AppKit
 #endif
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// Coordinates a post's audio: the attached song plays while its video stays muted.
 /// When the viewer unmutes the video, the music fades down as the video fades up — a
@@ -25,6 +28,15 @@ final class AudioCoordinator: ObservableObject {
         NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { AudioCoordinator.shared.appBecameActive() }
         }
+        #endif
+        // Start from the REAL application state. A background LAUNCH (bg fetch / silent push after a
+        // termination) builds the feed with no scenePhase change ever firing, so the default `false`
+        // let a "centered" top post start its song out of nowhere — audibly, in the middle of the
+        // night, because the system music player plays even when the app isn't on screen.
+        #if os(macOS)
+        backgrounded = !NSApplication.shared.isActive
+        #else
+        backgrounded = UIApplication.shared.applicationState != .active
         #endif
     }
 
@@ -181,8 +193,14 @@ final class MusicPlayback {
 
     var isPlaying: Bool { player.state.playbackStatus == .playing }
 
+    /// NEVER start playback unless Haven is frontmost. Starting the player steals playback focus
+    /// from whatever the user is listening to, and a background launch can reach these paths with
+    /// no scenePhase change ever having fired.
+    private var appFrontmost: Bool { NSApplication.shared.isActive }
+
     func play(_ track: TrackRefFfi) {
         current = track
+        guard appFrontmost else { return }                   // background wake must stay silent
         guard !SettingsStore.shared.silent else { return }   // app is muted
         let ids = trackIds(track.catalogId)
         // macOS can only play catalog songs — a store id is required (no MPMediaItem library).
@@ -223,12 +241,12 @@ final class MusicPlayback {
         if player.state.playbackStatus == .playing { player.pause() }
     }
     func unduck() {
-        guard current != nil else { return }
+        guard current != nil, appFrontmost else { return }
         Task { @MainActor in try? await player.play() }
     }
     /// Resume the queued song if it's paused (e.g. a video had ducked it).
     func resume() {
-        guard current != nil, player.state.playbackStatus != .playing else { return }
+        guard current != nil, appFrontmost, player.state.playbackStatus != .playing else { return }
         Task { @MainActor in try? await player.play() }
     }
     /// Fully (re)queue and start the current track — used on unmute, when the song may never
@@ -255,8 +273,16 @@ final class MusicPlayback {
     private var authed = false
     var isPlaying: Bool { player.playbackState == .playing }
 
+    /// NEVER issue playback unless the app is frontmost. The application music player is a
+    /// SYSTEM-side agent: it plays audibly even when Haven is backgrounded, and starting it steals
+    /// playback focus from the user's own Music session (CarPlay pausing mid-drive; the 3am
+    /// top-post song). A background LAUNCH (bg fetch / silent push) never fires a scenePhase
+    /// change, so AudioCoordinator's backgrounded flag alone can't cover it — gate the chokepoint.
+    private var appFrontmost: Bool { UIApplication.shared.applicationState == .active }
+
     func play(_ track: TrackRefFfi) {
         current = track
+        guard appFrontmost else { return }                   // background wake must stay silent
         guard !SettingsStore.shared.silent else { return }   // app is muted
         let ids = trackIds(track.catalogId)
         guard ids.store != nil || ids.pid != nil else { return }
@@ -284,11 +310,11 @@ final class MusicPlayback {
         if player.playbackState == .playing { player.pause() }
     }
     func unduck() {
-        if current != nil { player.play() }
+        if current != nil, appFrontmost { player.play() }
     }
     /// Resume the queued song if it's paused (e.g. a video had ducked it).
     func resume() {
-        guard current != nil, player.playbackState != .playing else { return }
+        guard current != nil, appFrontmost, player.playbackState != .playing else { return }
         player.play()
     }
     /// Fully (re)queue and start the current track — used on unmute, when the song may never

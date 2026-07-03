@@ -7,6 +7,18 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.16] — 2026-07-03
+
+### Fixed
+- **DMs finally land in the relay mailbox ("the push showed her message but the app never
+  did").** The relay store's path sanitizer rejected any key component containing `:` — and every
+  DM circle id is `dm:<a>-<b>`, so no relay could EVER store a DM envelope: an offline recipient
+  got the push banner (which travels via the blind worker) but the message itself had no
+  store-and-forward path at all. Disk names are now escaped (`:`→`%3A`, Windows-safe) while keys
+  keep their colons on the wire; existing stores are unaffected. Verified live: the first-ever DM
+  mailboxes appeared on the relay within minutes of deploying, with history backfilled. Also fixed
+  a trailing-slash LIST prefix failing the same sanitizer.
+
 ## [0.1.0-beta.15] — 2026-07-03
 
 ### Fixed

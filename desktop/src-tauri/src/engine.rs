@@ -104,6 +104,8 @@ pub struct Engine {
     /// HTTP relay URLs that recently failed to answer → retry-after epoch ms (2-min backoff), so a
     /// dead LAN address doesn't cost a connect-timeout per chunk.
     http_url_bad: StdMutex<HashMap<String, u64>>,
+    /// Frame-9 mesh-relay msgIds already seen (dedup / loop protection, parity with iOS seenRelay).
+    seen_relay: StdMutex<std::collections::HashSet<String>>,
 }
 
 const MEDIA_CHUNK_SIZE: usize = 512 * 1024;
@@ -113,6 +115,17 @@ const MEDIA_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 /// 9-byte ASCII magic marking a chunk manifest blob. A sealed envelope is JSON starting with '{',
 /// so it can never collide. Must be byte-identical across iOS/macOS + Android.
 const MEDIA_MANIFEST_MAGIC: &[u8] = b"HVCHUNK1\n";
+
+fn hex_to_bytes32(hex: &str) -> Option<Vec<u8>> {
+    if hex.len() != 64 {
+        return None;
+    }
+    (0..32).map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()).collect()
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -164,6 +177,7 @@ impl Engine {
                 .build()
                 .unwrap_or_default(),
             http_url_bad: StdMutex::new(HashMap::new()),
+            seen_relay: StdMutex::new(std::collections::HashSet::new()),
         }))
     }
 
@@ -1239,6 +1253,7 @@ impl Engine {
                 wire::DEVICE_ENROLL => me.handle_enrollment_request(&body),
                 wire::DEVICE_GRANT => me.handle_device_grant(&body),
                 wire::DEVICE_ROSTER => me.handle_device_roster_announce(&body),
+                wire::RELAY => me.handle_relay(&body),
                 _ => log::debug!("ignoring frame type {t} (not yet handled)"),
             }
             me.emit_changed();
@@ -2627,25 +2642,140 @@ impl Engine {
         self.prefs.lock().unwrap().contacts.iter().any(|c| c.id_hex == hex)
     }
 
+    /// Send a call-signaling frame direct AND live-forwarded through the circle relays (frame 9 —
+    /// the relay host unwraps and sends the inner frame onward over its own connections). Cross-NAT
+    /// fallback: a callee whose direct dial back to the caller fails still lands the ACCEPT within
+    /// the ring window. (The invite push rings the callee, but the answer path was direct-only.)
+    fn send_call_frame(self: &Arc<Self>, t: u8, frame_body: &[u8], to_hex: &str) {
+        self.send_frame(t, frame_body, to_hex);
+        let mut dests = self.social.device_node_ids_for(to_hex.to_string());
+        if dests.is_empty() {
+            dests.push(to_hex.to_string());
+        }
+        for h in self.device_hints_for(to_hex) {
+            if !dests.iter().any(|d| d.eq_ignore_ascii_case(&h)) {
+                dests.push(h);
+            }
+        }
+        self.originate_relay_internet(&dests, &wire::frame(t, frame_body));
+    }
+
+    /// Originate a frame-9 live forward of `inner` to `dests` via up to 3 adopted internet relays.
+    /// Wire format parity with iOS emitRelay: [16B msgId][1B ttl][1B destCount][32B×dest][inner].
+    fn originate_relay_internet(self: &Arc<Self>, dests: &[String], inner: &[u8]) {
+        let dest_bytes: Vec<Vec<u8>> = dests.iter().filter_map(|h| hex_to_bytes32(h)).collect();
+        if dest_bytes.is_empty() {
+            return;
+        }
+        let mut msg_id = [0u8; 16];
+        {
+            use rand::RngCore;
+            rand::rngs::OsRng.fill_bytes(&mut msg_id);
+        }
+        self.seen_relay.lock().unwrap().insert(bytes_to_hex(&msg_id)); // don't reprocess our own
+        let mut p = Vec::with_capacity(18 + dest_bytes.len() * 32 + inner.len());
+        p.extend_from_slice(&msg_id);
+        p.push(3); // ttl
+        p.push(dest_bytes.len().min(255) as u8);
+        for d in dest_bytes.iter().take(255) {
+            p.extend_from_slice(d);
+        }
+        p.extend_from_slice(inner);
+        let my_acct = self.social.my_node_hex().to_lowercase();
+        let my_dev = self.social.my_device_node_hex().to_lowercase();
+        let relays: Vec<String> = self.prefs.lock().unwrap().relays.values().flatten().cloned().collect();
+        let mut used = std::collections::HashSet::new();
+        let mut sent = 0;
+        for r in relays {
+            let h = r.to_lowercase();
+            if h.starts_with("s3:") || h == my_acct || h == my_dev || !used.insert(h) {
+                continue;
+            }
+            self.send_frame(wire::RELAY, &p, &r);
+            sent += 1;
+            if sent >= 3 {
+                break;
+            }
+        }
+    }
+
+    /// Frame-9 mesh relay: process the inner frame if we're a destination, and forward it onward to
+    /// the other destinations over our own connections (we may be the relay host the sender hopped
+    /// through). Dedup by msgId (loop protection, parity with iOS handleRelay).
+    fn handle_relay(self: &Arc<Self>, body: &[u8]) {
+        if body.len() < 18 {
+            return;
+        }
+        {
+            let mut seen = self.seen_relay.lock().unwrap();
+            if !seen.insert(bytes_to_hex(&body[..16])) {
+                return;
+            }
+            if seen.len() > 2000 {
+                seen.clear();
+            }
+        }
+        let ttl = body[16];
+        let dest_count = body[17] as usize;
+        let mut off = 18;
+        if body.len() < off + dest_count * 32 {
+            return;
+        }
+        let mut dests = Vec::with_capacity(dest_count);
+        for _ in 0..dest_count {
+            dests.push(bytes_to_hex(&body[off..off + 32]));
+            off += 32;
+        }
+        let inner = &body[off..];
+        if inner.is_empty() {
+            return;
+        }
+        let me_acct = self.social.my_node_hex().to_lowercase();
+        let me_dev = self.social.my_device_node_hex().to_lowercase();
+        let for_me = dests.iter().any(|d| {
+            let l = d.to_lowercase();
+            l == me_acct || l == me_dev
+        });
+        if for_me {
+            self.dispatch(inner.to_vec());
+        }
+        if ttl == 0 {
+            return;
+        }
+        let node = self.node.lock().unwrap().clone();
+        let Some(node) = node else { return };
+        for dest in dests {
+            let l = dest.to_lowercase();
+            if l == me_acct || l == me_dev {
+                continue;
+            }
+            let node = node.clone();
+            let inner = inner.to_vec();
+            tauri::async_runtime::spawn(async move {
+                let _ = node.send_to_node(dest, inner).await;
+            });
+        }
+    }
+
     pub fn call_group_invite(self: &Arc<Self>, session_id: String, group_name: String, roster: Vec<String>, to: Vec<String>) {
         let me = self.node_id_hex();
         let frame = callwire::group_invite(&me, &session_id, &group_name, &roster.join(","));
         for t in to {
-            self.send_frame(wire::GROUP_INVITE, &frame, &t);
+            self.send_call_frame(wire::GROUP_INVITE, &frame, &t);
         }
     }
 
     pub fn call_accept(self: &Arc<Self>, session_id: String, to: Vec<String>) {
         let frame = callwire::accept(&self.node_id_hex(), &session_id);
         for t in to {
-            self.send_frame(wire::CALL_ACCEPT, &frame, &t);
+            self.send_call_frame(wire::CALL_ACCEPT, &frame, &t);
         }
     }
 
     pub fn call_hangup(self: &Arc<Self>, to: Vec<String>) {
         let frame = callwire::hangup(&self.node_id_hex());
         for t in to {
-            self.send_frame(wire::CALL_HANGUP, &frame, &t);
+            self.send_call_frame(wire::CALL_HANGUP, &frame, &t);
         }
     }
 
@@ -2656,7 +2786,7 @@ impl Engine {
             _ => wire::ICE,
         };
         let frame = callwire::signal(&self.node_id_hex(), &session_id, json.as_bytes());
-        self.send_frame(t, &frame, &to);
+        self.send_call_frame(t, &frame, &to);
     }
 
     // ---- persistence --------------------------------------------------------------------

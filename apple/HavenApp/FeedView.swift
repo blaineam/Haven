@@ -1605,6 +1605,39 @@ final class FeedStore: ObservableObject {
     /// Send a call signaling/audio frame to a peer (direct, over the internet transport).
     func sendCallFrame(_ type: UInt8, _ payload: Data, to nodeHex: String) {
         sendIroh(type, payload, to: nodeHex)
+        // Cross-NAT fallback: hop the same frame LIVE through the circle relays (frame 9 — the
+        // relay host unwraps + sends it onward over its own connections). The nearby originateRelay
+        // flood never leaves the room, so a callee whose direct dial back to the caller failed had
+        // NO way to deliver the ACCEPT — the push rang her, but the answer died in the NAT.
+        var dests = social?.deviceNodeIdsFor(accountHex: nodeHex) ?? [nodeHex]
+        for h in deviceHints(for: nodeHex) where !dests.contains(where: { $0.lowercased() == h }) { dests.append(h) }
+        originateRelayInternet(dests: dests, inner: frame(type, payload))
+    }
+
+    /// Originate a frame-9 live forward of `inner` to `dests` via up to 3 adopted INTERNET relays
+    /// (same wire format as emitRelay, but sent over iroh to the relay host instead of flooded to
+    /// the nearby mesh). The host's handleRelay forwards `inner` to each dest it can reach.
+    private func originateRelayInternet(dests: [String], inner: Data) {
+        let destBytes = dests.compactMap { nodeIdBytes($0) }
+        guard !destBytes.isEmpty else { return }
+        let id = Data((0..<16).map { _ in UInt8.random(in: 0...255) })
+        seenRelay.insert(id.map { String(format: "%02x", $0) }.joined())   // don't reprocess our own
+        var p = Data()
+        p.append(id)
+        p.append(Self.relayTTL)
+        p.append(UInt8(min(destBytes.count, 255)))
+        for d in destBytes.prefix(255) { p.append(d) }
+        p.append(inner)
+        let myAcct = AccountStore.currentNodeHex().lowercased()
+        let myDev = social?.myDeviceNodeHex().lowercased() ?? ""
+        var sent = 0
+        for relayHex in RelayMailboxStore.shared.allRelays() {
+            let h = relayHex.lowercased()
+            if h.hasPrefix("s3:") || h == myAcct || h == myDev { continue }
+            sendIroh(9, p, to: relayHex)
+            sent += 1
+            if sent >= 3 { break }
+        }
     }
 
     /// Notify a callee via push that a call is coming in (so they're alerted even if the app

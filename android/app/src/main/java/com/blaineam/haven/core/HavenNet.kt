@@ -358,6 +358,7 @@ object HavenNet : InboundListener {
                 Wire.DEVICE_GRANT -> handleDeviceGrant(body)
                 Wire.EVENT -> handleEvent(body)
                 Wire.RELAY_NODE -> handleRelayNode(body)
+                Wire.RELAY -> handleRelay(body, viaNearby)
                 Wire.PRESIGN -> handlePresignBootstrap(body)
                 Wire.MEDIA_REQ -> handleMediaRequest(body)
                 Wire.MEDIA_CHUNK -> handleMediaChunk(body)
@@ -373,8 +374,82 @@ object HavenNet : InboundListener {
     /** CallManager registers here to receive call frames (kept as a hook to avoid a hard dependency). */
     var callRouter: ((type: Int, body: ByteArray) -> Unit)? = null
 
-    /** Send a call signaling frame to one node (used by CallManager). */
-    fun sendCallFrame(type: Int, payload: ByteArray, toNodeHex: String) = sendFrame(type, payload, toNodeHex)
+    /** Send a call signaling frame to one node (used by CallManager): direct AND live-forwarded
+     *  through the circle relays (frame 9 — the relay host unwraps + sends it onward over its own
+     *  connections). Cross-NAT fallback: a callee whose direct dial back to the caller fails still
+     *  lands the ACCEPT within the ring window (the push rings, but the answer path was direct-only). */
+    fun sendCallFrame(type: Int, payload: ByteArray, toNodeHex: String) {
+        sendFrame(type, payload, toNodeHex)
+        val dests = LinkedHashSet<String>()
+        dests.addAll(runCatching { social.deviceNodeIdsFor(toNodeHex) }.getOrDefault(emptyList()))
+        if (dests.isEmpty()) dests.add(toNodeHex)
+        dests.addAll(deviceHintsFor(toNodeHex))
+        originateRelayInternet(dests.toList(), Wire.frame(type, payload))
+    }
+
+    // ---- Frame-9 mesh relay (internet live-forward; wire parity with iOS emitRelay) --------
+    //   [16B msgId][1B ttl][1B destCount][32B × dest][inner frame]
+
+    private val seenRelay = LinkedHashSet<String>()
+
+    private fun hexToBytes32(hex: String): ByteArray? {
+        if (hex.length != 64) return null
+        return runCatching { ByteArray(32) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() } }.getOrNull()
+    }
+    private fun bytesToHex(b: ByteArray): String = b.joinToString("") { "%02x".format(it) }
+
+    /** Originate a live frame-9 forward of [inner] to [dests] via up to 3 adopted internet relays. */
+    private fun originateRelayInternet(dests: List<String>, inner: ByteArray) {
+        val destBytes = dests.mapNotNull { hexToBytes32(it) }
+        if (destBytes.isEmpty()) return
+        val msgId = ByteArray(16).also { java.security.SecureRandom().nextBytes(it) }
+        seenRelay.add(bytesToHex(msgId))   // don't reprocess our own
+        if (seenRelay.size > 2000) seenRelay.clear()
+        val out = java.io.ByteArrayOutputStream()
+        out.write(msgId); out.write(4); out.write(minOf(destBytes.size, 255))
+        for (d in destBytes.take(255)) out.write(d)
+        out.write(inner)
+        val p = out.toByteArray()
+        val mineAcct = nodeIdHex.lowercase()
+        val mineDev = runCatching { social.myDeviceNodeHex() }.getOrDefault("").lowercase()
+        var sent = 0
+        for (relayHex in relayNodes.values.flatten().distinct()) {
+            val h = relayHex.lowercase()
+            if (h.startsWith("s3:") || h == mineAcct || h == mineDev) continue
+            sendFrame(Wire.RELAY, p, relayHex)
+            if (++sent >= 3) break
+        }
+    }
+
+    /** Frame-9 mesh relay: process the inner frame if we're a destination, and forward it onward
+     *  to the other destinations (we may be the relay host the sender hopped through). */
+    private fun handleRelay(body: ByteArray, viaNearby: Boolean) {
+        if (body.size < 18) return
+        val key = bytesToHex(body.copyOfRange(0, 16))
+        if (!seenRelay.add(key)) return   // dedup / loop protection
+        if (seenRelay.size > 2000) { seenRelay.clear(); seenRelay.add(key) }
+        val ttl = body[16].toInt() and 0xFF
+        val destCount = body[17].toInt() and 0xFF
+        var off = 18
+        if (body.size < off + destCount * 32) return
+        val dests = ArrayList<String>(destCount)
+        repeat(destCount) {
+            dests.add(bytesToHex(body.copyOfRange(off, off + 32)))
+            off += 32
+        }
+        val inner = body.copyOfRange(off, body.size)
+        if (inner.isEmpty()) return
+        val meAcct = nodeIdHex.lowercase()
+        val meDev = runCatching { social.myDeviceNodeHex() }.getOrDefault("").lowercase()
+        if (dests.any { it.lowercase() == meAcct || it.lowercase() == meDev }) onInbound(inner, viaNearby)
+        if (ttl <= 0) return
+        val n = node ?: return
+        for (dest in dests) {
+            val d = dest.lowercase()
+            if (d == meAcct || d == meDev) continue
+            scope.launch { runCatching { n.sendToNode(dest, inner) } }
+        }
+    }
 
     private fun handleHello(payload: ByteArray, viaNearby: Boolean = false) {
         val hello = Wire.parseHello(payload) ?: return

@@ -556,7 +556,7 @@ var DOWNLOADS = {
                    android: "Get the Android beta", windows: "Download for Windows", linux: "Download for Linux" };
     var target = { // preferred destination per platform; "#" / "" both mean "not ready"
       ios: DOWNLOADS.APP_STORE_URL || DOWNLOADS.APPLE_BETA_URL,
-      macos: DOWNLOADS.MAC_APP_STORE_URL || (assets && assets.dmg) || DOWNLOADS.APPLE_BETA_URL,
+      macos: DOWNLOADS.MAC_APP_STORE_URL || DOWNLOADS.APPLE_BETA_URL,
       android: (PLAY_BETA_URL && PLAY_BETA_URL !== "#") ? PLAY_BETA_URL : (assets && assets.apk),
       windows: assets && assets.win,
       linux: assets && assets.linux
@@ -586,17 +586,13 @@ var DOWNLOADS = {
     else bs.push('<span class="muted small">TestFlight beta — invite required for now</span>');
     return card("iPhone &amp; iPad", "iOS · iPadOS — App&nbsp;Store", bs, recommended);
   }
-  // macOS: the App Store is the primary destination; the Developer ID–notarized .dmg from the
-  // latest release stays as the direct-download alternative (NOT the Tauri build).
-  function macCard(dmg, recommended) {
+  // macOS ships on the App Store (the native SwiftUI app — direct .dmg downloads retired at launch).
+  function macCard(recommended) {
     var bs = [];
     if (DOWNLOADS.MAC_APP_STORE_URL) bs.push(btn(DOWNLOADS.MAC_APP_STORE_URL, "Download on the App&nbsp;Store", true));
-    if (dmg) bs.push(btn(dmg, DOWNLOADS.MAC_APP_STORE_URL ? "Or the notarized .dmg" : "Download for Mac (.dmg)", !DOWNLOADS.MAC_APP_STORE_URL));
-    if (!bs.length) {
-      bs.push(APPLE_BETA_URL ? btn(APPLE_BETA_URL, "Join the TestFlight beta", true)
-                             : '<span class="muted small">Building…</span>');
-    }
-    return card("macOS", "Native app — App&nbsp;Store or notarized&nbsp;.dmg", bs, recommended);
+    else if (APPLE_BETA_URL) bs.push(btn(APPLE_BETA_URL, "Join the TestFlight beta", true));
+    else bs.push('<span class="muted small">Building…</span>');
+    return card("macOS", "Native app — App&nbsp;Store", bs, recommended);
   }
 
   // Detect the visitor's platform from the standard, browser-provided UA platform — no
@@ -639,7 +635,6 @@ var DOWNLOADS = {
       var flat = pick(/\.flatpak$/i);
       var hasRelay = any(/^haven-relay-/i);
       var apk = pick(/universal.*\.apk$/i) || pick(/\.apk$/i);
-      var dmg = pick(/macOS\.dmg$/i) || pick(/\.dmg$/i);
 
       var plat = detectPlatform();
       var rec = function (k) { return plat === k; };
@@ -655,7 +650,7 @@ var DOWNLOADS = {
       // Each entry tagged with its platform key; the matching card gets the badge and floats first.
       var entries = [
         { p: "ios",     html: iosCard(rec("ios")) },
-        { p: "macos",   html: macCard(dmg, rec("macos")) },
+        { p: "macos",   html: macCard(rec("macos")) },
         { p: "android", html: androidCard(rec("android")) },
         { p: "windows", html: card("Windows", "x86-64", winBtns.length ? winBtns : [btn(null)], rec("windows")) },
         { p: "linux",   html: card("Linux", "Ubuntu · Debian · Fedora · Arch", linuxBtns.length ? linuxBtns : [btn(null)], rec("linux")) },
@@ -665,10 +660,10 @@ var DOWNLOADS = {
       var ordered = entries.filter(function (e) { return e.p === plat; })
         .concat(entries.filter(function (e) { return e.p !== plat; }));
       grid.innerHTML = ordered.map(function (e) { return e.html; }).join("");
-      wireHeroButton({ dmg: dmg, apk: apk, win: (exe || msi), linux: (deb || appimg || rpm) });
+      wireHeroButton({ apk: apk, win: (exe || msi), linux: (deb || appimg || rpm) });
     })
     .catch(function () {
-      grid.innerHTML = iosCard() + macCard(null) +
+      grid.innerHTML = iosCard() + macCard() +
         '<div class="dl-card"><h4>Windows · Linux · Steam Deck</h4><div class="muted small">desktop &amp; relay</div>' +
         '<div class="dl-btns">' + btn("https://github.com/" + REPO + "/releases/latest", "Browse downloads on GitHub", true) + '</div></div>';
       // Release fetch failed — hero still auto-detects; store links work, desktop falls back to #download.

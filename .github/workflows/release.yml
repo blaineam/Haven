@@ -255,110 +255,6 @@ jobs:
           path: out/*
           if-no-files-found: error
 
-  # ── macOS: the NATIVE SwiftUI app (HavenMac), Developer ID signed + notarized .dmg ──────
-  # NOT the Tauri build. This is a direct-download counterpart to the App Store build that
-  # `rocket` ships. Uses the Developer ID cert (APPLE_CERTIFICATE) + notarytool (APPLE_ID /
-  # APPLE_PASSWORD / APPLE_TEAM_ID). Uses the developer-id entitlements (no push/keychain-group)
-  # so no provisioning profile is needed.
-  macos-app:
-    needs: meta
-    runs-on: macos-latest
-    continue-on-error: true   # a signing/notarization hiccup must never block Win/Linux/relay
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: core
-      - name: Install XcodeGen
-        run: brew install xcodegen
-      - name: Build HavenFFI.xcframework (Rust core → Swift)
-        working-directory: apple
-        run: ./build-rust-xcframework.sh
-      - name: Generate Xcode project
-        working-directory: apple
-        run: xcodegen generate
-      - name: Import Developer ID certificate
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-        run: |
-          set -euo pipefail
-          KC="$RUNNER_TEMP/haven-signing.keychain-db"
-          KCPW="$(openssl rand -hex 20)"
-          CERT="$RUNNER_TEMP/cert.p12"
-          echo "$APPLE_CERTIFICATE" | base64 --decode > "$CERT"
-          security create-keychain -p "$KCPW" "$KC"
-          security set-keychain-settings -lut 21600 "$KC"
-          security unlock-keychain -p "$KCPW" "$KC"
-          security import "$CERT" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 \
-            -k "$KC" -T /usr/bin/codesign -T /usr/bin/security
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPW" "$KC" >/dev/null
-          security list-keychains -d user -s "$KC" $(security list-keychains -d user | sed 's/"//g')
-          echo "── Code-signing identities (must include a 'Developer ID Application'): ──"
-          security find-identity -v -p codesigning "$KC"
-      - name: Archive · export · dmg · notarize HavenMac
-        working-directory: apple
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          VERSION: ${{ needs.meta.outputs.version }}
-        run: |
-          set -euo pipefail
-          ARCHIVE="$RUNNER_TEMP/HavenMac.xcarchive"
-          # Manual Developer ID signing with the direct-download entitlements (no profile needed).
-          xcodebuild -project Haven.xcodeproj -scheme HavenMac \
-            -configuration Release -destination 'generic/platform=macOS' \
-            -archivePath "$ARCHIVE" \
-            CODE_SIGN_STYLE=Manual \
-            CODE_SIGN_IDENTITY="$APPLE_SIGNING_IDENTITY" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
-            ENABLE_HARDENED_RUNTIME=YES \
-            CODE_SIGN_ENTITLEMENTS=HavenApp/Haven.macOS.developerid.entitlements \
-            archive
-          cat > "$RUNNER_TEMP/export.plist" <<PLIST
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-            <key>method</key><string>developer-id</string>
-            <key>teamID</key><string>${APPLE_TEAM_ID}</string>
-            <key>signingStyle</key><string>manual</string>
-            <key>signingCertificate</key><string>Developer ID Application</string>
-          </dict></plist>
-          PLIST
-          xcodebuild -exportArchive -archivePath "$ARCHIVE" \
-            -exportOptionsPlist "$RUNNER_TEMP/export.plist" \
-            -exportPath "$RUNNER_TEMP/export"
-          APP="$(/usr/bin/find "$RUNNER_TEMP/export" -maxdepth 1 -name '*.app' | head -1)"
-          echo "exported app: $APP"
-          # Build a STYLED drag-to-Applications .dmg with dmgbuild (brand background + icon layout,
-          # parity with Blip / Enter Space Helper). dmgbuild writes the volume's .DS_Store directly,
-          # so the styling actually applies on a headless CI runner — a Finder AppleScript silently
-          # no-ops there, which is why earlier releases shipped an unstyled dmg. Verified locally.
-          mkdir -p "$RUNNER_TEMP/out"
-          DMG="$RUNNER_TEMP/out/Haven-${VERSION}-macOS.dmg"
-          python3 -m venv "$RUNNER_TEMP/dmgvenv"
-          "$RUNNER_TEMP/dmgvenv/bin/pip" install --quiet dmgbuild
-          "$RUNNER_TEMP/dmgvenv/bin/dmgbuild" -s Scripts/dmg_settings.py \
-            -D app="$APP" -D bg="$PWD/Scripts/dmg-background.png" \
-            "Haven" "$DMG"
-          # Notarize the dmg (notarizes the app inside) + staple the ticket.
-          xcrun notarytool submit "$DMG" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" --wait
-          xcrun stapler staple "$DMG"
-          xcrun stapler validate "$DMG"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: macos-app
-          path: ${{ runner.temp }}/out/*
-          if-no-files-found: error
-
-  # ── SteamOS / Steam Deck Flatpak (built from the Linux .deb) ────────────────────────────
   flatpak:
     needs: desktop
     runs-on: ubuntu-latest
@@ -399,7 +295,7 @@ jobs:
 
   # ── Publish one Release with every artifact + a version-pinned Flatpak manifest ─────────
   publish:
-    needs: [meta, relay, relay-windows, desktop, macos-app, flatpak]
+    needs: [meta, relay, relay-windows, desktop, flatpak]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
@@ -434,7 +330,7 @@ jobs:
           cat > NOTES.md <<EOF
           Haven ${{ needs.meta.outputs.version }}
 
-          **macOS** — the native SwiftUI app, Developer ID signed + notarized (\`Haven-*-macOS.dmg\`).
+          **iPhone · iPad · Mac** — on the App Store: https://apps.apple.com/app/id6782147901
           **Desktop GUI** — Windows (.msi / NSIS .exe) · Linux (.deb / .rpm / AppImage) ·
           SteamOS / Steam Deck (\`haven.flatpak\` + the pinned \`com.blaineam.haven.yml\`).
           **Android** — sideloadable .apk (universal + per-ABI), attached by the \`android\` workflow.

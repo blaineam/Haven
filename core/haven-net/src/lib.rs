@@ -326,12 +326,19 @@ impl Node {
         }
         match self.endpoint.connect(addr, ALPN).await.ah() {
             Ok(conn) => {
-                lock(&self.dial_gate).remove(&id);
+                // Do NOT clear the dial gate here: a connect that succeeds but dies young (a
+                // FLAPPING peer — e.g. a node whose key is bound by two endpoints trading the DERP
+                // registration) would otherwise reset its backoff on every redial, and each
+                // short-lived connection leaves iroh's per-peer path actor churning
+                // (close → open_path → close, ~30MB/min of fresh QUIC state — the 3GB jetsam).
+                // read_loop clears the gate once the connection proves healthy (lives ≥ 30s),
+                // and records a strike if it dies younger.
                 lock(&self.conns).insert(id, conn.clone());
                 let c = self.conns.clone();
                 let h = self.handler.clone();
+                let g = self.dial_gate.clone();
                 let cc = conn.clone();
-                tokio::spawn(async move { read_loop(cc, c, h).await });
+                tokio::spawn(async move { read_loop(cc, c, h, Some(g)).await });
                 Ok(conn)
             }
             Err(e) => {
@@ -567,20 +574,32 @@ async fn accept_loop(
                 return;
             }
             // Social: keep the inbound connection so we can send back to a peer who dialed us
-            // (they may be unreachable for us to dial directly).
+            // (they may be unreachable for us to dial directly). No dial gate: backoff applies
+            // to OUR outbound dials, not to who may dial us.
             lock(&conns).insert(conn.remote_id(), conn.clone());
-            read_loop(conn, conns, handler).await;
+            read_loop(conn, conns, handler, None).await;
         });
     }
 }
 
 /// Read every uni stream on a connection as one message, for the connection's life.
-async fn read_loop(conn: Connection, conns: Conns, handler: InboundHandler) {
+/// `dial_gate` (outbound connections only) makes the per-peer backoff flap-aware: a connection
+/// that dies within 30s counts as a FAILURE (strike → 30s..10min cooldown), one that lives
+/// longer clears the gate. Without this, connect-success reset the backoff every time, so a
+/// flapping peer was redialed each sync tick and every short-lived connection fed iroh's
+/// path-churn loop (the +2.8GB-in-100s runaway).
+async fn read_loop(
+    conn: Connection,
+    conns: Conns,
+    handler: InboundHandler,
+    dial_gate: Option<Arc<Mutex<HashMap<EndpointId, DialGate>>>>,
+) {
     // The connection's remote endpoint id — the sender's AUTHENTICATED device transport id.
     // Surfacing it lets the app learn a dialable id for a contact from any frame they deliver
     // directly (the reply-path bootstrap: an invitee holds no dial hints for the initiator, so
     // without this their hello-back/DMs relied on roster propagation that itself needs a route).
     let from = *conn.remote_id().as_bytes();
+    let started = std::time::Instant::now();
     loop {
         match conn.accept_uni().await {
             Ok(mut recv) => {
@@ -599,6 +618,17 @@ async fn read_loop(conn: Connection, conns: Conns, handler: InboundHandler) {
         }
     }
     let id = conn.remote_id();
+    if let Some(gate) = dial_gate {
+        let mut gate = lock(&gate);
+        if started.elapsed() >= std::time::Duration::from_secs(30) {
+            gate.remove(&id); // proved healthy — a future dial starts fresh
+        } else {
+            let g = gate.entry(id).or_insert(DialGate { fails: 0, until: std::time::Instant::now() });
+            g.fails = g.fails.saturating_add(1);
+            let secs = (30u64 << (g.fails.min(5) - 1)).min(600);
+            g.until = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        }
+    }
     let mut map = lock(&conns);
     if map.get(&id).map(|c| c.close_reason().is_some()).unwrap_or(false) {
         map.remove(&id);

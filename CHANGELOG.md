@@ -7,6 +7,26 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.24] — 2026-07-04
+
+### Fixed
+- **Runaway memory growth that killed call audio (iOS build 167 jetsam at 2.3 GB).** Crash logs
+  off the phone showed a single core thread at ~79% CPU growing the app 202 MB → 3 GB in under
+  two minutes: iroh's per-peer path actor spinning close → re-open-path → close against a
+  FLAPPING peer (a relay whose key was bound by two endpoints — the daemon bug fixed in
+  beta.23), allocating fresh QUIC state each lap until the system started killing audio daemons
+  mid-call. Defense on the app side: the per-peer dial backoff is now flap-aware — a connection
+  that dies within 30 s counts as a dial FAILURE (30 s → 10 min cooldown) instead of resetting
+  the backoff, so a flapping peer costs one short-lived connection per cooldown instead of a
+  continuous churn loop. (Connections that live ≥ 30 s clear the backoff as before.)
+- **Call audio now recovers instead of going permanently silent (iOS).** The app had no
+  handlers for audio interruptions, route changes, or the system's "media services were reset"
+  (mediaserverd dying — e.g. under the memory pressure above). Once that happened, WebRTC's
+  mic/playout units stayed dead for the rest of the call and the speaker toggle did nothing.
+  CallManager now reconfigures + reactivates the session, reapplies the speaker route, and
+  bounces WebRTC's audio unit on media-services-reset and interruption-end; the speaker button
+  also tracks the actual output route instead of showing a stale toggle.
+
 ## [0.1.0-beta.23] — 2026-07-04
 
 ### Fixed

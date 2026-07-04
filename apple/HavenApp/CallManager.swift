@@ -712,8 +712,61 @@ final class CallManager: NSObject, ObservableObject {
         #if targetEnvironment(macCatalyst)
         session.isAudioEnabled = true
         #endif
+        installAudioSessionObservers()
         #endif
     }
+
+    #if os(iOS)
+    // MARK: - Audio-session recovery
+    //
+    // iOS can tear call audio down mid-call: a Siri/phone-call interruption, or mediaserverd dying
+    // under system memory pressure ("media services were reset"). Without handling those, the call
+    // goes PERMANENTLY silent in both directions — the mic and playout units are dead, the speaker
+    // override is lost (the button visibly flips off), and re-toggling the speaker only sets an
+    // override on a dead session. Recovery = reconfigure + reactivate the session, then bounce
+    // WebRTC's audio unit so it rebuilds capture/playout on the fresh session (Apple QA1749).
+    private var audioObserversInstalled = false
+    private func installAudioSessionObservers() {
+        guard !audioObserversInstalled else { return }
+        audioObserversInstalled = true
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { _ in
+            Task { @MainActor in CallManager.shared.recoverCallAudio(reason: "media services reset") }
+        }
+        nc.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { note in
+            guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  AVAudioSession.InterruptionType(rawValue: raw) == .ended else { return }
+            Task { @MainActor in CallManager.shared.recoverCallAudio(reason: "interruption ended") }
+        }
+        // Keep the speaker button honest: a route change (headset unplug, session reset) can move
+        // output off the speaker — reflect reality instead of showing a stale toggle.
+        nc.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { _ in
+            Task { @MainActor in CallManager.shared.syncSpeakerState() }
+        }
+    }
+
+    private func recoverCallAudio(reason: String) {
+        guard active else { return }
+        HavenLog.net("call audio recovery (\(reason))")
+        let rtc = RTCAudioSession.sharedInstance()
+        rtc.lockForConfiguration()
+        try? rtc.setCategory(.playAndRecord, with: [.allowBluetooth, .defaultToSpeaker])
+        try? rtc.setMode(.voiceChat)
+        try? rtc.setActive(true)
+        try? rtc.overrideOutputAudioPort(speakerOn ? .speaker : .none)
+        rtc.unlockForConfiguration()
+        // Bounce the audio unit so WebRTC tears down + rebuilds capture/playout on the new session.
+        rtc.isAudioEnabled = false
+        rtc.isAudioEnabled = true
+    }
+
+    private func syncSpeakerState() {
+        guard active else { return }
+        let onSpeaker = AVAudioSession.sharedInstance().currentRoute.outputs
+            .contains { $0.portType == .builtInSpeaker }
+        if speakerOn != onSpeaker { speakerOn = onSpeaker }
+    }
+    #endif
 
     // MARK: - Controls (apply to ALL pairwise connections)
 

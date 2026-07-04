@@ -3,9 +3,9 @@
 # its own TLS roots (webpki-roots), so it needs nothing from the OS but a place to store data.
 #
 # Multi-arch: `docker buildx` / compose sets TARGETARCH; we map it to the release asset.
-# Pin a version with `--build-arg HAVEN_RELAY_VERSION=v0.1.0-beta.19` (or `latest`).
+# Pin a version with `--build-arg HAVEN_RELAY_VERSION=v0.1.0-beta.21` (or `latest`).
 FROM alpine:3.20
-ARG HAVEN_RELAY_VERSION=v0.1.0-beta.19
+ARG HAVEN_RELAY_VERSION=v0.1.0-beta.21
 ARG TARGETARCH
 RUN set -eux; \
     apk add --no-cache wget; \

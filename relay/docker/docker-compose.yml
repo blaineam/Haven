@@ -1,14 +1,17 @@
 # Haven relay on your NAS (or any always-on box) via Docker Compose.
 #
 #   1. Copy this folder (Dockerfile, entrypoint.sh, this file) to your NAS.
-#   2. In the Haven app: Settings ▸ Relays → "Add a relay" → copy the
-#      haven-relay://circle#… link it shows you.
+#   2. In the Haven app, get your circle's relay LINK:
+#        Settings ▸ Storage ▸ Advanced → "Connect an external relay"
+#        → "Copy this circle's relay link"   (a haven-relay://circle#… link)
 #   3. Put that link in a `.env` file next to this one:
 #          HAVEN_RELAY_LINK=haven-relay://circle#…
 #   4. Bring it up:
 #          docker compose up -d --build
-#   5. Watch it attach + reprint the paste-into-the-app link/QR:
-#          docker compose logs -f
+#   5. Give the app the relay's NODE ID (so your circle adopts it):
+#          docker compose exec haven-relay haven-relay id
+#      then paste that 64-hex id back on the same "Connect an external relay" screen
+#      (or Relays ▸ Add relay ▸ Haven relay). `docker compose logs -f` shows it too.
 #
 # The link is saved in the `haven-relay-data` volume, so it survives restarts and updates —
 # keep that volume to stay the SAME relay for your circle. The relay only ever moves

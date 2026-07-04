@@ -1247,6 +1247,15 @@ object HavenNet : InboundListener {
      * replacing existing relays — + tell contacts via frame 19. Adopt several for redundancy.
      * This is the EXPLICIT path, so it CLEARS any suppression AND reactivates the entry.
      */
+    /** This circle's relay LINK — hand it to a `haven-relay` daemon / the Docker relay
+     *  (`haven-relay run --link <link>`); it then prints a node id you paste back via adoptRelay.
+     *  Carries only the circle tag + public member node ids (no key material). Parity with iOS. */
+    fun relayLink(circleId: String = activeCircle.value): String? = runCatching {
+        val members = social.contactNodeIds(circleId).toMutableList()
+        runCatching { social.myNodeHex() }.getOrNull()?.let { members.add(it) }
+        uniffi.haven_ffi.makeRelayLink(circleId, members)
+    }.getOrNull()
+
     fun adoptRelay(nodeHex: String, name: String? = null, setDefault: Boolean = false) {
         val hex = nodeHex.trim().lowercase()
         if (hex.length != 64) return

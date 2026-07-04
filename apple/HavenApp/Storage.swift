@@ -562,6 +562,7 @@ struct AddRelaySheet: View {
     @State private var name = ""
     @State private var nodeInput = ""
     @State private var makeDefault = true
+    @State private var linkCopied = false
     // S3 fields
     @State private var endpoint = ""
     @State private var region = "us-east-1"
@@ -591,6 +592,25 @@ struct AddRelaySheet: View {
                     }
 
                     if kind == .haven {
+                        // Setting up a `haven-relay` daemon (or the Docker relay)? It needs THIS
+                        // circle's link first; then it prints a node id you paste below. Surface the
+                        // link-copy right here so the two-step flow is discoverable (it also lives on
+                        // Storage ▸ Advanced ▸ Connect an external relay).
+                        Section {
+                            Button {
+                                if let link = FeedStore.shared.relayLink() {
+                                    PlatformPasteboard.string = link
+                                    linkCopied = true
+                                }
+                            } label: {
+                                Label(linkCopied ? "Copied — run: haven-relay run --link …"
+                                                 : "Copy this circle's relay link",
+                                      systemImage: linkCopied ? "checkmark.circle.fill" : "doc.on.doc")
+                                    .foregroundStyle(linkCopied ? Color.green : HavenTheme.pink)
+                            }
+                        } header: { Text("Running your own relay?") }
+                        footer: { Text("For a `haven-relay` daemon or the Docker relay: copy this link, start the relay with it (`haven-relay run --link <link>`), then paste back the node id it prints below.") }
+
                         Section {
                             TextField("Relay node id (64 hex)", text: $nodeInput)
                                 .autocorrectionDisabled().havenAutocap(.never)

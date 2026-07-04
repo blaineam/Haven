@@ -6,21 +6,36 @@ ciphertext; it can't read a thing.
 
 ## Quick start
 
+Setting up a relay is a two-step handshake: you give the relay your circle's **link** (which members
+to forward toward), and you give the app the relay's **node id** (where to reach it). Both live in
+the same place in the app.
+
 1. Copy this folder (`Dockerfile`, `entrypoint.sh`, `docker-compose.yml`) to your NAS.
-2. In the Haven app: **Settings ▸ Relays → "Add a relay"** and copy the `haven-relay://circle#…`
-   link it shows you.
-3. Create a `.env` file next to `docker-compose.yml`:
+
+2. **In the Haven app, get your circle's relay link.** Go to
+   **Settings ▸ Storage ▸ Advanced → "Connect an external relay"** and tap
+   **"Copy this circle's relay link."** (On the Mac/desktop app it's the same
+   *Advanced storage* screen.) It's a `haven-relay://circle#…` link.
+   > Not the **Relays ▸ Add relay** sheet — that one is for step 5, pasting the node id *back*.
+
+3. Put the link in a `.env` file next to `docker-compose.yml`:
    ```
    HAVEN_RELAY_LINK=haven-relay://circle#…
    ```
+
 4. Build and start:
    ```sh
    docker compose up -d --build
    ```
-5. Confirm it attached (and see the paste-into-the-app link/QR reprinted):
+
+5. **Grab the relay's node id and give it to the app.** Print it:
    ```sh
-   docker compose logs -f
+   docker compose exec haven-relay haven-relay id      # 64-hex node id
+   docker compose logs -f                               # also shows it + the QR at startup
    ```
+   Back in the app on that same *Connect an external relay* screen, **paste the node id** into
+   *"Paste the daemon's node id"* and tap Connect. (Or use **Relays ▸ Add relay ▸ Haven relay** and
+   paste it there.) Your whole circle now adopts this relay.
 
 Every later start is just `docker compose up -d` — the link and identity live in the
 `haven-relay-data` volume, so the container stays the **same** relay across restarts and updates.

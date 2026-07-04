@@ -628,6 +628,22 @@ private fun AddRelayForm(context: android.content.Context, onDone: () -> Unit) {
         Spacer(Modifier.height(8.dp))
 
         if (!isS3) {
+            // Running your OWN relay (a haven-relay daemon or the Docker relay)? It needs THIS
+            // circle's link first; it then prints a node id you paste below. Surface the copy here so
+            // the two-step flow is discoverable (parity with iOS AddRelaySheet).
+            var linkCopied by remember { mutableStateOf(false) }
+            Text(if (linkCopied) "✓ Copied — run: haven-relay run --link …" else "Copy this circle's relay link",
+                color = if (linkCopied) Color(0xFF34D399) else HavenTheme.pink, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
+                modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable {
+                    HavenNet.relayLink()?.let {
+                        (context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager)
+                            .setPrimaryClip(android.content.ClipData.newPlainText("haven relay link", it))
+                        linkCopied = true
+                    }
+                }.padding(vertical = 6.dp))
+            Text("For a haven-relay daemon or the Docker relay: copy this link, start the relay with it, then paste back the node id it prints below.",
+                color = HavenTheme.textSecondary, fontSize = 11.sp)
+            Spacer(Modifier.height(12.dp))
             StorageField("Relay node id (64 hex)", nodeInput) { nodeInput = it.trim() }
             Spacer(Modifier.height(6.dp))
             Text("Paste the node id printed by a haven-relay daemon, or another device that's acting as a relay. Connects over iroh — a live P2P relay.",

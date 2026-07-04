@@ -7,6 +7,20 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.18] — 2026-07-03
+
+### Fixed
+- **UI smoothness: the engine no longer runs on the main thread (iOS/macOS).** A main-thread audit
+  found the heaviest engine work executing on the main actor: `exportState()` + the atomic state
+  write after every post/ingest burst (100-500ms freezes), per-envelope `receive()` crypto during
+  mailbox drains and event bursts, the full-feed `feed()` decode + O(posts) filter on every 20s
+  tick, N×`deviceNodeIdsFor` FFI calls per sync fan-out, and an O(items×media) disk scan per
+  sweep. All now run off-main via Swift structured concurrency: state persistence is serialized
+  through an actor (ordered, coalesced), envelope batches ingest on a background task with one
+  main-actor apply, the feed rebuild is detached with a stale-result generation guard, dial
+  targets are cached 10s (invalidated by fresh rosters/hints), and the media scan is capped to
+  once per 2s. Android already ingested off-main (Dispatchers.IO); desktop is Tokio-async.
+
 ## [0.1.0-beta.17] — 2026-07-03
 
 ### Fixed

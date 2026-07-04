@@ -263,8 +263,13 @@ final class FeedStore: ObservableObject {
     /// must dial each member's DEVICE node ids (learned from their signed roster) to actually reach them.
     /// We include the account id too, so a peer still on the pre-device-seed build (account id == node id) is
     /// reachable during cutover. De-duplicated, excludes self (both our account + device ids).
+    /// dialTargets fans out to N FFI calls (deviceNodeIdsFor per member) and runs on every 20s sync
+    /// tick for every circle — cache per circle for 10s. Rosters/hints change rarely; a fresh hint
+    /// (recordDeviceHints) invalidates the cache so a brand-new contact is dialable immediately.
+    private var dialTargetsCache: [String: (targets: [String], at: UInt64)] = [:]
     func dialTargets(_ circleId: String) -> [String] {
         guard let social else { return [] }
+        if let c = dialTargetsCache[circleId], now() - c.at < 10_000 { return c.targets }
         let mineAcct = social.myNodeHex().lowercased()
         let mineDev = social.myDeviceNodeHex().lowercased()
         var out = [String]()
@@ -275,6 +280,7 @@ final class FeedStore: ObservableObject {
             for d in social.deviceNodeIdsFor(accountHex: a) { add(d) }   // their device node ids (actual reach)
             for h in deviceHints(for: a) { add(h) }             // invite-link hints (until their roster lands)
         }
+        dialTargetsCache[circleId] = (out, now())
         return out
     }
 
@@ -298,6 +304,7 @@ final class FeedStore: ObservableObject {
         guard cur != before else { return }   // no-op for already-known hints (fires per hello)
         m[key] = Array(cur.suffix(8))
         contactDeviceHints = m
+        dialTargetsCache.removeAll()   // a new hint must be dialable immediately, not in 10s
     }
     private func deviceHints(for accountHex: String) -> [String] {
         contactDeviceHints[accountHex.lowercased()] ?? []
@@ -541,11 +548,13 @@ final class FeedStore: ObservableObject {
     }
     private func persist() {
         guard !DemoEnv.isDemo, let social else { return }
-        // The exported state holds DECRYPTED content + contacts + derived key material. Protect it at
-        // rest to match the in-transit E2EE — readable only after first unlock (so the NSE/background
-        // can still reach it), never in a locked-device forensic image / unencrypted backup.
-        try? social.exportState().write(to: stateURL,
-                                        options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        // exportState() serializes the WHOLE engine (100s of ms on a large account) and the atomic
+        // write hits disk — both used to run on the main actor after every post/ingest burst and
+        // froze the UI. The actor serializes writers so an older export can never clobber a newer one.
+        let url = stateURL
+        Task.detached(priority: .utility) {
+            await StatePersister.shared.persist(social: social, to: url)
+        }
     }
 
     private func bringOnline(seed: Data) {
@@ -665,29 +674,46 @@ final class FeedStore: ObservableObject {
     }
 
     private func now() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
+    /// Stale-result guard for the off-main feed rebuild: only the newest refresh may publish.
+    private var refreshGeneration: UInt64 = 0
     func refresh() {
-        let raw = social?.feed(circleId: activeCircleId, nowMs: now(), viewerRetentionSecs: CircleSettingsStore.shared.retentionSecs(activeCircleId)) ?? []
-        // Hide posts from blocked people and from anyone no longer in this circle (removed members), so
-        // a removal actually clears their content from the feed. My own posts always stay. Filtering by
-        // prefix because a feed item carries the author's short id.
-        let members = social?.contactNodeIds(circleId: activeCircleId)   // nil = social not ready
+        guard let social else { items = []; return }
+        // Snapshot the main-actor state, then run the engine read (`feed()` decodes + re-opens every
+        // envelope — real CPU) and the O(posts) filter OFF the main actor. This used to run on main
+        // on every 20s tick and every ingest burst — the single biggest source of feed jank.
+        refreshGeneration += 1
+        let gen = refreshGeneration
+        let circleId = activeCircleId
+        let retention = CircleSettingsStore.shared.retentionSecs(circleId)
         let blocked = ConnectionsStore.shared.blocked
-        let removed = ConnectionsStore.shared.removedHexes(inCircle: activeCircleId)   // explicit severances
+        let removed = ConnectionsStore.shared.removedHexes(inCircle: circleId)   // explicit severances
         let showHidden = HiddenStore.shared.showHidden
-        items = raw.filter { fi in
-            // Personal per-post hide (reversible via the "show hidden" toggle).
-            if !showHidden && HiddenStore.shared.isHidden(fi.id) { return false }
-            // Explicitly removed/blocked authors are ALWAYS hidden — even if the engine's membership list
-            // still lags behind the severance. (Checked before isMe so a removal can't be defeated.)
-            if blocked.contains(where: { $0.hasPrefix(fi.authorShort) }) { return false }
-            if removed.contains(where: { $0.hasPrefix(fi.authorShort) }) { return false }
-            if fi.isMe { return true }
-            guard let members else { return true }   // lookup unavailable — don't blank the feed
-            // empty list = a genuine solo circle → hide everyone else (incl. a re-synced removed member)
-            return members.contains(where: { $0.hasPrefix(fi.authorShort) })
+        let hidden = HiddenStore.shared.hidden
+        let nowMs = now()
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let raw = social.feed(circleId: circleId, nowMs: nowMs, viewerRetentionSecs: retention)
+            // Hide posts from blocked people and from anyone no longer in this circle (removed
+            // members), so a removal actually clears their content. My own posts always stay.
+            // Prefix-matching because a feed item carries the author's short id.
+            let members = social.contactNodeIds(circleId: circleId)
+            let filtered = raw.filter { fi in
+                // Personal per-post hide (reversible via the "show hidden" toggle).
+                if !showHidden && hidden.contains(fi.id) { return false }
+                // Explicitly removed/blocked authors are ALWAYS hidden — even if the engine's
+                // membership list lags the severance. (Before isMe so a removal can't be defeated.)
+                if blocked.contains(where: { $0.hasPrefix(fi.authorShort) }) { return false }
+                if removed.contains(where: { $0.hasPrefix(fi.authorShort) }) { return false }
+                if fi.isMe { return true }
+                // empty list = a genuine solo circle → hide everyone else (incl. re-synced removed)
+                return members.contains(where: { $0.hasPrefix(fi.authorShort) })
+            }
+            await MainActor.run {
+                guard let self, self.refreshGeneration == gen, self.activeCircleId == circleId else { return }
+                self.items = filtered
+                self.sensitiveCache.removeAll()   // a refresh may have ingested new SensitiveFlag events
+                SpotlightIndex.reindexAll()       // no-op unless the user enabled Spotlight indexing
+            }
         }
-        sensitiveCache.removeAll()   // a refresh may have ingested new SensitiveFlag events
-        SpotlightIndex.reindexAll()   // no-op unless the user enabled Spotlight indexing
     }
 
     private var refreshPending = false
@@ -1128,15 +1154,20 @@ final class FeedStore: ObservableObject {
     @MainActor func pullMailbox(circleIds ids: [String]) async {
         guard let social, ids.contains(where: { SharedStore.hasMailbox($0) }) else { return }
         let msgs = await SharedStore.pollMailbox(circleIds: ids)
-        var changed = false
-        for (cid, env) in msgs {
-            if (try? social.receive(circleId: cid, envelope: env)) == true {
-                changed = true
-                notifyNewest(in: cid)
-                bumpUnseen(cid)
+        guard !msgs.isEmpty else { return }
+        // receive() does real crypto per envelope; a backlog drain used to run the whole loop on
+        // the main actor and freeze the UI for the duration. Ingest the batch off-main, then hop
+        // back once with the circles that changed.
+        let ingested: [String] = await Task.detached(priority: .utility) {
+            var changed: [String] = []
+            for (cid, env) in msgs where (try? social.receive(circleId: cid, envelope: env)) == true {
+                changed.append(cid)
             }
-        }
-        if changed { persist(); refresh(); requestMissingMedia() }
+            return changed
+        }.value
+        guard !ingested.isEmpty else { return }
+        for cid in ingested { notifyNewest(in: cid); bumpUnseen(cid) }
+        persist(); refresh(); requestMissingMedia()
     }
 
     /// Drain events that arrived inline in a push (stashed by the NSE) and ingest them — silent
@@ -1147,13 +1178,22 @@ final class FeedStore: ObservableObject {
         let envs = SharedInbox.drain()
         guard !envs.isEmpty else { return }
         let ids = circles.map { $0.id }
-        var changed = false
-        for env in envs {
-            for cid in ids where (try? social.receive(circleId: cid, envelope: env)) == true {
-                changed = true; notifyNewest(in: cid); bumpUnseen(cid); break
+        // Trying every circle per envelope multiplies the receive() crypto — run the whole batch
+        // off-main and apply the result in one main-actor hop (same shape as pullMailbox).
+        Task.detached(priority: .utility) { [weak self] in
+            var ingested: [String] = []
+            for env in envs {
+                for cid in ids where (try? social.receive(circleId: cid, envelope: env)) == true {
+                    ingested.append(cid); break
+                }
+            }
+            guard !ingested.isEmpty else { return }
+            await MainActor.run {
+                guard let self else { return }
+                for cid in ingested { self.notifyNewest(in: cid); self.bumpUnseen(cid) }
+                self.persist(); self.refresh(); self.requestMissingMedia()
             }
         }
-        if changed { persist(); refresh(); requestMissingMedia() }
     }
 
     // Length-prefixed field helpers ([u16 LE len][bytes]).
@@ -1253,6 +1293,7 @@ final class FeedStore: ObservableObject {
         guard let social else { return }
         if social.ingestRosterWire(wire: payload) {
             RelayHost.shared.authorizeMembership()   // authorize the newly-learned device ids at our relay
+            dialTargetsCache.removeAll()             // newly-learned device ids must be dialable now
         }
     }
 
@@ -1761,8 +1802,14 @@ final class FeedStore: ObservableObject {
     }
 
     private var mediaReqAt: [String: UInt64] = [:]   // ref → last direct-request ms (throttle)
+    private var lastMediaScanMs: UInt64 = 0
     private func requestMissingMedia() {
         guard let social, node != nil || nearby != nil else { return }
+        // The scan below is O(items × media) with a stat() per ref (MediaStore.has) — cap it to
+        // once per 2s on the main actor; per-ref request throttles below stay unchanged.
+        let nowMs = now()
+        guard nowMs - lastMediaScanMs > 2_000 else { return }
+        lastMediaScanMs = nowMs
         let myHex = social.myNodeHex()
         var missing = Set<String>()
         // Skip synthetic refs (geo: location pins): they carry no fetchable bytes, so counting them
@@ -1773,7 +1820,6 @@ final class FeedStore: ObservableObject {
         }
         let circleIds = circles.map { $0.id }
         SyncMetrics.shared.nbMediaPending = missing.count
-        let nowMs = now()
         // THROTTLE: a missing ref was re-requested from every contact on every sync, so a backlog of
         // missing media flooded the network with hundreds of thousands of frames per cycle (drowning real
         // delivery). Direct-request each ref at most once per 5 min, and only a handful per cycle — the
@@ -2135,15 +2181,20 @@ final class FeedStore: ObservableObject {
         let circleId = String(data: circleIdData, encoding: .utf8) ?? ""
         let envelope = payload.subdata(in: (payload.startIndex + off)..<payload.endIndex)
         guard !circleId.isEmpty, !envelope.isEmpty else { return }
-        let ingested = (try? social.receive(circleId: circleId, envelope: envelope)) == true
-        if ingested {
-            // Hearing a message is proof of life — refresh "last seen" for a DM's partner.
-            if circleId.hasPrefix("dm:"), let partner = dmPartnerHex(circleId) { recordHeard(partner) }
-            schedulePersist()             // coalesced — a sync burst writes once, not per event
-            scheduleRefresh()             // coalesced feed rebuild
-            scheduleRequestMissingMedia() // coalesced media pull (scans the whole feed)
-            notifyNewest(in: circleId)
-            bumpUnseen(circleId)
+        // receive() verifies + decrypts — real CPU per frame, and event frames arrive in BURSTS
+        // during a sync. Do the crypto off-main; hop back only for the (already-coalesced) applies.
+        Task.detached(priority: .utility) { [weak self] in
+            guard (try? social.receive(circleId: circleId, envelope: envelope)) == true else { return }
+            await MainActor.run {
+                guard let self else { return }
+                // Hearing a message is proof of life — refresh "last seen" for a DM's partner.
+                if circleId.hasPrefix("dm:"), let partner = self.dmPartnerHex(circleId) { self.recordHeard(partner) }
+                self.schedulePersist()             // coalesced — a sync burst writes once, not per event
+                self.scheduleRefresh()             // coalesced feed rebuild
+                self.scheduleRequestMissingMedia() // coalesced media pull (scans the whole feed)
+                self.notifyNewest(in: circleId)
+                self.bumpUnseen(circleId)
+            }
         }
     }
 

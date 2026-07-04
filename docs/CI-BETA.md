@@ -2,8 +2,8 @@
 
 How Haven's GitHub Actions produce downloadable installers for **every** platform so you can
 link beta-testers to a fresh build. Everything runs on GitHub-hosted runners — no proprietary
-services, no recurring cost beyond Apple's $99/yr developer program (only needed to *notarize*
-the macOS .dmg; an **unsigned** .dmg builds with zero secrets).
+services, no recurring cost beyond Apple's $99/yr developer program (used by the separate
+Apple/App-Store pipeline — iPhone, iPad, and Mac ship on the App Store, not from CI).
 
 ---
 
@@ -21,7 +21,6 @@ That single tag fans out to every platform job and produces **one GitHub Release
 | --- | --- | --- |
 | **Android** | `.apk` (universal + per-ABI) | ✅ **debug-signed** beta APK |
 | **Windows** | `.msi`, NSIS `.exe` | ✅ unsigned (SmartScreen warns) |
-| **macOS** | `.dmg` | ✅ **unsigned** (right-click → Open to bypass Gatekeeper) |
 | **Linux** | `.deb`, `.rpm`, `.AppImage` | ✅ |
 | **SteamOS / Steam Deck** | `haven.flatpak` + pinned manifest | ✅ |
 | **Relay daemon** | `haven-relay-<target>` + `.deb` | ✅ |
@@ -34,7 +33,7 @@ Add the signing secrets later (below) and the *same* tag yields fully-signed/not
 
 | Workflow | Triggers | Produces |
 | --- | --- | --- |
-| `.github/workflows/release.yml` | `v*` tags, `workflow_dispatch` | Relay, Windows/Linux desktop, **macOS .dmg**, Flatpak → one Release |
+| `.github/workflows/release.yml` | `v*` tags, `workflow_dispatch` | Relay, Windows/Linux desktop, Flatpak → one Release (macOS ships on the App Store) |
 | `.github/workflows/android.yml` | push to `main`, `v*` tags, `workflow_dispatch` | Android `.apk` → artifact, attached to the Release on `v*` |
 | `.github/workflows/desktop.yml` | push/PR touching `desktop/` or `core/` | Windows/Linux installers as CI artifacts (no Release) |
 | `.github/workflows/relay-release.yml` | `relay-v*` tags | Relay binaries only (hotfix path) |
@@ -62,18 +61,16 @@ https://github.com/blaineam/haven/releases/download/vX.Y.Z/<file>
 https://github.com/blaineam/haven/releases/latest          # human-facing "latest" page
 ```
 
-e.g. `…/releases/download/v0.1.0/Haven_0.1.0_aarch64.dmg`,
-`…/releases/download/v0.1.0/app-universal-debug.apk`.
+e.g. `…/releases/download/v0.1.0/app-universal-release.apk`.
 
 **CI artifacts** (per-run, e.g. a `main` push with no tag) — download from the run's summary page
 under **Artifacts**, or via the API/`gh`:
 
 ```sh
 gh run download --name haven-android-apk     # latest android.yml run's APK
-gh run download --name desktop-macos          # the .dmg
 ```
 
-Artifact names: `haven-android-apk`, `desktop-windows`, `desktop-linux`, `desktop-macos`,
+Artifact names: `haven-android-apk`, `desktop-windows`, `desktop-linux`,
 `flatpak`, `relay-<target>`.
 
 ---
@@ -106,24 +103,10 @@ When all four are set, `android.yml` decodes the keystore to a temp file and run
 `HAVEN_KEYSTORE_PASSWORD` / `HAVEN_KEY_ALIAS` / `HAVEN_KEY_PASSWORD` (the workflow maps the
 secrets onto those env vars) to sign. Without them it runs `assembleDebug` (debug-signed).
 
-### macOS (signed + notarized .dmg)
+### macOS
 
-| Secret | What it is |
-| --- | --- |
-| `APPLE_CERTIFICATE` | "Developer ID Application" cert exported as a base64 `.p12` |
-| `APPLE_CERTIFICATE_PASSWORD` | Password you set when exporting the `.p12` |
-| `APPLE_SIGNING_IDENTITY` | e.g. `Developer ID Application: Your Name (TEAMID)` |
-| `APPLE_ID` | Your Apple ID email |
-| `APPLE_PASSWORD` | An **app-specific password** (appleid.apple.com → Sign-In & Security) |
-| `APPLE_TEAM_ID` | Your 10-char Apple Developer Team ID |
-
-Export the cert from Keychain Access → your "Developer ID Application" cert → **Export** as
-`.p12`, then `base64 -i cert.p12 | pbcopy` into `APPLE_CERTIFICATE`. Tauri reads these env vars
-to sign + notarize during `cargo tauri build`. Without them the job produces an **unsigned**
-`.dmg` (testers right-click → **Open** once to bypass Gatekeeper).
-
-> Note: this is the cross-platform **Tauri desktop** client. The native iOS/macOS App Store
-> builds ship via the separate Apple pipeline (`rocket` / native `HavenMac`), not this workflow.
+macOS ships on the **App Store** (native `HavenMac` via the `rocket` pipeline). CI builds no
+Mac artifacts — the retired Developer-ID `.dmg` leg was removed when 1.0 launched.
 
 ### Windows code-signing (optional)
 
@@ -137,7 +120,6 @@ Store path (MSIX) re-signs anyway — see `docs/WINDOWS-PORT.md`.
 ## Which artifacts build with NO secrets (start beta today)
 
 - **Android** — debug-signed `.apk`, installable on any device with "install unknown apps".
-- **macOS** — unsigned `.dmg`.
 - **Windows** — unsigned `.msi` / `.exe`.
 - **Linux** — `.deb` / `.rpm` / `.AppImage`.
 - **SteamOS** — `haven.flatpak`.

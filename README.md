@@ -3,7 +3,7 @@
 > Your friends *and* your family. That's the whole product.
 
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE)
-[![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](docs/ROADMAP.md)
+[![Status: 1.0 in App Review](https://img.shields.io/badge/status-1.0%20in%20App%20Review-brightgreen.svg)](docs/ROADMAP.md)
 [![Platforms](https://img.shields.io/badge/platforms-iOS%20%7C%20macOS%20%7C%20Android%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](#platforms)
 [![Crypto](https://img.shields.io/badge/crypto-hybrid%20post--quantum-success.svg)](docs/DECISIONS.md)
 
@@ -38,8 +38,11 @@ S3-compatible bucket, or a direct peer-to-peer link.
 
 ## Status
 
-Alpha. It runs on iPhone, iPad, and Mac, is on TestFlight, and has been used
-device-to-device over the real internet and a nearby Bluetooth/Wi-Fi mesh. Done so far:
+**1.0.0 is submitted to App Review for iPhone, iPad, and Mac** (App Store:
+https://apps.apple.com/app/id6782147901 — live on approval). Android ships as a
+signed APK from every GitHub release; Windows/Linux installers and the relay
+daemon ride the same releases. It's been used device-to-device over the real
+internet and a nearby Bluetooth/Wi-Fi mesh daily. Done so far:
 
 - **Hybrid post-quantum core** (`p2pcore`) — identity (Ed25519+ML-DSA, X25519+ML-KEM-768),
   AEAD seal/open, reach-me links, deterministic seed-based identity; unit-tested.

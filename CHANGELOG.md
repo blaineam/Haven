@@ -7,6 +7,29 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.19] — 2026-07-04
+
+Launch-polish wave alongside the 1.0.0 App Review submissions (iOS build 166, macOS build 167).
+
+### Added
+- **Deep-linked invites on Android + desktop.** Android registered `haven://` but dropped the
+  link (ACTION_VIEW unhandled) — it now routes to the Connect screen and connects immediately,
+  and a new intent filter offers "Open with Haven" for the invite web link. Windows/Linux
+  desktop registers `haven://` at install time (Tauri deep-link) → connect-by-link + focus.
+
+### Fixed
+- **Story captions render identically on iOS, Android, and desktop.** Android photos baked the
+  caption into pixels with an empty body (the author's position/typography never traveled) and
+  used mismatched color/font index tables; desktop neither encoded nor decoded (raw control-char
+  text). All platforms now speak the same normalized wire format and match fonts, colors,
+  positions, and effect shadows.
+- **macOS UI polish**: circular glass icon buttons replace the barely-visible rounded-rect
+  chrome; sheets extend the brand gradient edge-to-edge instead of showing gray bands.
+
+### Changed
+- **macOS `.dmg` retired** — the Mac app ships on the App Store; all past release dmg assets
+  removed and the CI leg deleted.
+
 ## [0.1.0-beta.18] — 2026-07-03
 
 ### Fixed

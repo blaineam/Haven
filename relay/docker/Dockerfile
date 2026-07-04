@@ -2,18 +2,28 @@
 # release (no Rust toolchain needed) and runs it. The binary is fully static and bundles
 # its own TLS roots (webpki-roots), so it needs nothing from the OS but a place to store data.
 #
-# Multi-arch: `docker buildx` / compose sets TARGETARCH; we map it to the release asset.
+# Multi-arch: BuildKit/buildx sets TARGETARCH; the LEGACY builder (older NAS Docker) does NOT —
+# there the declared-but-unset ARG tripped `set -u` (exit 2) before wget even ran, so we default
+# it to "" and fall back to `uname -m` on the build machine (NAS builds are native-arch anyway).
 # Pin a version with `--build-arg HAVEN_RELAY_VERSION=v0.1.0-beta.23` (or `latest`).
 FROM alpine:3.20
 ARG HAVEN_RELAY_VERSION=v0.1.0-beta.23
-ARG TARGETARCH
+ARG TARGETARCH=""
 RUN set -eux; \
     apk add --no-cache wget; \
-    case "$TARGETARCH" in \
+    arch="$TARGETARCH"; \
+    if [ -z "$arch" ]; then \
+      case "$(uname -m)" in \
+        x86_64) arch=amd64 ;; \
+        aarch64|arm64) arch=arm64 ;; \
+        armv7l|armv6l|armhf) arch=arm ;; \
+      esac; \
+    fi; \
+    case "$arch" in \
       amd64) asset="haven-relay-x86_64-unknown-linux-musl" ;; \
       arm64) asset="haven-relay-aarch64-unknown-linux-musl" ;; \
       arm)   asset="haven-relay-armv7-unknown-linux-musleabihf" ;; \
-      *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+      *) echo "unsupported arch: '$arch' (uname -m: $(uname -m)) — set --build-arg TARGETARCH=amd64|arm64|arm" >&2; exit 1 ;; \
     esac; \
     if [ "$HAVEN_RELAY_VERSION" = "latest" ]; then \
       url="https://github.com/blaineam/haven/releases/latest/download/$asset"; \

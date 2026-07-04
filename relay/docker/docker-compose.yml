@@ -1,0 +1,40 @@
+# Haven relay on your NAS (or any always-on box) via Docker Compose.
+#
+#   1. Copy this folder (Dockerfile, entrypoint.sh, this file) to your NAS.
+#   2. In the Haven app: Settings ▸ Relays → "Add a relay" → copy the
+#      haven-relay://circle#… link it shows you.
+#   3. Put that link in a `.env` file next to this one:
+#          HAVEN_RELAY_LINK=haven-relay://circle#…
+#   4. Bring it up:
+#          docker compose up -d --build
+#   5. Watch it attach + reprint the paste-into-the-app link/QR:
+#          docker compose logs -f
+#
+# The link is saved in the `haven-relay-data` volume, so it survives restarts and updates —
+# keep that volume to stay the SAME relay for your circle. The relay only ever moves
+# CIPHERTEXT; it holds no key that can read your circle's content.
+services:
+  haven-relay:
+    build:
+      context: .
+      # Track the newest release instead of the pinned default:
+      # args: { HAVEN_RELAY_VERSION: latest }
+    image: haven-relay:local
+    container_name: haven-relay
+    restart: unless-stopped
+    environment:
+      # First run attaches to your circle from this; later runs reuse the saved link.
+      HAVEN_RELAY_LINK: ${HAVEN_RELAY_LINK:-}
+    ports:
+      - "8674:8674"        # plain-HTTP media interface (fast cross-NAT / LAN media path)
+    volumes:
+      - haven-relay-data:/data   # identity + sealed-blob mailbox — keep to stay the same relay
+    # The relay dials OUT over Haven Net (iroh/QUIC + DERP) and needs no inbound port to work;
+    # 8674 is published only so peers who can reach this box pull media over the fast HTTP path.
+    #
+    # Prefer a bind mount to a specific NAS share? Replace the volume line with, e.g.:
+    #   - /volume1/docker/haven-relay:/data
+    # and delete the top-level `volumes:` block below.
+
+volumes:
+  haven-relay-data:

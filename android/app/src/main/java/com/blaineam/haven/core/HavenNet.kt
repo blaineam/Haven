@@ -314,6 +314,7 @@ object HavenNet : InboundListener {
 
     /** Add an existing contact to a circle + greet them there so it forms on their side. */
     fun addToCircle(circleId: String, contactIdHex: String) {
+        CircleRemovals.remove(circleId, contactIdHex)   // deliberate re-add un-bans them (parity with iOS)
         runCatching { social.addExistingToCircle(circleId, contactIdHex) }
         persist(); bumpCircles()
         sendHello(circleId, contactIdHex)
@@ -473,6 +474,12 @@ object HavenNet : InboundListener {
 
         // DM circles encode both full node ids — only those two may ever join (MITM/contamination guard).
         if (hello.circleId.startsWith("dm:") && !dmAllows(hello.circleId, idHex)) return
+        // A member you explicitly removed from THIS circle must NOT auto-rejoin on their handshake
+        // (parity with iOS). A removed person keeps broadcasting Hellos — they don't know they're gone —
+        // and without this guard the "already a contact" branch below silently re-added them to the very
+        // circle you removed them from, so the removal never stuck. A deliberate re-add clears the
+        // tombstone (addToCircle), so this only blocks the unsolicited rejoin.
+        if (isRemovedFromCircle(hello.circleId, idHex)) return
         // A verified Hello forms the circle on our side if we don't have it yet (matches iOS).
         runCatching { social.createCircle(hello.circleId, hello.circleName) }
 

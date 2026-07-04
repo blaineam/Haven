@@ -32,6 +32,13 @@ object CircleRemovals {
 
     fun contains(circleId: String, hex: String): Boolean = all().contains(key(circleId, hex))
 
+    /** Re-allow a member into a circle (clears the removal) — ONLY when the user deliberately re-adds
+     *  them. Mirrors iOS `ConnectionsStore.clearCircleRemoval`. */
+    fun remove(circleId: String, hex: String) {
+        val s = all().toMutableSet()
+        if (s.remove(key(circleId, hex))) prefs.edit().putStringSet(KEY, s).apply()
+    }
+
     /** The removed member hexes for one circle. */
     fun forCircle(circleId: String): Set<String> =
         all().asSequence().filter { it.startsWith("$circleId|") }.map { it.substringAfter("|") }.toSet()

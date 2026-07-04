@@ -117,6 +117,7 @@ struct MessagesView: View {
             } else {
                 ToolbarItem(placement: .havenTrailing) {
                     Button { showPicker = true } label: { Image(systemName: "square.and.pencil") }
+                        .buttonStyle(HavenGlassIcon())
                 }
             }
         }
@@ -353,6 +354,7 @@ struct DMThreadView: View {
                         CallManager.shared.startCall(participants: members, name: store.dmPartnerName(circleId))
                     }
                 } label: { Image(systemName: "phone.fill") }
+                .buttonStyle(HavenGlassIcon())
                 .disabled(store.dmMemberHexes(circleId).isEmpty)
             }
         }

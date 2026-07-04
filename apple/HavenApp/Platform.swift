@@ -262,6 +262,22 @@ extension View {
 }
 
 extension View {
+    /// macOS sheets paint a flat gray window background above and below the content, so a view
+    /// whose gradient lives INSIDE its own ZStack shows dull bands at the sheet's top/bottom.
+    /// This extends the brand gradient across the WHOLE sheet (and hides Form/List's default
+    /// scroll background, the other gray-band source). No-op on iOS — full-screen covers are
+    /// already immersive and the shipped look must not shift.
+    @ViewBuilder
+    func havenSheetBackground() -> some View {
+        #if os(macOS)
+        self
+            .scrollContentBackground(.hidden)
+            .background(HavenBackground().ignoresSafeArea())
+        #else
+        self
+        #endif
+    }
+
     /// `.fullScreenCover` on iOS; falls back to `.sheet` on macOS (no full-screen cover there).
     @ViewBuilder
     func havenFullScreenCover<Content: View>(isPresented: Binding<Bool>,
@@ -274,6 +290,7 @@ extension View {
         // collapse to a useless sliver. Give it a roomy default frame so every sheet is usable.
         self.sheet(isPresented: isPresented, onDismiss: onDismiss) {
             content().frame(minWidth: 460, idealWidth: 540, minHeight: 560, idealHeight: 680)
+                .havenSheetBackground()
         }
         #endif
     }
@@ -292,8 +309,10 @@ extension View {
             if wide {
                 content(it).frame(minWidth: 720, idealWidth: 1040, maxWidth: .infinity,
                                   minHeight: 520, idealHeight: 760, maxHeight: .infinity)
+                    .havenSheetBackground()
             } else {
                 content(it).frame(minWidth: 460, idealWidth: 540, minHeight: 560, idealHeight: 680)
+                    .havenSheetBackground()
             }
         }
         #endif

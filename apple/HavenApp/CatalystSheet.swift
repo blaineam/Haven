@@ -12,6 +12,11 @@ private struct MacSheetClose: ViewModifier {
         #if os(macOS) || targetEnvironment(macCatalyst)
         content
             .frame(minWidth: 480, idealWidth: 560, minHeight: 580, idealHeight: 700)
+            // The window paints flat gray above/below content whose gradient lives in its own
+            // ZStack — extend the brand gradient across the WHOLE sheet (and hide Form/List's
+            // default scroll background, the other gray-band source) so it reads as one surface.
+            .scrollContentBackground(.hidden)
+            .background(HavenBackground().ignoresSafeArea())
             .overlay(alignment: .topTrailing) {
                 Button { dismiss() } label: {
                     Text("Done")
@@ -39,6 +44,8 @@ extension View {
     func macSheetFrame() -> some View {
         #if os(macOS) || targetEnvironment(macCatalyst)
         return self.frame(minWidth: 480, idealWidth: 560, minHeight: 580, idealHeight: 700)
+            .scrollContentBackground(.hidden)
+            .background(HavenBackground().ignoresSafeArea())   // one cohesive gradient surface
         #else
         return self
         #endif

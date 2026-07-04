@@ -72,6 +72,29 @@ struct PressableStyle: ButtonStyle {
     }
 }
 
+/// Icon buttons: on macOS a modern circular GLASS chip (material + hairline ring + press
+/// feedback) — the platform's default chrome rendered bare `Image` buttons as barely-visible
+/// rounded rectangles. On iOS the label passes through untouched (toolbars already tint glyphs
+/// correctly there, and the shipped look must not shift).
+struct HavenGlassIcon: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        #if os(macOS)
+        configuration.label
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(.primary)
+            .frame(width: 34, height: 34)
+            .background(.ultraThinMaterial, in: Circle())
+            .overlay(Circle().strokeBorder(.white.opacity(0.14), lineWidth: 1))
+            .contentShape(Circle())
+            .scaleEffect(configuration.isPressed ? 0.94 : 1)
+            .opacity(configuration.isPressed ? 0.75 : 1)
+            .animation(HavenTheme.snappy, value: configuration.isPressed)
+        #else
+        configuration.label
+        #endif
+    }
+}
+
 /// A prominent brand-gradient pill button.
 struct BrandButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {

@@ -139,16 +139,19 @@ struct CircleView: View {
                 Button {
                     CallManager.shared.startCall(participants: members, name: store.activeCircleName)
                 } label: { Image(systemName: "phone.fill") }
+                .buttonStyle(HavenGlassIcon())
                 .disabled(members.isEmpty)
                 .accessibilityLabel("Start group call")
             }
             ToolbarItem(placement: .havenTrailing) {
                 Button { showInvite = true } label: { Image(systemName: "person.badge.plus") }
+                    .buttonStyle(HavenGlassIcon())
             }
             ToolbarItem(placement: .havenTrailing) {
                 NavigationLink { CircleSettingsView(circleId: store.activeCircleId) } label: {
                     Image(systemName: "gearshape.fill")
                 }
+                .buttonStyle(HavenGlassIcon())
                 .accessibilityLabel("Circle settings")
             }
         }

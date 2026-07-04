@@ -50,6 +50,7 @@ struct YouView: View {
                     } label: {
                         Image(systemName: "gearshape.fill")
                     }
+                    .buttonStyle(HavenGlassIcon())
                     .accessibilityLabel("Settings")
                 }
             }

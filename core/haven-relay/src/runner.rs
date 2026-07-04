@@ -5,7 +5,6 @@ use std::net::SocketAddr;
 use std::process::{Child, Command, Stdio};
 
 use anyhow::{anyhow, Result};
-use haven_net::blobstore::BlobServer;
 use haven_net::s3tunnel::S3Server;
 use haven_net::RelayNode;
 use p2pcore::identity::Identity;
@@ -41,39 +40,41 @@ pub async fn run(cfg: Config) -> Result<()> {
 
     // --- Media store-and-forward --------------------------------------------------
     // Keep the started servers/guards alive for the process lifetime.
-    let mut _blob_guard: Option<std::sync::Arc<BlobServer>> = None;
     let mut _s3_guard: Option<std::sync::Arc<S3Server>> = None;
     let mut _rclone_guard: Option<RcloneChild> = None;
     let mut _http_guard: Option<haven_net::httprelay::HttpRelay> = None;
 
     match &cfg.backend {
         StoreBackend::Local => {
-            // Default: serve sealed blobs straight off local disk over haven/blob/1.
+            // Default: serve sealed blobs straight off local disk over haven/blob/1 — on the
+            // RELAY'S OWN endpoint (one node, two ALPNs). A separate BlobServer::spawn under the
+            // same key bound a SECOND iroh endpoint that stole this node id's DERP home-relay
+            // registration, so inbound dials flapped between the two endpoints and members saw
+            // the relay as "Unreachable — retrying" (the same-key second-endpoint bug, again).
             let store = cfg.data_dir.join("store");
-            let blob = BlobServer::spawn(id.node_secret_bytes(), store.clone())
-                .await
-                .map_err(|e| anyhow!("start local-disk blob store: {e}"))?;
+            let node = relay.node();
+            node.enable_relay(store.clone());
             println!(
-                "✓ media store live — local-disk blob mailbox at {} over Haven Net (haven/blob/1).",
+                "✓ media store live — local-disk blob mailbox at {} over Haven Net (haven/blob/1, shared endpoint).",
                 store.display()
             );
-            println!("  storage node id (volunteer_node_id): {}", blob.node_id_hex());
+            println!("  storage node id (volunteer_node_id): {my_hex}");
 
             // Lock the mailbox to the circle's members (+ sibling relays) so only members can read or
             // enumerate it — a stranger who learns this relay's node id gets nothing (audit
             // transport-F4). The link the operator pasted defines the membership.
-            blob.authorize(&cfg.link.circle, cfg.link.members.clone(), cfg.peers.clone());
+            node.relay_authorize(&cfg.link.circle, cfg.link.members.clone(), cfg.peers.clone());
 
             // Mesh replication: pull from each sibling relay every 30s so the mailbox
             // self-heals across the mesh (peers do the same in reverse → eventual set-union).
             if !cfg.peers.is_empty() {
                 println!("  meshing with {} sibling relay(s) — mailbox self-replicates.", cfg.peers.len());
-                let blob_mesh = blob.clone();
+                let mesh_node = node.clone();
                 let peers = cfg.peers.clone();
                 tokio::spawn(async move {
                     loop {
                         for peer in &peers {
-                            let _ = blob_mesh.sync_pull_from(peer).await;
+                            let _ = mesh_node.relay_sync_from(peer).await;
                         }
                         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                     }
@@ -100,7 +101,6 @@ pub async fn run(cfg: Config) -> Result<()> {
                 println!("  http token : {}", cfg.http_token);
                 _http_guard = Some(http);
             }
-            _blob_guard = Some(blob);
         }
         StoreBackend::S3 | StoreBackend::Rclone { .. } => {
             // Opt-in: rclone serve s3 (local dir or a named remote) over haven/s3/1.
@@ -109,7 +109,12 @@ pub async fn run(cfg: Config) -> Result<()> {
                 Ok(child) => {
                     _rclone_guard = Some(child);
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    let s3 = S3Server::spawn(id.node_secret_bytes(), s3_local)
+                    // The S3 tunnel gets its OWN derived identity: a second endpoint under the
+                    // RELAY'S key would steal the DERP registration (same-key second-endpoint bug)
+                    // and make both flap unreachable. Deterministic (seed-derived), so the printed
+                    // volunteer_node_id is stable across restarts.
+                    let s3_id = Identity::from_seed(&derive_subseed(&cfg.seed, b"haven-relay/s3/1"));
+                    let s3 = S3Server::spawn(s3_id.node_secret_bytes(), s3_local)
                         .await
                         .map_err(|e| anyhow!("start s3-over-iroh: {e}"))?;
                     match &cfg.backend {
@@ -194,4 +199,15 @@ fn start_rclone(cfg: &Config, addr: SocketAddr) -> Result<RcloneChild> {
 
 fn hex32(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Derive a deterministic sub-identity seed from the relay seed for an auxiliary endpoint (the S3
+/// tunnel), so it never shares the relay's node id — two live endpoints under one key fight over
+/// the DERP home-relay registration and both flap unreachable.
+fn derive_subseed(seed: &[u8; 32], label: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(seed);
+    h.update(label);
+    h.finalize().into()
 }

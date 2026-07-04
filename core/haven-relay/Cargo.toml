@@ -49,6 +49,7 @@ start = false
 haven-net = { path = "../haven-net" }
 p2pcore = { path = "../p2pcore" }
 anyhow = "1"
+sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

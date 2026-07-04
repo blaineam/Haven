@@ -7,6 +7,20 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.23] — 2026-07-04
+
+### Fixed
+- **Standalone relay daemon (NAS/Docker) no longer flaps "Unreachable — retrying".** The daemon
+  ran its media store as a SECOND iroh endpoint under the SAME key as the connection relay
+  (`BlobServer::spawn` beside `RelayNode::spawn`) — the same-key second-endpoint bug that caused
+  the beta.13 internet outage in the apps: the two endpoints fight over the node id's DERP
+  home-relay registration, so inbound dials flap between reachable and dead. The daemon now
+  serves the blob mailbox on the relay's OWN endpoint (one node, two ALPNs — the same
+  `enable_relay` path the in-app relays have used since beta.13). The opt-in S3 tunnel gets its
+  own seed-derived identity for the same reason (its printed `volunteer_node_id` changes once).
+  Relay identity, saved link, mailbox contents, and the HTTP media interface are all unchanged —
+  update the container and the same relay id just becomes reliably dialable.
+
 ## [0.1.0-beta.22] — 2026-07-04
 
 ### Fixed

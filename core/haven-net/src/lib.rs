@@ -448,6 +448,14 @@ impl RelayNode {
         self.me_hex.clone()
     }
 
+    /// The underlying node — so a standalone daemon can host the blob mailbox on THIS endpoint
+    /// (`enable_relay`/`relay_authorize`/`relay_sync_from`) instead of spawning a second iroh
+    /// endpoint under the same key, which steals the DERP home-relay registration and makes the
+    /// relay flap between reachable and unreachable (the same-key second-endpoint bug).
+    pub fn node(&self) -> Arc<Node> {
+        self.node.clone()
+    }
+
     /// Same-machine dial address (loopback), for local/integration tests.
     pub async fn local_dial_addr(&self) -> Result<EndpointAddr> {
         self.node.local_dial_addr().await

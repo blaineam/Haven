@@ -1014,20 +1014,34 @@ final class FeedStore: ObservableObject {
         requestMissingMedia()
     }
 
-    /// Re-emit the host's OWN relay id to every circle (nearby + mesh), WITHOUT adoptRelayNode's heavy
-    /// backfill. frame 19 used to fire only once at relay start, so a sibling/friend that wasn't reachable
-    /// at that instant never learned the relay — which is why the iPhone "sees the Mac nearby but won't
-    /// show its relay." Cheap (one sealed announce per circle), so it's safe every sync tick + on connect.
+    /// Re-emit EVERY relay this device knows for each circle (nearby + direct + mesh), WITHOUT
+    /// adoptRelayNode's heavy backfill. frame 19 used to fire only once (relay start / adopt), so a
+    /// sibling/friend that wasn't reachable at that instant never learned the relay — which is why
+    /// the iPhone "sees the Mac nearby but won't show its relay", and why an adopted EXTERNAL relay
+    /// (NAS docker daemon) never reached circle members at all: only the self-hosted relay was ever
+    /// re-announced. Android already re-announces all circle relays per hello — this is that parity.
+    /// Cheap (one small sealed announce per relay per circle), so it's safe every sync tick.
     func reannounceOwnRelay() {
-        guard let social, RelayHost.shared.serving else { return }
-        let hex = RelayHost.shared.nodeId
-        guard hex.count == 64 else { return }
-        let data = relayAnnounceData(hex)
+        guard let social else { return }
         for ci in circles {
-            guard let sealed = try? social.sealCircleMedia(circleId: ci.id, data: data) else { continue }
-            var p = Data(); lpAppend(&p, Data(ci.id.utf8)); p.append(sealed)
-            nearbyBroadcast(19, p)
-            originateRelay(dests: dialTargets(ci.id), inner: frame(19, p))
+            // Active relays for the circle (adopted external + all-circles default) plus the relay
+            // THIS device hosts. Skip s3: pseudo-relays — those share via the S3-config frame, and
+            // handleRelayNode expects a 64-hex node id.
+            var hexes = RelayMailboxStore.shared.relays(forCircle: ci.id).filter { !$0.hasPrefix("s3:") }
+            if RelayHost.shared.serving, RelayHost.shared.nodeId.count == 64,
+               !hexes.contains(RelayHost.shared.nodeId) {
+                hexes.append(RelayHost.shared.nodeId)
+            }
+            guard !hexes.isEmpty else { continue }
+            let members = dialTargets(ci.id)
+            for hex in hexes where hex.count == 64 {
+                let data = relayAnnounceData(hex)
+                guard let sealed = try? social.sealCircleMedia(circleId: ci.id, data: data) else { continue }
+                var p = Data(); lpAppend(&p, Data(ci.id.utf8)); p.append(sealed)
+                nearbyBroadcast(19, p)
+                for m in members { sendIroh(19, p, to: m) }
+                originateRelay(dests: members, inner: frame(19, p))
+            }
         }
     }
 

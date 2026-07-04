@@ -7,6 +7,18 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.22] — 2026-07-04
+
+### Fixed
+- **Adopted external relays (NAS / Docker daemon) now actually reach circle members (iOS/macOS +
+  desktop).** Adding a relay announced it to the circle exactly ONCE, at adopt time; the periodic
+  re-announce only ever covered the relay the device itself hosts. A member who was unreachable at
+  that one moment never learned the external relay — "I shared my NAS relay with the circle but my
+  friend doesn't see it." The periodic re-announce now covers EVERY active relay known for each
+  circle (adopted external + all-circles default + self-hosted), over nearby, direct, and mesh
+  paths — parity with Android, which already re-announced all circle relays per hello. Receivers
+  were already idempotent (only a genuinely new relay triggers the backfill).
+
 ## [0.1.0-beta.21] — 2026-07-04
 
 Stability wave: the add-friend handshake and re-adding a previously-removed friend now work

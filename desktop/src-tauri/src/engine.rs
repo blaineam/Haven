@@ -1610,19 +1610,44 @@ impl Engine {
     /// (one sealed announce per circle per contact), so it's safe to run every sync tick. No-op unless we're
     /// hosting. (Desktop has no nearby/Bluetooth mesh, so this is the iroh-only subset of the iOS fix.)
     pub fn reannounce_own_relay(self: &Arc<Self>) {
-        let hex = match self.relay_host.lock().unwrap().as_ref() {
-            Some(h) => h.node_id_hex(),
-            None => return,
-        };
-        if hex.len() != 64 {
-            return;
-        }
-        let body = self.relay_announce_body(&hex);
+        // Re-emit EVERY relay this device knows for each circle — not just the one it hosts. A
+        // frame-19 announce used to fire once at relay start / adopt time, so a member who wasn't
+        // reachable at that instant never learned an adopted EXTERNAL relay (NAS docker daemon).
+        // Android re-announces all circle relays per hello; this is that parity (iOS too).
+        let own_hex = self
+            .relay_host
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|h| h.node_id_hex())
+            .filter(|h| h.len() == 64);
         for c in self.social.circles() {
-            let Ok(sealed) = self.social.seal_circle_media(c.id.clone(), body.clone()) else { continue };
-            let frame = wire::event_payload(&c.id, &sealed);
-            for id_hex in self.social.contact_node_ids(c.id.clone()) {
-                self.send_frame(wire::RELAY_NODE, &frame, &id_hex);
+            let mut hexes: Vec<String> = {
+                let p = self.prefs.lock().unwrap();
+                p.relays
+                    .get(&c.id)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|h| h.len() == 64 && !h.starts_with("s3:") && p.relay_is_active(h))
+                    .collect()
+            };
+            if let Some(own) = &own_hex {
+                if !hexes.iter().any(|h| h == own) {
+                    hexes.push(own.clone());
+                }
+            }
+            if hexes.is_empty() {
+                continue;
+            }
+            let members = self.social.contact_node_ids(c.id.clone());
+            for hex in &hexes {
+                let body = self.relay_announce_body(hex);
+                let Ok(sealed) = self.social.seal_circle_media(c.id.clone(), body.clone()) else { continue };
+                let frame = wire::event_payload(&c.id, &sealed);
+                for id_hex in &members {
+                    self.send_frame(wire::RELAY_NODE, &frame, id_hex);
+                }
             }
         }
     }

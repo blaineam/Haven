@@ -7,6 +7,22 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.20] — 2026-07-04
+
+### Fixed
+- **Removing someone from a circle sticks (Android).** A removed member kept reappearing: they
+  don't know they're gone and keep broadcasting Hellos, and `handleHello`'s "already a contact"
+  branch silently re-added their bundle to the very circle you removed them from. It now honors
+  the removal tombstone (parity with iOS); a deliberate re-add still un-bans them.
+
+### Added
+- **Android call screen: speakerphone toggle** (loudspeaker ⇄ earpiece via AudioManager, default
+  on for video calls; a Bluetooth/wired headset still overrides) and the **add-people button is
+  always visible** (dimmed when there's no one left to add) so the control row is stable.
+- **Docker Compose for the relay** (`relay/docker/`) — run `haven-relay` on a NAS or home server
+  in a container: pulls the static musl binary (amd64/arm64/armv7), persists identity + the sealed
+  mailbox to a volume, exposes the `:8674` media interface.
+
 ## [0.1.0-beta.19] — 2026-07-04
 
 Launch-polish wave alongside the 1.0.0 App Review submissions (iOS build 166, macOS build 167).

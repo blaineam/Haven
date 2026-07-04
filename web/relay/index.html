@@ -40,15 +40,16 @@
   <section class="hero" style="padding:64px 0 30px">
     <div class="container">
       <span class="eyebrow reveal">Relays</span>
-      <h1 class="reveal" style="font-size:clamp(34px,6vw,58px)">A little always-on helper<br /><span class="h-grad">that can never read a thing.</span></h1>
+      <h1 class="reveal" style="font-size:clamp(34px,6vw,58px)">Be the bridge<br /><span class="h-grad">for your circle.</span></h1>
       <p class="lead reveal">
-        Haven works beautifully with nothing extra. But a relay makes it even more reliable — a small,
-        always-on program that holds your circle's <em>encrypted</em> messages for friends who are
-        offline, and hands them over later. It only ever sees scrambled bytes. It's optional, and it's
-        free to run on hardware you already own.
+        Every Haven app — iPhone, iPad, Mac, Android, Windows, Linux — can be a relay for your circles.
+        Flip one switch and your device quietly holds your circle's <em>sealed</em> messages for friends
+        who are offline, and hands them over later. It runs reliably in the background, it never weakens
+        anything — everything it touches stays end-to-end encrypted with post-quantum cryptography it
+        can't open — and it's free, on hardware you already own. No terminal, no server, no setup.
       </p>
       <div class="btn-row reveal">
-        <a class="btn" href="#setup">Set up a relay</a>
+        <a class="btn" href="#setup">Turn yours on</a>
         <a class="btn ghost" href="#what">What is a relay, really?</a>
       </div>
     </div>
@@ -132,11 +133,11 @@
     <div class="container">
       <div class="center reveal">
         <span class="eyebrow">The easy way</span>
-        <h2 style="font-size:clamp(26px,4.5vw,40px)">Set up your own relay in two commands.</h2>
+        <h2 style="font-size:clamp(26px,4.5vw,40px)">One switch, inside the app you already have.</h2>
         <p class="lead">
-          The <code>haven-relay</code> binary does everything: it links to your circle and serves both
-          jobs — the live switchboard and the sealed mailbox — straight off your machine's disk, over
-          Haven's own encrypted network. No cloud, no S3, no ports, no domain, no config.
+          There's nothing to install and no terminal to open. The Haven app itself serves both jobs —
+          the live switchboard and the sealed mailbox — straight off your device, over Haven's own
+          encrypted network. No cloud, no ports, no domain, no config.
         </p>
       </div>
 
@@ -144,42 +145,34 @@
         <div class="steps">
           <div class="step">
             <div class="sn" aria-hidden="true"></div>
-            <div style="min-width:0">
-              <h4>Install it (one line)</h4>
-              <p>On any always-on machine you own — old laptop, Raspberry Pi, home server, free cloud VM:</p>
-              <div class="copywrap" style="margin-top:10px">
-                <button class="copybtn" type="button">Copy</button>
-                <pre><code>curl -fsSL https://wemiller.com/apps/haven/relay/install.sh | sh</code></pre>
-              </div>
+            <div>
+              <h4>Open Haven on a device you leave running</h4>
+              <p>The <b>Mac app</b> or the <b>Windows / Linux desktop app</b> is perfect — both keep
+                relaying quietly in the background, and the desktop app has an
+                <b>“Always-on relay”</b> option so it comes back by itself after a reboot. (Any device
+                can help, phones included — a plugged-in computer just makes your circle resilient
+                around the clock.)</p>
             </div>
           </div>
 
           <div class="step">
             <div class="sn" aria-hidden="true"></div>
-            <div style="min-width:0">
-              <h4>Grab a relay link from the app</h4>
-              <p>In Haven, go to <b>You → Advanced → Relay → “Add a relay.”</b> It shows you a relay link
-                for your circle (it starts with <code>haven-relay://circle#…</code>). Copy it.</p>
+            <div>
+              <h4>Flip “Be your circle's relay”</h4>
+              <p>In the app: <b>Settings ▸ Relays → “Be your circle's relay.”</b> On the Mac it's also
+                one click in the menu bar (<b>“Run as a circle relay”</b>). Your friends' apps discover
+                it on their own — nobody has to configure anything.</p>
             </div>
           </div>
 
           <div class="step">
             <div class="sn" aria-hidden="true"></div>
-            <div style="min-width:0">
-              <h4>Go live (paste the link)</h4>
-              <p>On the relay machine, paste your link in:</p>
-              <div class="copywrap" style="margin-top:10px">
-                <button class="copybtn" type="button">Copy</button>
-                <pre><code>haven-relay run --link "haven-relay://circle#…"</code></pre>
-              </div>
-              <p style="margin-top:10px">
-                That's it. It prints a QR + the link (so you can re-add it in the app any time), creates
-                its own identity, makes a <code>~/.haven-relay/store</code> folder, and starts serving
-                your circle's sealed mailbox over Haven Net. Leave it running.
-              </p>
-              <p class="dim" style="margin-top:8px;font-size:13.5px">
-                Restarting later? Just <code>haven-relay run</code> with no arguments — it remembers your link.
-              </p>
+            <div>
+              <h4>That's it — you're the bridge</h4>
+              <p>Leave the device on. Posts, messages and media for friends who are offline now wait —
+                sealed — on your machine and deliver the moment they're back. Everything stays
+                end-to-end encrypted with hybrid post-quantum cryptography; being a relay never lets
+                you (or anyone) read a thing.</p>
             </div>
           </div>
         </div>
@@ -189,6 +182,54 @@
           proven by a test in the codebase where a relay stores a sealed blob and is shown to be unable to
           decrypt it.
         </div>
+
+        <details class="tech" style="margin-top:22px">
+          <summary>Comfortable in a shell? Run the standalone relay instead</summary>
+          <div class="steps" style="margin-top:14px">
+            <div class="step">
+              <div class="sn" aria-hidden="true"></div>
+              <div>
+                <h4>Install it (one line)</h4>
+                <p>The same relay, as a tiny <code>haven-relay</code> binary — for an old laptop,
+                  Raspberry Pi, home server, or free cloud VM with no Haven app on it:</p>
+                <div class="copywrap" style="margin-top:10px">
+                  <button class="copybtn" type="button">Copy</button>
+                  <pre><code>curl -fsSL https://wemiller.com/apps/haven/relay/install.sh | sh</code></pre>
+                </div>
+              </div>
+            </div>
+
+            <div class="step">
+              <div class="sn" aria-hidden="true"></div>
+              <div>
+                <h4>Grab a relay link from the app</h4>
+                <p>In Haven, go to <b>Settings ▸ Relays → “Add a relay.”</b> It shows you a relay link
+                  for your circle (it starts with <code>haven-relay://circle#…</code>). Copy it.</p>
+              </div>
+            </div>
+
+            <div class="step">
+              <div class="sn" aria-hidden="true"></div>
+              <div>
+                <h4>Go live (paste the link)</h4>
+                <p>On the relay machine, paste your link in:</p>
+                <div class="copywrap" style="margin-top:10px">
+                  <button class="copybtn" type="button">Copy</button>
+                  <pre><code>haven-relay run --link "haven-relay://circle#…"</code></pre>
+                </div>
+                <p style="margin-top:10px">
+                  It prints a QR + the link (so you can re-add it in the app any time), creates its own
+                  identity, makes a <code>~/.haven-relay/store</code> folder, and starts serving your
+                  circle's sealed mailbox over Haven Net. Leave it running —
+                  <code>haven-relay service install</code> makes it survive reboots.
+                </p>
+                <p class="dim" style="margin-top:8px;font-size:13.5px">
+                  Restarting later? Just <code>haven-relay run</code> with no arguments — it remembers your link.
+                </p>
+              </div>
+            </div>
+          </div>
+        </details>
       </div>
     </div>
   </section>

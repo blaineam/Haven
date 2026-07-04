@@ -306,25 +306,34 @@
         <div class="grid cols-2" style="align-items:center;gap:24px">
           <div>
             <span class="eyebrow">Want it even more reliable?</span>
-            <h2 style="font-size:clamp(23px,4vw,32px)">Run a relay for your circle.</h2>
+            <h2 style="font-size:clamp(23px,4vw,32px)">Be the bridge for your circle.</h2>
             <p class="muted" style="margin-top:12px;font-size:16px">
-              A relay is a tiny, always-on helper that holds your circle's <em>encrypted</em> messages
-              for friends who are offline, so nothing is missed. It can never read a word — and it's
-              free to run on an old laptop or a Raspberry Pi.
+              Every Haven app can be a relay: flip <b>“Be your circle's relay”</b> in Settings and your
+              device quietly holds your circle's <em>sealed</em> messages for friends who are offline —
+              running reliably in the background, always end-to-end encrypted with post-quantum
+              cryptography it can never open. Leave a Mac or desktop app running and your whole circle
+              gets more resilient. No terminal, no server, nothing to install.
             </p>
             <div class="btn-row" style="justify-content:flex-start">
-              <a class="btn" href="relay/">Set up a relay</a>
+              <a class="btn" href="relay/">Turn yours on</a>
             </div>
           </div>
           <div class="card flat" style="padding:18px">
-            <div class="copywrap">
-              <button class="copybtn" type="button">Copy</button>
-              <pre><code>curl -fsSL https://wemiller.com/apps/haven/relay/install.sh | sh
+            <p style="margin:0;font-size:15px"><b>1.</b> Open Haven on a device you leave running<br />
+              <b>2.</b> Settings ▸ Relays → <b>“Be your circle's relay”</b><br />
+              <b>3.</b> Done — friends' apps find it automatically</p>
+            <details class="tech" style="margin-top:14px">
+              <summary>Prefer a terminal? The standalone relay</summary>
+              <div class="copywrap" style="margin-top:10px">
+                <button class="copybtn" type="button">Copy</button>
+                <pre><code>curl -fsSL https://wemiller.com/apps/haven/relay/install.sh | sh
 haven-relay run --link "haven-relay://circle#…"</code></pre>
-            </div>
-            <p class="dim" style="font-size:13px;margin:10px 4px 0">
-              One command to install, one to go live. No ports, no domain, no cloud required.
-            </p>
+              </div>
+              <p class="dim" style="font-size:13px;margin:10px 4px 0">
+                One command to install, one to go live — for a Pi or server with no Haven app.
+                No ports, no domain, no cloud required.
+              </p>
+            </details>
           </div>
         </div>
       </div>

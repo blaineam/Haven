@@ -77,13 +77,15 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 
-private val capColors = listOf(Color.White, Color.Black, Color(0xFFEC4899), Color(0xFFF59E0B),
-    Color(0xFF38BDF8), Color(0xFF34D399), Color(0xFFEF4444), Color(0xFFA855F7))
-private val fontFamilies = listOf(FontFamily.SansSerif, FontFamily.Serif, FontFamily.Monospace, FontFamily.Cursive)
-private fun typefaceFor(i: Int): Typeface = when (i % 4) {
+// The WIRE palette/typography (StoryCaptions) — indexes ride the encoded caption, so the picker
+// must use the same tables as every viewer on every platform.
+private val capColors = StoryCaptions.colors
+private val fontFamilies = StoryCaptions.fontFamilies
+private fun typefaceFor(i: Int): Typeface = when (i % fontFamilies.size) {
     1 -> Typeface.create(Typeface.SERIF, Typeface.BOLD)
-    2 -> Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-    3 -> Typeface.create("cursive", Typeface.BOLD)
+    2 -> Typeface.create("cursive", Typeface.BOLD)
+    3 -> Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+    4 -> Typeface.create(Typeface.DEFAULT_BOLD, Typeface.BOLD)
     else -> Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
 }
 
@@ -181,7 +183,8 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
             ) {
                 BasicTextField(
                     value = caption, onValueChange = { caption = it },
-                    textStyle = TextStyle(color = lc.textColor, fontSize = sizeSp.sp, fontWeight = FontWeight.Bold,
+                    textStyle = TextStyle(color = lc.textColor, fontSize = sizeSp.sp,
+                        fontWeight = StoryCaptions.fontWeight(fontIdx % fontFamilies.size),
                         fontFamily = fontFamilies[fontIdx % fontFamilies.size], textAlign = TextAlign.Center, shadow = lc.shadow),
                     cursorBrush = SolidColor(HavenTheme.pink),
                     modifier = Modifier.wrapContentWidth().background(lc.bg, RoundedCornerShape(8.dp))
@@ -276,12 +279,15 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
                                                 else runCatching { LocalMedia.store(DEFAULT_CIRCLE, out.readBytes(), isVideo = true) }.getOrNull() ?: ref
                                             }
                                         }
-                                        HavenNet.postStory(caption.trim(), newRef, music)
+                                        HavenNet.postStory(encodedCaption(caption, colorIdx, fontIdx, style, capOffset, boxSize, sizeSp), newRef, music)
                                     } else {
+                                        // Filter + the author's zoom/pan are pixel operations and stay
+                                        // baked; the CAPTION rides the wire format instead (parity with
+                                        // iOS/desktop) so every platform renders it live + identically.
                                         val baked = withContext(Dispatchers.IO) {
-                                            bakePhoto(srcBmp, filter.spec, caption.trim(), capColor, style, fontIdx, sizeSp, capOffset, boxSize, mediaScale, mediaOffset)
+                                            bakePhoto(srcBmp, filter.spec, "", capColor, style, fontIdx, sizeSp, capOffset, boxSize, mediaScale, mediaOffset)
                                         }
-                                        HavenNet.postStory("", baked ?: ref, music)
+                                        HavenNet.postStory(encodedCaption(caption, colorIdx, fontIdx, style, capOffset, boxSize, sizeSp), baked ?: ref, music)
                                     }
                                 }.onFailure { android.util.Log.e("StoryEditor", "share to story failed", it) }.isSuccess
                                 sharing = false
@@ -374,4 +380,27 @@ private fun bakePhoto(
         val bytes = ByteArrayOutputStream().also { out.compress(Bitmap.CompressFormat.JPEG, 90, it) }.toByteArray()
         LocalMedia.store(DEFAULT_CIRCLE, bytes)
     }.getOrNull()
+}
+
+/** Map the editor's on-screen caption state to the normalized wire format (see StoryCaptions):
+ *  position = fraction of the preview box from its top-left (drag offset is from center),
+ *  size = multiplier on the 28-unit cross-platform base. */
+private fun encodedCaption(
+    caption: String, colorIdx: Int, fontIdx: Int, style: CapStyle,
+    capOffset: Offset, boxSize: IntSize, sizeSp: Float,
+): String {
+    val wireStyle = when (style) {
+        CapStyle.PLAIN -> StoryCaptions.CapStyle.PLAIN
+        CapStyle.SHADOW -> StoryCaptions.CapStyle.SHADOW
+        CapStyle.GLOW -> StoryCaptions.CapStyle.GLOW
+        CapStyle.NEON -> StoryCaptions.CapStyle.NEON
+        CapStyle.HIGHLIGHT -> StoryCaptions.CapStyle.HIGHLIGHT
+    }
+    val x = if (boxSize.width > 0) (0.5f + capOffset.x / boxSize.width) else 0.5f
+    val y = if (boxSize.height > 0) (0.5f + capOffset.y / boxSize.height) else 0.5f
+    return StoryCaptions.encode(
+        caption, colorIdx % StoryCaptions.colors.size, fontIdx % StoryCaptions.fontFamilies.size, wireStyle,
+        x = x.coerceIn(0f, 1f), y = y.coerceIn(0f, 1f),
+        size = (sizeSp / 28f).coerceIn(0.6f, 1.9f),
+    )
 }

@@ -724,10 +724,74 @@ async function renderStories() {
   hydrateMedia(root, "default");
 }
 
+
+// ---- Story captions (cross-platform wire format) ----------------------------------------
+// \u0001color,font,styleRaw,x,y,size,mediaScale,mediaOffX,mediaOffY\u0001text — positions/size
+// normalized so a caption authored on any platform lands in the same spot at the same relative
+// size. Tables mirror apple/HavenApp/StoryCaption.swift + Android StoryCaptions.kt exactly.
+const StoryCaptions = {
+  colors: ["#ffffff", "#000000", "#EC4899", "#8B5CF6", "#F59E0B", "#EF4444",
+           "#F97316", "#22C55E", "#3B82F6", "#06B6D4", "#EAB308", "#10B981"],
+  fonts: [
+    "-apple-system, 'Segoe UI', Roboto, sans-serif|700",
+    "Georgia, 'Times New Roman', serif|700",
+    "'SF Pro Rounded', 'Comic Sans MS', cursive|800",
+    "'SF Mono', Consolas, monospace|700",
+    "-apple-system, 'Segoe UI', Roboto, sans-serif|900",
+  ],
+  lightIdx: [0, 9, 10, 11],   // white/cyan/yellow/mint → dark highlight text
+  encode(caption, spec) {
+    const t = (caption || "").trim();
+    if (!t) return "";
+    const f = (n, d) => Number(n).toFixed(d);
+    return "\u0001" + [spec.color, spec.font, spec.style, f(spec.x, 3), f(spec.y, 3), f(spec.size, 3),
+                        "1.000", "0.0000", "0.0000"].join(",") + "\u0001" + t;
+  },
+  decode(body) {
+    const def = { color: 0, font: 0, style: 1, x: 0.5, y: 0.5, size: 1 };
+    if (!body || body[0] !== "\u0001") return { text: body || "", spec: def };
+    const sep = body.indexOf("\u0001", 1);
+    if (sep < 0) return { text: body.slice(1), spec: def };
+    const n = body.slice(1, sep).split(",");
+    let style = parseInt(n[2], 10); if (Number.isNaN(style)) style = 1;
+    if ((style === 0 || style === 1) && n.length === 6) style = style === 1 ? 4 : 1;  // legacy bit
+    return { text: body.slice(sep + 1), spec: {
+      color: parseInt(n[0], 10) || 0, font: parseInt(n[1], 10) || 0, style,
+      x: parseFloat(n[3]) || 0.5, y: parseFloat(n[4]) || 0.5, size: parseFloat(n[5]) || 1,
+    } };
+  },
+  // A styled, absolutely-positioned overlay for a media container (position:relative required).
+  overlay(body) {
+    const { text, spec } = this.decode(body);
+    if (!text.trim()) return null;
+    const c = this.colors[Math.min(Math.max(spec.color, 0), this.colors.length - 1)];
+    const [family, weight] = this.fonts[Math.min(Math.max(spec.font, 0), this.fonts.length - 1)].split("|");
+    const hl = spec.style === 4;
+    const d = el("div", { class: "story-cap" }, text);
+    d.style.cssText =
+      "position:absolute;left:" + (spec.x * 100) + "%;top:" + (spec.y * 100) + "%;" +
+      "transform:translate(-50%,-50%);max-width:86%;text-align:center;white-space:pre-wrap;" +
+      "font-family:" + family + ";font-weight:" + weight + ";" +
+      "font-size:calc(" + (spec.size * 5.5) + "cqh);line-height:1.25;pointer-events:none;";
+    switch (spec.style) {
+      case 0: d.style.color = c; d.style.textShadow = "0 0 4px rgba(0,0,0,.55)"; break;              // plain
+      case 2: d.style.color = c; d.style.textShadow = "1.5px 2px 2px rgba(0,0,0,.85)"; break;        // shadow
+      case 3: d.style.color = "#fff"; d.style.textShadow = "0 0 6px " + c + ",0 0 14px " + c + ",0 0 2px rgba(0,0,0,.3)"; break; // neon
+      case 4: d.style.color = this.lightIdx.includes(spec.color) ? "#000" : "#fff";                  // highlight
+              d.style.background = c; d.style.borderRadius = "8px"; d.style.padding = "3px 10px"; break;
+      default: d.style.color = c; d.style.textShadow = "0 0 8px " + c + "e6,0 0 3px rgba(0,0,0,.35)"; // glow
+    }
+    return d;
+  },
+};
+
 function addStoryDialog() {
   state.attachments = [];
   const composer = buildComposer(async (body, music) => {
-    await invoke("post_story", { body, media: state.attachments[0] ? state.attachments[0].ref : null, music });
+    // Ship the cross-platform caption wire format (centered, default glow) so phones render
+    // the caption styled + positioned instead of as plain text.
+    const encoded = StoryCaptions.encode(body, { color: 0, font: 0, style: 1, x: 0.5, y: 0.85, size: 1 });
+    await invoke("post_story", { body: encoded, media: state.attachments[0] ? state.attachments[0].ref : null, music });
   }, "Caption your story…", { circleId: "default" });
   modal(el("div", {}, el("h2", {}, "New story"), composer));
 }
@@ -735,10 +799,19 @@ function addStoryDialog() {
 function viewStory(it) {
   const inner = el("div", { class: "col", style: "align-items:center" });
   const storyRef = (it.media || []).find((r) => !r.startsWith("geo:") && !r.startsWith("a:"));
-  if (storyRef) { const m = storyRef.startsWith("v:") ? el("video", { "data-ref": storyRef, controls: "", autoplay: "" }) : el("img", { "data-ref": storyRef, style: "max-width:100%;border-radius:12px" }); inner.append(m); }
+  const cap = StoryCaptions.overlay(it.body);
+  if (storyRef) {
+    const m = storyRef.startsWith("v:") ? el("video", { "data-ref": storyRef, controls: "", autoplay: "" }) : el("img", { "data-ref": storyRef, style: "max-width:100%;border-radius:12px" });
+    // container-query height units size the caption relative to the MEDIA, like the phones do.
+    const wrap = el("div", { style: "position:relative;max-width:100%;container-type:size;display:inline-block" }, m);
+    if (cap) wrap.append(cap);
+    inner.append(wrap);
+  } else if (cap) {
+    const solo = el("div", { style: "position:relative;width:100%;min-height:200px;container-type:size" }, cap);
+    inner.append(solo);
+  }
   const storyGeo = (it.media || []).map(parseGeo).find(Boolean);
   if (storyGeo) inner.append(geoChip(storyGeo));
-  if (it.body) inner.append(el("p", {}, it.body));
   const m = el("div", {}, el("h2", {}, it.author_name + "'s story"), inner);
   modal(m);
   hydrateMedia(m, "default");

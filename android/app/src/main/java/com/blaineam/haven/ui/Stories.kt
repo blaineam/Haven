@@ -178,20 +178,30 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit) 
             val isHl = spec.style == StoryCaptions.CapStyle.HIGHLIGHT
             val cfg = androidx.compose.ui.platform.LocalConfiguration.current
             val w = cfg.screenWidthDp.dp; val h = cfg.screenHeightDp.dp
-            val textColor = if (isHl) StoryCaptions.highlightTextColor(spec.colorIdx) else StoryCaptions.color(spec.colorIdx)
-            // Apply the chosen caption EFFECT (glow/shadow/neon) — was rendering plain on Android while
-            // the iOS receiver showed the effect.
+            // NEON draws WHITE text with a colored halo (iOS parity); highlight gets contrast text.
+            val baseColor = StoryCaptions.color(spec.colorIdx)
+            val textColor = when {
+                isHl -> StoryCaptions.highlightTextColor(spec.colorIdx)
+                spec.style == StoryCaptions.CapStyle.NEON -> Color.White
+                else -> baseColor
+            }
+            // Effect radii/offsets tuned to visually match the iOS renderer (Compose has ONE shadow
+            // per TextStyle, so each style uses its dominant iOS layer): plain=black r4 legibility
+            // shadow, glow=soft self-colored r8, shadow=tight black r2 offset(1.5,2)pt, neon=big
+            // colored halo (iOS layers r6+r14 → r14 dominant).
             val captionShadow = when (spec.style) {
-                StoryCaptions.CapStyle.GLOW -> androidx.compose.ui.graphics.Shadow(textColor.copy(alpha = 0.9f), androidx.compose.ui.geometry.Offset.Zero, 18f)
-                StoryCaptions.CapStyle.NEON -> androidx.compose.ui.graphics.Shadow(textColor, androidx.compose.ui.geometry.Offset.Zero, 32f)
-                StoryCaptions.CapStyle.SHADOW -> androidx.compose.ui.graphics.Shadow(Color.Black.copy(alpha = 0.85f), androidx.compose.ui.geometry.Offset(2f, 3f), 6f)
+                StoryCaptions.CapStyle.PLAIN -> androidx.compose.ui.graphics.Shadow(Color.Black.copy(alpha = 0.55f), androidx.compose.ui.geometry.Offset.Zero, 4f * 3f)
+                StoryCaptions.CapStyle.GLOW -> androidx.compose.ui.graphics.Shadow(baseColor.copy(alpha = 0.9f), androidx.compose.ui.geometry.Offset.Zero, 8f * 3f)
+                StoryCaptions.CapStyle.NEON -> androidx.compose.ui.graphics.Shadow(baseColor, androidx.compose.ui.geometry.Offset.Zero, 14f * 3f)
+                StoryCaptions.CapStyle.SHADOW -> androidx.compose.ui.graphics.Shadow(Color.Black.copy(alpha = 0.85f), androidx.compose.ui.geometry.Offset(1.5f * 3f, 2f * 3f), 2f * 3f)
                 else -> null
             }
             androidx.compose.material3.Text(
                 decoded.text,
                 color = textColor,
                 fontSize = (28 * spec.size).sp,
-                fontWeight = FontWeight.SemiBold,
+                fontWeight = StoryCaptions.fontWeight(spec.fontIdx),
+                fontFamily = StoryCaptions.fontFamily(spec.fontIdx),
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                 style = androidx.compose.ui.text.TextStyle(shadow = captionShadow),
                 modifier = Modifier.align(Alignment.Center)

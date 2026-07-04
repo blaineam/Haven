@@ -15,6 +15,8 @@
     <!-- Wave 3+: camera, mic, media. Declared early so the manifest is stable. -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Route call audio to the loudspeaker/earpiece (the in-call speaker toggle). -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Foreground "stay connected" service (keeps the iroh node alive for real-time delivery). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

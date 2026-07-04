@@ -38,6 +38,9 @@ object CallManager {
     val peerName = mutableStateOf("")
     val micOn = mutableStateOf(true)
     val cameraOn = mutableStateOf(true)
+    /** Speakerphone (loudspeaker) vs earpiece. Defaults ON for a video call, OFF for voice-only —
+     *  set when audio starts; the user can flip it any time (iOS parity). */
+    val speakerOn = mutableStateOf(true)
     /** In-app minimized call (small floating tile + tap to restore), iOS parity. */
     val minimized = mutableStateOf(false)
     /** Sharing this device's screen into the call instead of the camera. */
@@ -255,7 +258,12 @@ object CallManager {
         mediaStarted = true
         connecting.value = connecting.value && !inCall.value
         val f = ensureFactory()
-        // Audio.
+        // Audio. Put the audio system into in-communication mode and route to the loudspeaker by
+        // default (so a video call is hands-free); the speaker toggle flips it to the earpiece.
+        runCatching {
+            audioManager().mode = android.media.AudioManager.MODE_IN_COMMUNICATION
+            applySpeaker()
+        }
         val audioSource = f.createAudioSource(MediaConstraints())
         audioTrack = f.createAudioTrack("haven-audio", audioSource).apply { setEnabled(micOn.value) }
         // Video (front camera).
@@ -321,6 +329,16 @@ object CallManager {
     // ---- Controls ----
 
     fun toggleMic() { micOn.value = !micOn.value; audioTrack?.setEnabled(micOn.value) }
+    fun toggleSpeaker() { speakerOn.value = !speakerOn.value; applySpeaker() }
+
+    private fun audioManager(): android.media.AudioManager =
+        appContext.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+
+    /** Route audio to the loudspeaker or the earpiece per [speakerOn]. Bluetooth/wired headsets, when
+     *  present, take over regardless — the OS honors the connected route over this flag. */
+    private fun applySpeaker() {
+        runCatching { audioManager().isSpeakerphoneOn = speakerOn.value }
+    }
     fun toggleCamera() {
         cameraOn.value = !cameraOn.value
         localVideo?.setEnabled(cameraOn.value)
@@ -392,6 +410,13 @@ object CallManager {
         runCatching { surfaceHelper?.dispose() }; surfaceHelper = null
         localVideo = null
         remoteVideo.clear(); remoteScreen.clear(); remoteCameraOff.clear(); participants.clear(); roster.clear()
+        // Hand audio back to the system (drop in-communication mode + loudspeaker routing).
+        runCatching {
+            val am = audioManager()
+            am.isSpeakerphoneOn = false
+            am.mode = android.media.AudioManager.MODE_NORMAL
+        }
+        speakerOn.value = true   // default for the next call
         sessionId = ""; mediaStarted = false; isCaller = false
         ringing.value = false; connecting.value = false; inCall.value = false; minimized.value = false
         peerName.value = ""

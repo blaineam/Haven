@@ -31,6 +31,8 @@ import androidx.compose.material.icons.filled.ScreenShare
 import androidx.compose.material.icons.filled.StopScreenShare
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.filled.PhoneInTalk
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material3.Icon
@@ -165,6 +167,7 @@ private fun InCall() {
     val name by CallManager.peerName
     val micOn by CallManager.micOn
     val cameraOn by CallManager.cameraOn
+    val speakerOn by CallManager.speakerOn
     val participants = CallManager.participants
     val remote = CallManager.remoteVideo
     val sharing by CallManager.screenShare
@@ -240,11 +243,15 @@ private fun InCall() {
         ) {
             RoundButton(if (micOn) Icons.Filled.Mic else Icons.Filled.MicOff,
                 if (micOn) HavenTheme.card else Color.White, "Mic") { CallManager.toggleMic() }
+            RoundButton(if (speakerOn) Icons.Filled.VolumeUp else Icons.Filled.PhoneInTalk,
+                if (speakerOn) Color.White else HavenTheme.card, if (speakerOn) "Speaker on" else "Speaker off") {
+                CallManager.toggleSpeaker()
+            }
             RoundButton(if (cameraOn) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
                 if (cameraOn) HavenTheme.card else Color.White, "Camera") { CallManager.toggleCamera() }
             RoundButton(Icons.Filled.Cameraswitch, HavenTheme.card, "Flip") { CallManager.switchCamera() }
-            if (CallManager.addableContacts().isNotEmpty())
-                RoundButton(Icons.Filled.PersonAdd, HavenTheme.card, "Add people") { showAddPeople = true }
+            RoundButton(Icons.Filled.PersonAdd, HavenTheme.card, "Add people",
+                enabled = CallManager.addableContacts().isNotEmpty()) { showAddPeople = true }
             RoundButton(if (sharing) Icons.Filled.StopScreenShare else Icons.Filled.ScreenShare,
                 if (sharing) Color.White else HavenTheme.card, "Share screen") {
                 if (sharing) CallManager.stopScreenShare()
@@ -327,9 +334,13 @@ private fun CallTile(
 }
 
 @Composable
-private fun RoundButton(icon: ImageVector, bg: Color, desc: String, onClick: () -> Unit) {
+private fun RoundButton(icon: ImageVector, bg: Color, desc: String, enabled: Boolean = true, onClick: () -> Unit) {
+    val faded = if (enabled) bg else bg.copy(alpha = 0.4f)
     Box(
-        Modifier.size(60.dp).clip(CircleShape).background(bg).clickable { onClick() },
+        Modifier.size(60.dp).clip(CircleShape).background(faded).clickable(enabled = enabled) { onClick() },
         contentAlignment = Alignment.Center,
-    ) { Icon(icon, desc, tint = if (bg == HavenTheme.card) Color.White else Color.Black, modifier = Modifier.size(26.dp)) }
+    ) {
+        Icon(icon, desc, modifier = Modifier.size(26.dp),
+            tint = (if (bg == HavenTheme.card) Color.White else Color.Black).copy(alpha = if (enabled) 1f else 0.5f))
+    }
 }

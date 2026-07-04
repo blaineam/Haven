@@ -7,6 +7,39 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.21] — 2026-07-04
+
+Stability wave: the add-friend handshake and re-adding a previously-removed friend now work
+reliably over the internet, on every platform. **Update all of your own linked devices** — the
+removal-record fix converges fleet-wide once each device runs this build.
+
+### Fixed
+- **Re-adding a removed friend finally sticks (all platforms).** Removal records synced between
+  your own devices were grow-only and permanent: every self-sync pass re-applied the severance,
+  so a friend you had once removed — then deliberately re-added via a new invite or approval —
+  was silently removed again seconds later, their handshakes dropped and their posts hidden.
+  This compounded with each release that made "removal sticks" stricter (iOS beta.10, Android
+  beta.20) until whole friendships went mute. Removal records are now last-writer-wins per
+  entry (`1` = removed, `0` = deliberately re-added): every deliberate re-add path — approving
+  a request, scanning an invite, adding back to a circle — clears the tombstone locally AND
+  publishes the clear so sibling devices stop re-severing. Desktop also gained the
+  removed-member handshake guard (parity with iOS/Android).
+- **Reply-path bootstrap now works on relay-hosting devices (core).** The beta.17 fix (learn a
+  dialable device id from any direct hello) never worked on a device that hosts an in-process
+  relay: the relay's inbound path zeroed the authenticated sender id before delivering bare
+  payloads to the app. Since most devices host a relay, a fresh internet invite often left the
+  initiator un-dialable by the invitee — "connected but mute". The sender id now survives the
+  relay-hosting path; core tests assert it.
+- **iOS/macOS: a freshly-approved friend is dialable immediately.** The 10s dial-target cache
+  (beta.18) wasn't invalidated when you approved a connection request or when a handshake added
+  a member — the very next sync tick could skip the brand-new friend. The cache now clears on
+  every contact/membership change.
+- **Android call screen: the share-screen and hang-up buttons are back.** All seven in-call
+  controls sat in a single row wider than the screen, silently pushing the last buttons off the
+  right edge once the speakerphone toggle landed (beta.20). The controls now match iOS: two
+  rows — media toggles (mic / speaker / camera / flip-when-camera-on) above, call actions
+  (share screen / add people / hang up) below.
+
 ## [0.1.0-beta.20] — 2026-07-04
 
 ### Fixed

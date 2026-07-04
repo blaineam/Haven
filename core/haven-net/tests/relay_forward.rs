@@ -40,7 +40,7 @@ async fn relay_forwards_sealed_post_between_indirect_peers() {
     // first (establishing a reusable connection the relay can send back on) — exactly
     // how an offline-friendly member registers with its circle's relay.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let bob_node = Node::spawn(bob.node_secret_bytes(), Arc::new(move |p| {
+    let bob_node = Node::spawn(bob.node_secret_bytes(), Arc::new(move |_from: [u8; 32], p: Vec<u8>| {
         // A member peels the relay header (if present) before opening.
         let inner = RoutingFrame::parse(&p).map(|f| f.payload).unwrap_or(p);
         let _ = tx.send(inner);
@@ -60,7 +60,7 @@ async fn relay_forwards_sealed_post_between_indirect_peers() {
 
     // Alice dials ONLY the relay and asks it to forward to Bob. Alice never learns
     // Bob's address; Bob never learned Alice's. The relay bridges them.
-    let alice_node = Node::spawn(alice.node_secret_bytes(), Arc::new(|_| {})).await.unwrap();
+    let alice_node = Node::spawn(alice.node_secret_bytes(), Arc::new(|_: [u8; 32], _: Vec<u8>| {})).await.unwrap();
     let relay_dial = relay.local_dial_addr().await.unwrap();
     // Establish Alice→relay via loopback, then forward by relay's node id.
     alice_node.send(relay_dial, b"hello-relay").await.unwrap();

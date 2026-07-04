@@ -150,11 +150,16 @@ pub struct Prefs {
     pub contacts: Vec<Contact>,
     #[serde(default)]
     pub blocked: Vec<String>,
-    /// Members explicitly removed from a circle, as "circleId|hex". Grow-only severances — propagated to
-    /// our own devices as intentional `removal:` records (not inferred from absence) and used to suppress
+    /// Members explicitly removed from a circle, as "circleId|hex". Severances — propagated to our own
+    /// devices as intentional `removal:` = 1 records (not inferred from absence) and used to suppress
     /// re-adding the member on an additive re-sync, and to hide their posts/calls. Mirrors iOS/Android.
     #[serde(default)]
     pub circle_removals: Vec<String>,
+    /// Removals we deliberately CLEARED (re-added the person). Kept — not deleted — so self-sync can
+    /// publish the clear as `removal:<key>` = 0, an explicit newer LWW write that supersedes the stale
+    /// removal on our other devices (grow-only removals re-severed a re-added friend on every pass).
+    #[serde(default)]
+    pub circle_removals_cleared: Vec<String>,
     /// Legacy single-relay-per-circle map (migrated into `relays` on load; kept for back-compat).
     #[serde(default)]
     pub relay_nodes: std::collections::HashMap<String, String>,

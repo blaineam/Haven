@@ -27,29 +27,38 @@ final class ConnectionsStore: ObservableObject {
     /// block, this only bans them from that one circle — and crucially it survives their handshakes, so
     /// a removed member can't auto-rejoin the circle on their next Hello.
     @Published private(set) var circleRemovals: Set<String> = []
+    /// Removals we deliberately CLEARED (re-added the person). Kept — not deleted — so self-sync can
+    /// publish the clear as an explicit LWW write (removal:<key> = 0) that supersedes the stale
+    /// removal record on our other devices. Without this, a sibling's grow-only removal record
+    /// re-severed a re-added friend on every sync pass, forever.
+    private(set) var clearedCircleRemovals: Set<String> = []
 
     private let d = UserDefaults.standard
     private let blockedKey = "haven.blocked"
     private let noHistoryKey = "haven.noHistory"
     private let circleRemovalsKey = "haven.circleRemovals"
+    private let clearedRemovalsKey = "haven.circleRemovals.cleared"
     private func removalKey(_ circleId: String, _ idHex: String) -> String { "\(circleId)|\(idHex)" }
 
     private init() {
         if let arr = d.array(forKey: blockedKey) as? [String] { blocked = Set(arr) }
         if let arr = d.array(forKey: noHistoryKey) as? [String] { noHistory = Set(arr) }
         if let arr = d.array(forKey: circleRemovalsKey) as? [String] { circleRemovals = Set(arr) }
+        if let arr = d.array(forKey: clearedRemovalsKey) as? [String] { clearedCircleRemovals = Set(arr) }
     }
 
     /// Factory-reset this store — clear in-memory + persisted state.
     func wipe() {
-        pending = []; blocked = []; noHistory = []; circleRemovals = []
-        [blockedKey, noHistoryKey, circleRemovalsKey].forEach { d.removeObject(forKey: $0) }
+        pending = []; blocked = []; noHistory = []; circleRemovals = []; clearedCircleRemovals = []
+        [blockedKey, noHistoryKey, circleRemovalsKey, clearedRemovalsKey].forEach { d.removeObject(forKey: $0) }
     }
 
     /// Mark a member as removed from a circle (prevents handshake re-add).
     func removeFromCircle(_ idHex: String, circleId: String) {
         circleRemovals.insert(removalKey(circleId, idHex))
+        clearedCircleRemovals.remove(removalKey(circleId, idHex))
         d.set(Array(circleRemovals), forKey: circleRemovalsKey)
+        d.set(Array(clearedCircleRemovals), forKey: clearedRemovalsKey)
     }
     /// Was this member explicitly removed from this circle?
     func isRemovedFromCircle(_ idHex: String, circleId: String) -> Bool {
@@ -61,9 +70,15 @@ final class ConnectionsStore: ObservableObject {
         return Set(circleRemovals.filter { $0.hasPrefix(prefix) }.map { String($0.dropFirst(prefix.count)) })
     }
     /// Re-allow a member into a circle (clears the removal) — e.g. when you deliberately re-add them.
+    /// The key moves to `clearedCircleRemovals` (even when THIS device holds no removal record — a
+    /// sibling device might) so the clear propagates via self-sync as an explicit newer write instead
+    /// of silently losing to a stale removal record.
     func clearCircleRemoval(_ idHex: String, circleId: String) {
-        circleRemovals.remove(removalKey(circleId, idHex))
+        let key = removalKey(circleId, idHex)
+        circleRemovals.remove(key)
+        clearedCircleRemovals.insert(key)
         d.set(Array(circleRemovals), forKey: circleRemovalsKey)
+        d.set(Array(clearedCircleRemovals), forKey: clearedRemovalsKey)
     }
 
     func setNoHistory(_ idHex: String) {

@@ -82,10 +82,12 @@ final class SelfSyncCoordinator {
             if let data = try? JSONEncoder().encode(c) { m["contact:\(c.idHex)"] = data }
         }
         for hex in ConnectionsStore.shared.blocked { m["blocked:\(hex)"] = Data([1]) }
-        // Explicit circle severances — propagate as ADDITIVE, grow-only records (a removal is intentional
-        // and must never be undone by a peer's absence; that's why it's NOT a dynamic prefix). Keyed
-        // removal:<circleId>|<hex>. This is the safe way to make "remove someone" stick across my devices.
+        // Explicit circle severances — LWW per entry, never inferred from absence (NOT a dynamic
+        // prefix). Keyed removal:<circleId>|<hex>: value 1 = removed, value 0 = deliberately re-added.
+        // The 0 write is what lets a re-add actually stick fleet-wide — before it, the grow-only
+        // removal record re-severed a re-added friend on every sibling's sync pass, forever.
         for key in ConnectionsStore.shared.circleRemovals { m["removal:\(key)"] = Data([1]) }
+        for key in ConnectionsStore.shared.clearedCircleRemovals { m["removal:\(key)"] = Data([0]) }
         // Circles: name + member bundles + relay nodes, so another device can reconstruct each
         // circle and seal to every member. (Additive in v1 — member/circle removal is a follow-up.)
         if let social = social {
@@ -167,12 +169,21 @@ final class SelfSyncCoordinator {
 
         // Circle severances synced from another of my devices → apply them here too: record the removal
         // and purge that member from the circle (so removing someone on my phone severs them on my Mac).
+        // Value 0 = the removal was deliberately CLEARED (re-added) on another device — un-ban locally
+        // and never re-sever; the member bundle comes back via the additive circle: record.
         for e in live where e.key.hasPrefix("removal:") {
             let key = String(e.key.dropFirst("removal:".count))   // "<circleId>|<hex>"
             guard let bar = key.firstIndex(of: "|") else { continue }
             let circleId = String(key[key.startIndex..<bar])
             let hex = String(key[key.index(after: bar)...])
-            guard !circleId.isEmpty, !hex.isEmpty, !conn.isRemovedFromCircle(hex, circleId: circleId) else { continue }
+            guard !circleId.isEmpty, !hex.isEmpty else { continue }
+            if e.value.first == 0 {
+                if conn.isRemovedFromCircle(hex, circleId: circleId) {
+                    conn.clearCircleRemoval(hex, circleId: circleId)
+                }
+                continue
+            }
+            guard !conn.isRemovedFromCircle(hex, circleId: circleId) else { continue }
             conn.removeFromCircle(hex, circleId: circleId)
             social?.removeFromCircle(circleId: circleId, nodeHex: hex)
         }

@@ -426,12 +426,12 @@ impl RelayNode {
         let seen: Arc<Mutex<relay::SeenSet>> = Arc::new(Mutex::new(relay::SeenSet::default()));
 
         let h = holder.clone();
-        let handler: InboundHandler = Arc::new(move |_from: [u8; 32], bytes: Vec<u8>| {
+        let handler: InboundHandler = Arc::new(move |from: [u8; 32], bytes: Vec<u8>| {
             let this = lock(&h).clone();
             if let Some(this) = this {
                 let deliver = on_frame.clone();
                 tokio::spawn(async move {
-                    this.handle_inbound(bytes, deliver).await;
+                    this.handle_inbound(from, bytes, deliver).await;
                 });
             }
         });
@@ -457,16 +457,17 @@ impl RelayNode {
     /// (Members call this by sending the relay a [`relay::RoutingFrame`]; this is also
     /// the programmatic entry used in tests / when wrapping locally.)
     pub async fn forward(&self, frame: relay::RoutingFrame) {
-        self.handle_inbound(frame.to_bytes(), None).await;
+        self.handle_inbound([0u8; 32], frame.to_bytes(), None).await;
     }
 
-    async fn handle_inbound(&self, bytes: Vec<u8>, deliver: Option<InboundHandler>) {
+    async fn handle_inbound(&self, from: [u8; 32], bytes: Vec<u8>, deliver: Option<InboundHandler>) {
         let Some(frame) = relay::RoutingFrame::parse(&bytes) else {
-            // Not a relay frame: a bare payload addressed straight to us. Deliver if we
-            // have a member handler; otherwise (pure forwarder) ignore. Zero sender: the
-            // authenticated conn id was consumed upstream (RelayNode's own handler).
+            // Not a relay frame: a bare payload addressed straight to us — the sender IS the
+            // authenticated connection peer, so pass its id through (a relay-hosting member
+            // otherwise never learns reply-path hints from direct hellos). Pure forwarders
+            // (no member handler) ignore.
             if let Some(d) = deliver {
-                d([0u8; 32], bytes);
+                d(from, bytes);
             }
             return;
         };

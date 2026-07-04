@@ -750,6 +750,7 @@ impl Engine {
 
     /// Add an existing contact to a circle + greet them there so it forms on their side.
     pub fn add_to_circle(self: &Arc<Self>, circle_id: String, contact_id_hex: String) {
+        self.clear_circle_removal(&circle_id, &contact_id_hex); // deliberate re-add un-bans them
         let _ = self.social.add_existing_to_circle(circle_id.clone(), contact_id_hex.clone());
         self.persist();
         self.emit_changed();
@@ -764,14 +765,36 @@ impl Engine {
         {
             let mut p = self.prefs.lock().unwrap();
             let entry = format!("{circle_id}|{}", contact_id_hex.to_lowercase());
+            p.circle_removals_cleared.retain(|e| e != &entry);
             if !p.circle_removals.iter().any(|e| e == &entry) {
                 p.circle_removals.push(entry);
             }
+            let _ = p.save(&self.paths);
         }
         self.social.remove_from_circle(circle_id, contact_id_hex);
         self.persist();
         self.authorize_membership();
         self.emit_changed();
+    }
+
+    /// Was this member explicitly removed from this circle? (Blocks their unsolicited handshake rejoin.)
+    fn is_removed_from_circle(&self, circle_id: &str, id_hex: &str) -> bool {
+        let entry = format!("{circle_id}|{}", id_hex.to_lowercase());
+        self.prefs.lock().unwrap().circle_removals.iter().any(|e| e == &entry)
+    }
+
+    /// Re-allow a member into a circle — ONLY on a deliberate re-add (approve / add / invite connect).
+    /// The entry moves to `circle_removals_cleared` (even when THIS device holds no removal — a
+    /// sibling might) so the clear propagates via self-sync as an explicit newer LWW write instead of
+    /// silently losing to a stale removal record.
+    fn clear_circle_removal(&self, circle_id: &str, id_hex: &str) {
+        let entry = format!("{circle_id}|{}", id_hex.to_lowercase());
+        let mut p = self.prefs.lock().unwrap();
+        p.circle_removals.retain(|e| e != &entry);
+        if !p.circle_removals_cleared.iter().any(|e| e == &entry) {
+            p.circle_removals_cleared.push(entry);
+        }
+        let _ = p.save(&self.paths);
     }
 
     // ---- feed / authoring ---------------------------------------------------------------
@@ -987,6 +1010,9 @@ impl Engine {
             Ok(i) => i,
             Err(_) => return false,
         };
+        // Scanning/pasting an invite is a DELIBERATE add: clear any old removal tombstone, or their
+        // hellos stay dropped (handshake guard) and self-sync re-severs them (re-add never sticks).
+        self.clear_circle_removal(DEFAULT_CIRCLE, &info.id_hex);
         // Store the invite's device-id hints BEFORE the hello, so the very first dial can reach
         // their device (their account id resolves to no node post-device-seed).
         self.record_device_hints(&info.id_hex, Self::extract_invite_hints(&trimmed));
@@ -1010,6 +1036,9 @@ impl Engine {
             idx.map(|i| st.pending.remove(i))
         };
         if let Some(req) = req {
+            // Approving IS a deliberate re-add — clear any old removal tombstone or their hellos
+            // stay dropped (handshake guard) and self-sync re-severs them on every pass.
+            self.clear_circle_removal(DEFAULT_CIRCLE, &req.id_hex);
             self.accept_contact(DEFAULT_CIRCLE, &req.bundle, &req.id_hex, &req.name, &req.verify_hex, true);
             self.emit_changed();
         }
@@ -1292,6 +1321,12 @@ impl Engine {
             .unwrap_or_else(|| "Someone".to_string());
 
         if hello.circle_id.starts_with("dm:") && !Self::dm_allows(&hello.circle_id, &id_hex) {
+            return;
+        }
+        // A member you explicitly removed from THIS circle must NOT auto-rejoin on their handshake
+        // (parity with iOS/Android). Deliberate re-adds (approve / add_to_circle / connect_by_link)
+        // clear the tombstone first, so this only blocks the unsolicited rejoin.
+        if self.is_removed_from_circle(&hello.circle_id, &id_hex) {
             return;
         }
         self.social.create_circle(hello.circle_id.clone(), hello.circle_name.clone());

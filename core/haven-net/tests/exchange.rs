@@ -25,18 +25,25 @@ async fn two_nodes_exchange_a_sealed_post() {
     // Bob listens (inbound payloads go to a channel); Alice dials Bob and sends.
     // Each node binds to its identity's key, so its transport id == its Haven id.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let bob_node = Node::spawn(bob.node_secret_bytes(), Arc::new(move |p| { let _ = tx.send(p); })).await.unwrap();
+    let bob_node = Node::spawn(bob.node_secret_bytes(), Arc::new(move |from: [u8; 32], p: Vec<u8>| {
+        let _ = tx.send((from, p));
+    }))
+    .await
+    .unwrap();
     assert_eq!(bob_node.node_id_hex(), hex32(&bob.public().node_id_bytes()),
                "transport node id must equal the Haven identity id");
     let bob_addr = bob_node.local_dial_addr().await.unwrap();
-    let alice_node = Node::spawn(alice.node_secret_bytes(), Arc::new(|_| {})).await.unwrap();
+    let alice_node = Node::spawn(alice.node_secret_bytes(), Arc::new(|_: [u8; 32], _: Vec<u8>| {})).await.unwrap();
     alice_node.send(bob_addr, &payload).await.unwrap();
 
     // Bob receives the opaque bytes and opens the post with his own keys.
-    let received = timeout(Duration::from_secs(10), rx.recv())
+    let (from, received) = timeout(Duration::from_secs(10), rx.recv())
         .await
         .expect("recv timed out")
         .expect("channel closed");
+    // A direct frame carries the sender's AUTHENTICATED transport id (the reply-path bootstrap).
+    assert_eq!(hex32(&from), alice_node.node_id_hex(),
+               "direct delivery must surface the sender's authenticated node id");
     let env = SealedEnvelope::from_bytes(&received).unwrap();
     let opened = open_event(&bob, &alice.public(), &env).unwrap();
 

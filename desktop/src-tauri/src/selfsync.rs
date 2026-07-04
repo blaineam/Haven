@@ -72,10 +72,14 @@ pub fn current_local(prefs: &Prefs, social: &HavenSocial) -> BTreeMap<String, Ve
         m.insert(format!("blocked:{hex}"), vec![1]);
     }
 
-    // Explicit circle severances (grow-only) — so a removal converges to our other devices as an
-    // INTENTIONAL record rather than being inferred from (strictly-additive) member absence.
+    // Explicit circle severances — LWW per entry: 1 = removed, 0 = deliberately re-added. The 0
+    // write is what lets a re-add stick fleet-wide (grow-only removals re-severed a re-added
+    // friend on every sibling sync pass). Never inferred from member absence.
     for entry in &prefs.circle_removals {
         m.insert(format!("removal:{entry}"), vec![1]);
+    }
+    for entry in &prefs.circle_removals_cleared {
+        m.insert(format!("removal:{entry}"), vec![0]);
     }
 
     // Circles: name + member bundles + relay nodes, so another device can reconstruct each circle
@@ -231,12 +235,25 @@ pub fn apply_local(
         }
     }
 
-    // Explicit circle severances synced from our other devices (grow-only): record them locally so the
-    // member isn't re-registered below, and apply the removal to the circle here too.
-    for (k, _) in entries {
+    // Explicit circle severances synced from our other devices: value 1 → record locally so the
+    // member isn't re-registered below + apply the removal to the circle here too. Value 0 → the
+    // removal was deliberately CLEARED (re-added) on another device: un-ban locally and never
+    // re-sever; the member bundle comes back via the additive circle: record.
+    for (k, v) in entries {
         let Some(entry) = k.strip_prefix("removal:") else { continue };
+        if v.first() == Some(&0) {
+            if prefs.circle_removals.iter().any(|e| e == entry) {
+                prefs.circle_removals.retain(|e| e != entry);
+                if !prefs.circle_removals_cleared.iter().any(|e| e == entry) {
+                    prefs.circle_removals_cleared.push(entry.to_string());
+                }
+                changed = true;
+            }
+            continue;
+        }
         if !prefs.circle_removals.iter().any(|e| e == entry) {
             prefs.circle_removals.push(entry.to_string());
+            prefs.circle_removals_cleared.retain(|e| e != entry);
             changed = true;
         }
         if let Some((cid, hex)) = entry.split_once('|') {

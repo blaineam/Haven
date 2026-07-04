@@ -180,6 +180,9 @@ struct ConnectView: View {
                 let trimmed = friendName.trimmingCharacters(in: .whitespaces)
                 let name = trimmed.isEmpty ? "Friend" : trimmed
                 contacts.add(name: name, idHex: f.idHex, verificationHex: f.verificationHex)
+                // Scanning an invite is a DELIBERATE add: clear any old removal tombstone, or
+                // their hellos stay dropped and self-sync re-severs them (re-add never sticks).
+                ConnectionsStore.shared.clearCircleRemoval(f.idHex, circleId: "default")
                 // Store the invite's device-id hints BEFORE the hello, so the very first dial
                 // can reach their device (their account id resolves to no node post-device-seed).
                 FeedStore.shared.recordDeviceHints(accountHex: f.idHex, deviceIds: foundHints)

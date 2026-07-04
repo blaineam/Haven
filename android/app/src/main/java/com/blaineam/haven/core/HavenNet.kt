@@ -668,6 +668,9 @@ object HavenNet : InboundListener {
     fun connectByLink(uri: String): Boolean {
         val trimmed = uri.trim()
         val info = runCatching { parseLink(trimmed) }.getOrNull() ?: return false
+        // Scanning an invite is a DELIBERATE add: clear any old removal tombstone, or their hellos
+        // stay dropped (handleHello guard) and self-sync re-severs them (re-add never sticks).
+        CircleRemovals.remove(DEFAULT_CIRCLE, info.idHex)
         // Store the invite's device-id hints BEFORE the hello, so the very first dial can reach
         // their device (their account id resolves to no node post-device-seed).
         recordDeviceHints(info.idHex, InviteHints.extract(trimmed))
@@ -712,6 +715,9 @@ object HavenNet : InboundListener {
 
     /** Approve a pending request: add them, persist, and Hello back so they auto-accept us. */
     fun approve(req: PendingRequest) {
+        // Approving IS a deliberate re-add — clear any old removal tombstone or their hellos stay
+        // dropped (handleHello guard) and self-sync re-severs them on every pass.
+        CircleRemovals.remove(DEFAULT_CIRCLE, req.idHex)
         acceptContact(DEFAULT_CIRCLE, req.bundle, req.idHex, req.name, req.verifyHex, helloBack = true)
         pending.removeAll { it.idHex == req.idHex }
     }

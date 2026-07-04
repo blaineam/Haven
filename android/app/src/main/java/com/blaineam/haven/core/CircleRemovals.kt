@@ -8,12 +8,15 @@ import android.content.Context
  * from a peer's absence — and (b) survives an additive re-sync: [SelfSyncCoordinator] will not re-add
  * anyone listed here (anti-reinflation), and their posts/calls in that circle are filtered out.
  *
- * Severing is grow-only: it is never undone just because another device still lists the member. Mirrors
- * the iOS `ConnectionsStore.circleRemovals`.
+ * A removal is LWW per entry, never undone by absence: a DELIBERATE re-add moves the entry to the
+ * CLEARED set, which self-sync publishes as `removal:<key> = 0` — an explicit newer write that
+ * supersedes the stale removal record on the user's other devices. (Grow-only removals re-severed a
+ * re-added friend on every sibling sync pass, forever.) Mirrors iOS `ConnectionsStore.circleRemovals`.
  */
 object CircleRemovals {
     private const val PREFS = "haven.circleRemovals"
     private const val KEY = "removed" // Set<"circleId|hex">
+    private const val KEY_CLEARED = "cleared" // Set<"circleId|hex"> — deliberately re-added
     private lateinit var appContext: Context
 
     fun init(ctx: Context) { appContext = ctx.applicationContext }
@@ -24,19 +27,30 @@ object CircleRemovals {
     /** Every removal as "circleId|hex". */
     fun all(): Set<String> = prefs.getStringSet(KEY, emptySet())?.toSet() ?: emptySet()
 
+    /** Every deliberately-cleared removal as "circleId|hex" (published as removal:<key> = 0). */
+    fun allCleared(): Set<String> = prefs.getStringSet(KEY_CLEARED, emptySet())?.toSet() ?: emptySet()
+
     fun add(circleId: String, hex: String) {
         if (hex.isBlank()) return
+        val k = key(circleId, hex)
         val s = all().toMutableSet()
-        if (s.add(key(circleId, hex))) prefs.edit().putStringSet(KEY, s).apply()
+        val c = allCleared().toMutableSet()
+        val changed = s.add(k) or c.remove(k)
+        if (changed) prefs.edit().putStringSet(KEY, s).putStringSet(KEY_CLEARED, c).apply()
     }
 
     fun contains(circleId: String, hex: String): Boolean = all().contains(key(circleId, hex))
 
-    /** Re-allow a member into a circle (clears the removal) — ONLY when the user deliberately re-adds
-     *  them. Mirrors iOS `ConnectionsStore.clearCircleRemoval`. */
+    /** Re-allow a member into a circle — ONLY when the user deliberately re-adds them. Recorded in the
+     *  CLEARED set even if THIS device holds no removal (a sibling might), so the clear propagates.
+     *  Mirrors iOS `ConnectionsStore.clearCircleRemoval`. */
     fun remove(circleId: String, hex: String) {
+        if (hex.isBlank()) return
+        val k = key(circleId, hex)
         val s = all().toMutableSet()
-        if (s.remove(key(circleId, hex))) prefs.edit().putStringSet(KEY, s).apply()
+        val c = allCleared().toMutableSet()
+        val changed = s.remove(k) or c.add(k)
+        if (changed) prefs.edit().putStringSet(KEY, s).putStringSet(KEY_CLEARED, c).apply()
     }
 
     /** The removed member hexes for one circle. */

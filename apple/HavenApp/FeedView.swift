@@ -438,10 +438,15 @@ final class FeedStore: ObservableObject {
     /// their bundle, Hello back, back-fill posts), then clear the request.
     func approveConnection(_ req: ConnectionRequest, shareHistory: Bool) {
         guard let social else { return }
+        // Approving IS a deliberate re-add: clear any old removal tombstone for them, or their
+        // hellos stay silently dropped (isRemovedFromCircle guard) and self-sync re-severs them
+        // on every pass — the "removed a friend once, could never re-add them" bug.
+        ConnectionsStore.shared.clearCircleRemoval(req.idHex, circleId: "default")
         let vhex = try? social.bundleVerificationHex(bundle: req.bundle)
         ContactsStore.shared.add(name: req.name, idHex: req.idHex, verificationHex: vhex)
         social.createCircle(id: "default", name: "Your circle")
         _ = try? social.addContactBundle(circleId: "default", bundle: req.bundle)
+        dialTargetsCache.removeAll()   // the new friend must be dialable now, not when the 10s cache expires
         ContactsStore.shared.setAuthoritativeName(idHex: req.idHex, req.name)
         recordHeard(req.idHex)
         if !shareHistory { ConnectionsStore.shared.setNoHistory(req.idHex) }
@@ -2141,6 +2146,7 @@ final class FeedStore: ObservableObject {
                                               dedupeKey: "circle-\(circleId)")
         }
         guard (try? social.addContactBundle(circleId: circleId, bundle: bundle)) != nil else { return }
+        dialTargetsCache.removeAll()   // a just-handshaked member must be dialable now, not in 10s
         recordHeard(idHex)
         persist(); refreshCircles()
         if !profileBlob.isEmpty,

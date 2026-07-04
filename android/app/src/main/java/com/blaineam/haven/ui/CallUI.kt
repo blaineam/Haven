@@ -236,32 +236,41 @@ private fun InCall() {
             Text(name.ifBlank { "Haven call" }, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         }
 
-        // Controls.
-        Row(
+        // Controls — TWO rows, matching iOS: media toggles up top, call actions (share / add /
+        // hang up) below. A single row of 7 buttons was wider than any phone screen, which
+        // silently pushed the share-screen and HANG-UP buttons off the right edge.
+        Column(
             Modifier.align(Alignment.BottomCenter).padding(bottom = 36.dp),
-            horizontalArrangement = Arrangement.spacedBy(20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            RoundButton(if (micOn) Icons.Filled.Mic else Icons.Filled.MicOff,
-                if (micOn) HavenTheme.card else Color.White, "Mic") { CallManager.toggleMic() }
-            RoundButton(if (speakerOn) Icons.Filled.VolumeUp else Icons.Filled.PhoneInTalk,
-                if (speakerOn) Color.White else HavenTheme.card, if (speakerOn) "Speaker on" else "Speaker off") {
-                CallManager.toggleSpeaker()
-            }
-            RoundButton(if (cameraOn) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
-                if (cameraOn) HavenTheme.card else Color.White, "Camera") { CallManager.toggleCamera() }
-            RoundButton(Icons.Filled.Cameraswitch, HavenTheme.card, "Flip") { CallManager.switchCamera() }
-            RoundButton(Icons.Filled.PersonAdd, HavenTheme.card, "Add people",
-                enabled = CallManager.addableContacts().isNotEmpty()) { showAddPeople = true }
-            RoundButton(if (sharing) Icons.Filled.StopScreenShare else Icons.Filled.ScreenShare,
-                if (sharing) Color.White else HavenTheme.card, "Share screen") {
-                if (sharing) CallManager.stopScreenShare()
-                else {
-                    val mpm = context.getSystemService(android.content.Context.MEDIA_PROJECTION_SERVICE)
-                        as android.media.projection.MediaProjectionManager
-                    projectionLauncher.launch(mpm.createScreenCaptureIntent())
+            Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                RoundButton(if (micOn) Icons.Filled.Mic else Icons.Filled.MicOff,
+                    if (micOn) HavenTheme.card else Color.White, "Mic") { CallManager.toggleMic() }
+                RoundButton(if (speakerOn) Icons.Filled.VolumeUp else Icons.Filled.PhoneInTalk,
+                    if (speakerOn) Color.White else HavenTheme.card, if (speakerOn) "Speaker on" else "Speaker off") {
+                    CallManager.toggleSpeaker()
+                }
+                RoundButton(if (cameraOn) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
+                    if (cameraOn) HavenTheme.card else Color.White, "Camera") { CallManager.toggleCamera() }
+                if (cameraOn) {
+                    RoundButton(Icons.Filled.Cameraswitch, HavenTheme.card, "Flip") { CallManager.switchCamera() }
                 }
             }
-            RoundButton(Icons.Filled.CallEnd, Color(0xFFEF4444), "End") { CallManager.hangup() }
+            Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                RoundButton(if (sharing) Icons.Filled.StopScreenShare else Icons.Filled.ScreenShare,
+                    if (sharing) Color.White else HavenTheme.card, "Share screen") {
+                    if (sharing) CallManager.stopScreenShare()
+                    else {
+                        val mpm = context.getSystemService(android.content.Context.MEDIA_PROJECTION_SERVICE)
+                            as android.media.projection.MediaProjectionManager
+                        projectionLauncher.launch(mpm.createScreenCaptureIntent())
+                    }
+                }
+                RoundButton(Icons.Filled.PersonAdd, HavenTheme.card, "Add people",
+                    enabled = CallManager.addableContacts().isNotEmpty()) { showAddPeople = true }
+                RoundButton(Icons.Filled.CallEnd, Color(0xFFEF4444), "End") { CallManager.hangup() }
+            }
         }
     }
 }

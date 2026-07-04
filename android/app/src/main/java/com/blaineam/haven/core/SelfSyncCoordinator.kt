@@ -124,10 +124,14 @@ object SelfSyncCoordinator {
         for (hex in HavenNet.selfSyncBlockedSnapshot()) {
             m["blocked:$hex"] = byteArrayOf(1)
         }
-        // Explicit circle severances (grow-only) — so a removal converges to our other devices as an
-        // INTENTIONAL record rather than being inferred from (now strictly-additive) member absence.
+        // Explicit circle severances — LWW per entry: 1 = removed, 0 = deliberately re-added. The 0
+        // write is what lets a re-add stick fleet-wide (grow-only removals re-severed a re-added
+        // friend on every sibling sync pass). Never inferred from member absence.
         for (entry in CircleRemovals.all()) {
             m["removal:$entry"] = byteArrayOf(1)
+        }
+        for (entry in CircleRemovals.allCleared()) {
+            m["removal:$entry"] = byteArrayOf(0)
         }
         // Circles: name + member bundles + relay nodes, so another device can reconstruct each
         // circle and seal to every member. Encoded by the SHARED Rust encoder so the bytes are
@@ -205,15 +209,21 @@ object SelfSyncCoordinator {
         for (hex in wantBlocked - haveBlocked) HavenNet.selfSyncSetBlocked(hex, true)
         for (hex in haveBlocked - wantBlocked) HavenNet.selfSyncSetBlocked(hex, false)
 
-        // Explicit circle severances synced from our other devices (grow-only): record them locally so
-        // the member won't be re-added below, and apply the removal to the circle here too.
+        // Explicit circle severances synced from our other devices: value 1 → record locally so the
+        // member won't be re-added below + apply the removal to the circle here too. Value 0 → the
+        // removal was deliberately CLEARED (re-added) on another device: un-ban locally and never
+        // re-sever; the member bundle comes back via the additive circle: record.
         for (e in live) if (e.key.startsWith("removal:")) {
             val body = e.key.removePrefix("removal:")
             val cid = body.substringBefore("|")
             val hex = body.substringAfter("|", "")
             if (cid.isNotEmpty() && hex.isNotEmpty()) {
-                CircleRemovals.add(cid, hex)
-                if (social != null) runCatching { social.removeFromCircle(cid, hex) }
+                if (e.value.firstOrNull()?.toInt() == 0) {
+                    if (CircleRemovals.contains(cid, hex)) CircleRemovals.remove(cid, hex)
+                } else {
+                    CircleRemovals.add(cid, hex)
+                    if (social != null) runCatching { social.removeFromCircle(cid, hex) }
+                }
             }
         }
 

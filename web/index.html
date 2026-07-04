@@ -372,7 +372,7 @@ haven-relay run --link "haven-relay://circle#…"</code></pre>
       <div class="center reveal">
         <span class="eyebrow">The beta is here</span>
         <h2 style="font-size:clamp(26px,4.5vw,40px)">Get <span class="h-grad">Haven</span> on every screen</h2>
-        <p class="lead">iPhone &amp; iPad via TestFlight; macOS (native, notarized), Windows, Linux and Steam&nbsp;Deck straight from the latest release; a tiny relay for a Pi or server.</p>
+        <p class="lead">iPhone, iPad &amp; Mac on the App&nbsp;Store; Windows, Linux and Steam&nbsp;Deck straight from the latest release; a tiny relay for a Pi or server.</p>
       </div>
       <div class="dl-grid reveal" id="download-grid" aria-live="polite">
         <p class="muted center" id="download-loading">Loading the latest release…</p>
@@ -447,10 +447,10 @@ var DOWNLOADS = {
   // Apple: public TestFlight invite link (set once external testing is enabled
   // in App Store Connect). While in beta iOS + macOS ship via TestFlight.
   APPLE_BETA_URL: "",        /* TODO: paste public TestFlight invite URL when external testing is on */
-  // App Store product URL — set only once Haven is actually LIVE on the App Store
-  // (not TestFlight). Leaving it "" keeps the site honest about being in beta.
-  APP_STORE_URL: "",         /* TODO: paste App Store URL at launch (leave "" while beta) */
-  MAC_APP_STORE_URL: "",     /* TODO: paste Mac App Store URL at launch (leave "" while beta) */
+  // App Store product URL — 1.0.0 submitted for review 2026-07-04 (iOS + macOS, build 166);
+  // this link goes live the moment Apple approves.
+  APP_STORE_URL: "https://apps.apple.com/app/id6782147901",
+  MAC_APP_STORE_URL: "https://apps.apple.com/app/id6782147901",
   // Android closed beta: the Google Play testing opt-in ("Become a tester") URL.
   PLAY_BETA_URL: "https://play.google.com/store/apps/details?id=com.blaineam.haven",  /* Google Play listing (com.blaineam.haven) */
   // Desktop / Linux / relay builds are served from the latest GitHub release and
@@ -547,7 +547,7 @@ var DOWNLOADS = {
                    android: "Get the Android beta", windows: "Download for Windows", linux: "Download for Linux" };
     var target = { // preferred destination per platform; "#" / "" both mean "not ready"
       ios: DOWNLOADS.APP_STORE_URL || DOWNLOADS.APPLE_BETA_URL,
-      macos: (assets && assets.dmg) || DOWNLOADS.MAC_APP_STORE_URL || DOWNLOADS.APPLE_BETA_URL,
+      macos: DOWNLOADS.MAC_APP_STORE_URL || (assets && assets.dmg) || DOWNLOADS.APPLE_BETA_URL,
       android: (PLAY_BETA_URL && PLAY_BETA_URL !== "#") ? PLAY_BETA_URL : (assets && assets.apk),
       windows: assets && assets.win,
       linux: assets && assets.linux
@@ -571,19 +571,23 @@ var DOWNLOADS = {
            '</div><div class="dl-btns">' + btns.join("") + '</div></div>';
   }
   function iosCard(recommended) {
-    var b = APPLE_BETA_URL
-      ? btn(APPLE_BETA_URL, "Join the TestFlight beta", true)
-      : '<span class="muted small">TestFlight beta — invite required for now</span>';
-    return card("iPhone &amp; iPad", "iOS · iPadOS — via TestFlight", [b], recommended);
+    var bs = [];
+    if (DOWNLOADS.APP_STORE_URL) bs.push(btn(DOWNLOADS.APP_STORE_URL, "Download on the App&nbsp;Store", true));
+    else if (APPLE_BETA_URL) bs.push(btn(APPLE_BETA_URL, "Join the TestFlight beta", true));
+    else bs.push('<span class="muted small">TestFlight beta — invite required for now</span>');
+    return card("iPhone &amp; iPad", "iOS · iPadOS — App&nbsp;Store", bs, recommended);
   }
-  // macOS = the NATIVE SwiftUI app as a Developer ID–notarized .dmg from the latest release
-  // (NOT the Tauri build). Falls back to TestFlight until the first signed .dmg is published.
+  // macOS: the App Store is the primary destination; the Developer ID–notarized .dmg from the
+  // latest release stays as the direct-download alternative (NOT the Tauri build).
   function macCard(dmg, recommended) {
-    var b = dmg
-      ? btn(dmg, "Download for Mac (.dmg)", true)
-      : (APPLE_BETA_URL ? btn(APPLE_BETA_URL, "Join the TestFlight beta", true)
-                        : '<span class="muted small">Building…</span>');
-    return card("macOS", "Native app — Developer&nbsp;ID notarized&nbsp;.dmg", [b], recommended);
+    var bs = [];
+    if (DOWNLOADS.MAC_APP_STORE_URL) bs.push(btn(DOWNLOADS.MAC_APP_STORE_URL, "Download on the App&nbsp;Store", true));
+    if (dmg) bs.push(btn(dmg, DOWNLOADS.MAC_APP_STORE_URL ? "Or the notarized .dmg" : "Download for Mac (.dmg)", !DOWNLOADS.MAC_APP_STORE_URL));
+    if (!bs.length) {
+      bs.push(APPLE_BETA_URL ? btn(APPLE_BETA_URL, "Join the TestFlight beta", true)
+                             : '<span class="muted small">Building…</span>');
+    }
+    return card("macOS", "Native app — App&nbsp;Store or notarized&nbsp;.dmg", bs, recommended);
   }
 
   // Detect the visitor's platform from the standard, browser-provided UA platform — no

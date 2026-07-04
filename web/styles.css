@@ -184,10 +184,10 @@ code{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
   padding:.12em .4em;border-radius:6px;font-size:.88em}
 pre{
   background:#06060a;border:1px solid var(--card-border);border-radius:var(--radius-sm);
-  padding:16px 18px;overflow:auto;margin:14px 0;
+  padding:16px 18px;overflow-x:auto;overflow-y:hidden;margin:14px 0;max-width:100%;
 }
 pre code{background:none;border:none;padding:0;font-size:13px;line-height:1.65;color:#e7e7ee}
-.copywrap{position:relative}
+.copywrap{position:relative;min-width:0;max-width:100%}
 .copywrap pre{padding-right:74px}
 .copybtn{
   position:absolute;top:10px;right:10px;border:1px solid var(--card-border);
@@ -199,6 +199,11 @@ pre code{background:none;border:none;padding:0;font-size:13px;line-height:1.65;c
 /* ── Step list (relay) ────────────────────────────────────────────────── */
 .steps{counter-reset:step;display:flex;flex-direction:column;gap:16px;margin:8px 0 0}
 .step{display:grid;grid-template-columns:40px 1fr;gap:16px;align-items:start}
+/* Grid/flex items refuse to shrink below their content by default (min-width:auto), so a long
+   non-wrapping code line (curl … | sh) blew the step column — and the whole page — wider than a
+   phone screen instead of letting the pre's own overflow-x scroll it. Fixed structurally here so
+   no individual step needs an inline min-width:0 hack. */
+.step>*{min-width:0}
 .step .sn{
   counter-increment:step;width:36px;height:36px;border-radius:11px;display:grid;place-items:center;
   font-weight:800;font-size:16px;background:var(--brand);color:#fff;

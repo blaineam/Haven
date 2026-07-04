@@ -2477,11 +2477,19 @@ struct FeedView: View {
             .onAppear {
                 store.configure(seed: seed)
                 // Screenshot harness: open the full-screen story viewer for its hero shot.
+                // The feed rebuild is async now, so RETRY until the demo stories are published
+                // (a single fixed delay raced the off-main refresh and silently skipped the scene).
                 if DemoEnv.scene == .story {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                        guard !store.groupedStoriesFlat.isEmpty else { return }
-                        storyIndex = 0; showStories = true
+                    func tryPresent(_ attempt: Int = 0) {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                            if !store.groupedStoriesFlat.isEmpty {
+                                storyIndex = 0; showStories = true
+                            } else if attempt < 10 {
+                                tryPresent(attempt + 1)
+                            }
+                        }
                     }
+                    tryPresent()
                 }
             }
             .sensoryFeedback(.success, trigger: store.postTick)

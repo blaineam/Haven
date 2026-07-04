@@ -149,14 +149,16 @@ capture_sim() {
   mute_off
 }
 
-# ── Mac Catalyst leg (opt-in) ───────────────────────────────────────────────────────
-# Haven on macOS ships via Mac Catalyst — a normal windowed app. We build the Catalyst
-# destination, launch each scene with the same HAVEN_* env, resolve the app's window via
-# the shared mac-window-id.swift, and `screencapture -l<id>` it frameless. Requires an
-# UNLOCKED + AWAKE display + Screen Recording permission for the controlling terminal.
+# ── macOS leg (opt-in) ──────────────────────────────────────────────────────────────
+# Haven on macOS is a NATIVE windowed app (HavenMac scheme — Catalyst is long gone). We
+# build it, launch each scene with the same HAVEN_* env (binary exec'd directly — `open`
+# does NOT propagate the caller's environment), resolve the app's window via the shared
+# mac-window-id.swift, and `screencapture -o -l<id>` it as a clean floating-window PNG
+# (rounded corners + alpha; no full-screen control needed — it's not a menu-bar app).
+# Requires an UNLOCKED + AWAKE display + Screen Recording permission for the terminal.
 capture_mac() {
   local key="mac"
-  echo "==> Mac Catalyst ($key)"
+  echo "==> macOS native ($key)"
   local SHARED="$PROJECT_ROOT/../../_shared/screenshots"
   [ -f "$SHARED/mac-window-id.swift" ] || { echo "  !! $SHARED/mac-window-id.swift missing" >&2; return 1; }
 
@@ -173,9 +175,9 @@ SWIFT
 
   local derived="/tmp/haven-shots-dd-mac"
   mkdir -p "$derived"
-  echo "  Building $SCHEME (Mac Catalyst)…"
-  if ! xcodebuild -project "$PROJECT" -scheme "$SCHEME" \
-      -destination "platform=macOS,variant=Mac Catalyst" -configuration Debug \
+  echo "  Building HavenMac (native macOS)…"
+  if ! xcodebuild -project "$PROJECT" -scheme HavenMac \
+      -destination "platform=macOS" -configuration Debug \
       -derivedDataPath "$derived" CODE_SIGNING_ALLOWED=NO build \
       >"$derived/mac-build.log" 2>&1; then
     echo "  mac build failed; tail of log:" >&2
@@ -184,7 +186,7 @@ SWIFT
   fi
   local APP
   APP="$(find "$derived/Build/Products" -maxdepth 2 -name "Haven.app" | head -1)"
-  [ -n "$APP" ] || { echo "  no Catalyst .app produced" >&2; return 1; }
+  [ -n "$APP" ] || { echo "  no HavenMac .app produced" >&2; return 1; }
 
   rm -rf "${OUT:?}/$key"; mkdir -p "$OUT/$key"
   mute_on
@@ -193,8 +195,9 @@ SWIFT
     local tab="${entry%%|*}" rest="${entry#*|}"
     local scene="${rest%%|*}" file="${rest#*|}"
     pkill -f "Haven.app/Contents/MacOS/Haven" 2>/dev/null; sleep 1
+    # Exec the binary directly — env vars do NOT survive LaunchServices (`open`).
     HAVEN_DEMO=1 HAVEN_SKIP_ONBOARDING=1 HAVEN_NO_NET=1 HAVEN_TAB="$tab" HAVEN_SCENE="$scene" \
-      open -n "$APP" >/dev/null 2>&1
+      "$APP/Contents/MacOS/Haven" >/dev/null 2>&1 &
     sleep 7
     local wid; wid="$(swift "$SHARED/mac-window-id.swift" "Haven" 2>/dev/null)"
     if [ -n "$wid" ]; then

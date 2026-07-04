@@ -170,6 +170,18 @@ struct HavenApp: App {
     @ViewBuilder private var mainRoot: some View {
         RootView()
             .onAppear {
+                #if os(macOS)
+                // Screenshot harness: force a 1440×900pt window (Retina 2× = 2880×1800 — the exact
+                // App Store Mac canvas) so every capture is identically sized regardless of any
+                // saved window frame from a previous launch.
+                if DemoEnv.isDemo {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        if let w = NSApp.windows.first(where: { $0.isVisible }) ?? NSApp.windows.first {
+                            w.setFrame(NSRect(x: 80, y: 80, width: 1440, height: 900), display: true)
+                        }
+                    }
+                }
+                #endif
                 #if os(iOS)
                 // Seed the post-audio autoplay default from the hardware silent switch on open:
                 // silenced → start muted (no autoplay until the user taps unmute); ringer on →

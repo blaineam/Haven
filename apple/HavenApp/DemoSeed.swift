@@ -106,13 +106,18 @@ enum DemoSeeder {
         ]
 
         for i in people.indices {
-            guard let engine = try? HavenSocial(accountSeed: seedData(people[i].seedByte)) else { continue }
+            let engine: HavenSocial
+            do { engine = try HavenSocial(accountSeed: seedData(people[i].seedByte)) }
+            catch { NSLog("DEMO persona engine FAILED: %@", String(describing: error)); continue }
             people[i].engine = engine
             engine.createCircle(id: "default", name: "Your circle")
             // I learn their keys (so I can open their posts) and they learn mine (so they can
             // seal posts to a circle that includes me).
-            let hex = (try? main.addContactBundle(circleId: "default", bundle: engine.myBundle())) ?? ""
-            _ = try? engine.addContactBundle(circleId: "default", bundle: main.myBundle())
+            let hex: String
+            do { hex = try main.addContactBundle(circleId: "default", bundle: engine.myBundle()) }
+            catch { NSLog("DEMO addContactBundle FAILED: %@", String(describing: error)); continue }
+            do { _ = try engine.addContactBundle(circleId: "default", bundle: main.myBundle()) }
+            catch { NSLog("DEMO reverse addContactBundle FAILED: %@", String(describing: error)) }
             people[i].hex = hex
             guard !hex.isEmpty else { continue }
             let p = people[i]
@@ -220,10 +225,18 @@ enum DemoSeeder {
                                    media: [String] = [], music: TrackRefFfi? = nil, at minutesAgo: Int) -> String? {
         guard valid.indices.contains(i), let engine = valid[i].engine else { return nil }
         let ts = msAgo(minutesAgo)
-        guard let env = try? engine.post(circleId: "default", body: body, media: media, music: music,
-                                         retentionSecs: nil, story: false, muteVideo: false, createdAt: ts),
-              (try? main.receive(circleId: "default", envelope: env)) == true else { return nil }
-        return idForCreatedAt(main, ts)
+        guard (try? engine.post(circleId: "default", body: body, media: media, music: music,
+                                retentionSecs: nil, story: false, muteVideo: false, createdAt: ts)) != nil else {
+            NSLog("DEMO friendPost: post() FAILED for persona %d", i); return nil
+        }
+        // Epoch-sealed events can only be opened with the AUTHOR's key commit — replay the friend's
+        // sync bundle (commit + re-sealed events) into my engine, exactly like a real hello
+        // back-fill does. (A bare post envelope alone stopped opening once group keying required
+        // the commit, which is why the demo cast silently vanished from the feed.)
+        replayIntoMain(main, from: engine)
+        let id = idForCreatedAt(main, ts)
+        if id == nil { NSLog("DEMO friendPost: persona %d post did not land after sync replay", i) }
+        return id
     }
 
     /// I author a post into the default circle. Returns its id.
@@ -267,11 +280,19 @@ enum DemoSeeder {
         }
     }
 
+    /// Replay a friend's default-circle sync bundle (their epoch KEY COMMIT + re-sealed events)
+    /// into my engine — what a real hello back-fill delivers. Idempotent.
+    private static func replayIntoMain(_ main: HavenSocial, from friend: HavenSocial) {
+        for env in friend.syncEnvelopes(circleId: "default") {
+            _ = try? main.receive(circleId: "default", envelope: env)
+        }
+    }
+
     private static func story(_ main: HavenSocial, by persona: Persona?, refs: [String], caption: String, at minutesAgo: Int) {
         guard let engine = persona?.engine else { return }
-        if let env = try? engine.post(circleId: "default", body: caption, media: refs, music: nil,
-                                      retentionSecs: 86_400, story: true, muteVideo: false, createdAt: msAgo(minutesAgo)) {
-            _ = try? main.receive(circleId: "default", envelope: env)
+        if (try? engine.post(circleId: "default", body: caption, media: refs, music: nil,
+                             retentionSecs: 86_400, story: true, muteVideo: false, createdAt: msAgo(minutesAgo))) != nil {
+            replayIntoMain(main, from: engine)   // commit + re-sealed events (see friendPost)
         }
     }
 
@@ -289,9 +310,12 @@ enum DemoSeeder {
             if line.mine {
                 _ = try? main.post(circleId: dmId, body: line.body, media: [], music: line.music,
                                    retentionSecs: nil, story: false, muteVideo: false, createdAt: ts)
-            } else if let env = try? engine.post(circleId: dmId, body: line.body, media: [], music: line.music,
-                                                 retentionSecs: nil, story: false, muteVideo: false, createdAt: ts) {
-                _ = try? main.receive(circleId: dmId, envelope: env)
+            } else if (try? engine.post(circleId: dmId, body: line.body, media: [], music: line.music,
+                                        retentionSecs: nil, story: false, muteVideo: false, createdAt: ts)) != nil {
+                // Epoch-sealed: replay the friend's DM sync bundle (their key commit + events).
+                for env in engine.syncEnvelopes(circleId: dmId) {
+                    _ = try? main.receive(circleId: dmId, envelope: env)
+                }
             }
         }
     }

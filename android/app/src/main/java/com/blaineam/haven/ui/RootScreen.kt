@@ -89,6 +89,12 @@ private fun MainScaffold() {
     var tab by remember { mutableStateOf(demoTab() ?: Tab.Circle) }
     var showConnect by remember { mutableStateOf(false) }
 
+    // Deep-linked invite (haven:// or the invite web page) → surface the Connect screen, which
+    // consumes the pending link and connects (parity with iOS's incomingLink flow).
+    LaunchedEffect(com.blaineam.haven.core.InviteInbox.pending) {
+        if (com.blaineam.haven.core.InviteInbox.pending != null) showConnect = true
+    }
+
     // Bring the transport up once we're past onboarding; re-sync on resume. In demo mode the
     // RootScreen LaunchedEffect already did init/seed, and `haven_no_net` keeps the node offline.
     LaunchedEffect(Unit) {

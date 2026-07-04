@@ -36,3 +36,17 @@ object ShareInbox {
         return m
     }
 }
+
+/// A haven:// (or https invite-page) link the app was OPENED with — parity with iOS's
+/// incomingLink → ConnectView flow. RootScreen observes it, opens the Connect screen with the
+/// link prefilled, and clears it.
+object InviteInbox {
+    var pending by mutableStateOf<String?>(null)
+        private set
+    fun offer(uri: String?) {
+        val u = uri?.trim().orEmpty()
+        // Only invite-shaped links (payload rides the #fragment). Anything else is a plain share.
+        if (u.contains('#') && (u.startsWith("haven://") || u.contains("wemiller.com"))) pending = u
+    }
+    fun consume(): String? = pending.also { pending = null }
+}

@@ -9,6 +9,7 @@ import android.net.Uri
 import androidx.core.content.IntentCompat
 import com.blaineam.haven.core.DemoEnv
 import com.blaineam.haven.core.HavenNet
+import com.blaineam.haven.core.InviteInbox
 import com.blaineam.haven.core.LocalMedia
 import com.blaineam.haven.core.ShareInbox
 import com.blaineam.haven.core.isVideoUri
@@ -67,6 +68,9 @@ class MainActivity : FragmentActivity() {
     /** Text / links / photos / videos shared into Haven → prefill the composer + attach media. */
     private fun handleShare(intent: Intent?) {
         when (intent?.action) {
+            // A haven:// or https invite link the app was opened with (tap in a browser/DM) —
+            // parity with the iOS URL-scheme flow: route to the Connect screen, prefilled.
+            Intent.ACTION_VIEW -> InviteInbox.offer(intent.data?.toString())
             Intent.ACTION_SEND -> {
                 if (intent.type?.startsWith("text") == true) {
                     ShareInbox.offer(intent.getStringExtra(Intent.EXTRA_TEXT))

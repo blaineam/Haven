@@ -41,6 +41,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-notification = "2"
 # Start Haven on login (registry / LaunchAgent / .desktop) so the in-app relay survives reboot.
 tauri-plugin-autostart = "2"
+tauri-plugin-deep-link = "2"
 
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

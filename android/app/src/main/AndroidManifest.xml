@@ -60,6 +60,15 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="haven" />
             </intent-filter>
+            <!-- The invite WEB link (https://wemiller.com/apps/haven/#…) — offers "Open with
+                 Haven" so a tapped invite lands in the app even without the custom scheme.
+                 (Not autoVerify: no assetlinks.json on the domain; the chooser is fine.) -->
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="wemiller.com" android:pathPrefix="/apps/haven" />
+            </intent-filter>
             <!-- Share a YouTube/web link (or any text) from another app into Haven. -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />

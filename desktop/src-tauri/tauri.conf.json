@@ -33,7 +33,15 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["msi", "nsis", "deb", "rpm", "appimage", "app", "dmg"],
+    "targets": [
+      "msi",
+      "nsis",
+      "deb",
+      "rpm",
+      "appimage",
+      "app",
+      "dmg"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -44,13 +52,24 @@
     "macOS": {
       "dmg": {
         "background": "dmg/background.png",
-        "windowSize": { "width": 660, "height": 400 },
-        "appPosition": { "x": 145, "y": 185 },
-        "applicationFolderPosition": { "x": 515, "y": 185 }
+        "windowSize": {
+          "width": 660,
+          "height": 400
+        },
+        "appPosition": {
+          "x": 145,
+          "y": 185
+        },
+        "applicationFolderPosition": {
+          "x": 515,
+          "y": 185
+        }
       }
     },
     "windows": {
-      "webviewInstallMode": { "type": "embedBootstrapper" }
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      }
     },
     "linux": {
       "deb": {
@@ -59,15 +78,30 @@
           "libgtk-3-0",
           "libayatana-appindicator3-1"
         ],
-        "recommends": ["pipewire", "xdg-desktop-portal"]
+        "recommends": [
+          "pipewire",
+          "xdg-desktop-portal"
+        ]
       },
       "rpm": {
-        "depends": ["webkit2gtk4.1", "gtk3", "libappindicator-gtk3"]
+        "depends": [
+          "webkit2gtk4.1",
+          "gtk3",
+          "libappindicator-gtk3"
+        ]
       }
     },
     "category": "SocialNetworking",
     "shortDescription": "Private post-quantum P2P social.",
     "longDescription": "Haven is a serverless, end-to-end encrypted, post-quantum peer-to-peer social network. No accounts, no servers you don't own. This desktop client also runs as your circle's relay/mailbox so posts reach friends even when you're both offline."
   },
-  "plugins": {}
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "haven"
+        ]
+      }
+    }
+  }
 }

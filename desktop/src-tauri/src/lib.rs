@@ -125,6 +125,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -137,6 +138,26 @@ pub fn run() {
             builder.manage(engine).setup(move |app| {
                 let handle = app.handle().clone();
                 setup_engine.set_app(handle.clone());
+                // haven:// deep links (a tapped invite): connect straight away + surface the window
+                // (parity with the iOS URL scheme / Android intent filter). Windows/Linux register
+                // the scheme at install time via the plugin; register_all covers dev builds.
+                {
+                    use tauri_plugin_deep_link::DeepLinkExt;
+                    #[cfg(any(target_os = "linux", windows))]
+                    let _ = app.deep_link().register_all();
+                    let link_engine = setup_engine.clone();
+                    let link_handle = handle.clone();
+                    app.deep_link().on_open_url(move |event| {
+                        for url in event.urls() {
+                            if link_engine.connect_by_link(url.to_string()) {
+                                if let Some(w) = link_handle.get_webview_window("main") {
+                                    let _ = w.show();
+                                    let _ = w.set_focus();
+                                }
+                            }
+                        }
+                    });
+                }
                 let e = setup_engine.clone();
                 tauri::async_runtime::spawn(async move {
                     e.start().await;

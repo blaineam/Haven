@@ -24,6 +24,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,6 +52,15 @@ fun ConnectScreen(onDone: () -> Unit) {
     var pasted by remember { mutableStateOf("") }
     var status by remember { mutableStateOf<String?>(null) }
     var showScanner by remember { mutableStateOf(false) }
+
+    // A haven:// / invite-page link the app was OPENED with (deep link) — prefill and connect
+    // immediately, parity with iOS's incomingLink flow.
+    LaunchedEffect(Unit) {
+        com.blaineam.haven.core.InviteInbox.consume()?.let { link ->
+            status = if (HavenNet.connectByLink(link)) "Invite sent — waiting for them to accept."
+            else "That didn't look like a Haven invite."
+        }
+    }
 
     val camPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) showScanner = true

@@ -781,7 +781,12 @@ fn short(node_hex: &str) -> String {
 /// Foreign listener that receives inbound sealed-envelope bytes.
 #[uniffi::export(with_foreign)]
 pub trait InboundListener: Send + Sync {
-    fn on_inbound(&self, payload: Vec<u8>);
+    /// `from_hex` is the sender's AUTHENTICATED transport node id (the iroh connection's remote
+    /// endpoint id — proof of key possession), or "" when the frame wasn't received over a direct
+    /// peer connection. Apps use it to learn a dialable DEVICE id for a contact from any frame they
+    /// deliver (the reply-path bootstrap: an invitee holds no dial hints for the initiator, so
+    /// their hello-back/DMs otherwise depend on roster propagation that itself needs a route).
+    fn on_inbound(&self, from_hex: String, payload: Vec<u8>);
 }
 
 /// A live peer-to-peer node: listens for inbound sealed posts and dials peers by
@@ -804,9 +809,11 @@ impl HavenNode {
             .map_err(|_| HavenError::Invalid { msg: "seed must be 32 bytes".into() })?;
         let identity = Identity::from_seed(&seed);
         let l = listener.clone();
-        let handler: haven_net::InboundHandler = Arc::new(move |payload| {
+        let handler: haven_net::InboundHandler = Arc::new(move |from: [u8; 32], payload| {
+            // All-zeros = not a direct peer connection (relay-routed) → empty sender hex.
+            let from_hex = if from == [0u8; 32] { String::new() } else { hex(&from) };
             // Never let a panic cross back into the foreign (Swift) callback and abort.
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| l.on_inbound(payload)));
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| l.on_inbound(from_hex.clone(), payload)));
         });
         let node = Node::spawn(identity.node_secret_bytes(), handler)
             .await

@@ -7,6 +7,19 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.17] — 2026-07-03
+
+### Fixed
+- **New internet friends can now talk back ("we're connected but his DMs and profile never
+  arrive").** Invite-link dial hints only bootstrap the direction that scanned the link: the
+  invitee holds NO dialable id for the initiator, so their hello-back (which carries their
+  name/profile), DMs, and posts depended on roster propagation that itself needs a working route —
+  a timing lottery. The transport has always AUTHENTICATED each connection's remote endpoint id;
+  it's now surfaced through the inbound callback (`InboundListener.on_inbound(from_hex, payload)`),
+  and a hello received over a direct connection records the sender's device id as a dial hint for
+  their account on all platforms. One successful delivery in either direction now bootstraps the
+  reply path instantly; the signed device roster still supersedes hints.
+
 ## [0.1.0-beta.16] — 2026-07-03
 
 ### Fixed

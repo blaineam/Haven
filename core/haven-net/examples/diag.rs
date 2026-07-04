@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let target = std::env::args().nth(1);
     let seed: [u8; 32] = rand::random();
-    let node = haven_net::Node::spawn(seed, Arc::new(|_frame: Vec<u8>| {})).await?;
+    let node = haven_net::Node::spawn(seed, Arc::new(|_from: [u8; 32], _frame: Vec<u8>| {})).await?;
     println!("node id: {}", node.node_id_hex());
 
     for i in 0..15 {

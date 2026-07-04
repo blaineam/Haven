@@ -293,7 +293,9 @@ final class FeedStore: ObservableObject {
         let key = accountHex.lowercased()
         var m = contactDeviceHints
         var cur = m[key] ?? []
+        let before = cur
         for d in deviceIds.map({ $0.lowercased() }) where d.count == 64 && !cur.contains(d) { cur.append(d) }
+        guard cur != before else { return }   // no-op for already-known hints (fires per hello)
         m[key] = Array(cur.suffix(8))
         contactDeviceHints = m
     }
@@ -565,8 +567,8 @@ final class FeedStore: ObservableObject {
             online = true
         }
         // Internet path (iroh + n0 discovery/relays).
-        let bridge = InboundBridge { [weak self] data in
-            Task { @MainActor in self?.handleInbound(data, viaNearby: false) }
+        let bridge = InboundBridge { [weak self] fromHex, data in
+            Task { @MainActor in self?.handleInbound(data, viaNearby: false, senderDevice: fromHex.isEmpty ? nil : fromHex) }
         }
         listener = bridge
         Task { @MainActor in
@@ -1203,7 +1205,10 @@ final class FeedStore: ObservableObject {
         nearby?.broadcast(frame(type, payload))
     }
 
-    private func handleInbound(_ data: Data, viaNearby: Bool) {
+    /// `senderDevice` = the AUTHENTICATED transport id the frame arrived from (nil for nearby /
+    /// relay-unwrapped frames). A direct HELLO teaches us a dialable device id for its account —
+    /// the reply-path bootstrap (an invitee holds no invite hints for the initiator).
+    private func handleInbound(_ data: Data, viaNearby: Bool, senderDevice: String? = nil) {
         guard let type = data.first else { return }
         if viaNearby { nearbyActive = true } else { internetActive = true }
         let payload = Data(data.dropFirst())
@@ -1214,7 +1219,7 @@ final class FeedStore: ObservableObject {
             if head.count == 64, ConnectionsStore.shared.isBlocked(head) { return }
         }
         switch type {
-        case 0: handleHello(payload, viaNearby: viaNearby)
+        case 0: handleHello(payload, viaNearby: viaNearby, senderDevice: senderDevice)
         case 1: handleEvent(payload)
         case 3: handleMediaRequest(payload)
         case 5: handleMediaChunk(payload)
@@ -2023,7 +2028,7 @@ final class FeedStore: ObservableObject {
         ContactsStore.shared.contacts.contains { $0.idHex == idHex }
     }
 
-    private func handleHello(_ payload: Data, viaNearby: Bool = false) {
+    private func handleHello(_ payload: Data, viaNearby: Bool = false, senderDevice: String? = nil) {
         guard let social else { return }
         // [LP circleId][LP circleName][LP bundle][signed profile]
         var off = 0
@@ -2035,6 +2040,12 @@ final class FeedStore: ObservableObject {
         guard !circleId.isEmpty else { return }
         let profileBlob = payload.subdata(in: (payload.startIndex + off)..<payload.endIndex)
         let idHex = nodeHex(bundle.prefix(32))
+        // A hello delivered DIRECTLY teaches us the sender's dialable device id for this account —
+        // the reply-path bootstrap (their signed roster supersedes; a wrong hint only misroutes
+        // sealed frames, same trust model as invite-link hints).
+        if let senderDevice, senderDevice.count == 64, senderDevice.lowercased() != idHex.lowercased() {
+            recordDeviceHints(accountHex: idHex, deviceIds: [senderDevice])
+        }
         // A handshake from ANOTHER OF MY OWN DEVICES (linked → same identity, same node id). NEVER treat
         // it as a stranger's connection request ("connect with yourself") — just trade self-sync slots so
         // the two devices converge. This is the fix for the "asked to connect with an identity of myself

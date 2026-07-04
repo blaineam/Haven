@@ -28,7 +28,11 @@ const ALPN: &[u8] = b"haven/social/0";
 const MAX_PAYLOAD: usize = 256 * 1024 * 1024;
 
 /// Called for each inbound payload (sealed envelope / protocol frame bytes).
-pub type InboundHandler = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
+/// Inbound frame callback: `(sender_node_id, payload)`. The sender id is the AUTHENTICATED iroh
+/// endpoint id of the connection the frame arrived on (proof of key possession at the transport
+/// layer) — all-zeros when the origin isn't a direct peer connection (e.g. a relay-delivered
+/// routing frame, where the immediate peer is the forwarder, not the author).
+pub type InboundHandler = Arc<dyn Fn([u8; 32], Vec<u8>) + Send + Sync>;
 
 type Conns = Arc<Mutex<HashMap<EndpointId, Connection>>>;
 
@@ -422,7 +426,7 @@ impl RelayNode {
         let seen: Arc<Mutex<relay::SeenSet>> = Arc::new(Mutex::new(relay::SeenSet::default()));
 
         let h = holder.clone();
-        let handler: InboundHandler = Arc::new(move |bytes: Vec<u8>| {
+        let handler: InboundHandler = Arc::new(move |_from: [u8; 32], bytes: Vec<u8>| {
             let this = lock(&h).clone();
             if let Some(this) = this {
                 let deliver = on_frame.clone();
@@ -459,9 +463,10 @@ impl RelayNode {
     async fn handle_inbound(&self, bytes: Vec<u8>, deliver: Option<InboundHandler>) {
         let Some(frame) = relay::RoutingFrame::parse(&bytes) else {
             // Not a relay frame: a bare payload addressed straight to us. Deliver if we
-            // have a member handler; otherwise (pure forwarder) ignore.
+            // have a member handler; otherwise (pure forwarder) ignore. Zero sender: the
+            // authenticated conn id was consumed upstream (RelayNode's own handler).
             if let Some(d) = deliver {
-                d(bytes);
+                d([0u8; 32], bytes);
             }
             return;
         };
@@ -479,7 +484,9 @@ impl RelayNode {
             .any(|d| relay::RoutingFrame::dest_hex(d) == self.me_hex);
         if me_is_dest {
             if let Some(d) = &deliver {
-                d(frame.payload.clone());
+                // Zero sender: the payload was relay-routed — the immediate peer is the
+                // forwarder, not the author, so no id here is author-authenticated.
+                d([0u8; 32], frame.payload.clone());
             }
         }
 
@@ -560,6 +567,11 @@ async fn accept_loop(
 
 /// Read every uni stream on a connection as one message, for the connection's life.
 async fn read_loop(conn: Connection, conns: Conns, handler: InboundHandler) {
+    // The connection's remote endpoint id — the sender's AUTHENTICATED device transport id.
+    // Surfacing it lets the app learn a dialable id for a contact from any frame they deliver
+    // directly (the reply-path bootstrap: an invitee holds no dial hints for the initiator, so
+    // without this their hello-back/DMs relied on roster propagation that itself needs a route).
+    let from = *conn.remote_id().as_bytes();
     loop {
         match conn.accept_uni().await {
             Ok(mut recv) => {
@@ -569,7 +581,7 @@ async fn read_loop(conn: Connection, conns: Conns, handler: InboundHandler) {
                         // The handler crosses into a foreign (Swift) callback — a panic
                         // there would abort the whole app, so contain it.
                         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            handler(payload);
+                            handler(from, payload);
                         }));
                     }
                 });

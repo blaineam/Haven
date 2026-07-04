@@ -333,12 +333,16 @@ object HavenNet : InboundListener {
 
     // ---- Inbound dispatch (called off-main by the Rust node) -----------------------------
 
-    override fun onInbound(payload: ByteArray) = onInbound(payload, viaNearby = false)
+    override fun onInbound(fromHex: String, payload: ByteArray) =
+        onInbound(payload, viaNearby = false, senderDevice = fromHex.ifEmpty { null })
 
     /** [viaNearby] = arrived over the local proximity mesh. A Hello from an UNKNOWN node over nearby
      *  must NOT spawn a connection request (proximity != intent to connect — that was request spam);
      *  only targeted iroh/relay invites prompt. */
-    fun onInbound(payload: ByteArray, viaNearby: Boolean) {
+    /** [senderDevice] = the AUTHENTICATED transport id the frame arrived from (null for nearby /
+     *  relay-unwrapped frames). A direct HELLO teaches us a dialable device id for its account —
+     *  the reply-path bootstrap (an invitee holds no invite hints for the initiator). */
+    fun onInbound(payload: ByteArray, viaNearby: Boolean, senderDevice: String? = null) {
         if (payload.isEmpty()) return
         val type = payload[0].toInt() and 0xFF
         val body = payload.copyOfRange(1, payload.size)
@@ -353,7 +357,7 @@ object HavenNet : InboundListener {
         scope.launch {
             withContext(Dispatchers.Main) { internetActive.value = true }
             when (type) {
-                Wire.HELLO -> handleHello(body, viaNearby)
+                Wire.HELLO -> handleHello(body, viaNearby, senderDevice)
                 Wire.DEVICE_ENROLL -> handleEnrollmentRequest(body)
                 Wire.DEVICE_GRANT -> handleDeviceGrant(body)
                 Wire.EVENT -> handleEvent(body)
@@ -451,10 +455,16 @@ object HavenNet : InboundListener {
         }
     }
 
-    private fun handleHello(payload: ByteArray, viaNearby: Boolean = false) {
+    private fun handleHello(payload: ByteArray, viaNearby: Boolean = false, senderDevice: String? = null) {
         val hello = Wire.parseHello(payload) ?: return
         val idHex = nodeHex(hello.bundle)
         if (blocked.contains(idHex)) return   // a blocked node can't handshake back in
+        // A hello delivered DIRECTLY teaches us the sender's dialable device id for this account —
+        // the reply-path bootstrap (their signed roster supersedes; a wrong hint only misroutes
+        // sealed frames, same trust model as invite-link hints).
+        if (senderDevice != null && senderDevice.length == 64 && !senderDevice.equals(idHex, ignoreCase = true)) {
+            recordDeviceHints(idHex, listOf(senderDevice))
+        }
         val actualVerify = runCatching { social.bundleVerificationHex(hello.bundle) }.getOrNull() ?: return
         val name = runCatching { social.verifyProfile(hello.bundle, hello.signedProfile) }.getOrNull() ?: "Someone"
         // Capture the full profile card (avatar + emoji) so the feed/people/story-tray show real photos.
@@ -684,7 +694,9 @@ object HavenNet : InboundListener {
         if (ids.isEmpty()) return
         val key = accountHex.lowercase()
         val cur = LinkedHashSet(deviceHints[key] ?: emptyList())
+        val before = cur.size
         for (d in ids.map { it.lowercase() }) if (d.length == 64) cur.add(d)
+        if (cur.size == before) return   // no-op for already-known hints (fires per hello)
         deviceHints[key] = cur.toList().takeLast(8)
         saveDeviceHints()
     }

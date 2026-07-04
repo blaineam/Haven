@@ -1225,6 +1225,13 @@ impl Engine {
     // ---- inbound dispatch ---------------------------------------------------------------
 
     fn dispatch(self: &Arc<Self>, payload: Vec<u8>) {
+        self.dispatch_from(None, payload)
+    }
+
+    /// `sender_device` = the AUTHENTICATED transport id the frame arrived from (None when relayed/
+    /// unknown). A direct HELLO teaches us a dialable device id for its account — the reply-path
+    /// bootstrap (an invitee holds no invite hints for the initiator).
+    fn dispatch_from(self: &Arc<Self>, sender_device: Option<String>, payload: Vec<u8>) {
         if payload.is_empty() {
             return;
         }
@@ -1243,7 +1250,7 @@ impl Engine {
         tauri::async_runtime::spawn(async move {
             me.dyn_state.lock().unwrap().internet_active = true;
             match t {
-                wire::HELLO => me.handle_hello(&body),
+                wire::HELLO => me.handle_hello_from(sender_device.as_deref(), &body),
                 wire::EVENT => me.handle_event(&body),
                 wire::RELAY_NODE => me.handle_relay_node(&body).await,
                 wire::MEDIA_REQ => me.handle_media_request(&body).await,
@@ -1261,10 +1268,22 @@ impl Engine {
     }
 
     fn handle_hello(self: &Arc<Self>, payload: &[u8]) {
+        self.handle_hello_from(None, payload)
+    }
+
+    fn handle_hello_from(self: &Arc<Self>, sender_device: Option<&str>, payload: &[u8]) {
         let Some(hello) = wire::parse_hello(payload) else { return };
         let id_hex = wire::node_hex(&hello.bundle);
         if self.prefs.lock().unwrap().blocked.contains(&id_hex) {
             return;
+        }
+        // A hello delivered DIRECTLY teaches us the sender's dialable device id for this account —
+        // the reply-path bootstrap. The signed roster (frame 27) supersedes; a hint can at worst
+        // misroute sealed frames (they stay unreadable), same trust as invite-link hints.
+        if let Some(dev) = sender_device {
+            if dev.len() == 64 && !dev.eq_ignore_ascii_case(&id_hex) {
+                self.record_device_hints(&id_hex, vec![dev.to_lowercase()]);
+            }
         }
         let Ok(actual_verify) = self.social.bundle_verification_hex(hello.bundle.clone()) else { return };
         let name = self
@@ -3018,9 +3037,9 @@ struct NodeListener {
 }
 
 impl InboundListener for NodeListener {
-    fn on_inbound(&self, payload: Vec<u8>) {
+    fn on_inbound(&self, from_hex: String, payload: Vec<u8>) {
         if let Some(engine) = self.engine.upgrade() {
-            engine.dispatch(payload);
+            engine.dispatch_from(if from_hex.is_empty() { None } else { Some(from_hex) }, payload);
         }
     }
 }

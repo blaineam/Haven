@@ -62,6 +62,12 @@ targets:
         # Track the build settings (a managed Info.plist won't do this automatically).
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        # The relay's plain-HTTP media interface on the LAN (http://<lan-ip>:8674) — blobs are
+        # E2E-sealed before they touch the wire; public URLs should be https (proxy/tunnel).
+        # Lives HERE because xcodegen regenerates Info.plist from these properties: a hand-edit
+        # to the plist (commit 1177c8d) silently vanished on every `xcodegen generate`.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         UILaunchScreen: {}
         # Required by the Mac App Store (ignored on iOS). Haven is a social network.
         LSApplicationCategoryType: public.app-category.social-networking
@@ -150,6 +156,9 @@ targets:
         CFBundleIconName: AppIcon
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        # LAN plain-HTTP relay media (see the iOS target's note — xcodegen owns this plist).
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         LSApplicationCategoryType: public.app-category.social-networking
         ITSAppUsesNonExemptEncryption: false
         NSCameraUsageDescription: "Haven uses the camera so you can capture photos and videos to share with your circle. Nothing is uploaded — media is encrypted on your device first."

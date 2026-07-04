@@ -6,13 +6,6 @@
 	<array>
 		<string>com.blaineam.kith.refresh</string>
 	</array>
-	<key>NSAppTransportSecurity</key>
-	<dict>
-		<!-- The relay's plain-HTTP media interface on the LAN (http://<lan-ip>:8674) — blobs are
-		     E2E-sealed before they touch the wire; public URLs should be https (proxy/tunnel). -->
-		<key>NSAllowsLocalNetworking</key>
-		<true/>
-	</dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
@@ -46,6 +39,11 @@
 	<false/>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.social-networking</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSAppleMusicUsageDescription</key>
 	<string>Haven lets you add a song to a post; it plays through your own Apple Music.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>

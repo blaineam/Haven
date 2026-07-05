@@ -7,6 +7,25 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.27] — 2026-07-05
+
+### Fixed
+- **The frozen feed, root-caused and fixed (iOS/macOS).** "Swiping on a tall video post doesn't
+  scroll" turned out to be TWO bugs, both reproduced and verified fixed live in the simulator:
+  1. **A main-thread DEADLOCK froze the entire app** — not just scrolling. The sync-status badge
+     re-evaluates on a schedule and synchronously read `MCSession.connectedPeers`, which
+     dispatches into MultipeerConnectivity's internal queue; while the nearby mesh was busy
+     (media chunks streaming — e.g. right after a video post, or whenever your Mac's Haven is in
+     Bluetooth range) that read deadlocked against MC's receive thread. The app kept rendering
+     its last frame but every touch was dead. Peer state is now cached from the session delegate
+     (the sanctioned path); nothing touches MCSession synchronously anymore.
+  2. **The video scrub gesture blocked the feed's scroll pan** — on iOS 26 a SwiftUI DragGesture
+     on the video surface eats vertical swipes even when attached as `simultaneousGesture`
+     (bisect-verified). The scrub is now a UIKit pan recognizer on the player surface that
+     REFUSES to begin unless the movement is horizontal — vertical swipes never engage it, so
+     the feed scrolls natively; horizontal drags scrub exactly as before (verified: scrub bar
+     live in the same session where vertical swipes scroll).
+
 ## [0.1.0-beta.26] — 2026-07-04
 
 ### Fixed

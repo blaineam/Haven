@@ -39,9 +39,23 @@ final class NearbyTransport: NSObject {
         browser.delegate = self
     }
 
+    /// Peer list CACHED from the delegate. Reading `session.connectedPeers` synchronously
+    /// dispatch_syncs into MultipeerConnectivity's internal queue — and while the session's recv
+    /// thread is mid-transfer (media chunks streaming) that call DEADLOCKS the caller against MC's
+    /// internal rwlock. Observed live: the sync-status badge (a TimelineView — re-evaluated on a
+    /// schedule) read it from the MAIN thread and wedged the app permanently: frozen video frame,
+    /// dead touches, "swiping on a tall video post won't scroll the feed". The delegate callback is
+    /// the sanctioned place to learn peer state; everything else reads this snapshot.
+    private let peersLock = NSLock()
+    private var peersSnapshot: [MCPeerID] = []
+    private var cachedPeers: [MCPeerID] {
+        peersLock.lock(); defer { peersLock.unlock() }
+        return peersSnapshot
+    }
+
     /// Whether any nearby peer is currently connected (used to tell the user whether a device-link
-    /// request actually has a path to the other device).
-    var hasConnectedPeers: Bool { !session.connectedPeers.isEmpty }
+    /// request actually has a path to the other device). Lock-guarded cache — NEVER touches MCSession.
+    var hasConnectedPeers: Bool { !cachedPeers.isEmpty }
 
     func start() {
         advertiser.startAdvertisingPeer()
@@ -52,6 +66,7 @@ final class NearbyTransport: NSObject {
         advertiser.stopAdvertisingPeer()
         browser.stopBrowsingForPeers()
         session.disconnect()
+        peersLock.lock(); peersSnapshot = []; peersLock.unlock()
     }
 
     /// Bytes enqueued for sending but not yet handed off — backpressure so a slow link (BLE) can't let the
@@ -74,7 +89,9 @@ final class NearbyTransport: NSObject {
         sendQueue.async { [weak self] in
             guard let self else { return }
             defer { self.backlogLock.lock(); self.backlogBytes -= frame.count; self.backlogLock.unlock() }
-            let peers = self.session.connectedPeers
+            // Cached peers, not session.connectedPeers — the sync read can deadlock against MC's
+            // recv thread mid-transfer (see peersSnapshot), which would wedge this queue forever.
+            let peers = self.cachedPeers
             guard !peers.isEmpty else { return }
             try? self.session.send(frame, toPeers: peers, with: .reliable)
         }
@@ -83,6 +100,10 @@ final class NearbyTransport: NSObject {
 
 extension NearbyTransport: MCSessionDelegate {
     func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
+        // Refresh the snapshot HERE (we're on MC's own callback queue, where the read is safe) so
+        // no other thread ever needs to touch session.connectedPeers.
+        let peers = session.connectedPeers
+        peersLock.lock(); peersSnapshot = peers; peersLock.unlock()
         if state == .connected { onPeerConnected() }
     }
     func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {

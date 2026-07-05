@@ -7,7 +7,7 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.1.0-beta.25] — 2026-07-04
 
 ### Fixed
 - **Tall videos no longer block feed scrolling (iOS/macOS).** The video scrub drag was attached

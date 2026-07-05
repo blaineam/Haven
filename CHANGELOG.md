@@ -7,6 +7,18 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+- **Tall videos no longer block feed scrolling (iOS/macOS).** The video scrub drag was attached
+  at high priority, so it won the gesture race for ANY movement — including vertical — and its
+  internal "is this horizontal?" bail-out couldn't give the gesture back: a tall video was a
+  wall you couldn't scroll past. Now: vertical swipes always scroll the feed (single-video
+  scrub is simultaneous + axis-checked; the carousel scrub strip is capped at 96 pt instead of
+  a third of the video), horizontal swipes page a carousel or scrub, and the full-screen viewer
+  pages off video items (its full-area scrub used to eat every horizontal drag) while
+  swipe-down-to-dismiss now works on video pages.
+
 ## [0.1.0-beta.24] — 2026-07-04
 
 ### Fixed

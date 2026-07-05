@@ -26,7 +26,10 @@ struct MediaZoomViewer: View {
             Color.black.opacity(1 - min(0.6, Double(abs(dismissOffset)) / 600)).ignoresSafeArea()
             TabView(selection: $index) {
                 ForEach(Array(refs.enumerated()), id: \.offset) { i, ref in
-                    ZoomablePage(ref: ref, zoomed: $zoomed).tag(i)
+                    // paged: with several items a video keeps its scrub to the compact bottom
+                    // strip so a horizontal swipe elsewhere PAGES the viewer (a full-area scrub
+                    // used to eat every horizontal drag — you couldn't swipe off a video page).
+                    ZoomablePage(ref: ref, zoomed: $zoomed, paged: refs.count > 1).tag(i)
                 }
             }
             .havenPagedTabViewStyle(showsIndex: refs.count > 1)
@@ -66,6 +69,7 @@ struct MediaZoomViewer: View {
 private struct ZoomablePage: View {
     let ref: String
     @Binding var zoomed: Bool
+    var paged: Bool = false   // part of a multi-item viewer → video scrub confined to the bottom strip
     @State private var scale: CGFloat = 1
     @State private var lastScale: CGFloat = 1
     @State private var offset: CGSize = .zero
@@ -75,7 +79,7 @@ private struct ZoomablePage: View {
         Group {
             if let m = MediaStore.shared.item(ref) {
                 if m.kind == .video, let url = m.videoURL {
-                    CarouselVideo(url: url)   // autoplays + loops, full system controls
+                    CarouselVideo(url: url, inCarousel: paged)   // autoplays + loops, full system controls
                 } else if let img = m.image {
                     // Photo — or a video whose file hasn't downloaded yet: show its still
                     // (with a play badge) instead of a blank page.
@@ -126,6 +130,7 @@ private struct ZoomablePage: View {
 /// pauses + tears down when you swipe to another page.
 private struct CarouselVideo: View {
     let url: URL
+    var inCarousel: Bool = false   // multi-item viewer: confine scrub to the strip so swipes page
     @State private var player: AVPlayer?
     @State private var looper: Any?
 
@@ -133,7 +138,7 @@ private struct CarouselVideo: View {
         // The SAME custom gesture player as the inline feed (hold-to-pause, drag-to-scrub, clean chrome)
         // rather than AVKit's VideoPlayer with its stock airplay/volume/scrubber bar.
         Group {
-            if let player { GestureVideoPlayer(player: player) } else { Color.black }
+            if let player { GestureVideoPlayer(player: player, inCarousel: inCarousel) } else { Color.black }
         }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onAppear {

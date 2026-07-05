@@ -111,17 +111,25 @@ struct GestureVideoPlayer: View {
             // intercept the long-press.
             .highPriorityGesture(holdToPause)
         if inCarousel {
-            // Only a drag in the bottom 1/3 scrubs; a horizontal drag in the top 2/3 falls through to the
-            // carousel so it pages between items.
+            // Only a drag in a COMPACT bottom strip scrubs; a horizontal drag anywhere else falls
+            // through to the carousel so it pages between items. The strip is capped at 96pt — it
+            // used to be a full 1/3 of the video, which on a TALL video made a huge dead zone where
+            // the high-priority drag ate VERTICAL swipes too (the feed wouldn't scroll from there).
             base.overlay(alignment: .bottom) {
                 Color.clear
-                    .frame(height: max(56, geo.size.height / 3))
+                    .frame(height: min(96, max(56, geo.size.height / 3)))
                     .contentShape(Rectangle())
                     .highPriorityGesture(scrub(width: geo.size.width))
             }
         } else {
-            // Single video (no carousel): a horizontal drag anywhere scrubs; vertical falls through to feed.
-            base.highPriorityGesture(scrub(width: geo.size.width))
+            // Single video (no carousel): a horizontal drag anywhere scrubs. SIMULTANEOUS, not
+            // high-priority: a high-priority DragGesture WINS the recognizer race on any 8pt
+            // movement — including vertical — and our axis-check bail-out can't hand the gesture
+            // back, so a tall video was a wall the feed couldn't scroll past (and the full-screen
+            // viewer couldn't dismiss-drag past). Simultaneous lets vertical pans reach the
+            // ancestor scroll/dismiss untouched; horizontal still scrubs cleanly because a
+            // vertical ScrollView ignores horizontal drags.
+            base.simultaneousGesture(scrub(width: geo.size.width))
         }
     }
 

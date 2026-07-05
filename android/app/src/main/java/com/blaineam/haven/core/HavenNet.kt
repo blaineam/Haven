@@ -139,7 +139,10 @@ object HavenNet : InboundListener {
         var fails = 0
         var nextRetryMs = 0L   // earliest epoch-ms we'll try again; 0 = available now
         fun available(nowMs: Long): Boolean = nowMs >= nextRetryMs
-        fun recordSuccess() { fails = 0; nextRetryMs = 0L }
+        var lastSuccessMs = 0L   // proof-of-life stamp; gates what we re-announce to the circle
+        fun recordSuccess() { fails = 0; nextRetryMs = 0L; lastSuccessMs = System.currentTimeMillis() }
+        fun provenAlive(nowMs: Long, withinMs: Long): Boolean =
+            lastSuccessMs > 0 && nowMs - lastSuccessMs <= withinMs
         fun recordFailure(nowMs: Long) {
             fails += 1
             // Don't park a relay on the FIRST failure — a single transient miss/timeout mid-transfer (common
@@ -867,8 +870,14 @@ object HavenNet : InboundListener {
             val envs = runCatching { social.syncEnvelopes(circleId) }.getOrDefault(emptyList())
             for (env in envs) sendFrame(Wire.EVENT, Wire.eventPayload(circleId, env), toNodeHex)
         }
-        // Tell this peer about EVERY relay I know for the circle, so we pool all mailboxes.
+        // Tell this peer about the circle relays WE have proof of life for (a successful op within
+        // 5 min) — plus the relay this device hosts (announced by reannounceOwnRelay). Announcing
+        // every relay ever LEARNED made dead relay ids echo around the mesh forever: each member
+        // re-broadcast them and receivers reactivated them. A live relay is re-proven constantly
+        // by the mailbox poll, so this gates nothing real.
+        val nowMs = System.currentTimeMillis()
         for (nodeHex in relaysFor(circleId)) {
+            if (relayHealth[nodeHex]?.provenAlive(nowMs, 300_000) != true) continue
             val sealed = relayAnnounceBlob(circleId, nodeHex)
             if (sealed != null) sendFrame(Wire.RELAY_NODE, Wire.eventPayload(circleId, sealed), toNodeHex)
         }

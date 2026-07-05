@@ -1027,7 +1027,14 @@ final class FeedStore: ObservableObject {
             // Active relays for the circle (adopted external + all-circles default) plus the relay
             // THIS device hosts. Skip s3: pseudo-relays — those share via the S3-config frame, and
             // handleRelayNode expects a 64-hex node id.
-            var hexes = RelayMailboxStore.shared.relays(forCircle: ci.id).filter { !$0.hasPrefix("s3:") }
+            // ONLY announce relays WE have proof of life for (a successful op within 5 min) or the
+            // one we host. Re-announcing everything we'd ever LEARNED turned dead relay ids into a
+            // permanent echo: every member kept re-broadcasting them, receivers reactivated them
+            // (announce = "the owner says it's back"), and media paths burned timeouts on ghosts.
+            // A live relay is re-proven constantly by the 20s mailbox poll, so this gates nothing real.
+            var hexes = RelayMailboxStore.shared.relays(forCircle: ci.id).filter {
+                !$0.hasPrefix("s3:") && RelayHealth.shared.provenAlive($0, withinMs: 300_000)
+            }
             if RelayHost.shared.serving, RelayHost.shared.nodeId.count == 64,
                !hexes.contains(RelayHost.shared.nodeId) {
                 hexes.append(RelayHost.shared.nodeId)

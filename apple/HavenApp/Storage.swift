@@ -192,16 +192,21 @@ struct RelayPoolSection: View {
         if !relays.isEmpty {
             Section {
                 ForEach(relays, id: \.self) { node in
-                    let reachable = health.available(node)
+                    // "Reachable" now means PROVEN — a successful op within 15 min — not merely
+                    // "no recent failure", which showed long-dead relays as green forever.
+                    let proven = health.provenAlive(node, withinMs: 900_000)
+                    let backedOff = !health.available(node)
                     let isSelf = relay.serving && node == relay.nodeId
                     HStack(spacing: 10) {
-                        Image(systemName: reachable ? "circle.fill" : "exclamationmark.triangle.fill")
+                        Image(systemName: (proven || isSelf) ? "circle.fill"
+                                          : (backedOff ? "exclamationmark.triangle.fill" : "circle.dotted"))
                             .font(.caption2)
-                            .foregroundStyle(reachable ? Color.green : Color.orange)
+                            .foregroundStyle((proven || isSelf) ? Color.green : (backedOff ? Color.orange : Color.secondary))
                         VStack(alignment: .leading, spacing: 1) {
                             Text("\(node.prefix(12))…").font(.system(.footnote, design: .monospaced))
-                            Text(isSelf ? "This device · \(reachable ? "reachable" : "backing off")"
-                                        : (reachable ? "Reachable" : "Unreachable — retrying"))
+                            Text(isSelf ? "This device · \(backedOff ? "backing off" : "reachable")"
+                                        : (proven ? "Reachable"
+                                           : (backedOff ? "Unreachable — retrying" : "Not verified recently")))
                                 .font(.caption2).foregroundStyle(.secondary)
                         }
                         Spacer()
@@ -496,19 +501,22 @@ struct RelaysView: View {
     @ViewBuilder private func relayRow(_ e: RelayEntry) -> some View {
         let isDefault = store.defaultNodeHex == e.hex
         let isSelf = relay.serving && e.hex == relay.nodeId
-        let reachable = health.available(e.hex)
+        // Green means PROVEN (a successful op within 15 min), not "no recent failure" —
+        // long-dead relays used to sit green forever because nothing had dialed them lately.
+        let proven = health.provenAlive(e.hex, withinMs: 900_000) || isSelf
+        let backedOff = !health.available(e.hex)
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 Image(systemName: e.isS3 ? "externaldrive.fill"
-                          : (e.active ? (reachable ? "circle.fill" : "exclamationmark.triangle.fill") : "pause.circle.fill"))
+                          : (e.active ? (proven ? "circle.fill" : (backedOff ? "exclamationmark.triangle.fill" : "circle.dotted")) : "pause.circle.fill"))
                     .font(.caption2)
-                    .foregroundStyle(!e.active ? Color.secondary : (e.isS3 ? Color.blue : (reachable ? Color.green : Color.orange)))
+                    .foregroundStyle(!e.active ? Color.secondary : (e.isS3 ? Color.blue : (proven ? Color.green : (backedOff ? Color.orange : Color.secondary))))
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 6) {
                         Text(e.name).font(.subheadline.weight(.medium))
                         if isDefault { Image(systemName: "star.fill").font(.caption2).foregroundStyle(HavenTheme.pink) }
                     }
-                    Text(statusLine(e, isSelf: isSelf, reachable: reachable))
+                    Text(statusLine(e, isSelf: isSelf, proven: proven, backedOff: backedOff))
                         .font(.caption2).foregroundStyle(.secondary)
                     Text(e.isS3 ? e.hex : "\(e.hex.prefix(16))…")
                         .font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
@@ -545,11 +553,12 @@ struct RelaysView: View {
         .padding(.vertical, 4)
     }
 
-    private func statusLine(_ e: RelayEntry, isSelf: Bool, reachable: Bool) -> String {
+    private func statusLine(_ e: RelayEntry, isSelf: Bool, proven: Bool, backedOff: Bool) -> String {
         if !e.active { return "Deactivated — config kept" }
         if e.isS3 { return "S3 bucket · store-and-forward" }
-        if isSelf { return "This device · \(reachable ? "reachable" : "backing off")" }
-        return reachable ? "Reachable" : "Unreachable — retrying"
+        if isSelf { return "This device · \(backedOff ? "backing off" : "reachable")" }
+        if proven { return "Reachable" }
+        return backedOff ? "Unreachable — retrying" : "Not verified recently"
     }
 }
 

@@ -1622,14 +1622,24 @@ impl Engine {
             .map(|h| h.node_id_hex())
             .filter(|h| h.len() == 64);
         for c in self.social.circles() {
+            // ONLY announce relays WE have proof of life for (a successful op within 5 min) or the
+            // one we host. Re-announcing everything ever LEARNED made dead relay ids echo around
+            // the mesh forever (each member re-broadcast them; receivers reactivated them).
+            let now = now_ms();
             let mut hexes: Vec<String> = {
                 let p = self.prefs.lock().unwrap();
+                let health = self.relay_health.lock().unwrap();
                 p.relays
                     .get(&c.id)
                     .cloned()
                     .unwrap_or_default()
                     .into_iter()
-                    .filter(|h| h.len() == 64 && !h.starts_with("s3:") && p.relay_is_active(h))
+                    .filter(|h| {
+                        h.len() == 64
+                            && !h.starts_with("s3:")
+                            && p.relay_is_active(h)
+                            && health.get(h).map(|hh| hh.proven_alive(now, 300_000)).unwrap_or(false)
+                    })
                     .collect()
             };
             if let Some(own) = &own_hex {
@@ -1950,7 +1960,7 @@ impl Engine {
     }
 
     fn mark_relay_ok(&self, node_hex: &str) {
-        self.relay_health.lock().unwrap().entry(node_hex.to_string()).or_default().record_success();
+        self.relay_health.lock().unwrap().entry(node_hex.to_string()).or_default().record_success_at(now_ms());
         // Stamp the relay's last-seen so purge_stale never reaps a relay that's actually working, and
         // an inactive relay's stale-clock only counts time since it last succeeded. Mirrors iOS markSeen.
         let mut p = self.prefs.lock().unwrap();

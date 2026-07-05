@@ -7,6 +7,26 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.26] — 2026-07-04
+
+### Fixed
+- **Vertical swipes on tall videos scroll the feed — for real this time (iOS/macOS).** beta.25
+  fixed the scrub gesture but missed the second eater: hold-to-pause was a HIGH-PRIORITY
+  long-press whose sequenced drag claimed the whole swipe whenever your finger rested for 0.2s
+  before moving — exactly how deliberate scrolls start. It's now simultaneous (video posts have
+  no context menu to out-prioritize); a slow scroll may briefly pause the video and it resumes
+  on lift.
+- **Dead relays stop resurrecting and posing as "Reachable" (all platforms).** beta.22 made every
+  member re-announce every relay id they'd ever learned — an echo chamber: dead relays came back
+  on every device (receivers deliberately reactivate announced relays), media uploads kept
+  burning timeouts against ghosts ("keeps reporting it is sending"), and the storage UI showed
+  green for anything that simply hadn't been dialed lately. Announces are now LIVENESS-GATED:
+  a device only re-announces relays IT completed a successful operation against within the last
+  5 minutes (plus the relay it hosts) — a live relay is re-proven constantly by the mailbox
+  poll, a dead one goes silent everywhere and ages out. The relay list now shows "Reachable"
+  only with a proven success in the last 15 minutes ("Not verified recently" / "Unreachable —
+  retrying" otherwise), so the status finally reflects reality. Forgotten relays stay forgotten.
+
 ## [0.1.0-beta.25] — 2026-07-04
 
 ### Fixed

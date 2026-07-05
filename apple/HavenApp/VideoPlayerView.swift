@@ -107,9 +107,13 @@ struct GestureVideoPlayer: View {
             // double-tap isn't consumed as a single tap.
             .onTapGesture(count: 2) { onDoubleTap() }
             .onTapGesture(count: 1) { onTap() }
-            // Hold-to-pause, owned here at high priority so the ancestor contextMenu / zoom / feed can't
-            // intercept the long-press.
-            .highPriorityGesture(holdToPause)
+            // Hold-to-pause. SIMULTANEOUS, not high-priority: the high-priority long-press +
+            // its sequenced drag claimed the WHOLE swipe once your finger rested >0.2s — the
+            // second (and last) way a tall video ate vertical feed scrolls even after the scrub
+            // gesture was fixed. Video posts carry no contextMenu (reserved for the player), so
+            // there is nothing left to out-prioritize; a slow scroll may briefly pause the video,
+            // and it resumes on lift.
+            .simultaneousGesture(holdToPause)
         if inCarousel {
             // Only a drag in a COMPACT bottom strip scrubs; a horizontal drag anywhere else falls
             // through to the carousel so it pages between items. The strip is capped at 96pt — it

@@ -12,6 +12,10 @@ pub struct RelayHealth {
     pub fails: u32,
     /// Earliest time (epoch ms) we'll try this relay again; 0 = available now.
     pub next_retry_ms: u64,
+    /// Epoch ms of the last SUCCESSFUL op; 0 = never. Gates what we re-announce to the circle —
+    /// vouching for relay ids we haven't actually reached lately is how dead relays echoed
+    /// around the mesh forever ("old relays keep coming back").
+    pub last_success_ms: u64,
 }
 
 impl RelayHealth {
@@ -20,7 +24,19 @@ impl RelayHealth {
         now_ms >= self.next_retry_ms
     }
 
-    /// A successful operation clears the backoff.
+    /// Did WE personally complete a successful op within `within_ms` of `now_ms`?
+    pub fn proven_alive(&self, now_ms: u64, within_ms: u64) -> bool {
+        self.last_success_ms > 0 && now_ms.saturating_sub(self.last_success_ms) <= within_ms
+    }
+
+    /// A successful operation clears the backoff and stamps proof-of-life.
+    pub fn record_success_at(&mut self, now_ms: u64) {
+        self.fails = 0;
+        self.next_retry_ms = 0;
+        self.last_success_ms = now_ms;
+    }
+
+    /// A successful operation clears the backoff (no timestamp — prefer `record_success_at`).
     pub fn record_success(&mut self) {
         self.fails = 0;
         self.next_retry_ms = 0;

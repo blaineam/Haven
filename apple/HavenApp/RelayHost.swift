@@ -579,7 +579,7 @@ final class RelayHealth: ObservableObject {
     static let shared = RelayHealth()
     private init() {}
 
-    private struct Health { var fails: UInt32 = 0; var nextRetryMs: UInt64 = 0 }
+    private struct Health { var fails: UInt32 = 0; var nextRetryMs: UInt64 = 0; var lastSuccessMs: UInt64 = 0 }
     private var byNode: [String: Health] = [:]
 
     private static let baseBackoffMs: UInt64 = 5_000     // first failure → 5s cool-off
@@ -591,9 +591,17 @@ final class RelayHealth: ObservableObject {
         guard let h = byNode[nodeHex] else { return true }
         return nowMs() >= h.nextRetryMs
     }
-    /// A successful op clears the backoff.
+    /// Did WE personally complete a successful op against this relay within `withinMs`? In-memory
+    /// only (resets on relaunch) — deliberately strict, it gates what we re-announce to the circle:
+    /// vouching for a relay we haven't actually reached lately is how dead relay ids echoed around
+    /// the mesh forever ("old relays keep coming back and report reachable").
+    func provenAlive(_ nodeHex: String, withinMs: UInt64) -> Bool {
+        guard let t = byNode[nodeHex]?.lastSuccessMs, t > 0 else { return false }
+        return nowMs() &- t <= withinMs
+    }
+    /// A successful op clears the backoff (and stamps proof-of-life for announce gating).
     func recordSuccess(_ nodeHex: String) {
-        byNode[nodeHex] = Health(fails: 0, nextRetryMs: 0)
+        byNode[nodeHex] = Health(fails: 0, nextRetryMs: 0, lastSuccessMs: nowMs())
         objectWillChange.send()
     }
     /// A failure grows the backoff exponentially (5s, 10s, 20s … capped at 5m).

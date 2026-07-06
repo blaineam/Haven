@@ -80,6 +80,16 @@ pub struct Node {
     handler: InboundHandler,
     relay: Arc<Mutex<Option<RelayCfg>>>,
     dial_gate: Arc<Mutex<HashMap<EndpointId, DialGate>>>,
+    /// Single-flight per-peer dial locks (see `conn_for`). The gate alone can't stop a burst:
+    /// it's checked BEFORE `endpoint.connect` and only updated when a dial FINISHES — a dead id
+    /// takes ~30s to time out, so every send queued in that window sailed through the check and
+    /// opened its own doomed `Connecting`. A busy sync cycle fans out dozens of concurrent sends
+    /// per peer (device-id expansion), so one offline device meant an unbounded pile of parallel
+    /// handshakes, each churning iroh's per-peer path actor (`open_path_on_all_conns`) — the
+    /// tens-of-GB / watchdog-panic leak in build 174.
+    dialing: Arc<Mutex<HashMap<EndpointId, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Dials actually handed to `endpoint.connect` (diagnostics + the single-flight unit test).
+    dial_attempts: Arc<std::sync::atomic::AtomicU64>,
     secret: [u8; 32], // this node's key — also the in-process relay's identity (one shared node)
 }
 
@@ -121,7 +131,16 @@ impl Node {
         let h = handler.clone();
         let r = relay.clone();
         tokio::spawn(async move { accept_loop(ep, c, h, r).await });
-        Ok(Self { endpoint, conns, handler, relay, dial_gate: Arc::new(Mutex::new(HashMap::new())), secret })
+        Ok(Self {
+            endpoint,
+            conns,
+            handler,
+            relay,
+            dial_gate: Arc::new(Mutex::new(HashMap::new())),
+            dialing: Arc::new(Mutex::new(HashMap::new())),
+            dial_attempts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            secret,
+        })
     }
 
     /// This node's id (== the owning identity's `node_id_bytes`), as hex.
@@ -328,10 +347,25 @@ impl Node {
                 return Ok(c);
             }
         }
+        // SINGLE-FLIGHT: at most ONE in-flight dial per peer id. Concurrent senders queue on the
+        // per-id lock; when the winner finishes they re-check the live-conn map (reuse its
+        // connection) and the dial gate (its failure gates them out) instead of each opening
+        // their own parallel `Connecting`. Without this, a burst of sends to an offline device
+        // all passed the gate check while the first 30s dial was still in flight — hundreds of
+        // simultaneous doomed handshakes churning iroh's path machinery (the build-174 leak).
+        let dial_lock = lock(&self.dialing).entry(id).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
+        let _guard = dial_lock.lock().await;
+        // A queued sender wakes here after the winner's dial resolved: reuse its connection…
+        if let Some(c) = lock(&self.conns).get(&id).cloned() {
+            if c.close_reason().is_none() {
+                return Ok(c);
+            }
+        }
         // Per-peer backoff: an id that just failed to connect is NOT redialed until its cooldown
         // expires (30s doubling to 10min). A live connection resets it; ids that are permanently
         // dead (account ids under device-seed transport) settle at one cheap attempt per 10min
         // instead of a continuous handshake storm that drowns our own relay path.
+        // (…or, if the winner FAILED, its strike below is now visible and gates the whole queue.)
         {
             let gate = lock(&self.dial_gate);
             if let Some(g) = gate.get(&id) {
@@ -340,6 +374,7 @@ impl Node {
                 }
             }
         }
+        self.dial_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match self.endpoint.connect(addr, ALPN).await.ah() {
             Ok(conn) => {
                 // Do NOT clear the dial gate here: a connect that succeeds but dies young (a
@@ -368,9 +403,24 @@ impl Node {
                     let now = std::time::Instant::now();
                     gate.retain(|_, g| g.until > now);
                 }
+                drop(gate);
+                // Bound the single-flight map the same way: entries nobody currently holds
+                // (strong_count == 1 → only the map's own Arc) are stale and safe to drop —
+                // a racing sender simply re-inserts a fresh lock.
+                let mut dialing = lock(&self.dialing);
+                if dialing.len() > 512 {
+                    dialing.retain(|_, m| Arc::strong_count(m) > 1);
+                }
                 Err(e)
             }
         }
+    }
+
+    /// How many dials were actually handed to `endpoint.connect` over this node's lifetime.
+    /// Diagnostics + the single-flight regression test (a send burst to one dead id must
+    /// produce ONE attempt, not one per sender).
+    pub fn dial_attempt_count(&self) -> u64 {
+        self.dial_attempts.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Send a sealed payload to `final_dest` **via a relay**: wrap it in a mesh-relay

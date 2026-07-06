@@ -7,6 +7,26 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+- **The build-174 runaway leak / watchdog kernel panic: dials are now single-flight per peer.**
+  The Mac app hit 100% CPU on one background thread with footprint growing ~41MB/s
+  (7.0→10.4GB in 88s, jetsam lifetimeMax ~170GB overnight, then a watchdog panic). Symbolicated
+  hot stack: `iroh RemoteStateActor::open_path_on_all_conns` — per-peer path-actor churn.
+  The iroh trace showed the driver: bursts of 4–10 **concurrent** `endpoint.connect` calls to
+  the SAME offline device id, microseconds apart (~9 dials/sec sustained; 6,688 connecting
+  events vs 387 connected in one 24-min session). The per-peer dial gate couldn't stop it:
+  it's checked *before* `connect` but only updated when a dial *finishes* (~30s for a dead id),
+  so every send queued inside that window opened its own doomed `Connecting`, each one churning
+  iroh's path machinery. A busy sync cycle fans out dozens of sends per peer (account→device-id
+  expansion, restored to FULL device lists by the beta.28 roster healing — why 174 tipped over).
+  `conn_for` now holds a per-peer async lock across the dial: concurrent senders queue, then
+  either reuse the winner's connection or bail on the gate the winner's failure just set. A
+  burst to one dead id collapses to ONE dial (regression-tested: `dial_single_flight.rs`).
+  Verified live on the Mac: connect volume dropped ~40× and RSS holds a flat ~1.4GB baseline
+  where build 174 grew without bound.
+
 ## [0.1.0-beta.28] — 2026-07-05
 
 ### Fixed

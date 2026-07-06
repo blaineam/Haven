@@ -143,6 +143,25 @@ export default {
         return json({ ok: true }, 200);
       }
 
+      if (url.pathname === "/flag") {
+        // Moderation ledger (App Review 1.2 "notify the developer"). Haven is E2E — the developer
+        // sees NO content, ever. A report/block appends a content-free, pseudonymous entry:
+        // identity vs identity, action, offense category. Node ids are opaque public keys, so the
+        // ledger shows abuse PATTERNS (many reporters × one identity) without any PII. Entries are
+        // permanent — the action lives on in the ledger. List them with the `ledger:` KV prefix.
+        const { actor, subject, action, reason } = await request.json();
+        if (action !== "report" && action !== "block") return json({ error: "bad action" }, 400);
+        if (!/^[0-9a-f]{8,64}$/.test(actor || "") || !/^[0-9a-f]{8,64}$/.test(subject || ""))
+          return json({ error: "actor + subject node hex required" }, 400);
+        if (await rateLimited(env, request, "flag")) return json({ ok: true }, 200);
+        const key = `ledger:${new Date().toISOString()}:${crypto.randomUUID().slice(0, 8)}`;
+        await env.TOKENS.put(key, JSON.stringify({
+          actor, subject, action,
+          reason: String(reason || "").slice(0, 64),   // category only — free text stays in the circle
+        }));
+        return json({ ok: true });
+      }
+
       if (url.pathname === "/notify") {
         // ciphertext = base64 of the circle-sealed banner the NSE decrypts.
         // event = base64 of the sealed circle event itself (push-inline sync).

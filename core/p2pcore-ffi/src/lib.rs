@@ -803,6 +803,24 @@ fn poll_ffi(p: &FeedPoll, me_hex: &str) -> PollFfi {
     }
 }
 
+/// A member-filed content report for the UI (see `EventKind::Report`). Circles have no owner, so
+/// every member receives every report and acts with the power they already hold.
+#[derive(uniffi::Record)]
+pub struct ReportFfi {
+    /// The report event's own id.
+    pub id: String,
+    /// Who filed it (FULL node hex + 8-char display prefix for contact lookup).
+    pub reporter: String,
+    pub reporter_short: String,
+    /// The reported event id.
+    pub target: String,
+    /// The reported event's author — FULL node hex, usable directly for block().
+    pub author: String,
+    pub reason: String,
+    pub comment: String,
+    pub created_at: u64,
+}
+
 fn short(node_hex: &str) -> String {
     node_hex.chars().take(8).collect()
 }
@@ -1082,6 +1100,7 @@ fn event_target(kind: &EventKind) -> Option<&str> {
         | EventKind::Edit { target, .. }
         | EventKind::Unsend { target }
         | EventKind::SensitiveFlag { target }
+        | EventKind::Report { target, .. }
         | EventKind::Vote { target, .. } => Some(target.as_str()),
         EventKind::Post { .. } | EventKind::Message { .. } | EventKind::Poll { .. } => None,
     }
@@ -1754,6 +1773,50 @@ impl HavenSocial {
         out.dedup();
         out
     }
+    /// File a report against event `target` (objectionable content / abuse). The reported author's
+    /// FULL node hex is resolved from the local event log and embedded in the report, then the
+    /// report is sealed + broadcast to the whole circle like any event — every member sees it and
+    /// acts with the power they already hold (hide, remove-from-circle, block). Returns the
+    /// envelope to broadcast.
+    pub fn report(&self, circle_id: String, target: String, reason: String, comment: String, created_at: u64) -> Result<Vec<u8>, HavenError> {
+        let author = {
+            let st = self.state.lock().unwrap();
+            let Some(c) = st.circles.iter().find(|c| c.id == circle_id) else {
+                return Err(HavenError::Invalid { msg: "unknown circle".into() });
+            };
+            match c.events.iter().find(|e| e.id == target) {
+                Some(e) => e.author.clone(),
+                None => return Err(HavenError::Invalid { msg: "unknown target event".into() }),
+            }
+        };
+        self.author(&circle_id, created_at, EventKind::Report { target, author, reason, comment })
+    }
+
+    /// Every report filed in this circle (by any member), in event-log order.
+    pub fn reports(&self, circle_id: String) -> Vec<ReportFfi> {
+        let st = self.state.lock().unwrap();
+        let Some(c) = st.circles.iter().find(|c| c.id == circle_id) else { return vec![] };
+        c.events
+            .iter()
+            .filter_map(|e| {
+                if let EventKind::Report { target, author, reason, comment } = &e.kind {
+                    Some(ReportFfi {
+                        id: e.id.clone(),
+                        reporter: e.author.clone(),
+                        reporter_short: short(&e.author),
+                        target: target.clone(),
+                        author: author.clone(),
+                        reason: reason.clone(),
+                        comment: comment.clone(),
+                        created_at: e.created_at,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     pub fn edit(&self, circle_id: String, target: String, body: String, media: Vec<String>, music: Option<TrackRefFfi>, mute_video: bool, created_at: u64) -> Result<Vec<u8>, HavenError> {
         let music = music.map(|m| m.into_core());
         self.author(&circle_id, created_at, EventKind::Edit { target, body, media, music, mute_video })
@@ -2549,6 +2612,43 @@ mod net_tests {
         assert_eq!(bob.feed("fam".into(), 4_000, None).len(), 1, "fam post lands in fam circle");
         assert_eq!(bob.feed(cid, 4_000, None).len(), 1, "default circle is unchanged");
         assert_eq!(alice.circles().len(), 2, "alice now has two circles");
+    }
+
+    #[test]
+    fn reports_traverse_the_circle_and_carry_the_full_author_hex() {
+        let alice = HavenSocial::new([21u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([22u8; 32].to_vec()).unwrap();
+        let cid = DEFAULT_CIRCLE.to_string();
+        alice.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+        bob.add_contact_bundle(cid.clone(), alice.my_bundle()).unwrap();
+
+        // Bob posts; Alice receives it, then reports it.
+        bob.post(cid.clone(), "rude thing".into(), vec![], None, None, false, false, 1_000).unwrap();
+        sync(&bob, &alice, &cid);
+        let post_id = alice.feed(cid.clone(), 2_000, None)[0].id.clone();
+
+        // Reporting an event we never received is an error, not a silent no-op.
+        assert!(alice.report(cid.clone(), "nonexistent".into(), "spam".into(), String::new(), 2_000).is_err());
+
+        alice.report(cid.clone(), post_id.clone(), "harassment".into(), "uncalled for".into(), 2_000).unwrap();
+
+        // Alice sees her own report; the embedded author is Bob's FULL hex (directly blockable).
+        let mine = alice.reports(cid.clone());
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].target, post_id);
+        assert_eq!(mine[0].author, bob.my_node_hex());
+        assert_eq!(mine[0].reporter, alice.my_node_hex());
+        assert_eq!(mine[0].reason, "harassment");
+
+        // The report traverses to every member like any sealed event — Bob sees it too.
+        sync(&alice, &bob, &cid);
+        let theirs = bob.reports(cid.clone());
+        assert_eq!(theirs.len(), 1);
+        assert_eq!(theirs[0].author, bob.my_node_hex());
+        assert_eq!(theirs[0].comment, "uncalled for");
+
+        // Reports are moderation signals, not feed content — the feed still has only the post.
+        assert_eq!(bob.feed(cid, 3_000, None).len(), 1);
     }
 
     #[test]

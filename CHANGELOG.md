@@ -9,6 +9,20 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- **Decentralized content reporting (Apple platforms; App Review 1.2).** Haven circles have no
+  owner and the developer holds no keys, so moderation belongs to the members: a new sealed
+  `Report` event (`core`: `EventKind::Report`, `report()`/`reports()` FFI) broadcasts a report
+  to the WHOLE circle — reporter, reported author (full node hex, resolvable even on devices
+  that never received the post), offense category, and an optional note that never leaves the
+  circle. Reporting hides the post for the reporter instantly and can block the author in the
+  same motion; every other member sees a "Reported by …" banner on the post with their own
+  actions (hide for me / remove from circle / block). Older clients drop the unknown event kind
+  safely. Reports and blocks also append a **content-free entry to a permanent moderation
+  ledger** on the push Worker (`/flag`): actor node id × subject node id × action × category —
+  identity-vs-identity only, no content, no PII, so abuse patterns (many reporters × one
+  identity) stay visible in a system where the developer can see nothing else.
+
 ### Fixed
 - **Call audio has priority: no post music or video sound while a call is ringing, connecting,
   or live (all platforms).** Feed songs, story soundtracks, the DM song pill, and video audio

@@ -506,6 +506,7 @@ final class FeedStore: ObservableObject {
         if let c = ContactsStore.shared.contacts.first(where: { $0.idHex == idHex }) {
             ContactsStore.shared.remove(c)
         }
+        ModerationLedger.record(action: "block", subject: idHex, reason: "")
         persist(); refreshCircles(); refresh()
     }
 
@@ -746,6 +747,7 @@ final class FeedStore: ObservableObject {
                 guard let self, self.refreshGeneration == gen, self.activeCircleId == circleId else { return }
                 self.items = filtered
                 self.sensitiveCache.removeAll()   // a refresh may have ingested new SensitiveFlag events
+                self.reportsCache.removeAll()     // …and new Report events
                 SpotlightIndex.reindexAll()       // no-op unless the user enabled Spotlight indexing
             }
         }
@@ -835,6 +837,40 @@ final class FeedStore: ObservableObject {
         sensitiveCache[circleId, default: []].insert(ref)   // optimistic local
         broadcastEvent(circleId, env)
         objectWillChange.send()
+    }
+
+    // MARK: - Reports (decentralized moderation)
+
+    /// My ACCOUNT node hex (the contact handle) — the ledger's pseudonymous actor id.
+    var myAccountHex: String { social?.myNodeHex() ?? "" }
+
+    /// Cache of reports per circle, keyed by the reported event id. Cleared on each refresh.
+    private var reportsCache: [String: [String: [ReportFfi]]] = [:]
+
+    /// Reports filed in a circle by ANY member, keyed by the reported event id. Circles have no
+    /// owner — every member sees every report and acts with the power they already hold
+    /// (hide for themselves, remove the author from their circle, block).
+    func reports(circleId: String) -> [String: [ReportFfi]] {
+        if let c = reportsCache[circleId] { return c }
+        let grouped = Dictionary(grouping: social?.reports(circleId: circleId) ?? [], by: { $0.target })
+        reportsCache[circleId] = grouped
+        return grouped
+    }
+
+    /// File a report against a post/message: hide it locally right away (the reporter never sees it
+    /// again), broadcast the sealed report to the whole circle, and append a content-free
+    /// identity-vs-identity entry to the developer ledger. Returns the reported author's FULL node
+    /// hex (resolved by the core from the event log) so the caller can offer an immediate block.
+    @discardableResult
+    func report(circleId: String, target: String, reason: String, comment: String) -> String? {
+        guard let social, let env = try? social.report(circleId: circleId, target: target, reason: reason, comment: comment, createdAt: now()) else { return nil }
+        broadcastEvent(circleId, env)
+        HiddenStore.shared.hide(target)
+        reportsCache.removeValue(forKey: circleId)
+        let author = reports(circleId: circleId)[target]?.first?.author
+        ModerationLedger.record(action: "report", subject: author ?? "", reason: reason)
+        refresh()
+        return author
     }
 
     /// The current user's own posts — their personal archive.
@@ -3067,6 +3103,7 @@ struct PostCard: View {
     @State private var showCommentMediaPicker = false
     @State private var showAudioRecorder = false
     @State private var showEdit = false
+    @State private var showReport = false
     @State private var zoomTarget: ZoomTarget?
     @State private var players: [String: AVPlayer] = [:]
     @State private var playerObservers: [String: NSObjectProtocol] = [:]   // loop observers, removed on teardown
@@ -3145,6 +3182,12 @@ struct PostCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
+            // Another member reported this post → surface the circle's shared moderation signal
+            // with per-viewer actions (hide / remove from circle / block). The reporter themselves
+            // never sees it — reporting hid the post for them.
+            if !item.isMe, let reps = feed.reports(circleId: feed.activeCircleId)[item.id], !reps.isEmpty {
+                ReportedBanner(item: item, authorName: authorName, reports: reps)
+            }
             if item.unsent {
                 Label("Message unsent", systemImage: "minus.circle")
                     .font(.subheadline).italic().foregroundStyle(.secondary)
@@ -3183,6 +3226,7 @@ struct PostCard: View {
         .onChange(of: audio.centeredPostId) { syncPlayback() }
         .onChange(of: currentPage) { if isActive { playVisibleVideo() } }
         .sheet(isPresented: $showEdit) { EditPostSheet(item: item).macSheetFrame() }
+        .sheet(isPresented: $showReport) { ReportSheet(item: item, authorName: authorName) }
         .havenFullScreenCover(item: $zoomTarget, wide: true) { t in MediaZoomViewer(refs: t.refs, index: t.index) }
         .alert("Edit comment", isPresented: Binding(get: { editCommentId != nil }, set: { if !$0 { editCommentId = nil } })) {
             TextField("Comment", text: $editCommentText)
@@ -3567,6 +3611,11 @@ struct PostCard: View {
                         if isHidden { HiddenStore.shared.unhide(item.id) } else { HiddenStore.shared.hide(item.id) }
                         feed.refresh()
                     } label: { Label(isHidden ? "Unhide" : "Hide", systemImage: isHidden ? "eye" : "eye.slash") }
+                    if !item.isMe {
+                        Button(role: .destructive) { showReport = true } label: {
+                            Label("Report", systemImage: "flag")
+                        }
+                    }
                 } label: { Image(systemName: "ellipsis").foregroundStyle(.secondary).padding(6) }
             }
         }

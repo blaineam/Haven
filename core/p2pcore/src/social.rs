@@ -60,6 +60,14 @@ pub enum EventKind {
     /// client treats it as sensitive — so one member with SCA protects members on platforms with
     /// no equivalent. `target` is the media content-ref (content-addressed → identical everywhere).
     SensitiveFlag { target: String },
+    /// A member-filed report of another member's event (objectionable content / abuse) — the
+    /// decentralized moderation signal. Haven circles have no owner: every member holds their own
+    /// removal power, so a report is sealed to the WHOLE circle and each member acts with the power
+    /// they already have (hide for themselves, remove the author from their circle, block).
+    /// `target` is the reported event id; `author` is that event's author (FULL node hex), embedded
+    /// so a device that never received the target event can still act on its author. Older clients
+    /// fail to parse this variant and drop the single event — safe to ship incrementally.
+    Report { target: String, author: String, reason: String, #[serde(default)] comment: String },
     /// A poll: a question + options, optionally auto-closing at `close_at_ms` (0 = never). Results
     /// lock at close — votes timestamped at/after `close_at_ms` are ignored by the reducer.
     Poll { question: String, options: Vec<String>, close_at_ms: u64 },

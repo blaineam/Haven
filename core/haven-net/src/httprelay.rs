@@ -12,10 +12,15 @@
 //!
 //! ```text
 //!   GET  /k/<key>      → 200 <body>          | 404
-//!   HEAD /k/<key>      → 200                 | 404          (HAS)
+//!   HEAD /k/<key>      → 200                 | 404          (HAS; a hit refreshes liveness)
 //!   PUT  /k/<key>      → 200 "OK"            | 4xx/5xx      (body = blob, ≤ 256 MiB)
 //!   GET  /l/<prefix>   → 200 newline-joined keys            (LIST)
+//!   POST /t/<prefix>   → 200 newline-joined MISSING keys    (TOUCH; body = keys to refresh)
 //! ```
+//!
+//! TOUCH is the mailbox-GC liveness refresh (see `blobstore` module docs): the body lists
+//! the caller's live keys under `<prefix>` (one circle's mailbox), the relay bumps their
+//! mtimes, and the reply names the keys it does NOT hold so the caller re-PUTs them.
 //!
 //! `<key>`/`<prefix>` are percent-encoded store keys and pass through the same
 //! [`super::blobstore::safe_path`] validation as the iroh path (no traversal, no NUL).
@@ -41,12 +46,14 @@ use anyhow::{anyhow, bail, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::blobstore::{local_get, local_list, local_put, safe_path};
+use crate::blobstore::{local_get, local_list, local_put, local_touch, safe_path};
 
 /// Hard cap on a single blob — matches the iroh blob path (256 MiB).
 const MAX_BLOB: u64 = 256 * 1024 * 1024;
 /// Cap on the request head (request line + headers).
 const MAX_HEAD: usize = 16 * 1024;
+/// Cap on a TOUCH body (newline-joined keys) — matches the iroh TOUCH verb.
+const MAX_TOUCH_BODY: u64 = 256 * 1024;
 
 /// A running HTTP relay server. Dropping it (or calling [`HttpRelay::stop`]) stops serving.
 pub struct HttpRelay {
@@ -131,7 +138,10 @@ async fn handle_conn(stream: TcpStream, root: &PathBuf, token: &str) -> Result<(
                 }
             }
             Route::Head(key) => {
-                let hit = checked(root, &key).map(|k| local_get(root, &k).is_some()).unwrap_or(false);
+                // A HAS hit refreshes the entry's liveness stamp (mailbox GC) — local_touch
+                // returns the keys it did NOT find, so an empty result is a hit. Also avoids
+                // local_get reading the whole blob just to answer an existence check.
+                let hit = checked(root, &key).map(|k| local_touch(root, &[k]).is_empty()).unwrap_or(false);
                 head_respond(&mut w, if hit { 200 } else { 404 }, keep_alive).await?;
             }
             Route::Put(key) => {
@@ -158,6 +168,31 @@ async fn handle_conn(stream: TcpStream, root: &PathBuf, token: &str) -> Result<(
                     None => respond(&mut w, 403, "forbidden", keep_alive, b"").await?,
                 }
             }
+            Route::Touch(prefix) => {
+                // Mailbox-GC liveness refresh: body = newline-joined keys (each confined to
+                // `<prefix>` and the haven/ namespace); reply = the keys we do NOT hold.
+                if clen > MAX_TOUCH_BODY {
+                    discard(&mut r, clen.min(MAX_TOUCH_BODY)).await.ok();
+                    respond(&mut w, 413, "too large", false, b"").await?;
+                    return Ok(());
+                }
+                let mut body = vec![0u8; clen as usize];
+                r.read_exact(&mut body).await?;
+                match checked(root, &prefix) {
+                    Some(p) => {
+                        // Confine to the prefix as a DIRECTORY ("fam" must not match "famX").
+                        let want = if p.ends_with('/') { p.clone() } else { format!("{p}/") };
+                        let keys: Vec<String> = String::from_utf8_lossy(&body)
+                            .lines()
+                            .filter(|k| k.starts_with(&want) && checked(root, k).is_some())
+                            .map(|k| k.to_string())
+                            .collect();
+                        let misses = local_touch(root, &keys);
+                        respond(&mut w, 200, "OK", keep_alive, misses.join("\n").as_bytes()).await?;
+                    }
+                    None => respond(&mut w, 403, "forbidden", keep_alive, b"").await?,
+                }
+            }
             Route::Bad => {
                 discard(&mut r, clen).await?;
                 respond(&mut w, 404, "no route", keep_alive, b"").await?;
@@ -172,6 +207,7 @@ enum Route {
     Head(String),
     Put(String),
     List(String),
+    Touch(String),
     Bad,
 }
 
@@ -187,6 +223,9 @@ fn route(method: &str, path: &str) -> Route {
     }
     if let (Some(p), "GET") = (path.strip_prefix("/l/"), method) {
         return Route::List(decode(p));
+    }
+    if let (Some(p), "POST") = (path.strip_prefix("/t/"), method) {
+        return Route::Touch(decode(p));
     }
     Route::Bad
 }
@@ -353,6 +392,17 @@ mod tests {
             // LIST sees the key.
             let l = req("GET", "/l/haven/media", auth, b"");
             assert!(l.contains("haven/media/x"), "{l}");
+            // TOUCH refreshes hits and reports misses (mailbox-GC liveness refresh).
+            assert!(req("PUT", "/k/haven/mailbox/fam/aa", auth, b"sealed").starts_with("HTTP/1.1 200"));
+            let t = req(
+                "POST",
+                "/t/haven/mailbox/fam/",
+                auth,
+                b"haven/mailbox/fam/aa\nhaven/mailbox/fam/gone\nhaven/mailbox/other/bb",
+            );
+            assert!(t.starts_with("HTTP/1.1 200"), "{t}");
+            assert!(t.ends_with("haven/mailbox/fam/gone"), "only the in-prefix miss is reported: {t}");
+            assert!(!t.contains("other/bb"), "cross-circle keys are ignored: {t}");
             // self/ refused even with the token.
             assert!(req("GET", "/k/self/a/state/b", auth, b"").starts_with("HTTP/1.1 403"));
         });

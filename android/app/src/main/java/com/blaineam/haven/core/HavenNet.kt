@@ -213,13 +213,18 @@ object HavenNet : InboundListener {
         // Engine runs on this device's UNIQUE identity (parity with iOS configure()); account id stays the
         // sealing/trust anchor + contact handle. Friends resolve it to our device node id via the roster.
         social.useDeviceIdentity(DeviceKeyStore.deviceAccount().secretSeed())
-        social.registerDevice(DeviceKeyStore.deviceBundle(), DeviceKeyStore.deviceName,
-                              (System.currentTimeMillis() / 1000).toULong())
         DeviceCredentialStore.init(appContext)
         DeviceRosterManager.init(appContext)
         SelfSyncCoordinator.init(appContext)
         DmPins.init(appContext)
         restoreState()
+        // Self-register AFTER importing persisted state (parity with iOS): registering first wrote a
+        // fresh v1 roster that restoreState's higher-version-wins restore then clobbered — so a stale
+        // revocation of our own device id in the persisted roster could never be cleared. Registering
+        // against the imported roster makes the re-authorization a version-bumped update that
+        // propagates (see DeviceList::merge).
+        social.registerDevice(DeviceKeyStore.deviceBundle(), DeviceKeyStore.deviceName,
+                              (System.currentTimeMillis() / 1000).toULong())
         loadContacts()
         loadDeviceHints()
         loadBlocked()
@@ -1035,8 +1040,17 @@ object HavenNet : InboundListener {
         scope.launch(Dispatchers.Main) { feedVersion.value++ }
         val payload = Wire.eventPayload(circleId, env)
         for (idHex in dialTargets(circleId)) sendFrame(Wire.EVENT, payload, idHex)
-        // Store-and-forward via the circle relay so offline members still get it.
-        scope.launch { uploadEvent(circleId, env) }
+        // Store-and-forward via the circle relay so offline members still get it. The epoch HEAD
+        // (roster + current key commit) rides along: with the full-history backfill throttled to
+        // daily, a relay-only peer could otherwise pull this event long before the commit that opens
+        // it (it would sit in their pending-epoch buffer). Cheap — the commit is cached until the
+        // epoch/recipient set changes, and the persisted seen-set dedupes the re-upload. iOS parity.
+        scope.launch {
+            for (head in runCatching { social.exportEpochHead(circleId) }.getOrDefault(emptyList())) {
+                uploadEvent(circleId, head)
+            }
+            uploadEvent(circleId, env)
+        }
         // Nearby mesh (never DMs — they stay point-to-point, matching iOS).
         if (NearbyTransport.active && !circleId.startsWith("dm:")) {
             NearbyTransport.broadcast(Wire.frame(Wire.EVENT, payload))
@@ -1215,8 +1229,9 @@ object HavenNet : InboundListener {
         val circleId = String(cidBytes, Charsets.UTF_8)
         val sealed = r.rest()
         if (circleId.isEmpty() || sealed.isEmpty()) return
-        val open = runCatching { social.openCircleMedia(circleId, sealed) }.getOrNull() ?: return
-        val text = String(open, Charsets.UTF_8).trim()
+        val opened = runCatching { social.openCircleMediaSender(circleId, sealed) }.getOrNull() ?: return
+        val announcerHex = opened.senderHex.lowercase()   // authenticated envelope sender (account id)
+        val text = String(opened.data, Charsets.UTF_8).trim()
         // Extended announce: JSON {node, urls, token} carries the relay's HTTP media interface.
         var announcedUrls: List<String> = emptyList()
         var announcedToken = ""
@@ -1229,12 +1244,19 @@ object HavenNet : InboundListener {
             o.optString("node", "").trim().lowercase()
         } else text.lowercase()
         if (nodeHex.length != 64) return
-        // A contact (often your OWN other device) RE-ANNOUNCED their circle relay. Previously a relay
-        // the user had deactivated/forgot stayed in `suppressed` and was permanently ignored here — so
-        // deleting your Mac's relay on your phone meant it never came back even when the Mac re-announced
-        // it. Now a deliberate re-announce REACTIVATES the existing inactive entry (clears suppression +
-        // active=true) rather than being dropped, so own-device / re-announced relays can resurface.
+        // A contact RE-ANNOUNCED a circle relay. Reactivating a deactivated/forgotten entry is allowed
+        // ONLY when the announce comes from the relay's OWNER — the announced id is one of the sender's
+        // own authorized device ids (their in-app relay; that's what lets your Mac's relay come back on
+        // your phone when the Mac itself re-announces it), or their account id (legacy account-id
+        // relay). A THIRD-PARTY echo must never resurrect it: every member re-announces every relay
+        // they hold proof-of-life for, so a relay the user deliberately deleted — but which is still
+        // RUNNING somewhere (an old docker container, a forgotten daemon) — bounced back within one
+        // sync tick, forever. Non-owner announces of a tombstoned relay are dropped; brand-new relays
+        // still auto-pool below. iOS parity.
         if (suppressedRelays.contains(nodeHex) || !isRelayActive(nodeHex)) {
+            val ownerDevices = runCatching { social.deviceNodeIdsFor(announcerHex) }
+                .getOrDefault(emptyList()).map { it.lowercase() }
+            if (nodeHex != announcerHex && nodeHex !in ownerDevices) return
             suppressedRelays.remove(nodeHex)
             ensureRelayEntry(nodeHex, activate = true)
             relayHealth.remove(nodeHex)
@@ -1803,11 +1825,47 @@ object HavenNet : InboundListener {
         if (eventsToo) {
             val envs = runCatching { social.exportMyEnvelopes(circleId) }.getOrDefault(emptyList())
             for (env in envs) uploadEvent(circleId, env)
+            // TOUCH the same refs on every relay so mailbox GC keeps them (uploadEvent is
+            // seen-set-skipped once an envelope landed ONCE — without this, nothing would ever
+            // refresh a live entry and the relay's 30-day TTL would eat real history). Misses
+            // are re-PUT, so the daily refresh also repairs a relay that lost our entries.
+            refreshMailboxKeys(circleId, envs)
         }
         // Also push the media bytes of anything I've posted here that I still hold locally — through
         // the serial media queue so several circles backfilling at once can't stack full blobs in RAM.
         val feed = runCatching { social.feed(circleId, nowMs(), null) }.getOrDefault(emptyList())
         for (item in feed) if (item.isMe) item.media.forEach { if (LocalMedia.has(it)) enqueueBackup(circleId, it) }
+    }
+
+    /** Refresh the liveness of my envelopes on every iroh relay serving a circle — ONE batched
+     *  TOUCH per relay; the relay bumps their GC clocks and replies with the keys it does NOT
+     *  hold, which are re-PUT (refresh doubles as repair). Deliberately ignores the seen-set:
+     *  "seen" means uploaded once, and this exists precisely to re-assert what already exists.
+     *  S3 pseudo-relays have no GC, and our own hosted relay is touched locally (no self-dial). */
+    private suspend fun refreshMailboxKeys(circleId: String, envs: List<ByteArray>) {
+        if (envs.isEmpty()) return
+        val byKey = envs.associateBy { mailboxKey(circleId, it) }
+        val keys = byKey.keys.toList()
+        val prefix = "haven/mailbox/$circleId/"
+        val hostedHex = runCatching { relayHost?.nodeIdHex() }.getOrNull()
+        for (nodeHex in relaysFor(circleId)) {
+            if (nodeHex.startsWith("s3:")) continue
+            if (hostedHex != null && nodeHex == hostedHex) {
+                val misses = runCatching { relayHost?.localTouch(keys) }.getOrNull() ?: continue
+                for (k in misses) byKey[k]?.let { env -> runCatching { relayHost?.localPut(k, env) } }
+                continue
+            }
+            val client = relayClientFor(nodeHex) ?: continue
+            val result = runCatching { client.touch(prefix, keys) }
+            val misses = result.getOrNull()
+            if (misses == null) {
+                // Unreachable, or a pre-GC relay without TOUCH — it isn't sweeping, skip safely.
+                Log.d(TAG, "mailbox touch failed ($nodeHex): ${result.exceptionOrNull()?.message}")
+                continue
+            }
+            markRelayOk(nodeHex)
+            for (k in misses) byKey[k]?.let { env -> runCatching { client.put(k, env) } }
+        }
     }
 
     /** Ensure the relay holds this circle's FULL history (every event + every media blob I hold,

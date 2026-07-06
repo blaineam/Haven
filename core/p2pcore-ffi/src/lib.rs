@@ -296,6 +296,14 @@ pub struct ContactRosterWire {
     pub wire: Vec<u8>,
 }
 
+/// A circle-sealed blob opened together with its authenticated sender (a member's account id hex) —
+/// for callers that must judge the ANNOUNCER, not just read the payload (owner-gated relay announces).
+#[derive(uniffi::Record)]
+pub struct OpenedCircleBlobFfi {
+    pub sender_hex: String,
+    pub data: Vec<u8>,
+}
+
 #[derive(uniffi::Record)]
 pub struct SignedNotification {
     /// The verified author's node id (hex). The receiver should still confirm it's a known contact
@@ -429,6 +437,16 @@ impl RelayClient {
     pub async fn list(&self, prefix: String) -> Vec<String> {
         self.inner.list(&prefix).await.unwrap_or_default()
     }
+
+    /// Refresh the liveness of `keys` (all under `prefix`, one circle's mailbox path) so the
+    /// relay's mailbox GC keeps them; returns the keys the relay does NOT hold — re-PUT those
+    /// (the daily refresh doubles as repair). Errors against an unreachable or pre-GC relay.
+    pub async fn touch(&self, prefix: String, keys: Vec<String>) -> Result<Vec<String>, HavenError> {
+        self.inner
+            .touch(&prefix, &keys)
+            .await
+            .map_err(|e| HavenError::Invalid { msg: format!("relay touch: {e}") })
+    }
 }
 
 /// The built-in relay/mailbox the app runs in-process. It now ATTACHES to the messaging node's
@@ -488,6 +506,13 @@ impl RelayServerHandle {
     /// uploaded to it (it can't poll itself over iroh).
     pub fn local_list(&self, prefix: String) -> Vec<String> {
         self.node.node.relay_local_list(&prefix)
+    }
+
+    /// Refresh the liveness of `keys` in our OWN hosted mailbox (the host's daily refresh can't
+    /// TOUCH itself over iroh — self-dial guard). Returns the keys the store does NOT hold so the
+    /// caller re-PUTs them via `local_put`.
+    pub fn local_touch(&self, keys: Vec<String>) -> Vec<String> {
+        self.node.node.relay_local_touch(&keys)
     }
 
     /// Serve this relay's store over plain HTTP on `bind` (e.g. "0.0.0.0:8674"; port 0 =
@@ -1824,6 +1849,10 @@ impl HavenSocial {
     /// not per-author), so a forwarded friend event still verifies + displays as theirs. `limit` caps to the
     /// most recent N events so this stays cheap when called periodically.
     fn epoch_sync_bundle_impl(&self, circle_id: &str, mine_only: bool, limit: u32) -> Vec<Vec<u8>> {
+        self.epoch_sync_bundle_inner(circle_id, mine_only, limit, false)
+    }
+
+    fn epoch_sync_bundle_inner(&self, circle_id: &str, mine_only: bool, limit: u32, head_only: bool) -> Vec<Vec<u8>> {
         let mut st = self.state.lock().unwrap();
         let me_hex = hex(&st.me.public().node_id_bytes());
         let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return vec![] };
@@ -1870,6 +1899,9 @@ impl HavenSocial {
                 }
             }
         }
+        if head_only {
+            return out; // roster + current key commit only — no event re-seals
+        }
         let mut events: Vec<Event> = st.circles[idx]
             .events
             .iter()
@@ -1895,6 +1927,15 @@ impl HavenSocial {
     /// my own). NOT for sending to friends (that stays mine-only via sync_envelopes).
     pub fn export_recent_envelopes(&self, circle_id: String, limit: u32) -> Vec<Vec<u8>> {
         self.epoch_sync_bundle_impl(&circle_id, false, limit)
+    }
+
+    /// Just the epoch HEAD — my device roster + the current key commit, NO event re-seals. Cheap
+    /// (the commit is cached until the epoch/recipient set changes) and idempotent to receive.
+    /// Upload this alongside every posted event: with the full-history backfill throttled to daily,
+    /// a relay-only peer could otherwise receive an event sealed under a fresh epoch long before the
+    /// commit that opens it arrives (the event would sit in `pending_epoch` until the next backfill).
+    pub fn export_epoch_head(&self, circle_id: String) -> Vec<Vec<u8>> {
+        self.epoch_sync_bundle_inner(&circle_id, true, 0, true)
     }
 
     /// Ingest a sealed envelope received from the network. Routes by wire tag: a key commit (stores
@@ -2042,6 +2083,16 @@ impl HavenSocial {
         // Dual-open: device key (Option 1), then account key (legacy account-sealed media).
         st.device.as_ref().and_then(|d| open_bytes(d, &sender_pub, &env).ok())
             .or_else(|| open_bytes(&st.me, &sender_pub, &env).ok())
+    }
+
+    /// [`Self::open_circle_media`] that ALSO returns who sealed the blob (the envelope's verified
+    /// sender, a circle member's account id hex). Callers that must make a trust decision about the
+    /// announcement itself — e.g. "only the relay's OWNER may reactivate a deactivated relay" — need
+    /// the authenticated sender, not just the plaintext.
+    pub fn open_circle_media_sender(&self, circle_id: String, sealed: Vec<u8>) -> Option<OpenedCircleBlobFfi> {
+        let sender_hex = SealedEnvelope::from_bytes(&sealed).ok()?.sender_hex();
+        let data = self.open_circle_media(circle_id, sealed)?;
+        Some(OpenedCircleBlobFfi { sender_hex, data })
     }
 
     /// Decrypt a circle-sealed media blob from a FILE and write the plaintext to another FILE, doing

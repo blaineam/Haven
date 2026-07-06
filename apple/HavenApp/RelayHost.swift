@@ -155,6 +155,13 @@ final class RelayHost: ObservableObject {
     func localGet(_ key: String) -> Data? { handle?.localGet(key: key) }
     /// Keys under `prefix` in our own mailbox, so the host can ingest what others uploaded to it.
     func localList(_ prefix: String) -> [String] { handle?.localList(prefix: prefix) ?? [] }
+    /// Refresh the liveness of `keys` in our OWN hosted mailbox (the daily refresh can't TOUCH
+    /// itself over iroh — self-dial guard). Returns the keys the store lacks (re-PUT via localPut);
+    /// empty when not hosting so a stopped relay never triggers a local re-upload storm.
+    func localTouch(_ keys: [String]) -> [String] {
+        guard let handle, serving else { return [] }
+        return handle.localTouch(keys: keys)
+    }
 
     private func stop() {
         handle?.disable()      // detach the relay from the node's endpoint

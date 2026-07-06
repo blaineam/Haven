@@ -108,3 +108,87 @@ async fn sealed_blob_put_to_local_disk_relay_is_fetched_by_another_node_and_rela
     let _ = std::fs::remove_dir_all(&store_dir);
     let _ = &server;
 }
+
+/// The **mailbox GC** proof, over the real wire: TOUCH refreshes an entry's liveness and
+/// reports misses for repair, HAS hits refresh too, AGES exposes idle ages, and the TTL
+/// sweep deletes exactly the entries no one re-asserted — never media, never fresh keys.
+#[tokio::test]
+async fn touch_refreshes_liveness_and_ttl_sweep_prunes_only_untouched_mailbox_entries() {
+    use haven_net::blobstore::{gc_sweep, GC_GRACE, MAILBOX_TTL};
+
+    let member = Identity::generate();
+    let relay_id = Identity::generate();
+    let store_dir = std::env::temp_dir().join(format!("haven-relay-gctest-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&store_dir);
+    let server = BlobServer::spawn(relay_id.node_secret_bytes(), store_dir.clone()).await.unwrap();
+    let relay_addr = server.local_dial_addr().await.unwrap();
+    let client = BlobClient::connect_addr(member.node_secret_bytes(), relay_addr).await.unwrap();
+
+    // One live entry, one legacy duplicate no client will ever re-assert, one media blob.
+    let live = "haven/mailbox/fam/live".to_string();
+    let dead = "haven/mailbox/fam/dead".to_string();
+    let media = "haven/media/photo".to_string();
+    for (k, v) in [(&live, b"sealed-live".as_slice()), (&dead, b"sealed-dead"), (&media, b"sealed-media")] {
+        timeout(Duration::from_secs(10), client.put(k, v)).await.expect("put timed out").unwrap();
+    }
+
+    // Age everything past the TTL, as if the store predates GC / no one refreshed for a month.
+    let ancient = std::time::SystemTime::now()
+        - std::time::Duration::from_secs(MAILBOX_TTL.as_secs() + 24 * 3600);
+    for k in [&live, &dead, &media] {
+        std::fs::File::options()
+            .write(true)
+            .open(store_dir.join(k))
+            .and_then(|f| f.set_modified(ancient))
+            .unwrap();
+    }
+
+    // AGES reports the idle ages over the wire (the age-preserving mesh-sync inventory).
+    let ages = timeout(Duration::from_secs(10), client.list_ages("haven/mailbox/fam/"))
+        .await
+        .expect("ages timed out")
+        .unwrap();
+    assert_eq!(ages.len(), 2);
+    assert!(ages.iter().all(|(_, age)| *age > MAILBOX_TTL.as_secs()), "both entries look ancient");
+
+    // The daily refresh: ONE batched TOUCH — the live key is re-asserted (clock resets), a
+    // key the relay lost is reported back as a miss so the client re-PUTs it.
+    let gone = "haven/mailbox/fam/gone".to_string();
+    let misses = timeout(
+        Duration::from_secs(10),
+        client.touch("haven/mailbox/fam/", &[live.clone(), gone.clone()]),
+    )
+    .await
+    .expect("touch timed out")
+    .unwrap();
+    assert_eq!(misses, vec![gone], "TOUCH reports exactly the keys the relay lacks");
+
+    // A HAS hit also counts as liveness (the has-then-put upload path).
+    std::fs::File::options()
+        .write(true)
+        .open(store_dir.join(&media))
+        .and_then(|f| f.set_modified(ancient))
+        .unwrap();
+    assert!(timeout(Duration::from_secs(10), client.has(&media)).await.expect("has timed out").unwrap());
+
+    // Sweep: plant the marker, age it past the first-enable grace, then sweep for real.
+    assert_eq!(gc_sweep(&store_dir, MAILBOX_TTL, GC_GRACE), 0, "first call only plants the marker");
+    std::fs::File::options()
+        .write(true)
+        .open(store_dir.join(".haven-gc-enabled"))
+        .and_then(|f| f.set_modified(ancient))
+        .unwrap();
+    assert_eq!(gc_sweep(&store_dir, MAILBOX_TTL, GC_GRACE), 1, "exactly the dead entry is deleted");
+
+    let listed = timeout(Duration::from_secs(10), client.list("haven/"))
+        .await
+        .expect("list timed out")
+        .unwrap();
+    assert!(listed.contains(&live), "the touched entry survives");
+    assert!(listed.contains(&media), "media is never swept (HAS also re-stamped it)");
+    assert!(!listed.contains(&dead), "the never-touched duplicate is gone");
+
+    client.close().await;
+    let _ = std::fs::remove_dir_all(&store_dir);
+    let _ = &server;
+}

@@ -539,6 +539,43 @@ enum SharedStore {
         }
     }
 
+    /// Refresh the liveness of every envelope in `envelopes` on every relay serving `circleId`
+    /// (relay-side mailbox GC deletes entries no member refreshes for 30 days — legacy duplicate
+    /// and stale-epoch envelopes age out; these stay). ONE batched TOUCH per relay, not a
+    /// round-trip per key; the relay replies with the keys it lacks and we re-PUT those, so the
+    /// daily refresh doubles as repair (it also self-heals a relay that GC'd our history while
+    /// we were away). Deliberately ignores the seen-set — "seen" means uploaded ONCE, and the
+    /// whole point here is re-asserting entries that already exist.
+    static func refreshMailbox(circleId: String, envelopes: [Data]) async {
+        guard !envelopes.isEmpty else { return }
+        var byKey: [String: Data] = [:]
+        for env in envelopes { byKey[mailboxKey(circleId, env)] = env }
+        let keys = Array(byKey.keys)
+        let prefix = "haven/mailbox/\(circleId)/"
+        for node in relayNodes(circleId) where !node.hasPrefix("s3:") {
+            // Our OWN hosted relay: touch the local store directly (no iroh self-connection).
+            if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
+                for k in RelayHost.shared.localTouch(keys) {
+                    if let env = byKey[k] { _ = RelayHost.shared.localPut(k, env) }
+                }
+                continue
+            }
+            guard let c = await RelayClients.client(node) else { continue }
+            do {
+                let misses = try await c.touch(prefix: prefix, keys: keys)
+                RelayHealth.shared.recordSuccess(node)
+                RelayMailboxStore.shared.markSeen(node)
+                for k in misses {
+                    if let env = byKey[k] { try? await c.put(key: k, data: env) }
+                }
+            } catch {
+                // Unreachable, or a pre-GC relay that doesn't speak TOUCH — either way it
+                // isn't sweeping anything, so skipping the refresh is safe.
+                HavenLog.relay("touch \(node.prefix(10)) \(circleId): \(error)")
+            }
+        }
+    }
+
     /// Poll the mailbox for envelopes we haven't seen. Returns (circleId, envelope) pairs.
     static func pollMailbox(circleIds: [String]) async -> [(String, Data)] {
         var out: [(String, Data)] = []

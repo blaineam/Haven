@@ -6,6 +6,27 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest wave (built, batched for next upload)
+- **Relay mailbox garbage collection (all platforms + CLI relay)**: the ~6,700 legacy
+  duplicate envelopes per mature circle (random-seal era + stale-epoch copies) finally age
+  OUT of the relays instead of being re-LISTed on every 30s poll (~700 KB a pop) and
+  re-circulated forever by mesh sync. New `TOUCH` verb (iroh + HTTP): each member batch-
+  refreshes the refs it can deterministically re-seal, daily, on every relay (misses are
+  re-PUT — refresh doubles as repair); every relay host sweeps `haven/mailbox/**` entries
+  idle > 30 days (media/self-sync never swept; 48h first-enable grace); and mesh sync is
+  age-preserving (new `AGES` verb — skips expired entries, back-dates pulls) so a GC'd entry
+  can't ping-pong back between siblings. A member can only keep entries alive, never delete.
+  See `docs/RELAY-AND-DEPLOY.md` "Mailbox garbage collection".
+- **Own-device sync + zombie relays — root-caused and fixed (all platforms)**: the account
+  roster had the Mac's own device id STUCK in `revoked` (grow-only revocation union meant
+  re-authorization could never propagate, and iOS/Android self-registered before state import so
+  the imported roster clobbered it every launch) — that's why iPhone posts stopped reaching the
+  Mac directly and why every launch rotated every circle epoch (my_epoch 76 on an 88-event
+  circle). Newer-version roster verdicts now win revocation disagreements; registration runs
+  after import. And deleted/deactivated relays only reactivate on an announce from the relay's
+  OWNER (authenticated sealed-announce sender) — third-party echoes of relays you deleted (but
+  which still run somewhere, e.g. old docker containers) no longer resurrect them. Posts also
+  upload their epoch key commit alongside, so relay-only peers can always open fresh-epoch
+  events.
 - **30-second cold start on the circle feed — root-caused and fixed (all platforms, verified live
   on the Mac with real data)**: the mailbox ingestion cursor was in-memory only, so every cold
   start re-downloaded + re-verified the ENTIRE relay mailbox (~6,700 entries for 88 events); and

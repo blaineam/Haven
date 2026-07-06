@@ -13,6 +13,11 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 CORE="$HERE/../core"
 CARGO="${CARGO:-$HOME/.cargo/bin/cargo}"
 RUSTUP="${RUSTUP:-$HOME/.cargo/bin/rustup}"
+# Force rustup's rustc (parity with apple/build-rust-xcframework.sh). A Homebrew `rust`
+# install puts /opt/homebrew/bin/rustc ahead of ~/.cargo/bin in PATH and cargo picks it up —
+# but Homebrew rust has no Android std, so every cross-compile dies with
+# "error[E0463]: can't find crate for `std`" even though rustup's targets ARE installed.
+export RUSTC="${RUSTC:-$HOME/.cargo/bin/rustc}"
 
 # --- Locate the Android SDK + NDK -------------------------------------------------
 ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/opt/homebrew/share/android-commandlinetools}}"

@@ -68,6 +68,9 @@ struct DynState {
     media_req_at: HashMap<String, u64>,
     /// last time we mirrored our OWN media to the circle relays (idempotent backfill, ~every 2 min).
     last_media_backfill_ms: u64,
+    /// last time we TOUCH-refreshed our event envelopes on the circle relays (mailbox-GC liveness,
+    /// daily). In-memory: 0 at start → first loop tick refreshes, then every 24h of uptime.
+    last_event_refresh_ms: u64,
     internet_active: bool,
     relay_active: bool,
     started: bool,
@@ -472,6 +475,25 @@ impl Engine {
                 };
                 if due {
                     me.backfill_media_to_relays().await;
+                }
+                // Daily (first tick after launch, then every 24h of uptime): re-assert my event
+                // envelopes in every circle mailbox — upload what a relay never saw, TOUCH what
+                // it already holds so relay-side mailbox GC (30-day TTL) keeps live entries
+                // while legacy duplicates and stale-epoch copies age out.
+                let refresh_due = {
+                    let mut st = me.dyn_state.lock().unwrap();
+                    let now = now_ms();
+                    if now - st.last_event_refresh_ms > 86_400_000 {
+                        st.last_event_refresh_ms = now;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if refresh_due {
+                    for c in me.social.circles() {
+                        me.backfill_mailbox(&c.id).await;
+                    }
                 }
                 me.purge_stale_relays().await; // GC relays inactive + unseen > 7 days (config else survives)
             }
@@ -895,7 +917,18 @@ impl Engine {
         let me = self.clone();
         let cid = circle_id.to_string();
         let env = env.to_vec();
-        tauri::async_runtime::spawn(async move { me.upload_event(&cid, &env).await; });
+        tauri::async_runtime::spawn(async move {
+            // The epoch HEAD (roster + current key commit) rides along with every authored event:
+            // a relay-only peer could otherwise pull the event long before the commit that opens it
+            // (it would sit in their pending-epoch buffer until the next full backfill). Cheap —
+            // the commit is cached until the epoch/recipient set changes, and the persisted
+            // seen-set dedupes the re-upload. iOS/Android parity.
+            for head in me.social.export_epoch_head(cid.clone()) {
+                me.upload_event(&cid, &head).await;
+            }
+            me.upload_event(&cid, &env).await;
+            me.flush_seen_mailbox();
+        });
     }
 
     // ---- DMs ----------------------------------------------------------------------------
@@ -1390,8 +1423,9 @@ impl Engine {
         if circle_id.is_empty() || sealed.is_empty() {
             return;
         }
-        let Some(open) = self.social.open_circle_media(circle_id.clone(), sealed) else { return };
-        let text = String::from_utf8_lossy(&open).trim().to_string();
+        let Some(opened) = self.social.open_circle_media_sender(circle_id.clone(), sealed) else { return };
+        let announcer_hex = opened.sender_hex.to_lowercase(); // authenticated envelope sender (account id)
+        let text = String::from_utf8_lossy(&opened.data).trim().to_string();
         // Extended announce: JSON {node, urls, token} also carries the relay's plain-HTTP media
         // interface (the reliable cross-NAT path). Legacy announces are the bare 64-hex id.
         let mut announced_urls: Vec<String> = Vec::new();
@@ -1417,14 +1451,27 @@ impl Engine {
             return;
         }
         {
-            // A contact (often your OWN other device) RE-ANNOUNCED their circle relay. Previously a relay
-            // the user had deactivated/forgot stayed in `suppressed_relays` and was permanently ignored here
-            // — so deleting your PC's relay on your phone meant it never came back even when the PC
-            // re-announced it. Now a deliberate re-announce REACTIVATES the existing inactive entry (clears
-            // suppression + active=true) rather than being dropped. Mirrors the iOS handleRelayNode fix.
+            // A contact RE-ANNOUNCED a circle relay. Reactivating a deactivated/forgotten entry is
+            // allowed ONLY when the announce comes from the relay's OWNER — the announced id is one of
+            // the sender's own authorized device ids (their in-app relay; that's what lets your PC's
+            // relay come back on your phone when the PC itself re-announces it), or their account id
+            // (legacy account-id relay). A THIRD-PARTY echo must never resurrect it: every member
+            // re-announces every relay they hold proof-of-life for, so a relay the user deliberately
+            // deleted — but which is still RUNNING somewhere (an old docker container, a forgotten
+            // daemon) — bounced back within one sync tick, forever. Non-owner announces of a tombstoned
+            // relay are dropped; brand-new relays still auto-pool below. iOS/Android parity.
+            let announcer_owns_relay = node_hex == announcer_hex
+                || self
+                    .social
+                    .device_node_ids_for(announcer_hex.clone())
+                    .iter()
+                    .any(|d| d.to_lowercase() == node_hex);
             let mut p = self.prefs.lock().unwrap();
             let was_suppressed_or_inactive =
                 p.suppressed_relays.contains(&node_hex) || !p.relay_is_active(&node_hex);
+            if was_suppressed_or_inactive && !announcer_owns_relay {
+                return;
+            }
             if was_suppressed_or_inactive {
                 p.suppressed_relays.retain(|h| h != &node_hex);
                 p.ensure_relay_entry(&node_hex, None, node_hex.starts_with("s3:"), true);
@@ -2151,9 +2198,15 @@ impl Engine {
         if !has_relay && !has_s3 {
             return;
         }
-        for env in self.social.export_my_envelopes(circle_id.to_string()) {
-            self.upload_event(circle_id, &env).await;
+        let envs = self.social.export_my_envelopes(circle_id.to_string());
+        for env in &envs {
+            self.upload_event(circle_id, env).await;
         }
+        // TOUCH the same refs on every relay so mailbox GC keeps them (upload_event is
+        // seen-set-skipped once an envelope landed ONCE — without this, nothing would ever
+        // refresh a live entry and the relay's 30-day TTL would eat real history). Misses
+        // are re-PUT inside, so the refresh also repairs a relay that lost our entries.
+        self.refresh_mailbox(circle_id, &envs).await;
         self.flush_seen_mailbox();
         let feed = self.social.feed(circle_id.to_string(), now_ms(), None);
         for item in feed {
@@ -2163,6 +2216,52 @@ impl Engine {
                         self.upload_media(circle_id, &r).await;
                     }
                 }
+            }
+        }
+    }
+
+    /// Refresh the liveness of `envs` (my deterministically re-sealed envelopes) on every iroh
+    /// relay serving `circle_id` — ONE batched TOUCH per relay bumps their mailbox-GC clocks;
+    /// the relay replies with the keys it does NOT hold and those are re-PUT (refresh doubles
+    /// as repair). Deliberately ignores the seen-set: "seen" means uploaded once, and this
+    /// exists precisely to re-assert entries that already exist. Our own hosted relay is
+    /// touched locally (no iroh self-dial); S3 mailboxes have no GC.
+    async fn refresh_mailbox(self: &Arc<Self>, circle_id: &str, envs: &[Vec<u8>]) {
+        if envs.is_empty() {
+            return;
+        }
+        let by_key: HashMap<String, &Vec<u8>> =
+            envs.iter().map(|e| (Self::mailbox_key(circle_id, e), e)).collect();
+        let keys: Vec<String> = by_key.keys().cloned().collect();
+        let prefix = format!("haven/mailbox/{circle_id}/");
+        let hosted = self.relay_host.lock().unwrap().as_ref().map(|h| h.node_id_hex());
+        for node_hex in self.relays_for(circle_id) {
+            if hosted.as_deref() == Some(node_hex.as_str()) {
+                let misses = match self.relay_host.lock().unwrap().as_ref() {
+                    Some(h) => h.local_touch(keys.clone()),
+                    None => continue,
+                };
+                if let Some(h) = self.relay_host.lock().unwrap().as_ref() {
+                    for k in misses {
+                        if let Some(env) = by_key.get(&k) {
+                            h.local_put(k, env.to_vec());
+                        }
+                    }
+                }
+                continue;
+            }
+            let Some(client) = self.relay_client_for(&node_hex).await else { continue };
+            match client.touch(prefix.clone(), keys.clone()).await {
+                Ok(misses) => {
+                    self.mark_relay_ok(&node_hex);
+                    for k in misses {
+                        if let Some(env) = by_key.get(&k) {
+                            let _ = client.put(k, env.to_vec()).await;
+                        }
+                    }
+                }
+                // Unreachable, or a pre-GC relay without TOUCH — it isn't sweeping, skip safely.
+                Err(e) => log::debug!("mailbox touch failed ({node_hex}): {e}"),
             }
         }
     }

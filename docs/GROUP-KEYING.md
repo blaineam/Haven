@@ -49,6 +49,11 @@ post-quantum property is preserved end to end.
   never covers two distinct plaintexts. Tradeoff (accepted): an observer holding two envelopes from the
   same epoch can tell whether they seal the *identical* plaintext — that equality is exactly what the
   mailbox dedup relies on, and without the epoch key the salt is indistinguishable from random.
+  Determinism is also what powers **mailbox GC**: each member can re-derive the exact refs of its
+  own live envelopes and TOUCH-refresh them daily on every relay, so relays TTL-expire everything
+  no member re-asserts — the legacy random-seal duplicates and stale-epoch copies (a rotation
+  re-seals history under the new epoch → the old epoch's envelopes become dead weight). See
+  [`RELAY-AND-DEPLOY.md`](RELAY-AND-DEPLOY.md) "Mailbox garbage collection".
 
 ### Membership change → new epoch (this is what gives revocation)
 

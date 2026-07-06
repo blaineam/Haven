@@ -211,19 +211,33 @@ impl DeviceList {
     /// UNION merge for multi-master accounts: when several devices each hold the account signing key
     /// (e.g. they all restored the same account from iCloud) and each self-registers its own device id,
     /// a plain higher-version-wins replace ([`adopt_if_newer`]) lets two devices clobber each other's
-    /// registration. Instead take a **2P-set union**: union the `devices` and `revoked` sets, drop
-    /// anything revoked, and (only if that changes our membership) bump past both versions and RE-SIGN
-    /// with the account key. Any holder of the account identity produces the same merged set, so all
-    /// replicas converge; revocations stick because `revoked` only grows and always beats `devices`.
-    /// Returns `None` when the merge wouldn't change our membership (no needless re-sign / rotation storm).
-    /// Both inputs must already be `verify()`-ed by the caller.
+    /// registration. Instead take a **2P-set union**: union the `devices` sets and union the `revoked`
+    /// sets — EXCEPT that where the two lists disagree about a revocation, the HIGHER-version list's
+    /// verdict wins. A pure grow-only `revoked` made un-revocation impossible: `with_self_added`
+    /// deliberately clears its own tombstone (explicit re-authorization, version-bumped), but every
+    /// union with any older copy of the roster re-added it — so a device that ever got revoked
+    /// flip-flopped forever (each flip re-signing + rotating every circle epoch: the roster/epoch
+    /// churn bug). Both lists carry the account's signature and versions only grow, so "newer verdict
+    /// wins" cannot be forged and a replayed old list can only lose. On a version TIE a revocation
+    /// stays (safe default). Returns `None` when the merge wouldn't change our membership (no
+    /// needless re-sign / rotation storm). Both inputs must already be `verify()`-ed by the caller.
     pub fn merge(&self, other: &DeviceList, account: &Identity, updated_at: u64) -> Option<DeviceList> {
         if other.account_id != self.account_id {
             return None;
         }
-        let mut revoked = self.revoked.clone();
-        for r in &other.revoked {
-            if !revoked.contains(r) {
+        let (newer, older) = if other.version > self.version { (other, self) } else { (self, other) };
+        let mut revoked: Vec<[u8; 32]> = Vec::new();
+        for r in self.revoked.iter().chain(other.revoked.iter()) {
+            if revoked.contains(r) {
+                continue;
+            }
+            // Revoked only in the older list + explicitly re-authorized by the strictly-newer one
+            // (present in its devices, absent from its revoked) → the re-authorization wins.
+            let reauthorized = newer.version > older.version
+                && older.revoked.contains(r)
+                && !newer.revoked.contains(r)
+                && newer.devices.contains(r);
+            if !reauthorized {
                 revoked.push(*r);
             }
         }
@@ -409,6 +423,41 @@ mod tests {
 
     fn id(seed: u8) -> Identity {
         Identity::from_seed(&[seed; 32])
+    }
+
+    #[test]
+    fn merge_honors_newer_reauthorization() {
+        // A device that was revoked and then explicitly re-authorized (with_self_added bumps the
+        // version and clears the tombstone) must STAY re-authorized when merged with an older copy
+        // that still carries the revocation — otherwise the tombstone flip-flops forever, re-signing
+        // the roster and rotating every circle epoch on each flip.
+        let account = id(1);
+        let dev = id(2).public().node_id_bytes();
+        let other_dev = id(3).public().node_id_bytes();
+        // v2: dev revoked.
+        let revoked_list = DeviceList::signed(&account, 2, 100, vec![other_dev], vec![dev]);
+        // Self-registration re-authorizes dev at v3.
+        let reauth = revoked_list.with_self_added(dev, &account, 200).expect("re-add clears tombstone");
+        assert_eq!(reauth.version, 3);
+        assert!(reauth.is_authorized(&dev));
+        // Merging the newer (re-authorized) list with the stale revoked copy — in either direction —
+        // must not resurrect the tombstone.
+        if let Some(m) = reauth.merge(&revoked_list, &account, 300) {
+            assert!(m.is_authorized(&dev), "newer re-authorization must win the merge");
+        } // None = no membership change, which also preserves the re-authorization.
+        let m2 = revoked_list.merge(&reauth, &account, 300).expect("stale side adopts the re-auth");
+        assert!(m2.is_authorized(&dev));
+        assert!(m2.verify(&account.public()).is_ok());
+        // A revocation that is NEWER than the device list still sticks (revoke wins going forward).
+        let re_revoked = DeviceList::signed(&account, m2.version + 1, 400, vec![other_dev], vec![dev]);
+        let m3 = m2.merge(&re_revoked, &account, 500).expect("newer revocation adopted");
+        assert!(!m3.is_authorized(&dev));
+        // And a same-version disagreement keeps the revocation (safe default on ties).
+        let tie_a = DeviceList::signed(&account, 10, 600, vec![dev, other_dev], vec![]);
+        let tie_b = DeviceList::signed(&account, 10, 600, vec![other_dev], vec![dev]);
+        if let Some(m4) = tie_a.merge(&tie_b, &account, 700) {
+            assert!(!m4.is_authorized(&dev));
+        }
     }
 
     #[test]

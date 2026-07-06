@@ -59,6 +59,10 @@ pub async fn run(cfg: Config) -> Result<()> {
                 store.display()
             );
             println!("  storage node id (volunteer_node_id): {my_hex}");
+            println!(
+                "  mailbox GC on — event entries not refreshed by any member for 30 days are pruned \
+                 (media is never pruned; first sweep waits 48h after enabling)."
+            );
 
             // Lock the mailbox to the circle's members (+ sibling relays) so only members can read or
             // enumerate it — a stranger who learns this relay's node id gets nothing (audit

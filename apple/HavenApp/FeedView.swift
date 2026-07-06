@@ -123,12 +123,21 @@ final class FeedStore: ObservableObject {
             // contact card friends pin), never a transport address. Each client hosts its relay on its own
             // id; friends reach each via the circle's relay list (the set of these ids).
             _ = social.useDeviceIdentity(deviceSeed: DeviceKeyStore.deviceAccount().secretSeed())
-            _ = social.registerDevice(deviceBundle: DeviceKeyStore.deviceBundle(),
-                                      name: DeviceKeyStore.deviceName,
-                                      createdAt: UInt64(Date().timeIntervalSince1970))
             HavenLog.net("configure account=\(social.myNodeHex().prefix(10)) instance=\(social.myDeviceNodeHex().prefix(10))")
         }
         loadPersisted()
+        // Self-register THIS device AFTER importing persisted state. Registering first wrote a fresh
+        // v1 roster that import_state's higher-version-wins restore then CLOBBERED with the persisted
+        // roster — so if that roster carried a (stale) revocation of our own device id, the device
+        // never effectively re-registered and stayed revoked forever (friends wouldn't dial us, and
+        // the re-register/re-revoke flip-flop rotated every circle epoch on each launch).
+        // Registering against the imported roster makes the re-authorization an explicit,
+        // version-bumped update that propagates (see DeviceList::merge).
+        if let social {
+            _ = social.registerDevice(deviceBundle: DeviceKeyStore.deviceBundle(),
+                                      name: DeviceKeyStore.deviceName,
+                                      createdAt: UInt64(Date().timeIntervalSince1970))
+        }
         loadLastHeard()   // so "last seen" survives an app restart
         refreshCircles()     // also purges any contaminated DM membership (see refreshCircles)
         refresh()
@@ -146,13 +155,20 @@ final class FeedStore: ObservableObject {
         // launch. One real circle had accumulated ~6700 mailbox entries for 88 events, and every
         // cold start re-pulled + re-verified all of them — the 30-second circle-feed cold start.
         // New-relay adoption and share-history still backfill immediately (their own call sites).
-        let backfillKey = "haven.lastMailboxBackfillAt"
-        if Date().timeIntervalSince1970 - UserDefaults.standard.double(forKey: backfillKey) > 86_400 {
-            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: backfillKey)
-            backfillMailbox(circleIds: circles.map(\.id))
-        }
+        dailyMailboxRefreshIfDue()
         Task { await BackgroundUploader.shared.flush() }   // retry any posts that didn't reach the mailbox
         ScheduledStore.shared.start()   // fire any "send later" posts/DMs whose time has come
+    }
+
+    /// Once a day: re-assert everything I authored — upload anything a mailbox never saw AND
+    /// TOUCH-refresh what it already holds, so relay-side mailbox GC (30-day TTL) keeps my live
+    /// entries while legacy duplicates/stale-epoch copies age out. Checked at launch and from the
+    /// 30s poll timer, so an always-open Mac (weeks between relaunches) still refreshes on time.
+    private func dailyMailboxRefreshIfDue() {
+        let backfillKey = "haven.lastMailboxBackfillAt"
+        guard Date().timeIntervalSince1970 - UserDefaults.standard.double(forKey: backfillKey) > 86_400 else { return }
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: backfillKey)
+        backfillMailbox(circleIds: circles.map(\.id))
     }
 
     // MARK: - Demo seeding (HAVEN_DEMO=1 only — PII-free synthetic content for screenshots)
@@ -175,7 +191,10 @@ final class FeedStore: ObservableObject {
         mailboxTimer?.invalidate()
         pollMailboxNow()
         mailboxTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.pollMailboxNow() }
+            Task { @MainActor in
+                self?.pollMailboxNow()
+                self?.dailyMailboxRefreshIfDue()   // long-lived sessions refresh without a relaunch
+            }
         }
     }
 
@@ -1159,7 +1178,16 @@ final class FeedStore: ObservableObject {
         nearbyBroadcast(1, payload)   // sealed — only members + the user's own devices open it, so a DM syncs to your other device too
         originateRelay(dests: members, inner: frame(1, payload))   // reach members behind a relay
         // Store-and-forward mailbox upload, queued so it finishes in the background if the user
-        // leaves the app before it lands (and is retried on next launch).
+        // leaves the app before it lands (and is retried on next launch). The epoch HEAD (my roster
+        // + current key commit) rides along: with the full-history backfill throttled to daily, a
+        // relay-only peer could otherwise pull this event long before the commit that opens it (it
+        // would sit in their pending-epoch buffer). Cheap — the commit is cached until the epoch or
+        // recipient set changes, and the persisted seen-set dedupes the re-upload.
+        if let social {
+            for head in social.exportEpochHead(circleId: circleId) {
+                BackgroundUploader.shared.enqueue(circleId: circleId, env: head)
+            }
+        }
         BackgroundUploader.shared.enqueue(circleId: circleId, env: env)
         persist()   // we just authored something — save it
     }
@@ -1554,9 +1582,16 @@ final class FeedStore: ObservableObject {
         guard !ids.isEmpty else { return }
         Task.detached(priority: .utility) {
             for cid in ids {
-                for env in social.exportMyEnvelopes(circleId: cid) {
+                let envs = social.exportMyEnvelopes(circleId: cid)
+                for env in envs {
                     await SharedStore.uploadEvent(circleId: cid, env: env)
                 }
+                // TOUCH the same refs on every relay so mailbox GC keeps them (uploadEvent is
+                // seen-set-skipped once an envelope landed ONCE — without this, nothing would
+                // ever refresh a live entry and the relay's 30-day TTL would eat real history).
+                // The relay replies with keys it lacks and those are re-PUT inside, so the
+                // daily refresh also repairs a relay that GC'd us while we were away.
+                await SharedStore.refreshMailbox(circleId: cid, envelopes: envs)
             }
         }
     }
@@ -1592,8 +1627,10 @@ final class FeedStore: ObservableObject {
         let circleId = String(data: cidData, encoding: .utf8) ?? ""
         let sealed = payload.subdata(in: (payload.startIndex + off)..<payload.endIndex)
         guard !circleId.isEmpty, !sealed.isEmpty,
-              let data = social.openCircleMedia(circleId: circleId, sealed: sealed),
-              var nodeHex = String(data: data, encoding: .utf8) else { return }
+              let opened = social.openCircleMediaSender(circleId: circleId, sealed: sealed),
+              var nodeHex = String(data: opened.data, encoding: .utf8) else { return }
+        let announcerHex = opened.senderHex.lowercased()   // authenticated envelope sender (account id)
+        let data = opened.data
         // Extended announce: JSON {node, urls, token} also carries the relay's plain-HTTP media
         // interface (the reliable cross-NAT path). Legacy announces are the bare 64-hex id.
         var announcedUrls: [String] = []
@@ -1605,13 +1642,20 @@ final class FeedStore: ObservableObject {
             nodeHex = (obj["node"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         }
         guard nodeHex.count == 64 else { return }
-        // A contact (often your OWN other device) RE-ANNOUNCED their circle relay. Previously a relay the
-        // user had deactivated/forgot stayed in `suppressed` and was permanently ignored here — so deleting
-        // your Mac's relay on your iPhone meant it never came back even when the Mac re-announced it. Now a
-        // deliberate re-announce REACTIVATES the existing inactive entry (clears suppression + active=true)
-        // rather than being dropped, so own-device / re-announced relays can resurface.
+        // A contact RE-ANNOUNCED a circle relay. Reactivating a deactivated/forgotten entry is allowed
+        // ONLY when the announce comes from the relay's OWNER — the announced id is one of the sender's
+        // own authorized device ids (their in-app relay; that's what lets your Mac's relay come back on
+        // your iPhone when the Mac itself re-announces it), or their account id (a legacy account-id
+        // relay). A THIRD-PARTY echo must never resurrect it: every member re-announces every relay
+        // they hold proof-of-life for, so a relay the user deliberately deleted — but which is still
+        // RUNNING somewhere (an old docker container, a forgotten daemon) — bounced back within one
+        // sync tick, forever (the "deleted relays keep coming back" zombie loop). Non-owner announces
+        // of a tombstoned relay are dropped entirely; brand-new relays still auto-pool below.
         let lower = nodeHex.lowercased()
+        let ownerDevices = social.deviceNodeIdsFor(accountHex: announcerHex).map { $0.lowercased() }
+        let announcerOwnsRelay = lower == announcerHex || ownerDevices.contains(lower)
         if RelayMailboxStore.shared.isForgotten(lower) || !RelayMailboxStore.shared.isActive(lower) {
+            guard announcerOwnsRelay else { return }
             RelayMailboxStore.shared.reactivate(lower)
         }
         // A contact advertised their circle relay → ADD it to our redundant set for this circle, so

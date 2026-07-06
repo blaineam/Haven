@@ -182,7 +182,26 @@ impl Node {
     pub fn enable_relay(&self, root: std::path::PathBuf) {
         let mut g = lock(&self.relay);
         if g.is_none() {
-            *g = Some(RelayCfg { root, auth: Arc::new(Mutex::new(blobstore::RelayAuth::default())), http: None });
+            *g = Some(RelayCfg { root: root.clone(), auth: Arc::new(Mutex::new(blobstore::RelayAuth::default())), http: None });
+            // Stamp the GC-enabled marker now so the 48h first-enable grace clock starts.
+            let _ = blobstore::gc_sweep(&root, blobstore::MAILBOX_TTL, blobstore::GC_GRACE);
+            // Hourly mailbox GC for the in-process store. A plain thread (not a tokio task):
+            // `RelayServerHandle.attach` calls this from outside any async runtime on the app
+            // platforms. Wakes every minute so it exits promptly once the relay is disabled.
+            let holder = Arc::downgrade(&self.relay);
+            std::thread::spawn(move || {
+                let mut slept = std::time::Duration::ZERO;
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(60));
+                    slept += std::time::Duration::from_secs(60);
+                    let Some(relay) = holder.upgrade() else { return };
+                    let Some(root) = lock(&relay).as_ref().map(|c| c.root.clone()) else { return };
+                    if slept >= blobstore::GC_INTERVAL {
+                        slept = std::time::Duration::ZERO;
+                        let _ = blobstore::gc_sweep(&root, blobstore::MAILBOX_TTL, blobstore::GC_GRACE);
+                    }
+                }
+            });
         }
     }
     /// Stop hosting (drop the relay attachment — also stops the HTTP interface if serving).
@@ -248,6 +267,17 @@ impl Node {
         root.map(|r| blobstore::local_list(&r, prefix)).unwrap_or_default()
     }
 
+    /// Refresh the liveness stamp of `keys` in the in-process relay store (the HOST's own daily
+    /// mailbox refresh — it can't TOUCH itself over iroh, self-dial guard). Returns the keys the
+    /// store does NOT hold so the caller re-PUTs them; all keys back if not hosting (caller treats
+    /// that like an unreachable relay and skips).
+    pub fn relay_local_touch(&self, keys: &[String]) -> Vec<String> {
+        let Some(root) = lock(&self.relay).as_ref().map(|c| c.root.clone()) else {
+            return keys.to_vec();
+        };
+        blobstore::local_touch(&root, keys)
+    }
+
     /// Mesh anti-entropy: pull every sealed blob a SIBLING relay holds that our in-process relay lacks,
     /// into our store (idempotent set-union). No-op if we don't host a relay. Returns blobs pulled.
     pub async fn relay_sync_from(&self, peer_node_hex: &str) -> usize {
@@ -257,24 +287,10 @@ impl Node {
         // refuses all inbound handshakes while it lives. That single line made relay-path INBOUND to
         // any relay-hosting device effectively dead (dials timed out at 30s; direct dials took ~5ms).
         let Ok(client) = self.blob_client(peer_node_hex) else { return 0 };
-        let mut pulled = 0usize;
-        let peer_keys = client.list(blobstore::SYNC_PREFIX).await.unwrap_or_default();
-        for key in blobstore::keys_to_pull(&root, &peer_keys) {
-            let Ok(local) = blobstore::safe_path(&root, &key) else { continue };
-            let Ok(Some(blob)) = client.get(&key).await else { continue };
-            if blob.is_empty() {
-                continue;
-            }
-            if let Some(parent) = local.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            let tmp = local.with_extension("part");
-            if std::fs::write(&tmp, &blob).and_then(|_| std::fs::rename(&tmp, &local)).is_ok() {
-                pulled += 1;
-            } else {
-                let _ = std::fs::remove_file(&tmp);
-            }
-        }
+        // Age-preserving pull (shared with BlobServer::sync_pull_from): expired mailbox
+        // entries are never pulled back, and pulled files keep the peer's idle age — so a
+        // GC'd entry can't ping-pong between sibling relays forever.
+        let pulled = blobstore::pull_missing_from_peer(&root, &client).await;
         let _ = client.close().await;
         pulled
     }

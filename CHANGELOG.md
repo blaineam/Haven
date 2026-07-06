@@ -9,7 +9,72 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- **Relay mailbox garbage collection (all platforms + CLI relay).** Deterministic sealing
+  stopped NEW duplicates, but the thousands of legacy ones (a random-sealed copy of every
+  event per backfill run, plus a full stale copy per epoch rotation) sat on every relay
+  forever: each 30s poll re-LISTed ~6,700 keys (~700 KB per list from a remote relay) for an
+  88-event circle, and mesh sync re-circulated the dead entries between siblings for good.
+  Entries are opaque to the relay and live keys are never re-PUT (`has()` hits skip the
+  write), so a bare mtime TTL would have eaten live history, and a deletion on one relay
+  would be resurrected by the next anti-entropy pass. Shipped as three cooperating parts
+  (`core/haven-net/blobstore.rs`, identical over iroh `haven/blob/1` and the HTTP relay):
+  1. **`TOUCH` (iroh `T` / `POST /t/<prefix>`)** — daily, each member sends the refs of every
+     envelope it can deterministically re-seal (own events + current key commit + roster) in
+     ONE batched request per relay; the relay bumps those entries' liveness (mtime) and
+     replies with the keys it lacks, which the client re-PUTs — the refresh doubles as repair
+     and self-heals a relay that GC'd a long-offline member's history. `HAS`/`HEAD` hits
+     refresh too; the host's own in-process relay is touched locally (no iroh self-dial).
+     Client wiring: iOS/macOS `SharedStore.refreshMailbox` off the daily backfill gate (now
+     also re-checked on the 30s poll timer so an always-open Mac refreshes without a
+     relaunch), Android `refreshMailboxKeys` off the persisted daily gate, desktop
+     `Engine::refresh_mailbox` off a new daily gate in the 15s loop.
+  2. **TTL sweep** — every relay host (CLI daemon, in-app RelayHost on iOS/Android/desktop,
+     `BlobServer`) hourly deletes `haven/mailbox/**` entries idle > 30 days plus abandoned
+     `.part` files; media and self-sync slots are never swept. A `.haven-gc-enabled` marker
+     delays the first deletion by 48h so members get a refresh cycle in before anything goes
+     (pre-GC stores have ancient mtimes on LIVE entries too).
+  3. **Age-preserving mesh sync (`AGES` verb)** — anti-entropy now exchanges `(key, idle-age)`
+     pairs, skips mailbox entries already past the TTL (never resurrect what's dying
+     elsewhere), and back-dates pulled files by the peer's age, so dead entries age
+     monotonically across the whole mesh instead of ping-ponging back with fresh mtimes.
+     Falls back to plain `LIST` (everything fresh) against a pre-GC sibling.
+  Net: legacy duplicates, stale-epoch copies, and retention-expired events all age out of
+  every relay within one TTL; the 30s poll LIST shrinks to the live set. Authorization
+  unchanged in spirit: TOUCH follows PUT's membership rules, broad prefixes are refused to
+  non-relays, and a member can only keep entries alive — deletion is purely the relay's local
+  TTL policy. Accepted tradeoff (documented): an author inactive on ALL devices for > 30 days
+  drops off relays until their next refresh re-PUTs everything; devices stay the source of
+  truth. Also pinned `RUSTC` in `android/build-rust.sh` (parity with the Apple script) so a
+  Homebrew rust can't shadow rustup's Android-capable toolchain.
+
 ### Fixed
+- **Own-device revocation flip-flop — posts not syncing between your own devices (all
+  platforms).** The account's device roster had the Mac's own device id stuck in `revoked`
+  (observed live: roster v54 with the Mac's transport id revoked), so siblings never dialed it
+  directly and every roster exchange re-signed + rotated every circle's epoch (`my_epoch: 76`
+  on an 88-event circle). Two compounding bugs: (1) `DeviceList` union-merge treated `revoked`
+  as grow-only, so the explicit re-authorization `register_device` performs at launch was
+  re-tombstoned by ANY older roster copy — un-revocation could never propagate. Where two
+  account-signed copies now disagree about a revocation, the strictly-newer version's verdict
+  wins (replays have lower versions; ties keep the revocation). (2) iOS and Android
+  self-registered BEFORE importing persisted state, so the imported (higher-version) roster
+  clobbered the registration every launch — registration now runs after import (desktop already
+  did). Ship to ALL your devices: an un-updated device keeps re-adding the tombstone.
+- **Deleted/deactivated relays stop resurrecting (all platforms).** Every member re-announces
+  every relay it holds proof-of-life for, and ANY announce reactivated a deactivated/forgotten
+  entry — so a relay you deleted but which is still running somewhere (an old docker container)
+  bounced back within one sync tick, forever. Reactivating an existing tombstoned entry now
+  requires the announce to come from the relay's OWNER (the announced id is one of the sender's
+  authorized device ids, or their account id for legacy account-id relays), authenticated via
+  the sealed announce's verified sender (new FFI `open_circle_media_sender`). Third-party
+  echoes of a tombstoned relay are dropped; brand-new relays still auto-pool.
+- **Posts now carry their key commit to the mailbox.** With the full-history backfill throttled
+  to daily, a relay-only peer could receive an event sealed under a fresh epoch long before the
+  commit that opens it (it sat undecryptable in the pending-epoch buffer). Every authored event
+  now uploads the epoch head (roster + current key commit, new FFI `export_epoch_head`)
+  alongside it — near-free, since the commit is cached until the epoch/recipient set changes
+  and the persisted seen-set dedupes.
 - **30-second cold start on the circle feed, root-caused and fixed (all platforms).** Two
   compounding bugs:
   1. **The mailbox seen-set wasn't persisted.** Every cold start treated the ENTIRE relay

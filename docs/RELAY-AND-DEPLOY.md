@@ -75,6 +75,45 @@ relay). The pieces:
    the desktop engine auto-syncs its hosted relay from every adopted sibling (health-aware, so a
    down peer is skipped). Every official client can be a full mesh node, not just the CLI.
 
+### Mailbox garbage collection — TOUCH + TTL + age-preserving sync (implemented)
+
+Before deterministic event sealing (see [`GROUP-KEYING.md`](GROUP-KEYING.md)), every backfill
+re-sealed history into fresh bytes, so mailboxes accumulated a copy of every event per run —
+a real circle held **~6,700 entries for 88 events**. The persisted seen-set fixed cold-start
+re-ingestion, but every 30s poll still `LIST`ed all keys (~700 KB per list from a remote
+relay) and mesh sync circulated the dead entries forever. Entries are **opaque** to the relay
+and live keys are never re-PUT (`has()` hits skip the write), so a naive mtime TTL would eat
+live history; and a deletion on one relay would be resurrected by the next anti-entropy pass.
+GC therefore has three cooperating parts (all in `core/haven-net/blobstore.rs`, served
+identically over iroh `haven/blob/1` and the plain-HTTP interface):
+
+1. **Client-declared liveness (`TOUCH` / `POST /t/<prefix>`).** Daily, each member re-seals
+   what it can deterministically reproduce (its OWN events + current key commit + roster) and
+   sends the refs in ONE batched TOUCH per relay. The relay bumps those entries' mtimes and
+   replies with the keys it does NOT hold; the client re-PUTs the misses — the refresh doubles
+   as repair (and self-heals a relay that GC'd a returning member's history). `HAS` hits
+   refresh too. Own hosted relays are touched locally (no iroh self-dial).
+2. **TTL sweep (`gc_sweep`).** Every relay host — CLI daemon, in-app RelayHost (iOS/Android/
+   desktop), `BlobServer` — hourly deletes `haven/mailbox/**` entries idle > **30 days**
+   (`MAILBOX_TTL`), plus abandoned `.part` files. Media and self-sync slots are NEVER swept.
+   A `.haven-gc-enabled` marker delays the first deletion by **48h** after the store first
+   runs GC-aware code, so every member gets a daily-refresh cycle to stamp live entries
+   (pre-GC stores have ancient mtimes on live keys too).
+3. **Age-preserving mesh sync (`AGES` verb).** Anti-entropy now reads `(key, idle-age)` pairs,
+   **skips mailbox entries already past the TTL** (never resurrect what's dying elsewhere),
+   and back-dates a pulled file's mtime by the peer's age — dead entries age monotonically
+   mesh-wide instead of ping-ponging between siblings with fresh mtimes. Against a pre-GC
+   peer that only speaks `LIST`, everything counts as fresh (old behavior, transitional).
+
+Net effect: legacy duplicates, stale-epoch copies, and retention-expired events all stop
+being touched and age out of every relay within one TTL; the 30s poll shrinks back to the
+live set. Accepted tradeoff: an author inactive on ALL devices for > 30 days falls off the
+relays until they return (their next refresh re-PUTs everything); members' devices remain
+the source of truth — the relay is a mailbox, not an archive. Authorization: TOUCH follows
+the PUT rules (circle members + sibling relays only, once membership is configured), broad
+TOUCH/AGES prefixes are refused to non-relays, and a member can at most keep entries alive —
+it can never delete (deletion is purely the relay's local TTL policy).
+
 **Security note (review before relying on it in production):** replication never widens content exposure —
 adopting a relay already hands it the full (sealed) mailbox, so a peer relay holding the same
 ciphertext is no new disclosure. The review items are (a) **amplification/DoS** — cap peer

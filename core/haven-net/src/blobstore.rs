@@ -12,7 +12,41 @@
 //!   GET <key>           → returns the stored body         → reply: OK <len> <bytes> | MISS
 //!   HAS <key>           → existence check                 → reply: HIT | MISS
 //!   LIST <prefix>       → newline-joined keys under prefix → reply: OK <len> <bytes>
+//!   TOUCH <prefix> + keys → refresh liveness of the listed keys → reply: OK [+ missing keys]
+//!   AGES <prefix>       → "<age-secs> <key>" lines under prefix (for age-aware mesh sync)
 //! ```
+//!
+//! ## Mailbox garbage collection (TOUCH + TTL)
+//!
+//! Event envelopes now seal deterministically, but the mailbox had already accumulated
+//! thousands of legacy duplicates (a fresh random-sealed copy of every event per backfill
+//! run, plus a full stale copy per epoch rotation) — ~6,700 entries for an 88-event circle,
+//! re-LISTed on every 30s poll and re-circulated forever by mesh sync. Entries are opaque
+//! to the relay and live keys are never re-PUT (`has()` hits skip the write), so a naive
+//! mtime TTL would delete live history. GC therefore works on **client-declared liveness**:
+//!
+//! - Each member's app periodically (daily) sends `TOUCH` with the refs of every envelope
+//!   it can deterministically re-seal (its OWN events + current key commit + roster) — one
+//!   ~key-list request, not one round-trip per key. The relay bumps those files' mtimes and
+//!   replies with the keys it does NOT hold, which the client re-PUTs (refresh = repair).
+//!   `HAS` hits refresh mtime too.
+//! - [`gc_sweep`] runs hourly on every relay host and deletes `haven/mailbox/**` entries
+//!   whose mtime is older than [`MAILBOX_TTL`] (30 days). Live entries are touched daily by
+//!   each active author; legacy duplicates, stale-epoch copies, and retention-expired
+//!   events are never touched again, so they age out everywhere. Media (`haven/media/…`)
+//!   and self-sync slots are NEVER swept.
+//! - Mesh sync is **age-preserving** so a deletion isn't resurrected: `AGES` reports each
+//!   key's idle age, a puller skips mailbox entries already older than the TTL, and it
+//!   back-dates the pulled file's mtime by the peer's age — dead entries age monotonically
+//!   across the whole mesh instead of ping-ponging between relays with fresh mtimes.
+//! - A first-enable grace ([`GC_GRACE`], 48h, tracked by a `.haven-gc-enabled` marker in
+//!   the store root) gives every member a daily-refresh cycle to stamp live entries before
+//!   the first sweep may delete anything (pre-GC stores have ancient mtimes on LIVE keys).
+//!
+//! Tradeoff (accepted, documented): an author inactive on ALL devices for > TTL stops
+//! refreshing; their envelopes fall off relays until they return (their next refresh
+//! re-PUTs every miss). Members' local stores are the source of truth — the relay is a
+//! store-and-forward mailbox, not an archive.
 //!
 //! ## Content-addressed, relay-opaque
 //!
@@ -52,6 +86,19 @@ pub const BLOB_ALPN: &[u8] = b"haven/blob/1";
 const MAX_BLOB: u64 = 256 * 1024 * 1024;
 /// Hard cap on a key length (keys are short content-addressed paths).
 const MAX_KEY: usize = 512;
+/// Hard cap on a TOUCH request body (newline-joined keys — thousands of refs fit easily).
+const MAX_TOUCH_BODY: u64 = 256 * 1024;
+
+/// The namespace mailbox GC applies to. Media + self-sync slots are never swept.
+pub(crate) const MAILBOX_PREFIX: &str = "haven/mailbox/";
+/// A mailbox entry idle (no PUT / HAS hit / TOUCH) longer than this is garbage-collected.
+/// Clients refresh their live refs daily, so 30 days tolerates a month of total inactivity.
+pub const MAILBOX_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 3600);
+/// After GC is first enabled on a store, wait this long before the first deletion — every
+/// member gets a daily-refresh cycle to stamp its live entries (pre-GC mtimes are ancient).
+pub const GC_GRACE: std::time::Duration = std::time::Duration::from_secs(48 * 3600);
+/// How often a relay host runs [`gc_sweep`].
+pub const GC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
 
 // --- request framing ----------------------------------------------------------------
 //
@@ -75,6 +122,10 @@ const VERB_PUT: u8 = b'P';
 const VERB_GET: u8 = b'G';
 const VERB_HAS: u8 = b'H';
 const VERB_LIST: u8 = b'L';
+/// Refresh liveness of a batch of keys (body = newline-joined keys under the header prefix).
+const VERB_TOUCH: u8 = b'T';
+/// LIST with idle ages ("<age-secs> <key>" lines) — for age-preserving mesh sync.
+const VERB_AGES: u8 = b'A';
 
 /// Sentinel returned by GET when the key is absent. Chosen to be distinguishable from a
 /// stored blob: it begins with a NUL and is exactly these 5 bytes.
@@ -89,24 +140,59 @@ impl<T, E: std::fmt::Debug> IntoAnyhow<T> for std::result::Result<T, E> {
     }
 }
 
-/// Validate a blob key and resolve it to a concrete path **inside** `root`, refusing any
-/// key that could escape the store directory. Returns the joined path.
-/// Pure mesh-sync decision: of the keys a peer advertises, which should we pull? Those that
-/// (a) stay inside our namespace (no traversal / absolute / `..`), and (b) we don't already
-/// hold — capped at `MAX_SYNC_PULL`. Factored out so the set-difference + safety logic is
-/// unit-testable without a live network.
-pub(crate) fn keys_to_pull(root: &Path, peer_keys: &[String]) -> Vec<String> {
+/// Pure mesh-sync decision: of the `(key, idle-age-secs)` pairs a peer advertises, which
+/// should we pull? Those that (a) stay inside our namespace (no traversal / absolute /
+/// `..`), (b) we don't already hold, and (c) for mailbox entries, aren't already past the
+/// GC TTL — pulling one of those would RESURRECT an entry that is dying (or already
+/// deleted) everywhere else, which is exactly how dead entries used to circulate forever.
+/// Capped at `MAX_SYNC_PULL`. Factored out so the set-difference + safety + age logic is
+/// unit-testable without a live network. (A legacy peer that can't report ages advertises
+/// age 0, i.e. "fresh" — old pull-everything behavior during the transition.)
+pub(crate) fn keys_to_pull(root: &Path, peer_keys: &[(String, u64)]) -> Vec<(String, u64)> {
+    let ttl = MAILBOX_TTL.as_secs();
     let mut out = Vec::new();
-    for key in peer_keys {
+    for (key, age) in peer_keys {
         if out.len() >= MAX_SYNC_PULL {
             break;
         }
+        if *age >= ttl && key.starts_with(MAILBOX_PREFIX) {
+            continue; // expired on the peer's clock → never resurrect
+        }
         match safe_path(root, key) {
-            Ok(p) if !p.is_file() => out.push(key.clone()),
+            Ok(p) if !p.is_file() => out.push((key.clone(), *age)),
             _ => {} // already have it, or it escapes our namespace → never pull
         }
     }
     out
+}
+
+/// Bump a stored blob's mtime to "now" — the liveness stamp GC ages against.
+fn touch_now(path: &Path) {
+    let _ = std::fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|f| f.set_modified(std::time::SystemTime::now()));
+}
+
+/// Back-date a just-pulled blob's mtime by the peer's reported idle age, so replication
+/// preserves age instead of resetting it (resetting is what resurrected dead entries).
+fn backdate(path: &Path, age_secs: u64) {
+    if age_secs == 0 {
+        return; // already "now"
+    }
+    let then = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
+    let _ = std::fs::File::options().write(true).open(path).and_then(|f| f.set_modified(then));
+}
+
+/// Seconds since a file was last written/touched (0 on any error → treated as fresh, so a
+/// filesystem hiccup can never make an entry look expired).
+fn idle_age_secs(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn hex(b: &[u8]) -> String {
@@ -228,6 +314,78 @@ pub(crate) fn local_list(root: &Path, prefix: &str) -> Vec<String> {
     out
 }
 
+/// Like [`local_list`] but with each key's idle age in seconds — the AGES verb / age-aware
+/// mesh sync read their inventory through this.
+pub(crate) fn local_list_ages(root: &Path, prefix: &str) -> Vec<(String, u64)> {
+    local_list(root, prefix)
+        .into_iter()
+        .filter_map(|key| safe_path(root, &key).ok().map(|p| (key, idle_age_secs(&p))))
+        .collect()
+}
+
+/// Refresh the liveness stamp (mtime) of every key in `keys` the store holds; returns the
+/// keys it does NOT hold so the caller can re-PUT them (refresh doubles as repair). The
+/// in-process host calls this directly for its own store (no iroh self-dial); remote
+/// clients reach it via the TOUCH verb / `POST /t/`.
+pub(crate) fn local_touch(root: &Path, keys: &[String]) -> Vec<String> {
+    let mut misses = Vec::new();
+    for key in keys {
+        match safe_path(root, key) {
+            Ok(p) if p.is_file() => touch_now(&p),
+            Ok(_) => misses.push(key.clone()),
+            Err(_) => {} // unsafe key: neither touched nor reported (don't invite a re-PUT)
+        }
+    }
+    misses
+}
+
+/// Garbage-collect the mailbox namespace: delete `haven/mailbox/**` entries idle longer
+/// than `ttl`, plus abandoned `.part` temp files (> 1h old), then prune empty directories.
+/// Returns how many entries were deleted. ONLY the mailbox is swept — media and self-sync
+/// slots are permanent until explicitly erased.
+///
+/// A `.haven-gc-enabled` marker in the store root (created on first call) delays the first
+/// deletion by `grace`: a pre-GC store has ancient mtimes on LIVE entries too, so members
+/// need one daily-refresh cycle to stamp them before anything may be deleted.
+pub fn gc_sweep(root: &Path, ttl: std::time::Duration, grace: std::time::Duration) -> usize {
+    let marker = root.join(".haven-gc-enabled");
+    if !marker.is_file() {
+        if let Some(parent) = marker.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let _ = std::fs::write(&marker, b"");
+        return 0;
+    }
+    if idle_age_secs(&marker) < grace.as_secs() {
+        return 0; // inside the first-enable grace window
+    }
+    let Ok(mailbox_root) = safe_path(root, MAILBOX_PREFIX) else { return 0 };
+    let mut deleted = 0usize;
+    sweep_dir(&mailbox_root, ttl.as_secs(), &mut deleted);
+    deleted
+}
+
+/// Recursive TTL sweep under `dir`; removes directories that end up empty (best-effort).
+fn sweep_dir(dir: &Path, ttl_secs: u64, deleted: &mut usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            sweep_dir(&path, ttl_secs, deleted);
+            let _ = std::fs::remove_dir(&path); // only succeeds if now empty
+        } else if path.is_file() {
+            let is_part = path.extension().map(|e| e == "part").unwrap_or(false);
+            let age = idle_age_secs(&path);
+            // Abandoned temp writes go after an hour; real entries after the TTL.
+            if (is_part && age > 3600) || (!is_part && age > ttl_secs) {
+                if std::fs::remove_file(&path).is_ok() {
+                    *deleted += 1;
+                }
+            }
+        }
+    }
+}
+
 pub struct BlobServer {
     endpoint: Endpoint,
     secret: [u8; 32],
@@ -255,6 +413,16 @@ impl BlobServer {
         let srv = Arc::new(Self { endpoint, secret, root: root.clone(), auth: Arc::new(Mutex::new(RelayAuth::default())) });
         let acc = srv.clone();
         tokio::spawn(async move { acc.accept_loop(root).await });
+        // Hourly mailbox GC (see the module docs): entries idle > MAILBOX_TTL age out; the
+        // task holds only a Weak so a dropped server stops sweeping.
+        let weak = Arc::downgrade(&srv);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(GC_INTERVAL).await;
+                let Some(srv) = weak.upgrade() else { break };
+                let _ = gc_sweep(&srv.root, MAILBOX_TTL, GC_GRACE);
+            }
+        });
         Ok(srv)
     }
 
@@ -296,25 +464,7 @@ impl BlobServer {
             self.endpoint.clone(),
             EndpointAddr::new(parse_node_id(peer_node_hex)?),
         )?;
-        let mut pulled = 0usize;
-        let peer_keys = client.list(SYNC_PREFIX).await.unwrap_or_default();
-        for key in keys_to_pull(&self.root, &peer_keys) {
-            let Ok(local) = safe_path(&self.root, &key) else { continue };
-            // `get` caps the read at MAX_BLOB, so an oversized body can't blow up memory.
-            let Ok(Some(blob)) = client.get(&key).await else { continue };
-            if blob.is_empty() {
-                continue;
-            }
-            if let Some(parent) = local.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            let tmp = local.with_extension("part");
-            if std::fs::write(&tmp, &blob).and_then(|_| std::fs::rename(&tmp, &local)).is_ok() {
-                pulled += 1;
-            } else {
-                let _ = std::fs::remove_file(&tmp);
-            }
-        }
+        let pulled = pull_missing_from_peer(&self.root, &client).await;
         let _ = client.close().await;
         Ok(pulled)
     }
@@ -368,6 +518,47 @@ impl BlobServer {
     }
 }
 
+/// One age-preserving anti-entropy pass: pull every blob the peer behind `client` holds
+/// (under the Haven namespace) that `root` lacks. Shared by [`BlobServer::sync_pull_from`]
+/// and the in-node relay attachment (`Node::relay_sync_from`) so the age semantics can't
+/// drift apart. Expired mailbox entries are never pulled, and a pulled file keeps the
+/// peer's idle age (see [`keys_to_pull`] / [`backdate`]) — that pair is what stops mesh
+/// sync from resurrecting GC'd entries forever.
+pub(crate) async fn pull_missing_from_peer(root: &Path, client: &BlobClient) -> usize {
+    // Age-aware inventory when the peer speaks AGES; a pre-GC peer only speaks LIST, so
+    // everything it advertises counts as fresh (the old pull-everything behavior).
+    let peer_keys = match client.list_ages(SYNC_PREFIX).await {
+        Ok(v) => v,
+        Err(_) => client
+            .list(SYNC_PREFIX)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|k| (k, 0))
+            .collect(),
+    };
+    let mut pulled = 0usize;
+    for (key, age) in keys_to_pull(root, &peer_keys) {
+        let Ok(local) = safe_path(root, &key) else { continue };
+        // `get` caps the read at MAX_BLOB, so an oversized body can't blow up memory.
+        let Ok(Some(blob)) = client.get(&key).await else { continue };
+        if blob.is_empty() {
+            continue;
+        }
+        if let Some(parent) = local.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let tmp = local.with_extension("part");
+        if std::fs::write(&tmp, &blob).and_then(|_| std::fs::rename(&tmp, &local)).is_ok() {
+            backdate(&local, age);
+            pulled += 1;
+        } else {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+    pulled
+}
+
 /// The circle id in a `haven/mailbox/<circle>/...` key, or None for non-mailbox / too-broad keys.
 fn mailbox_circle(key: &str) -> Option<&str> {
     let rest = key.strip_prefix("haven/mailbox/")?;
@@ -393,8 +584,8 @@ fn mailbox_forbidden(auth: &Arc<Mutex<RelayAuth>>, peer: &str, verb: u8, key: &s
     if a.relays.contains(peer) {
         return false; // sibling relay → may sync freely (mesh anti-entropy)
     }
-    if verb == VERB_LIST && is_broad_mailbox_prefix(key) {
-        return true; // a non-relay may not enumerate across circles
+    if (verb == VERB_LIST || verb == VERB_AGES || verb == VERB_TOUCH) && is_broad_mailbox_prefix(key) {
+        return true; // a non-relay may not enumerate (or keep-alive) across circles
     }
     match mailbox_circle(key) {
         Some(circle) => !a.members.get(circle).map(|m| m.contains(peer)).unwrap_or(false),
@@ -510,8 +701,44 @@ pub(crate) async fn handle_request(
             let _ = send.finish();
         }
         VERB_HAS => {
-            let exists = safe_path(&root, &key).map(|p| p.is_file()).unwrap_or(false);
+            let exists = match safe_path(&root, &key) {
+                Ok(p) if p.is_file() => {
+                    // A HAS hit is proof the caller still cares about this entry —
+                    // refresh its liveness stamp so mailbox GC keeps it.
+                    touch_now(&p);
+                    true
+                }
+                _ => false,
+            };
             let _ = send.write_all(if exists { b"HIT" } else { b"MISS" }).await;
+            let _ = send.finish();
+        }
+        VERB_TOUCH => {
+            // Body = newline-joined keys to refresh; every key must live under the header
+            // prefix (so per-circle membership auth above covers all of them). Reply:
+            // "OK" + the keys we do NOT hold (the caller re-PUTs those — refresh = repair).
+            let blen = recv.read_u64().await.ah()?;
+            if blen > MAX_TOUCH_BODY {
+                let _ = send.write_all(b"ERR too big").await;
+                let _ = send.finish();
+                return Ok(());
+            }
+            let mut body = vec![0u8; blen as usize];
+            recv.read_exact(&mut body).await.ah()?;
+            // Confine to the authorized prefix as a DIRECTORY ("fam" must not match "famX").
+            let want = if key.ends_with('/') { key.clone() } else { format!("{key}/") };
+            let keys: Vec<String> = String::from_utf8_lossy(&body)
+                .lines()
+                .filter(|k| k.starts_with(&want))
+                .map(|k| k.to_string())
+                .collect();
+            let misses = local_touch(&root, &keys);
+            let mut reply = String::from("OK");
+            for m in &misses {
+                reply.push('\n');
+                reply.push_str(m);
+            }
+            let _ = send.write_all(reply.as_bytes()).await;
             let _ = send.finish();
         }
         VERB_LIST => {
@@ -522,6 +749,21 @@ pub(crate) async fn handle_request(
             }
             keys.sort();
             let body = keys.join("\n");
+            let _ = send.write_all(body.as_bytes()).await;
+            let _ = send.finish();
+        }
+        VERB_AGES => {
+            // LIST with idle ages: "<age-secs> <key>" per line — the age-preserving mesh
+            // sync inventory. Same auth shape as LIST (checked above). A bad prefix yields
+            // an empty reply — local_list's fall-back-to-root would enumerate self/ slots.
+            let mut pairs =
+                if safe_path(&root, &key).is_ok() { local_list_ages(&root, &key) } else { Vec::new() };
+            pairs.sort();
+            let body = pairs
+                .into_iter()
+                .map(|(k, age)| format!("{age} {k}"))
+                .collect::<Vec<_>>()
+                .join("\n");
             let _ = send.write_all(body.as_bytes()).await;
             let _ = send.finish();
         }
@@ -675,6 +917,51 @@ impl BlobClient {
         Ok(reply == b"HIT")
     }
 
+    /// Refresh the liveness of `keys` (all under `prefix`, a single circle's mailbox path)
+    /// so mailbox GC keeps them; returns the keys the relay does NOT hold — the caller
+    /// re-PUTs those (refresh doubles as repair). One request for the whole batch.
+    pub async fn touch(&self, prefix: &str, keys: &[String]) -> Result<Vec<String>> {
+        let body = keys.join("\n");
+        if body.len() as u64 > MAX_TOUCH_BODY {
+            bail!("touch batch too large");
+        }
+        let conn = self.conn().await?;
+        let (mut send, mut recv) = conn.open_bi().await.ah()?;
+        write_header(&mut send, VERB_TOUCH, prefix).await?;
+        send.write_u64(body.len() as u64).await.ah()?;
+        send.write_all(body.as_bytes()).await.ah()?;
+        send.finish().ah()?;
+        let reply = recv.read_to_end(MAX_TOUCH_BODY as usize + 16).await.ah()?;
+        let text = String::from_utf8_lossy(&reply);
+        let mut lines = text.lines();
+        match lines.next() {
+            Some("OK") => Ok(lines.map(|s| s.to_string()).collect()),
+            other => bail!("touch failed: {}", other.unwrap_or("empty reply")),
+        }
+    }
+
+    /// Keys under `prefix` with idle ages ("seconds since last write/touch") — the
+    /// age-preserving mesh-sync inventory. Errors against a pre-GC relay that doesn't
+    /// speak AGES; callers fall back to [`Self::list`] (age 0 = fresh).
+    pub async fn list_ages(&self, prefix: &str) -> Result<Vec<(String, u64)>> {
+        let conn = self.conn().await?;
+        let (mut send, mut recv) = conn.open_bi().await.ah()?;
+        write_header(&mut send, VERB_AGES, prefix).await?;
+        send.write_u64(0).await.ah()?;
+        send.finish().ah()?;
+        let bytes = recv.read_to_end(MAX_BLOB as usize).await.ah()?;
+        let text = String::from_utf8_lossy(&bytes);
+        if text.starts_with("ERR") {
+            bail!("ages failed: {text}");
+        }
+        let mut out = Vec::new();
+        for line in text.lines() {
+            let Some((age, key)) = line.split_once(' ') else { bail!("bad ages line") };
+            out.push((key.to_string(), age.parse::<u64>().map_err(|_| anyhow!("bad age"))?));
+        }
+        Ok(out)
+    }
+
     /// List stored keys under `prefix` (e.g. a circle's mailbox path). Used to poll the
     /// mailbox for new sealed posts.
     pub async fn list(&self, prefix: &str) -> Result<Vec<String>> {
@@ -767,22 +1054,94 @@ mod tests {
     }
 
     #[test]
-    fn keys_to_pull_skips_local_and_unsafe() {
+    fn keys_to_pull_skips_local_unsafe_and_expired() {
         let dir = std::env::temp_dir().join(format!("haven-sync-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("haven/mailbox/fam")).unwrap();
         // We already hold this one.
         std::fs::write(dir.join("haven/mailbox/fam/have"), b"x").unwrap();
 
-        let peer = vec![
-            "haven/mailbox/fam/have".to_string(),   // already local → skip
-            "haven/mailbox/fam/missing".to_string(), // we lack it → pull
-            "haven/media/blob1".to_string(),         // we lack it → pull
-            "../etc/passwd".to_string(),             // path traversal → never
-            "/abs/evil".to_string(),                 // absolute → never
+        let ttl = MAILBOX_TTL.as_secs();
+        let peer: Vec<(String, u64)> = vec![
+            ("haven/mailbox/fam/have".to_string(), 0),    // already local → skip
+            ("haven/mailbox/fam/missing".to_string(), 0), // we lack it → pull
+            ("haven/media/blob1".to_string(), 0),         // we lack it → pull
+            ("../etc/passwd".to_string(), 0),             // path traversal → never
+            ("/abs/evil".to_string(), 0),                 // absolute → never
+            // Mailbox entry already past the GC TTL on the peer → dying/deleted everywhere
+            // else; pulling it would RESURRECT it. Never pull.
+            ("haven/mailbox/fam/expired".to_string(), ttl + 5),
+            // Media has no TTL → an old age never blocks replication.
+            ("haven/media/ancient".to_string(), ttl + 5),
         ];
         let want = keys_to_pull(&dir, &peer);
-        assert_eq!(want, vec!["haven/mailbox/fam/missing".to_string(), "haven/media/blob1".to_string()]);
+        assert_eq!(
+            want,
+            vec![
+                ("haven/mailbox/fam/missing".to_string(), 0),
+                ("haven/media/blob1".to_string(), 0),
+                ("haven/media/ancient".to_string(), ttl + 5),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn touch_refreshes_ages_and_reports_misses() {
+        let dir = std::env::temp_dir().join(format!("haven-touch-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        local_put(&dir, "haven/mailbox/fam/live", b"sealed").unwrap();
+        let path = safe_path(&dir, "haven/mailbox/fam/live").unwrap();
+        backdate(&path, 10 * 24 * 3600);
+        assert!(idle_age_secs(&path) > 9 * 24 * 3600, "backdate applies");
+        // local_list_ages reports the idle age alongside the key.
+        let ages = local_list_ages(&dir, "haven/mailbox/fam/");
+        assert_eq!(ages.len(), 1);
+        assert!(ages[0].0 == "haven/mailbox/fam/live" && ages[0].1 > 9 * 24 * 3600);
+        // TOUCH refreshes what exists, reports what doesn't, ignores unsafe keys.
+        let misses = local_touch(
+            &dir,
+            &[
+                "haven/mailbox/fam/live".to_string(),
+                "haven/mailbox/fam/gone".to_string(),
+                "../etc/passwd".to_string(),
+            ],
+        );
+        assert_eq!(misses, vec!["haven/mailbox/fam/gone".to_string()]);
+        assert!(idle_age_secs(&path) < 60, "touch resets the liveness clock");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gc_sweeps_only_stale_mailbox_entries_after_grace() {
+        let dir = std::env::temp_dir().join(format!("haven-gc-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        local_put(&dir, "haven/mailbox/fam/stale", b"x").unwrap();
+        local_put(&dir, "haven/mailbox/dm:a-b/stale", b"x").unwrap();
+        local_put(&dir, "haven/mailbox/fam/live", b"x").unwrap();
+        local_put(&dir, "haven/media/ancient", b"x").unwrap();
+        std::fs::write(dir.join("self-slot"), b"x").unwrap();
+        let ttl_plus = MAILBOX_TTL.as_secs() + 24 * 3600;
+        for key in ["haven/mailbox/fam/stale", "haven/mailbox/dm:a-b/stale", "haven/media/ancient"] {
+            backdate(&safe_path(&dir, key).unwrap(), ttl_plus);
+        }
+        backdate(&dir.join("self-slot"), ttl_plus);
+        // First call only plants the marker; nothing may be deleted inside the grace window.
+        assert_eq!(gc_sweep(&dir, MAILBOX_TTL, GC_GRACE), 0);
+        assert!(local_has(&dir, "haven/mailbox/fam/stale"));
+        assert_eq!(gc_sweep(&dir, MAILBOX_TTL, GC_GRACE), 0, "still inside grace");
+        // Age the marker past the grace → stale mailbox entries (and ONLY those) go.
+        backdate(&dir.join(".haven-gc-enabled"), GC_GRACE.as_secs() + 3600);
+        assert_eq!(gc_sweep(&dir, MAILBOX_TTL, GC_GRACE), 2);
+        assert!(!local_has(&dir, "haven/mailbox/fam/stale"));
+        assert!(!local_has(&dir, "haven/mailbox/dm:a-b/stale"));
+        assert!(local_has(&dir, "haven/mailbox/fam/live"), "fresh entries survive");
+        assert!(local_has(&dir, "haven/media/ancient"), "media is never swept");
+        assert!(dir.join("self-slot").is_file(), "non-mailbox files are never swept");
+        // The emptied dm circle directory is pruned; the still-populated one remains.
+        assert!(!safe_path(&dir, "haven/mailbox/dm:a-b").unwrap().exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

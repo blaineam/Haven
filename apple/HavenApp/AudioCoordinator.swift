@@ -58,6 +58,9 @@ final class AudioCoordinator: ObservableObject {
     /// even when the app is in the background, so a background feed refresh re-running syncPlayback was
     /// kicking the post song on out of nowhere. Cleared when the app is active again.
     private var backgrounded = false
+    /// A call is ringing/connecting/in progress — call audio owns the stage: no post music, no video
+    /// audio (videos keep playing, muted). Computed live so scroll-driven start() can't race a flag.
+    private var callActive: Bool { CallManager.shared.callInProgress }
 
     /// Begin a post's audio. If a song is attached it plays (video muted). Otherwise the
     /// author's `muteVideo` choice decides: off → the video plays its own audio; on → silent.
@@ -70,7 +73,8 @@ final class AudioCoordinator: ObservableObject {
         // Play the video's own audio only when there's no song, the author left it unmuted, the app
         // isn't globally silenced, AND the viewer's GLOBAL video-sound toggle is on. The global flag is
         // what makes "tap one video to unmute" carry to every other video + survive loops.
-        let playVideoAudio = (track == nil) && !muteVideo && !SettingsStore.shared.silent && SettingsStore.shared.videoSoundOn
+        let playVideoAudio = (track == nil) && !muteVideo && !SettingsStore.shared.silent
+            && SettingsStore.shared.videoSoundOn && !callActive
         videoUnmuted = playVideoAudio
         video?.volume = playVideoAudio ? 1 : 0
         // Never auto-start the song while backgrounded (the system music player would play it audibly even
@@ -80,7 +84,7 @@ final class AudioCoordinator: ObservableObject {
 
     /// Tap-to-toggle a music-only post's sound (pause/resume the song).
     func toggleMusic(postId: String, track: TrackRefFfi?) {
-        guard !SettingsStore.shared.silent else { return }
+        guard !SettingsStore.shared.silent, !callActive else { return }
         if activePostId != postId { start(postId: postId, track: track, video: nil) }
         if MusicPlayback.shared.isPlaying { MusicPlayback.shared.duck() }
         else { MusicPlayback.shared.resume() }
@@ -93,6 +97,7 @@ final class AudioCoordinator: ObservableObject {
             videoPlayer?.volume = 0
             videoUnmuted = false
         } else {
+            guard !callActive else { return }   // un-silencing mid-call must not raise feed audio
             // Unmute must actually (re)start audio for the active post — not just flip a flag.
             // If a song is attached but was never queued (play() bails while silent), there's
             // nothing to resume — so reissue a full play of the active post's track.
@@ -111,7 +116,7 @@ final class AudioCoordinator: ObservableObject {
     /// Toggle the video's own audio, crossfading against the song. Flips the GLOBAL video-sound toggle
     /// so the choice applies to every video and persists across loops/scroll (not just this one post).
     func toggleVideoAudio() {
-        guard !SettingsStore.shared.silent else { return }   // app is muted
+        guard !SettingsStore.shared.silent, !callActive else { return }   // app muted / call owns audio
         let on = !videoUnmuted
         videoUnmuted = on
         SettingsStore.shared.videoSoundOn = on
@@ -138,6 +143,17 @@ final class AudioCoordinator: ObservableObject {
         backgrounded = true
         MusicPlayback.shared.duck()
         videoPlayer?.pause()
+    }
+
+    /// A call just started (outgoing dial or incoming ring): cut feed audio IMMEDIATELY so the
+    /// ring/voice never competes with a post song or a video's soundtrack. Videos keep playing,
+    /// muted. While `callActive` is true every raise-audio path above is also gated, so nothing
+    /// can sneak the volume back up mid-call; normal rules resume once the call tears down.
+    func silenceForCall() {
+        fadeTimer?.invalidate(); fadeTimer = nil
+        MusicPlayback.shared.duck()
+        videoPlayer?.volume = 0
+        videoUnmuted = false
     }
 
     /// App returned to the foreground — allow playback again (it only actually resumes on the feed, via
@@ -197,11 +213,15 @@ final class MusicPlayback {
     /// from whatever the user is listening to, and a background launch can reach these paths with
     /// no scenePhase change ever having fired.
     private var appFrontmost: Bool { NSApplication.shared.isActive }
+    /// NEVER start/resume while a call is ringing/connecting/live — call audio has priority. Gated
+    /// here at the chokepoint so every entry point (feed, stories, DM song pill) is covered.
+    private var callActive: Bool { CallManager.shared.callInProgress }
 
     func play(_ track: TrackRefFfi) {
         current = track
         guard appFrontmost else { return }                   // background wake must stay silent
         guard !SettingsStore.shared.silent else { return }   // app is muted
+        guard !callActive else { return }                    // call audio owns the stage
         let ids = trackIds(track.catalogId)
         // macOS can only play catalog songs — a store id is required (no MPMediaItem library).
         guard let store = ids.store, !store.isEmpty else { return }
@@ -241,12 +261,12 @@ final class MusicPlayback {
         if player.state.playbackStatus == .playing { player.pause() }
     }
     func unduck() {
-        guard current != nil, appFrontmost else { return }
+        guard current != nil, appFrontmost, !callActive else { return }
         Task { @MainActor in try? await player.play() }
     }
     /// Resume the queued song if it's paused (e.g. a video had ducked it).
     func resume() {
-        guard current != nil, appFrontmost, player.state.playbackStatus != .playing else { return }
+        guard current != nil, appFrontmost, !callActive, player.state.playbackStatus != .playing else { return }
         Task { @MainActor in try? await player.play() }
     }
     /// Fully (re)queue and start the current track — used on unmute, when the song may never
@@ -279,11 +299,15 @@ final class MusicPlayback {
     /// top-post song). A background LAUNCH (bg fetch / silent push) never fires a scenePhase
     /// change, so AudioCoordinator's backgrounded flag alone can't cover it — gate the chokepoint.
     private var appFrontmost: Bool { UIApplication.shared.applicationState == .active }
+    /// NEVER start/resume while a call is ringing/connecting/live — call audio has priority. Gated
+    /// here at the chokepoint so every entry point (feed, stories, DM song pill) is covered.
+    private var callActive: Bool { CallManager.shared.callInProgress }
 
     func play(_ track: TrackRefFfi) {
         current = track
         guard appFrontmost else { return }                   // background wake must stay silent
         guard !SettingsStore.shared.silent else { return }   // app is muted
+        guard !callActive else { return }                    // call audio owns the stage
         let ids = trackIds(track.catalogId)
         guard ids.store != nil || ids.pid != nil else { return }
         // Playing through the system player needs media-library authorization.
@@ -310,11 +334,11 @@ final class MusicPlayback {
         if player.playbackState == .playing { player.pause() }
     }
     func unduck() {
-        if current != nil, appFrontmost { player.play() }
+        if current != nil, appFrontmost, !callActive { player.play() }
     }
     /// Resume the queued song if it's paused (e.g. a video had ducked it).
     func resume() {
-        guard current != nil, appFrontmost, player.playbackState != .playing else { return }
+        guard current != nil, appFrontmost, !callActive, player.playbackState != .playing else { return }
         player.play()
     }
     /// Fully (re)queue and start the current track — used on unmute, when the song may never

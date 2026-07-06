@@ -35,6 +35,10 @@ object CallManager {
     val ringing = mutableStateOf(false)
     val connecting = mutableStateOf(false)
     val inCall = mutableStateOf(false)
+    /** True for the WHOLE call lifecycle (ringing → connecting → in progress). Feed/story media
+     *  playback checks this so post music previews and video audio never compete with the call.
+     *  Reading it inside a Composable subscribes to all three states (recomposes on any flip). */
+    val callInProgress: Boolean get() = ringing.value || connecting.value || inCall.value
     val peerName = mutableStateOf("")
     val micOn = mutableStateOf(true)
     val cameraOn = mutableStateOf(true)
@@ -115,6 +119,7 @@ object CallManager {
         peerName.value = name
         isCaller = true
         connecting.value = true
+        com.blaineam.haven.ui.MusicPlayer.stop()   // call audio owns the stage from the first dial
         refreshParticipants()
         // Frame 21 group invite to everyone.
         val frame = CallWire.groupInvite(myHex, sessionId, name, rosterCsv())
@@ -199,6 +204,7 @@ object CallManager {
         peerName.value = name
         isCaller = false
         ringing.value = true
+        com.blaineam.haven.ui.MusicPlayer.stop()   // stop the song preview before the ring
         refreshParticipants()
     }
 

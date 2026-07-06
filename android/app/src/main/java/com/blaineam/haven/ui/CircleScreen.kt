@@ -1022,9 +1022,12 @@ fun VideoTile(circleId: String, ref: String, modifier: Modifier = Modifier) {
         }
         android.util.Log.i("VideoTile", "FILE ref=$ref file=${file?.absolutePath ?: "NULL"} exists=${file?.exists() == true} size=${file?.length() ?: -1}")
     }
-    // Re-apply the global mute state whenever it flips or the player becomes ready.
-    LaunchedEffect(soundOn, player.value) {
-        val v = if (soundOn) 1f else 0f
+    // Re-apply the global mute state whenever it flips, a call starts/ends, or the player becomes
+    // ready. While a call is ringing/connecting/live the video is FORCED silent (call audio
+    // priority); reading callInProgress here subscribes this composable to the call state.
+    val callActive = com.blaineam.haven.core.CallManager.callInProgress
+    LaunchedEffect(soundOn, callActive, player.value) {
+        val v = if (soundOn && !callActive) 1f else 0f
         runCatching { player.value?.setVolume(v, v) }
     }
     val f = file
@@ -1067,7 +1070,7 @@ fun VideoTile(circleId: String, ref: String, modifier: Modifier = Modifier) {
                                     mp.setSurface(android.view.Surface(st))
                                     mp.isLooping = true
                                     mp.setOnPreparedListener {
-                                        val vol = if (profile.videoSoundOn) 1f else 0f
+                                        val vol = if (profile.videoSoundOn && !com.blaineam.haven.core.CallManager.callInProgress) 1f else 0f
                                         it.setVolume(vol, vol)
                                         it.start()   // autoplay (iOS parity)
                                         applyAspect()   // video dimensions are known now → fix the squish

@@ -71,6 +71,9 @@ final class CallManager: NSObject, ObservableObject {
 
     private var active = false        // a call exists (ringing, connecting, or in progress)
     private var isCaller = false
+    /// True for the WHOLE call lifecycle (ringing → connecting → in progress). Feed/story/DM
+    /// media playback checks this so post music and video audio never compete with call audio.
+    var callInProgress: Bool { active }
     private var inviteTimer: Timer?   // caller resends the invite until someone answers
 
     // Group-call session.
@@ -171,6 +174,7 @@ final class CallManager: NSObject, ObservableObject {
         self.sessionId = sessionId ?? UUID().uuidString
         self.roster = Set(invitees).union([myHex])
         self.peerName = name; connecting = true; isCaller = true; active = true
+        AudioCoordinator.shared.silenceForCall()   // call audio owns the stage from the first ring
         refreshParticipants()
         let uuid = UUID(); callUUID = uuid
         guard useCallKit else { beginOutgoing(); return }   // Catalyst/macOS: no CallKit, send invites directly
@@ -329,6 +333,7 @@ final class CallManager: NSObject, ObservableObject {
     }
 
     func reportIncoming(name: String) {
+        AudioCoordinator.shared.silenceForCall()   // stop feed music/video audio before the ring
         let uuid = callUUID ?? UUID(); callUUID = uuid
         #if os(macOS)
         ringing = true; startInAppRinging(); return   // native macOS: in-app overlay + ring

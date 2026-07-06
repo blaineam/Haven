@@ -72,6 +72,11 @@ struct StoryViewer: View {
         )
         .onAppear { loadCurrent() }
         .onDisappear { teardown() }
+        // A call starting MID-story mutes the clip's own audio immediately (call audio priority);
+        // MusicPlayback ducks itself, but this player is view-local so it must react here.
+        .onReceive(CallManager.shared.objectWillChange) { _ in
+            if CallManager.shared.callInProgress { player?.isMuted = true }
+        }
         .onReceive(tick) { _ in
             // Waiting on media: re-check + re-request (~every 2s) until it arrives, then load.
             if let ref = waitingMedia {
@@ -343,7 +348,8 @@ struct StoryViewer: View {
         if let ref = s.media.first, let item = MediaStore.shared.item(ref),
            item.kind == .video, let url = item.videoURL {
             let p = AVPlayer(url: url)
-            p.isMuted = (s.music != nil)
+            // Muted under the author's song — or while a call is ringing/live (call audio priority).
+            p.isMuted = (s.music != nil) || CallManager.shared.callInProgress
             // Weak capture + keep the token so loadCurrent/teardown can remove it. A strong capture +
             // discarded token is exactly what leaked every story player forever.
             endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime,

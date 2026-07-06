@@ -78,6 +78,8 @@ object MusicPlayer {
     fun toggle(url: String) {
         if (playingUrl == url) { stop(); return }
         stop()
+        // Call audio priority: never start a song preview while a call is ringing/connecting/live.
+        if (com.blaineam.haven.core.CallManager.callInProgress) return
         runCatching {
             player = MediaPlayer().apply {
                 setDataSource(url)

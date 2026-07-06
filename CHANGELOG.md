@@ -7,6 +7,21 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+- **Call audio has priority: no post music or video sound while a call is ringing, connecting,
+  or live (all platforms).** Feed songs, story soundtracks, the DM song pill, and video audio
+  could keep playing (or be started by scrolling) over an active call. Now a starting call
+  silences whatever is playing immediately — the outgoing dial and the incoming ring both hook
+  the same silencer — and every raise-audio path is gated for the whole call lifecycle, at the
+  playback chokepoints so no entry point can sneak sound back in: Apple `MusicPlayback`
+  play/resume/unduck + `AudioCoordinator` (feed videos stay playing, muted; stories mute their
+  clip mid-call via the call state), Android `MusicPlayer.toggle` + `VideoTile` volume (feed +
+  stories; recomposes on call state), desktop `syncFeedVideoSound()` (every `<video data-video>`
+  forced muted from first ring to teardown). Normal sound rules resume when the call ends —
+  nothing auto-blasts; playback comes back through the usual feed interactions.
+
 ## [0.1.0-beta.29] — 2026-07-06
 
 ### Fixed

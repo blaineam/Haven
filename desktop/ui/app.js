@@ -181,7 +181,7 @@ async function renderFeed() {
     el("button", { class: "btn small ghost", title: "Mute/unmute all videos", onclick: async () => {
       state.videoSoundOn = !state.videoSoundOn;
       await invoke("set_video_sound", { on: state.videoSoundOn }).catch(() => {});
-      document.querySelectorAll("video[data-video]").forEach((v) => { v.muted = !state.videoSoundOn; });
+      syncFeedVideoSound();
       renderFeed();
     } }, state.videoSoundOn ? "🔊" : "🔇"),
   );
@@ -365,7 +365,8 @@ function geoChip(geo) {
 function mediaNode(ref, imgStyle) {
   // Videos start muted unless the global "play video sound" toggle is on (iOS parity); native controls
   // still let the user override per-video. data-video lets the toggle re-apply across all of them.
-  if (ref.startsWith("v:")) return el("video", Object.assign({ "data-ref": ref, "data-video": "1", controls: "" }, state.videoSoundOn ? {} : { muted: "" }));
+  // While a call is ringing/connecting/live they render muted regardless (call audio priority).
+  if (ref.startsWith("v:")) return el("video", Object.assign({ "data-ref": ref, "data-video": "1", controls: "" }, state.videoSoundOn && !callAudioActive() ? {} : { muted: "" }));
   if (ref.startsWith("a:")) return el("audio", { "data-ref": ref, controls: "", style: "width:100%;margin-top:6px;display:block" });
   return el("img", Object.assign({ "data-ref": ref, loading: "lazy" }, imgStyle ? { style: imgStyle } : {}));
 }
@@ -1258,6 +1259,15 @@ const call = {
   screenOn: false, screenStream: null, camTrack: null,
 };
 
+/** Call audio priority: true from the first ring/dial until teardown. */
+function callAudioActive() { return call.ringing || call.connecting || call.inCall; }
+/** Feed/DM <video> sound = the user's global toggle, overridden to MUTED while a call is
+ *  ringing/connecting/live so post soundtracks never compete with call audio. Called on the
+ *  global toggle, on every call state transition, and by mediaNode for newly-rendered videos. */
+function syncFeedVideoSound() {
+  document.querySelectorAll("video[data-video]").forEach((v) => { v.muted = callAudioActive() || !state.videoSoundOn; });
+}
+
 const invitees = () => [...call.roster].filter((h) => h !== call.me).sort();
 
 async function callStart(others, name, video) {
@@ -1266,6 +1276,7 @@ async function callStart(others, name, video) {
   call.session = `win-${call.me.slice(0, 8)}-${Date.now()}`;
   call.roster = new Set([...others, call.me]);
   call.name = name; call.video = video; call.connecting = true; call.camOn = video;
+  syncFeedVideoSound();   // call audio owns the stage from the first dial
   await invoke("call_group_invite", { sessionId: call.session, groupName: name, roster: [...call.roster], to: invitees() });
   await startMesh();
   renderCallOverlay();
@@ -1354,7 +1365,7 @@ async function onCallEvent(payload) {
         return;
       }
       call.session = c.sessionId; call.roster = members; call.name = c.groupName || c.name || displayNameFor(c.from);
-      call.ringing = true; call.video = true; renderCallOverlay();
+      call.ringing = true; call.video = true; syncFeedVideoSound(); renderCallOverlay();
       break;
     }
     case "accept": {
@@ -1411,6 +1422,7 @@ function teardownCall() {
   if (call.localStream) call.localStream.getTracks().forEach((t) => t.stop());
   call.localStream = null; call.remote = {};
   call.roster.clear(); call.session = ""; call.ringing = false; call.connecting = false; call.inCall = false;
+  syncFeedVideoSound();   // restore the user's global video-sound choice now the call is over
   renderCallOverlay();
 }
 

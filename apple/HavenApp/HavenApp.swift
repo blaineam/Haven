@@ -236,6 +236,7 @@ struct RootView: View {
     @ObservedObject private var shareRouter = ShareRouter.shared   // share-sheet hand-off (iOS only)
     #endif
     @ObservedObject private var call = CallManager.shared          // drives the minimized "Call" tab
+    @ObservedObject private var terms = TermsStore.shared          // zero-tolerance terms gate (1.2)
 
     @State private var tab = ProcessInfo.processInfo.environment["HAVEN_TAB"] ?? "circle"
     @State private var showConnect = false
@@ -257,11 +258,18 @@ struct RootView: View {
             if !profile.onboarded {
                 OnboardingView(profile: profile, accountStore: accountStore)
                     .transition(.opacity)
+            } else if !terms.accepted {
+                // Already onboarded but never agreed to the terms — upgraders, restored
+                // identities, and linked devices (whose flows skip onboarding's final step).
+                // Nobody uses Haven without agreeing (App Review 1.2).
+                TermsGateView()
+                    .transition(.opacity)
             } else {
                 main
             }
         }
         .animation(HavenTheme.smooth, value: profile.onboarded)
+        .animation(HavenTheme.smooth, value: terms.accepted)
         // Privacy: while a biometric-locked circle is active, blur the app whenever it isn't
         // frontmost — this is what the app-switcher snapshot captures, so locked content never
         // leaks there. The lock screen takes over on return.

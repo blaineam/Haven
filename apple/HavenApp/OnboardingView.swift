@@ -47,8 +47,15 @@ struct OnboardingView: View {
         switch step {
         case 0: welcome
         case 1: pickName
-        default: howItWorks
+        case 2: howItWorks
+        default: terms
         }
+    }
+
+    /// Final step (App Review 1.2): agreeing to the zero-tolerance terms IS the door into Haven —
+    /// the button below says "I agree" and there is no other way through.
+    private var terms: some View {
+        ScrollView { TermsContent() }
     }
 
     private var welcome: some View {
@@ -143,14 +150,14 @@ struct OnboardingView: View {
     private var controls: some View {
         VStack(spacing: 14) {
             Button(action: advance) {
-                Text(step == 0 ? "Get started" : step == 1 ? "Continue" : "Enter Haven")
+                Text(step == 0 ? "Get started" : step == 3 ? "I agree — enter Haven" : "Continue")
             }
             .buttonStyle(BrandButtonStyle())
             .disabled(step == 1 && name.trimmingCharacters(in: .whitespaces).isEmpty)
             .opacity(step == 1 && name.trimmingCharacters(in: .whitespaces).isEmpty ? 0.5 : 1)
 
             HStack(spacing: 7) {
-                ForEach(0..<3) { i in
+                ForEach(0..<4) { i in
                     Capsule()
                         .fill(i == step ? AnyShapeStyle(HavenTheme.brandHorizontal) : AnyShapeStyle(Color(.tertiaryLabel)))
                         .frame(width: i == step ? 22 : 7, height: 7)
@@ -166,7 +173,8 @@ struct OnboardingView: View {
             profile.emoji = emoji
             if let pickedImage { profile.setAvatar(pickedImage) }
         }
-        if step >= 2 {
+        if step >= 3 {
+            TermsStore.shared.accept()   // "I agree" — the only door in (App Review 1.2)
             withAnimation(HavenTheme.smooth) { profile.onboarded = true }
         } else {
             withAnimation(HavenTheme.smooth) { step += 1 }

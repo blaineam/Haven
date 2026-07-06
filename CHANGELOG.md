@@ -10,6 +10,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **Zero-tolerance terms of use gate (Apple platforms; App Review 1.2).** Agreeing to the terms
+  is now the only door into Haven: new users agree as the final onboarding step ("I agree —
+  enter Haven"), and anyone already past onboarding — upgraders, restored identities, linked
+  devices (whose flows skipped onboarding's last step) — hits a standalone full-screen
+  `TermsGateView` on next launch. The in-app summary spells out zero tolerance for
+  objectionable content or abusive users, what's never allowed, circle enforcement
+  (report/remove/block), and the content-free moderation ledger; the canonical text lives in
+  `docs/TERMS.md` (linked in-app). Acceptance is versioned (`haven.terms.acceptedVersion`) so
+  materially revised terms re-prompt everyone.
 - **Decentralized content reporting (Apple platforms; App Review 1.2).** Haven circles have no
   owner and the developer holds no keys, so moderation belongs to the members: a new sealed
   `Report` event (`core`: `EventKind::Report`, `report()`/`reports()` FFI) broadcasts a report

@@ -291,6 +291,18 @@ final class CallManager: NSObject, ObservableObject {
                 refreshParticipants()
                 // If media is already up, dial any newly-known peers per the glare rule.
                 if mediaStarted { for p in added where p != myHex { connectPeerIfNeeded(p) } }
+            } else if sessionId.hasPrefix("push:"), roster.contains(from) {
+                // A VoIP push rang us first with a PLACEHOLDER session ("push:<caller>") — this
+                // frame is the REAL invite catching up. It used to be DROPPED here (session-id
+                // mismatch), so a call answered from the CallKit screen never adopted the real
+                // session: every later SDP frame failed validSession and the call sat dead. Adopt
+                // the real id + roster; if the user already answered, re-accept under the real id
+                // so the caller proceeds.
+                sessionId = sid2
+                roster.formUnion(members)
+                peerName = members.count <= 2 ? displayName(for: from) : (gname2.isEmpty ? peerName : gname2)
+                refreshParticipants()
+                if inCall { for p in invitees() { sendAccept(to: p) } }
             }
             return
         }
@@ -448,6 +460,10 @@ final class CallManager: NSObject, ObservableObject {
     func handleOffer(_ payload: Data) {
         guard let (from, sid, json) = parseSignal(payload), validSession(sid),
               roster.contains(from) else { return }   // only a session participant negotiates (F3)
+        // First real signal into a VoIP-push placeholder session → adopt the caller's session id
+        // (the answer-before-invite ordering: our accept went out under "push:<caller>", the
+        // caller ignored the sid and dialed us — this offer carries the real id).
+        if sessionId.hasPrefix("push:"), !sid.isEmpty { sessionId = sid }
         if !mediaStarted { startMesh() }
         let peer = peerConn(for: from)
         guard let sdp = CallSignal.decodeSDP(json) else { return }
@@ -488,8 +504,11 @@ final class CallManager: NSObject, ObservableObject {
 
     private func validSession(_ sid: String) -> Bool {
         // Accept frames for the active session; also accept legacy/inferred ids when we only have
-        // one session. Mismatched concurrent sessions are dropped.
-        return sid == sessionId || sessionId.isEmpty
+        // one session. Mismatched concurrent sessions are dropped. A "push:" session is a VoIP-push
+        // PLACEHOLDER (we were rung before the real invite reached us) — the signal's sid IS the
+        // real session, so accept it; the sender is still gated by roster membership at every call
+        // site, so only the pushed caller (or their roster) can speak into the placeholder.
+        return sid == sessionId || sessionId.isEmpty || sessionId.hasPrefix("push:")
     }
 
     func handleAudio(_ payload: Data) {}

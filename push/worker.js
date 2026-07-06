@@ -50,12 +50,20 @@ export default {
 
       if (url.pathname === "/register-voip") {
         // PushKit VoIP token (separate from the regular APNs token) so calls can ring from a
-        // fully-killed/locked device. One token per node id.
+        // fully-killed/locked device. A node id (ACCOUNT id) can have MULTIPLE iOS devices —
+        // keep a LIST like /register does. The old single-record shape silently broke ringing
+        // for every device except whichever registered last (each launch of any linked device
+        // clobbered the one slot), which reads as "calls never ring in the background".
         const { nodeId, token, sandbox, ts, sig } = await request.json();
         if (!nodeId || !token) return json({ error: "nodeId + token required" }, 400);
         if (!(await verifyReg(nodeId, token, ts, sig))) return json({ error: "unauthorized" }, 401);
-        await env.TOKENS.put(`voip:${nodeId}`, JSON.stringify({ token, sandbox: !!sandbox }));
-        return json({ ok: true });
+        const rec = (await env.TOKENS.get(`voip:${nodeId}`, "json")) || {};
+        const tokens = (rec.tokens || (rec.token ? [{ token: rec.token, sandbox: rec.sandbox }] : []))
+          .filter((t) => t.token !== token);
+        tokens.push({ token, sandbox: !!sandbox });
+        if (tokens.length > 5) tokens.splice(0, tokens.length - 5);   // cap per identity
+        await env.TOKENS.put(`voip:${nodeId}`, JSON.stringify({ tokens }));
+        return json({ ok: true, devices: tokens.length });
       }
 
       if (url.pathname === "/call") {
@@ -66,24 +74,73 @@ export default {
         const { nodeId, ciphertext } = await request.json();
         if (!nodeId) return json({ error: "nodeId required" }, 400);
         if (await rateLimited(env, request, "call")) return json({ ok: true }, 200);
-        const rec = await env.TOKENS.get(`voip:${nodeId}`, "json");
-        // Uniform response whether or not the node is registered (audit F6): a distinguishable 404
-        // would let anyone enumerate which node-ids are real, call-capable Haven users.
-        if (!rec || !rec.token) return json({ ok: true }, 200);
         const jwt = await providerToken(env);
-        const host = rec.sandbox ? "api.sandbox.push.apple.com" : (env.APNS_HOST || "api.push.apple.com");
-        const res = await fetch(`https://${host}/3/device/${rec.token}`, {
-          method: "POST",
-          headers: {
-            authorization: `bearer ${jwt}`,
-            "apns-topic": `${env.APNS_TOPIC}.voip`,   // VoIP pushes use the <bundleId>.voip topic
-            "apns-push-type": "voip",
-            "apns-priority": "10",
-          },
-          body: JSON.stringify({ e: ciphertext || "" }),
-        });
-        if (res.status === 410) await env.TOKENS.delete(`voip:${nodeId}`);
-        return json({ ok: res.ok }, res.ok ? 200 : 502);
+        // A call push that lands after the caller gave up (~30s) must NOT ring a ghost call —
+        // tell APNs to drop it instead of storing-and-forwarding it minutes later.
+        const expiry = String(Math.floor(Date.now() / 1000) + 45);
+        const rec = await env.TOKENS.get(`voip:${nodeId}`, "json");
+        // Every registered iOS device of this identity (list; legacy single-record migrated).
+        const voip = rec ? (rec.tokens || (rec.token ? [{ token: rec.token, sandbox: rec.sandbox }] : [])) : [];
+        const survivors = [];
+        let anyOk = false;
+        for (const t of voip) {
+          const host = t.sandbox ? "api.sandbox.push.apple.com" : (env.APNS_HOST || "api.push.apple.com");
+          const res = await fetch(`https://${host}/3/device/${t.token}`, {
+            method: "POST",
+            headers: {
+              authorization: `bearer ${jwt}`,
+              "apns-topic": `${env.APNS_TOPIC}.voip`,   // VoIP pushes use the <bundleId>.voip topic
+              "apns-push-type": "voip",
+              "apns-priority": "10",
+              "apns-expiration": expiry,
+            },
+            body: JSON.stringify({ e: ciphertext || "" }),
+          });
+          if (res.ok) anyOk = true;
+          if (res.status !== 410) survivors.push(t);   // drop tokens APNs says are dead
+        }
+        if (survivors.length !== voip.length) {
+          if (survivors.length) await env.TOKENS.put(`voip:${nodeId}`, JSON.stringify({ tokens: survivors }));
+          else await env.TOKENS.delete(`voip:${nodeId}`);
+        }
+        // FALLBACK: no live VoIP token (registration failed / old build / token pruned) → ring
+        // the regular alert path loudly instead of silently doing nothing. The NSE decrypts the
+        // same sealed {t,h} payload into "Incoming call"; macOS gets its usual silent+decrypt.
+        if (!anyOk) {
+          const nrec = await env.TOKENS.get(nodeId, "json");
+          const ntokens = nrec ? (nrec.tokens || (nrec.token ? [{ token: nrec.token, sandbox: nrec.sandbox }] : [])) : [];
+          for (const t of ntokens) {
+            const host = t.sandbox ? "api.sandbox.push.apple.com" : (env.APNS_HOST || "api.push.apple.com");
+            const quiet = t.platform === "macos";
+            const payload = quiet
+              ? { aps: { "content-available": 1 }, ...(ciphertext && ciphertext !== "_" ? { e: ciphertext } : {}), call: 1 }
+              : {
+                  aps: {
+                    "mutable-content": 1,
+                    alert: { title: "Haven", body: "Incoming call" },
+                    sound: "default",
+                    "interruption-level": "time-sensitive",
+                  },
+                  ...(ciphertext && ciphertext !== "_" ? { e: ciphertext } : {}),
+                  call: 1,
+                };
+            const res = await fetch(`https://${host}/3/device/${t.token}`, {
+              method: "POST",
+              headers: {
+                authorization: `bearer ${jwt}`,
+                "apns-topic": env.APNS_TOPIC,
+                "apns-push-type": quiet ? "background" : "alert",
+                "apns-priority": quiet ? "5" : "10",
+                "apns-expiration": expiry,
+              },
+              body: JSON.stringify(payload),
+            });
+            if (res.ok) anyOk = true;
+          }
+        }
+        // Uniform response whether or not the node is registered (audit F6): a distinguishable
+        // error would let anyone enumerate which node-ids are real, call-capable Haven users.
+        return json({ ok: true }, 200);
       }
 
       if (url.pathname === "/notify") {

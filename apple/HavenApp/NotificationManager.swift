@@ -18,7 +18,40 @@ final class NotificationManager {
     static let refreshTaskId = "com.blaineam.kith.refresh"
 
     private var authorized = false
+    // Dedupe keys of everything we've already notified about — PERSISTED. This was in-memory
+    // only, so every relaunch forgot it and the next ingest burst (mailbox poll, epoch-churn
+    // re-seals, history backfill) re-notified the SAME newest message per circle — "the same
+    // notifications again and again". `notifiedOrder` keeps insertion order so the cap trims
+    // the OLDEST half; the old `removeAll()` at the cap made every past key eligible again.
     private var notified = Set<String>()
+    private var notifiedOrder: [String] = []
+    private var notifiedLoaded = false
+    private var notifiedSavePending = false
+    private var notifiedURL: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("haven-notified.txt")
+    }
+    private func loadNotifiedIfNeeded() {
+        guard !notifiedLoaded else { return }
+        notifiedLoaded = true
+        guard let text = try? String(contentsOf: notifiedURL, encoding: .utf8) else { return }
+        for key in text.split(separator: "\n").map(String.init) where notified.insert(key).inserted {
+            notifiedOrder.append(key)
+        }
+    }
+    private func scheduleNotifiedSave() {
+        guard !notifiedSavePending else { return }
+        notifiedSavePending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self else { return }
+            self.notifiedSavePending = false
+            let snapshot = self.notifiedOrder.joined(separator: "\n")
+            DispatchQueue.global(qos: .utility).async { [url = self.notifiedURL] in
+                try? snapshot.write(to: url, atomically: true, encoding: .utf8)
+            }
+        }
+    }
 
     /// Ask once for permission to show local notifications.
     func requestAuthorization() {
@@ -63,13 +96,23 @@ final class NotificationManager {
     }
     #endif
 
-    /// Post a local notification (only when the app isn't in the foreground).
-    func notify(title: String, body: String, dedupeKey: String) {
+    /// Post a local notification (only when the app isn't in the foreground). Deduped by
+    /// `dedupeKey` across relaunches (persisted), so re-ingested history can't re-notify.
+    /// `persist: false` keeps the old session-only dedupe — for deliberate, repeatable flows
+    /// (e.g. device enrollment) where the SAME key should notify again on a later occasion.
+    func notify(title: String, body: String, dedupeKey: String, persist: Bool = true) {
         guard authorized else { return }
         guard !PlatformApp.isActive else { return }
-        guard !notified.contains(dedupeKey) else { return }
-        notified.insert(dedupeKey)
-        if notified.count > 3000 { notified.removeAll() }
+        loadNotifiedIfNeeded()
+        guard notified.insert(dedupeKey).inserted else { return }
+        if persist {
+            notifiedOrder.append(dedupeKey)
+            if notifiedOrder.count > 3000 {   // trim the OLDEST half; never wipe everything
+                for old in notifiedOrder.prefix(1500) { notified.remove(old) }
+                notifiedOrder.removeFirst(1500)
+            }
+            scheduleNotifiedSave()
+        }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body

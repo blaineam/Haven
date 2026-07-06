@@ -1376,7 +1376,7 @@ final class FeedStore: ObservableObject {
             title: connected ? "Asked your primary device" : "Looking for your primary device…",
             body: connected ? "Pulling your profile + posts…"
                             : "Keep your primary device (iPhone) open on the same Wi-Fi/Bluetooth.",
-            dedupeKey: "device-resync-request")
+            dedupeKey: "device-resync-request", persist: false)   // deliberate flow — may recur later
     }
 
     /// Turn on device-key multi-device on THIS (primary) device — register the account key as the
@@ -1438,7 +1438,7 @@ final class FeedStore: ObservableObject {
         refresh(); requestMissingMedia()
         NotificationManager.shared.notify(title: "Device authorized",
                                           body: "This device is now a secure linked device — syncing your stuff…",
-                                          dedupeKey: "device-auth-grant")
+                                          dedupeKey: "device-auth-grant", persist: false)   // deliberate flow — may recur later
     }
 
     /// Another of my devices asked for my full state (after being authorized). Push it: profile + circles
@@ -2302,6 +2302,12 @@ final class FeedStore: ObservableObject {
     private func notifyNewest(in circleId: String) {
         let inbound = messages(in: circleId).filter { !$0.isMe && !$0.unsent }
         guard let newest = inbound.max(by: { $0.createdAt < $1.createdAt }) else { return }
+        // FRESH items only (mirrors bumpUnseen). This fires on ANY change in the circle — a
+        // history backfill, an epoch-rotation re-seal, a reaction to an old post — and then
+        // notifies about the newest EXISTING message, not what actually arrived. Combined with
+        // a wiped/fresh dedupe store that meant the same old message notified again and again;
+        // an old message re-surfacing is never worth a banner.
+        guard now() &- newest.createdAt < 10 * 60 * 1000 else { return }
         let name = ContactsStore.shared.name(forNodePrefix: newest.authorShort) ?? "Someone"
         // A biometric-locked circle must not spill its content (or even who/where) onto the lock
         // screen — mirror the NSE's redaction for this in-process notification path too.

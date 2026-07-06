@@ -26,6 +26,14 @@ final class HavenAppDelegate: NSObject, UIApplicationDelegate {
         if let seed = AccountStore.storedSeed() {
             Task { @MainActor in FeedStore.shared.configure(seed: seed) }
         }
+        // PushKit REQUIRES its registry to exist by the end of didFinishLaunching: a VoIP push
+        // that launches the killed app in the BACKGROUND never renders a view, so the old
+        // `.onAppear`-only startVoip() meant no registry existed, the queued call push had
+        // nowhere to land, and the phone simply didn't ring unless Haven had been foregrounded
+        // since boot. Synchronous on purpose (a queued Task can land after launch returns);
+        // didFinishLaunching runs on the main thread, so main-actor isolation holds. The
+        // onAppear call remains — startVoip is idempotent.
+        MainActor.assumeIsolated { PushManager.shared.startVoip() }
         #if os(iOS)
         // Bring up the Apple Watch companion bridge (thin client over WCSession). No-op if
         // there's no paired Watch; it just vends recent threads + accepts quick replies.
@@ -99,14 +107,23 @@ final class HavenAppDelegate: NSObject, NSApplicationDelegate {
         // macOS has no Notification Service Extension, so the relay sends a silent push carrying
         // the sealed banner `e`; decrypt it IN-PROCESS (same seed-only FFI the iOS NSE uses) and
         // post a local notification. The relay never sees plaintext. Locked circles are redacted.
+        let isCall = userInfo["call"] != nil   // /call fallback (no PushKit on macOS)
         if let e = userInfo["e"] as? String, let sealed = Data(base64Encoded: e),
            let seed = SharedSeed.read(),
            let plain = openSealedWithSeed(seed: seed, sealed: sealed),
            let obj = try? JSONSerialization.jsonObject(with: plain) as? [String: Any] {
             let locked = (obj["c"] as? String).map { SharedLockedCircles.read().contains($0) } ?? false
             let title = locked ? "Haven" : ((obj["t"] as? String) ?? "Haven")
-            let body = locked ? "New activity in a locked circle" : ((obj["b"] as? String) ?? "New message")
+            let fallbackBody = isCall ? "📞 Incoming call — open Haven to answer" : "New message"
+            let body = locked ? "New activity in a locked circle" : ((obj["b"] as? String) ?? fallbackBody)
             Task { @MainActor in NotificationManager.shared.notify(title: title, body: body, dedupeKey: e) }
+        } else if isCall {
+            // Call doorbell we couldn't decrypt (it's sealed+signed for the PushKit opener) —
+            // still surface SOMETHING rather than staying silent.
+            Task { @MainActor in
+                NotificationManager.shared.notify(title: "Haven", body: "📞 Incoming call — open Haven to answer",
+                                                  dedupeKey: "call:\(Date().timeIntervalSince1970)")
+            }
         }
         Task { @MainActor in FeedStore.shared.forceSync() }
     }

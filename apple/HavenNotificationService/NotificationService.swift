@@ -64,10 +64,16 @@ final class NotificationService: UNNotificationServiceExtension {
     }
 
     /// The sealed payload is a tiny JSON object `{ "t": <title>, "b": <body>, "c": <circleId> }`.
+    /// A CALL payload is `{ "t": <caller name>, "h": <caller hex> }` — same blob the PushKit
+    /// handler opens; it reaches the NSE only via the worker's `/call` FALLBACK (no live VoIP
+    /// token), so label it as an incoming call rather than the generic "New message".
     private static func decode(_ data: Data) -> (String, String)? {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         if let redacted = redactIfLocked(obj) { return redacted }
         let title = (obj["t"] as? String) ?? "Haven"
+        if obj["b"] == nil, obj["h"] is String {
+            return (title, "📞 Incoming call — open Haven to answer")
+        }
         let body = (obj["b"] as? String) ?? "New message"
         return (title, body)
     }

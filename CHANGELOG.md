@@ -7,7 +7,42 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.1.0-beta.28] — 2026-07-05
+
+### Fixed
+- **iOS→iOS calls now ring with Haven backgrounded or killed.** The PushKit→CallKit pipeline
+  existed end-to-end but four defects kept it from ever ringing in the background:
+  1. **The PKPushRegistry was only created in SwiftUI `.onAppear`** — a VoIP push that
+     launches a killed app in the BACKGROUND never renders a view, so no registry existed,
+     the queued call push had nowhere to land, and the phone stayed silent until Haven was
+     next foregrounded. PushKit requires the registry by the end of `didFinishLaunching`;
+     it's created there now (synchronously).
+  2. **One VoIP token slot per account on the push worker** — every launch of ANY linked iOS
+     device overwrote `voip:<nodeId>`, so only whichever device registered last could ring.
+     Now a token LIST (like `/register`), `/call` pushes every device, dead tokens pruned.
+  3. **A push-rung call could never become a working call.** The VoIP push rings with a
+     placeholder session (`push:<caller>`); when the real frame-21 invite caught up it was
+     DROPPED (session-id mismatch), and every SDP frame then failed `validSession` — answering
+     from the CallKit screen produced a dead call. The placeholder now ADOPTS the real session
+     (from the invite, or from the first offer in the answer-before-invite ordering), and
+     re-accepts under the real id if the user already picked up.
+  4. **`/call` did NOTHING when no VoIP token was registered.** It now falls back to a loud
+     time-sensitive alert push through the regular token path ("📞 Incoming call" via the NSE;
+     macOS gets its silent-decrypt banner), and both paths carry `apns-expiration` (~45s) so a
+     late-delivered doorbell can't ring a call that's already over.
+  Requires `cd push && wrangler deploy` + shipping the app to BOTH parties.
+- **The same notifications fired again and again (all platforms).** Three compounding causes:
+  the local-notification dedupe set was in-memory only (every relaunch forgot what was already
+  notified — and at its 3000-entry cap it wiped ENTIRELY, re-arming every past banner);
+  "notify newest" fired on ANY change in a circle (history backfill, key commits, epoch-
+  rotation re-seals of old events) and then described the newest EXISTING message rather than
+  what actually arrived; and Android/desktop had no dedupe at all (desktop notified per
+  changed envelope, including key commits). Now: the dedupe store is PERSISTED on every
+  platform (iOS/macOS `haven-notified.txt`, Android prefs, desktop `notified.txt`), caps trim
+  instead of wiping, and a banner only fires when the circle's newest inbound item is
+  genuinely fresh (< 10 min) — an old message resurfacing is never worth a banner. (The
+  roster-revocation fix above removes the biggest churn *generator*; this makes banners
+  immune to any future re-delivery/churn source too.)
 
 ### Added
 - **Relay mailbox garbage collection (all platforms + CLI relay).** Deterministic sealing

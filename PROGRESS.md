@@ -6,6 +6,18 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest wave (built, batched for next upload)
+- **Background call ringing fixed (iOS→iOS)**: four defects in the PushKit→CallKit path —
+  registry created only in `.onAppear` (a background VoIP launch never renders a view → the
+  wake push had nowhere to land), ONE voip-token slot per account on the worker (any linked
+  device's launch stole ringing from the others), the real invite/SDP frames were dropped
+  against the push-placeholder session (answering from the lock screen produced a dead call),
+  and `/call` did nothing at all without a voip token (now falls back to a loud time-sensitive
+  alert; both paths expire in ~45s so late doorbells can't ghost-ring). NEEDS: `cd push &&
+  wrangler deploy` + shipping the app to both parties.
+- **Repeated notifications fixed (all platforms)**: dedupe store now persisted everywhere
+  (in-memory-only before — every relaunch re-notified the newest message per circle; the cap
+  wiped the WHOLE set), and banners only fire when the newest inbound item is < 10 min old, so
+  history backfill / key commits / epoch-churn re-seals can't resurface old messages.
 - **Relay mailbox garbage collection (all platforms + CLI relay)**: the ~6,700 legacy
   duplicate envelopes per mature circle (random-seal era + stale-epoch copies) finally age
   OUT of the relays instead of being re-LISTed on every 30s poll (~700 KB a pop) and

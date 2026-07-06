@@ -71,6 +71,10 @@ struct DynState {
     /// last time we TOUCH-refreshed our event envelopes on the circle relays (mailbox-GC liveness,
     /// daily). In-memory: 0 at start → first loop tick refreshes, then every 24h of uptime.
     last_event_refresh_ms: u64,
+    /// "<circle>:<item id>" keys already notified about — PERSISTED to `notified.txt` so a
+    /// relaunch can't re-notify the same message (see notify_circle).
+    notified: HashSet<String>,
+    notified_dirty: bool,
     internet_active: bool,
     relay_active: bool,
     started: bool,
@@ -167,6 +171,9 @@ impl Engine {
         );
         let dyn_state = DynState {
             seen_mailbox: std::fs::read_to_string(paths.root.join("mailbox-seen.txt"))
+                .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
+                .unwrap_or_default(),
+            notified: std::fs::read_to_string(paths.root.join("notified.txt"))
                 .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
                 .unwrap_or_default(),
             ..DynState::default()
@@ -1405,11 +1412,9 @@ impl Engine {
             self.persist();
             self.emit_changed();
             self.request_missing_media();
-            let is_dm = ev.circle_id.starts_with("dm:");
-            self.notify(
-                if is_dm { "New message" } else { "New in your circle" },
-                if is_dm { "You have a new Haven message" } else { "Someone posted in your circle" },
-            );
+            // Freshness + persisted dedupe: a re-delivered / re-sealed old envelope (history
+            // resend, epoch churn, key commit) must not re-notify (see notify_circle).
+            self.notify_circle(&ev.circle_id);
         }
     }
 
@@ -2268,6 +2273,11 @@ impl Engine {
 
     pub async fn poll_mailbox(self: &Arc<Self>) {
         let mut changed = false;
+        // Circles whose engine state changed this pass — notified ONCE each, after ingest,
+        // through notify_circle's freshness + dedupe guards. Notifying per changed ENVELOPE
+        // (the old shape) fired for key commits and epoch-rotation re-seals of old history
+        // too, so the same "new message" banner repeated forever on a churning circle.
+        let mut changed_circles: std::collections::BTreeSet<String> = Default::default();
         // (circle_id, relay_node_hex) for every circle × every configured relay — reading from
         // all of them means a message present on any reachable relay still arrives.
         let relay_targets: Vec<(String, String)> = {
@@ -2296,11 +2306,7 @@ impl Engine {
                 self.mark_mailbox_seen(key);
                 if self.social.receive(circle_id.clone(), env).unwrap_or(false) {
                     changed = true;
-                    let is_dm = circle_id.starts_with("dm:");
-                    self.notify(
-                        if is_dm { "New message" } else { "New in your circle" },
-                        if is_dm { "You have a new Haven message" } else { "Someone posted in your circle" },
-                    );
+                    changed_circles.insert(circle_id.clone());
                 }
             }
         }
@@ -2322,14 +2328,13 @@ impl Engine {
                     self.mark_mailbox_seen(key);
                     if self.social.receive(c.id.clone(), env).unwrap_or(false) {
                         changed = true;
-                        let is_dm = c.id.starts_with("dm:");
-                        self.notify(
-                            if is_dm { "New message" } else { "New in your circle" },
-                            if is_dm { "You have a new Haven message" } else { "Someone posted in your circle" },
-                        );
+                        changed_circles.insert(c.id.clone());
                     }
                 }
             }
+        }
+        for cid in changed_circles {
+            self.notify_circle(&cid);
         }
         self.flush_seen_mailbox();
         if changed {
@@ -2337,6 +2342,48 @@ impl Engine {
             self.emit_changed();
             self.request_missing_media();
         }
+    }
+
+    /// Notify about a circle whose state just changed — but only when its newest INBOUND item
+    /// is genuinely fresh (< 10 min) and hasn't been notified before (persisted dedupe). The
+    /// change signal alone also fires for key commits, backfilled history, and epoch-rotation
+    /// re-seals of old events; none of those deserve a banner.
+    fn notify_circle(&self, circle_id: &str) {
+        let feed = self.social.feed(circle_id.to_string(), now_ms(), None);
+        let Some(newest) = feed.iter().filter(|i| !i.is_me).max_by_key(|i| i.created_at) else { return };
+        if now_ms().saturating_sub(newest.created_at) > 10 * 60 * 1000 {
+            return;
+        }
+        let key = format!("{circle_id}:{}", newest.id);
+        {
+            let mut st = self.dyn_state.lock().unwrap();
+            if !st.notified.insert(key) {
+                return;
+            }
+            // Cheap cap — the recency guard is what really stops ancient items re-notifying.
+            if st.notified.len() > 2000 {
+                st.notified.clear();
+            }
+            st.notified_dirty = true;
+        }
+        self.flush_notified();
+        let is_dm = circle_id.starts_with("dm:");
+        self.notify(
+            if is_dm { "New message" } else { "New in your circle" },
+            if is_dm { "You have a new Haven message" } else { "Someone posted in your circle" },
+        );
+    }
+
+    fn flush_notified(&self) {
+        let snapshot = {
+            let mut st = self.dyn_state.lock().unwrap();
+            if !st.notified_dirty {
+                return;
+            }
+            st.notified_dirty = false;
+            st.notified.iter().cloned().collect::<Vec<_>>().join("\n")
+        };
+        let _ = std::fs::write(self.paths.root.join("notified.txt"), snapshot);
     }
 
     /// Configure (and verify) a BYO S3/R2/B2 bucket. Stores the secret in the keychain, the rest

@@ -683,15 +683,35 @@ object HavenNet : InboundListener {
         }
     }
 
-    /** Post a local notification for new inbound content when the app isn't foreground. */
+    /** Post a local notification for new inbound content when the app isn't foreground.
+     *  Guarded two ways (this fired on ANY changed envelope — history backfill, epoch-rotation
+     *  re-seals, key commits — so the same "new message" notified again and again):
+     *  1. FRESH only — the circle's newest inbound item must be < 10 min old; an old message
+     *     resurfacing is never worth a banner.
+     *  2. Deduped on the newest item's id, PERSISTED — one banner per actual message, across
+     *     relaunches and across however many envelopes/relays re-deliver it. */
     private fun notifyInbound(circleId: String) {
         if (isForeground) return
+        val feed = runCatching { social.feed(circleId, nowMs(), null) }.getOrDefault(emptyList())
+        val newest = feed.filter { !it.isMe }.maxByOrNull { it.createdAt } ?: return
+        if (nowMs() - newest.createdAt > 600_000uL) return   // 10 min (ULong math; skew-safe enough)
+        if (!markNotified("$circleId:${newest.id}")) return
         val isDm = circleId.startsWith("dm:")
         Notifications.notify(
             appContext,
             title = if (isDm) "New message" else "New in your circle",
             body = if (isDm) "You have a new Haven message" else "Someone posted in your circle",
         )
+    }
+
+    /** Record a notification dedupe key; false if already notified. Persisted (capped — the
+     *  10-minute recency guard above is what really stops ancient items from re-notifying). */
+    private fun markNotified(key: String): Boolean {
+        val cur = prefs.getStringSet("notifiedIds", emptySet())?.toMutableSet() ?: mutableSetOf()
+        if (!cur.add(key)) return false
+        if (cur.size > 800) { cur.clear(); cur.add(key) }
+        prefs.edit().putStringSet("notifiedIds", cur).apply()
+        return true
     }
 
     // ---- Outbound ------------------------------------------------------------------------

@@ -66,6 +66,13 @@ Haven uses only standard, published cryptographic algorithms (X25519 + ML-KEM-76
 NOTIFICATIONS
 Push uses a self-hosted relay (a Cloudflare Worker) that is BLIND: it forwards an already-encrypted payload and cannot read it; a Notification Service Extension decrypts it on-device into the banner. No content is stored on any server.
 
+NETWORK SERVER ENTITLEMENT (macOS — com.apple.security.network.server)
+Haven is peer-to-peer: every install is a network peer, so the app must ACCEPT incoming connections, not just make outgoing ones. The server entitlement is required for core functionality, in three concrete ways:
+1. Inbound P2P transport: the app binds a QUIC (UDP) endpoint and listens for incoming connections from the user's own linked devices and invited circle members — this is how posts, photos, direct messages, and call signaling arrive device-to-device (there is no cloud server to pull from).
+2. The built-in circle relay (Settings → Storage → "Host a relay"): the user's Mac can volunteer as their circle's always-on encrypted mailbox. It listens for and responds to incoming connections from circle members to store-and-forward end-to-end-encrypted envelopes while recipients are offline, and serves an authenticated local HTTP interface (port 8674) so members can exchange large media.
+3. NAT traversal (hole-punching) requires receiving unsolicited inbound UDP packets on the bound socket.
+Removing the entitlement would break all inbound peer connectivity and with it the app's core purpose (a serverless social network). To observe it: enable "Host a relay" on the Mac, then post from a second device — the Mac accepts the inbound connection and stores the sealed envelope.
+
 ## review_first_name
 Blaine
 

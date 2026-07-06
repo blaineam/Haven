@@ -75,6 +75,13 @@ struct DynState {
     /// relaunch can't re-notify the same message (see notify_circle).
     notified: HashSet<String>,
     notified_dirty: bool,
+    /// "<dest>|<ref>" pairs whose media blob is CONFIRMED on that destination (relay node hex, or
+    /// "s3") — PERSISTED to `media-backed-up.txt`. Media keys are content-addressed so a confirmed
+    /// upload is permanent (no staleness). Without this, every 2-min backfill re-read each of MY
+    /// media files from disk into RAM (a 600 MB video per pass) and re-uploaded blobs the relays
+    /// already held. iOS `MediaBackupLedger` / Android `backedUp` parity.
+    media_backed_up: HashSet<String>,
+    media_backed_up_dirty: bool,
     internet_active: bool,
     relay_active: bool,
     started: bool,
@@ -174,6 +181,9 @@ impl Engine {
                 .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
                 .unwrap_or_default(),
             notified: std::fs::read_to_string(paths.root.join("notified.txt"))
+                .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
+                .unwrap_or_default(),
+            media_backed_up: std::fs::read_to_string(paths.root.join("media-backed-up.txt"))
                 .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
                 .unwrap_or_default(),
             ..DynState::default()
@@ -1829,6 +1839,9 @@ impl Engine {
         }
         self.relay_clients.lock().await.remove(&hex);
         self.relay_health.lock().unwrap().remove(&hex);
+        // A forgotten relay may be wiped — drop its media confirmations so a re-adopted one is re-mirrored.
+        self.forget_media_backed_up(&hex);
+        self.flush_media_backed_up();
         self.emit_changed();
     }
 
@@ -2127,6 +2140,39 @@ impl Engine {
             st.seen_mailbox.iter().cloned().collect::<Vec<_>>().join("\n")
         };
         let _ = std::fs::write(self.paths.root.join("mailbox-seen.txt"), snapshot);
+    }
+
+    /// Is `reference` confirmed present on `dest` (relay node hex, or "s3")? See DynState docs.
+    fn media_backed_up_has(&self, dest: &str, reference: &str) -> bool {
+        self.dyn_state.lock().unwrap().media_backed_up.contains(&format!("{dest}|{reference}"))
+    }
+    fn mark_media_backed_up(&self, dest: &str, reference: &str) {
+        let mut st = self.dyn_state.lock().unwrap();
+        if st.media_backed_up.insert(format!("{dest}|{reference}")) {
+            st.media_backed_up_dirty = true;
+        }
+    }
+    fn flush_media_backed_up(&self) {
+        let snapshot = {
+            let mut st = self.dyn_state.lock().unwrap();
+            if !st.media_backed_up_dirty {
+                return;
+            }
+            st.media_backed_up_dirty = false;
+            st.media_backed_up.iter().cloned().collect::<Vec<_>>().join("\n")
+        };
+        let _ = std::fs::write(self.paths.root.join("media-backed-up.txt"), snapshot);
+    }
+    /// Forget a destination's media confirmations (relay forgotten/erased) so we re-mirror to it
+    /// if it ever comes back. iOS `MediaBackupLedger.forgetDest` parity.
+    fn forget_media_backed_up(&self, dest: &str) {
+        let mut st = self.dyn_state.lock().unwrap();
+        let before = st.media_backed_up.len();
+        let prefix = format!("{dest}|");
+        st.media_backed_up.retain(|k| !k.starts_with(&prefix));
+        if st.media_backed_up.len() != before {
+            st.media_backed_up_dirty = true;
+        }
     }
 
     /// Build (and cache) the BYO S3 mailbox client from prefs + the keychain secret, if configured.
@@ -2600,79 +2646,141 @@ impl Engine {
     }
 
     async fn upload_media(self: &Arc<Self>, circle_id: &str, reference: &str) {
-        let Some(blob) = self.media.raw_sealed(reference) else { return };
         let key = Self::media_key(reference);
+
+        // ---- Probe phase: NO blob read. The media key is content-addressed (independent of the
+        // sealed bytes), so every unconfirmed destination can be asked "do you already hold it?"
+        // BEFORE the sealed file is loaded into RAM — a large video used to be re-read from disk
+        // AND re-uploaded on every 2-min backfill pass. Probe hits go into the persisted ledger;
+        // only a destination that is REACHABLE and MISSING the blob justifies the read below, and
+        // a relay that is unreachable or in its backoff window waits for a later pass.
+        let mut s3_needs = false;
+        if let Some(s3) = self.s3_client().await {
+            if !self.media_backed_up_has("s3", reference) {
+                match s3.get(&key).await {
+                    Ok(Some(_)) => self.mark_media_backed_up("s3", reference),
+                    Ok(None) => s3_needs = true,
+                    Err(_) => {} // bucket unreachable — don't read the blob on its behalf
+                }
+            }
+        }
+        let mut http_uploads: Vec<(String, String, String)> = vec![]; // (node, base url, token)
+        let mut dial_uploads: Vec<(String, Arc<RelayClient>)> = vec![];
+        for node_hex in self.relays_for(circle_id) {
+            if node_hex.starts_with("s3:") { continue; }
+            if self.media_backed_up_has(&node_hex, reference) { continue; }
+            // Relay HTTP interface — a reachable relay is authoritative (the iroh path serves the
+            // SAME store): hit → ledger, 404 → upload over HTTP; only unreachable falls to the dial.
+            // Bind out of the lock FIRST so the MutexGuard is dropped before any `.await` below.
+            let http_iface = self.prefs.lock().unwrap().relay_http(&node_hex);
+            if let Some((urls, token)) = http_iface {
+                let mut resolved = false;
+                for base in urls.iter().filter(|u| !self.http_url_bad(u)) {
+                    match self.http_get(base, &token, &key).await {
+                        Ok(Some(_)) => {
+                            self.mark_relay_ok(&node_hex);
+                            self.mark_media_backed_up(&node_hex, reference);
+                            resolved = true;
+                        }
+                        Ok(None) => {
+                            http_uploads.push((node_hex.clone(), base.clone(), token.clone()));
+                            resolved = true;
+                        }
+                        Err(()) => self.mark_http_url_bad(base),
+                    }
+                    if resolved { break; }
+                }
+                if resolved { continue; }
+            }
+            // iroh fallback — relay_client_for honors the backoff window (None = skip, no read).
+            if let Some(client) = self.relay_client_for(&node_hex).await {
+                if client.has(key.clone()).await {
+                    self.mark_relay_ok(&node_hex);
+                    self.mark_media_backed_up(&node_hex, reference);
+                } else {
+                    dial_uploads.push((node_hex.clone(), client));
+                }
+            }
+        }
+        if !s3_needs && http_uploads.is_empty() && dial_uploads.is_empty() {
+            self.flush_media_backed_up();
+            return;
+        }
+
+        // ---- Read the sealed blob, now known to be needed by at least one reachable destination.
+        let Some(blob) = self.media.raw_sealed(reference) else { return };
         let chunked = blob.len() > MEDIA_CHUNK_BYTES;
         // S3/HTTP bucket FIRST — the DEFAULT media transport. Plain HTTPS traverses any NAT, whereas
         // the iroh blob ALPN (haven/blob/1) drops its outbound datagrams over a pure-relay cross-NAT
         // path (noq/iroh fork bug): blob transfers that must cross a NAT stall and die even while
         // messaging works over the same relay path.
-        if let Some(s3) = self.s3_client().await {
-            if chunked {
+        if s3_needs {
+            if let Some(s3) = self.s3_client().await {
+                let ok = if chunked {
+                    let mut sizes = Vec::new();
+                    let mut all = true;
+                    for (i, slice) in blob.chunks(MEDIA_CHUNK_BYTES).enumerate() {
+                        if s3.put(&Self::media_chunk_key(reference, i), slice).await.is_err() { all = false; break; }
+                        sizes.push(slice.len());
+                    }
+                    all && s3.put(&key, &Self::make_manifest(&sizes)).await.is_ok()
+                } else {
+                    s3.put(&key, &blob).await.is_ok()
+                };
+                if ok { self.mark_media_backed_up("s3", reference); }
+            }
+        }
+        // Then mirror to every relay that probed reachable-and-missing. Large blobs are sliced into
+        // 8 MB chunks under "<key>.p/<i>" with a manifest at <key> so a GET never exceeds MAX_BLOB.
+        // An HTTP interface that dies mid-upload falls back to the iroh dial (same store).
+        for (node_hex, base, token) in http_uploads {
+            let ok = if chunked {
                 let mut sizes = Vec::new();
-                let mut ok = true;
+                let mut all = true;
                 for (i, slice) in blob.chunks(MEDIA_CHUNK_BYTES).enumerate() {
-                    if s3.put(&Self::media_chunk_key(reference, i), slice).await.is_err() { ok = false; break; }
+                    if !self.http_put(&base, &token, &Self::media_chunk_key(reference, i), slice.to_vec()).await {
+                        all = false;
+                        break;
+                    }
                     sizes.push(slice.len());
                 }
-                if ok { let _ = s3.put(&key, &Self::make_manifest(&sizes)).await; }
+                all && self.http_put(&base, &token, &key, Self::make_manifest(&sizes)).await
             } else {
-                let _ = s3.put(&key, &blob).await;
+                self.http_put(&base, &token, &key, blob.clone()).await
+            };
+            if ok {
+                self.mark_relay_ok(&node_hex);
+                self.mark_media_backed_up(&node_hex, reference);
+            } else {
+                self.mark_http_url_bad(&base);
+                if let Some(client) = self.relay_client_for(&node_hex).await {
+                    dial_uploads.push((node_hex, client));
+                }
             }
         }
-        // Then mirror to every relay (redundancy + the LAN/hosted fast-path). Per relay, its plain-HTTP
-        // interface is tried FIRST (the reliable cross-NAT path); the iroh blob dial is the fallback.
-        // Large blobs are sliced into 8 MB chunks under "<key>.p/<i>" with a manifest at <key> so a GET
-        // never exceeds MAX_BLOB. "s3:" pseudo-entries are the bucket handled above — can't be dialed.
-        for node_hex in self.relays_for(circle_id) {
-            if node_hex.starts_with("s3:") { continue; }
-            // Relay HTTP interface — the DEFAULT cross-NAT path. Bind out of the lock FIRST so the
-            // MutexGuard is dropped before any `.await` below (a guard held across await isn't Send).
-            let http_iface = self.prefs.lock().unwrap().relay_http(&node_hex);
-            if let Some((urls, token)) = http_iface {
-                let mut put = false;
-                for base in urls.iter().filter(|u| !self.http_url_bad(u)) {
-                    let ok = if chunked {
-                        let mut sizes = Vec::new();
-                        let mut all = true;
-                        for (i, slice) in blob.chunks(MEDIA_CHUNK_BYTES).enumerate() {
-                            if !self.http_put(base, &token, &Self::media_chunk_key(reference, i), slice.to_vec()).await {
-                                all = false;
-                                break;
-                            }
-                            sizes.push(slice.len());
-                        }
-                        all && self.http_put(base, &token, &key, Self::make_manifest(&sizes)).await
-                    } else {
-                        self.http_put(base, &token, &key, blob.clone()).await
-                    };
-                    if ok { put = true; break; } else { self.mark_http_url_bad(base); }
-                }
-                if put {
-                    self.mark_relay_ok(&node_hex);
-                    continue; // the iroh path serves the SAME store — done with this relay
-                }
-            }
-            if let Some(client) = self.relay_client_for(&node_hex).await {
-                let res: Result<(), ()> = async {
-                    if chunked {
-                        let mut sizes = Vec::new();
-                        for (i, slice) in blob.chunks(MEDIA_CHUNK_BYTES).enumerate() {
-                            client.put(Self::media_chunk_key(reference, i), slice.to_vec()).await.map_err(|_| ())?;
-                            sizes.push(slice.len());
-                        }
-                        client.put(key.clone(), Self::make_manifest(&sizes)).await.map_err(|_| ())
-                    } else {
-                        client.put(key.clone(), blob.clone()).await.map_err(|_| ())
+        for (node_hex, client) in dial_uploads {
+            let res: Result<(), ()> = async {
+                if chunked {
+                    let mut sizes = Vec::new();
+                    for (i, slice) in blob.chunks(MEDIA_CHUNK_BYTES).enumerate() {
+                        client.put(Self::media_chunk_key(reference, i), slice.to_vec()).await.map_err(|_| ())?;
+                        sizes.push(slice.len());
                     }
-                }
-                .await;
-                match res {
-                    Ok(()) => self.mark_relay_ok(&node_hex),
-                    Err(()) => self.relay_failed(&node_hex).await,
+                    client.put(key.clone(), Self::make_manifest(&sizes)).await.map_err(|_| ())
+                } else {
+                    client.put(key.clone(), blob.clone()).await.map_err(|_| ())
                 }
             }
+            .await;
+            match res {
+                Ok(()) => {
+                    self.mark_relay_ok(&node_hex);
+                    self.mark_media_backed_up(&node_hex, reference);
+                }
+                Err(()) => self.relay_failed(&node_hex).await,
+            }
         }
+        self.flush_media_backed_up();
     }
 
     async fn fetch_media_from_relay(self: &Arc<Self>, circle_id: &str, reference: &str) -> bool {

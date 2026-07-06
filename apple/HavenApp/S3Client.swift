@@ -57,8 +57,16 @@ struct S3Client {
     }
 
     func headObject(key: String) async -> Bool {
-        guard let req = try? signedRequest(method: "HEAD", path: "/\(bucket)/\(encodePath(key))", query: [], payload: Data()) else { return false }
-        guard let (_, resp) = try? await URLSession.shared.data(for: req), let http = resp as? HTTPURLResponse else { return false }
+        await headObjectExists(key: key) == true
+    }
+
+    /// Tri-state HEAD: true = the key exists, false = the bucket ANSWERED but doesn't hold it,
+    /// nil = no HTTP response at all (offline/unreachable). The distinction lets callers skip
+    /// expensive work (e.g. sealing a multi-hundred-MB media file) when the bucket can't be
+    /// reached anyway — a plain false would force the upload attempt.
+    func headObjectExists(key: String) async -> Bool? {
+        guard let req = try? signedRequest(method: "HEAD", path: "/\(bucket)/\(encodePath(key))", query: [], payload: Data()) else { return nil }
+        guard let (_, resp) = try? await URLSession.shared.data(for: req), let http = resp as? HTTPURLResponse else { return nil }
         return (200..<300).contains(http.statusCode)
     }
 

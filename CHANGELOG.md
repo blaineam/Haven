@@ -10,6 +10,19 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Fixed
+- **Media backup no longer re-reads + re-seals whole video files just to discover nobody
+  needs them.** `backup(ref:)` (iOS/macOS), `uploadMedia` (Android) and `upload_media`
+  (desktop) loaded the ENTIRE media file into RAM — and on Apple re-sealed it (~2× the file
+  size transient) — whenever ANY destination relay wasn't yet confirmed in the backup ledger,
+  even if that relay was unreachable or in backoff. On macOS this meant a 522MB and a 673MB
+  video were re-sealed on EVERY backfill pass (multi-GB RSS spikes every ~2 minutes, forever,
+  for relays that were never coming back). The media key is content-addressed (independent of
+  the sealed bytes), so all three platforms now run an existence-probe phase FIRST: confirmed
+  blobs go straight into the ledger, and the file is only read + sealed when at least one
+  destination is actually reachable AND missing it — a relay that's unreachable or inside its
+  RelayHealth backoff window is skipped without touching the file. Desktop additionally gains
+  the persisted `media-backed-up.txt` ledger it never had (iOS `MediaBackupLedger` / Android
+  `backedUp` parity — it used to re-upload every blob to every relay every 2 minutes).
 - **The build-174 runaway leak / watchdog kernel panic: dials are now single-flight per peer.**
   The Mac app hit 100% CPU on one background thread with footprint growing ~41MB/s
   (7.0→10.4GB in 88s, jetsam lifetimeMax ~170GB overnight, then a watchdog panic). Symbolicated

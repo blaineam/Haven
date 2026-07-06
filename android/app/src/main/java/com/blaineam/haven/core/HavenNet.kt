@@ -2259,53 +2259,100 @@ object HavenNet : InboundListener {
         // Skip entirely if every destination already has this blob (before the expensive rawSealed read).
         val dests = mediaRelaysFor(circleId)
         if (dests.isNotEmpty() && dests.all { isBackedUp(it, ref) }) return
-        val blob = LocalMedia.rawSealed(ref) ?: return
         val key = mediaKey(ref)
-        val chunked = blob.size > mediaChunkBytes
         val hostedHex = runCatching { relayHost?.nodeIdHex() }.getOrNull()
+
+        // ---- Probe phase: NO blob read. The media key is content-addressed (independent of the
+        // sealed bytes), so every unconfirmed destination can be asked "do you already hold it?"
+        // BEFORE the full sealed file is loaded into RAM — a large video used to be re-read every
+        // backfill pass just to discover every unconfirmed relay was unreachable/in backoff. Only
+        // a destination that is REACHABLE and MISSING the blob justifies the read below; probe hits
+        // go straight into the ledger, unreachable relays wait for a later pass.
+        val uploadS3 = ArrayList<Pair<String, uniffi.haven_ffi.S3ConfigFfi>>()   // "s3:" pseudo-node → cfg
+        val uploadLocal = ArrayList<String>()                                 // own hosted relay
+        val uploadHttp = ArrayList<Pair<String, RelayEntry>>()                // node → HTTP interface
+        val uploadDial = ArrayList<Pair<String, RelayClient>>()               // node → connected client
         for (nodeHex in dests) {
             if (isBackedUp(nodeHex, ref)) continue   // already confirmed on this relay
-            // S3-BUCKET relay: put via the S3 FFI (relayClientFor can't dial an "s3:" pseudo-node).
+            // S3-BUCKET relay: probe via the S3 FFI (relayClientFor can't dial an "s3:" pseudo-node).
+            // success(bytes) = already mirrored, success(null) = reachable miss, failure = unreachable.
             if (nodeHex.startsWith("s3:")) {
                 val cfg = StorageStore.s3Config(appContext) ?: continue
-                runCatching {
-                    if (chunked) {
-                        val sizes = chunkOffsets(blob.size).mapIndexed { i, (from, to) ->
-                            uniffi.haven_ffi.s3Put(cfg, mediaChunkKey(ref, i), blob.copyOfRange(from, to)); to - from
-                        }
-                        uniffi.haven_ffi.s3Put(cfg, key, makeManifest(sizes))
-                    } else {
-                        uniffi.haven_ffi.s3Put(cfg, key, blob)
-                    }
-                }.onSuccess { markRelaySeen(nodeHex); markBackedUp(nodeHex, ref) }
-                    .onFailure { android.util.Log.d(TAG, "s3 media put failed ($nodeHex): ${it.message}") }
-                continue
-            }
-            // Our OWN hosted relay: write straight into the local store (never dial/HTTP ourselves).
-            if (hostedHex != null && nodeHex == hostedHex) {
-                runCatching {
-                    if (chunked) {
-                        val sizes = chunkOffsets(blob.size).mapIndexed { i, (from, to) ->
-                            relayHost?.localPut(mediaChunkKey(ref, i), blob.copyOfRange(from, to)); to - from
-                        }
-                        relayHost?.localPut(key, makeManifest(sizes))
-                    } else {
-                        relayHost?.localPut(key, blob)
-                    }
-                }.onSuccess { markBackedUp(nodeHex, ref) }
-                continue
-            }
-            // Relay HTTP interface — the DEFAULT cross-NAT path. Success = done for this relay
-            // (the iroh path serves the same store); unreachable → fall back to the iroh put.
-            val entry = relayEntries[nodeHex]
-            if (entry != null && httpUrlsFor(entry).isNotEmpty()) {
-                if (httpUploadMedia(entry, ref, key, blob, chunked)) {
-                    markRelaySeen(nodeHex); markBackedUp(nodeHex, ref)
-                    android.util.Log.i("MediaSync", "HTTP uploaded ref=$ref to ${nodeHex.take(8)}")
-                    continue
+                runCatching { uniffi.haven_ffi.s3Get(cfg, key) }.onSuccess {
+                    if (it != null) { markRelaySeen(nodeHex); markBackedUp(nodeHex, ref) }
+                    else uploadS3.add(nodeHex to cfg)
                 }
+                continue
             }
-            val client = relayClientFor(nodeHex) ?: continue
+            // Our OWN hosted relay: the local store answers instantly (never dial/HTTP ourselves).
+            if (hostedHex != null && nodeHex == hostedHex) {
+                if (relayHost?.localGet(key) != null) markBackedUp(nodeHex, ref)
+                else uploadLocal.add(nodeHex)
+                continue
+            }
+            // Relay HTTP interface — a reachable relay is authoritative (the iroh path serves the
+            // SAME store): hit → ledger, 404 → upload over HTTP; only unreachable falls to the dial.
+            val entry = relayEntries[nodeHex]
+            if (entry != null) {
+                var resolved = false
+                for (base in httpUrlsFor(entry)) {
+                    val r = relayHttpGet(base, entry.httpToken, key)
+                    if (r.isFailure) { markHttpUrlBad(base); continue }
+                    if (r.getOrNull() != null) { markRelaySeen(nodeHex); markBackedUp(nodeHex, ref) }
+                    else uploadHttp.add(nodeHex to entry)
+                    resolved = true
+                    break
+                }
+                if (resolved) continue
+            }
+            val client = relayClientFor(nodeHex) ?: continue   // honors backoff — skip WITHOUT reading
+            runCatching { client.has(key) }.onSuccess {
+                if (it) { markRelayOk(nodeHex); markBackedUp(nodeHex, ref) }
+                else uploadDial.add(nodeHex to client)
+            }.onFailure { relayFailed(nodeHex) }
+        }
+        if (uploadS3.isEmpty() && uploadLocal.isEmpty() && uploadHttp.isEmpty() && uploadDial.isEmpty()) return
+
+        // ---- Read the sealed blob, now known to be needed by at least one reachable destination.
+        val blob = LocalMedia.rawSealed(ref) ?: return
+        val chunked = blob.size > mediaChunkBytes
+        for ((nodeHex, cfg) in uploadS3) {
+            runCatching {
+                if (chunked) {
+                    val sizes = chunkOffsets(blob.size).mapIndexed { i, (from, to) ->
+                        uniffi.haven_ffi.s3Put(cfg, mediaChunkKey(ref, i), blob.copyOfRange(from, to)); to - from
+                    }
+                    uniffi.haven_ffi.s3Put(cfg, key, makeManifest(sizes))
+                } else {
+                    uniffi.haven_ffi.s3Put(cfg, key, blob)
+                }
+            }.onSuccess { markRelaySeen(nodeHex); markBackedUp(nodeHex, ref) }
+                .onFailure { android.util.Log.d(TAG, "s3 media put failed ($nodeHex): ${it.message}") }
+        }
+        // Our OWN hosted relay: write straight into the local store.
+        for (nodeHex in uploadLocal) {
+            runCatching {
+                if (chunked) {
+                    val sizes = chunkOffsets(blob.size).mapIndexed { i, (from, to) ->
+                        relayHost?.localPut(mediaChunkKey(ref, i), blob.copyOfRange(from, to)); to - from
+                    }
+                    relayHost?.localPut(key, makeManifest(sizes))
+                } else {
+                    relayHost?.localPut(key, blob)
+                }
+            }.onSuccess { markBackedUp(nodeHex, ref) }
+        }
+        // Relay HTTP interface — the DEFAULT cross-NAT path. Success = done for this relay
+        // (the iroh path serves the same store); a mid-upload failure falls back to the iroh put.
+        for ((nodeHex, entry) in uploadHttp) {
+            if (httpUploadMedia(entry, ref, key, blob, chunked)) {
+                markRelaySeen(nodeHex); markBackedUp(nodeHex, ref)
+                android.util.Log.i("MediaSync", "HTTP uploaded ref=$ref to ${nodeHex.take(8)}")
+                continue
+            }
+            relayClientFor(nodeHex)?.let { uploadDial.add(nodeHex to it) }
+        }
+        for ((nodeHex, client) in uploadDial) {
             runCatching {
                 if (chunked) {
                     val sizes = chunkOffsets(blob.size).mapIndexed { i, (from, to) ->

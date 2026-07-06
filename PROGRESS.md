@@ -6,6 +6,15 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest wave (built, batched for next upload)
+- **30-second cold start on the circle feed — root-caused and fixed (all platforms, verified live
+  on the Mac with real data)**: the mailbox ingestion cursor was in-memory only, so every cold
+  start re-downloaded + re-verified the ENTIRE relay mailbox (~6,700 entries for 88 events); and
+  the mailbox grew unbounded because every backfill re-sealed history into fresh random bytes →
+  a brand-new content-addressed entry per event per run. Cursor is now persisted on all four
+  platforms; event envelopes seal **deterministically** (plaintext-keyed salt + derived nonce, no
+  wire change) so re-seals dedupe; key commits are cached (and persisted) per recipient-set; the
+  full-history backfill is throttled to daily and off the main actor; `iroh-trace.log` capped at
+  16MB (was 370MB). Verified: relaunch went from "6714 keys, 6714 new" to "6715 keys, 0 new".
 - **CLI self-installs auto-start**: `haven-relay service install` wires up reboot-survival on
   the current OS itself (systemd user unit / launchd agent / Windows Scheduled Task; crontab
   `@reboot` fallback) — `service uninstall` reverses it. No more hand-editing unit files.

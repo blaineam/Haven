@@ -438,7 +438,54 @@ enum SharedStore {
     // when they're online; any member polls + downloads when *they're* online — the two
     // never need to overlap. The bucket only ever holds opaque, circle-sealed blobs.
 
+    // Mailbox keys already ingested or confirmed uploaded — PERSISTED. This was in-memory only,
+    // so every cold start treated the whole mailbox as new and re-downloaded + re-verified every
+    // envelope (observed: ~6700 keys for an 88-event circle → the 30-second cold start on the
+    // circle feed, all burned on crypto for duplicates the engine then dropped). Guarded by a lock
+    // (poll/upload run on detached tasks); writes are debounced to one file save per burst.
+    private static let seenLock = NSLock()
+    private static var seenLoaded = false
     private static var seenMailbox = Set<String>()
+    private static var seenSavePending = false
+    private static var seenURL: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("haven-mailbox-seen.txt")
+    }
+    private static func withSeen<T>(_ body: (inout Set<String>) -> T) -> T {
+        seenLock.lock(); defer { seenLock.unlock() }
+        if !seenLoaded {
+            seenLoaded = true
+            if let text = try? String(contentsOf: seenURL, encoding: .utf8) {
+                seenMailbox = Set(text.split(separator: "\n").map(String.init))
+            }
+        }
+        return body(&seenMailbox)
+    }
+    private static func seenContains(_ key: String) -> Bool { withSeen { $0.contains(key) } }
+    /// Record a key as seen and schedule a debounced save (one write per burst, off the caller).
+    private static func markSeen(_ key: String) {
+        let scheduleSave: Bool = withSeen { set in
+            guard set.insert(key).inserted, !seenSavePending else { return false }
+            seenSavePending = true
+            return true
+        }
+        guard scheduleSave else { return }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+            let snapshot: String = withSeen { set in
+                seenSavePending = false
+                return set.joined(separator: "\n")
+            }
+            try? snapshot.write(to: seenURL, atomically: true, encoding: .utf8)
+        }
+    }
+
+    /// Wipe the persisted seen-set — identity reset/adoption must not inherit the old identity's
+    /// ingestion cursor (its keys are meaningless to the new engine state).
+    static func resetSeenMailbox() {
+        withSeen { $0.removeAll() }
+        try? FileManager.default.removeItem(at: seenURL)
+    }
 
     private static func mailboxKey(_ circleId: String, _ env: Data) -> String {
         let h = SHA256.hash(data: env).map { String(format: "%02x", $0) }.joined()
@@ -452,7 +499,7 @@ enum SharedStore {
     @discardableResult
     static func uploadEvent(circleId: String, env: Data) async -> Bool {
         let key = mailboxKey(circleId, env)
-        if seenMailbox.contains(key) { return true }
+        if seenContains(key) { return true }
         // Relay (common path) → owner's own bucket → member's pre-signed pool → legacy creds.
         let nodes = relayNodes(circleId)
         if !nodes.isEmpty {
@@ -471,7 +518,7 @@ enum SharedStore {
                 do { try await c.put(key: key, data: env); RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node); landed = true }
                 catch { RelayHealth.shared.recordFailure(node); RelayClients.forget(node) }
             }
-            if landed { seenMailbox.insert(key); FeedStore.shared.markRelay(true); return true }
+            if landed { markSeen(key); FeedStore.shared.markRelay(true); return true }
             FeedStore.shared.markRelay(false); return false
         }
         if PresignStore.shared.hasPool(circleId) && !isOwner(circleId) {
@@ -479,14 +526,14 @@ enum SharedStore {
             guard let put = await PresignStore.shared.nextPutURL(circleId: circleId, myHex: FeedStore.shared.myNodeHex) else {
                 FeedStore.shared.markRelay(false); return false
             }
-            if await S3Client.putURL(put, data: env) { seenMailbox.insert(key); FeedStore.shared.markRelay(true); return true }
+            if await S3Client.putURL(put, data: env) { markSeen(key); FeedStore.shared.markRelay(true); return true }
             FeedStore.shared.markRelay(false); return false
         }
         guard let s3 = isOwner(circleId) ? ownerS3() : mailboxClient() else { return false }
-        if await s3.headObject(key: key) { seenMailbox.insert(key); FeedStore.shared.markRelay(true); return true }
+        if await s3.headObject(key: key) { markSeen(key); FeedStore.shared.markRelay(true); return true }
         do {
             try await s3.putObject(key: key, data: env)
-            seenMailbox.insert(key); FeedStore.shared.markRelay(true); return true
+            markSeen(key); FeedStore.shared.markRelay(true); return true
         } catch {
             FeedStore.shared.markRelay(false); return false
         }
@@ -507,11 +554,12 @@ enum SharedStore {
                     // friend uploaded to it (the previously-missing read-own-relay path).
                     if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
                         let localKeys = RelayHost.shared.localList(prefix)
-                        let fresh = localKeys.filter { !seenMailbox.contains($0) }
+                        let fresh = localKeys.filter { !seenContains($0) }
                         HavenLog.relay("poll OWN relay \(cid): \(localKeys.count) keys, \(fresh.count) new")
                         for key in fresh {
-                            seenMailbox.insert(key)
-                            if let data = RelayHost.shared.localGet(key) { out.append((cid, data)) }
+                            // Mark seen only once the bytes are in hand, so a failed read is
+                            // retried on the next poll instead of being skipped forever.
+                            if let data = RelayHost.shared.localGet(key) { markSeen(key); out.append((cid, data)) }
                         }
                         continue
                     }
@@ -519,25 +567,23 @@ enum SharedStore {
                     let keys = await c.list(prefix: prefix)
                     RelayHealth.shared.recordSuccess(node)
                     RelayMailboxStore.shared.markSeen(node)
-                    for key in keys where !seenMailbox.contains(key) {
-                        seenMailbox.insert(key)
-                        if let data = await c.get(key: key) { out.append((cid, data)) }
+                    for key in keys where !seenContains(key) {
+                        if let data = await c.get(key: key) { markSeen(key); out.append((cid, data)) }
                     }
                 }
             } else if PresignStore.shared.hasPool(cid) && !isOwner(cid) {
                 // Member: LIST + GET via the pre-signed pool URLs (no credentials).
                 if let listURL = await PresignStore.shared.listURL(cid), let xml = await S3Client.getURL(listURL) {
-                    for key in S3Client.parseListKeys(xml) where !seenMailbox.contains(key) {
-                        seenMailbox.insert(key)
+                    for key in S3Client.parseListKeys(xml) where !seenContains(key) {
                         if let g = await PresignStore.shared.getURL(circleId: cid, key: key), let data = await S3Client.getURL(g) {
+                            markSeen(key)
                             out.append((cid, data))
                         }
                     }
                 }
             } else if let s3 = isOwner(cid) ? ownerS3() : mailboxClient(), let s3keys = try? await s3.listKeys(prefix: prefix) {
-                for key in s3keys where !seenMailbox.contains(key) {
-                    seenMailbox.insert(key)
-                    if let data = try? await s3.getObject(key: key) { out.append((cid, data)) }
+                for key in s3keys where !seenContains(key) {
+                    if let data = try? await s3.getObject(key: key) { markSeen(key); out.append((cid, data)) }
                 }
             }
         }

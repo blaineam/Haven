@@ -127,7 +127,31 @@ object HavenNet : InboundListener {
     private val RELAY_STALE_AFTER_MS = 7L * 24 * 3600 * 1000
     private val relayClients = HashMap<String, RelayClient>()
     private val relayMutex = Mutex()
+
+    // Mailbox keys already ingested or confirmed uploaded — PERSISTED (parity with iOS). In-memory
+    // only, every cold start treated the whole mailbox as new and re-downloaded + re-verified every
+    // envelope (a real circle had accumulated ~6700 entries for 88 events → a 30-second cold start,
+    // all burned on crypto for duplicates the engine then dropped). Loaded lazily, saved debounced.
     private val seenMailbox = HashSet<String>()
+    private var seenMailboxLoaded = false
+    private var seenMailboxSavePending = false
+    private val seenMailboxFile: File get() = File(appContext.filesDir, "haven_mailbox_seen.txt")
+    private fun ensureSeenMailboxLoaded() {
+        if (seenMailboxLoaded) return
+        seenMailboxLoaded = true
+        runCatching { if (seenMailboxFile.exists()) seenMailbox.addAll(seenMailboxFile.readLines().filter { it.isNotBlank() }) }
+    }
+    /** Record a mailbox key as seen and schedule one debounced save for the burst. */
+    private fun markMailboxSeen(key: String) {
+        ensureSeenMailboxLoaded()
+        if (!seenMailbox.add(key) || seenMailboxSavePending) return
+        seenMailboxSavePending = true
+        scope.launch {
+            kotlinx.coroutines.delay(2_000)
+            seenMailboxSavePending = false
+            runCatching { seenMailboxFile.writeText(seenMailbox.joinToString("\n")) }
+        }
+    }
 
     /**
      * Per-relay exponential-backoff health (5s → 5m), keyed by node hex — drives graceful
@@ -922,7 +946,15 @@ object HavenNet : InboundListener {
         // so a sibling reading the relay finds it. The nearby chunk path is unreliable; the relay is durable.
         if (nowMs - lastMediaBackfillMs > 120_000) {
             lastMediaBackfillMs = nowMs
-            scope.launch { runCatching { for (c in social.circles()) backfillMailbox(c.id) } }
+            // Event envelopes at most DAILY (persisted across launches): re-uploads are idempotent
+            // now (deterministic envelopes + the persisted seen-set), but the re-seal is still a
+            // hybrid signature per event — not something to burn every 2 minutes. Before this
+            // gate, every 2-minute tick re-sealed the whole history into fresh envelope bytes →
+            // a new mailbox entry per event per tick, the bloat behind the slow cold start.
+            // Media stays on the 2-minute cadence (its backup queue skips blobs already present).
+            val eventsToo = nowMs - prefs.getLong("lastEventBackfillMs", 0L) > 86_400_000L
+            if (eventsToo) prefs.edit().putLong("lastEventBackfillMs", nowMs).apply()
+            scope.launch { runCatching { for (c in social.circles()) backfillMailbox(c.id, eventsToo = eventsToo) } }
         }
     }
 
@@ -1716,15 +1748,23 @@ object HavenNet : InboundListener {
 
     /** Drop a sealed event into the circle's mailbox (Haven relay node and/or S3 pre-signed pool). */
     private suspend fun uploadEvent(circleId: String, env: ByteArray) {
+        // Skip anything already confirmed in a mailbox: envelopes re-seal deterministically now, so
+        // a backfill reproduces the same content-addressed key and the persisted seen-set makes the
+        // whole re-upload a no-op instead of a network sweep (and, before determinism, a fresh
+        // mailbox entry per event per run — the bloat behind the slow cold start).
+        val key = mailboxKey(circleId, env)
+        ensureSeenMailboxLoaded()
+        if (seenMailbox.contains(key)) return
+        var landed = false
         // S3 pre-signed pool (the BYO-bucket path many circles use).
         if (Presign.hasBootstrap(circleId)) {
             if (Presign.uploadEvent(circleId, nodeIdHex, env)) {
+                landed = true
                 withContext(Dispatchers.Main) { relayActive.value = true }
             }
         }
         // Mirror to EVERY configured Haven relay (redundancy). Content-addressed keys make
         // re-puts idempotent, and a relay in backoff is skipped — graceful fallback.
-        val key = mailboxKey(circleId, env)
         val hostedHex = runCatching { relayHost?.nodeIdHex() }.getOrNull()
         for (nodeHex in relaysFor(circleId)) {
             // S3-bucket relay (store-and-forward): PUT the sealed blob straight into the bucket via the
@@ -1732,31 +1772,38 @@ object HavenNet : InboundListener {
             if (nodeHex.startsWith("s3:")) {
                 val cfg = StorageStore.s3Config(appContext) ?: continue
                 runCatching { uniffi.haven_ffi.s3Put(cfg, key, env) }
-                    .onSuccess { markRelaySeen(nodeHex); withContext(Dispatchers.Main) { relayActive.value = true } }
+                    .onSuccess { landed = true; markRelaySeen(nodeHex); withContext(Dispatchers.Main) { relayActive.value = true } }
                     .onFailure { Log.d(TAG, "s3 relay put failed ($nodeHex): ${it.message}") }
                 continue
             }
             // Our OWN hosted relay: store directly into the local mailbox (no iroh self-dial).
             if (hostedHex != null && nodeHex == hostedHex) {
-                runCatching { relayHost?.localPut(key, env) }
+                runCatching { relayHost?.localPut(key, env) }.onSuccess { landed = true }
                 withContext(Dispatchers.Main) { relayActive.value = true }
                 continue
             }
             val client = relayClientFor(nodeHex) ?: continue
             runCatching { client.put(key, env) }
                 .onSuccess {
+                    landed = true
                     markRelayOk(nodeHex)
                     withContext(Dispatchers.Main) { relayActive.value = true }
                 }
                 .onFailure { Log.d(TAG, "mailbox put failed ($nodeHex): ${it.message}"); relayFailed(nodeHex) }
         }
+        if (landed) markMailboxSeen(key)
     }
 
-    /** Re-upload every post I authored in a circle (for members who were offline when I posted). */
-    private suspend fun backfillMailbox(circleId: String) {
+    /** Re-upload every post I authored in a circle (for members who were offline when I posted).
+     *  `eventsToo = false` skips the event re-seal (a hybrid signature per event) and only enqueues
+     *  media — used by the 2-minute sync tick, which needs media freshness but not a daily-enough
+     *  event sweep. */
+    private suspend fun backfillMailbox(circleId: String, eventsToo: Boolean = true) {
         if (relaysFor(circleId).isEmpty() && !Presign.hasBootstrap(circleId)) return
-        val envs = runCatching { social.exportMyEnvelopes(circleId) }.getOrDefault(emptyList())
-        for (env in envs) uploadEvent(circleId, env)
+        if (eventsToo) {
+            val envs = runCatching { social.exportMyEnvelopes(circleId) }.getOrDefault(emptyList())
+            for (env in envs) uploadEvent(circleId, env)
+        }
         // Also push the media bytes of anything I've posted here that I still hold locally — through
         // the serial media queue so several circles backfilling at once can't stack full blobs in RAM.
         val feed = runCatching { social.feed(circleId, nowMs(), null) }.getOrDefault(emptyList())
@@ -1785,13 +1832,14 @@ object HavenNet : InboundListener {
     /** Poll every circle's mailbox; ingest envelopes we haven't seen. */
     suspend fun pollMailbox() {
         if (!ready) return
+        ensureSeenMailboxLoaded()
         var changed = false
         // S3 pre-signed pools (the BYO-bucket path).
         for (circleId in Presign.circles()) {
             val items = runCatching { Presign.poll(circleId, seenMailbox) }.getOrDefault(emptyList())
             if (items.isNotEmpty()) withContext(Dispatchers.Main) { relayActive.value = true }
             for ((key, env) in items) {
-                seenMailbox.add(key)
+                markMailboxSeen(key)
                 if (runCatching { social.receive(circleId, env) }.getOrDefault(false)) {
                     changed = true; notifyInbound(circleId)
                 }
@@ -1823,7 +1871,7 @@ object HavenNet : InboundListener {
                 for (s3key in keys) {
                     if (seenMailbox.contains(s3key)) continue
                     val env = runCatching { uniffi.haven_ffi.s3Get(cfg, s3key) }.getOrNull() ?: continue
-                    seenMailbox.add(s3key)
+                    markMailboxSeen(s3key)
                     if (runCatching { social.receive(circleId, env) }.getOrDefault(false)) {
                         changed = true; notifyInbound(circleId)
                     }
@@ -1839,7 +1887,7 @@ object HavenNet : InboundListener {
             for (key in keys) {
                 if (seenMailbox.contains(key)) continue
                 val env = runCatching { client.get(key) }.getOrNull() ?: continue
-                seenMailbox.add(key)
+                markMailboxSeen(key)
                 if (runCatching { social.receive(circleId, env) }.getOrDefault(false)) {
                     changed = true
                     notifyInbound(circleId)
@@ -2561,6 +2609,7 @@ object HavenNet : InboundListener {
     fun reset() {
         contacts.clear(); pending.clear(); blocked.clear(); initiated.clear()
         relayNodes.clear(); relayClients.clear(); relayHealth.clear(); seenMailbox.clear()
+        runCatching { seenMailboxFile.delete() }   // a new identity must not inherit the seen-set
         relayEntries.clear(); suppressedRelays.clear(); defaultRelayHex = ""
         Presign.reset()
         CircleLock.reset()

@@ -42,18 +42,25 @@ pub fn init_logging(dir: String) {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         let path = std::path::PathBuf::from(&dir).join("iroh-trace.log");
+        // Cap the file: it appends debug-level connection logs for the app's whole life and had
+        // grown unbounded (370MB observed on a daily-driver Mac). Start fresh past ~16MB.
+        if std::fs::metadata(&path).map(|m| m.len() > 16 * 1024 * 1024).unwrap_or(false) {
+            let _ = std::fs::remove_file(&path);
+        }
         let filter = tracing_subscriber::EnvFilter::new(
             "iroh=debug,iroh_relay=debug,iroh_net=debug,noq=info,haven_net=debug",
         );
+        // One shared handle (Mutex<File> is a MakeWriter) — the previous per-line open/append/close
+        // was needless I/O churn during connection storms (exactly when this log is busiest).
+        let file: Box<dyn std::io::Write + Send> =
+            match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                Ok(f) => Box::new(f),
+                Err(_) => Box::new(std::io::sink()),
+            };
         let _ = tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_ansi(false)
-            .with_writer(move || -> Box<dyn std::io::Write> {
-                match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-                    Ok(f) => Box::new(f),
-                    Err(_) => Box::new(std::io::sink()),
-                }
-            })
+            .with_writer(std::sync::Mutex::new(file))
             .try_init();
     });
 }
@@ -931,6 +938,12 @@ struct Circle {
     /// my blobs; distributed in my key commits. Peers' secrets are stored so I can find their blobs.
     my_circle_secret: [u8; 32],
     peer_circle_secrets: HashMap<String, [u8; 32]>,
+    /// Session cache of the last sealed key commit: (context hash over epoch/key/secret/recipients,
+    /// tagged wire bytes). The KEM inside a commit is necessarily random, so re-sealing one for the
+    /// SAME context produces different bytes — and the content-addressed mailbox then stores a new
+    /// copy per backfill run. Reusing the cached bytes while the context is unchanged keeps the
+    /// mailbox key stable (events are handled separately: their sealing is fully deterministic).
+    cached_commit: Option<([u8; 32], Vec<u8>)>,
 }
 
 impl Circle {
@@ -947,6 +960,7 @@ impl Circle {
             pending_epoch: vec![],
             my_circle_secret: [0u8; 32],
             peer_circle_secrets: HashMap::new(),
+            cached_commit: None,
         }
     }
     /// Ensure I have a current epoch key for my own posts AND a stable circle secret (bootstrap on
@@ -1284,6 +1298,12 @@ struct PersistCircle {
     my_circle_secret: [u8; 32],
     #[serde(default)]
     peer_circle_secrets: Vec<(String, [u8; 32])>,
+    /// The last sealed key commit (context hash, tagged wire bytes) — persisted so a daily backfill
+    /// re-uses the SAME commit bytes across launches while the context (epoch/key/secret/recipient
+    /// devices) is unchanged. Without this the KEM's randomness minted a new content-addressed
+    /// mailbox entry per backfill run. Defaulted so older state files load (re-seal once).
+    #[serde(default)]
+    cached_commit: Option<([u8; 32], Vec<u8>)>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PersistState {
@@ -1824,8 +1844,31 @@ impl HavenSocial {
         if let Some(cd) = st.device_lists.get(&me_pub.node_id_bytes()) {
             out.push(tagged(TAG_DEVICE_ROSTER, &encode_roster(&me_pub, cd)));
         }
-        if let Ok(commit) = seal_key_commit(&st.me, &members, circle_id, epoch, &key, &secret) {
-            out.push(tagged(TAG_KEY_COMMIT, &commit.to_bytes()));
+        // Key commit: the hybrid KEM is random, so a re-seal for the SAME context yields new bytes
+        // and the content-addressed mailbox would accumulate a copy per backfill. Reuse the cached
+        // sealed commit while (epoch, key, secret, recipient devices) are unchanged.
+        let commit_ctx: [u8; 32] = {
+            let mut h = blake3::Hasher::new();
+            h.update(b"haven-commit-ctx-v1");
+            h.update(&epoch.to_le_bytes());
+            h.update(&key);
+            h.update(&secret);
+            let mut ids: Vec<[u8; 32]> = members.iter().map(|m| m.node_id_bytes()).collect();
+            ids.sort_unstable();
+            for id in &ids {
+                h.update(id);
+            }
+            *h.finalize().as_bytes()
+        };
+        match &st.circles[idx].cached_commit {
+            Some((ctx, bytes)) if *ctx == commit_ctx => out.push(bytes.clone()),
+            _ => {
+                if let Ok(commit) = seal_key_commit(&st.me, &members, circle_id, epoch, &key, &secret) {
+                    let bytes = tagged(TAG_KEY_COMMIT, &commit.to_bytes());
+                    st.circles[idx].cached_commit = Some((commit_ctx, bytes.clone()));
+                    out.push(bytes);
+                }
+            }
         }
         let mut events: Vec<Event> = st.circles[idx]
             .events
@@ -2062,6 +2105,7 @@ impl HavenSocial {
                 peer_epoch_keys: c.peer_epoch_keys.iter().map(|((a, e), k)| (a.clone(), *e, *k)).collect(),
                 my_circle_secret: c.my_circle_secret,
                 peer_circle_secrets: c.peer_circle_secrets.iter().map(|(a, s)| (a.clone(), *s)).collect(),
+                cached_commit: c.cached_commit.clone(),
             }).collect(),
             device_rosters: {
                 let me_id = st.me.public().node_id_bytes();
@@ -2107,6 +2151,7 @@ impl HavenSocial {
                 peer_epoch_keys: vec![],
                 my_circle_secret: [0u8; 32],
                 peer_circle_secrets: vec![],
+                cached_commit: None,
             });
         }
     }
@@ -2150,6 +2195,11 @@ impl HavenSocial {
         }
         for (a, s) in pc.peer_circle_secrets {
             st.circles[idx].peer_circle_secrets.entry(a).or_insert(s);
+        }
+        // Restore the sealed-commit cache so a daily backfill reuses the same commit bytes across
+        // launches (context-hash-gated: a stale one is simply ignored and re-sealed on next export).
+        if st.circles[idx].cached_commit.is_none() {
+            st.circles[idx].cached_commit = pc.cached_commit;
         }
     }
 

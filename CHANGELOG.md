@@ -7,6 +7,41 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+- **30-second cold start on the circle feed, root-caused and fixed (all platforms).** Two
+  compounding bugs:
+  1. **The mailbox seen-set wasn't persisted.** Every cold start treated the ENTIRE relay
+     mailbox as new and re-downloaded + re-verified every envelope — a real circle had
+     accumulated ~6,700 mailbox entries for 88 events, so launch burned 30+ seconds on hybrid
+     signature verification of duplicates the engine then discarded. The ingestion cursor now
+     persists across launches (iOS/macOS `haven-mailbox-seen.txt`, Android
+     `haven_mailbox_seen.txt`, desktop `mailbox-seen.txt`), and a key is only marked seen once
+     its bytes are actually in hand (a failed download is retried instead of skipped forever).
+     Identity reset/adoption wipes the cursor. (First launch after this update re-scans once to
+     seed the cursor; every launch after that is fast.)
+  2. **The mailbox grew without bound.** Backfill re-sealed the whole history on every launch
+     (iOS) / every 2 minutes (Android), and every re-seal produced fresh random bytes — so the
+     content-addressed mailbox key was NEW each time and relays accumulated a copy of every
+     event per run. Event envelopes now seal **deterministically** (salt is a PRF over the
+     plaintext keyed by the epoch key; nonce derived from the per-plaintext event key; the
+     hybrid signature was already deterministic), so a re-seal reproduces byte-identical
+     envelopes, the relay's `has()` dedupe finally works, and the mailbox stays at one entry
+     per event per epoch. An edit derives a fresh salt → fresh key + nonce, so AES-GCM never
+     reuses a (key, nonce) pair across distinct plaintexts; no wire change — old receivers just
+     read the carried salt/nonce. Key commits (necessarily KEM-random) are cached — and
+     persisted with the engine state — per recipient-set, so backfills reuse the same commit
+     bytes until the epoch/membership/device set actually changes.
+- **Full-history event backfill throttled to daily.** New-relay adoption and share-history
+  still backfill immediately; the launch-time (iOS/macOS) and 2-minute-tick (Android) sweeps
+  now run at most once a day — the re-seal is a hybrid signature per event, and the daily run
+  is a cheap no-op thanks to the persisted seen-set + deterministic envelopes. The iOS re-seal
+  also moved off the main actor.
+- **`iroh-trace.log` capped.** The connection-diagnostic log grew unbounded (370MB observed on
+  a daily-driver Mac) and re-opened the file for every line; it now starts fresh past 16MB and
+  reuses one handle.
+
 ## [0.1.0-beta.27] — 2026-07-05
 
 ### Fixed

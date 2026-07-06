@@ -103,6 +103,7 @@ final class FeedStore: ObservableObject {
             try? FileManager.default.moveItem(at: stateURL, to: backup)
         }
         SelfSyncCoordinator.shared.reset()
+        SharedStore.resetSeenMailbox()   // the new identity must not inherit the old ingestion cursor
         configure(seed: seed)
     }
 
@@ -139,7 +140,17 @@ final class FeedStore: ObservableObject {
         RelayMailboxStore.shared.purgeStale()   // erase relays inactive AND unseen > 7 days (config else survives)
         RelayHost.shared.startIfEnabled()   // resume serving as the circle's relay if toggled on
         PresignStore.shared.remintAllOwned()   // refresh any S3 pre-signed pools I own
-        backfillMailbox(circleIds: circles.map(\.id))   // ensure already-posted content is in the mailbox
+        // Ensure already-posted content is in the mailbox — at most once a day, not every launch.
+        // This ran unconditionally at startup, and (before deterministic envelopes) every run
+        // re-sealed the whole history into brand-new bytes → a NEW mailbox key per event per
+        // launch. One real circle had accumulated ~6700 mailbox entries for 88 events, and every
+        // cold start re-pulled + re-verified all of them — the 30-second circle-feed cold start.
+        // New-relay adoption and share-history still backfill immediately (their own call sites).
+        let backfillKey = "haven.lastMailboxBackfillAt"
+        if Date().timeIntervalSince1970 - UserDefaults.standard.double(forKey: backfillKey) > 86_400 {
+            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: backfillKey)
+            backfillMailbox(circleIds: circles.map(\.id))
+        }
         Task { await BackgroundUploader.shared.flush() }   // retry any posts that didn't reach the mailbox
         ScheduledStore.shared.start()   // fire any "send later" posts/DMs whose time has come
     }
@@ -1533,13 +1544,20 @@ final class FeedStore: ObservableObject {
 
     /// Re-upload every post I've ALREADY authored in these circles to their mailbox. Fixes the
     /// case where you set up a relay/bucket *after* posting — those posts never reached the
-    /// mailbox, so offline members couldn't get them. Idempotent (content-addressed keys).
+    /// mailbox, so offline members couldn't get them. Idempotent (content-addressed keys — and
+    /// event envelopes now re-seal deterministically, so a re-run reproduces the SAME keys and
+    /// the persisted seen-set/`has()` checks skip everything already uploaded). The re-seal is
+    /// still real CPU (a hybrid signature per event), so it runs off the main actor.
     func backfillMailbox(circleIds: [String]) {
         guard let social else { return }
-        for cid in circleIds where SharedStore.hasMailbox(cid) {
-            let envs = social.exportMyEnvelopes(circleId: cid)
-            guard !envs.isEmpty else { continue }
-            Task { for env in envs { await SharedStore.uploadEvent(circleId: cid, env: env) } }
+        let ids = circleIds.filter { SharedStore.hasMailbox($0) }
+        guard !ids.isEmpty else { return }
+        Task.detached(priority: .utility) {
+            for cid in ids {
+                for env in social.exportMyEnvelopes(circleId: cid) {
+                    await SharedStore.uploadEvent(circleId: cid, env: env)
+                }
+            }
         }
     }
 

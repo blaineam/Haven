@@ -20,7 +20,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
-use crate::crypto::{open, seal};
+use crate::crypto::{open, seal_reproducible};
 use crate::identity::{HavenId, Identity};
 use crate::social::{self, Event, Group, SealedEnvelope};
 use crate::{CoreError, Result};
@@ -172,10 +172,27 @@ pub fn seal_event_in_epoch(
     event: &Event,
 ) -> Result<EpochEnvelope> {
     let plaintext = serde_json::to_vec(event).map_err(|_| CoreError::Encoding("event encode"))?;
-    let mut salt = [0u8; 16];
-    OsRng.fill_bytes(&mut salt);
+    // DETERMINISTIC salt: a PRF over the plaintext keyed by the (secret) epoch key, instead of
+    // random bytes. Re-sealing the same event in the same epoch then reproduces the envelope
+    // byte-for-byte (the hybrid signature is deterministic too: Ed25519 + ML-DSA's deterministic
+    // variant), so the content-addressed mailbox key is STABLE — the relay `has()` check dedupes
+    // a backfill instead of accumulating a fresh copy of the whole history per app launch (a
+    // mailbox had grown to ~6700 entries for 88 events, and every cold start re-pulled all of
+    // them). Binding the plaintext hash means an EDITED event derives a different salt → a
+    // different key + nonce, so the derived-nonce seal can never reuse a (key, nonce) pair
+    // across distinct plaintexts. Without the epoch key the salt is indistinguishable from
+    // random, so it reveals nothing beyond the equality of identical re-seals — exactly the
+    // property the dedup needs.
+    let salt: [u8; 16] = {
+        let mut h = blake3::Hasher::new_keyed(epoch_key);
+        h.update(b"haven-event-salt-v1");
+        h.update(circle_id.as_bytes());
+        h.update(&epoch.to_le_bytes());
+        h.update(&plaintext);
+        h.finalize().as_bytes()[..16].try_into().expect("16 bytes")
+    };
     let event_key = derive_event_key(epoch_key, &salt, circle_id, epoch);
-    let ciphertext = seal(&event_key, &plaintext);
+    let ciphertext = seal_reproducible(&event_key, &plaintext);
 
     let mut env = EpochEnvelope {
         circle_id: circle_id.to_string(),
@@ -247,6 +264,43 @@ mod tests {
         let wrong = new_epoch_key();
         assert!(open_event_in_epoch(&alice.public(), &wrong, &env, false).is_err());
         let _ = bob;
+    }
+
+    #[test]
+    fn resealing_same_event_is_byte_identical() {
+        // The mailbox stores envelopes under SHA256(bytes); backfill re-seals history on every
+        // run, so identical re-seals MUST reproduce identical bytes or the mailbox grows without
+        // bound (and every cold start re-pulls the duplicates — the 30s cold-start bug).
+        let alice = member(1);
+        let key = new_epoch_key();
+        let ev = post(&alice, 100, "same event, sealed twice");
+        let a = seal_event_in_epoch(&alice, "c1", 0, &key, &ev).unwrap();
+        let b = seal_event_in_epoch(&alice, "c1", 0, &key, &ev).unwrap();
+        assert_eq!(a.to_bytes(), b.to_bytes());
+        // Still opens + authenticates normally.
+        assert_eq!(open_event_in_epoch(&alice.public(), &key, &a, false).unwrap(), ev);
+    }
+
+    #[test]
+    fn distinct_plaintexts_never_share_key_or_nonce() {
+        // The derived-nonce seal is only sound if a (key, nonce) pair never covers two different
+        // plaintexts. The salt binds the plaintext hash, so ANY change (an edit, a different
+        // event, another epoch/circle) must produce a different salt — and therefore a different
+        // derived key + nonce (the nonce is a PRF of the key).
+        let alice = member(1);
+        let key = new_epoch_key();
+        let ev1 = post(&alice, 100, "original");
+        let ev2 = post(&alice, 100, "edited body");
+        let env1 = seal_event_in_epoch(&alice, "c1", 0, &key, &ev1).unwrap();
+        let env2 = seal_event_in_epoch(&alice, "c1", 0, &key, &ev2).unwrap();
+        assert_ne!(env1.salt, env2.salt);
+        // Same event in a different epoch or circle also re-salts (no cross-context reuse).
+        let env3 = seal_event_in_epoch(&alice, "c1", 1, &key, &ev1).unwrap();
+        let env4 = seal_event_in_epoch(&alice, "c2", 0, &key, &ev1).unwrap();
+        assert_ne!(env1.salt, env3.salt);
+        assert_ne!(env1.salt, env4.salt);
+        // Everything still round-trips.
+        assert_eq!(open_event_in_epoch(&alice.public(), &key, &env2, false).unwrap(), ev2);
     }
 
     #[test]

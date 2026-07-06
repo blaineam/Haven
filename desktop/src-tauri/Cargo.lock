@@ -2349,6 +2349,7 @@ dependencies = [
 name = "haven_ffi"
 version = "0.0.1"
 dependencies = [
+ "blake3",
  "data-encoding",
  "haven-net",
  "haven-s3",

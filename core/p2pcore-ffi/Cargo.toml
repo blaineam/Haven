@@ -12,6 +12,7 @@ crate-type = ["lib", "staticlib", "cdylib"]
 haven-net = { version = "0.0.1", path = "../haven-net" }
 p2pcore = { path = "../p2pcore" }
 haven-s3 = { path = "../haven-s3" }
+blake3 = "1"
 data-encoding = "2.11.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"

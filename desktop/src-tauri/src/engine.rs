@@ -51,7 +51,13 @@ struct DynState {
     pending: Vec<PendingRequest>,
     /// node ids we initiated a connect to (scanned their QR) → expected verify hash.
     initiated: HashMap<String, String>,
+    /// Mailbox keys already ingested or confirmed uploaded — PERSISTED to `mailbox-seen.txt`
+    /// (loaded at engine start, flushed after each poll/backfill that added keys). In-memory
+    /// only, every cold start re-pulled + re-verified the ENTIRE mailbox — thousands of
+    /// duplicate envelopes on a mature circle, all burned on crypto the engine then dropped.
     seen_mailbox: HashSet<String>,
+    /// seen_mailbox holds keys not yet flushed to disk.
+    seen_mailbox_dirty: bool,
     /// ref -> partial chunks while a media transfer is in flight.
     incoming_media: HashMap<String, IncomingMedia>,
     requested_refs: HashSet<String>,
@@ -156,6 +162,12 @@ impl Engine {
             crate::roster::DeviceRoster::device_name(),
             now_ms() / 1000,
         );
+        let dyn_state = DynState {
+            seen_mailbox: std::fs::read_to_string(paths.root.join("mailbox-seen.txt"))
+                .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
+                .unwrap_or_default(),
+            ..DynState::default()
+        };
         Ok(Arc::new(Self {
             seed,
             social,
@@ -165,7 +177,7 @@ impl Engine {
             node: StdMutex::new(None),
             relay_host: StdMutex::new(None),
             prefs: StdMutex::new(prefs),
-            dyn_state: StdMutex::new(DynState::default()),
+            dyn_state: StdMutex::new(dyn_state),
             scheduled: StdMutex::new(scheduled),
             roster: StdMutex::new(roster),
             sched_counter: std::sync::atomic::AtomicU64::new(0),
@@ -2045,6 +2057,26 @@ impl Engine {
         format!("haven/mailbox/{circle_id}/{hex}")
     }
 
+    /// Record a mailbox key as ingested/uploaded; [`Self::flush_seen_mailbox`] persists the set
+    /// (call it once after a poll/backfill pass) so the cursor survives restarts.
+    fn mark_mailbox_seen(&self, key: String) {
+        let mut st = self.dyn_state.lock().unwrap();
+        if st.seen_mailbox.insert(key) {
+            st.seen_mailbox_dirty = true;
+        }
+    }
+    fn flush_seen_mailbox(&self) {
+        let snapshot = {
+            let mut st = self.dyn_state.lock().unwrap();
+            if !st.seen_mailbox_dirty {
+                return;
+            }
+            st.seen_mailbox_dirty = false;
+            st.seen_mailbox.iter().cloned().collect::<Vec<_>>().join("\n")
+        };
+        let _ = std::fs::write(self.paths.root.join("mailbox-seen.txt"), snapshot);
+    }
+
     /// Build (and cache) the BYO S3 mailbox client from prefs + the keychain secret, if configured.
     async fn s3_client(self: &Arc<Self>) -> Option<Arc<S3Mailbox>> {
         if let Some(c) = self.s3.lock().await.as_ref() {
@@ -2067,6 +2099,13 @@ impl Engine {
 
     async fn upload_event(self: &Arc<Self>, circle_id: &str, env: &[u8]) {
         let key = Self::mailbox_key(circle_id, env);
+        // Skip anything already confirmed in a mailbox: event envelopes re-seal deterministically
+        // now, so a backfill reproduces the same content-addressed key and the persisted seen-set
+        // turns the whole re-upload into a no-op instead of a network sweep.
+        if self.dyn_state.lock().unwrap().seen_mailbox.contains(&key) {
+            return;
+        }
+        let mut landed = false;
         // 1) Mirror to EVERY configured Haven relay (redundancy). Content-addressed keys make
         //    re-puts idempotent, and a relay in backoff is skipped — graceful fallback.
         let hosted = self.relay_host.lock().unwrap().as_ref().map(|h| h.node_id_hex());
@@ -2076,6 +2115,7 @@ impl Engine {
                 if let Some(h) = self.relay_host.lock().unwrap().as_ref() {
                     h.local_put(key.clone(), env.to_vec());
                     self.dyn_state.lock().unwrap().relay_active = true;
+                    landed = true;
                 }
                 continue;
             }
@@ -2084,6 +2124,7 @@ impl Engine {
                     Ok(()) => {
                         self.mark_relay_ok(&node_hex);
                         self.dyn_state.lock().unwrap().relay_active = true;
+                        landed = true;
                     }
                     Err(e) => {
                         log::debug!("mailbox put failed ({node_hex}): {e}");
@@ -2096,7 +2137,11 @@ impl Engine {
         if let Some(s3) = self.s3_client().await {
             if s3.put(&key, env).await.is_ok() {
                 self.dyn_state.lock().unwrap().relay_active = true;
+                landed = true;
             }
+        }
+        if landed {
+            self.mark_mailbox_seen(key);
         }
     }
 
@@ -2109,6 +2154,7 @@ impl Engine {
         for env in self.social.export_my_envelopes(circle_id.to_string()) {
             self.upload_event(circle_id, &env).await;
         }
+        self.flush_seen_mailbox();
         let feed = self.social.feed(circle_id.to_string(), now_ms(), None);
         for item in feed {
             if item.is_me {
@@ -2148,7 +2194,7 @@ impl Engine {
                     continue;
                 }
                 let Some(env) = client.get(key.clone()).await else { continue };
-                self.dyn_state.lock().unwrap().seen_mailbox.insert(key);
+                self.mark_mailbox_seen(key);
                 if self.social.receive(circle_id.clone(), env).unwrap_or(false) {
                     changed = true;
                     let is_dm = circle_id.starts_with("dm:");
@@ -2174,7 +2220,7 @@ impl Engine {
                         Ok(Some(e)) => e,
                         _ => continue,
                     };
-                    self.dyn_state.lock().unwrap().seen_mailbox.insert(key);
+                    self.mark_mailbox_seen(key);
                     if self.social.receive(c.id.clone(), env).unwrap_or(false) {
                         changed = true;
                         let is_dm = c.id.starts_with("dm:");
@@ -2186,6 +2232,7 @@ impl Engine {
                 }
             }
         }
+        self.flush_seen_mailbox();
         if changed {
             self.persist();
             self.emit_changed();
@@ -3085,6 +3132,8 @@ impl Engine {
         }
         self.media.clear();
         store::remove_if_exists(&self.paths.state_file());
+        // A new identity must not inherit the old ingestion cursor.
+        store::remove_if_exists(&self.paths.root.join("mailbox-seen.txt"));
         // Clear the self-sync base too, so adopting a new identity doesn't diff an empty engine against
         // a stale base and tombstone the account (the data-loss bug).
         store::remove_if_exists(&self.paths.selfsync_state_file());

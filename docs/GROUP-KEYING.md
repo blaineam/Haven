@@ -35,9 +35,20 @@ post-quantum property is preserved end to end.
   carries `circle_id` + `epoch` in its authenticated payload. This is the *only* place the per-recipient
   KEM wrap is still used — once per epoch, not once per event.
 - **Events** (posts/messages/media/comments/reactions/…) are sealed with a per-event key derived from
-  the current epoch key: `event_key = HKDF(salt = epoch_key, ikm = event_id, info = "haven-event-key-v1")`,
+  the current epoch key: `event_key = HKDF(salt, ikm = epoch_key, info = "haven-event-key-v1" ‖ circle ‖ epoch)`,
   then AES-256-GCM, and hybrid-signed by the author. The envelope carries `circle_id` + `epoch` +
   ciphertext + signature — **no per-recipient wrapping**, so it is true group encryption and smaller.
+- **Event sealing is deterministic** (per `(plaintext, circle, epoch, epoch_key)`): the carried `salt`
+  is a keyed BLAKE3 PRF over the plaintext (keyed by the epoch key), and the AES-GCM nonce is derived
+  from the resulting per-plaintext `event_key`; the hybrid signature (Ed25519 + ML-DSA's deterministic
+  variant) was already deterministic. Re-sealing the same event therefore reproduces the envelope
+  byte-for-byte, so the relay mailbox's content-addressed key (`SHA256(envelope)`) is stable and a
+  history backfill dedupes instead of accumulating a fresh copy of every event per run (the unbounded
+  mailbox growth that made cold starts re-pull thousands of duplicates). Safety: a different plaintext
+  (e.g. an edited event) derives a different salt → a different key + nonce, so a (key, nonce) pair
+  never covers two distinct plaintexts. Tradeoff (accepted): an observer holding two envelopes from the
+  same epoch can tell whether they seal the *identical* plaintext — that equality is exactly what the
+  mailbox dedup relies on, and without the epoch key the salt is indistinguishable from random.
 
 ### Membership change → new epoch (this is what gives revocation)
 

@@ -144,6 +144,31 @@ pub fn seal(key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
     out
 }
 
+/// AES-256-GCM seal with the nonce DERIVED from the key instead of random, so sealing the same
+/// plaintext under the same key is byte-for-byte reproducible. Output layout is identical to
+/// [`seal`] (nonce(12) ‖ ciphertext ‖ tag(16)), so [`open`] reads both interchangeably.
+///
+/// SAFETY: only sound when the key is unique per distinct plaintext — a (key, nonce) pair must
+/// never encrypt two different messages. The epoch event path guarantees this by deriving the
+/// event key from a salt that itself binds the plaintext hash (see `seal_event_in_epoch`), so an
+/// edited event gets a fresh key + nonce while an identical re-seal reproduces the same bytes.
+/// The reproducibility is what makes content-addressed mailbox keys stable: a re-sealed event
+/// dedupes on the relay instead of accumulating a new copy per backfill.
+pub fn seal_reproducible(key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
+    let mut h = blake3::Hasher::new();
+    h.update(b"haven-derived-nonce-v1");
+    h.update(key);
+    let nonce: [u8; 12] = h.finalize().as_bytes()[..12].try_into().expect("12 bytes");
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let ct = cipher
+        .encrypt(Nonce::from_slice(&nonce), plaintext)
+        .expect("AES-GCM encryption is infallible for valid keys");
+    let mut out = Vec::with_capacity(12 + ct.len());
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ct);
+    out
+}
+
 /// Inverse of [`seal`]. Fails if the data was tampered with (GCM tag mismatch).
 pub fn open(key: &[u8; 32], sealed: &[u8]) -> Result<Vec<u8>> {
     if sealed.len() < 12 + 16 {

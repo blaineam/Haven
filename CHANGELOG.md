@@ -7,7 +7,7 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.1.0-beta.29] — 2026-07-06
 
 ### Fixed
 - **Media backup no longer re-reads + re-seals whole video files just to discover nobody

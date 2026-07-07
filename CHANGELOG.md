@@ -7,7 +7,7 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.1.0-beta.30] — 2026-07-06
 
 ### Added
 - **Zero-tolerance terms of use gate (Apple platforms; App Review 1.2).** Agreeing to the terms

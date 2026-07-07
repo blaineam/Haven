@@ -189,7 +189,7 @@ async function main() {
 					type: 'reviewSubmissionItems',
 					relationships: {
 						reviewSubmission: { data: { type: 'reviewSubmissions', id: sub.id } },
-						appStoreVersionForReview: { data: { type: 'appStoreVersions', id: version.id } },
+						appStoreVersion: { data: { type: 'appStoreVersions', id: version.id } },
 					},
 				},
 			});

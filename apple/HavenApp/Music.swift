@@ -86,7 +86,7 @@ struct SongPicker: View {
             .navigationTitle("Pick a song")
             #if os(iOS)
             .havenInlineNavTitle()
-            .toolbar { ToolbarItem(placement: .havenCancelLeading) { Button("Cancel") { stopPreview(); dismiss() } } }
+            .toolbar { ToolbarItem(placement: .havenCancelLeading) { Button("Cancel") { stopPreview(); dismiss() }.havenToolbarPill() } }
             .searchable(text: $query, prompt: source == .library ? "Search your music" : "Search Apple Music")
             .onAppear(perform: loadLibrary)
             #else

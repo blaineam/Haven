@@ -190,13 +190,15 @@ struct InAppBrowserView: View {
                     }
                     .padding(.horizontal, 12).padding(.vertical, 6)
                     .frame(maxWidth: .infinity)
-                    .background(Color(.secondarySystemFill), in: Capsule())
+                    .havenGlass(in: Capsule())
                     Button { openURL(url) } label: { Image(systemName: "safari") }
                     ShareLink(item: url) { Image(systemName: "square.and.arrow.up") }
-                    Button("Done") { dismiss() }.fontWeight(.semibold).keyboardShortcut(.cancelAction)
+                    Button("Done") { dismiss() }
+                        .buttonStyle(GlassPillButtonStyle(tint: HavenTheme.pink))
+                        .keyboardShortcut(.cancelAction)
                 }
                 .padding(.horizontal, 14).padding(.vertical, 10)
-                .buttonStyle(.borderless)
+                .buttonStyle(GlassIconButtonStyle())   // nav/share chips: glass circles, no bare glyphs
                 Divider()
                 WebView(url: url, model: model)
             }

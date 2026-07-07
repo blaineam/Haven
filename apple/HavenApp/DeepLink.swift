@@ -94,7 +94,7 @@ struct PostLinkView: View {
             }
             .navigationTitle("Post")
             .havenInlineNavTitle()
-            .toolbar { ToolbarItem(placement: .havenConfirmLeading) { Button("Done") { dismiss() } } }
+            .toolbar { ToolbarItem(placement: .havenConfirmLeading) { Button("Done") { dismiss() }.havenToolbarPill() } }
         }
     }
 }

@@ -39,12 +39,14 @@ struct ConnectView: View {
                         if mode == 0 { invite } else { addFriend }
                     }
                     .padding(20)
+                    .frame(maxWidth: 560)                     // one readable column on wide macOS windows
+                    .frame(maxWidth: .infinity)
                 }
             }
             .navigationTitle("Connect")
             .havenInlineNavTitle()
             // The "added!" confirmation screen has its own prominent Done — don't also show the toolbar one.
-            .toolbar { if addedName == nil { ToolbarItem(placement: .havenConfirmTrailing) { Button("Done") { dismiss() } } } }
+            .toolbar { if addedName == nil { ToolbarItem(placement: .havenConfirmTrailing) { Button("Done") { dismiss() }.havenToolbarPill() } } }
             .sheet(isPresented: $showScanner) { scannerSheet }
             .onAppear {
                 guard let link = incomingLink, !link.isEmpty else { return }
@@ -77,7 +79,7 @@ struct ConnectView: View {
             }
             .navigationTitle("Scan QR")
             .havenInlineNavTitle()
-            .toolbar { ToolbarItem(placement: .havenCancelTrailing) { Button("Cancel") { showScanner = false } } }
+            .toolbar { ToolbarItem(placement: .havenCancelTrailing) { Button("Cancel") { showScanner = false }.havenToolbarPill() } }
         }
     }
 
@@ -147,7 +149,9 @@ struct ConnectView: View {
                 Text("or").font(.caption).foregroundStyle(.secondary)
 
                 TextField("Paste invite link…", text: $pasted, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.plain)   // one glass surface (roundedBorder doubled with the mac bezel)
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .havenGlass(in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                     .accessibilityIdentifier("pasteLink")
 
                 if let problem {
@@ -172,7 +176,9 @@ struct ConnectView: View {
                 note: "Ask your friend to read their safety words aloud. If they match, it's really them."
             )
             TextField("Add a nickname (optional)", text: $friendName)
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(.plain)
+                .padding(.horizontal, 14).padding(.vertical, 10)
+                .havenGlass(in: Capsule())
                 .accessibilityIdentifier("friendName")
             Text("Their own name will appear once you connect — they choose it, signed with their key.")
                 .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)

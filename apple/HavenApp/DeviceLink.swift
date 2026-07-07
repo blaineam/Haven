@@ -53,6 +53,8 @@ struct TransferIdentityView: View {
                     }
                 }
                 .padding(20)
+                .frame(maxWidth: 520)                     // one readable column on wide macOS windows
+                .frame(maxWidth: .infinity)
             }
         }
         .navigationTitle("Transfer")
@@ -109,6 +111,8 @@ struct LinkDeviceView: View {
                     }
                 }
                 .padding(20)
+                .frame(maxWidth: 520)
+                .frame(maxWidth: .infinity)
             }
         }
         .navigationTitle("Link device")
@@ -151,7 +155,9 @@ struct RestoreIdentityView: View {
                     VStack(spacing: 8) {
                         TextField("Paste your recovery code", text: $pasted, axis: .vertical)
                             .havenAutocap(.never).autocorrectionDisabled()
-                            .padding(12).background(.background, in: RoundedRectangle(cornerRadius: 12))
+                            .textFieldStyle(.plain)   // one glass surface, no system bezel inside it
+                            .padding(12)
+                            .havenGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                         Button { attempt(pasted) } label: { Label("Restore from code", systemImage: "arrow.down.circle.fill") }
                             .buttonStyle(BrandButtonStyle())
                             .disabled(pasted.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -206,6 +212,8 @@ struct RestoreIdentityView: View {
                         .font(.caption2).foregroundStyle(.secondary)
                 }
                 .padding(20)
+                .frame(maxWidth: 520)
+                .frame(maxWidth: .infinity)
             }
         }
         .navigationTitle("Restore")

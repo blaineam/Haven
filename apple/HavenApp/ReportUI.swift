@@ -51,6 +51,11 @@ enum ReportReason: String, CaseIterable, Identifiable {
 
 /// Report a post/message: pick a category, optionally add a note for the circle, optionally block
 /// the author in the same motion. Submitting hides the post for the reporter instantly.
+///
+/// Layout is a hand-rolled column, NOT a Form: macOS Form renders labeled rows as a two-column
+/// grid, so the note field's label pushed the whole sheet's content rightward, and every control
+/// hugged the section insets. Each choice is a full-width glass pill; the field and toggle carry
+/// exactly one glass surface each (no doubled backgrounds or borders — house rule).
 struct ReportSheet: View {
     let item: FeedItemFfi
     let authorName: String
@@ -61,40 +66,21 @@ struct ReportSheet: View {
     @State private var alsoBlock = false
 
     var body: some View {
+        #if os(macOS)
+        HavenMacSheet("Report post") {
+            formColumn
+        } footer: {
+            Button("Report") { submit() }
+                .buttonStyle(BrandButtonStyle())
+                .disabled(reason == nil)
+                .opacity(reason == nil ? 0.5 : 1)
+                .keyboardShortcut(.defaultAction)
+        }
+        #else
         NavigationStack {
             ZStack {
                 HavenBackground()
-                Form {
-                    Section("What's wrong with it?") {
-                        ForEach(ReportReason.allCases) { r in
-                            Button {
-                                reason = r
-                            } label: {
-                                HStack {
-                                    Label(r.rawValue, systemImage: r.icon).foregroundStyle(.primary)
-                                    Spacer()
-                                    if reason == r {
-                                        Image(systemName: "checkmark.circle.fill").foregroundStyle(HavenTheme.pink)
-                                    }
-                                }
-                            }
-                            .listRowBackground(Color.clear)
-                        }
-                    }
-                    Section {
-                        TextField("Add a note for your circle (optional)", text: $comment, axis: .vertical)
-                            .lineLimit(2 ... 4)
-                            .listRowBackground(Color.clear)
-                        Toggle(isOn: $alsoBlock) {
-                            Label("Also block \(authorName)", systemImage: "hand.raised")
-                        }
-                        .tint(HavenTheme.pink)
-                        .listRowBackground(Color.clear)
-                    } footer: {
-                        Text("The post disappears from your feed right away, and everyone in the circle sees your report so they can act too. Only who reported whom and the category are logged — never the content.")
-                    }
-                }
-                .scrollContentBackground(.hidden)
+                ScrollView { formColumn.padding(20) }
             }
             .navigationTitle("Report post")
             .havenInlineNavTitle()
@@ -107,7 +93,63 @@ struct ReportSheet: View {
                 }
             }
         }
-        .macSheetFrame()
+        #endif
+    }
+
+    private var formColumn: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("What's wrong with it?")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.leading, 4)
+            ForEach(ReportReason.allCases) { r in
+                Button {
+                    withAnimation(HavenTheme.snappy) { reason = r }
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: r.icon)
+                            .frame(width: 22)
+                            .foregroundStyle(reason == r ? HavenTheme.pink : .secondary)
+                        Text(r.rawValue).foregroundStyle(.primary)
+                        Spacer()
+                        if reason == r {
+                            Image(systemName: "checkmark.circle.fill").foregroundStyle(HavenTheme.pink)
+                        }
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 12)
+                    .havenGlass(in: Capsule(), tint: reason == r ? HavenTheme.pink.opacity(0.35) : nil)
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(PressableStyle())
+            }
+
+            TextField("Add a note for your circle (optional)", text: $comment, axis: .vertical)
+                .lineLimit(2 ... 4)
+                .textFieldStyle(.plain)
+                .padding(.horizontal, 16).padding(.vertical, 12)
+                .havenGlass(in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .padding(.top, 8)
+
+            // Label leading, switch trailing — a bare Toggle keeps them glued together and
+            // centered, which looked lost inside the full-width pill.
+            HStack {
+                Label("Also block \(authorName)", systemImage: "hand.raised")
+                Spacer()
+                Toggle("", isOn: $alsoBlock)
+                    .labelsHidden()
+                    #if os(macOS)
+                    .toggleStyle(.switch)   // a switch reads modern in the pill; the checkbox looked dated
+                    #endif
+                    .tint(HavenTheme.pink)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            .havenGlass(in: Capsule())
+
+            Text("The post disappears from your feed right away, and everyone in the circle sees your report so they can act too. Only who reported whom and the category are logged — never the content.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4).padding(.top, 6)
+        }
     }
 
     private func submit() {

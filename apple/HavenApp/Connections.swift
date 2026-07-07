@@ -184,7 +184,7 @@ struct ConnectionRequestsView: View {
             }
             .navigationTitle("Connection requests")
             .havenInlineNavTitle()
-            .toolbar { ToolbarItem(placement: .havenConfirmTrailing) { Button("Done") { dismiss() } } }
+            .toolbar { ToolbarItem(placement: .havenConfirmTrailing) { Button("Done") { dismiss() }.havenToolbarPill() } }
             .confirmationDialog("Share your past posts with \(approveTarget?.name ?? "them")?",
                                 isPresented: Binding(get: { approveTarget != nil }, set: { if !$0 { approveTarget = nil } }),
                                 titleVisibility: .visible) {

@@ -256,23 +256,27 @@ struct EditProfileSheet: View {
                             }
                         }
 
+                        // Fields carry exactly ONE surface (glass) — the default macOS field style
+                        // painted its own bezel + focus ring inside the custom shapes.
                         TextField("Your name", text: $name)
                             .font(.title3).multilineTextAlignment(.center)
-                            .padding(.vertical, 12).background(.background, in: Capsule())
-                            .overlay(Capsule().strokeBorder(Color.white.opacity(0.1))).padding(.horizontal, 30)
+                            .havenPillField()
+                            .padding(.horizontal, 30)
 
                         VStack(spacing: 10) {
                             TextField("Add a short bio", text: $bio, axis: .vertical)
                                 .lineLimit(1...3)
                                 .havenAutocap(.sentences)
-                                .padding(12).background(.background, in: RoundedRectangle(cornerRadius: 14))
-                                .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.white.opacity(0.1)))
+                                .textFieldStyle(.plain)
+                                .padding(12)
+                                .havenGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                             TextField("Add a link (e.g. yoursite.com)", text: $link)
                                 .havenAutocap(.never)
                                 .autocorrectionDisabled()
                                 .havenURLKeyboard()
-                                .padding(12).background(.background, in: RoundedRectangle(cornerRadius: 14))
-                                .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.white.opacity(0.1)))
+                                .textFieldStyle(.plain)
+                                .padding(12)
+                                .havenGlass(in: Capsule())
                         }
                         .font(.subheadline).padding(.horizontal, 24)
                         Text("Your bio and link show on your profile for the people in your circle.")
@@ -291,6 +295,8 @@ struct EditProfileSheet: View {
                         }.padding(.horizontal, 20)
                     }
                     .padding(.vertical, 20)
+                    .frame(maxWidth: 520)                     // one readable column on wide macOS windows
+                    .frame(maxWidth: .infinity)
                 }
             }
             .navigationTitle("Edit profile")
@@ -300,9 +306,9 @@ struct EditProfileSheet: View {
                 name = profile.displayName; bio = profile.bio; link = profile.link
                 loaded = true
             }
-            .toolbar { ToolbarItem(placement: .havenConfirmTrailing) { Button("Done") { commit(); dismiss() } } }
+            .toolbar { ToolbarItem(placement: .havenConfirmTrailing) { Button("Done") { commit(); dismiss() }.havenToolbarPill(tint: HavenTheme.pink) } }
             .sheet(isPresented: $showPhotoPicker) {
-                SingleImagePicker { profile.setAvatar($0) }
+                SingleImagePicker { profile.setAvatar($0) }.macSheetFrame()
             }
         }
     }

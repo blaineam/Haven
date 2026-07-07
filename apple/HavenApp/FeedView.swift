@@ -3461,9 +3461,11 @@ struct PostCard: View {
             audio.toggleVideoAudio()
         } label: {
             Image(systemName: audio.activePostId == item.id && audio.videoUnmuted ? "speaker.wave.2.fill" : "speaker.slash.fill")
-                .foregroundStyle(.white).padding(10)
-                .background(.black.opacity(0.45), in: Circle())
+                .foregroundStyle(.white)
         }
+        // A glass circle chip and nothing else — the default button style painted its own
+        // rounded-rect bezel BEHIND the circle on macOS (the doubled-background look).
+        .buttonStyle(GlassIconButtonStyle(tint: .white))
         .padding(10)
         // Save/Share lives here for videos (the player's long-press is hold-to-pause, so the
         // video itself no longer carries a contextMenu).
@@ -3929,7 +3931,7 @@ struct PostCommentsSheet: View {
             }
             .navigationTitle("Comments")
             .havenInlineNavTitle()
-            .toolbar { ToolbarItem(placement: .havenConfirmLeading) { Button("Done") { dismiss() } } }
+            .toolbar { ToolbarItem(placement: .havenConfirmLeading) { Button("Done") { dismiss() }.havenToolbarPill() } }
         }
     }
 }
@@ -4084,12 +4086,13 @@ struct NewCircleView: View {
             .navigationTitle("New circle")
             .havenInlineNavTitle()
             .toolbar {
-                ToolbarItem(placement: .havenCancelLeading) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .havenCancelLeading) { Button("Cancel") { dismiss() }.havenToolbarPill() }
                 ToolbarItem(placement: .havenTrailing) {
                     Button("Create") {
                         onCreate(name.trimmingCharacters(in: .whitespaces), Array(selected))
                         dismiss()
                     }
+                    .havenToolbarPill(tint: HavenTheme.pink)
                     .fontWeight(.semibold)
                     .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
                 }

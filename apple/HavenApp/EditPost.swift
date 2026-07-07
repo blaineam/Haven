@@ -26,11 +26,12 @@ struct EditPostSheet: View {
                 HavenBackground()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
+                        // One glass surface — no system bezel inside a custom shape (house rule).
                         TextField("Say something…", text: $text, axis: .vertical)
                             .lineLimit(3...10)
+                            .textFieldStyle(.plain)
                             .padding(12)
-                            .background(.background, in: RoundedRectangle(cornerRadius: 14))
-                            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.white.opacity(0.08)))
+                            .havenGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
                         if !media.isEmpty {
                             ScrollView(.horizontal, showsIndicators: false) {
@@ -100,7 +101,9 @@ struct EditPostSheet: View {
             .navigationTitle("Edit post")
             .havenInlineNavTitle()
             .toolbar {
-                ToolbarItem(placement: .havenCancelLeading) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .havenCancelLeading) {
+                    Button("Cancel") { dismiss() }.havenToolbarPill()
+                }
                 ToolbarItem(placement: .havenTrailing) {
                     Button("Save") {
                         FeedStore.shared.edit(item.id, text.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -108,6 +111,7 @@ struct EditPostSheet: View {
                         dismiss()
                     }
                     .fontWeight(.semibold)
+                    .havenToolbarPill(tint: HavenTheme.pink)
                     .disabled(text.trimmingCharacters(in: .whitespaces).isEmpty && media.isEmpty)
                 }
             }

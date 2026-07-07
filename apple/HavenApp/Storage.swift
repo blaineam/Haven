@@ -648,9 +648,10 @@ struct AddRelaySheet: View {
             .navigationTitle("Add relay")
             .havenInlineNavTitle()
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.havenToolbarPill() }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Add") { add() }
+                        .havenToolbarPill(tint: HavenTheme.pink)
                         .disabled(kind == .haven ? !havenValid : !s3Valid)
                 }
             }

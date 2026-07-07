@@ -139,9 +139,11 @@ struct SchedulePicker: View {
             .navigationTitle("Schedule")
             .havenInlineNavTitle()
             .toolbar {
-                ToolbarItem(placement: .havenCancelLeading) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .havenCancelLeading) { Button("Cancel") { dismiss() }.havenToolbarPill() }
                 ToolbarItem(placement: .havenConfirmTrailing) {
-                    Button("Schedule") { onSchedule(date); dismiss() }.disabled(date <= Date())
+                    Button("Schedule") { onSchedule(date); dismiss() }
+                        .havenToolbarPill(tint: HavenTheme.pink)
+                        .disabled(date <= Date())
                 }
             }
         }

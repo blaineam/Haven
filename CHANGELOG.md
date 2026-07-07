@@ -41,6 +41,18 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   wording is identical across platforms so ledger entries aggregate cleanly.
 
 ### Fixed
+- **macOS UI polish sweep: glass, pills, and single surfaces everywhere.** The Mac app's chrome
+  had accumulated doubled control surfaces and stock-AppKit artifacts. New design vocabulary in
+  `Theme.swift` — `havenGlass` (real Liquid Glass on macOS/iOS 26+, material fallback below),
+  circular/pill glass button styles, a one-surface pill text-field style, and a `HavenMacSheet`
+  scaffold that runs the brand gradient to a sheet's extreme edges with glass chrome. Applied
+  across the app: the report sheet is a hand-rolled column (macOS Form's label column shifted
+  everything right), every custom-shaped text field drops the system bezel that doubled inside it
+  (onboarding name, edit profile, edit post, connect, restore, location label), the video mute
+  chip no longer draws a rectangular bezel behind its circle, sheet toolbar text buttons are
+  glass pills, the in-app browser header uses glass chips, and onboarding/terms/edit-profile/
+  connect/device-link center a readable column instead of smearing across wide Mac windows.
+  iOS keeps its shipped look (all chrome changes are macOS-conditional or visually identical).
 - **Call audio has priority: no post music or video sound while a call is ringing, connecting,
   or live (all platforms).** Feed songs, story soundtracks, the DM song pill, and video audio
   could keep playing (or be started by scrolling) over an active call. Now a starting call

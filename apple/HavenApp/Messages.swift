@@ -112,8 +112,8 @@ struct MessagesView: View {
         .havenInlineNavTitle()
         .toolbar {
             if rearranging {
-                ToolbarItem(placement: .havenLeading) { Button("Cancel") { cancelRearrange() } }
-                ToolbarItem(placement: .havenTrailing) { Button("Save") { saveRearrange() }.fontWeight(.semibold) }
+                ToolbarItem(placement: .havenLeading) { Button("Cancel") { cancelRearrange() }.havenToolbarPill() }
+                ToolbarItem(placement: .havenTrailing) { Button("Save") { saveRearrange() }.fontWeight(.semibold).havenToolbarPill(tint: HavenTheme.pink) }
             } else {
                 ToolbarItem(placement: .havenTrailing) {
                     Button { showPicker = true } label: { Image(systemName: "square.and.pencil") }
@@ -252,10 +252,10 @@ struct DMContactPicker: View {
             .navigationTitle(selected.count > 1 ? "New group · \(selected.count)" : "New message")
             .havenInlineNavTitle()
             .toolbar {
-                ToolbarItem(placement: .havenCancelLeading) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .havenCancelLeading) { Button("Cancel") { dismiss() }.havenToolbarPill() }
                 ToolbarItem(placement: .havenConfirmTrailing) {
                     Button(selected.count > 1 ? "Start group" : "Start") { start() }
-                        .fontWeight(.semibold).disabled(selected.isEmpty)
+                        .fontWeight(.semibold).havenToolbarPill(tint: HavenTheme.pink).disabled(selected.isEmpty)
                 }
             }
         }

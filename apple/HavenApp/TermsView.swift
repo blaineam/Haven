@@ -78,6 +78,9 @@ struct TermsGateView: View {
                     .buttonStyle(BrandButtonStyle())
             }
             .padding(24)
+            // One readable column on any window size (macOS windows are arbitrarily wide).
+            .frame(maxWidth: 560)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }

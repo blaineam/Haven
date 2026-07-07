@@ -102,7 +102,9 @@ struct LocationPicker: View {
                 }
                 VStack(spacing: 12) {
                     TextField("Add a label (optional) — e.g. \"My place\"", text: $label)
-                        .textFieldStyle(.roundedBorder)
+                        .textFieldStyle(.plain)
+                        .padding(.horizontal, 14).padding(.vertical, 10)
+                        .havenGlass(in: Capsule())
                     Button {
                         onPick(SharedLocation.ref(lat: center.latitude, lon: center.longitude, label: label))
                         dismiss()
@@ -116,11 +118,12 @@ struct LocationPicker: View {
             .navigationTitle("Pin a location")
             .havenInlineNavTitle()
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.havenToolbarPill() }
                 ToolbarItem(placement: .havenTrailing) {
                     Button { position = .userLocation(fallback: .automatic) } label: {
                         Image(systemName: "location.fill")
                     }
+                    .buttonStyle(HavenGlassIcon())
                 }
             }
             .onAppear { mgr.requestWhenInUseAuthorization() }

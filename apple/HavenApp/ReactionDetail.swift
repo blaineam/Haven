@@ -40,7 +40,7 @@ struct ReactionDetailView: View {
             }
             .navigationTitle("Who reacted")
             .havenInlineNavTitle()
-            .toolbar { ToolbarItem(placement: .havenConfirmTrailing) { Button("Done") { dismiss() } } }
+            .toolbar { ToolbarItem(placement: .havenConfirmTrailing) { Button("Done") { dismiss() }.havenToolbarPill() } }
         }
     }
 

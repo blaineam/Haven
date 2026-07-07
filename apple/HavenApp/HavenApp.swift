@@ -298,6 +298,7 @@ struct RootView: View {
             pendingInvite = PendingInvite(link: s)   // item-driven sheet → correct on first open
         }
         // Shared links open inside Haven (in-app browser) from anywhere — posts, comments, bios.
+        // (No macSheetFrame — the browser sets its own wide frame; adding both fights over size.)
         .sheet(item: $linkPresenter.presented) { presented in
             InAppBrowserView(url: presented.url)
         }

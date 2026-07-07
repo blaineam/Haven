@@ -1294,7 +1294,7 @@ struct AddToCallPicker: View {
             }
             .navigationTitle("Add to call")
             .havenInlineNavTitle()
-            .toolbar { ToolbarItem(placement: .havenCancelLeading) { Button("Cancel") { dismiss() } } }
+            .toolbar { ToolbarItem(placement: .havenCancelLeading) { Button("Cancel") { dismiss() }.havenToolbarPill() } }
         }
     }
 }

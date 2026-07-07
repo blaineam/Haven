@@ -26,6 +26,11 @@ struct OnboardingView: View {
                 controls
             }
             .padding(24)
+            // A single readable column no matter the window: macOS windows are arbitrarily wide,
+            // and unconstrained steps smeared the emoji grid and pill buttons across the full
+            // 1440pt+ width. The column centers itself in whatever space the window offers.
+            .frame(maxWidth: 560)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .sheet(isPresented: $showRestore) {
             NavigationStack {
@@ -33,6 +38,7 @@ struct OnboardingView: View {
                     withAnimation(HavenTheme.smooth) { profile.onboarded = true }
                 }
             }
+            .macSheetFrame()   // gradient to the sheet's edges + a usable size on macOS
         }
         .sheet(isPresented: $showLink) {
             NavigationStack {
@@ -40,6 +46,7 @@ struct OnboardingView: View {
                     withAnimation(HavenTheme.smooth) { profile.onboarded = true }
                 }
             }
+            .macSheetFrame()
         }
     }
 
@@ -101,12 +108,12 @@ struct OnboardingView: View {
             .buttonStyle(.bordered).tint(HavenTheme.pink)
             .sheet(isPresented: $showPhotoPicker) { SingleImagePicker { pickedImage = $0 } }
 
+            // ONE surface: plain field style + a single glass capsule. (The default macOS field
+            // style drew its own bezel + focus ring INSIDE the capsule — doubled chrome.)
             TextField("Your name or nickname", text: $name)
                 .font(.title3)
                 .multilineTextAlignment(.center)
-                .padding(.vertical, 12)
-                .background(.background, in: Capsule())
-                .overlay(Capsule().strokeBorder(Color.white.opacity(0.1)))
+                .havenPillField()
                 .padding(.horizontal, 20)
 
             Text(pickedImage == nil ? "Or pick an emoji" : "Emoji (shown if you remove your photo)")

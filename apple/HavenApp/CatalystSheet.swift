@@ -18,15 +18,10 @@ private struct MacSheetClose: ViewModifier {
             .scrollContentBackground(.hidden)
             .background(HavenBackground().ignoresSafeArea())
             .overlay(alignment: .topTrailing) {
-                Button { dismiss() } label: {
-                    Text("Done")
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(HavenTheme.pink)
-                        .padding(.horizontal, 16).padding(.vertical, 12)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .keyboardShortcut(.cancelAction)   // Esc closes it too
+                Button("Done") { dismiss() }
+                    .buttonStyle(GlassPillButtonStyle(tint: HavenTheme.pink))
+                    .padding(12)
+                    .keyboardShortcut(.cancelAction)   // Esc closes it too
             }
         #else
         content

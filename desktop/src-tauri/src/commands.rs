@@ -301,6 +301,49 @@ pub fn unsend_post(engine: Eng, circle_id: String, target: String) {
     engine.unsend_post(circle_id, target);
 }
 
+// ---- reports (decentralized moderation) ----------------------------------------------------
+
+#[derive(Serialize)]
+pub struct ReportDto {
+    pub id: String,
+    /// Who filed it — full node hex + resolved display name for the banner.
+    pub reporter: String,
+    pub reporter_name: String,
+    /// The reported event id.
+    pub target: String,
+    /// The reported event's author — FULL node hex, usable directly for block/remove.
+    pub author: String,
+    pub reason: String,
+    pub comment: String,
+    pub created_at: u64,
+}
+
+/// File a report: seals it to the whole circle, appends a content-free ledger entry, and returns
+/// the reported author's FULL node hex so the UI can offer block-in-the-same-motion.
+#[tauri::command]
+pub fn report(engine: Eng, circle_id: String, target: String, reason: String, comment: String) -> Option<String> {
+    engine.report(circle_id, target, reason, comment)
+}
+
+/// Every report filed in the circle by ANY member — the circle's shared moderation signal.
+#[tauri::command]
+pub fn reports(engine: Eng, circle_id: String) -> Vec<ReportDto> {
+    engine
+        .reports(&circle_id)
+        .into_iter()
+        .map(|r| ReportDto {
+            reporter_name: engine.display_name(&r.reporter_short),
+            id: r.id,
+            reporter: r.reporter,
+            target: r.target,
+            author: r.author,
+            reason: r.reason,
+            comment: r.comment,
+            created_at: r.created_at,
+        })
+        .collect()
+}
+
 // ---- DMs ---------------------------------------------------------------------------------
 
 #[tauri::command]

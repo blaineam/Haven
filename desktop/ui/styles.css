@@ -322,6 +322,14 @@ input:focus, textarea:focus, select:focus {
 .attach-preview img, .attach-preview video { width: 74px; height: 74px; object-fit: cover; border-radius: var(--r-sm); }
 .attach-preview .x { position: absolute; top: -6px; right: -6px; background: var(--panel-solid); border: 1px solid var(--line-strong); border-radius: 50%; width: 20px; height: 20px; line-height: 18px; text-align: center; font-size: 12px; }
 
+/* ---- Reports (decentralized moderation) ---- */
+.reported-banner {
+  display: flex; align-items: center; gap: 8px; padding: 10px 12px; margin: 8px 0;
+  background: rgba(251, 191, 36, 0.12); border: 1px solid rgba(251, 191, 36, 0.3);
+  border-radius: var(--r-sm);
+}
+.btn.reason { text-align: left; justify-content: flex-start; }
+
 /* ---- Calls ---- */
 .call-overlay-full { width: min(960px, 94vw); max-height: 92vh; display: flex; flex-direction: column; }
 .call-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); flex: 1; }

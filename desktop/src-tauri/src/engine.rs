@@ -25,6 +25,9 @@ use crate::wire;
 
 pub const DEFAULT_CIRCLE: &str = "default";
 
+/// The push Worker — also hosts the content-free moderation ledger (`/flag`).
+pub const PUSH_RELAY: &str = "https://haven-push.blaineams3.workers.dev";
+
 /// One configured relay's full state for the Relays hub UI (active + inactive).
 #[derive(Clone)]
 pub struct RelayDetail {
@@ -923,6 +926,57 @@ impl Engine {
         }
     }
 
+    // ---- reports (decentralized moderation) -----------------------------------------------
+
+    /// File a report against event `target`: seal + broadcast it to the whole circle (every member
+    /// sees it and acts with the power they already hold) and append a content-free entry to the
+    /// developer ledger. Returns the reported author's FULL node hex — resolved by the core from
+    /// the event log — so the caller can offer block-in-the-same-motion. The caller hides the post
+    /// locally (the reporter never sees it again).
+    pub fn report(self: &Arc<Self>, circle_id: String, target: String, reason: String, comment: String) -> Option<String> {
+        match self.social.report(circle_id.clone(), target.clone(), reason.clone(), comment, now_ms()) {
+            Ok(env) => {
+                self.after_author(&circle_id, &env);
+                let author = self
+                    .social
+                    .reports(circle_id)
+                    .into_iter()
+                    .find(|r| r.target == target)
+                    .map(|r| r.author);
+                self.moderation_flag("report", author.clone().unwrap_or_default(), reason);
+                author
+            }
+            Err(e) => {
+                log::error!("report failed: {e}");
+                None
+            }
+        }
+    }
+
+    /// Every report filed in this circle (by any member), straight from the core event log.
+    pub fn reports(&self, circle_id: &str) -> Vec<haven_ffi::ReportFfi> {
+        self.social.reports(circle_id.to_string())
+    }
+
+    /// Fire-and-forget, content-free entry to the developer moderation ledger on the push Worker
+    /// (App Review 1.2 parity with Apple/Android): actor × subject × action × offense category —
+    /// opaque node hexes only, never content. Free-text comments stay sealed to the circle.
+    fn moderation_flag(&self, action: &str, subject: String, reason: String) {
+        if subject.is_empty() {
+            return;
+        }
+        let body = serde_json::json!({
+            "actor": self.social.my_node_hex(),
+            "subject": subject,
+            "action": action,
+            "reason": reason,
+        });
+        let http = self.http.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = http.post(format!("{PUSH_RELAY}/flag")).json(&body).send().await;
+        });
+    }
+
     /// Persist, bump the UI, and broadcast a freshly-authored sealed envelope to members.
     fn after_author(self: &Arc<Self>, circle_id: &str, env: &[u8]) {
         self.persist();
@@ -1120,6 +1174,7 @@ impl Engine {
     }
 
     pub fn block(self: &Arc<Self>, id_hex: String) {
+        self.moderation_flag("block", id_hex.clone(), String::new());
         self.social.block_member(id_hex.clone());
         {
             let mut p = self.prefs.lock().unwrap();

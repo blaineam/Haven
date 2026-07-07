@@ -778,6 +778,7 @@ object HavenNet : InboundListener {
 
     /** Block a node: purge from every circle, drop from contacts, ignore future frames. */
     fun block(idHex: String) {
+        ModerationLedger.record("block", idHex, "")
         runCatching { social.blockMember(idHex) }
         contacts.removeAll { it.idHex == idHex }
         pending.removeAll { it.idHex == idHex }
@@ -1053,6 +1054,28 @@ object HavenNet : InboundListener {
         val env = runCatching { social.unsend(circleId, postId, nowMs()) }.getOrNull() ?: return
         afterAuthor(circleId, env)
     }
+
+    /**
+     * File a report against a post/message (decentralized moderation — docs/MODERATION.md): hide
+     * it locally right away (the reporter never sees it again), broadcast the sealed report to the
+     * whole circle, and append a content-free identity-vs-identity entry to the developer ledger.
+     * Returns the reported author's FULL node hex (resolved by the core from the event log) so the
+     * caller can offer block-in-the-same-motion.
+     */
+    fun report(circleId: String, target: String, reason: String, comment: String): String? {
+        val env = runCatching { social.report(circleId, target, reason, comment, nowMs()) }.getOrNull() ?: return null
+        afterAuthor(circleId, env)
+        HiddenStore.hide(target)
+        val author = runCatching { social.reports(circleId) }.getOrDefault(emptyList())
+            .firstOrNull { it.target == target }?.author
+        ModerationLedger.record("report", author ?: "", reason)
+        return author
+    }
+
+    /** Reports filed in a circle by ANY member, grouped by the reported event id. Circles have no
+     *  owner — every member sees every report and acts with the power they already hold. */
+    fun reports(circleId: String): Map<String, List<uniffi.haven_ffi.ReportFfi>> =
+        runCatching { social.reports(circleId) }.getOrDefault(emptyList()).groupBy { it.target }
 
     /** Persist, bump the feed, and broadcast a freshly-authored sealed envelope to members. */
     private fun afterAuthor(circleId: String, env: ByteArray) {

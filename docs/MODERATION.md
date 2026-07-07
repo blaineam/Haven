@@ -50,7 +50,12 @@ List entries: `wrangler kv key list --binding TOKENS --prefix ledger:` (values a
 
 ## Platform status
 
-- **Apple (iOS + native macOS)** — shipped (report sheet, banner, ledger pings).
-- **Android / desktop** — core event is platform-neutral; UI pending (see
-  [ANDROID-PARITY.md](ANDROID-PARITY.md)). Android's existing `HiddenStore`/block still apply;
-  unknown `Report` events are dropped harmlessly until the UI lands.
+- **Apple (iOS + native macOS)** — shipped (report sheet, banner, ledger pings) —
+  `apple/HavenApp/ReportUI.swift`.
+- **Android** — shipped (`ui/ReportUI.kt` + `core/Moderation.kt`): report sheet with the same five
+  categories, "Reported by …" banner with hide/remove/block, instant local hide via `HiddenStore`,
+  and ledger pings on report + block.
+- **Desktop (Tauri)** — shipped (`report`/`reports` commands + `reportDialog`/`reportedBanner` in
+  `ui/app.js`); the ledger ping is sent by the Rust backend (`Engine::moderation_flag`).
+
+The category wording is identical on every platform so ledger entries aggregate cleanly.

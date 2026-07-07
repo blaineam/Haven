@@ -228,6 +228,8 @@ pub fn run() {
             commands::unreact,
             commands::edit_post,
             commands::unsend_post,
+            commands::report,
+            commands::reports,
             commands::dm_threads,
             commands::delete_conversation,
             commands::start_dm,

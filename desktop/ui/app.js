@@ -198,9 +198,13 @@ async function renderFeed() {
   const items = (await invoke("feed", { circleId: state.activeCircle }))
     .filter((i) => !i.story)
     .filter((i) => Hidden.showHidden || !Hidden.has(i.id));   // personal per-post hide (reversible)
+  // Reports filed by ANY member — the circle's shared moderation signal, grouped per post.
+  const reportsByTarget = {};
+  for (const r of await invoke("reports", { circleId: state.activeCircle }).catch(() => []))
+    (reportsByTarget[r.target] ||= []).push(r);
   const list = el("div", {});
   if (!items.length) list.append(el("div", { class: "empty" }, "No posts yet. Say hello to your circle, or connect a friend."));
-  for (const it of items) list.append(postCard(it, state.activeCircle));
+  for (const it of items) list.append(postCard(it, state.activeCircle, reportsByTarget[it.id] || []));
 
   root.replaceChildren(head, composer, list);
   hydrateMedia(root, state.activeCircle);
@@ -531,7 +535,7 @@ function imageToJpegBase64(file, maxDim = 2048, quality = 0.82) {
   });
 }
 
-function postCard(it, circleId) {
+function postCard(it, circleId, reports = []) {
   const head = el("div", { class: "post-head" },
     el("div", { class: "avatar" }, initials(it.author_name)),
     el("div", {},
@@ -540,6 +544,11 @@ function postCard(it, circleId) {
     ),
     el("button", { class: "kebab menu-btn", onclick: (e) => postMenu(e, it, circleId) }, "⋯"),
   );
+
+  // Another member reported this post → surface the circle's shared moderation signal with
+  // per-viewer actions (hide / remove from circle / block). The reporter themselves never sees
+  // it — reporting hid the post for them.
+  const banner = !it.is_me && reports.length ? reportedBanner(it, circleId, reports) : null;
 
   const body = it.unsent
     ? el("div", { class: "post-body muted" }, "🚫 This post was unsent")
@@ -596,7 +605,90 @@ function postCard(it, circleId) {
   cmtBtn.addEventListener("click", () => comments.classList.toggle("show"));
 
   const geoNode = geo ? geoChip(geo) : null;
-  return el("div", { class: "card post" }, head, body, media.children.length ? media : null, geoNode, audio.children.length ? audio : null, song, actions, comments);
+  return el("div", { class: "card post" }, head, banner, body, media.children.length ? media : null, geoNode, audio.children.length ? audio : null, song, actions, comments);
+}
+
+// ---- Reports (decentralized moderation) --------------------------------------------------
+// Mirrors apple/HavenApp/ReportUI.swift: circles have no owner, so a report is sealed to the
+// WHOLE circle and every member acts with the power they already hold. Only who-reported-whom
+// and the category ever leave the circle (the backend's content-free ledger ping).
+
+const REPORT_REASONS = [
+  ["Harassment or bullying", "🗯"],
+  ["Nudity or sexual content", "🙈"],
+  ["Violence or dangerous acts", "⚠️"],
+  ["Spam or scam", "🛡"],
+  ["Something else", "🚩"],
+];
+
+/// Pick a category, optionally add a circle-only note, optionally block the author in the same
+/// motion. Submitting hides the post for the reporter instantly.
+function reportDialog(it, circleId) {
+  let reason = null;
+  let alsoBlock = false;
+  const submit = el("button", { class: "btn primary", disabled: true, onclick: async () => {
+    const author = await invoke("report", { circleId, target: it.id, reason, comment: note.value.trim() }).catch(() => null);
+    Hidden.hide(it.id);
+    if (alsoBlock && author) await invoke("block", { idHex: author }).catch(() => {});
+    $("#modal-root").replaceChildren();
+    toast("Reported");
+    renderFeed();
+  } }, "Report");
+  const rows = REPORT_REASONS.map(([r, icon]) => el("button", { class: "btn reason", onclick: (e) => {
+    reason = r;
+    submit.disabled = false;
+    $$(".reason", e.target.closest(".col")).forEach((b) => b.classList.toggle("primary", b === e.target.closest(".reason")));
+  } }, `${icon} ${r}`));
+  const note = el("textarea", { placeholder: "Add a note for your circle (optional)", rows: 2 });
+  const blockBox = el("input", { type: "checkbox", onchange: (e) => { alsoBlock = e.target.checked; } });
+  modal(el("div", {},
+    el("h2", {}, "Report post"),
+    el("div", { class: "muted small", style: "margin-bottom:8px" }, "What's wrong with it?"),
+    el("div", { class: "col" }, ...rows),
+    note,
+    el("label", { class: "row", style: "margin-top:8px;gap:8px;cursor:pointer" }, blockBox, `✋ Also block ${it.author_name}`),
+    el("div", { class: "muted small", style: "margin-top:10px" },
+      "The post disappears from your feed right away, and everyone in the circle sees your report so they can act too. Only who reported whom and the category are logged — never the content."),
+    el("div", { class: "row", style: "margin-top:12px;justify-content:flex-end" }, submit),
+  ));
+}
+
+/// Banner on a post that OTHER members reported. Each viewer decides for themselves: hide it,
+/// remove the author from their circle, or block.
+function reportedBanner(it, circleId, reports) {
+  const names = [...new Set(reports.map((r) => r.reporter_name))].sort().join(", ");
+  const reasons = [...new Set(reports.map((r) => r.reason))].join(" · ");
+  const notes = reports.map((r) => r.comment).filter(Boolean);
+  return el("div", { class: "reported-banner" },
+    el("span", {}, "🚩"),
+    el("div", { style: "flex:1;min-width:0" },
+      el("div", { class: "small", style: "font-weight:600" }, `Reported by ${names}`),
+      el("div", { class: "small muted" }, reasons + (notes.length ? ` — “${notes[0]}”` : "")),
+    ),
+    el("button", { class: "btn small ghost", onclick: () => reportedActions(it, circleId, reports) }, "Act"),
+  );
+}
+
+function reportedActions(it, circleId, reports) {
+  const author = reports[0].author;   // FULL node hex, embedded by the reporter's core
+  const m = el("div", {}, el("h2", {}, "Reported post"),
+    el("div", { class: "col" },
+      el("button", { class: "btn", onclick: () => { Hidden.hide(it.id); $("#modal-root").replaceChildren(); renderFeed(); } }, "🙈 Hide for me"),
+      el("button", { class: "btn danger", onclick: async () => {
+        if (!confirm(`Remove ${it.author_name} from this circle? Their posts leave your view of the circle and they can't rejoin through you.`)) return;
+        await invoke("remove_from_circle", { circleId, contactIdHex: author }).catch(() => {});
+        $("#modal-root").replaceChildren();
+        toast("Removed");
+        renderFeed();
+      } }, `👋 Remove ${it.author_name} from circle`),
+      el("button", { class: "btn danger", onclick: async () => {
+        await invoke("block", { idHex: author }).catch(() => {});
+        $("#modal-root").replaceChildren();
+        toast("Blocked");
+        renderFeed();
+      } }, `✋ Block ${it.author_name}`),
+    ));
+  modal(m);
 }
 
 const hasMine = (rs, e) => (rs || []).some((r) => r.emoji === e && r.mine);
@@ -624,6 +716,8 @@ function postMenu(e, it, circleId) {
       // Hide any post from my own feed (reversible via "Show hidden").
       el("button", { class: "btn", onclick: () => { isHidden ? Hidden.unhide(it.id) : Hidden.hide(it.id); $("#modal-root").replaceChildren(); renderFeed(); } },
         isHidden ? "👁 Unhide" : "🙈 Hide post"),
+      // Report to the whole circle (decentralized moderation — see reportDialog).
+      it.is_me ? null : el("button", { class: "btn danger", onclick: () => { $("#modal-root").replaceChildren(); reportDialog(it, circleId); } }, "🚩 Report"),
     ));
   modal(m);
 }

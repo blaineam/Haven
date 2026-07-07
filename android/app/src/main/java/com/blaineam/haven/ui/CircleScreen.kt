@@ -143,6 +143,8 @@ fun CircleScreen(onAddFriend: () -> Unit) {
     }
     val storyGroups = remember(items) { groupStories(items) }
     val posts = remember(items) { items.filter { !it.story } }
+    // Reports filed by ANY member — the circle's shared moderation signal, grouped per post.
+    val reportsByTarget = remember(version, active) { HavenNet.reports(active) }
     var viewingStory by remember { mutableStateOf<Int?>(null) }
     var showStoryCamera by remember { mutableStateOf(false) }
     var showPostCamera by remember { mutableStateOf(false) }   // in-app camera capture for a post
@@ -238,7 +240,7 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                                 color = HavenTheme.textSecondary, fontSize = 14.sp, textAlign = TextAlign.Center,
                             )
                         }
-                    } else items(posts, key = { it.id }) { PostCard(it, active) }
+                    } else items(posts, key = { it.id }) { PostCard(it, active, reportsByTarget[it.id].orEmpty()) }
                 }
             }
 
@@ -1117,9 +1119,10 @@ private val QUICK_EMOJI = listOf("❤️", "😂", "🔥", "👍", "🎉", "😮
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun PostCard(item: FeedItemFfi, circleId: String = DEFAULT_CIRCLE) {
+fun PostCard(item: FeedItemFfi, circleId: String = DEFAULT_CIRCLE, reports: List<uniffi.haven_ffi.ReportFfi> = emptyList()) {
     var showComment by remember(item.id) { mutableStateOf(false) }
     var postMenu by remember(item.id) { mutableStateOf(false) }
+    var showReport by remember(item.id) { mutableStateOf(false) }
     var commentDraft by remember(item.id) { mutableStateOf("") }
     var showPicker by remember(item.id) { mutableStateOf(false) }
     var showEdit by remember(item.id) { mutableStateOf(false) }
@@ -1177,8 +1180,22 @@ fun PostCard(item: FeedItemFfi, circleId: String = DEFAULT_CIRCLE) {
                             postMenu = false
                         },
                     )
+                    if (!item.isMe) DropdownMenuItem(
+                        text = { Text("Report", color = Color(0xFFF87171)) },
+                        onClick = { postMenu = false; showReport = true },
+                    )
                 }
             }
+        }
+        // Another member reported this post → surface the circle's shared moderation signal with
+        // per-viewer actions (hide / remove from circle / block). The reporter themselves never
+        // sees it — reporting hid the post for them. (Parity with iOS ReportedBanner.)
+        if (!item.isMe && reports.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            ReportedBanner(item, circleId, HavenNet.displayName(item.authorShort), reports)
+        }
+        if (showReport) {
+            ReportSheet(item, circleId, HavenNet.displayName(item.authorShort)) { showReport = false }
         }
         // An unsent post shows a placeholder and hides ALL affordances (media, reactions,
         // react/comment bar, composer) — parity with iOS, which renders "Message unsent" and

@@ -31,6 +31,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   ledger** on the push Worker (`/flag`): actor node id × subject node id × action × category —
   identity-vs-identity only, no content, no PII, so abuse patterns (many reporters × one
   identity) stay visible in a system where the developer can see nothing else.
+- **Content reporting on Android and desktop (parity).** The same decentralized moderation UI on
+  the other two platforms: Android gets a report sheet (`ui/ReportUI.kt` — the five Apple-identical
+  categories, optional circle-only note, "also block" toggle, instant local hide via
+  `HiddenStore`), the "Reported by …" banner with per-viewer actions (hide for me / remove from
+  circle / block), and ledger pings (`core/Moderation.kt`); the Tauri desktop gets
+  `report`/`reports` commands, the same report dialog + reported banner in the web UI, and a
+  backend-side ledger ping (`Engine::moderation_flag`) that also covers every block. Category
+  wording is identical across platforms so ledger entries aggregate cleanly.
 
 ### Fixed
 - **Call audio has priority: no post music or video sound while a call is ringing, connecting,

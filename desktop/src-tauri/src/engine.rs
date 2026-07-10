@@ -90,8 +90,15 @@ struct DynState {
     started: bool,
     hosting: bool,
     foreground: bool,
-    /// Coalesces overlapping self-sync passes (the 15s loop must never run two at once).
+    /// Coalesces overlapping self-sync passes (the loop must never run two at once).
     self_syncing: bool,
+    /// Adaptive sync cadence (device-heat control) — see start_mailbox_loop. `last_activity_ms` is
+    /// stamped by bump_activity on any real activity (foreground, an authored post, an arriving
+    /// message, a peer connecting); the two due timestamps gate the expensive poll/fan-out work so an
+    /// idle app backs off (sync 20s->60s->120s, poll 30s->90s->180s). iOS FeedStore parity (build 178).
+    last_activity_ms: u64,
+    next_sync_due_ms: u64,
+    next_poll_due_ms: u64,
 }
 
 /// Where a self-sync slot can be read/written: a Haven relay (by node hex) or the user's S3.
@@ -222,6 +229,9 @@ impl Engine {
 
     pub fn set_foreground(&self, fg: bool) {
         self.dyn_state.lock().unwrap().foreground = fg;
+        if fg {
+            self.bump_activity(); // back to foreground → snap sync cadence tight
+        }
     }
 
     fn emit_changed(&self) {
@@ -463,59 +473,114 @@ impl Engine {
         }
         self.fire_due_scheduled(); // flush anything overdue from while the app was closed
         self.purge_stale_relays().await; // erase relays inactive AND unseen > 7 days (config else survives)
+        self.bump_activity(); // seed activity NOW so launch starts at tight cadence (idle=huge would else max-back-off)
         self.start_mailbox_loop();
     }
 
+    /// Base cadence stretched by how long the app has sat idle. Idle <3min = base; <15min = ×3; else ×6.
+    fn adaptive_interval(now: u64, last_activity_ms: u64, base: u64) -> u64 {
+        let idle = now.saturating_sub(last_activity_ms);
+        if idle < 180_000 {
+            base
+        } else if idle < 900_000 {
+            base * 3
+        } else {
+            base * 6
+        }
+    }
+
+    /// Mark "something is happening" → snap both timers back to their tight base cadence immediately.
+    fn bump_activity(&self) {
+        let mut st = self.dyn_state.lock().unwrap();
+        st.last_activity_ms = now_ms();
+        st.next_sync_due_ms = 0;
+        st.next_poll_due_ms = 0;
+    }
+
+    // Adaptive sync cadence (device-heat control). The loop keeps a cheap 10s heartbeat, but the
+    // EXPENSIVE work (mailbox poll, mesh dials, relay re-announce, media retry/backfill) only runs
+    // when it's DUE. When the app is idle — foregrounded but nothing arriving/authored — the due
+    // interval STRETCHES, so an idle machine isn't blasting the network every 15s (the main heat
+    // source). Any real activity resets it to the tight base cadence (see bump_activity), and pushes
+    // still wake the app for immediacy either way. iOS FeedStore parity: sync base 20s, poll base 30s.
     fn start_mailbox_loop(self: &Arc<Self>) {
         let me = self.clone();
         tauri::async_runtime::spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-                me.poll_mailbox().await;
-                // Persistently retry any media an interrupted nearby/iroh transfer left incomplete —
-                // relay first, then peers — every tick until nothing is missing (parity with iOS/Android).
-                me.request_missing_media();
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                let now = now_ms();
+                // Scheduled posts are time-sensitive — check every heartbeat so they fire punctually
+                // regardless of the adaptive back-off below (cheap: just compares due timestamps).
                 me.fire_due_scheduled();
-                me.mesh_sync().await;
-                me.poll_self_sync().await;
-                // Re-emit our own relay id every tick so peers reliably learn it (frame 19 was a one-shot
-                // at relay start). Cheap; no-op unless we host.
-                me.reannounce_own_relay();
-                // Mirror our own media to the relays we know periodically (~every 2 min). The cross-device
-                // chunk path is unreliable; the relay is the durable convergence path.
-                let due = {
+
+                // Poll bucket (base 30s): pull the circle mailbox so posts arrive even when peers
+                // aren't both online, then converge this user's OWN devices over the same relays.
+                let poll_due = {
                     let mut st = me.dyn_state.lock().unwrap();
-                    let now = now_ms();
-                    if now - st.last_media_backfill_ms > 120_000 {
-                        st.last_media_backfill_ms = now;
+                    if now >= st.next_poll_due_ms {
+                        st.next_poll_due_ms = now + Self::adaptive_interval(now, st.last_activity_ms, 30_000);
                         true
                     } else {
                         false
                     }
                 };
-                if due {
-                    me.backfill_media_to_relays().await;
+                if poll_due {
+                    me.poll_mailbox().await;
+                    me.poll_self_sync().await;
                 }
-                // Daily (first tick after launch, then every 24h of uptime): re-assert my event
-                // envelopes in every circle mailbox — upload what a relay never saw, TOUCH what
-                // it already holds so relay-side mailbox GC (30-day TTL) keeps live entries
-                // while legacy duplicates and stale-epoch copies age out.
-                let refresh_due = {
+
+                // Sync bucket (base 20s): the network fan-out that runs the radio hot, so it backs off
+                // hardest when idle. Retry incomplete media (relay first, then peers), mesh-dial sibling
+                // relays, re-emit our own relay id (frame 19 was a one-shot at relay start; no-op unless
+                // we host), the ~2-min media backfill + daily mailbox refresh (own inner gates), and GC
+                // relays inactive + unseen > 7 days.
+                let sync_due = {
                     let mut st = me.dyn_state.lock().unwrap();
-                    let now = now_ms();
-                    if now - st.last_event_refresh_ms > 86_400_000 {
-                        st.last_event_refresh_ms = now;
+                    if now >= st.next_sync_due_ms {
+                        st.next_sync_due_ms = now + Self::adaptive_interval(now, st.last_activity_ms, 20_000);
                         true
                     } else {
                         false
                     }
                 };
-                if refresh_due {
-                    for c in me.social.circles() {
-                        me.backfill_mailbox(&c.id).await;
+                if sync_due {
+                    me.request_missing_media();
+                    me.mesh_sync().await;
+                    me.reannounce_own_relay();
+                    // Mirror our own media to the relays we know periodically (~every 2 min). The
+                    // cross-device chunk path is unreliable; the relay is the durable convergence path.
+                    let backfill_due = {
+                        let mut st = me.dyn_state.lock().unwrap();
+                        if now - st.last_media_backfill_ms > 120_000 {
+                            st.last_media_backfill_ms = now;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if backfill_due {
+                        me.backfill_media_to_relays().await;
                     }
+                    // Daily (first sync tick after launch, then every 24h of uptime): re-assert my event
+                    // envelopes in every circle mailbox — upload what a relay never saw, TOUCH what it
+                    // already holds so relay-side mailbox GC (30-day TTL) keeps live entries while legacy
+                    // duplicates and stale-epoch copies age out.
+                    let refresh_due = {
+                        let mut st = me.dyn_state.lock().unwrap();
+                        if now - st.last_event_refresh_ms > 86_400_000 {
+                            st.last_event_refresh_ms = now;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if refresh_due {
+                        for c in me.social.circles() {
+                            me.backfill_mailbox(&c.id).await;
+                        }
+                    }
+                    me.purge_stale_relays().await; // GC relays inactive + unseen > 7 days (config else survives)
                 }
-                me.purge_stale_relays().await; // GC relays inactive + unseen > 7 days (config else survives)
             }
         });
     }
@@ -986,6 +1051,7 @@ impl Engine {
 
     /// Persist, bump the UI, and broadcast a freshly-authored sealed envelope to members.
     fn after_author(self: &Arc<Self>, circle_id: &str, env: &[u8]) {
+        self.bump_activity(); // I just posted/messaged → keep sync tight
         self.persist();
         self.emit_changed();
         let payload = wire::event_payload(circle_id, env);
@@ -1233,6 +1299,7 @@ impl Engine {
     }
 
     fn accept_contact(self: &Arc<Self>, circle_id: &str, bundle: &[u8], id_hex: &str, name: &str, verify_hex: &str, hello_back: bool) {
+        self.bump_activity(); // a peer just connected → sync tight for the catch-up burst
         let _ = self.social.add_contact_bundle(circle_id.to_string(), bundle.to_vec());
         {
             let mut p = self.prefs.lock().unwrap();
@@ -1511,6 +1578,7 @@ impl Engine {
         let Some(ev) = wire::parse_event(payload) else { return };
         let changed = self.social.receive(ev.circle_id.clone(), ev.envelope).unwrap_or(false);
         if changed {
+            self.bump_activity(); // a live event arrived → keep sync tight while the conversation is active
             self.persist();
             self.emit_changed();
             self.request_missing_media();
@@ -2476,6 +2544,7 @@ impl Engine {
         }
         self.flush_seen_mailbox();
         if changed {
+            self.bump_activity(); // a message arrived → keep sync tight while the conversation is live
             self.persist();
             self.emit_changed();
             self.request_missing_media();

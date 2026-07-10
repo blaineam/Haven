@@ -242,6 +242,7 @@ object HavenNet : InboundListener {
     /** Start the iroh node and begin syncing. Safe to call repeatedly. */
     fun start() {
         if (node != null) return
+        bumpActivity()   // seed activity NOW so launch starts at tight cadence (idle=huge would else max-back-off)
         // DIAGNOSTIC: capture iroh/noq connection-level logs to filesDir/iroh-trace.log BEFORE the node starts.
         runCatching { uniffi.haven_ffi.initLogging(appContext.filesDir.path) }
         scope.launch {
@@ -274,28 +275,60 @@ object HavenNet : InboundListener {
         startMailboxLoop()
     }
 
-    /** Poll the circle relay/mailbox every 15s so posts arrive even when peers aren't both online. */
+    // Adaptive sync cadence (device-heat control). The loop keeps a cheap 10s heartbeat, but the
+    // EXPENSIVE work (contact hello+roster fan-out, relay re-announce, mailbox poll, mesh dials) only
+    // runs when it's DUE. When the app is idle — foregrounded but nothing arriving/authored — the
+    // due-interval STRETCHES, so an idle phone isn't blasting hello+roster to every contact every tick
+    // (the main heat source). Any real activity (foreground, an authored post, an arriving message, a
+    // nearby peer connecting) resets it to the tight base cadence, and pushes still wake the app for
+    // immediacy either way. Parity with iOS FeedStore (build 178): sync base 20s, poll base 30s.
+    @Volatile private var lastActivityMs = 0L
+    @Volatile private var nextSyncDueMs = 0L
+    @Volatile private var nextPollDueMs = 0L
+    /** Base cadence stretched by how long the app has sat idle. Idle <3min = base; <15min = ×3; else ×6. */
+    private fun adaptiveInterval(base: Long): Long {
+        val idle = System.currentTimeMillis() - lastActivityMs
+        return when {
+            idle < 180_000 -> base
+            idle < 900_000 -> base * 3
+            else -> base * 6
+        }
+    }
+    /** Mark "something is happening" → snap both timers back to their tight base cadence immediately. */
+    fun bumpActivity() {
+        lastActivityMs = System.currentTimeMillis()
+        nextSyncDueMs = 0
+        nextPollDueMs = 0
+    }
+
+    /** Adaptive-cadence loop: 10s heartbeat, expensive work only when due so an idle phone stays cool. */
     private var loopStarted = false
     private fun startMailboxLoop() {
         if (loopStarted) return
         loopStarted = true
         scope.launch {
             while (true) {
-                delay(15_000)
-                runCatching { pollMailbox() }
-                // Greet contacts (Hello every tick keeps connections warm; full history re-send +
-                // own-media relay backfill are throttled internally) and re-announce our relay so peers
-                // that weren't connected at relay start still learn it (iOS reannounceOwnRelay parity).
-                runCatching { syncWithContacts() }
-                // Persistently retry any media an interrupted nearby/iroh transfer left incomplete —
-                // pull from the circle relay AND re-request from peers every tick until nothing is
-                // missing, so posts never stay fragmented (parity with iOS).
-                runCatching { requestMissingMedia() }
-                // Proactively push the media we hold to nearby own devices (the reliable own-device
-                // channel) so a sibling gets our photos without relying on request/response.
-                runCatching { pushOwnMediaNearby() }
-                // GC relays that have been inactive + unseen > 7 days (active-but-unreachable kept).
-                runCatching { purgeStaleRelays() }
+                delay(10_000)
+                val nowMs = System.currentTimeMillis()
+                // Sync bucket (base 20s): greet contacts (Hello keeps connections warm; full history
+                // re-send + own-media relay backfill are throttled internally), re-announce our relay so
+                // peers that weren't connected at relay start still learn it (iOS reannounceOwnRelay
+                // parity), retry any incomplete media transfer (pull from relay AND re-request from
+                // peers), push own media to nearby siblings, and GC relays inactive + unseen > 7 days.
+                // This fan-out is the primary heat source, so it backs off hardest when idle.
+                if (nowMs >= nextSyncDueMs) {
+                    nextSyncDueMs = nowMs + adaptiveInterval(20_000)
+                    runCatching { syncWithContacts() }
+                    runCatching { requestMissingMedia() }
+                    runCatching { pushOwnMediaNearby() }
+                    runCatching { purgeStaleRelays() }
+                }
+                // Poll bucket (base 30s): pull the circle relay/mailbox so posts arrive even when peers
+                // aren't both online (pollMailbox also drives mesh + multi-device self-sync internally).
+                if (nowMs >= nextPollDueMs) {
+                    nextPollDueMs = nowMs + adaptiveInterval(30_000)
+                    runCatching { pollMailbox() }
+                }
             }
         }
     }
@@ -695,6 +728,7 @@ object HavenNet : InboundListener {
         val ev = Wire.parseEvent(payload) ?: return
         val changed = runCatching { social.receive(ev.circleId, ev.envelope) }.getOrDefault(false)
         if (changed) {
+            bumpActivity()   // a live event arrived → keep sync tight while the conversation is active
             persist()
             scope.launch(Dispatchers.Main) { feedVersion.value++ }
             requestMissingMedia()   // fetch any photos/videos the new post references
@@ -1098,6 +1132,7 @@ object HavenNet : InboundListener {
 
     /** Persist, bump the feed, and broadcast a freshly-authored sealed envelope to members. */
     private fun afterAuthor(circleId: String, env: ByteArray) {
+        bumpActivity()   // I just posted/messaged → keep sync tight
         persist()
         scope.launch(Dispatchers.Main) { feedVersion.value++ }
         val payload = Wire.eventPayload(circleId, env)
@@ -1143,6 +1178,7 @@ object HavenNet : InboundListener {
 
     /** A nearby peer just connected — greet over the mesh + back-fill the open circle. */
     fun onNearbyConnected() {
+        bumpActivity()   // a peer just appeared → sync tight for the catch-up burst
         val hello = helloPayload(DEFAULT_CIRCLE) ?: return
         NearbyTransport.broadcast(Wire.frame(Wire.HELLO, hello))
         for (env in runCatching { social.syncEnvelopes(DEFAULT_CIRCLE) }.getOrDefault(emptyList())) {
@@ -2021,6 +2057,7 @@ object HavenNet : InboundListener {
         // refresh trigger (selfSyncDidApply) when a peer device's state arrives.
         runCatching { SelfSyncCoordinator.sync(social) }
         if (changed) {
+            bumpActivity()   // a message arrived → keep sync tight while the conversation is live
             persist()
             withContext(Dispatchers.Main) { feedVersion.value++ }
             requestMissingMedia()

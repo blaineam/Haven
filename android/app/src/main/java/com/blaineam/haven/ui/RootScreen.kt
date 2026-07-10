@@ -122,6 +122,7 @@ private fun MainScaffold() {
         val obs = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_RESUME -> {
+                    HavenNet.bumpActivity()   // back to foreground → snap sync cadence tight
                     HavenNet.isForeground = true; HavenNet.syncWithContacts(); HavenNet.requestMissingMedia()
                     com.blaineam.haven.core.ScheduledStore.fireDue()   // post anything now due
                 }

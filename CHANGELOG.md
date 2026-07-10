@@ -36,6 +36,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   stretching to 60s/90s after 3 min idle, 120s/180s after 15 min). Any real activity — foreground, a
   post you send, a message arriving, a peer connecting — snaps the cadence back to tight instantly,
   and pushes still wake the app for immediacy. An open-but-idle phone no longer runs the radio hot.
+  Now on **all three platforms**: iOS/macOS, Android (`HavenNet` sync loop), and the desktop Tauri
+  engine (`engine.rs` mailbox loop) share the same base intervals, idle multipliers, and reset triggers.
 - **No more re-downloading old posts on every launch (device heat).** The mailbox "seen" cursor was
   saved on a 2s debounce and lost if the app was killed during the initial sync burst, so the next
   launch re-fetched + re-verified the whole mailbox. It's now flushed synchronously on
@@ -54,6 +56,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   `openssl rand -hex 32`) to pin the relay's identity independent of the `/data` volume — a
   recreated container no longer mints a new node id the circle has to re-adopt. Documented in the
   compose file + relay README.
+
+- **Choppy scrolling everywhere.** The Messages-tab unread badge recomputed by decoding a full feed
+  for every DM conversation — on the main thread — inside the feed refresh, which fires on every
+  sync tick regardless of which screen is open. So a background sync stalled the UI app-wide, making
+  every scrollable screen stutter. The badge is now event-driven (recomputed only when a DM message
+  arrives, a thread is read, or at startup) and never on the per-refresh hot path. Verified with a
+  main-thread sample: no feed decode on the main thread during sync.
 
 ### Added
 - **Storage usage + "keep my own posts".** Settings → Storage shows how much space synced media

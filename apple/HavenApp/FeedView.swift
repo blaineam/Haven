@@ -166,6 +166,7 @@ final class FeedStore: ObservableObject {
         loadLastHeard()   // so "last seen" survives an app restart
         refreshCircles()     // also purges any contaminated DM membership (see refreshCircles)
         refresh()
+        recomputeUnreadDMs()   // one-time badge compute at startup (kept OFF the per-refresh hot path)
         seedDemoIfNeeded()   // HAVEN_DEMO=1 only — PII-free synthetic dataset for screenshots
         guard ProcessInfo.processInfo.environment["HAVEN_NO_NET"] != "1" else { return }
         bringOnline(seed: seed)
@@ -782,8 +783,11 @@ final class FeedStore: ObservableObject {
                 self.items = filtered
                 self.sensitiveCache.removeAll()   // a refresh may have ingested new SensitiveFlag events
                 self.reportsCache.removeAll()     // …and new Report events
-                self.recomputeUnreadDMs()         // keep the Messages badge honest (startup + ingest)
                 SpotlightIndex.reindexAll()       // no-op unless the user enabled Spotlight indexing
+                // NB: recomputeUnreadDMs() is NOT called here. It decodes a full feed per DM circle
+                // on the main actor (real crypto, takes the engine lock), and refresh() fires on
+                // every sync tick / ingest — running it here stalled scrolling. It's event-driven
+                // instead: bumpUnseen (DM ingest), markThreadRead (read), and configure (startup).
             }
         }
     }
@@ -1342,7 +1346,12 @@ final class FeedStore: ObservableObject {
         persist()
         guard !ingested.isEmpty else { return }
         bumpActivity()   // a message arrived → keep sync tight while the conversation is live
-        for cid in ingested { notifyNewest(in: cid); bumpUnseen(cid) }
+        var dmIngested = false
+        for cid in ingested {
+            notifyNewest(in: cid)
+            if cid.hasPrefix("dm:") { dmIngested = true } else { bumpUnseen(cid) }
+        }
+        if dmIngested { recomputeUnreadDMs() }   // once for the whole batch, not per DM circle
         refresh(); requestMissingMedia()
     }
 

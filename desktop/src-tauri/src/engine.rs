@@ -973,7 +973,14 @@ impl Engine {
         });
         let http = self.http.clone();
         tauri::async_runtime::spawn(async move {
-            let _ = http.post(format!("{PUSH_RELAY}/flag")).json(&body).send().await;
+            // Manual JSON body — this crate's reqwest is built without the `json` feature
+            // (default-features = false), which is what broke the beta.30 release build.
+            let _ = http
+                .post(format!("{PUSH_RELAY}/flag"))
+                .header("content-type", "application/json")
+                .body(body.to_string())
+                .send()
+                .await;
         });
     }
 

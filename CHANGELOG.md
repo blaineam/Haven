@@ -7,7 +7,19 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.1.0-beta.31] — 2026-07-09
+
+### Fixed
+- **Desktop/relay release builds restored.** The beta.30 `release` workflow failed to compile
+  (`Engine::moderation_flag` used reqwest's `.json()` but the desktop crate builds reqwest with
+  `default-features = false`, no `json` feature) — so the latest GitHub release shipped with no
+  Windows/Linux/flatpak/relay assets and the website's download cards sat on "Building…". The
+  ledger ping now serializes its body explicitly.
+
+### Changed
+- **Website reflects launch.** haven's landing page no longer says "free while in beta":
+  iPhone/iPad/Mac are live on the App Store as a one-time $9.99 purchase; the Android and
+  desktop betas remain free until they ship. Download section headline updated to match.
 
 ### Added
 - **DM unread badges (Apple platforms).** Conversations now show an unread-count pill — on the

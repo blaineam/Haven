@@ -231,6 +231,7 @@ pub fn run() {
             commands::report,
             commands::reports,
             commands::dm_threads,
+            commands::mark_dm_read,
             commands::delete_conversation,
             commands::start_dm,
             commands::start_group_dm,

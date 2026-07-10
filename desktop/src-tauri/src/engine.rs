@@ -1101,25 +1101,55 @@ impl Engine {
         }
     }
 
-    /// DM threads as (circleId, partnerName, lastBody, lastAt, memberCount). Sorted most-recently-active
-    /// first. `memberCount` lets the UI tell a group DM (2+ others) from a 1:1.
-    pub fn dm_threads(&self) -> Vec<(String, String, String, u64, u32)> {
-        let cleared = self.prefs.lock().unwrap().dm_cleared_before.clone();
+    /// A DM's read watermark: its `dm_last_read` entry, else the first-run seed (so pre-feature
+    /// history doesn't badge). Mirrors iOS `DMReadStore.watermark`.
+    fn dm_watermark(&self, circle_id: &str) -> u64 {
+        let p = self.prefs.lock().unwrap();
+        p.dm_last_read.get(circle_id).copied().unwrap_or(p.dm_read_seeded_at)
+    }
+
+    /// The user is viewing a DM thread: advance its watermark to "now or the newest visible message,
+    /// whichever is later". Taking the message time into account absorbs sender clock skew — a
+    /// message stamped slightly in our future would otherwise stay "unread" forever. Monotonic; the
+    /// new watermark reaches our other devices via self-sync (`setting:dmLastRead`, per-key MAX).
+    /// Deliberately does NOT emit `haven:changed` — the caller is mid-render (feedback loop).
+    pub fn mark_dm_read(&self, circle_id: String) {
+        let newest = self.messages(&circle_id).iter().map(|m| m.created_at).max().unwrap_or(0);
+        let mark = now_ms().max(newest);
+        let mut p = self.prefs.lock().unwrap();
+        if mark <= p.dm_last_read.get(&circle_id).copied().unwrap_or(0) {
+            return;
+        }
+        p.dm_last_read.insert(circle_id, mark);
+        let _ = p.save(&self.paths);
+    }
+
+    /// DM threads as (circleId, partnerName, lastBody, lastAt, memberCount, unread). Sorted
+    /// most-recently-active first. `memberCount` lets the UI tell a group DM (2+ others) from a 1:1;
+    /// `unread` = inbound messages newer than the thread's read watermark (row/pin badge).
+    pub fn dm_threads(&self) -> Vec<(String, String, String, u64, u32, u32)> {
+        let (cleared, reads, seed) = {
+            let p = self.prefs.lock().unwrap();
+            (p.dm_cleared_before.clone(), p.dm_last_read.clone(), p.dm_read_seeded_at)
+        };
         let mut out = vec![];
         for c in self.social.circles() {
             if !c.id.starts_with("dm:") {
                 continue;
             }
             let cutoff = cleared.get(&c.id).copied();
-            let (last_body, last_at) = self
-                .social
-                .feed(c.id.clone(), now_ms(), None)
+            let wm = reads.get(&c.id).copied().unwrap_or(seed);
+            let feed = self.social.feed(c.id.clone(), now_ms(), None);
+            let visible: Vec<_> =
+                feed.iter().filter(|i| cutoff.map_or(true, |cut| i.created_at >= cut)).collect();
+            let (last_body, last_at) = visible
                 .iter()
-                .filter(|i| cutoff.map_or(true, |cut| i.created_at >= cut))
                 .max_by_key(|i| i.created_at)
                 .map(|i| (crate::secret::preview(&i.body), i.created_at))
                 .unwrap_or_default();
-            out.push((c.id.clone(), c.name.clone(), last_body, last_at, c.member_count));
+            let unread =
+                visible.iter().filter(|i| !i.is_me && !i.unsent && i.created_at > wm).count() as u32;
+            out.push((c.id.clone(), c.name.clone(), last_body, last_at, c.member_count, unread));
         }
         out.sort_by(|a, b| b.3.cmp(&a.3));
         out
@@ -3440,6 +3470,8 @@ impl Engine {
         {
             let mut p = self.prefs.lock().unwrap();
             *p = Prefs::default();
+            // Re-stamp the unread seed for the next identity (0 would badge all of history).
+            p.dm_read_seeded_at = now_ms();
             let _ = p.save(&self.paths);
         }
         {

@@ -153,10 +153,21 @@ private fun MainScaffold() {
                     unselectedIconColor = HavenTheme.textSecondary,
                     unselectedTextColor = HavenTheme.textSecondary,
                 )
+                // Messages tab badge = CONVERSATIONS with unread messages (per-thread read watermarks
+                // in DmRead, iOS parity). Opening the tab clears nothing — each thread clears as it's
+                // actually viewed. Recomputes on new messages (feedVersion) and on reads (DmRead.version,
+                // which self-sync also bumps when another device reads a thread).
+                val feedTick by HavenNet.feedVersion
+                val readTick by com.blaineam.haven.core.DmRead.version
+                val unreadDms = remember(feedTick, readTick) { HavenNet.unreadDmConversations() }
                 Tab.entries.forEach { t ->
                     // Badge the Circle tab with the number of pending connection requests (parity with
                     // iOS, which badges the circle tab). `pending` is a SnapshotStateList so this updates live.
-                    val badgeCount = if (t == Tab.Circle) HavenNet.pending.size else 0
+                    val badgeCount = when (t) {
+                        Tab.Circle -> HavenNet.pending.size
+                        Tab.Messages -> unreadDms
+                        else -> 0
+                    }
                     NavigationBarItem(
                         selected = tab == t,
                         onClick = { tab = t },

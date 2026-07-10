@@ -110,10 +110,13 @@ async function refreshBadges() {
     b.classList.toggle("show", pend.length > 0);
   } catch (_) {}
   try {
+    // Messages badge = CONVERSATIONS with unread messages (per-thread read watermarks, iOS parity).
+    // Opening the tab clears nothing — each thread clears as it's actually viewed.
     const dms = await invoke("dm_threads");
+    const unread = dms.filter((t) => (t.unread || 0) > 0).length;
     const b = $("#badge-messages");
-    b.textContent = dms.length;
-    b.classList.toggle("show", dms.length > 0);
+    b.textContent = unread;
+    b.classList.toggle("show", unread > 0);
   } catch (_) {}
 }
 
@@ -932,18 +935,28 @@ async function renderMessages() {
     renderMessages();
   };
 
-  // Pinned grid (large avatars) above the list.
+  const unreadPill = (n) => el("span", { class: "unread-pill" }, n > 99 ? "99+" : String(n));
+
+  // Pinned grid (large avatars) above the list. iMessage-style: the unread count rides the
+  // pinned avatar's shoulder.
   const grid = el("div", { class: "pin-grid" });
   for (const t of pinned) {
+    const unread = t.unread || 0;
     grid.append(el("div", { class: "pin-tile", onclick: () => openDm(t) },
-      el("div", { class: "avatar big" }, initials(t.name)),
-      el("div", { class: "pin-name" }, t.name)));
+      el("div", { class: "avatar-wrap" },
+        el("div", { class: "avatar big" }, initials(t.name)),
+        unread > 0 ? unreadPill(unread) : null),
+      el("div", { class: "pin-name" + (unread > 0 ? " unread" : "") }, t.name)));
   }
 
   const threadRow = (t) => {
+    const unread = t.unread || 0;
     const row = el("div", { class: "thread-item", onclick: () => openDm(t) },
       el("div", { class: "avatar" }, initials(t.name)),
-      el("div", { style: "flex:1;min-width:0" }, el("div", { class: "name" }, t.name), el("div", { class: "muted small", style: "white-space:nowrap;overflow:hidden;text-overflow:ellipsis" }, t.last_body || "No messages yet")),
+      el("div", { style: "flex:1;min-width:0" },
+        el("div", { class: "name" + (unread > 0 ? " unread" : "") }, t.name),
+        el("div", { class: (unread > 0 ? "" : "muted ") + "small", style: "white-space:nowrap;overflow:hidden;text-overflow:ellipsis" }, t.last_body || "No messages yet")),
+      unread > 0 ? unreadPill(unread) : null,
       el("div", { class: "muted small" }, relTime(t.last_at)),
       el("button", { class: "btn small ghost", title: Pins.has(t.circle_id) ? "Unpin" : "Pin", onclick: (e) => { e.stopPropagation(); if (!Pins.has(t.circle_id) && Pins.full) { toast("You can pin up to 6 conversations."); return; } Pins.toggle(t.circle_id); renderMessages(); } }, Pins.has(t.circle_id) ? "📌" : "📍"),
       el("button", { class: "btn small ghost danger", title: "Delete", onclick: (e) => { e.stopPropagation(); del(t); } }, "🗑"),
@@ -1039,6 +1052,11 @@ async function renderThread(root, dm) {
   );
   hydrateMedia(root, dm.id);
   chat.scrollTop = chat.scrollHeight;
+  // The user is looking at this thread: advance its read watermark. renderThread re-runs on every
+  // haven:changed, so messages arriving WHILE the thread is open are marked read too — backing out
+  // never leaves a stale badge for a conversation the user just watched. (The command deliberately
+  // doesn't emit haven:changed, so this can't render-loop.)
+  invoke("mark_dm_read", { circleId: dm.id }).then(refreshBadges).catch(() => {});
 }
 
 // ---- Connect ---------------------------------------------------------------------------

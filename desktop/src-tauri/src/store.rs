@@ -212,6 +212,16 @@ pub struct Prefs {
     /// re-started DM shows fresh. Mirrors iOS `haven.dm.clearedBefore`.
     #[serde(default)]
     pub dm_cleared_before: std::collections::HashMap<String, u64>,
+    /// Per-DM READ watermark (circleId -> epoch ms). A message is unread when it's inbound and newer
+    /// than its conversation's watermark; only actually viewing the thread advances it. Monotonic
+    /// (never moves backward), which makes the cross-device merge trivial: per-key MAX via the
+    /// `setting:dmLastRead` self-sync key. Mirrors iOS `DMReadStore`.
+    #[serde(default)]
+    pub dm_last_read: std::collections::HashMap<String, u64>,
+    /// Watermark for DMs with no `dm_last_read` entry yet — stamped ONCE at first run so the day
+    /// this feature ships, pre-existing history doesn't light every conversation up as unread.
+    #[serde(default)]
+    pub dm_read_seeded_at: u64,
 }
 
 impl Prefs {
@@ -232,6 +242,12 @@ impl Prefs {
         // erase model). Pre-existing relays become active=true with last_seen=now so their stale-clock
         // starts now. Idempotent: only fills gaps. Mirrors iOS `migrateEntries`.
         prefs.migrate_relay_entries();
+        // First run (or first run since this feature shipped): stamp the unread seed and PERSIST it,
+        // so messages that arrive while the app is closed still count as unread on the next launch.
+        if prefs.dm_read_seeded_at == 0 {
+            prefs.dm_read_seeded_at = Self::now_ms();
+            let _ = prefs.save(paths);
+        }
         prefs
     }
 

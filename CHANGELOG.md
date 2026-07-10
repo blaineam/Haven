@@ -29,6 +29,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   opening the Messages tab no longer clears anything. Watermarks self-sync across your devices
   with a per-key MAX merge (monotonic, so a fresh device can never "un-read" a sibling), and are
   seeded on first run so pre-existing history doesn't light every conversation up as unread.
+- **DM unread badges (Android + desktop).** Same feature, ported: Android gets the pill on
+  conversation rows (pinned rows included) plus a Messages tab badge; desktop gets it on thread
+  rows, pinned tiles, and the sidebar Messages badge (which previously showed the *total* thread
+  count — it now counts conversations with unread). All three platforms share the
+  `setting:dmLastRead` self-sync key (JSON map circleId → unix-ms, per-key MAX merge), so reading
+  a thread on any device clears its badge on every other, iPhone ↔ Android ↔ PC alike. Android:
+  `DmRead` (SharedPreferences); desktop: `Prefs.dm_last_read` + a `mark_dm_read` Tauri command.
+  No core changes — self-sync keys are opaque pass-through.
 
 ## [0.1.0-beta.30] — 2026-07-06
 

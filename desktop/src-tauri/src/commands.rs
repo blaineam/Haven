@@ -111,6 +111,8 @@ pub struct DmThreadDto {
     pub last_at: u64,
     /// Total members (me + others). > 2 ⇒ a group DM (UI shows sender names on incoming messages).
     pub member_count: u32,
+    /// Inbound messages newer than this thread's read watermark (the row/pin badge count).
+    pub unread: u32,
 }
 
 #[derive(Deserialize)]
@@ -351,14 +353,22 @@ pub fn dm_threads(engine: Eng) -> Vec<DmThreadDto> {
     engine
         .dm_threads()
         .into_iter()
-        .map(|(circle_id, name, last_body, last_at, member_count)| DmThreadDto {
+        .map(|(circle_id, name, last_body, last_at, member_count, unread)| DmThreadDto {
             circle_id,
             name,
             last_body,
             last_at,
             member_count,
+            unread,
         })
         .collect()
+}
+
+/// The user is viewing a DM thread — advance its read watermark (clears its badge here and, via
+/// self-sync, on the user's other devices).
+#[tauri::command]
+pub fn mark_dm_read(engine: Eng, circle_id: String) {
+    engine.mark_dm_read(circle_id);
 }
 
 /// Delete a whole DM conversation locally (records a "cleared before" watermark so re-syncing this

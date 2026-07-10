@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -106,6 +107,7 @@ private data class Conversation(
     val title: String,
     val contact: Contact?,   // non-null for a 1:1 (drives the avatar + opening the thread)
     val lastActivity: ULong,
+    val unread: Int,         // inbound messages newer than the thread's read watermark
 )
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -113,18 +115,19 @@ private data class Conversation(
 private fun ThreadList(onOpen: (Contact) -> Unit, onOpenGroup: (String, String) -> Unit) {
     val contacts = HavenNet.contacts
     val version by HavenNet.feedVersion
+    val readTick by com.blaineam.haven.core.DmRead.version
     val pins = com.blaineam.haven.core.DmPins.pinned
     var showGroupPicker by remember { mutableStateOf(false) }
 
     // Unified conversation list: every 1:1 (one per contact) + every existing group DM, each with its
     // last-activity time. Sorted newest-first; pinned (up to 6) float to the top in pin order.
-    val conversations = remember(version, contacts, pins.toList()) {
+    val conversations = remember(version, readTick, contacts, pins.toList()) {
         val oneToOnes = contacts.map { c ->
             val cid = HavenNet.dmCircleId(c.idHex)
-            Conversation(cid, c.name, c, HavenNet.lastActivity(cid))
+            Conversation(cid, c.name, c, HavenNet.lastActivity(cid), HavenNet.unreadMessages(cid))
         }
         val groups = HavenNet.groupDmThreads().map { (cid, title) ->
-            Conversation(cid, title, null, HavenNet.lastActivity(cid))
+            Conversation(cid, title, null, HavenNet.lastActivity(cid), HavenNet.unreadMessages(cid))
         }
         val all = oneToOnes + groups
         val byId = all.associateBy { it.circleId }
@@ -212,8 +215,13 @@ private fun ConversationRow(conv: Conversation, pinned: Boolean, onOpen: () -> U
                 }
             }
             Spacer(Modifier.size(12.dp))
-            Text(conv.title, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium,
+            Text(conv.title, color = Color.White, fontSize = 16.sp,
+                fontWeight = if (conv.unread > 0) FontWeight.Bold else FontWeight.Medium,
                 maxLines = 1, modifier = Modifier.weight(1f))
+            if (conv.unread > 0) {
+                UnreadBadge(conv.unread)
+                Spacer(Modifier.size(8.dp))
+            }
             if (pinned) {
                 Icon(Icons.Filled.PushPin, "Pinned", tint = HavenTheme.pink, modifier = Modifier.size(16.dp))
             }
@@ -250,6 +258,20 @@ private fun ConversationRow(conv: Conversation, pinned: Boolean, onOpen: () -> U
                 TextButton(onClick = { confirmDelete = false }) { Text("Cancel", color = HavenTheme.textSecondary) }
             },
         )
+    }
+}
+
+/** Unread-count pill for conversation rows (and anywhere else a count belongs). iOS parity. */
+@Composable
+fun UnreadBadge(count: Int) {
+    Box(
+        Modifier.defaultMinSize(minWidth = 20.dp, minHeight = 20.dp)
+            .clip(RoundedCornerShape(10.dp)).background(HavenTheme.pink)
+            .padding(horizontal = if (count > 9) 6.dp else 0.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(if (count > 99) "99+" else "$count", color = Color.White,
+            fontSize = 11.sp, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -314,6 +336,14 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
     var showOptions by remember { mutableStateOf(false) }
     val version by HavenNet.feedVersion
     val msgs = remember(version, circleId) { HavenNet.messages(circleId) }
+    // The user is viewing this thread: advance its read watermark on open AND whenever a message
+    // arrives while it's open (keyed on version), plus once more on the way out — so backing out
+    // never leaves a stale badge for a conversation the user just watched. iOS parity
+    // (onAppear/onChange/onDisappear in DMThreadView).
+    androidx.compose.runtime.LaunchedEffect(version, circleId) { HavenNet.markThreadRead(circleId) }
+    androidx.compose.runtime.DisposableEffect(circleId) {
+        onDispose { HavenNet.markThreadRead(circleId) }
+    }
     val isGroup = remember(circleId) { HavenNet.isGroupDm(circleId) }
     val relayReachable by HavenNet.relayActive
     val picker = androidx.activity.compose.rememberLauncherForActivityResult(

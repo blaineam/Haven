@@ -117,6 +117,10 @@ object SelfSyncCoordinator {
         m["setting:saveOthersToPhotos"] = byteArrayOf(if (p.saveOthersPosts) 1 else 0)
         m["setting:autoOptimize"] = byteArrayOf(if (p.autoOptimize) 1 else 0)
         m["setting:retentionDays"] = int32LE(p.retentionDays)
+        // DM read watermarks — reading a thread on one device clears its badge on the others. JSON
+        // map circleId → unix-ms (the iOS wire format), merged per-key MAX on apply (monotonic —
+        // no device can un-read another). Never published empty (a fresh device changes nothing).
+        DmRead.toJsonBytes()?.let { m["setting:dmLastRead"] = it }
         // Roster: contacts (full card) + blocked list.
         for (c in HavenNet.selfSyncContactsSnapshot()) {
             m["contact:${c.idHex}"] = encodeContact(c)
@@ -174,6 +178,9 @@ object SelfSyncCoordinator {
                 if (n != p.retentionDays) p.setRetention(n)
             }
         }
+        // DM read watermarks from my other devices: per-key MAX merge (monotonic — always safe).
+        // DmRead bumps its own version on change, so unread badges recompose by themselves.
+        h.get("setting:dmLastRead")?.let { DmRead.applySyncedJson(it) }
 
         // Roster reconciliation (set-like — enumerate the converged state via entries()).
         val live = h.entries()

@@ -62,6 +62,16 @@ pub fn current_local(prefs: &Prefs, social: &HavenSocial) -> BTreeMap<String, Ve
     m.insert("setting:retention".into(), retention.to_le_bytes().to_vec());
     m.insert("setting:host_on_launch".into(), vec![if prefs.host_on_launch { 1 } else { 0 }]);
 
+    // DM read watermarks — reading a thread on one device clears its badge on the others. JSON map
+    // circleId → unix-ms (the iOS/Android wire format), merged per-key MAX on apply: monotonic, so
+    // no device can un-read another, and a fresh device's empty map changes nothing. Only published
+    // when non-empty so a fresh device can't blank a sibling's map.
+    if !prefs.dm_last_read.is_empty() {
+        if let Ok(data) = serde_json::to_vec(&prefs.dm_last_read) {
+            m.insert("setting:dmLastRead".into(), data);
+        }
+    }
+
     // Roster: contacts (full card, deterministic serde) + blocked list (marker).
     for c in &prefs.contacts {
         if let Ok(data) = serde_json::to_vec(c) {
@@ -170,6 +180,17 @@ pub fn apply_local(
             if b != prefs.host_on_launch {
                 prefs.host_on_launch = b;
                 changed = true;
+            }
+        }
+    }
+    // DM read watermarks from my other devices: per-key MAX merge (monotonic — always safe).
+    if let Some(v) = get("setting:dmLastRead") {
+        if let Ok(m) = serde_json::from_slice::<BTreeMap<String, u64>>(v) {
+            for (k, ts) in m {
+                if ts > prefs.dm_last_read.get(&k).copied().unwrap_or(0) {
+                    prefs.dm_last_read.insert(k, ts);
+                    changed = true;
+                }
             }
         }
     }

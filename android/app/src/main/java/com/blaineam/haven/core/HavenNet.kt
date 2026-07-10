@@ -217,6 +217,7 @@ object HavenNet : InboundListener {
         DeviceRosterManager.init(appContext)
         SelfSyncCoordinator.init(appContext)
         DmPins.init(appContext)
+        DmRead.init(appContext)
         restoreState()
         // Self-register AFTER importing persisted state (parity with iOS): registering first wrote a
         // fresh v1 roster that restoreState's higher-version-wins restore then clobbered — so a stale
@@ -621,6 +622,24 @@ object HavenNet : InboundListener {
     // re-starting/re-syncing it re-fetches the old messages (true network deletion is impossible in
     // P2P); the watermark hides everything from before the clear so a re-started DM shows fresh.
     private val dmPrefs get() = appContext.getSharedPreferences("haven.dm", Context.MODE_PRIVATE)
+
+    /** Inbound messages in a DM newer than its READ watermark (see [DmRead]) — the row badge count. */
+    fun unreadMessages(circleId: String): Int {
+        val wm = DmRead.watermark(circleId)
+        return messages(circleId).count { !it.isMe && !it.unsent && it.createdAt > wm }
+    }
+
+    /** The user is viewing a DM thread: advance its read watermark past the newest visible message
+     *  (clears its badge here and, via self-sync, on the user's other devices). */
+    fun markThreadRead(circleId: String) {
+        DmRead.markRead(circleId, messages(circleId).maxOfOrNull { it.createdAt } ?: 0UL)
+    }
+
+    /** Messages-tab badge: the number of CONVERSATIONS with unread messages. Watermark-based, not a
+     *  session counter — it survives relaunch and clears only as threads are actually read. */
+    fun unreadDmConversations(): Int =
+        runCatching { social.circles() }.getOrDefault(emptyList())
+            .count { it.id.startsWith("dm:") && unreadMessages(it.id) > 0 }
 
     /** The "cleared before" watermark (ms) for a DM circle, or null if never cleared. */
     fun dmClearedBefore(circleId: String): ULong? {
@@ -2762,6 +2781,7 @@ object HavenNet : InboundListener {
         Presign.reset()
         CircleLock.reset()
         AvatarStore.clear()
+        DmRead.wipe()   // a new identity must not inherit read watermarks (or the old seed)
         relayActive.value = false
         activeCircle.value = DEFAULT_CIRCLE
         prefs.edit().clear().apply()

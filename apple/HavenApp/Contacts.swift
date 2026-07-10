@@ -44,7 +44,7 @@ final class ContactsStore: ObservableObject {
     private let key = "haven.contacts"
 
     /// Factory-reset this store — clear in-memory + persisted contacts.
-    func wipe() { contacts = []; UserDefaults.standard.removeObject(forKey: key) }
+    func wipe() { contacts = []; avatarCache.removeAll(); UserDefaults.standard.removeObject(forKey: key) }
 
     init() {
         if let data = UserDefaults.standard.data(forKey: key),
@@ -93,15 +93,26 @@ final class ContactsStore: ObservableObject {
         // main thread when it's decoded for display.
         if !avatar.isEmpty, avatar.count <= 200_000, contacts[i].avatarB64 != avatar {
             contacts[i].avatarB64 = avatar; changed = true
+            avatarCache[contacts[i].idHex] = nil   // decoded cache is stale — re-decode on next read
         }
         if !emoji.isEmpty, contacts[i].emoji != emoji { contacts[i].emoji = emoji; changed = true }
         if changed { save() }
     }
 
-    /// A contact's shared avatar image (decoded), by node-id prefix — for rendering others' photos.
+    /// Decoded-avatar cache, keyed by contact idHex. `avatarImage` is called from `PeerAvatar.body`
+    /// on EVERY render for EVERY visible row — without this it base64-decoded the string and built a
+    /// fresh UIImage (JPEG-decoded on the main thread at draw) every time, which also defeated UIKit's
+    /// own decoded-bitmap cache (a new instance each call). That main-thread decode-per-render, times
+    /// every avatar on screen, was a major scroll-jank + device-heat source. Invalidated on avatar change.
+    private var avatarCache: [String: PlatformImage] = [:]
+
+    /// A contact's shared avatar image (decoded + cached), by node-id prefix — for rendering others' photos.
     func avatarImage(forNodePrefix prefix: String) -> PlatformImage? {
-        guard let b64 = contact(forNodePrefix: prefix)?.avatarB64, let data = Data(base64Encoded: b64) else { return nil }
-        return PlatformImage(data: data)
+        guard let c = contact(forNodePrefix: prefix) else { return nil }
+        if let cached = avatarCache[c.idHex] { return cached }
+        guard let b64 = c.avatarB64, let data = Data(base64Encoded: b64), let img = PlatformImage(data: data) else { return nil }
+        avatarCache[c.idHex] = img
+        return img
     }
     func emoji(forNodePrefix prefix: String) -> String? { contact(forNodePrefix: prefix)?.emoji }
 

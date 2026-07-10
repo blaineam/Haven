@@ -70,6 +70,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   unread badge was decoding a full feed per DM conversation on the main thread inside the
   per-refresh hot path — now event-driven only.) Diagnosed from the device's own iroh connection
   trace (which ruled out a networking runaway) plus the frame-dispatch path.
+- **Contact avatars re-decoded on every render (main-thread JPEG decode).** `PeerAvatar` looked up a
+  contact's avatar in its `body` — which base64-decoded the string and built a brand-new `UIImage`
+  (JPEG-decoded on the main thread at draw) on *every* render, for *every* avatar on screen, also
+  defeating UIKit's own decoded-bitmap cache. On-device Time Profiler (over USB) showed this as the
+  image-decode cost that spiked the main thread during render bursts. Decoded avatars are now cached
+  per contact and invalidated when the photo changes — so scrolling and app-switcher snapshots no
+  longer re-decode every face. (Profiling also confirmed the post-quantum signing crypto runs 100%
+  off the main thread, so it costs battery during sync but never blocks scrolling.)
 
 ### Added
 - **Storage usage + "keep my own posts".** Settings → Storage shows how much space synced media

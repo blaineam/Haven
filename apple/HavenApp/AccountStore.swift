@@ -569,6 +569,7 @@ final class AccountStore: ObservableObject {
         ContactsStore.shared.wipe()
         CircleSettingsStore.shared.wipe()
         HiddenStore.shared.wipe()
+        DMReadStore.shared.wipe()
         EmojiStore.shared.wipe()
         MediaStore.shared.clearMemoryCache()
         DeviceRosterManager.shared.stepDown()

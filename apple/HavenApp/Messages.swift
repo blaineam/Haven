@@ -36,6 +36,19 @@ final class DMPinStore: ObservableObject {
     }
 }
 
+/// Unread-count pill for conversation rows and pinned tiles (and anywhere else a count belongs).
+struct UnreadBadge: View {
+    let count: Int
+    var body: some View {
+        Text(count > 99 ? "99+" : "\(count)")
+            .font(.caption2.weight(.bold)).monospacedDigit()
+            .foregroundStyle(.white)
+            .padding(.horizontal, count > 9 ? 6 : 0)
+            .frame(minWidth: 20, minHeight: 20)
+            .background(HavenTheme.pink, in: Capsule())
+    }
+}
+
 private extension View {
     /// Force a List into active edit mode so `.onMove` shows reorder handles. `\.editMode` is iOS-only;
     /// macOS List reorders by drag without it, so this is a no-op there.
@@ -140,16 +153,23 @@ struct MessagesView: View {
 
     private func rowLabel(_ circleId: String) -> some View {
         let name = store.dmPartnerName(circleId)
+        let unread = store.unreadMessages(in: circleId)
         return HStack(spacing: 12) {
             PeerAvatar(nodeHex: store.dmPartnerHex(circleId) ?? "", name: name, size: 40)
             VStack(alignment: .leading, spacing: 2) {
-                Text(name).font(.subheadline.weight(.medium))
+                Text(name).font(.subheadline.weight(unread > 0 ? .bold : .medium))
                 // Most RECENT message by time — `.last` alone is storage order, not chronological,
                 // so it was showing the wrong (often first) message.
                 if let last = store.messages(in: circleId).max(by: { $0.createdAt < $1.createdAt }) {
                     Text(last.unsent ? "Message unsent" : (SecretMessages.isSecret(last.body) ? "🔒 Secret message" : last.body))
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        .font(.caption)
+                        .foregroundStyle(unread > 0 ? .primary : .secondary)
+                        .lineLimit(1)
                 }
+            }
+            if unread > 0 {
+                Spacer()
+                UnreadBadge(count: unread)
             }
         }
     }
@@ -192,9 +212,16 @@ struct MessagesView: View {
     }
 
     private func pinnedTile(_ id: String) -> some View {
-        VStack(spacing: 6) {
+        let unread = store.unreadMessages(in: id)
+        return VStack(spacing: 6) {
             PeerAvatar(nodeHex: store.dmPartnerHex(id) ?? "", name: store.dmPartnerName(id), size: 60)
-            Text(store.dmPartnerName(id)).font(.caption2).lineLimit(1).foregroundStyle(.primary)
+                // iMessage-style: the unread count rides the pinned avatar's shoulder.
+                .overlay(alignment: .topTrailing) {
+                    if unread > 0 { UnreadBadge(count: unread).offset(x: 6, y: -4) }
+                }
+            Text(store.dmPartnerName(id))
+                .font(.caption2.weight(unread > 0 ? .bold : .regular))
+                .lineLimit(1).foregroundStyle(.primary)
         }
     }
 
@@ -358,7 +385,11 @@ struct DMThreadView: View {
                 .disabled(store.dmMemberHexes(circleId).isEmpty)
             }
         }
-        .onAppear { store.forceSync() }
+        .onAppear { store.forceSync(); store.markThreadRead(circleId) }
+        // Messages arriving WHILE the thread is open are being read — keep the watermark current
+        // so backing out never leaves a stale badge for a conversation the user just watched.
+        .onChange(of: store.postTick) { store.markThreadRead(circleId) }
+        .onDisappear { store.markThreadRead(circleId) }
         .onDisappear { MusicPlayback.shared.stop() }   // leaving the thread silences any DM song
         .havenFullScreenCover(item: $zoom, wide: true) { t in MediaZoomViewer(refs: t.refs, index: t.index) }
         .sheet(item: $reactTarget) { t in

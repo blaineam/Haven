@@ -77,6 +77,11 @@ final class SelfSyncCoordinator {
         // non-empty so a fresh device can't blank a sibling's pins (absence ≠ authoritative).
         let pins = DMPinStore.shared.pinned
         if !pins.isEmpty { m["setting:pinnedDMs"] = Data(pins.joined(separator: "\n").utf8) }
+        // DM read watermarks — reading a thread on one device clears its badge on the others.
+        // Monotonic per-conversation timestamps, merged by per-key MAX on apply (always safe:
+        // no device can un-read another, and a fresh device's empty map changes nothing).
+        let reads = DMReadStore.shared.lastRead
+        if !reads.isEmpty, let data = try? JSONEncoder().encode(reads) { m["setting:dmLastRead"] = data }
         // Roster: contacts (full card) + blocked list.
         for c in ContactsStore.shared.contacts {
             if let data = try? JSONEncoder().encode(c) { m["contact:\(c.idHex)"] = data }
@@ -142,6 +147,10 @@ final class SelfSyncCoordinator {
         }
         if let v = h.get(key: "setting:pinnedDMs"), let str = String(data: v, encoding: .utf8) {
             DMPinStore.shared.applySynced(str.split(separator: "\n").map(String.init))
+        }
+        if let v = h.get(key: "setting:dmLastRead"), let m = try? JSONDecoder().decode([String: UInt64].self, from: v) {
+            DMReadStore.shared.applySynced(m)   // per-key MAX merge
+            FeedStore.shared.recomputeUnreadDMs()
         }
 
         // Roster reconciliation (set-like — enumerate the converged state via entries()).

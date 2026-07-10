@@ -359,7 +359,9 @@ struct RootView: View {
             } else {
                 AudioCoordinator.shared.pauseForBackground()    // left the feed → silence post music + video
             }
-            if t == "messages" { feedStore.markMessagesSeen() }
+            // Opening the Messages tab does NOT clear the badge — it counts conversations with
+            // unread messages (per-thread watermarks in DMReadStore) and clears per conversation
+            // as each thread is actually read.
         }
         .overlay {
             CallOverlay()

@@ -7,6 +7,17 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+- **DM unread badges (Apple platforms).** Conversations now show an unread-count pill — on the
+  row, on the pinned tile's avatar (iMessage-style), and on the Messages tab (which counts
+  conversations with unread, not raw messages). Read state is a per-conversation watermark
+  (`DMReadStore`): persistent across launches, advanced only by actually opening the thread —
+  opening the Messages tab no longer clears anything. Watermarks self-sync across your devices
+  with a per-key MAX merge (monotonic, so a fresh device can never "un-read" a sibling), and are
+  seeded on first run so pre-existing history doesn't light every conversation up as unread.
+
 ## [0.1.0-beta.30] — 2026-07-06
 
 ### Added

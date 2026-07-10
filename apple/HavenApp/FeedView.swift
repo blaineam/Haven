@@ -748,6 +748,7 @@ final class FeedStore: ObservableObject {
                 self.items = filtered
                 self.sensitiveCache.removeAll()   // a refresh may have ingested new SensitiveFlag events
                 self.reportsCache.removeAll()     // …and new Report events
+                self.recomputeUnreadDMs()         // keep the Messages badge honest (startup + ingest)
                 SpotlightIndex.reindexAll()       // no-op unless the user enabled Spotlight indexing
             }
         }
@@ -2324,14 +2325,36 @@ final class FeedStore: ObservableObject {
     }
 
     func markCircleSeen() { unseenCircle = 0 }
-    func markMessagesSeen() { unseenMessages = 0 }
+
+    /// Inbound messages in a DM newer than its read watermark (see `DMReadStore`).
+    func unreadMessages(in circleId: String) -> Int {
+        let wm = DMReadStore.shared.watermark(circleId)
+        return messages(in: circleId).filter { !$0.isMe && !$0.unsent && $0.createdAt > wm }.count
+    }
+
+    /// The user is viewing a DM thread: advance its watermark past the newest visible message and
+    /// refresh the badges. (Opening the Messages TAB marks nothing read — only actually viewing a
+    /// conversation does.)
+    func markThreadRead(_ circleId: String) {
+        let newest = messages(in: circleId).map(\.createdAt).max() ?? 0
+        DMReadStore.shared.markRead(circleId, newestMessageAt: newest)
+        recomputeUnreadDMs()
+    }
+
+    /// Messages-tab badge = number of CONVERSATIONS with unread messages. Watermark-based, not a
+    /// session counter — it survives relaunch and clears only when threads are actually read.
+    func recomputeUnreadDMs() {
+        let n = dmCircles.reduce(0) { $0 + (unreadMessages(in: $1.id) > 0 ? 1 : 0) }
+        if n != unseenMessages { unseenMessages = n }
+    }
 
     /// Count a fresh inbound item as "unseen" for the badge (ignores historical back-fill).
     private func bumpUnseen(_ circleId: String) {
+        if circleId.hasPrefix("dm:") { recomputeUnreadDMs(); return }   // DMs: watermark-based, always exact
         let inbound = messages(in: circleId).filter { !$0.isMe && !$0.unsent }
         guard let newest = inbound.max(by: { $0.createdAt < $1.createdAt }) else { return }
         guard now() &- newest.createdAt < 5 * 60 * 1000 else { return }   // recent only
-        if circleId.hasPrefix("dm:") { unseenMessages += 1 } else { unseenCircle += 1 }
+        unseenCircle += 1
     }
 
     /// Post a local notification for the newest inbound item in a circle (no server).

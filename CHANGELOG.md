@@ -57,12 +57,19 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   recreated container no longer mints a new node id the circle has to re-adopt. Documented in the
   compose file + relay README.
 
-- **Choppy scrolling everywhere.** The Messages-tab unread badge recomputed by decoding a full feed
-  for every DM conversation — on the main thread — inside the feed refresh, which fires on every
-  sync tick regardless of which screen is open. So a background sync stalled the UI app-wide, making
-  every scrollable screen stutter. The badge is now event-driven (recomputed only when a DM message
-  arrives, a thread is read, or at startup) and never on the per-refresh hot path. Verified with a
-  main-thread sample: no feed decode on the main thread during sync.
+- **Choppy scrolling everywhere + device heating within seconds (the real cause).** Every inbound
+  network frame — every peer hello, every media chunk — unconditionally set `@Published`
+  `internetActive`/`nearbyActive = true` on `FeedStore`, the object the entire UI observes. Because
+  `@Published` fires a change notification even when the value is unchanged, this re-rendered the
+  WHOLE app on every packet: during a media transfer (~30–80 chunks/sec) or a post-background
+  reconnection burst, that's dozens–hundreds of full-UI re-renders per second — the app-wide scroll
+  jank and the "warm in seconds" heat, and worse after backgrounding (all contacts reconnect at
+  once). Now it publishes only on the real false→true transition. Also: the "last seen" tracker
+  serialized its whole dictionary to disk on the main thread on every DM message during a sync
+  burst — now debounced to one write per few seconds. (A related earlier fix: the Messages-tab
+  unread badge was decoding a full feed per DM conversation on the main thread inside the
+  per-refresh hot path — now event-driven only.) Diagnosed from the device's own iroh connection
+  trace (which ruled out a networking runaway) plus the frame-dispatch path.
 
 ### Added
 - **Storage usage + "keep my own posts".** Settings → Storage shows how much space synced media

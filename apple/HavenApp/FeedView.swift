@@ -713,10 +713,20 @@ final class FeedStore: ObservableObject {
     private let lastHeardKey = "haven.lastHeard"
     /// Note that we just heard from a peer (drives both "online" and "last seen"), persisting
     /// it so the last-seen time survives an app restart.
+    private var lastHeardPersistPending = false
     func recordHeard(_ idHex: String) {
         guard !idHex.isEmpty else { return }
         lastHeard[idHex] = Date()
-        UserDefaults.standard.set(lastHeard.mapValues { $0.timeIntervalSince1970 }, forKey: lastHeardKey)
+        // Debounce the disk write. This used to serialize the WHOLE dict to UserDefaults on the main
+        // thread on every call — and recordHeard fires per DM message during a sync burst. Coalesce to
+        // one write per few seconds ("last seen" is coarse; sub-second precision on disk is pointless).
+        guard !lastHeardPersistPending else { return }
+        lastHeardPersistPending = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            self.lastHeardPersistPending = false
+            UserDefaults.standard.set(self.lastHeard.mapValues { $0.timeIntervalSince1970 }, forKey: self.lastHeardKey)
+        }
     }
     private func loadLastHeard() {
         guard let raw = UserDefaults.standard.dictionary(forKey: lastHeardKey) as? [String: Double] else { return }
@@ -1435,7 +1445,14 @@ final class FeedStore: ObservableObject {
     /// the reply-path bootstrap (an invitee holds no invite hints for the initiator).
     private func handleInbound(_ data: Data, viaNearby: Bool, senderDevice: String? = nil) {
         guard let type = data.first else { return }
-        if viaNearby { nearbyActive = true } else { internetActive = true }
+        // Publish ONLY on the actual false→true transition. `@Published` fires objectWillChange even
+        // when the value is unchanged, and this runs on EVERY inbound frame (every hello, every media
+        // chunk). Setting `= true` unconditionally re-rendered the ENTIRE UI observing FeedStore per
+        // frame — during a media transfer or a post-background reconnection burst that's hundreds of
+        // whole-UI re-renders/sec: the app-wide scroll jank + device heat. The guard makes it publish
+        // once per transition instead of once per packet.
+        if viaNearby { if !nearbyActive { nearbyActive = true } }
+        else { if !internetActive { internetActive = true } }
         let payload = Data(data.dropFirst())
         // Frames that lead with a 64-char sender id (media req + calls + camera state): drop if
         // blocked (audit F4 — 22 was previously missing from this list).

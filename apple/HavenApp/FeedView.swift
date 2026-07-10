@@ -73,6 +73,29 @@ final class FeedStore: ObservableObject {
     private var listener: InboundBridge?
     private var syncTimer: Timer?
 
+    // Adaptive sync cadence (device-heat control). The timers keep a cheap fixed heartbeat, but the
+    // EXPENSIVE work (contact fan-out, relay LIST/poll, mesh dials) only runs when it's due. When the
+    // app is idle — foregrounded but no interaction and nothing arriving — the due-interval STRETCHES,
+    // so an idle phone isn't blasting hello+roster to every contact every 20s (the main heat source).
+    // Any real activity (foreground, an authored post, an arriving message, a peer connecting) resets
+    // it to the tight base cadence, and pushes still wake the app for immediacy either way.
+    private var lastActivityMs: UInt64 = 0
+    private var nextSyncDueMs: UInt64 = 0
+    private var nextPollDueMs: UInt64 = 0
+    /// Base cadences and the idle multipliers. Idle <3min = base; <15min = ×3; else ×6.
+    private func adaptiveInterval(base: UInt64) -> UInt64 {
+        let idle = now() &- lastActivityMs
+        if idle < 180_000 { return base }
+        if idle < 900_000 { return base * 3 }
+        return base * 6
+    }
+    /// Mark "something is happening" → snap both timers back to their tight base cadence immediately.
+    func bumpActivity() {
+        lastActivityMs = now()
+        nextSyncDueMs = 0
+        nextPollDueMs = 0
+    }
+
     // Chunked media reassembly: ref → temp file + which chunk indices we've received.
     // 512KB chunks overflowed MultipeerConnectivity's reliable-send buffer (small frames got through, media
     // chunks were silently dropped), so own-device media never arrived over nearby. 32KB transmits reliably
@@ -139,6 +162,7 @@ final class FeedStore: ObservableObject {
                                       createdAt: UInt64(Date().timeIntervalSince1970))
         }
         social?.setKeepOwnPosts(on: SettingsStore.shared.keepMyPosts)   // apply the archive preference
+        bumpActivity()   // seed activity NOW so launch starts at tight cadence (not instant max backoff)
         loadLastHeard()   // so "last seen" survives an app restart
         refreshCircles()     // also purges any contaminated DM membership (see refreshCircles)
         refresh()
@@ -191,10 +215,14 @@ final class FeedStore: ObservableObject {
     private func startMailboxPolling() {
         mailboxTimer?.invalidate()
         pollMailboxNow()
-        mailboxTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+        // 10s heartbeat, but the actual poll only runs when due (30s base, stretching when idle).
+        mailboxTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.pollMailboxNow()
-                self?.dailyMailboxRefreshIfDue()   // long-lived sessions refresh without a relaunch
+                guard let self else { return }
+                guard self.now() >= self.nextPollDueMs else { return }
+                self.nextPollDueMs = self.now() + self.adaptiveInterval(base: 30_000)
+                self.pollMailboxNow()
+                self.dailyMailboxRefreshIfDue()   // long-lived sessions refresh without a relaunch
             }
         }
     }
@@ -693,19 +721,24 @@ final class FeedStore: ObservableObject {
         guard let raw = UserDefaults.standard.dictionary(forKey: lastHeardKey) as? [String: Double] else { return }
         lastHeard = raw.mapValues { Date(timeIntervalSince1970: $0) }
     }
-    func forceSync() { ingestPushInbox(); syncWithContacts(); forceSelfSyncNextPoll(); pollMailboxNow() }
+    func forceSync() { bumpActivity(); ingestPushInbox(); syncWithContacts(); forceSelfSyncNextPoll(); pollMailboxNow() }
 
     private func startSyncTimer() {
         syncTimer?.invalidate()
-        syncTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
+        // 10s heartbeat, but the expensive fan-out (hello+roster to every contact, relay re-announce,
+        // mesh dials) only runs when due — 20s base, stretching to 60s/120s as the app sits idle. This
+        // is the primary device-heat fix: an open-but-idle phone no longer blasts the radio every 20s.
+        syncTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.syncWithContacts()
+                guard let self else { return }
+                guard self.now() >= self.nextSyncDueMs else { return }
+                self.nextSyncDueMs = self.now() + self.adaptiveInterval(base: 20_000)
+                self.syncWithContacts()
                 // Persistently retry any media an interrupted nearby/iroh transfer left incomplete —
-                // re-request direct from contacts AND pull from the circle relay if one exists. Keeps
-                // going every tick until nothing is missing, so posts never stay fragmented.
-                self?.requestMissingMedia()
+                // re-request direct from contacts AND pull from the circle relay if one exists.
+                self.requestMissingMedia()
                 RelayHost.shared.meshSyncTick()   // if we host a relay, pull from sibling relays
-                RelayMailboxStore.shared.purgeStale()   // GC relays that have been inactive + unseen > 7 days
+                RelayMailboxStore.shared.purgeStale()   // GC relays inactive + unseen > 7 days
             }
         }
     }
@@ -1152,6 +1185,7 @@ final class FeedStore: ObservableObject {
     private func nearbyPeerConnected() {
         guard let social else { return }
         nearbyActive = true
+        bumpActivity()   // a peer just appeared → sync tight for the catch-up burst
         reannounceOwnRelay()   // a freshly-connected sibling/friend immediately learns this host's relay
         // FIRST: offer this device's sealed self-sync slot to nearby peers. ONLY our own devices (same
         // seed) can open it — it's how a linked Mac/phone bootstraps circles + profile + posts LOCALLY,
@@ -1208,6 +1242,7 @@ final class FeedStore: ObservableObject {
     }
 
     private func broadcastEvent(_ circleId: String, _ env: Data) {
+        bumpActivity()   // I just posted/messaged → keep sync tight
         let payload = eventPayload(circleId, env)
         let members = social?.contactNodeIds(circleId: circleId) ?? []
         // Build the push banner once: title = my name, body keyed to the circle. We seal it
@@ -1306,6 +1341,7 @@ final class FeedStore: ObservableObject {
         // random-non-delivery failure). Cheap: msgs is only non-empty when the mailbox served bytes.
         persist()
         guard !ingested.isEmpty else { return }
+        bumpActivity()   // a message arrived → keep sync tight while the conversation is live
         for cid in ingested { notifyNewest(in: cid); bumpUnseen(cid) }
         refresh(); requestMissingMedia()
     }

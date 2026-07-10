@@ -29,6 +29,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   relay's 30-day GC only by its AUTHOR, so an author offline 30 days lost the post for everyone. Any
   active member now TOUCHes the mailbox keys it holds on the daily pass — any online reader keeps a
   post alive.
+- **Device overheating — adaptive sync cadence.** The biggest heat source was a 20s timer blasting
+  hello+roster to every contact across every circle, re-announcing relays, and mesh-dialing sibling
+  relays — every 20s, forever, even with the app open and idle. Both sync timers are now adaptive:
+  they keep a cheap heartbeat, but the expensive fan-out/poll only runs when due (20s/30s base,
+  stretching to 60s/90s after 3 min idle, 120s/180s after 15 min). Any real activity — foreground, a
+  post you send, a message arriving, a peer connecting — snaps the cadence back to tight instantly,
+  and pushes still wake the app for immediacy. An open-but-idle phone no longer runs the radio hot.
 - **No more re-downloading old posts on every launch (device heat).** The mailbox "seen" cursor was
   saved on a 2s debounce and lost if the app was killed during the initial sync burst, so the next
   launch re-fetched + re-verified the whole mailbox. It's now flushed synchronously on

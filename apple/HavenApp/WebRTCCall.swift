@@ -14,7 +14,15 @@ final class WebRTCCall: NSObject {
     /// One shared factory (creating several is wasteful and can crash).
     static let factory: RTCPeerConnectionFactory = {
         RTCInitializeSSL()
-        return RTCPeerConnectionFactory(encoderFactory: RTCDefaultVideoEncoderFactory(),
+        let encoder = RTCDefaultVideoEncoderFactory()
+        // Prefer H264: hardware encode/decode on Apple. Left to the default order a call can
+        // land on VP8/VP9 — SOFTWARE codecs that peg the CPU (device heat), starve the audio
+        // thread (dropouts), and pixelate under load. Peers without H264 still negotiate down.
+        if let h264 = RTCDefaultVideoEncoderFactory.supportedCodecs()
+            .first(where: { $0.name == kRTCVideoCodecH264Name }) {
+            encoder.preferredCodec = h264
+        }
+        return RTCPeerConnectionFactory(encoderFactory: encoder,
                                         decoderFactory: RTCDefaultVideoDecoderFactory())
     }()
 
@@ -194,7 +202,21 @@ final class WebRTCCall: NSObject {
         #endif
         videoSource = source; videoTrack = track; capturer = cap
         pc.add(track, streamIds: ["stream0"])
+        tuneVideoSender(trackId: track.trackId, maxBitrateBps: 1_200_000)
         startCapture()
+    }
+
+    /// Cap a video sender's bitrate and tell WebRTC to DEGRADE GRACEFULLY (drop resolution +
+    /// framerate together) under CPU/bandwidth pressure. Without this the encoder holds
+    /// resolution and just starves — which the user sees as pixelation, lag, and audio dropouts
+    /// (audio loses the CPU fight against an overloaded video encode).
+    private func tuneVideoSender(trackId: String, maxBitrateBps: Int) {
+        for sender in pc.senders where sender.track?.trackId == trackId {
+            let p = sender.parameters
+            p.degradationPreference = NSNumber(value: RTCDegradationPreference.balanced.rawValue)
+            for enc in p.encodings { enc.maxBitrateBps = NSNumber(value: maxBitrateBps) }
+            sender.parameters = p
+        }
     }
 
     func stopVideo() {
@@ -221,6 +243,9 @@ final class WebRTCCall: NSObject {
         screenSource = source; screenTrack = track
         // Use a distinct stream id so the receiver groups it separately from the camera.
         pc.add(track, streamIds: ["screen"])
+        // Screen content gets more headroom than the camera (text needs the detail), but is
+        // still capped + degradable so it can't starve the camera/audio.
+        tuneVideoSender(trackId: track.trackId, maxBitrateBps: 2_500_000)
         return true
     }
 

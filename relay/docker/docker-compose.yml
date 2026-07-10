@@ -28,6 +28,12 @@ services:
     environment:
       # First run attaches to your circle from this; later runs reuse the saved link.
       HAVEN_RELAY_LINK: ${HAVEN_RELAY_LINK:-}
+      # Optional but RECOMMENDED for a rock-stable node id: pin the identity seed (64 hex chars,
+      # `openssl rand -hex 32`). With it set, the relay keeps the SAME node id across restarts and
+      # image rebuilds even if the /data volume is lost or recreated — so your circle never has to
+      # re-adopt the relay. Without it the id comes from /data/identity.json and lives only as long
+      # as that volume. Put HAVEN_RELAY_SEED=… in your .env next to this file.
+      HAVEN_RELAY_SEED: ${HAVEN_RELAY_SEED:-}
     ports:
       - "8674:8674"        # plain-HTTP media interface (fast cross-NAT / LAN media path)
     volumes:

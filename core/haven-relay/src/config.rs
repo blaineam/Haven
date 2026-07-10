@@ -297,7 +297,24 @@ struct SeedFile {
 }
 
 /// Load the relay's 32-byte identity seed, generating + persisting one on first run.
+///
+/// Order: `HAVEN_RELAY_SEED` env (64-hex) → `<data_dir>/identity.json` → generate + persist. The env
+/// override exists specifically for Docker/Kubernetes, where a container recreated WITHOUT a durable
+/// volume for `<data_dir>` would otherwise mint a brand-new node id on every restart (the identity
+/// file lands in the ephemeral layer and is lost). Pinning the seed in the env keeps the relay's node
+/// id — and therefore its address in every circle member's relay list — stable across restarts and
+/// image updates, no volume required. Generate `openssl rand -hex 32`.
 pub fn load_or_create_seed(data_dir: &(impl AsRef<Path> + ?Sized)) -> Result<[u8; 32]> {
+    if let Ok(env_seed) = std::env::var("HAVEN_RELAY_SEED") {
+        let trimmed = env_seed.trim();
+        if !trimmed.is_empty() {
+            match decode_hex32(trimmed) {
+                Ok(bytes) => return Ok(bytes),
+                Err(_) => return Err(anyhow!("HAVEN_RELAY_SEED must be exactly 64 hex chars (32 bytes)")),
+            }
+        }
+    }
+
     let dir = data_dir.as_ref();
     std::fs::create_dir_all(dir).map_err(|e| anyhow!("create {}: {e}", dir.display()))?;
     let seed_path = dir.join("identity.json");

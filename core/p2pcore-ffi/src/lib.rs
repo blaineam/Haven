@@ -622,7 +622,7 @@ impl SocialDemo {
     pub fn feed(&self, now_ms: u64, viewer_retention_secs: Option<u64>) -> Vec<FeedItemFfi> {
         let st = self.state.lock().unwrap();
         let me = hex(&st.me.public().node_id_bytes());
-        build_feed(st.events.clone(), now_ms, viewer_retention_secs)
+        build_feed(st.events.clone(), now_ms, viewer_retention_secs, None)
             .into_iter()
             .map(|it| FeedItemFfi {
                 id: it.id,
@@ -914,8 +914,8 @@ impl HavenNode {
 // ===== Real networked social store =====
 
 /// Maps the core feed reducer output into the UI record type.
-fn map_feed(events: Vec<Event>, me: &str, now_ms: u64, viewer_retention_secs: Option<u64>) -> Vec<FeedItemFfi> {
-    build_feed(events, now_ms, viewer_retention_secs)
+fn map_feed(events: Vec<Event>, me: &str, now_ms: u64, viewer_retention_secs: Option<u64>, keep_own: bool) -> Vec<FeedItemFfi> {
+    build_feed(events, now_ms, viewer_retention_secs, if keep_own { Some(me) } else { None })
         .into_iter()
         .map(|it| FeedItemFfi {
             id: it.id,
@@ -1087,6 +1087,10 @@ struct NetState {
     /// account whose devices I haven't learned yet → that member falls back to its account key, so
     /// pre-multidevice peers keep working. See `recipients_with_devices`.
     device_lists: std::collections::HashMap<[u8; 32], ContactDevices>,
+    /// Viewer preference: keep MY OWN posts in the feed even when viewer auto-delete would age them
+    /// out for others (my personal archive). Read by `feed`; set via `set_keep_own_posts`. Not
+    /// persisted here — the app owns the toggle and re-applies it on launch.
+    keep_own_posts: bool,
 }
 
 const DEFAULT_CIRCLE: &str = "default";
@@ -1243,7 +1247,19 @@ fn receive_epoch_event(st: &mut NetState, idx: usize, body: &[u8]) -> Result<boo
             None => authorized_device_bundle(st, idx, &sender_hex), // a member's authorized device
         }
     };
-    let Some(sender) = sender else { return Ok(false) }; // unknown / removed sender → drop
+    let Some(sender) = sender else {
+        // Unknown sender — most often a member's authorized device whose signed ROSTER hasn't
+        // reached us yet (multi-device roster lag). Previously we DROPPED here; combined with the
+        // mailbox marking the key seen at fetch time, the event was then lost forever even after we
+        // learned their roster. Buffer it instead — `verify_and_store_roster`/import drains pending,
+        // so once the roster arrives the event is recovered. (A genuinely-removed sender's event
+        // simply never opens and ages out of the buffer.)
+        let c = &mut st.circles[idx];
+        if c.pending_epoch.len() < 512 && !c.pending_epoch.iter().any(|p| p == body) {
+            c.pending_epoch.push(body.to_vec());
+        }
+        return Ok(false);
+    };
     let Some(key) = st.circles[idx].key_for(&me_hex, &sender_hex, env.epoch) else {
         // Epoch key not learned yet — buffer (capped + de-duped); a later key commit unlocks it.
         let c = &mut st.circles[idx];
@@ -1302,6 +1318,18 @@ fn drain_pending(st: &mut NetState, idx: usize) {
     }
 }
 
+/// Drain the retry buffer of EVERY circle — called after a roster is learned (a member's newly-known
+/// device can now be matched as a valid sender) and after a state import (a persisted buffer meets
+/// the keys/rosters we already hold). Returns whether anything newly ingested.
+fn drain_all_pending(st: &mut NetState) -> bool {
+    let before: usize = st.circles.iter().map(|c| c.events.len()).sum();
+    for idx in 0..st.circles.len() {
+        drain_pending(st, idx);
+    }
+    let after: usize = st.circles.iter().map(|c| c.events.len()).sum();
+    after > before
+}
+
 /// A circle summary for the UI.
 #[derive(uniffi::Record)]
 pub struct CircleInfoFfi {
@@ -1348,6 +1376,15 @@ struct PersistCircle {
     /// mailbox entry per backfill run. Defaulted so older state files load (re-seal once).
     #[serde(default)]
     cached_commit: Option<([u8; 32], Vec<u8>)>,
+    /// Epoch events received before their key commit / the sender's roster arrived. Persisted so
+    /// the retry buffer SURVIVES a restart — without this, an event fetched from the mailbox (which
+    /// marks its content-key seen the moment the bytes are in hand) but not yet openable was buffered
+    /// only in memory; killing the app dropped the buffer, and the mailbox never re-served the key
+    /// (deterministic re-seal ⇒ same key ⇒ filtered by the seen-set). That was THE cause of "a random
+    /// circle member never gets a post". Now the buffer is durable and re-drained on every key-commit
+    /// AND roster arrival, so late keys/rosters still unlock it. Defaulted so old state files load.
+    #[serde(default)]
+    pending_epoch: Vec<Vec<u8>>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PersistState {
@@ -1386,8 +1423,15 @@ impl HavenSocial {
                 device: None,
                 circles: vec![Circle::bare(DEFAULT_CIRCLE.to_string(), "My Circle".to_string())],
                 device_lists: std::collections::HashMap::new(),
+                keep_own_posts: false,
             }),
         }))
+    }
+
+    /// Viewer preference: keep MY OWN posts even when viewer auto-delete would drop them (personal
+    /// archive). A sender-set expiry on my own post still applies. Set on launch + when the toggle flips.
+    pub fn set_keep_own_posts(&self, on: bool) {
+        self.state.lock().unwrap().keep_own_posts = on;
     }
 
     /// Adopt this DEVICE's transport/open identity (Option 1). The app passes its device-local seed
@@ -2020,7 +2064,13 @@ impl HavenSocial {
                 match decode_roster(&envelope[1..]).and_then(|(acct, list, creds)| {
                     HavenId::from_bytes(&acct).ok().map(|a| (a, list, creds))
                 }) {
-                    Some((account, list, creds)) => Ok(verify_and_store_roster(&mut st, &account, &list, &creds)),
+                    Some((account, list, creds)) => {
+                        let stored = verify_and_store_roster(&mut st, &account, &list, &creds);
+                        // A newly-learned roster may make a previously "unknown sender" event openable —
+                        // drain the durable buffer so multi-device roster lag no longer loses posts.
+                        let drained = drain_all_pending(&mut st);
+                        Ok(stored || drained)
+                    }
                     None => Ok(false),
                 }
             }
@@ -2037,13 +2087,14 @@ impl HavenSocial {
     pub fn feed(&self, circle_id: String, now_ms: u64, viewer_retention_secs: Option<u64>) -> Vec<FeedItemFfi> {
         let st = self.state.lock().unwrap();
         let me = hex(&st.me.public().node_id_bytes());
+        let keep_own = st.keep_own_posts;
         let events = st
             .circles
             .iter()
             .find(|c| c.id == circle_id)
             .map(|c| c.events.clone())
             .unwrap_or_default();
-        map_feed(events, &me, now_ms, viewer_retention_secs)
+        map_feed(events, &me, now_ms, viewer_retention_secs, keep_own)
     }
 
     /// Seal a media blob to one contact (hybrid KEM → AES-256-GCM). The recipient
@@ -2220,6 +2271,7 @@ impl HavenSocial {
                 my_circle_secret: c.my_circle_secret,
                 peer_circle_secrets: c.peer_circle_secrets.iter().map(|(a, s)| (a.clone(), *s)).collect(),
                 cached_commit: c.cached_commit.clone(),
+                pending_epoch: c.pending_epoch.clone(),
             }).collect(),
             device_rosters: {
                 let me_id = st.me.public().node_id_bytes();
@@ -2254,6 +2306,8 @@ impl HavenSocial {
             for (acct, list, creds) in ps.device_rosters {
                 restore_roster(&mut st, &acct, &list, &creds);
             }
+            // A restored buffer may already be openable with the keys/rosters we just loaded.
+            drain_all_pending(&mut st);
         } else if let Ok(old) = serde_json::from_slice::<LegacyPersistState>(&data) {
             Self::merge_circle(&mut st, PersistCircle {
                 id: DEFAULT_CIRCLE.to_string(),
@@ -2266,6 +2320,7 @@ impl HavenSocial {
                 my_circle_secret: [0u8; 32],
                 peer_circle_secrets: vec![],
                 cached_commit: None,
+                pending_epoch: vec![],
             });
         }
     }
@@ -2314,6 +2369,14 @@ impl HavenSocial {
         // launches (context-hash-gated: a stale one is simply ignored and re-sealed on next export).
         if st.circles[idx].cached_commit.is_none() {
             st.circles[idx].cached_commit = pc.cached_commit;
+        }
+        // Restore the durable retry buffer (capped + deduped). A drain runs after this whole import
+        // (import_state → drain_all_pending) so any key/roster we already hold unlocks it immediately.
+        for raw in pc.pending_epoch {
+            let c = &mut st.circles[idx];
+            if c.pending_epoch.len() < 512 && !c.pending_epoch.iter().any(|p| *p == raw) {
+                c.pending_epoch.push(raw);
+            }
         }
     }
 
@@ -2688,6 +2751,44 @@ mod net_tests {
         let members = alice.contact_node_ids(cid.clone());
         assert!(members.contains(&carol.my_node_hex()), "carol remains a member");
         assert!(!members.contains(&bob_hex), "bob is removed");
+    }
+
+    #[test]
+    fn event_before_key_commit_survives_a_restart_and_is_recovered() {
+        // THE random-non-delivery bug: an event fetched before its key commit is buffered, but the
+        // buffer used to be in-memory only. A restart lost it and the mailbox never re-served the key
+        // (seen-set), so that member permanently missed the post. Now the buffer is durable.
+        let alice = HavenSocial::new([40u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([41u8; 32].to_vec()).unwrap();
+        let cid = DEFAULT_CIRCLE.to_string();
+        alice.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+        bob.add_contact_bundle(cid.clone(), alice.my_bundle()).unwrap();
+
+        alice.post(cid.clone(), "hi everyone".into(), vec![], None, None, false, false, 1_000).unwrap();
+
+        // Split Alice's sync bundle into the key commit (tag 0x03) and the event (tag 0x02).
+        let bundle = alice.sync_envelopes(cid.clone());
+        let commits: Vec<Vec<u8>> = bundle.iter().filter(|e| e.first() == Some(&0x03)).cloned().collect();
+        let events: Vec<Vec<u8>> = bundle.iter().filter(|e| e.first() == Some(&0x02)).cloned().collect();
+        assert!(!commits.is_empty() && !events.is_empty(), "bundle has both a commit and an event");
+
+        // Bob receives ONLY the event first → buffered, can't open yet.
+        for e in &events { let _ = bob.receive(cid.clone(), e.clone()); }
+        assert!(bob.feed(cid.clone(), 2_000, None).is_empty(), "event buffered, not yet openable");
+
+        // Bob "restarts": persist → fresh instance from the SAME seed → import.
+        let saved = bob.export_state();
+        drop(bob);
+        let bob2 = HavenSocial::new([41u8; 32].to_vec()).unwrap();
+        bob2.add_contact_bundle(cid.clone(), alice.my_bundle()).unwrap();
+        bob2.import_state(saved);
+        assert!(bob2.feed(cid.clone(), 2_000, None).is_empty(), "still buffered after restart");
+
+        // NOW the key commit arrives → the persisted buffer drains → the post appears.
+        for c in &commits { let _ = bob2.receive(cid.clone(), c.clone()); }
+        let feed = bob2.feed(cid.clone(), 2_000, None);
+        assert_eq!(feed.len(), 1, "the post is recovered after the late key commit");
+        assert_eq!(feed[0].body, "hi everyone");
     }
 
     #[test]

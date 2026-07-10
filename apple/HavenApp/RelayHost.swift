@@ -297,6 +297,11 @@ struct RelayEntry: Codable, Identifiable, Equatable {
     var httpUrls: [String]?
     /// Bearer token the relay's HTTP interface requires (travels ONLY inside sealed announces).
     var httpToken: String?
+    /// When this relay was last (re-)ADOPTED into a circle (unix ms). Rides the announce so a member
+    /// who FORGOT it earlier reactivates on a NEWER re-add (LWW), while a stale third-party echo —
+    /// which carries the original, older timestamp — loses and stays forgotten. Defaulted (0) so old
+    /// state files load; a 0 announce never beats a real forget time.
+    var addedAtMs: UInt64?
     var id: String { hex }
 }
 
@@ -318,8 +323,17 @@ final class RelayMailboxStore: ObservableObject {
     /// re-announce DOES reactivate it (handleRelayNode clears the suppression + flips active=true), so
     /// your own re-announced relay can come back. Cleared on explicit adoption / reactivation.
     private var suppressed: Set<String>
+    /// When each relay was FORGOTTEN (unix ms), for LWW against a re-announce's `addedAtMs`. A newer
+    /// re-add reactivates; a forget newer than the last re-add keeps it dead. Parallel to `suppressed`.
+    private var forgotAt: [String: UInt64] = [:]
+    private let forgotAtKey = "haven.relay.forgotAt"
 
     private func nowMs() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
+
+    /// The adoption timestamp announced for a relay (bumped on explicit add/reactivate), 0 if unknown.
+    func addedAtMs(_ hex: String) -> UInt64 { entries[hex]?.addedAtMs ?? 0 }
+    /// When a relay was forgotten (0 if never), for the LWW reactivation gate.
+    func forgottenAtMs(_ hex: String) -> UInt64 { forgotAt[hex.lowercased()] ?? 0 }
 
     private init() {
         let d = UserDefaults.standard
@@ -335,6 +349,7 @@ final class RelayMailboxStore: ObservableObject {
         }
         relaysByCircle = loaded
         suppressed = Set((d.array(forKey: suppressedKey) as? [String]) ?? [])
+        forgotAt = (d.dictionary(forKey: forgotAtKey) as? [String: UInt64]) ?? [:]
         if !loaded.isEmpty { d.set(loaded, forKey: key) }
         // Load persisted entries, then migrate any relay that only exists in relaysByCircle/default
         // into a RelayEntry (active=true, short-hex name, lastSeen=now so the clock starts now).
@@ -399,11 +414,14 @@ final class RelayMailboxStore: ObservableObject {
     /// ADD a relay to a circle (append, don't replace) — mirrors desktop `adopt_relay`. This is the
     /// EXPLICIT path (user adopts / hosts), so it CLEARS any suppression AND reactivates the entry —
     /// re-adding a previously-deactivated relay always works.
-    func add(circleId: String, nodeHex: String, name: String? = nil, isS3: Bool = false) {
+    /// `adoptedAtMs`: 0 = an EXPLICIT local adoption (stamp now()); a non-zero value = the adoption
+    /// timestamp carried by a peer's announce (propagate it, don't invent a fresh one — inventing now()
+    /// on every echo would let a stale relay's re-announce keep beating a user's forget = zombie loop).
+    func add(circleId: String, nodeHex: String, name: String? = nil, isS3: Bool = false, adoptedAtMs: UInt64 = 0) {
         let hex = isS3 ? nodeHex : nodeHex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard isS3 ? hex.hasPrefix("s3:") : hex.count == 64 else { return }
         unforget(hex)
-        ensureEntry(hex, name: name, isS3: isS3, activate: true)
+        ensureEntry(hex, name: name, isS3: isS3, activate: true, adoptedAtMs: adoptedAtMs == 0 ? nowMs() : adoptedAtMs)
         var list = relaysByCircle[circleId] ?? []
         if !list.contains(hex) {
             list.append(hex)
@@ -414,14 +432,18 @@ final class RelayMailboxStore: ObservableObject {
 
     /// Create-or-update the RelayEntry for a hex. `activate` flips it on; lastSeen is stamped now on
     /// first creation so a freshly-added relay's stale-clock starts now (not 1970).
-    func ensureEntry(_ hex: String, name: String? = nil, isS3: Bool = false, activate: Bool = false) {
+    func ensureEntry(_ hex: String, name: String? = nil, isS3: Bool = false, activate: Bool = false, adoptedAtMs: UInt64 = 0) {
         if var e = entries[hex] {
             if let name, !name.isEmpty { e.name = name }
             if activate { e.active = true }
+            // Adoption stamp only ever moves FORWARD (max) — so the freshest legitimate re-add
+            // propagates while a stale echo can't roll it back or refresh it to now().
+            if adoptedAtMs > 0 { e.addedAtMs = max(e.addedAtMs ?? 0, adoptedAtMs) }
             entries[hex] = e
         } else {
             entries[hex] = RelayEntry(hex: hex, name: name ?? Self.shortName(hex),
-                                      active: activate ? true : true, lastSeenMs: nowMs(), isS3: isS3)
+                                      active: activate ? true : true, lastSeenMs: nowMs(), isS3: isS3,
+                                      addedAtMs: adoptedAtMs > 0 ? adoptedAtMs : nowMs())
         }
         persistEntries()
     }
@@ -478,14 +500,19 @@ final class RelayMailboxStore: ObservableObject {
     /// Clear a relay's FORGOTTEN tombstone (an explicit adoption / reactivation overrides a prior Forget).
     func unforget(_ nodeHex: String) {
         let hex = nodeHex.hasPrefix("s3:") ? nodeHex : nodeHex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard suppressed.remove(hex) != nil else { return }
+        let hadTombstone = suppressed.remove(hex) != nil
+        if forgotAt.removeValue(forKey: hex) != nil {
+            UserDefaults.standard.set(forgotAt, forKey: forgotAtKey)
+        }
+        guard hadTombstone else { return }
         UserDefaults.standard.set(Array(suppressed), forKey: suppressedKey)
     }
 
     /// Reactivate a deactivated relay: flip active=true and clear its suppression so it's dialed again.
-    func reactivate(_ hex: String) {
+    /// `adoptedAtMs`: 0 = explicit local reactivation (stamp now()); non-zero = the announce's stamp.
+    func reactivate(_ hex: String, adoptedAtMs: UInt64 = 0) {
         unforget(hex)
-        ensureEntry(hex, activate: true)
+        ensureEntry(hex, activate: true, adoptedAtMs: adoptedAtMs == 0 ? nowMs() : adoptedAtMs)
         RelayHealth.shared.forget(hex)   // clear any stale backoff so it's retried immediately
         objectWillChange.send()
     }
@@ -509,8 +536,10 @@ final class RelayMailboxStore: ObservableObject {
         // Keep relaysByCircle + the default intact — only the active flag changes. (relays(forCircle:)
         // already filters inactive entries out, so it stops being dialed/served immediately.)
         suppressed.insert(hex)
+        forgotAt[hex] = nowMs()   // LWW stamp: a re-announce only wins if it was (re-)added AFTER this
         persistEntries()
         UserDefaults.standard.set(Array(suppressed), forKey: suppressedKey)
+        UserDefaults.standard.set(forgotAt, forKey: forgotAtKey)
         RelayClients.forget(hex)
         RelayHealth.shared.forget(hex)
         objectWillChange.send()

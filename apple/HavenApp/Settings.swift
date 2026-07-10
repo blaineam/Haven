@@ -18,6 +18,8 @@ final class SettingsStore: ObservableObject {
     @Published var autoOptimize: Bool { didSet { d.set(autoOptimize, forKey: kOpt) } }
     /// Auto-delete posts older than this many days (0 = keep forever).
     @Published var retentionDays: Int { didSet { d.set(retentionDays, forKey: kRet) } }
+    /// When auto-delete is on, keep MY OWN posts even after they'd age out for others (my archive).
+    @Published var keepMyPosts: Bool { didSet { d.set(keepMyPosts, forKey: kKeepMine) } }
     /// Global mute — silences post music + video audio so you can browse quietly.
     @Published var silent: Bool {
         didSet { d.set(silent, forKey: kSilent); AudioCoordinator.shared.setSilent(silent) }
@@ -31,6 +33,7 @@ final class SettingsStore: ObservableObject {
     private let kSaveOthers = "haven.saveOthersToPhotos"
     private let kOpt = "haven.autoOptimize"
     private let kRet = "haven.retentionDays"
+    private let kKeepMine = "haven.keepMyPosts"
     private let kSilent = "haven.silent"
     private let kVideoSound = "haven.videoSoundOn"
 
@@ -39,6 +42,7 @@ final class SettingsStore: ObservableObject {
         saveOthersToPhotos = d.object(forKey: kSaveOthers) as? Bool ?? false   // default OFF — only my own posts auto-save
         autoOptimize = d.object(forKey: kOpt) as? Bool ?? true
         retentionDays = d.object(forKey: kRet) as? Int ?? 0       // default forever
+        keepMyPosts = d.object(forKey: kKeepMine) as? Bool ?? true   // default: always keep my own archive
         silent = d.object(forKey: kSilent) as? Bool ?? false
         videoSoundOn = d.object(forKey: kVideoSound) as? Bool ?? false   // default muted; tap any video to unmute all
     }
@@ -105,6 +109,14 @@ struct SettingsView: View {
     let accountStore: AccountStore
     var onReset: () -> Void
     @ObservedObject private var settings = SettingsStore.shared
+    @State private var storageText = "…"
+
+    /// Walk the media dir off the main actor and format the total (e.g. "1.2 GB · 340 files").
+    private func measureStorage() async {
+        let usage = await Task.detached(priority: .utility) { MediaStore.shared.diskUsage() }.value
+        let size = ByteCountFormatter.string(fromByteCount: usage.bytes, countStyle: .file)
+        storageText = usage.files == 0 ? "None yet" : "\(size) · \(usage.files) file\(usage.files == 1 ? "" : "s")"
+    }
 
     var body: some View {
         ZStack {
@@ -146,10 +158,26 @@ struct SettingsView: View {
                         Text("After 1 year").tag(365)
                     }
                     .tint(HavenTheme.pink)
+                    if settings.retentionDays > 0 {
+                        Toggle("Always keep my own posts", isOn: $settings.keepMyPosts)
+                            .tint(HavenTheme.pink)
+                            .onChange(of: settings.keepMyPosts) { _, on in FeedStore.shared.setKeepOwnPosts(on) }
+                    }
                 } header: { Text("Auto-delete — default") }
                 footer: {
-                    Text("Automatically remove posts older than this from your feed. A sender can set a shorter limit on their own posts — the shorter one always wins. Per-circle override available.")
+                    Text("Auto-delete only affects YOUR view — it hides old posts from your feed to keep things tidy. It never deletes anything for other people, and posts you sent stay on their devices. A sender can set a shorter limit on their own posts (that one does expire everywhere). With “Always keep my own posts” on, your own posts stay in your feed as a personal archive. Per-circle override available.")
                 }
+                Section {
+                    HStack {
+                        Label("Synced media", systemImage: "internaldrive")
+                        Spacer()
+                        Text(storageText).foregroundStyle(.secondary).monospacedDigit()
+                    }
+                } header: { Text("Storage") }
+                footer: {
+                    Text("Photos and videos from your circles, cached on this device. Freeing space here just re-downloads them from your relay when you next view them.")
+                }
+                .task { await measureStorage() }
                 Section {
                     NavigationLink { RelaysView() } label: {
                         Label("Relays", systemImage: "antenna.radiowaves.left.and.right")

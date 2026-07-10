@@ -363,6 +363,10 @@ pub fn build_feed(
     mut events: Vec<Event>,
     now_ms: u64,
     viewer_retention_secs: Option<u64>,
+    // When set to my own author hex, VIEWER auto-delete is skipped for my posts (my personal archive
+    // stays even after others' posts age out of my feed). A sender-set expiry on my OWN post still
+    // applies — that was my deliberate choice. `None` = viewer retention applies to everything.
+    keep_own_author: Option<&str>,
 ) -> Vec<FeedItem> {
     // Deterministic order: by time, then id (dedup identical ids).
     events.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
@@ -385,7 +389,9 @@ pub fn build_feed(
     for e in &events {
         match &e.kind {
             EventKind::Post { body, media, music, retention_secs, story, mute_video } => {
-                if is_expired(e.created_at, *retention_secs, viewer_retention_secs, now_ms) {
+                // Skip viewer retention for my own posts when "keep my posts" is on (sender expiry still applies).
+                let viewer = if keep_own_author == Some(e.author.as_str()) { None } else { viewer_retention_secs };
+                if is_expired(e.created_at, *retention_secs, viewer, now_ms) {
                     continue;
                 }
                 order.push(e.id.clone());
@@ -678,7 +684,7 @@ mod poll_tests {
         ];
 
         // Before close: only B(No) + C(No) count; B's earlier Yes is superseded, D's late vote ignored.
-        let p = build_feed(events.clone(), 500, None)
+        let p = build_feed(events.clone(), 500, None, None)
             .into_iter().find(|i| i.id == pid).unwrap().poll.unwrap();
         assert_eq!(p.options[0].votes, 0, "Yes: B moved away, D is post-close");
         assert_eq!(p.options[1].votes, 2, "No: B + C");
@@ -686,7 +692,7 @@ mod poll_tests {
         assert!(!p.closed);
 
         // After close: results are locked; the post-close vote is still ignored.
-        let p2 = build_feed(events, 2000, None)
+        let p2 = build_feed(events, 2000, None, None)
             .into_iter().find(|i| i.id == pid).unwrap().poll.unwrap();
         assert!(p2.closed);
         assert_eq!(p2.options[0].votes, 0);

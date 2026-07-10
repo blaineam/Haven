@@ -543,6 +543,20 @@ enum SharedStore {
         try? FileManager.default.removeItem(at: seenURL)
     }
 
+    /// Force the seen-set to disk NOW (called on background/terminate). The normal save is debounced
+    /// 2s and one-shot per burst — an app killed during the initial sync burst (common on iOS) never
+    /// wrote it, so the next launch treated the WHOLE mailbox as new and re-downloaded + re-verified
+    /// every envelope (the "redownloads old posts on every launch" heat report). A synchronous flush
+    /// on the way to the background closes that window.
+    static func flushSeenMailbox() {
+        let snapshot: String? = withSeen { set in
+            guard seenLoaded, !set.isEmpty else { return nil }
+            seenSavePending = false
+            return set.joined(separator: "\n")
+        }
+        if let snapshot { try? snapshot.write(to: seenURL, atomically: true, encoding: .utf8) }
+    }
+
     private static func mailboxKey(_ circleId: String, _ env: Data) -> String {
         let h = SHA256.hash(data: env).map { String(format: "%02x", $0) }.joined()
         return "haven/mailbox/\(circleId)/\(h)"
@@ -628,6 +642,35 @@ enum SharedStore {
                 // Unreachable, or a pre-GC relay that doesn't speak TOUCH — either way it
                 // isn't sweeping anything, so skipping the refresh is safe.
                 HavenLog.relay("touch \(node.prefix(10)) \(circleId): \(error)")
+            }
+        }
+    }
+
+    /// Every mailbox key we've already ingested for a circle (from the persisted seen-set). Used to
+    /// keep-alive posts we RECEIVED but didn't author — we can't re-derive a peer's key (only the
+    /// author can re-seal), but we hold the keys we fetched, so we can TOUCH them.
+    static func seenKeys(circleId: String) -> [String] {
+        let prefix = "haven/mailbox/\(circleId)/"
+        return withSeen { $0.filter { $0.hasPrefix(prefix) } }
+    }
+
+    /// TOUCH keys we HOLD but did not author, to keep them alive against the relay's 30-day GC.
+    /// Unlike `refreshMailbox` this never re-PUTs misses (a reader can't reconstruct a peer's sealed
+    /// envelope) — a key the relay already swept simply stays gone until its author refreshes it.
+    /// This is what makes "any active member keeps a post alive", not just its author.
+    static func touchHeldKeys(circleId: String) async {
+        let keys = seenKeys(circleId: circleId)
+        guard !keys.isEmpty else { return }
+        let prefix = "haven/mailbox/\(circleId)/"
+        for node in relayNodes(circleId) where !node.hasPrefix("s3:") {
+            if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
+                _ = RelayHost.shared.localTouch(keys)   // own store: bump liveness, ignore misses
+                continue
+            }
+            guard let c = await RelayClients.client(node) else { continue }
+            if let _ = try? await c.touch(prefix: prefix, keys: keys) {
+                RelayHealth.shared.recordSuccess(node)
+                RelayMailboxStore.shared.markSeen(node)
             }
         }
     }

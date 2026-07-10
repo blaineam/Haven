@@ -7,6 +7,54 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.33] — 2026-07-09  ·  App Store 1.0.1
+
+### Fixed
+- **Random non-delivery of posts/stories/messages in circles — the big one.** A member could
+  silently never receive a post even after everyone handshook and approved. Root cause: the relay
+  mailbox marks a content key "seen" (persistently) the moment the bytes are fetched, but the
+  buffer that holds an event waiting for its epoch key-commit or the sender's device roster
+  (`pending_epoch`) was IN-MEMORY only — killing the app dropped it, and the mailbox never
+  re-served the key (deterministic re-seal ⇒ same key ⇒ filtered by the seen-set). Now the buffer
+  is **persisted** and re-drained on every key-commit AND roster arrival, and an "unknown sender"
+  event (multi-device roster lag) is buffered instead of dropped. The engine state is also saved
+  after a poll that only buffered, so nothing is lost on a kill. Regression test added: an event
+  received before its key commit survives a restart and is recovered when the commit lands.
+- **Media now pulls from the relay's stored copy first.** `requestMissingMedia` fired the direct
+  peer-to-peer request alongside the relay restore, so an online author streamed the bytes
+  device-to-device even though the relay already held them (heat + bandwidth on both ends). The
+  relay/S3/own-store restore is tried first; the direct ask is a fallback only when there's no
+  mailbox or the stored copy can't be fetched.
+- **Relay copies no longer expire while people still want them.** A post was refreshed against the
+  relay's 30-day GC only by its AUTHOR, so an author offline 30 days lost the post for everyone. Any
+  active member now TOUCHes the mailbox keys it holds on the daily pass — any online reader keeps a
+  post alive.
+- **No more re-downloading old posts on every launch (device heat).** The mailbox "seen" cursor was
+  saved on a 2s debounce and lost if the app was killed during the initial sync burst, so the next
+  launch re-fetched + re-verified the whole mailbox. It's now flushed synchronously on
+  backgrounding. Idle churn cut too: the 50-event re-seal + media push for nearby catch-up run only
+  when a nearby peer is actually connected, and multi-device self-sync is throttled from every 30s
+  to ~2 min.
+- **Calls: less lag, pixelation, and audio drop-out.** The video encoder now prefers **H264**
+  (hardware on Apple) instead of possibly landing on software VP8/VP9 that pegs the CPU and starves
+  audio; senders are bitrate-capped and set to **degrade gracefully** (resolution + framerate drop
+  together under pressure) so audio wins the CPU fight.
+- **A removed relay can be re-added again.** A removed relay could never be re-announced to members
+  (the owner-gate can't recognize an external relay's owner). Relay tombstones are now timestamped
+  LWW: a re-add newer than a member's "forgot" time reactivates and repopulates across the circle,
+  while a stale echo (older adoption stamp) still loses — no zombie relays.
+- **The Docker relay keeps its node id across restarts.** Set `HAVEN_RELAY_SEED` (64 hex,
+  `openssl rand -hex 32`) to pin the relay's identity independent of the `/data` volume — a
+  recreated container no longer mints a new node id the circle has to re-adopt. Documented in the
+  compose file + relay README.
+
+### Added
+- **Storage usage + "keep my own posts".** Settings → Storage shows how much space synced media
+  uses on this device. When auto-delete is on, a new "Always keep my own posts" toggle preserves
+  your own posts in your feed as a personal archive (a sender-set expiry on your own post still
+  applies). The auto-delete footer now states the semantics plainly: it only tidies YOUR view and
+  never deletes anything for anyone else.
+
 ## [0.1.0-beta.32] — 2026-07-09
 
 ### Added

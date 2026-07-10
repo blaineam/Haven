@@ -96,7 +96,7 @@ fn feed_resolves_posts_comments_reactions_edits_unsends() {
 
     let feed = build_feed(vec![
         post.clone(), comment, react1, react2, edit, post2.clone(), unsend,
-    ], 1_000_000_000, None);
+    ], 1_000_000_000, None, None);
 
     assert_eq!(feed.len(), 2, "two posts in the feed");
     // Newest first → post2 then post.
@@ -128,7 +128,7 @@ fn cannot_edit_someone_elses_post() {
     // Bob tries to edit Alice's post.
     let forged_edit = Event::new(&b, 2, EventKind::Edit { target: post.id.clone(), body: "hacked".into(), media: vec![], music: None, mute_video: false });
 
-    let feed = build_feed(vec![post.clone(), forged_edit], 1_000_000_000, None);
+    let feed = build_feed(vec![post.clone(), forged_edit], 1_000_000_000, None, None);
     assert_eq!(feed[0].body, "mine", "edit by non-author is ignored");
     assert!(!feed[0].edited);
 }
@@ -142,17 +142,17 @@ fn retention_drops_posts_past_the_shortest_window() {
     });
 
     // Within the window → present.
-    assert_eq!(build_feed(vec![p.clone()], 30_000, None).len(), 1);
+    assert_eq!(build_feed(vec![p.clone()], 30_000, None, None).len(), 1);
     // Past the sender window (61s) → dropped.
-    assert_eq!(build_feed(vec![p.clone()], 61_000, None).len(), 0);
+    assert_eq!(build_feed(vec![p.clone()], 61_000, None, None).len(), 0);
 
     // Viewer default 10s is SHORTER than the sender's 60s → 10s wins.
-    assert_eq!(build_feed(vec![p.clone()], 11_000, Some(10)).len(), 0);
+    assert_eq!(build_feed(vec![p.clone()], 11_000, Some(10), None).len(), 0);
 
     // No retention anywhere → never expires.
     let q = Event::new(&a, 0, EventKind::Post {
         body: "forever".into(), media: vec![], music: None, retention_secs: None,
             story: false, mute_video: false,
     });
-    assert_eq!(build_feed(vec![q], u64::MAX, None).len(), 1);
+    assert_eq!(build_feed(vec![q], u64::MAX, None, None).len(), 1);
 }

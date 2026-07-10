@@ -41,6 +41,13 @@ Every later start is just `docker compose up -d` — the link and identity live 
 `haven-relay-data` volume, so the container stays the **same** relay across restarts and updates.
 Don't delete that volume unless you want a brand-new relay identity.
 
+> **Pin the node id (recommended).** If the `/data` volume is ever lost or the container is recreated
+> without it, the relay generates a brand-new node id and your circle has to re-adopt it. To make the
+> id permanent regardless of the volume, set a fixed seed: run `openssl rand -hex 32` once and put
+> `HAVEN_RELAY_SEED=<that 64-hex value>` in the `.env` next to the compose file. `HAVEN_RELAY_SEED`
+> takes precedence over `/data/identity.json`, so the same node id survives restarts, image rebuilds,
+> and even a wiped volume. Keep the seed secret — it *is* the relay's identity.
+
 ## Notes
 
 - **Ports:** `8674` is the plain-HTTP media interface — the fast path peers use to pull media when

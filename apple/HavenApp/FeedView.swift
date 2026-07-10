@@ -138,6 +138,7 @@ final class FeedStore: ObservableObject {
                                       name: DeviceKeyStore.deviceName,
                                       createdAt: UInt64(Date().timeIntervalSince1970))
         }
+        social?.setKeepOwnPosts(on: SettingsStore.shared.keepMyPosts)   // apply the archive preference
         loadLastHeard()   // so "last seen" survives an app restart
         refreshCircles()     // also purges any contaminated DM membership (see refreshCircles)
         refresh()
@@ -692,7 +693,7 @@ final class FeedStore: ObservableObject {
         guard let raw = UserDefaults.standard.dictionary(forKey: lastHeardKey) as? [String: Double] else { return }
         lastHeard = raw.mapValues { Date(timeIntervalSince1970: $0) }
     }
-    func forceSync() { ingestPushInbox(); syncWithContacts(); pollMailboxNow() }
+    func forceSync() { ingestPushInbox(); syncWithContacts(); forceSelfSyncNextPoll(); pollMailboxNow() }
 
     private func startSyncTimer() {
         syncTimer?.invalidate()
@@ -844,6 +845,9 @@ final class FeedStore: ObservableObject {
 
     /// My ACCOUNT node hex (the contact handle) — the ledger's pseudonymous actor id.
     var myAccountHex: String { social?.myNodeHex() ?? "" }
+
+    /// Apply the "keep my own posts" archive preference live (Settings toggle) + refresh the feed.
+    func setKeepOwnPosts(_ on: Bool) { social?.setKeepOwnPosts(on: on); refresh() }
 
     /// Cache of reports per circle, keyed by the reported event id. Cleared on each refresh.
     private var reportsCache: [String: [String: [ReportFfi]]] = [:]
@@ -1054,18 +1058,24 @@ final class FeedStore: ObservableObject {
         // waiting for the 3-min full re-send. Re-seal (the expensive part) runs OFF the main thread; only the
         // cheap fan-out hops back to main. Capped to recent events so it isn't a congestion/CPU sink. The
         // receiver dedups known events, so re-broadcasting is harmless.
-        let cidsForNearby = circles.map(\.id)
-        Task.detached(priority: .utility) { [weak self, social] in
-            var work: [(String, [Data])] = []
-            for cid in cidsForNearby {
-                // export_recent_envelopes = ALL authors (mine + received), so a sibling catches up on friends'
-                // posts/DMs I received too — not just my own (which syncEnvelopes was limited to).
-                let envs = social.exportRecentEnvelopes(circleId: cid, limit: 50)
-                if !envs.isEmpty { work.append((cid, envs)) }
-            }
-            await MainActor.run {
-                guard let self else { return }
-                for (cid, envs) in work { for env in envs { self.nearbyBroadcast(1, self.eventPayload(cid, env)) } }
+        // Own-device nearby catch-up RE-SEALS up to 50 events per circle (a hybrid signature each) —
+        // real CPU. Only worth doing when a nearby sibling is actually connected to receive it;
+        // otherwise it was pure heat every 20s on a phone with no Mac nearby. When no nearby peer is
+        // present the internet + mailbox paths already carry everything.
+        if nearby?.hasConnectedPeers == true {
+            let cidsForNearby = circles.map(\.id)
+            Task.detached(priority: .utility) { [weak self, social] in
+                var work: [(String, [Data])] = []
+                for cid in cidsForNearby {
+                    // export_recent_envelopes = ALL authors (mine + received), so a sibling catches up on friends'
+                    // posts/DMs I received too — not just my own (which syncEnvelopes was limited to).
+                    let envs = social.exportRecentEnvelopes(circleId: cid, limit: 50)
+                    if !envs.isEmpty { work.append((cid, envs)) }
+                }
+                await MainActor.run {
+                    guard let self else { return }
+                    for (cid, envs) in work { for env in envs { self.nearbyBroadcast(1, self.eventPayload(cid, env)) } }
+                }
             }
         }
         reannounceOwnRelay()   // frame 19 was a one-shot at relay start; re-emit so peers reliably learn it
@@ -1077,7 +1087,8 @@ final class FeedStore: ObservableObject {
             lastMediaBackfillMs = nowMs
             backfillMailboxMedia(circleIds: circles.map { $0.id })
         }
-        pushOwnMediaNearby()   // opportunistically push any NOT-yet-pushed media I hold to nearby siblings
+        // Only push media over nearby when a sibling is actually connected (else it's idle work).
+        if nearby?.hasConnectedPeers == true { pushOwnMediaNearby() }
         requestMissingMedia()
     }
 
@@ -1124,9 +1135,15 @@ final class FeedStore: ObservableObject {
     /// also learn the reliable cross-NAT media path. Sealed to the circle either way; a legacy
     /// receiver that expects a bare hex simply ignores the JSON form (wrong length).
     private func relayAnnounceData(_ hex: String) -> Data {
-        if let http = RelayMailboxStore.shared.httpInterface(hex),
-           let json = try? JSONSerialization.data(withJSONObject: ["node": hex, "urls": http.urls, "token": http.token]) {
-            return json
+        // Always carry the relay's adoption timestamp so receivers can LWW a stale tombstone. Use the
+        // JSON form whenever we have EITHER an HTTP interface or a non-zero adoption stamp; a legacy
+        // receiver ignores JSON it can't parse as a bare hex (wrong length), so this stays compatible.
+        let addedAt = RelayMailboxStore.shared.addedAtMs(hex)
+        let http = RelayMailboxStore.shared.httpInterface(hex)
+        if http != nil || addedAt > 0 {
+            var obj: [String: Any] = ["node": hex, "addedAt": addedAt]
+            if let http { obj["urls"] = http.urls; obj["token"] = http.token }
+            if let json = try? JSONSerialization.data(withJSONObject: obj) { return json }
         }
         return Data(hex.utf8)
     }
@@ -1231,11 +1248,26 @@ final class FeedStore: ObservableObject {
 
     /// Poll the shared mailbox and ingest any envelopes uploaded while we (or the sender)
     /// were offline. This is what delivers posts without both ends being online at once.
+    private var lastSelfSyncMs: UInt64 = 0
+    /// Force the next poll to run self-sync even if inside the throttle window (device link, foreground).
+    func forceSelfSyncNextPoll() { lastSelfSyncMs = 0 }
+
     func pollMailboxNow() {
         guard social != nil else { return }
-        // Multi-device self-sync runs on every poll, independent of per-circle mailboxes — it has
-        // its own transport (any configured relay OR the user's S3 bucket). (D16 Phase 3.) When it
-        // pulls in changes from another device (e.g. a synced circle) persist + refresh.
+        // Multi-device self-sync (profile, pins, contacts, read watermarks, circles) syncs the user's
+        // OWN devices and changes rarely — running its full LIST+FETCH+merge on every 30s poll was
+        // constant idle CPU/radio for no benefit. Throttle to ~2 min (convergence in 2 min instead of
+        // 30s is imperceptible); explicit triggers call forceSelfSyncNextPoll to bypass it.
+        let nowMs = now()
+        if nowMs - lastSelfSyncMs > 120_000 {
+            lastSelfSyncMs = nowMs
+            selfSyncAndPull()
+        } else {
+            Task { @MainActor in await self.pullMailbox(circleIds: self.circles.map { $0.id }) }
+        }
+    }
+
+    private func selfSyncAndPull() {
         Task { @MainActor in
             if await SelfSyncCoordinator.shared.sync(social: self.social) {
                 // refreshCircles() — NOT just refresh() — so a circle synced from another of MY devices
@@ -1267,9 +1299,15 @@ final class FeedStore: ObservableObject {
             }
             return changed
         }.value
+        // Persist whenever we ran ANY receive: an envelope that only BUFFERED (event arrived before
+        // its key commit / the sender's roster) mutated the now-durable pending_epoch buffer, and the
+        // mailbox already marked its key seen at fetch time — so if we don't save the engine state
+        // here, a kill before the key arrives loses the buffered event forever (the exact
+        // random-non-delivery failure). Cheap: msgs is only non-empty when the mailbox served bytes.
+        persist()
         guard !ingested.isEmpty else { return }
         for cid in ingested { notifyNewest(in: cid); bumpUnseen(cid) }
-        persist(); refresh(); requestMissingMedia()
+        refresh(); requestMissingMedia()
     }
 
     /// Drain events that arrived inline in a push (stashed by the NSE) and ingest them — silent
@@ -1629,6 +1667,11 @@ final class FeedStore: ObservableObject {
                 // The relay replies with keys it lacks and those are re-PUT inside, so the
                 // daily refresh also repairs a relay that GC'd us while we were away.
                 await SharedStore.refreshMailbox(circleId: cid, envelopes: envs)
+                // ALSO keep alive posts I RECEIVED (didn't author): TOUCH every mailbox key I hold.
+                // Without this a post was refreshed ONLY by its author, so if the author was offline
+                // for 30 days it was swept even though active readers still wanted it — the
+                // "relay copy expires too quickly" report. Any active member now keeps a post alive.
+                await SharedStore.touchHeldKeys(circleId: cid)
             }
         }
     }
@@ -1672,10 +1715,12 @@ final class FeedStore: ObservableObject {
         // interface (the reliable cross-NAT path). Legacy announces are the bare 64-hex id.
         var announcedUrls: [String] = []
         var announcedToken = ""
+        var announcedAddedAt: UInt64 = 0
         if nodeHex.hasPrefix("{"),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             announcedUrls = (obj["urls"] as? [String] ?? []).filter { $0.hasPrefix("http") }
             announcedToken = obj["token"] as? String ?? ""
+            announcedAddedAt = (obj["addedAt"] as? NSNumber)?.uint64Value ?? 0
             nodeHex = (obj["node"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         }
         guard nodeHex.count == 64 else { return }
@@ -1692,13 +1737,23 @@ final class FeedStore: ObservableObject {
         let ownerDevices = social.deviceNodeIdsFor(accountHex: announcerHex).map { $0.lowercased() }
         let announcerOwnsRelay = lower == announcerHex || ownerDevices.contains(lower)
         if RelayMailboxStore.shared.isForgotten(lower) || !RelayMailboxStore.shared.isActive(lower) {
-            guard announcerOwnsRelay else { return }
-            RelayMailboxStore.shared.reactivate(lower)
+            // Reactivate when EITHER the announcer owns the relay (their in-app/account relay — the
+            // original gate, keeps a Mac's relay coming back on the iPhone), OR the announce is a
+            // genuinely NEWER re-add than our forget (LWW). The latter is what lets an EXTERNAL relay
+            // (a docker daemon, whose id is nobody's device id) be re-added by whoever manages it and
+            // repopulate to every member — while a stale third-party echo, carrying the relay's
+            // ORIGINAL (older) adoption stamp, still loses and stays forgotten (no zombie loop).
+            let forgotMs = RelayMailboxStore.shared.forgottenAtMs(lower)
+            let newerReAdd = announcedAddedAt > 0 && announcedAddedAt > forgotMs
+            guard announcerOwnsRelay || newerReAdd else { return }
+            RelayMailboxStore.shared.reactivate(lower, adoptedAtMs: announcedAddedAt)
         }
         // A contact advertised their circle relay → ADD it to our redundant set for this circle, so
         // members automatically pool relays (more redundancy, no manual setup) — desktop parity.
         let wasNew = !RelayMailboxStore.shared.relays(forCircle: circleId).contains(lower)
-        RelayMailboxStore.shared.add(circleId: circleId, nodeHex: nodeHex)
+        // Propagate the announced adoption stamp (not now()) so the freshest legit re-add flows across
+        // the circle without any echo fabricating a new timestamp.
+        RelayMailboxStore.shared.add(circleId: circleId, nodeHex: nodeHex, adoptedAtMs: announcedAddedAt)
         // Record the relay's announced HTTP media interface (the reliable cross-NAT path).
         if !announcedUrls.isEmpty, !announcedToken.isEmpty {
             RelayMailboxStore.shared.setHttpInterface(lower, urls: announcedUrls, token: announcedToken)
@@ -1955,6 +2010,7 @@ final class FeedStore: ObservableObject {
         // settled. Available media still arrives quickly (a request lands within a cycle); unreachable media
         // just retries occasionally instead of churning.
         var budget = 12
+        let hasMailbox = circleIds.contains(where: { SharedStore.hasMailbox($0) })
         for ref in missing {
             let stale = (mediaReqAt[ref].map { nowMs - $0 > 90_000 } ?? true)
             guard stale, budget > 0 else { continue }
@@ -1962,15 +2018,25 @@ final class FeedStore: ObservableObject {
             budget -= 1
             var payload = Data(myHex.utf8)          // 64-byte requester id
             payload.append(Data(ref.utf8))
-            nearbyBroadcast(3, payload)
-            for contact in ContactsStore.shared.contacts { sendIroh(3, payload, to: contact.idHex) }
-            // Also try the circle's mailbox (relay/S3) — content-addressed + idempotent.
-            if circleIds.contains(where: { SharedStore.hasMailbox($0) }) {
+            let directAsk = {
+                self.nearbyBroadcast(3, payload)
+                for contact in ContactsStore.shared.contacts { self.sendIroh(3, payload, to: contact.idHex) }
+            }
+            // RELAY-FIRST: pull the stored copy from the circle's mailbox (own hosted store → relay
+            // HTTP :8674 → S3 → iroh blob, in that order inside restore). Only if there is NO mailbox,
+            // or the stored copy can't be fetched, fall back to asking an online author/peer directly.
+            // Previously the direct ask fired FIRST alongside the restore, so an online sender streamed
+            // the bytes peer-to-peer (heat + bandwidth on both) even though the relay already held them.
+            if hasMailbox {
                 Task { @MainActor in
                     if let data = await SharedStore.restore(ref: ref, circleIds: circleIds, social: social) {
                         MediaStore.shared.store(ref, data); autoSaveReceived(ref); scheduleRefresh()
+                    } else {
+                        directAsk()   // relay didn't have it (or unreachable) → ask a peer
                     }
                 }
+            } else {
+                directAsk()           // no mailbox in any circle → peer-to-peer is the only path
             }
         }
         if mediaReqAt.count > 4000 { mediaReqAt.removeAll() }   // bound the throttle map

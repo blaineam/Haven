@@ -174,6 +174,7 @@ struct HavenApp: App {
                 AudioCoordinator.shared.pauseForBackground()
                 NotificationManager.shared.scheduleRefresh()
                 BiometricGate.shared.relockAll()   // re-lock biometric circles on the way out
+                SharedStore.flushSeenMailbox()     // persist the ingestion cursor NOW (survive a kill)
                 Task { await BackgroundUploader.shared.flush() }   // finish pending mailbox uploads
             default: break
             }

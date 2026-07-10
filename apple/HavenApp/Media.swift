@@ -285,6 +285,23 @@ final class MediaStore: ObservableObject {
         return dir.appendingPathComponent("\(ref).\(kind.ext)")
     }
 
+    /// Total bytes of synced media on disk (the `haven-media` dir), and the file count. Walked lazily
+    /// off the caller's thread by the Settings screen so it never blocks. Photos/videos/audio dominate;
+    /// the small event log lives elsewhere and isn't counted here.
+    func diskUsage() -> (bytes: Int64, files: Int) {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey],
+                                                       options: [.skipsHiddenFiles]) else { return (0, 0) }
+        var total: Int64 = 0
+        var count = 0
+        for url in items {
+            if let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize {
+                total += Int64(size); count += 1
+            }
+        }
+        return (total, count)
+    }
+
     @discardableResult
     func addImage(_ image: PlatformImage) -> String {
         let ref = "img_\(UUID().uuidString)"

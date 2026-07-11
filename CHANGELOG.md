@@ -7,6 +7,15 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.34] — 2026-07-10
+
+### Fixed
+- **Crash + runaway heat: iroh path-management out-of-memory — all platforms.** Upgraded the
+  transport stack (iroh 1.0.0 → 1.0.2, QUIC engine noq 1.0.0 → 1.0.1) to fix an unbounded
+  path-queue growth that OOM-crashed the app after minutes on a real network and drove the device
+  heat. Full detail below (it was diagnosed from an iOS TestFlight crash, but the leaking code is in
+  the shared core, so Android, desktop, and the relay all get the fix). See beta.33 notes.
+
 ## [0.1.0-beta.33] — 2026-07-09  ·  App Store 1.0.1
 
 ### Fixed

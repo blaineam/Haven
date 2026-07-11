@@ -10,6 +10,17 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [0.1.0-beta.33] — 2026-07-09  ·  App Store 1.0.1
 
 ### Fixed
+- **Crash + runaway heat: iroh path-management out-of-memory (the real dominant cause).** A
+  TestFlight crash report showed a Rust `handle_alloc_error`/`rust_oom` abort deep in iroh's QUIC
+  path manager — `VecDeque::grow` inside `open_path_on_conn` / `RemoteStateActor::open_path_on_all_conns`
+  — i.e. an unbounded queue growing as the connection's network paths flapped open/abandoned, until
+  the app ran out of memory (~6.5 min on a real network). This path-flap churn was also burning CPU,
+  making it the dominant device-heat source above the UI issues fixed earlier this wave. Upgraded the
+  transport stack — **iroh 1.0.0 → 1.0.2** and its QUIC engine **noq 1.0.0 → 1.0.1** — whose changelog
+  specifically fixes "unbounded accumulation of pending path responses," `PATH_CIDS_BLOCKED` handling
+  for abandoned paths, and an `active_connections` underflow: exactly this failure mode. (The path
+  count can't be tuned down as a workaround — iroh ignores `max_concurrent_multipath_paths` below its
+  recommended floor of 13 — and disabling multipath would regress cross-NAT media delivery.)
 - **Random non-delivery of posts/stories/messages in circles — the big one.** A member could
   silently never receive a post even after everyone handshook and approved. Root cause: the relay
   mailbox marks a content key "seen" (persistently) the moment the bytes are fetched, but the

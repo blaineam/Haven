@@ -2181,6 +2181,37 @@ impl HavenSocial {
             .map_err(|e| HavenError::Invalid { msg: format!("{e}") })
     }
 
+    /// Seal a media blob from a FILE to another FILE, entirely in NATIVE (off-heap) memory —
+    /// symmetric to [`Self::open_circle_media_file`]. A large video (hundreds of MB) sealed via the
+    /// in-memory [`Self::seal_circle_media`] forces the whole plaintext AND the whole sealed envelope
+    /// through the caller's managed heap as one contiguous buffer; on iOS that single Swift `Data`
+    /// allocation TRAPS (EXC_BREAKPOINT in `__DataStorage.init`) once it can't be satisfied, crashing
+    /// the app the moment a big video is posted. Reading + sealing + writing here keeps every large
+    /// buffer in native memory (bounded by physical RAM, not the small managed heap), and the caller
+    /// then streams the sealed FILE to the mailbox in fixed windows — never holding it whole. Returns
+    /// whether it succeeded; writes atomically via a `.part` rename.
+    pub fn seal_circle_media_file(&self, circle_id: String, in_path: String, out_path: String) -> bool {
+        let Ok(data) = std::fs::read(&in_path) else { return false };
+        let sealed: Option<Vec<u8>> = (|| {
+            let st = self.state.lock().unwrap();
+            let circle = st.circles.iter().find(|c| c.id == circle_id)?;
+            let mut members = vec![st.me.public()];
+            members.extend(circle.members.iter().cloned());
+            let group = Group::new(circle_id.clone(), members);
+            seal_bytes(&st.me, &group, &data).ok().map(|env| env.to_bytes())
+        })();
+        drop(data); // free the plaintext before allocating no further large buffers
+        let Some(sealed) = sealed else { return false };
+        let tmp = format!("{out_path}.part");
+        let ok = std::fs::write(&tmp, &sealed)
+            .and_then(|_| std::fs::rename(&tmp, &out_path))
+            .is_ok();
+        if !ok {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        ok
+    }
+
     /// Open a circle-sealed media blob fetched from the shared store. Verifies the
     /// sender (read from the envelope) against the circle roster.
     pub fn open_circle_media(&self, circle_id: String, sealed: Vec<u8>) -> Option<Vec<u8>> {

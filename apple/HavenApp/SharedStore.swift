@@ -285,16 +285,24 @@ enum SharedStore {
             return
         }
 
-        // ---- Read + seal, now known to be needed by at least one reachable destination. OFF the
-        // main thread — doing it on the main actor janked the UI (the serial backup queue runs these
-        // back-to-back). The engine + file read are thread-safe.
-        let sealed: Data? = await Task.detached(priority: .utility) { () -> Data? in
-            guard let raw = try? Data(contentsOf: url) else { return nil }
-            return try? social.sealCircleMedia(circleId: circleId, data: raw)
+        // ---- Seal to a TEMP FILE, now known to be needed by at least one reachable destination.
+        // File→file in NATIVE memory (seal_circle_media_file): a large video sealed via the in-memory
+        // path forces the whole sealed envelope through one contiguous Swift `Data`, which TRAPS
+        // (EXC_BREAKPOINT in __DataStorage.init) when the allocation can't be satisfied — the app
+        // crashed the instant a big video was posted. Sealing to disk keeps the big buffers off the
+        // managed heap; the uploads below then stream the sealed file in 8 MB windows (never whole).
+        // OFF the main thread — the serial backup queue runs these back-to-back.
+        let sealedURL = url.deletingLastPathComponent()
+            .appendingPathComponent(".seal-\(ref).tmp")
+        defer { try? FileManager.default.removeItem(at: sealedURL) }
+        let sealedOK = await Task.detached(priority: .utility) { () -> Bool in
+            social.sealCircleMediaFile(circleId: circleId, inPath: url.path, outPath: sealedURL.path)
         }.value
-        guard let sealed else { HavenLog.sync("backup SEAL-FAIL ref=\(ref)"); return }
-        let chunked = sealed.count > mediaChunkBytes
-        HavenLog.sync("backup ref=\(ref) size=\(sealed.count) chunked=\(chunked) dests=\(uploads.count + (s3Needs ? 1 : 0)) s3=\(s3Needs)")
+        guard sealedOK,
+              let sealedSize = (try? FileManager.default.attributesOfItem(atPath: sealedURL.path)[.size] as? Int) ?? nil
+        else { HavenLog.sync("backup SEAL-FAIL ref=\(ref)"); MediaBackupBackoff.recordStalled(ref); return }
+        let chunked = sealedSize > mediaChunkBytes
+        HavenLog.sync("backup ref=\(ref) size=\(sealedSize) chunked=\(chunked) dests=\(uploads.count + (s3Needs ? 1 : 0)) s3=\(s3Needs)")
 
         // 1) S3/HTTP bucket FIRST — the DEFAULT media transport. Plain HTTPS traverses any NAT,
         //    whereas the iroh blob ALPN (haven/blob/1) drops its outbound datagrams over a
@@ -302,8 +310,8 @@ enum SharedStore {
         //    stall and die while messaging on the same relay path works.
         if s3Needs, let s3 {
             do {
-                try await putMedia(ref: ref, sealed: sealed) { try await s3.putObject(key: $0, data: $1) }
-                HavenLog.sync("backup s3-put OK ref=\(ref) size=\(sealed.count) chunked=\(chunked)")
+                try await putMediaFile(ref: ref, sealedURL: sealedURL, size: sealedSize) { try await s3.putObject(key: $0, data: $1) }
+                HavenLog.sync("backup s3-put OK ref=\(ref) size=\(sealedSize) chunked=\(chunked)")
                 MediaBackupLedger.mark("s3", ref); landed = true
             }
             catch { HavenLog.sync("backup s3-put FAIL ref=\(ref): \(error.localizedDescription)") }
@@ -314,11 +322,11 @@ enum SharedStore {
             switch route {
             case .ownRelay:
                 // Our OWN hosted relay: store directly in the local mailbox (no iroh self-dial).
-                try? await putMedia(ref: ref, sealed: sealed) { _ = RelayHost.shared.localPut($0, $1) }
+                try? await putMediaFile(ref: ref, sealedURL: sealedURL, size: sealedSize) { _ = RelayHost.shared.localPut($0, $1) }
                 MediaBackupLedger.mark(node, ref); landed = true
             case .http(let base, let token):
                 do {
-                    try await putMedia(ref: ref, sealed: sealed) { k, d in
+                    try await putMediaFile(ref: ref, sealedURL: sealedURL, size: sealedSize) { k, d in
                         guard await httpPut(base, token, k, d) else { throw URLError(.cannotConnectToHost) }
                     }
                     RelayMailboxStore.shared.markSeen(node)
@@ -330,25 +338,25 @@ enum SharedStore {
                     // The HTTP interface died mid-upload — fall back to the iroh dial (same store).
                     guard let c = await RelayClients.client(node) else { continue }
                     do {
-                        try await putMedia(ref: ref, sealed: sealed) { try await c.put(key: $0, data: $1) }
+                        try await putMediaFile(ref: ref, sealedURL: sealedURL, size: sealedSize) { try await c.put(key: $0, data: $1) }
                         RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
-                        HavenLog.sync("backup blob-dial OK ref=\(ref) relay=\(node.prefix(8)) size=\(sealed.count) — cross-NAT blob path WORKS")
+                        HavenLog.sync("backup blob-dial OK ref=\(ref) relay=\(node.prefix(8)) size=\(sealedSize) — cross-NAT blob path WORKS")
                         MediaBackupLedger.mark(node, ref); landed = true
                     }
                     catch {
-                        HavenLog.sync("backup blob-dial FAIL ref=\(ref) relay=\(node.prefix(8)) size=\(sealed.count): \(error.localizedDescription)")
+                        HavenLog.sync("backup blob-dial FAIL ref=\(ref) relay=\(node.prefix(8)) size=\(sealedSize): \(error.localizedDescription)")
                         RelayHealth.shared.recordFailure(node); RelayClients.forget(node)
                     }
                 }
             case .dial(let c):
                 do {
-                    try await putMedia(ref: ref, sealed: sealed) { try await c.put(key: $0, data: $1) }
+                    try await putMediaFile(ref: ref, sealedURL: sealedURL, size: sealedSize) { try await c.put(key: $0, data: $1) }
                     RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
-                    HavenLog.sync("backup blob-dial OK ref=\(ref) relay=\(node.prefix(8)) size=\(sealed.count) — cross-NAT blob path WORKS")
+                    HavenLog.sync("backup blob-dial OK ref=\(ref) relay=\(node.prefix(8)) size=\(sealedSize) — cross-NAT blob path WORKS")
                     MediaBackupLedger.mark(node, ref); landed = true
                 }
                 catch {
-                    HavenLog.sync("backup blob-dial FAIL ref=\(ref) relay=\(node.prefix(8)) size=\(sealed.count): \(error.localizedDescription)")
+                    HavenLog.sync("backup blob-dial FAIL ref=\(ref) relay=\(node.prefix(8)) size=\(sealedSize): \(error.localizedDescription)")
                     RelayHealth.shared.recordFailure(node); RelayClients.forget(node)
                 }
             }
@@ -363,21 +371,27 @@ enum SharedStore {
         isOwner(circleId) ? ownerS3() : mailboxClient()
     }
 
-    /// PUT one sealed media blob through a destination's key/value writer — sliced into 8 MB chunks
-    /// plus a manifest when large, a single blob otherwise (the shared wire format).
-    private static func putMedia(ref: String, sealed: Data, put: (String, Data) async throws -> Void) async throws {
-        if sealed.count > mediaChunkBytes {
+    /// PUT one sealed media blob that lives in a FILE through a destination's key/value writer,
+    /// STREAMING the file in 8 MB windows so the whole sealed blob is never resident on the managed
+    /// heap (a large video's sealed envelope is hundreds of MB — holding it whole traps the allocator).
+    /// Large → 8 MB chunk keys + a manifest; small → a single blob. Same wire format as `putMedia`.
+    private static func putMediaFile(ref: String, sealedURL: URL, size: Int,
+                                     put: (String, Data) async throws -> Void) async throws {
+        if size > mediaChunkBytes {
+            guard let fh = try? FileHandle(forReadingFrom: sealedURL) else { throw URLError(.cannotOpenFile) }
+            defer { try? fh.close() }
             var sizes: [Int] = []
-            var off = 0
-            while off < sealed.count {
-                let end = min(off + mediaChunkBytes, sealed.count)
-                let slice = sealed.subdata(in: off..<end)
+            while true {
+                let slice = (try? fh.read(upToCount: mediaChunkBytes)) ?? nil
+                guard let slice, !slice.isEmpty else { break }
                 try await put(chunkKey(ref, sizes.count), slice)
-                sizes.append(slice.count); off = end
+                sizes.append(slice.count)
             }
             try await put(key(ref), makeManifest(sizes: sizes))
         } else {
-            try await put(key(ref), sealed)
+            // Small (≤ one window): reading it whole is memory-safe.
+            let whole = (try? Data(contentsOf: sealedURL)) ?? Data()
+            try await put(key(ref), whole)
         }
     }
 

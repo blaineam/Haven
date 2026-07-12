@@ -65,7 +65,8 @@ final class RelayHost: ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in self?.start() }
             return
         }
-        // Keep the screen on / device awake while relaying (essential on iOS, harmless on Mac).
+        // Keep the device awake while relaying: screen-on on iOS (relaying stops when the app
+        // suspends), system-sleep prevention on Mac (the display may sleep; the app keeps serving).
         PlatformIdle.disabled = true
         let h = RelayServerHandle.attach(node: node, dir: storeDir)
         handle = h

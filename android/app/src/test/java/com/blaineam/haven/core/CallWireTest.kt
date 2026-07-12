@@ -19,6 +19,18 @@ class CallWireTest {
         assertEquals(listOf(hexA, hexB), g.roster)
     }
 
+    @Test fun group_invite_tolerates_trailing_timestamp_field() {
+        // Apple senders append a 4th LP field (unix-seconds send time) so receivers can refuse
+        // stale replayed invites. This parser reads exactly 3 fields — the extra field must be
+        // ignored, not break Android <-> iPhone calls.
+        val ts = "1770000000".toByteArray()
+        val frame = CallWire.groupInvite(hexA, "sess-1", "Family", hexB) +
+            byteArrayOf((ts.size and 0xff).toByte(), (ts.size shr 8).toByte()) + ts
+        val g = CallWire.parseGroupInvite(frame)!!
+        assertEquals("sess-1", g.sessionId)
+        assertEquals(listOf(hexB), g.roster)
+    }
+
     @Test fun group_invite_starts_with_raw_sender_hex() {
         val frame = CallWire.groupInvite(hexA, "s", "g", hexB)
         assertEquals(hexA, String(frame.copyOfRange(0, 64)))

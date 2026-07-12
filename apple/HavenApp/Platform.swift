@@ -161,9 +161,13 @@ enum PlatformPasteboard {
     }
 }
 
-// MARK: - Idle timer (prevent display sleep during playback / capture)
+// MARK: - Idle timer (keep the device serving while the relay is hosted)
 
-/// `UIApplication.isIdleTimerDisabled` on iOS; an `IOPMAssertion` on macOS.
+/// `UIApplication.isIdleTimerDisabled` on iOS (the app only relays while foreground, so the screen
+/// must stay on); an `IOPMAssertion` on macOS. The Mac assertion prevents SYSTEM sleep only — the
+/// display is free to sleep, since the app keeps running either way. (It used to be
+/// `PreventUserIdleDisplaySleep` named "Haven media playback", which held the screen awake for the
+/// entire multi-day life of a relay-hosting Mac.)
 enum PlatformIdle {
     #if !canImport(UIKit)
     private static var assertion: IOPMAssertionID = 0
@@ -185,9 +189,9 @@ enum PlatformIdle {
         if on, !held {
             var id: IOPMAssertionID = 0
             let ok = IOPMAssertionCreateWithName(
-                kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
+                kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
                 IOPMAssertionLevel(kIOPMAssertionLevelOn),
-                "Haven media playback" as CFString,
+                "Haven relay hosting" as CFString,
                 &id)
             if ok == kIOReturnSuccess { assertion = id; held = true }
         } else if !on, held {

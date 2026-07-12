@@ -156,6 +156,21 @@ mod tests {
     }
 
     #[test]
+    fn group_invite_tolerates_trailing_timestamp_field() {
+        // Apple senders append a 4th length-prefixed field (unix-seconds send time) so receivers
+        // can refuse stale replayed invites. This parser reads exactly 3 fields — the trailing
+        // field must be ignored, not break the call.
+        let me = "a".repeat(64);
+        let mut p = group_invite(&me, "sess1", "Family call", &"b".repeat(64));
+        let ts = b"1770000000";
+        p.extend_from_slice(&(ts.len() as u16).to_le_bytes());
+        p.extend_from_slice(ts);
+        let g = parse_group_invite(&p).unwrap();
+        assert_eq!(g.session_id, "sess1");
+        assert_eq!(g.roster.len(), 1);
+    }
+
+    #[test]
     fn signal_roundtrip() {
         let me = "a".repeat(64);
         let json = br#"{"t":"offer","sdp":"x"}"#;

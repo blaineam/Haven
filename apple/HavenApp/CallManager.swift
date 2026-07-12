@@ -98,6 +98,21 @@ final class CallManager: NSObject, ObservableObject {
     // Mac in-app ringing (no CallKit on Catalyst).
     private var inAppRinging = false
 
+    // Callee-side bounded ring. The caller gives up dialing at ~30s, but its hangup (frame 12) is
+    // fire-and-forget — if it never arrives (caller offline, dropped frame, or the invite itself
+    // was a stale copy delivered late through a relay hop), the ringtone would loop FOREVER
+    // (observed: a Mac rang nonstop for 20+ minutes). Ringing always stops after this timeout and
+    // the call is treated as missed.
+    private var ringTimeoutTimer: Timer?
+    private static let ringTimeoutSecs: TimeInterval = 60
+    /// Invites older than this (per the sender's frame-21 timestamp) never start a ring — the
+    /// caller stopped dialing long ago. Generous enough to absorb ordinary clock skew.
+    private static let inviteMaxAgeSecs: TimeInterval = 180
+    /// Sessions that already ended locally (declined / hung up / timed out / completed), with when.
+    /// A caller retransmits the invite every 2.5s and relay hops can replay copies late — none of
+    /// those may re-ring a session we've already left.
+    private var endedSessions: [String: Date] = [:]
+
     /// Per-peer connection + its candidate-buffering state.
     private final class PeerConn {
         let hex: String
@@ -235,11 +250,15 @@ final class CallManager: NSObject, ObservableObject {
     }
 
     /// Frame 21: group-invite carrying the session id + group name + full roster, sent to everyone.
+    /// A 4th length-prefixed field carries the send time (unix seconds, decimal) so receivers can
+    /// refuse to ring for a stale copy; every platform's parser reads exactly 3 fields and ignores
+    /// trailing bytes, so older receivers are unaffected.
     private func sendInvites() {
         var f = Data(myHex.utf8)
         CallManager.lpAppend(&f, Data(sessionId.utf8))
         CallManager.lpAppend(&f, Data(peerName.utf8))
         CallManager.lpAppend(&f, Data(rosterCSV().utf8))
+        CallManager.lpAppend(&f, Data(String(UInt64(Date().timeIntervalSince1970)).utf8))
         for p in invitees() { FeedStore.shared.sendCallFrame(21, f, to: p) }
     }
 
@@ -262,6 +281,7 @@ final class CallManager: NSObject, ObservableObject {
             if roster.isEmpty || !roster.contains(from) { roster.insert(from); refreshParticipants() }
             return
         }
+        guard !recentlyEnded("legacy:\(from)") else { return }   // declined/ended → retransmits can't re-ring
         sessionId = "legacy:\(from)"
         roster = [from, myHex]
         // Show the CALLER's name, not the name they sent (which is *our* name for a DM call).
@@ -286,6 +306,12 @@ final class CallManager: NSObject, ObservableObject {
         var members = Set(rosterStr.split(separator: ",").map(String.init).filter { $0.count == 64 })
         members.insert(from); members.insert(myHex)
         guard !sid2.isEmpty else { return }
+        // Optional 4th field (newer senders): the invite's send time. A copy older than the
+        // caller's entire dialing window is a replay — a relay hop or reconnect delivering it
+        // long after the caller gave up. It must not ring (or resurrect a session's roster).
+        if let tsData = CallManager.lpRead(body, &off),
+           let ts = TimeInterval(String(data: tsData, encoding: .utf8) ?? ""),
+           Date().timeIntervalSince1970 - ts > Self.inviteMaxAgeSecs { return }
 
         if active {
             // Same session, new roster info → merge (someone learned about more participants).
@@ -310,6 +336,7 @@ final class CallManager: NSObject, ObservableObject {
             }
             return
         }
+        guard !recentlyEnded(sid2) else { return }   // we already left this session — don't re-ring
         sessionId = sid2; roster = members
         // A 1:1 call's "group name" is really the callee's own name (what the caller called us), so
         // displaying it verbatim made both ends show the same person. Resolve the caller's name from
@@ -334,6 +361,7 @@ final class CallManager: NSObject, ObservableObject {
 
     func reportIncoming(name: String) {
         AudioCoordinator.shared.silenceForCall()   // stop feed music/video audio before the ring
+        startRingTimeout()
         let uuid = callUUID ?? UUID(); callUUID = uuid
         #if os(macOS)
         ringing = true; startInAppRinging(); return   // native macOS: in-app overlay + ring
@@ -350,6 +378,41 @@ final class CallManager: NSObject, ObservableObject {
             }
         }
         #endif
+    }
+
+    // MARK: - Ring timeout / stale-session suppression
+
+    /// Arm the callee-side bounded ring. Cleared by accept and by teardown (decline, hangup, end).
+    private func startRingTimeout() {
+        ringTimeoutTimer?.invalidate()
+        ringTimeoutTimer = Timer.scheduledTimer(withTimeInterval: Self.ringTimeoutSecs, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.ringTimedOut() }
+        }
+    }
+
+    /// Nobody answered and no hangup ever arrived — stop ringing and record a missed call.
+    private func ringTimedOut() {
+        guard active, ringing, !inCall else { return }
+        let who = peerName
+        #if !os(macOS)
+        if useCallKit, let provider, let uuid = callUUID {
+            provider.reportCall(with: uuid, endedAt: nil, reason: .unanswered)
+        }
+        #endif
+        teardown()
+        NotificationManager.shared.notify(
+            title: "Missed call",
+            body: who.isEmpty ? "You missed a call" : "You missed a call from \(who)",
+            dedupeKey: "missed-call:\(Date().timeIntervalSince1970)")
+    }
+
+    /// Did a session end here recently enough that a fresh invite for it must be ignored? The
+    /// window just outlasts the caller's ~30s retransmit burst: declining mustn't re-ring when our
+    /// hangup frame is lost, but a deliberate redial — or being re-added to a group call we left
+    /// (addToCall reuses the session id) — rings normally once the burst is over.
+    private func recentlyEnded(_ sid: String) -> Bool {
+        guard let endedAt = endedSessions[sid] else { return false }
+        return Date().timeIntervalSince(endedAt) < 45
     }
 
     // MARK: - Mac in-app ringing (no CallKit)
@@ -423,6 +486,7 @@ final class CallManager: NSObject, ObservableObject {
     /// Fired by CXAnswerCallAction (system UI or our button): really pick up. Accept-frame goes to
     /// EVERY other participant so they know to start dialing us; then we bring up media + mesh.
     private func reallyAccept() {
+        ringTimeoutTimer?.invalidate(); ringTimeoutTimer = nil
         ringing = false; stopInAppRinging(); inCall = true
         for p in invitees() { sendAccept(to: p) }
         startMesh()
@@ -455,10 +519,18 @@ final class CallManager: NSObject, ObservableObject {
         dropPeer(from)
         let remaining = roster.subtracting([myHex])
         if remaining.isEmpty {
+            let missed = ringing && !inCall   // caller hung up before we answered
+            let who = peerName
             #if !os(macOS)
             if let provider, let uuid = callUUID { provider.reportCall(with: uuid, endedAt: nil, reason: .remoteEnded) }
             #endif
             teardown()
+            if missed {
+                NotificationManager.shared.notify(
+                    title: "Missed call",
+                    body: who.isEmpty ? "You missed a call" : "You missed a call from \(who)",
+                    dedupeKey: "missed-call:\(Date().timeIntervalSince1970)")
+            }
         }
     }
 
@@ -1050,6 +1122,14 @@ final class CallManager: NSObject, ObservableObject {
     }
 
     private func teardown() {
+        // Remember the session so the caller's still-in-flight invite retransmits can't re-ring it.
+        if !sessionId.isEmpty {
+            endedSessions[sessionId] = Date()
+            if endedSessions.count > 50 {   // prune long-expired tombstones
+                endedSessions = endedSessions.filter { Date().timeIntervalSince($0.value) < 45 }
+            }
+        }
+        ringTimeoutTimer?.invalidate(); ringTimeoutTimer = nil
         CallTones.shared.stop()
         stopInAppRinging()
         stopSpeakerDetection()

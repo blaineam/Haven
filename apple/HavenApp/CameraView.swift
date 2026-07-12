@@ -21,6 +21,10 @@ struct CameraView: View {
     // the default. `liveThumb` is a downscaled still off the live feed for the swatches.
     @State private var liveFilter: HavenFilter = .original
     @State private var liveThumb: PlatformImage?
+    // The filter strip is COLLAPSED by default (matches the story camera) — an always-open strip
+    // crowded the live view and collided with the shutter. Swipe left/right on the preview still
+    // cycles filters without opening it; this toggle reveals the tappable swatches when wanted.
+    @State private var showFilters = false
 
     var body: some View {
         ZStack {
@@ -29,20 +33,37 @@ struct CameraView: View {
             }
             .ignoresSafeArea()
 
-            // Live filter strip, floated above the (UIKit) shutter so swatches don't cover it.
+            // Filter toggle (top-right, clear of the UIKit close button at top-left) + a collapsible
+            // strip floated ABOVE the shutter so swatches never cover it.
             #if !os(macOS)
-            if let liveThumb {
-                VStack {
+            VStack {
+                HStack {
                     Spacer()
+                    Button { withAnimation(.snappy) { showFilters.toggle() } } label: {
+                        Image(systemName: "camera.filters")
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(11)
+                            .background(showFilters ? AnyShapeStyle(HavenTheme.brandHorizontal)
+                                                    : AnyShapeStyle(.black.opacity(0.35)), in: Circle())
+                    }
+                    .padding(.trailing, 20).padding(.top, 12)
+                }
+                Spacer()
+                if showFilters, let liveThumb {
                     FilterStrip(thumbnail: liveThumb, selection: $liveFilter)
                         .background(.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                         .padding(.horizontal, 10)
+                        .padding(.bottom, 150)   // clear the shutter (60pt + safe-area inset) — no collision
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
-                .padding(.bottom, 118)
-                .allowsHitTesting(true)
             }
             #endif
         }
+        // Lock to portrait like the story camera: the shutter/controls never move on rotation, while
+        // the capture connection still follows the PHYSICAL device orientation (see shutter handlers),
+        // so rotating the phone records landscape/portrait automatically without the button shifting.
+        .portraitLocked()
         .havenFullScreenCover(item: Binding(get: { reviewRefs.map { CaptureBatch(refs: $0) } },
                                        set: { reviewRefs = $0?.refs })) { batch in
             CaptureReviewView(refs: batch.refs, initialFilter: liveFilter) { finalRefs in
@@ -481,6 +502,10 @@ final class CameraViewController: UIViewController,
     private let frameQueue = DispatchQueue(label: "haven.camera.frames")
     private var metalPreview: MetalCameraPreview?
     private var position: AVCaptureDevice.Position = .back
+    /// The active camera device — kept so pinch-to-zoom can drive `videoZoomFactor` (mirrors the
+    /// story camera, whose zoom gesture the post camera was missing).
+    private var videoDevice: AVCaptureDevice?
+    private var zoomBase: CGFloat = 1
     private let shutter = UIButton(type: .system)
     private let ring = UIView()
     private let filterNameLabel = UILabel()
@@ -584,6 +609,22 @@ final class CameraViewController: UIViewController,
         session.inputs.filter { ($0 as? AVCaptureDeviceInput)?.device.hasMediaType(.video) == true }
             .forEach { session.removeInput($0) }
         if session.canAddInput(input) { session.addInput(input) }
+        videoDevice = device
+        // Reset zoom to 1× on (re-)configure so a flip doesn't inherit the other lens's factor.
+        do { try device.lockForConfiguration(); device.videoZoomFactor = 1; device.unlockForConfiguration() }
+        catch { }
+    }
+
+    /// Pinch-to-zoom (copied from the story camera). Drives the device's `videoZoomFactor`; clamped
+    /// to the lens's supported range, capped at 8×.
+    @objc private func handlePinch(_ g: UIPinchGestureRecognizer) {
+        guard let dev = videoDevice else { return }
+        if g.state == .began { zoomBase = dev.videoZoomFactor }
+        guard g.state == .began || g.state == .changed else { return }
+        let maxZ = min(dev.maxAvailableVideoZoomFactor, 8)
+        let target = max(dev.minAvailableVideoZoomFactor, min(maxZ, zoomBase * g.scale))
+        do { try dev.lockForConfiguration(); dev.videoZoomFactor = target; dev.unlockForConfiguration() }
+        catch { }
     }
 
     private func buildControls() {
@@ -616,6 +657,9 @@ final class CameraViewController: UIViewController,
         let swipeR = UISwipeGestureRecognizer(target: self, action: #selector(swipeFilterRight))
         swipeR.direction = .right
         view.addGestureRecognizer(swipeL); view.addGestureRecognizer(swipeR)
+
+        // Pinch anywhere on the preview to zoom (copied from the story camera).
+        view.addGestureRecognizer(UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:))))
 
         filterNameLabel.translatesAutoresizingMaskIntoConstraints = false
         filterNameLabel.textColor = .white
@@ -671,10 +715,18 @@ final class CameraViewController: UIViewController,
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
             guard let self, self.shutterHeld, !self.videoStarted else { return }
             self.videoStarted = true
-            // Mirror the front camera so the recording matches the (mirrored) live preview.
-            if let conn = self.movieOutput.connection(with: .video), conn.isVideoMirroringSupported {
-                conn.automaticallyAdjustsVideoMirroring = false
-                conn.isVideoMirrored = (self.position == .front)
+            // Set the capture rotation from the CURRENT physical device orientation at record-start —
+            // NOT just when `orientationChanged` fires. Recording in portrait without ever rotating the
+            // phone previously left the movie connection at its configure-time (often invalid, pre-
+            // session-running) angle, so the clip came out sideways. Re-applying here guarantees the
+            // file matches how the device is physically held. Front camera is mirrored to match preview.
+            if let conn = self.movieOutput.connection(with: .video) {
+                let angle = havenPreviewRotationAngle()
+                if conn.isVideoRotationAngleSupported(angle) { conn.videoRotationAngle = angle }
+                if conn.isVideoMirroringSupported {
+                    conn.automaticallyAdjustsVideoMirroring = false
+                    conn.isVideoMirrored = (self.position == .front)
+                }
             }
             let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mov")
             self.movieOutput.startRecording(to: url, recordingDelegate: self)
@@ -690,7 +742,13 @@ final class CameraViewController: UIViewController,
             videoStarted = false
             if movieOutput.isRecording { movieOutput.stopRecording() }
         } else if wasHeld {
-            // Released before the 0.35s video threshold → it's a photo.
+            // Released before the 0.35s video threshold → it's a photo. Orient the still to the
+            // current physical device orientation (same reason as video: don't rely on a rotation
+            // notification having fired) so a portrait shot isn't saved sideways.
+            if let conn = photoOutput.connection(with: .video) {
+                let angle = havenPreviewRotationAngle()
+                if conn.isVideoRotationAngleSupported(angle) { conn.videoRotationAngle = angle }
+            }
             photoOutput.capturePhoto(with: AVCapturePhotoSettings(), delegate: self)
         }
     }

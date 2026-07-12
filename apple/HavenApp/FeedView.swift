@@ -1798,13 +1798,19 @@ final class FeedStore: ObservableObject {
         let lower = nodeHex.lowercased()
         let ownerDevices = social.deviceNodeIdsFor(accountHex: announcerHex).map { $0.lowercased() }
         let announcerOwnsRelay = lower == announcerHex || ownerDevices.contains(lower)
-        if RelayMailboxStore.shared.isForgotten(lower) || !RelayMailboxStore.shared.isActive(lower) {
-            // Reactivate when EITHER the announcer owns the relay (their in-app/account relay — the
-            // original gate, keeps a Mac's relay coming back on the iPhone), OR the announce is a
-            // genuinely NEWER re-add than our forget (LWW). The latter is what lets an EXTERNAL relay
-            // (a docker daemon, whose id is nobody's device id) be re-added by whoever manages it and
-            // repopulate to every member — while a stale third-party echo, carrying the relay's
-            // ORIGINAL (older) adoption stamp, still loses and stays forgotten (no zombie loop).
+        if RelayMailboxStore.shared.isForgotten(lower) {
+            // The user DELIBERATELY DELETED this relay. It comes back ONLY on a genuine re-add whose
+            // adoption stamp is NEWER than our deletion (pure LWW) — NOT because its owner merely
+            // reopened the app (that re-announces the relay's ORIGINAL, older adoption time, which
+            // must lose). Previously an `announcerOwnsRelay` short-circuit let any owner reopen
+            // resurrect a deleted relay — the "deleted relays came back when my mom opened the app"
+            // bug. A stale third-party echo (old stamp) and a legacy announce (addedAt=0) also lose.
+            let forgotMs = RelayMailboxStore.shared.forgottenAtMs(lower)
+            guard announcedAddedAt > forgotMs else { return }
+            RelayMailboxStore.shared.reactivate(lower, adoptedAtMs: announcedAddedAt)
+        } else if !RelayMailboxStore.shared.isActive(lower) {
+            // Merely INACTIVE (deactivated, not deleted) — the owner may bring it back, or a newer
+            // re-add. This keeps a Mac's relay coming back on the iPhone when the Mac re-announces it.
             let forgotMs = RelayMailboxStore.shared.forgottenAtMs(lower)
             let newerReAdd = announcedAddedAt > 0 && announcedAddedAt > forgotMs
             guard announcerOwnsRelay || newerReAdd else { return }

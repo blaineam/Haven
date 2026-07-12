@@ -350,6 +350,15 @@ final class RelayMailboxStore: ObservableObject {
         relaysByCircle = loaded
         suppressed = Set((d.array(forKey: suppressedKey) as? [String]) ?? [])
         forgotAt = (d.dictionary(forKey: forgotAtKey) as? [String: UInt64]) ?? [:]
+        // MIGRATION: relays deleted on a build BEFORE the deletion-timestamp existed are in
+        // `suppressed` but have no `forgotAt` entry. Without a deletion time the LWW gate can't tell
+        // a deliberate re-add from an owner merely reopening the app, so those old deletions leaked
+        // back. Stamp them "deleted now" so any future re-announce carrying the relay's ORIGINAL
+        // (older) adoption time loses — only a genuine re-add stamped after this migration wins.
+        var migrated = false
+        let nowStamp = UInt64(Date().timeIntervalSince1970 * 1000)
+        for hex in suppressed where forgotAt[hex] == nil { forgotAt[hex] = nowStamp; migrated = true }
+        if migrated { d.set(forgotAt, forKey: forgotAtKey) }
         if !loaded.isEmpty { d.set(loaded, forKey: key) }
         // Load persisted entries, then migrate any relay that only exists in relaysByCircle/default
         // into a RelayEntry (active=true, short-hex name, lastSeen=now so the clock starts now).

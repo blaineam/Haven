@@ -113,7 +113,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith
         GENERATE_INFOPLIST_FILE: NO
         MARKETING_VERSION: "1.0.2"
-        CURRENT_PROJECT_VERSION: "183"
+        CURRENT_PROJECT_VERSION: "184"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         ENABLE_USER_SCRIPT_SANDBOXING: YES
         "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
@@ -183,7 +183,7 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: NO
         MARKETING_VERSION: "1.0.2"
-        CURRENT_PROJECT_VERSION: "183"
+        CURRENT_PROJECT_VERSION: "184"
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         ENABLE_USER_SCRIPT_SANDBOXING: YES
         "EXCLUDED_ARCHS[sdk=macosx*]": x86_64
@@ -224,7 +224,7 @@ targets:
         PRODUCT_MODULE_NAME: HavenNotificationService
         GENERATE_INFOPLIST_FILE: NO
         MARKETING_VERSION: "1.0.2"
-        CURRENT_PROJECT_VERSION: "183"
+        CURRENT_PROJECT_VERSION: "184"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         ENABLE_USER_SCRIPT_SANDBOXING: YES
         CODE_SIGN_ENTITLEMENTS: HavenNotificationService/NSE.entitlements
@@ -256,7 +256,7 @@ targets:
         PRODUCT_MODULE_NAME: HavenBroadcast
         GENERATE_INFOPLIST_FILE: NO
         MARKETING_VERSION: "1.0.2"
-        CURRENT_PROJECT_VERSION: "183"
+        CURRENT_PROJECT_VERSION: "184"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         ENABLE_USER_SCRIPT_SANDBOXING: YES
         CODE_SIGN_ENTITLEMENTS: HavenBroadcast/Broadcast.entitlements
@@ -292,7 +292,7 @@ targets:
         PRODUCT_MODULE_NAME: HavenShareExtension
         GENERATE_INFOPLIST_FILE: NO
         MARKETING_VERSION: "1.0.2"
-        CURRENT_PROJECT_VERSION: "183"
+        CURRENT_PROJECT_VERSION: "184"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         ENABLE_USER_SCRIPT_SANDBOXING: YES
         CODE_SIGN_ENTITLEMENTS: HavenShareExtension/Share.entitlements
@@ -343,7 +343,7 @@ targets:
         MARKETING_VERSION: "1.0.2"
         # Keep in lock-step with the host iOS app's build number (Apple requires an embedded
         # watch app to share the companion's version/build).
-        CURRENT_PROJECT_VERSION: "183"
+        CURRENT_PROJECT_VERSION: "184"
         WATCHOS_DEPLOYMENT_TARGET: "10.0"
         TARGETED_DEVICE_FAMILY: "4"
         ENABLE_USER_SCRIPT_SANDBOXING: YES

@@ -609,6 +609,14 @@ fn mailbox_forbidden(auth: &Arc<Mutex<RelayAuth>>, peer: &str, verb: u8, key: &s
         return true; // a non-relay may not enumerate (or keep-alive) across circles
     }
     match mailbox_circle(key) {
+        // DM mailboxes (`dm:<a>-<b>[-<c>…]`) are keyed by their PARTICIPANTS' account ids and are never
+        // registered via authorize() on a SHARED/default relay whose host isn't a DM participant — so
+        // `members.get("dm:…")` is None and every DM op returns ERR forbidden, silently breaking offline
+        // DM store-and-forward. Gate DMs on known-membership instead: allow any peer that is a member of
+        // SOME circle this relay serves (a stranger who merely learns the relay id is still refused). DM
+        // bodies are E2E-sealed and keys are content-addressed, so a co-member can neither read nor forge
+        // another member's DM — only relay it. (Real circle keys keep the exact per-circle check.)
+        Some(circle) if circle.starts_with("dm:") => !a.members.values().any(|m| m.contains(peer)),
         Some(circle) => !a.members.get(circle).map(|m| m.contains(peer)).unwrap_or(false),
         None => false, // not a circle mailbox key
     }

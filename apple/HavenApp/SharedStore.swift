@@ -192,6 +192,32 @@ enum SharedStore {
     private static func relayNode(_ circleId: String) -> String? {
         relayNodes(circleId).first
     }
+
+    /// Relay node ids to MIRROR media to / FETCH media from — broader than the circle's own relays.
+    /// Media keys (`haven/media/<ref>`) are content-addressed AND permission-free on the relay (unlike
+    /// mailbox keys, which are circle-membership gated), so a blob may safely live on any relay every
+    /// member can reach. When a circle's OWN relays are all home-NAT'd and currently unreachable (the
+    /// P2P dial times out), media would otherwise strand with nowhere to land; here we add:
+    ///   1. shared `__bootstrap__` relays (every member who used the same invite knows them), and
+    ///   2. a fallback — if NONE of the above is reachable right now, any other reachable known relay —
+    /// so the blob lands SOMEWHERE reachable. Mesh anti-entropy then replicates it onto the circle's
+    /// own relays once they return, and a friend who shares any of these relays can fetch it directly.
+    /// s3: pseudo-nodes are excluded (handled by the S3 path).
+    private static func mediaDests(_ circleId: String) -> [String] {
+        var nodes = relayNodes(circleId).filter { !$0.hasPrefix("s3:") }
+        let store = RelayMailboxStore.shared
+        for b in store.relays(forCircle: "__bootstrap__") where !b.hasPrefix("s3:") && !nodes.contains(b) {
+            nodes.append(b)
+        }
+        let anyReachable = nodes.contains { RelayHealth.shared.available($0) }
+        if !anyReachable {
+            for r in store.allRelays()
+            where !r.hasPrefix("s3:") && !nodes.contains(r) && RelayHealth.shared.available(r) {
+                nodes.append(r)
+            }
+        }
+        return nodes
+    }
     /// This device's OWN S3 bucket (the owner uses its credentials directly).
     static func ownerS3() -> S3Client? { S3Client(StorageStore.shared) }
     private static func isOwner(_ circleId: String) -> Bool {
@@ -208,7 +234,9 @@ enum SharedStore {
         // Skip entirely if this blob is already confirmed on EVERY destination — before the expensive
         // file read + seal. Content-addressed keys never change, so a confirmed upload is permanent.
         // This is what stops the periodic backfill from re-sending media the relay already has.
-        let destNodes = relayNodes(circleId).filter { !$0.hasPrefix("s3:") }
+        // mediaDests broadens beyond the circle's own (possibly all-NAT'd) relays to any reachable
+        // shared relay, so a video isn't stranded when the circle's relay is offline.
+        let destNodes = mediaDests(circleId)
         let s3 = mediaS3(for: circleId)
         let allConfirmed = destNodes.allSatisfy { MediaBackupLedger.has($0, ref) }
             && (s3 == nil || MediaBackupLedger.has("s3", ref))
@@ -479,7 +507,7 @@ enum SharedStore {
         var httpMissed = Set<String>()
         if head == nil {
             httpOuter: for cid in circleIds {
-                for node in relayNodes(cid) {
+                for node in mediaDests(cid) {
                     if RelayHost.shared.serving, node == RelayHost.shared.nodeId { continue }
                     guard let http = RelayMailboxStore.shared.httpInterface(node) else { continue }
                     for base in http.urls where !httpUrlBad(base) {
@@ -505,7 +533,7 @@ enum SharedStore {
         }
         if head == nil {
             outer: for cid in circleIds {
-                for node in relayNodes(cid) where !node.hasPrefix("s3:") {
+                for node in mediaDests(cid) {
                     // Our own hosted relay was already consulted above; never dial ourselves.
                     if RelayHost.shared.serving, node == RelayHost.shared.nodeId { continue }
                     if httpMissed.contains(node) { continue }   // same store already said MISS over HTTP

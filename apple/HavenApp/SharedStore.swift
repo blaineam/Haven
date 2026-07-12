@@ -91,6 +91,47 @@ enum MediaBackupLedger {
     }
 }
 
+/// Exponential backoff for media backups that keep FAILING to land on any destination. Without this,
+/// the every-2-min `backfillMailboxMedia` re-reads, re-seals and re-uploads the same blob forever when
+/// no relay can hold it (e.g. every relay is behind a NAT the iroh blob ALPN can't traverse and there's
+/// no S3 bucket) — the "my posts get synced again and again" heat/traffic storm. Once a blob lands
+/// anywhere the backoff is cleared; while it can't land the retry interval doubles 2min → … → ~1h, so a
+/// genuinely-unreachable blob costs one attempt an hour instead of thirty. In-memory only: a fresh
+/// launch is a legitimate reason to retry promptly (the transport may have changed).
+@MainActor
+enum MediaBackupBackoff {
+    private static let baseMs: UInt64 = 2 * 60 * 1000        // first retry gap after a stall
+    private static let capMs: UInt64 = 60 * 60 * 1000        // never wait longer than an hour
+    private static var nextTry: [String: UInt64] = [:]       // ref → earliest retry (epoch ms)
+    private static var fails: [String: Int] = [:]            // ref → consecutive stall count
+
+    private static func nowMs() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
+
+    /// True if `ref` stalled recently and its backoff window hasn't elapsed — skip re-enqueueing it.
+    static func shouldSkip(_ ref: String) -> Bool {
+        guard let due = nextTry[ref] else { return false }
+        return nowMs() < due
+    }
+
+    /// The blob reached at least one destination (or is fully confirmed) — stop backing off.
+    static func recordLanded(_ ref: String) {
+        nextTry[ref] = nil
+        fails[ref] = nil
+    }
+
+    /// The blob reached NO destination this pass — grow the retry gap.
+    static func recordStalled(_ ref: String) {
+        let n = (fails[ref] ?? 0) + 1
+        fails[ref] = n
+        let shift = min(n - 1, 5)                            // 2,4,8,16,32,64 min → capped
+        let gap = min(baseMs << UInt64(shift), capMs)
+        nextTry[ref] = nowMs() + gap
+        if nextTry.count > 20_000 {                          // bound memory on huge feeds
+            nextTry.removeAll(); fails.removeAll()
+        }
+    }
+}
+
 @MainActor
 enum SharedStore {
     /// The bucket to use for the circle's mailbox: the shared relay if one was set,
@@ -171,7 +212,7 @@ enum SharedStore {
         let s3 = mediaS3(for: circleId)
         let allConfirmed = destNodes.allSatisfy { MediaBackupLedger.has($0, ref) }
             && (s3 == nil || MediaBackupLedger.has("s3", ref))
-        if allConfirmed && (!destNodes.isEmpty || s3 != nil) { return }
+        if allConfirmed && (!destNodes.isEmpty || s3 != nil) { MediaBackupBackoff.recordLanded(ref); return }
         guard let url = MediaStore.shared.storagePath(for: ref) else { return }
 
         // ---- Probe phase: NO file read, NO seal. `key(ref)` is content-addressed — independent of
@@ -236,7 +277,8 @@ enum SharedStore {
         guard s3Needs || !uploads.isEmpty else {
             // Every unconfirmed destination either turned out to already hold the blob (now in the
             // ledger) or was unreachable/backing off — the file is never read or sealed this pass.
-            if !landed { HavenLog.sync("backup NO-DEST ref=\(ref)") }
+            if !landed { HavenLog.sync("backup NO-DEST ref=\(ref)"); MediaBackupBackoff.recordStalled(ref) }
+            else { MediaBackupBackoff.recordLanded(ref) }
             return
         }
 
@@ -299,7 +341,8 @@ enum SharedStore {
                 catch { RelayHealth.shared.recordFailure(node); RelayClients.forget(node) }
             }
         }
-        if !landed { HavenLog.sync("backup NO-DEST ref=\(ref)") }
+        if !landed { HavenLog.sync("backup NO-DEST ref=\(ref)"); MediaBackupBackoff.recordStalled(ref) }
+        else { MediaBackupBackoff.recordLanded(ref) }
     }
 
     /// The bucket used for MEDIA in this circle: the owner's own creds for a circle whose pre-signed

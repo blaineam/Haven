@@ -1751,7 +1751,7 @@ final class FeedStore: ObservableObject {
                 refs.formUnion(item.media)
                 for c in item.comments { refs.formUnion(c.media) }
             }
-            for ref in refs where MediaStore.shared.has(ref) {
+            for ref in refs where MediaStore.shared.has(ref) && !MediaBackupBackoff.shouldSkip(ref) {
                 MediaBackupQueue.shared.enqueue(ref, circleId: cid, social: social)
             }
         }

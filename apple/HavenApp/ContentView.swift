@@ -34,6 +34,12 @@ struct YouView: View {
                         postsSection
                     }
                     .padding(20)
+                    // Pin the content to the viewport width. A vertical ScrollView proposes UNBOUNDED
+                    // width to its content, so an unconstrained Text (the bio) laid out on one line wider
+                    // than the screen — which made the whole content horizontally pannable (you could
+                    // swipe the profile sideways). Constraining width forces text to wrap and kills the
+                    // stray horizontal scroll. (The Circle feed didn't show it because its cards fill width.)
+                    .frame(maxWidth: .infinity)
                 }
                 // Match the Circle feed: any scroll dismisses the comment keyboard (interactively
                 // only dismissed on a deliberate keyboard drag, which felt stuck on the You tab).
@@ -193,6 +199,7 @@ struct YouView: View {
                     .font(.footnote).foregroundStyle(.secondary)
             }
         }
+        .frame(maxWidth: .infinity)   // take the proposed (viewport) width so the bio/link wrap, not overflow
     }
 
 

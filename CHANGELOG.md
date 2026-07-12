@@ -7,6 +7,19 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.35] — 2026-07-12
+
+### Fixed
+- **Deleted relays stop returning — now on Android & desktop too.** A relay you deleted came back
+  when its owner reopened the app (their device re-announced it, and the old owner-gate reactivated
+  it, ignoring your deletion). Relay tombstones are now timestamped last-writer-wins: a deleted relay
+  reactivates only on a genuine re-add newer than your deletion, never on a mere reopen; a
+  merely-deactivated (not deleted) relay still comes back when its owner re-announces it. The relay
+  announce carries an `addedAt` adoption stamp, byte-compatible across iOS/Android/desktop. Legacy
+  tombstones are migrated on load. Ships on Apple as 1.0.3; this brings the same fix to Android and
+  the desktop app. (Re-delete any already-resurrected relay once on the fixed build; it then stays
+  gone.)
+
 ## [0.1.0-beta.34] — 2026-07-10
 
 ### Fixed

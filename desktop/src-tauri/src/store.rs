@@ -116,6 +116,11 @@ pub struct RelayEntry {
     /// Bearer token the relay's HTTP interface requires (travels ONLY inside sealed announces).
     #[serde(default)]
     pub http_token: String,
+    /// When this relay was last (re-)ADOPTED (unix ms). Rides the announce so a member who FORGOT it
+    /// earlier reactivates only on a NEWER re-add (LWW); a stale echo carries the older stamp and loses.
+    /// 0 = unknown (legacy). Mirrors iOS/Android `addedAtMs`.
+    #[serde(default)]
+    pub added_at_ms: u64,
 }
 
 /// Erase an inactive+unseen relay entry after this long (7 days), matching iOS `staleAfterMs`.
@@ -173,6 +178,12 @@ pub struct Prefs {
     /// explicit re-adoption / reactivation. Mirrors iOS/Android.
     #[serde(default)]
     pub suppressed_relays: Vec<String>,
+    /// When each relay was FORGOTTEN (unix ms), for LWW against a re-announce's addedAt. A re-add newer
+    /// than the forget reactivates; a forget newer than the last add keeps it dead — so a relay's owner
+    /// merely REOPENING the app (re-announcing the relay's older adoption time) can't resurrect a relay
+    /// the user deleted. Mirrors iOS/Android `forgotAt`.
+    #[serde(default)]
+    pub forgot_at_relays: std::collections::HashMap<String, u64>,
     /// Per-relay metadata (name / active / last-seen / isS3), keyed by hex. The config survives a
     /// deactivation here so a relay can be turned back on without re-pasting anything. Mirrors iOS
     /// `RelayMailboxStore.entries` (UserDefaults key `haven.relay.entries`).
@@ -242,6 +253,20 @@ impl Prefs {
         // erase model). Pre-existing relays become active=true with last_seen=now so their stale-clock
         // starts now. Idempotent: only fills gaps. Mirrors iOS `migrateEntries`.
         prefs.migrate_relay_entries();
+        // MIGRATION: relays deleted BEFORE the deletion-timestamp existed are in `suppressed_relays` but
+        // have no `forgot_at_relays` entry. Without a deletion time the LWW gate can't tell a real re-add
+        // from a mere reopen, so those old deletions leaked back. Stamp them "deleted now" so a re-announce
+        // carrying the relay's ORIGINAL (older) adoption time loses. Mirrors iOS/Android.
+        {
+            let now = Self::now_ms();
+            let mut migrated = false;
+            for hex in prefs.suppressed_relays.clone() {
+                prefs.forgot_at_relays.entry(hex).or_insert_with(|| { migrated = true; now });
+            }
+            if migrated {
+                let _ = prefs.save(paths);
+            }
+        }
         // First run (or first run since this feature shipped): stamp the unread seed and PERSIST it,
         // so messages that arrive while the app is closed still count as unread on the next launch.
         if prefs.dm_read_seeded_at == 0 {
@@ -282,6 +307,7 @@ impl Prefs {
                         is_s3,
                         http_urls: Vec::new(),
                         http_token: String::new(),
+                        added_at_ms: now,
                         hex,
                     },
                 );
@@ -295,8 +321,25 @@ impl Prefs {
         self.relay_entries.get(hex).map(|e| e.active).unwrap_or(true)
     }
 
-    /// Create-or-update a RelayEntry. `activate` flips it on; last_seen is stamped on first creation so a
-    /// freshly-added relay's stale-clock starts now. Mirrors iOS `ensureEntry`.
+    /// When a relay was FORGOTTEN (0 if never), for the LWW reactivation gate.
+    pub fn relay_forgotten_at_ms(&self, hex: &str) -> u64 {
+        self.forgot_at_relays.get(hex).copied().unwrap_or(0)
+    }
+
+    /// Move a relay's adoption stamp FORWARD (max) — set to now() for `ms == 0` (an explicit local
+    /// adoption) or to the announced value otherwise (propagate a peer's stamp; never invent now() on an
+    /// echo, or a stale re-announce would keep beating a user's forget = the zombie loop). Mirrors the
+    /// `adoptedAtMs` handling in iOS/Android `ensureEntry`.
+    pub fn set_relay_added_at(&mut self, hex: &str, ms: u64) {
+        let stamp = if ms > 0 { ms } else { Self::now_ms() };
+        if let Some(e) = self.relay_entries.get_mut(hex) {
+            e.added_at_ms = e.added_at_ms.max(stamp);
+        }
+    }
+
+    /// Create-or-update a RelayEntry. `activate` flips it on; last_seen + added_at are stamped now on first
+    /// creation so a freshly-added relay's stale-clock (and adoption LWW clock) start now. Mirrors iOS
+    /// `ensureEntry`. Callers propagate a peer's announced adoption stamp via `set_relay_added_at`.
     pub fn ensure_relay_entry(&mut self, hex: &str, name: Option<&str>, is_s3: bool, activate: bool) {
         let now = Self::now_ms();
         match self.relay_entries.get_mut(hex) {
@@ -321,6 +364,7 @@ impl Prefs {
                         is_s3,
                         http_urls: Vec::new(),
                         http_token: String::new(),
+                        added_at_ms: now,
                     },
                 );
             }

@@ -1605,6 +1605,7 @@ impl Engine {
         // interface (the reliable cross-NAT path). Legacy announces are the bare 64-hex id.
         let mut announced_urls: Vec<String> = Vec::new();
         let mut announced_token = String::new();
+        let mut announced_added_at: u64 = 0;
         let node_hex = if text.starts_with('{') {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return };
             announced_urls = v["urls"]
@@ -1618,6 +1619,7 @@ impl Engine {
                 })
                 .unwrap_or_default();
             announced_token = v["token"].as_str().unwrap_or_default().to_string();
+            announced_added_at = v["addedAt"].as_u64().unwrap_or(0);
             v["node"].as_str().unwrap_or_default().trim().to_lowercase()
         } else {
             text.to_lowercase()
@@ -1642,17 +1644,35 @@ impl Engine {
                     .iter()
                     .any(|d| d.to_lowercase() == node_hex);
             let mut p = self.prefs.lock().unwrap();
-            let was_suppressed_or_inactive =
-                p.suppressed_relays.contains(&node_hex) || !p.relay_is_active(&node_hex);
-            if was_suppressed_or_inactive && !announcer_owns_relay {
-                return;
-            }
-            if was_suppressed_or_inactive {
+            let is_forgotten = p.suppressed_relays.contains(&node_hex);
+            let is_inactive = !p.relay_is_active(&node_hex);
+            let mut was_reactivated = false;
+            if is_forgotten {
+                // The user DELIBERATELY DELETED this relay. It comes back ONLY on a genuine re-add whose
+                // adoption stamp is NEWER than our deletion (pure LWW) — NOT because its owner merely
+                // reopened the app (that re-announces the relay's ORIGINAL, older adoption time). A stale
+                // third-party echo and a legacy announce (addedAt=0) also lose. iOS/Android parity (the
+                // "deleted relays came back when mom opened the app" fix).
+                if announced_added_at <= p.relay_forgotten_at_ms(&node_hex) {
+                    return;
+                }
                 p.suppressed_relays.retain(|h| h != &node_hex);
-                p.ensure_relay_entry(&node_hex, None, node_hex.starts_with("s3:"), true);
-            } else {
-                p.ensure_relay_entry(&node_hex, None, node_hex.starts_with("s3:"), false);
+                p.forgot_at_relays.remove(&node_hex);
+                was_reactivated = true;
+            } else if is_inactive {
+                // Merely INACTIVE (deactivated, not deleted) — the owner may bring it back, or a newer
+                // re-add. Keeps a PC's relay coming back on the phone when the PC re-announces it.
+                let newer_re_add = announced_added_at > 0 && announced_added_at > p.relay_forgotten_at_ms(&node_hex);
+                if !announcer_owns_relay && !newer_re_add {
+                    return;
+                }
+                was_reactivated = true;
             }
+            p.ensure_relay_entry(&node_hex, None, node_hex.starts_with("s3:"), was_reactivated);
+            // Propagate the announced adoption stamp (not now()) so the freshest legit re-add flows across
+            // the circle without any echo fabricating a new timestamp.
+            p.set_relay_added_at(&node_hex, announced_added_at);
+            let was_suppressed_or_inactive = was_reactivated;
             let list = p.relays.entry(circle_id.clone()).or_default();
             if !list.contains(&node_hex) {
                 list.push(node_hex.clone());
@@ -1781,10 +1801,20 @@ impl Engine {
     /// relay's plain-HTTP interface is known — JSON `{"node":hex,"urls":[…],"token":…}` so members
     /// also learn the reliable cross-NAT media path. A legacy receiver ignores the JSON form.
     fn relay_announce_body(&self, hex: &str) -> Vec<u8> {
-        if let Some((urls, token)) = self.prefs.lock().unwrap().relay_http(hex) {
-            if let Ok(json) = serde_json::to_vec(&serde_json::json!({
-                "node": hex, "urls": urls, "token": token,
-            })) {
+        let p = self.prefs.lock().unwrap();
+        let added_at = p.relay_entries.get(hex).map(|e| e.added_at_ms).unwrap_or(0);
+        let http = p.relay_http(hex);
+        drop(p);
+        // Always carry the adoption timestamp so receivers can LWW a stale tombstone. Use the JSON form
+        // whenever we have EITHER an HTTP interface or a non-zero adoption stamp; a legacy receiver ignores
+        // JSON it can't read as a bare hex (wrong length), so mixed versions stay compatible.
+        if http.is_some() || added_at > 0 {
+            let mut obj = serde_json::json!({ "node": hex, "addedAt": added_at });
+            if let Some((urls, token)) = http {
+                obj["urls"] = serde_json::json!(urls);
+                obj["token"] = serde_json::json!(token);
+            }
+            if let Ok(json) = serde_json::to_vec(&obj) {
                 return json;
             }
         }
@@ -1946,7 +1976,9 @@ impl Engine {
             // previously-deactivated relay always works. Mirrors iOS `add(circleId:nodeHex:)`.
             let mut p = self.prefs.lock().unwrap();
             p.suppressed_relays.retain(|h| h != &hex);
+            p.forgot_at_relays.remove(&hex);   // explicit adoption clears the deletion stamp
             p.ensure_relay_entry(&hex, None, false, true);
+            p.set_relay_added_at(&hex, 0);     // fresh adoption stamp = now()
             let _ = p.save(&self.paths);
         }
         for c in self.social.circles() {
@@ -1995,6 +2027,7 @@ impl Engine {
             if !p.suppressed_relays.contains(&hex) {
                 p.suppressed_relays.push(hex.clone());
             }
+            p.forgot_at_relays.insert(hex.clone(), now_ms());   // LWW: re-add only wins if newer
             let _ = p.save(&self.paths);
         }
         self.relay_clients.lock().await.remove(&hex);
@@ -2012,7 +2045,9 @@ impl Engine {
         {
             let mut p = self.prefs.lock().unwrap();
             p.suppressed_relays.retain(|h| h != &hex);
+            p.forgot_at_relays.remove(&hex);   // explicit reactivation clears the deletion stamp
             p.ensure_relay_entry(&hex, None, hex.starts_with("s3:"), true);
+            p.set_relay_added_at(&hex, 0);     // fresh adoption stamp = now()
             let _ = p.save(&self.paths);
         }
         self.relay_health.lock().unwrap().remove(&hex);
@@ -2068,6 +2103,7 @@ impl Engine {
             if !p.suppressed_relays.contains(&hex) {
                 p.suppressed_relays.push(hex.clone());
             }
+            p.forgot_at_relays.insert(hex.clone(), now_ms());   // LWW deletion stamp
             let _ = p.save(&self.paths);
         }
         self.relay_clients.lock().await.remove(&hex);

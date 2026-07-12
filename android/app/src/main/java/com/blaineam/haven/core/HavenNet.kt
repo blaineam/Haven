@@ -98,6 +98,15 @@ object HavenNet : InboundListener {
      *  Mirrors iOS `suppressed`. */
     private val suppressedRelays = mutableSetOf<String>()
 
+    /** When each relay was FORGOTTEN (unix ms), for LWW against a re-announce's addedAt. A re-add
+     *  NEWER than the forget reactivates; a forget newer than the last add keeps it dead — so a relay's
+     *  owner merely REOPENING the app (re-announcing the relay's older adoption time) can't resurrect a
+     *  relay the user deleted. Mirrors iOS `forgotAt`. */
+    private val forgotAtRelays = HashMap<String, Long>()
+
+    private fun relayForgottenAtMs(hex: String): Long = forgotAtRelays[hex.lowercase()] ?: 0L
+    private fun relayAddedAtMs(hex: String): Long = relayEntries[hex]?.addedAtMs ?: 0L
+
     /**
      * One configured relay: a Haven relay node (isS3=false) or an S3 bucket transport (isS3=true).
      * `hex` is the 64-char node id for a Haven relay, or a synthetic "s3:<bucket>" id for an S3 entry,
@@ -118,6 +127,10 @@ object HavenNet : InboundListener {
         val httpUrls: List<String> = emptyList(),
         /** Bearer token the relay's HTTP interface requires (travels ONLY inside sealed announces). */
         val httpToken: String = "",
+        /** When this relay was last (re-)ADOPTED (unix ms). Rides the announce so a member who FORGOT
+         *  it earlier reactivates only on a NEWER re-add (LWW); a stale echo carries the older stamp and
+         *  loses. 0 = unknown (legacy). Mirrors iOS `RelayEntry.addedAtMs`. */
+        val addedAtMs: Long = 0,
     )
     /** Per-relay metadata records, keyed by hex. The config survives deactivation here. */
     private val relayEntries = HashMap<String, RelayEntry>()
@@ -1309,12 +1322,15 @@ object HavenNet : InboundListener {
      */
     private fun relayAnnounceBlob(circleId: String, nodeHex: String): ByteArray? {
         val e = relayEntries[nodeHex]
-        val payload = if (e != null && e.httpUrls.isNotEmpty() && e.httpToken.isNotEmpty()) {
-            org.json.JSONObject()
-                .put("node", nodeHex)
-                .put("urls", JSONArray(e.httpUrls))
-                .put("token", e.httpToken)
-                .toString().toByteArray(Charsets.UTF_8)
+        val addedAt = e?.addedAtMs ?: 0L
+        val hasHttp = e != null && e.httpUrls.isNotEmpty() && e.httpToken.isNotEmpty()
+        // Always carry the adoption timestamp so receivers can LWW a stale tombstone. Use the JSON form
+        // whenever we have EITHER an HTTP interface or a non-zero adoption stamp; a legacy receiver
+        // ignores JSON it can't read as a bare hex (wrong length), so mixed versions stay compatible.
+        val payload = if (hasHttp || addedAt > 0) {
+            org.json.JSONObject().put("node", nodeHex).put("addedAt", addedAt).apply {
+                if (hasHttp) { put("urls", JSONArray(e!!.httpUrls)); put("token", e.httpToken) }
+            }.toString().toByteArray(Charsets.UTF_8)
         } else nodeHex.toByteArray(Charsets.UTF_8)
         return runCatching { social.sealCircleMedia(circleId, payload) }.getOrNull()
     }
@@ -1333,12 +1349,14 @@ object HavenNet : InboundListener {
         // Extended announce: JSON {node, urls, token} carries the relay's HTTP media interface.
         var announcedUrls: List<String> = emptyList()
         var announcedToken = ""
+        var announcedAddedAt = 0L
         val nodeHex: String = if (text.startsWith("{")) {
             val o = runCatching { JSONObject(text) }.getOrNull() ?: return
             announcedUrls = o.optJSONArray("urls")?.let { a ->
                 (0 until a.length()).mapNotNull { i -> a.optString(i).takeIf { u -> u.startsWith("http") } }
             } ?: emptyList()
             announcedToken = o.optString("token", "")
+            announcedAddedAt = o.optLong("addedAt", 0L)
             o.optString("node", "").trim().lowercase()
         } else text.lowercase()
         if (nodeHex.length != 64) return
@@ -1351,19 +1369,30 @@ object HavenNet : InboundListener {
         // RUNNING somewhere (an old docker container, a forgotten daemon) — bounced back within one
         // sync tick, forever. Non-owner announces of a tombstoned relay are dropped; brand-new relays
         // still auto-pool below. iOS parity.
-        if (suppressedRelays.contains(nodeHex) || !isRelayActive(nodeHex)) {
+        if (suppressedRelays.contains(nodeHex)) {
+            // The user DELIBERATELY DELETED this relay. It comes back ONLY on a genuine re-add whose
+            // adoption stamp is NEWER than our deletion (pure LWW) — NOT because its owner merely
+            // reopened the app (that re-announces the relay's ORIGINAL, older adoption time). A stale
+            // third-party echo and a legacy announce (addedAt=0) also lose. iOS parity (the "deleted
+            // relays came back when mom opened the app" fix).
+            if (announcedAddedAt <= relayForgottenAtMs(nodeHex)) return
+            reactivateRelay(nodeHex, adoptedAtMs = announcedAddedAt)
+        } else if (!isRelayActive(nodeHex)) {
+            // Merely INACTIVE (deactivated, not deleted) — the owner may bring it back, or a newer
+            // re-add. Keeps a Mac's relay coming back on the phone when the Mac re-announces it.
             val ownerDevices = runCatching { social.deviceNodeIdsFor(announcerHex) }
                 .getOrDefault(emptyList()).map { it.lowercase() }
-            if (nodeHex != announcerHex && nodeHex !in ownerDevices) return
-            suppressedRelays.remove(nodeHex)
-            ensureRelayEntry(nodeHex, activate = true)
-            relayHealth.remove(nodeHex)
+            val announcerOwnsRelay = nodeHex == announcerHex || nodeHex in ownerDevices
+            val newerReAdd = announcedAddedAt > 0 && announcedAddedAt > relayForgottenAtMs(nodeHex)
+            if (!announcerOwnsRelay && !newerReAdd) return
+            reactivateRelay(nodeHex, adoptedAtMs = announcedAddedAt)
         }
         // A contact advertised their circle relay → ADD it to our redundant set for this circle,
         // so members automatically pool relays (more redundancy, no manual setup). Append, never
-        // replace — parity with desktop handle_relay_node.
+        // replace — parity with desktop handle_relay_node. Propagate the announced adoption stamp
+        // (not now()) so the freshest legit re-add flows without any echo fabricating a new timestamp.
         val list = relayNodes.getOrPut(circleId) { mutableListOf() }
-        ensureRelayEntry(nodeHex, isS3 = false, activate = true)
+        ensureRelayEntry(nodeHex, isS3 = false, activate = true, adoptedAtMs = announcedAddedAt)
         // Record the relay's announced HTTP media interface (the reliable cross-NAT path).
         if (announcedUrls.isNotEmpty() && announcedToken.isNotEmpty()) {
             val e = relayEntries[nodeHex]
@@ -1427,7 +1456,8 @@ object HavenNet : InboundListener {
         val hex = nodeHex.trim().lowercase()
         if (hex.length != 64) return
         suppressedRelays.remove(hex)   // explicit adoption overrides a prior Forget
-        ensureRelayEntry(hex, name = name, isS3 = false, activate = true)
+        forgotAtRelays.remove(hex)     // …and clears the deletion timestamp (fresh adoption stamp below)
+        ensureRelayEntry(hex, name = name, isS3 = false, activate = true)   // adoptedAtMs=0 → stamp now()
         if (setDefault) defaultRelayHex = hex
         scope.launch {
             for (c in social.circles()) {
@@ -1487,6 +1517,7 @@ object HavenNet : InboundListener {
             // Keep relayNodes + the default intact — only the active flag changes. relaysFor() already
             // filters inactive entries out, so it stops being dialed/served immediately.
             suppressedRelays.add(hex)   // tombstone so passive auto-learn can't resurrect it
+            forgotAtRelays[hex] = relayNow()   // LWW: a re-announce only wins if (re-)added AFTER this
             saveRelayNodes()
             relayMutex.withLock {
                 runCatching { relayClients.remove(hex)?.close() }
@@ -1496,11 +1527,13 @@ object HavenNet : InboundListener {
         }
     }
 
-    /** Reactivate a deactivated relay: flip active=true + clear its suppression so it's dialed again. */
-    fun reactivateRelay(nodeHex: String) {
+    /** Reactivate a deactivated relay: flip active=true + clear its suppression so it's dialed again.
+     *  `adoptedAtMs`: 0 = explicit local reactivation (stamp now()); non-zero = the announce's stamp. */
+    fun reactivateRelay(nodeHex: String, adoptedAtMs: Long = 0) {
         val hex = if (nodeHex.startsWith("s3:")) nodeHex else nodeHex.trim().lowercase()
         suppressedRelays.remove(hex)
-        ensureRelayEntry(hex, activate = true)
+        forgotAtRelays.remove(hex)
+        ensureRelayEntry(hex, activate = true, adoptedAtMs = adoptedAtMs)
         relayHealth.remove(hex)   // clear stale backoff so it's retried immediately
         saveRelayNodes()
         bumpRelays()
@@ -1515,6 +1548,7 @@ object HavenNet : InboundListener {
             if (defaultRelayHex == hex) defaultRelayHex = ""
             relayEntries.remove(hex)
             suppressedRelays.add(hex)
+            forgotAtRelays[hex] = relayNow()   // LWW deletion stamp (a later re-add can still supersede)
             forgetBackedUp(hex)   // relay gone for good → re-mirror if a relay with this id ever returns
             saveRelayNodes()
             relayMutex.withLock {
@@ -1572,16 +1606,22 @@ object HavenNet : InboundListener {
     /** True when a relay is recorded + currently active. Unknown hexes are treated active (nothing breaks). */
     fun isRelayActive(hex: String): Boolean = relayEntries[hex]?.active ?: true
 
-    /** Create-or-update a RelayEntry. `activate` flips it on; lastSeen is stamped now on first create. */
-    private fun ensureRelayEntry(hex: String, name: String? = null, isS3: Boolean = false, activate: Boolean = false) {
+    /** Create-or-update a RelayEntry. `activate` flips it on; lastSeen is stamped now on first create.
+     *  `adoptedAtMs`: 0 = explicit local adoption (stamp now()); non-zero = the announce's adoption
+     *  stamp (propagate it, don't invent a fresh one — inventing now() on every echo would let a stale
+     *  relay's re-announce keep beating a user's forget = the zombie loop). Adoption stamp only moves
+     *  FORWARD (max). Mirrors iOS `ensureEntry(adoptedAtMs:)`. */
+    private fun ensureRelayEntry(hex: String, name: String? = null, isS3: Boolean = false, activate: Boolean = false, adoptedAtMs: Long = 0) {
         val e = relayEntries[hex]
         relayEntries[hex] = if (e != null) {
             e.copy(
                 name = if (!name.isNullOrBlank()) name else e.name,
                 active = if (activate) true else e.active,
+                addedAtMs = if (adoptedAtMs > 0) maxOf(e.addedAtMs, adoptedAtMs) else e.addedAtMs,
             )
         } else {
-            RelayEntry(hex, if (name.isNullOrBlank()) shortRelayName(hex) else name, true, relayNow(), isS3)
+            RelayEntry(hex, if (name.isNullOrBlank()) shortRelayName(hex) else name, true, relayNow(), isS3,
+                addedAtMs = if (adoptedAtMs > 0) adoptedAtMs else relayNow())
         }
         saveRelayNodes()
     }
@@ -2728,10 +2768,24 @@ object HavenNet : InboundListener {
     private fun loadRelayNodes() {
         relayNodes.clear()
         suppressedRelays.clear()
+        forgotAtRelays.clear()
         relayEntries.clear()
         defaultRelayHex = prefs.getString("relayDefault", "") ?: ""
         prefs.getString("relaysSuppressed", null)?.let { raw ->
             runCatching { val a = JSONArray(raw); for (i in 0 until a.length()) suppressedRelays.add(a.getString(i)) }
+        }
+        prefs.getString("relaysForgotAt", null)?.let { raw ->
+            runCatching { val o = JSONObject(raw); o.keys().forEach { k -> forgotAtRelays[k] = o.getLong(k) } }
+        }
+        // MIGRATION: relays deleted BEFORE the deletion-timestamp existed are in `suppressed` but have no
+        // `forgotAt`. Without a deletion time the LWW gate can't tell a real re-add from a mere reopen, so
+        // those old deletions leaked back. Stamp them "deleted now" so a re-announce carrying the relay's
+        // ORIGINAL (older) adoption time loses. Mirrors iOS. */
+        run {
+            var migrated = false
+            val nowStamp = relayNow()
+            for (hex in suppressedRelays) if (forgotAtRelays[hex] == null) { forgotAtRelays[hex] = nowStamp; migrated = true }
+            if (migrated) saveRelayNodes()
         }
         // New multi-relay format.
         prefs.getString("relays", null)?.let { raw ->
@@ -2778,6 +2832,7 @@ object HavenNet : InboundListener {
                             (0 until a.length()).mapNotNull { i -> a.optString(i).takeIf { it.isNotEmpty() } }
                         } ?: emptyList(),
                         httpToken = o.optString("httpToken", ""),
+                        addedAtMs = o.optLong("addedAtMs", 0L),
                     )
                 }
             }
@@ -2796,12 +2851,15 @@ object HavenNet : InboundListener {
                 put("lastSeenMs", e.lastSeenMs); put("isS3", e.isS3)
                 if (e.httpUrls.isNotEmpty()) put("httpUrls", JSONArray(e.httpUrls))
                 if (e.httpToken.isNotEmpty()) put("httpToken", e.httpToken)
+                if (e.addedAtMs > 0) put("addedAtMs", e.addedAtMs)
             })
         }
+        val forgotAtJson = JSONObject().apply { forgotAtRelays.forEach { (k, v) -> put(k, v) } }
         // Write the new format and clear the legacy key (completes the migration).
         prefs.edit()
             .putString("relays", o.toString())
             .putString("relaysSuppressed", JSONArray().apply { suppressedRelays.forEach { put(it) } }.toString())
+            .putString("relaysForgotAt", forgotAtJson.toString())
             .putString("relayEntries", entriesArr.toString())
             .putString("relayDefault", defaultRelayHex)
             .remove("relayNodes").apply()
@@ -2814,7 +2872,7 @@ object HavenNet : InboundListener {
         contacts.clear(); pending.clear(); blocked.clear(); initiated.clear()
         relayNodes.clear(); relayClients.clear(); relayHealth.clear(); seenMailbox.clear()
         runCatching { seenMailboxFile.delete() }   // a new identity must not inherit the seen-set
-        relayEntries.clear(); suppressedRelays.clear(); defaultRelayHex = ""
+        relayEntries.clear(); suppressedRelays.clear(); forgotAtRelays.clear(); defaultRelayHex = ""
         Presign.reset()
         CircleLock.reset()
         AvatarStore.clear()

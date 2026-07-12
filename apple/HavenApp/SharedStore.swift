@@ -265,7 +265,10 @@ enum SharedStore {
                 if resolved { continue }
             }
             // iroh fallback — RelayClients honors RelayHealth backoff (nil = skip WITHOUT sealing).
-            guard let c = await RelayClients.client(node) else { continue }
+            guard let c = await RelayClients.client(node) else {
+                HavenLog.sync("backup probe SKIP ref=\(ref) relay=\(node.prefix(8)) — unreachable/backing off (no http, no dial)")
+                continue
+            }
             if await c.has(key: key(ref)) {
                 RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
                 MediaBackupLedger.mark(node, ref); landed = true
@@ -323,22 +326,31 @@ enum SharedStore {
                     MediaBackupLedger.mark(node, ref); landed = true
                 } catch {
                     markHttpUrlBad(base)
+                    HavenLog.sync("backup http-put FAIL ref=\(ref) relay=\(node.prefix(8)): \(error.localizedDescription) — trying blob dial")
                     // The HTTP interface died mid-upload — fall back to the iroh dial (same store).
                     guard let c = await RelayClients.client(node) else { continue }
                     do {
                         try await putMedia(ref: ref, sealed: sealed) { try await c.put(key: $0, data: $1) }
                         RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
+                        HavenLog.sync("backup blob-dial OK ref=\(ref) relay=\(node.prefix(8)) size=\(sealed.count) — cross-NAT blob path WORKS")
                         MediaBackupLedger.mark(node, ref); landed = true
                     }
-                    catch { RelayHealth.shared.recordFailure(node); RelayClients.forget(node) }
+                    catch {
+                        HavenLog.sync("backup blob-dial FAIL ref=\(ref) relay=\(node.prefix(8)) size=\(sealed.count): \(error.localizedDescription)")
+                        RelayHealth.shared.recordFailure(node); RelayClients.forget(node)
+                    }
                 }
             case .dial(let c):
                 do {
                     try await putMedia(ref: ref, sealed: sealed) { try await c.put(key: $0, data: $1) }
                     RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
+                    HavenLog.sync("backup blob-dial OK ref=\(ref) relay=\(node.prefix(8)) size=\(sealed.count) — cross-NAT blob path WORKS")
                     MediaBackupLedger.mark(node, ref); landed = true
                 }
-                catch { RelayHealth.shared.recordFailure(node); RelayClients.forget(node) }
+                catch {
+                    HavenLog.sync("backup blob-dial FAIL ref=\(ref) relay=\(node.prefix(8)) size=\(sealed.count): \(error.localizedDescription)")
+                    RelayHealth.shared.recordFailure(node); RelayClients.forget(node)
+                }
             }
         }
         if !landed { HavenLog.sync("backup NO-DEST ref=\(ref)"); MediaBackupBackoff.recordStalled(ref) }

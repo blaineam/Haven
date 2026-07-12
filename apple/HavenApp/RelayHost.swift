@@ -327,6 +327,12 @@ final class RelayMailboxStore: ObservableObject {
     /// re-add reactivates; a forget newer than the last re-add keeps it dead. Parallel to `suppressed`.
     private var forgotAt: [String: UInt64] = [:]
     private let forgotAtKey = "haven.relay.forgotAt"
+    /// Relays we deliberately RE-ADDED after a deletion (hex → re-add unix ms). Kept — like the
+    /// friend-removal cleared-set — so self-sync publishes an explicit CLEAR (relay-removal = 0) that
+    /// supersedes a sibling's stale deletion tombstone. Without it a grow-only relay tombstone would
+    /// re-forget a re-added relay on every sibling's sync pass, forever.
+    private var clearedRelayForgets: [String: UInt64] = [:]
+    private let clearedRelayForgetsKey = "haven.relay.forgotAt.cleared"
 
     private func nowMs() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
 
@@ -334,6 +340,70 @@ final class RelayMailboxStore: ObservableObject {
     func addedAtMs(_ hex: String) -> UInt64 { entries[hex]?.addedAtMs ?? 0 }
     /// When a relay was forgotten (0 if never), for the LWW reactivation gate.
     func forgottenAtMs(_ hex: String) -> UInt64 { forgotAt[hex.lowercased()] ?? 0 }
+    /// Every relay we've forgotten, with its deletion timestamp — published to our OTHER devices via
+    /// self-sync so a deletion PROPAGATES (a sibling that still had the relay active learns it's gone).
+    var forgottenRelays: [String: UInt64] { forgotAt }
+    /// Relays we deliberately re-added (hex → re-add ms) — published as a CLEAR so a sibling's stale
+    /// deletion tombstone doesn't re-forget a relay we brought back.
+    var clearedRelayForgetRecords: [String: UInt64] { clearedRelayForgets }
+
+    /// Apply a relay-deletion CLEAR from another device (the relay was re-added there). Un-forget it
+    /// locally so it can be re-learned. The account-state CRDT already picked the newest write
+    /// (delete-vs-clear) per relay, so we simply apply whatever converged.
+    func applyClearedRelayForget(_ nodeHex: String) {
+        let hex = nodeHex.hasPrefix("s3:") ? nodeHex : nodeHex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard suppressed.contains(hex) || forgotAt[hex] != nil else { return }
+        suppressed.remove(hex)
+        forgotAt.removeValue(forKey: hex)
+        UserDefaults.standard.set(Array(suppressed), forKey: suppressedKey)
+        UserDefaults.standard.set(forgotAt, forKey: forgotAtKey)
+        objectWillChange.send()
+    }
+
+    /// Add a relay learned via SELF-SYNC (another of my devices' circle record) WITHOUT stamping a
+    /// fresh adoption time. Self-sync carries only a hex list (no timestamps), so the old code
+    /// fabricated addedAt=now() here — which let a sibling perpetually re-stamp a relay and defeat a
+    /// deletion's LWW ("deleted relays keep returning when another device syncs"). A sync-learned relay
+    /// keeps its EXISTING adoption stamp, or 0 (unknown) for a brand-new one — and 0 loses the LWW gate
+    /// to any real forget, so it can never resurrect a relay this device deleted. Respects the tombstone.
+    func addSynced(circleId: String, nodeHex: String) {
+        let hex = nodeHex.hasPrefix("s3:") ? nodeHex : nodeHex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard hex.hasPrefix("s3:") ? true : hex.count == 64 else { return }
+        guard !isForgotten(hex) else { return }   // never re-add a relay the user deleted
+        if entries[hex] == nil {
+            entries[hex] = RelayEntry(hex: hex, name: Self.shortName(hex), active: true,
+                                      lastSeenMs: nowMs(), isS3: hex.hasPrefix("s3:"), addedAtMs: 0)
+            persistEntries()
+        }
+        var list = relaysByCircle[circleId] ?? []
+        if !list.contains(hex) {
+            list.append(hex)
+            relaysByCircle[circleId] = list
+            UserDefaults.standard.set(relaysByCircle, forKey: key)
+        }
+    }
+
+    /// Apply a relay-deletion tombstone learned from another of my devices via self-sync (LWW). Forget
+    /// the relay locally IF the sibling's deletion is NEWER than our own adoption of it — so a deletion
+    /// on one device drops the relay on all of them, but a device that legitimately RE-ADDED it later
+    /// (addedAt > the synced forget time) keeps it. Idempotent.
+    func applyForgottenTombstone(_ nodeHex: String, atMs: UInt64) {
+        let hex = nodeHex.hasPrefix("s3:") ? nodeHex : nodeHex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard atMs > 0 else { return }
+        // A newer local re-add wins over the synced deletion.
+        if addedAtMs(hex) > atMs { return }
+        // Already forgotten at or after this time → nothing to do.
+        if (forgotAt[hex] ?? 0) >= atMs { return }
+        if var e = entries[hex] { e.active = false; entries[hex] = e }
+        suppressed.insert(hex)
+        forgotAt[hex] = atMs
+        persistEntries()
+        UserDefaults.standard.set(Array(suppressed), forKey: suppressedKey)
+        UserDefaults.standard.set(forgotAt, forKey: forgotAtKey)
+        RelayClients.forget(hex)
+        RelayHealth.shared.forget(hex)
+        objectWillChange.send()
+    }
 
     private init() {
         let d = UserDefaults.standard
@@ -350,6 +420,7 @@ final class RelayMailboxStore: ObservableObject {
         relaysByCircle = loaded
         suppressed = Set((d.array(forKey: suppressedKey) as? [String]) ?? [])
         forgotAt = (d.dictionary(forKey: forgotAtKey) as? [String: UInt64]) ?? [:]
+        clearedRelayForgets = (d.dictionary(forKey: clearedRelayForgetsKey) as? [String: UInt64]) ?? [:]
         // MIGRATION: relays deleted on a build BEFORE the deletion-timestamp existed are in
         // `suppressed` but have no `forgotAt` entry. Without a deletion time the LWW gate can't tell
         // a deliberate re-add from an owner merely reopening the app, so those old deletions leaked
@@ -510,8 +581,12 @@ final class RelayMailboxStore: ObservableObject {
     func unforget(_ nodeHex: String) {
         let hex = nodeHex.hasPrefix("s3:") ? nodeHex : nodeHex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let hadTombstone = suppressed.remove(hex) != nil
-        if forgotAt.removeValue(forKey: hex) != nil {
-            UserDefaults.standard.set(forgotAt, forKey: forgotAtKey)
+        let hadForget = forgotAt.removeValue(forKey: hex) != nil
+        if hadForget { UserDefaults.standard.set(forgotAt, forKey: forgotAtKey) }
+        // Record the re-add as a CLEAR so self-sync supersedes a sibling's stale deletion tombstone.
+        if hadTombstone || hadForget {
+            clearedRelayForgets[hex] = nowMs()
+            UserDefaults.standard.set(clearedRelayForgets, forKey: clearedRelayForgetsKey)
         }
         guard hadTombstone else { return }
         UserDefaults.standard.set(Array(suppressed), forKey: suppressedKey)
@@ -546,9 +621,11 @@ final class RelayMailboxStore: ObservableObject {
         // already filters inactive entries out, so it stops being dialed/served immediately.)
         suppressed.insert(hex)
         forgotAt[hex] = nowMs()   // LWW stamp: a re-announce only wins if it was (re-)added AFTER this
+        clearedRelayForgets.removeValue(forKey: hex)   // a fresh deletion supersedes any prior re-add clear
         persistEntries()
         UserDefaults.standard.set(Array(suppressed), forKey: suppressedKey)
         UserDefaults.standard.set(forgotAt, forKey: forgotAtKey)
+        UserDefaults.standard.set(clearedRelayForgets, forKey: clearedRelayForgetsKey)
         RelayClients.forget(hex)
         RelayHealth.shared.forget(hex)
         objectWillChange.send()
@@ -649,13 +726,16 @@ final class RelayHealth: ObservableObject {
         byNode[nodeHex] = Health(fails: 0, nextRetryMs: 0, lastSuccessMs: nowMs())
         objectWillChange.send()
     }
-    /// A failure grows the backoff exponentially (5s, 10s, 20s … capped at 5m).
+    /// A failure grows the backoff exponentially (5s, 10s, 20s … capped at 5m) AND invalidates
+    /// proof-of-life: a relay that just failed is no longer "reachable", even if it succeeded within
+    /// the last 15 min. Without this a relay stayed green for the full window while failing every op.
     func recordFailure(_ nodeHex: String) {
         var h = byNode[nodeHex] ?? Health()
         h.fails = h.fails == UInt32.max ? h.fails : h.fails + 1
         let shift = UInt64(min(h.fails - 1, 6))   // cap the exponent so the shift never overflows
         let backoff = min(Self.baseBackoffMs * (1 << shift), Self.maxBackoffMs)
         h.nextRetryMs = nowMs() + backoff
+        h.lastSuccessMs = 0   // no longer proven alive — the last thing we know is that it FAILED
         byNode[nodeHex] = h
         objectWillChange.send()
     }
@@ -701,9 +781,12 @@ enum RelayClients {
             HavenLog.relay("dial relay \(nodeHex.prefix(10)) → CONNECT FAIL")
             return nil
         }
-        RelayHealth.shared.recordSuccess(nodeHex)
-        RelayMailboxStore.shared.markSeen(nodeHex)
-        HavenLog.relay("dial relay \(nodeHex.prefix(10)) → ok")
+        // DO NOT record proof-of-life here. `node.relayClient(...)` is a LAZY constructor that does ZERO
+        // network I/O — the QUIC connection is established on the first real op. Recording success on it
+        // marked ANY well-formed node id "reachable" (dead relays showed a green dot), and vouched for
+        // dead ids in the re-announce gate. Proof-of-life is stamped by the ACTUAL ops (put/get/list/has/
+        // touch) at their call sites once bytes really move. Getting a client == "dialable", not "alive".
+        HavenLog.relay("dial relay \(nodeHex.prefix(10)) → client ready (unverified until first op)")
         cache[nodeHex] = c
         return c
     }

@@ -84,6 +84,27 @@ pub const BLOB_ALPN: &[u8] = b"haven/blob/1";
 
 /// Hard cap on a single blob (matches the social transport's 256 MiB ceiling).
 const MAX_BLOB: u64 = 256 * 1024 * 1024;
+
+/// Bound how long ANY single blob-client op may block. Without this a relay that accepts the QUIC
+/// connection but then never replies hangs the `await` forever — so the caller's serial fan-out
+/// stalls on that one relay and never records a failure (so backoff never engages). One dead/hung
+/// relay could therefore freeze posting/polling for ALL relays. A 30s ceiling on data ops (put/get)
+/// and a faster 12s dial cap bound the hang so a bad relay fails fast, records a strike, and gets
+/// backed off — isolating it from the healthy relays.
+const OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+
+/// Run a blob-client op under `OP_TIMEOUT`, turning a hang into a prompt error (so the caller records
+/// a relay failure and backs it off instead of stalling forever).
+async fn with_timeout<F, T>(what: &str, fut: F) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    match tokio::time::timeout(OP_TIMEOUT, fut).await {
+        Ok(r) => r,
+        Err(_) => bail!("relay {what} timed out"),
+    }
+}
 /// Hard cap on a key length (keys are short content-addressed paths).
 const MAX_KEY: usize = 512;
 /// Hard cap on a TOUCH request body (newline-joined keys — thousands of refs fit easily).
@@ -867,7 +888,10 @@ impl BlobClient {
                 return Ok(c.clone());
             }
         }
-        let c = self.endpoint.connect(self.dest.clone(), BLOB_ALPN).await.ah()?;
+        let c = tokio::time::timeout(DIAL_TIMEOUT, self.endpoint.connect(self.dest.clone(), BLOB_ALPN))
+            .await
+            .map_err(|_| anyhow!("relay dial timed out"))?
+            .ah()?;
         *guard = Some(c.clone());
         Ok(c)
     }
@@ -877,44 +901,53 @@ impl BlobClient {
         if body.len() as u64 > MAX_BLOB {
             bail!("blob too large");
         }
-        let conn = self.conn().await?;
-        let (mut send, mut recv) = conn.open_bi().await.ah()?;
-        write_header(&mut send, VERB_PUT, key).await?;
-        send.write_u64(body.len() as u64).await.ah()?;
-        send.write_all(body).await.ah()?;
-        send.finish().ah()?;
-        let reply = recv.read_to_end(64).await.ah()?;
-        if reply == b"OK" {
-            Ok(())
-        } else {
-            bail!("put failed: {}", String::from_utf8_lossy(&reply))
-        }
+        with_timeout("put", async {
+            let conn = self.conn().await?;
+            let (mut send, mut recv) = conn.open_bi().await.ah()?;
+            write_header(&mut send, VERB_PUT, key).await?;
+            send.write_u64(body.len() as u64).await.ah()?;
+            send.write_all(body).await.ah()?;
+            send.finish().ah()?;
+            let reply = recv.read_to_end(64).await.ah()?;
+            if reply == b"OK" {
+                Ok(())
+            } else {
+                bail!("put failed: {}", String::from_utf8_lossy(&reply))
+            }
+        })
+        .await
     }
 
     /// Fetch the (sealed) blob at `key`, or `None` if the relay doesn't have it.
     pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        let conn = self.conn().await?;
-        let (mut send, mut recv) = conn.open_bi().await.ah()?;
-        write_header(&mut send, VERB_GET, key).await?;
-        send.write_u64(0).await.ah()?;
-        send.finish().ah()?;
-        let bytes = recv.read_to_end(MAX_BLOB as usize).await.ah()?;
-        if bytes == MISS {
-            Ok(None)
-        } else {
-            Ok(Some(bytes))
-        }
+        with_timeout("get", async {
+            let conn = self.conn().await?;
+            let (mut send, mut recv) = conn.open_bi().await.ah()?;
+            write_header(&mut send, VERB_GET, key).await?;
+            send.write_u64(0).await.ah()?;
+            send.finish().ah()?;
+            let bytes = recv.read_to_end(MAX_BLOB as usize).await.ah()?;
+            if bytes == MISS {
+                Ok(None)
+            } else {
+                Ok(Some(bytes))
+            }
+        })
+        .await
     }
 
     /// Existence check for `key`.
     pub async fn has(&self, key: &str) -> Result<bool> {
-        let conn = self.conn().await?;
-        let (mut send, mut recv) = conn.open_bi().await.ah()?;
-        write_header(&mut send, VERB_HAS, key).await?;
-        send.write_u64(0).await.ah()?;
-        send.finish().ah()?;
-        let reply = recv.read_to_end(16).await.ah()?;
-        Ok(reply == b"HIT")
+        with_timeout("has", async {
+            let conn = self.conn().await?;
+            let (mut send, mut recv) = conn.open_bi().await.ah()?;
+            write_header(&mut send, VERB_HAS, key).await?;
+            send.write_u64(0).await.ah()?;
+            send.finish().ah()?;
+            let reply = recv.read_to_end(16).await.ah()?;
+            Ok(reply == b"HIT")
+        })
+        .await
     }
 
     /// Refresh the liveness of `keys` (all under `prefix`, a single circle's mailbox path)
@@ -925,56 +958,65 @@ impl BlobClient {
         if body.len() as u64 > MAX_TOUCH_BODY {
             bail!("touch batch too large");
         }
-        let conn = self.conn().await?;
-        let (mut send, mut recv) = conn.open_bi().await.ah()?;
-        write_header(&mut send, VERB_TOUCH, prefix).await?;
-        send.write_u64(body.len() as u64).await.ah()?;
-        send.write_all(body.as_bytes()).await.ah()?;
-        send.finish().ah()?;
-        let reply = recv.read_to_end(MAX_TOUCH_BODY as usize + 16).await.ah()?;
-        let text = String::from_utf8_lossy(&reply);
-        let mut lines = text.lines();
-        match lines.next() {
-            Some("OK") => Ok(lines.map(|s| s.to_string()).collect()),
-            other => bail!("touch failed: {}", other.unwrap_or("empty reply")),
-        }
+        with_timeout("touch", async {
+            let conn = self.conn().await?;
+            let (mut send, mut recv) = conn.open_bi().await.ah()?;
+            write_header(&mut send, VERB_TOUCH, prefix).await?;
+            send.write_u64(body.len() as u64).await.ah()?;
+            send.write_all(body.as_bytes()).await.ah()?;
+            send.finish().ah()?;
+            let reply = recv.read_to_end(MAX_TOUCH_BODY as usize + 16).await.ah()?;
+            let text = String::from_utf8_lossy(&reply);
+            let mut lines = text.lines();
+            match lines.next() {
+                Some("OK") => Ok(lines.map(|s| s.to_string()).collect()),
+                other => bail!("touch failed: {}", other.unwrap_or("empty reply")),
+            }
+        })
+        .await
     }
 
     /// Keys under `prefix` with idle ages ("seconds since last write/touch") — the
     /// age-preserving mesh-sync inventory. Errors against a pre-GC relay that doesn't
     /// speak AGES; callers fall back to [`Self::list`] (age 0 = fresh).
     pub async fn list_ages(&self, prefix: &str) -> Result<Vec<(String, u64)>> {
-        let conn = self.conn().await?;
-        let (mut send, mut recv) = conn.open_bi().await.ah()?;
-        write_header(&mut send, VERB_AGES, prefix).await?;
-        send.write_u64(0).await.ah()?;
-        send.finish().ah()?;
-        let bytes = recv.read_to_end(MAX_BLOB as usize).await.ah()?;
-        let text = String::from_utf8_lossy(&bytes);
-        if text.starts_with("ERR") {
-            bail!("ages failed: {text}");
-        }
-        let mut out = Vec::new();
-        for line in text.lines() {
-            let Some((age, key)) = line.split_once(' ') else { bail!("bad ages line") };
-            out.push((key.to_string(), age.parse::<u64>().map_err(|_| anyhow!("bad age"))?));
-        }
-        Ok(out)
+        with_timeout("ages", async {
+            let conn = self.conn().await?;
+            let (mut send, mut recv) = conn.open_bi().await.ah()?;
+            write_header(&mut send, VERB_AGES, prefix).await?;
+            send.write_u64(0).await.ah()?;
+            send.finish().ah()?;
+            let bytes = recv.read_to_end(MAX_BLOB as usize).await.ah()?;
+            let text = String::from_utf8_lossy(&bytes);
+            if text.starts_with("ERR") {
+                bail!("ages failed: {text}");
+            }
+            let mut out = Vec::new();
+            for line in text.lines() {
+                let Some((age, key)) = line.split_once(' ') else { bail!("bad ages line") };
+                out.push((key.to_string(), age.parse::<u64>().map_err(|_| anyhow!("bad age"))?));
+            }
+            Ok(out)
+        })
+        .await
     }
 
     /// List stored keys under `prefix` (e.g. a circle's mailbox path). Used to poll the
     /// mailbox for new sealed posts.
     pub async fn list(&self, prefix: &str) -> Result<Vec<String>> {
-        let conn = self.conn().await?;
-        let (mut send, mut recv) = conn.open_bi().await.ah()?;
-        write_header(&mut send, VERB_LIST, prefix).await?;
-        send.write_u64(0).await.ah()?;
-        send.finish().ah()?;
-        let bytes = recv.read_to_end(MAX_BLOB as usize).await.ah()?;
-        if bytes.is_empty() {
-            return Ok(Vec::new());
-        }
-        Ok(String::from_utf8_lossy(&bytes).lines().map(|s| s.to_string()).collect())
+        with_timeout("list", async {
+            let conn = self.conn().await?;
+            let (mut send, mut recv) = conn.open_bi().await.ah()?;
+            write_header(&mut send, VERB_LIST, prefix).await?;
+            send.write_u64(0).await.ah()?;
+            send.finish().ah()?;
+            let bytes = recv.read_to_end(MAX_BLOB as usize).await.ah()?;
+            if bytes.is_empty() {
+                return Ok(Vec::new());
+            }
+            Ok(String::from_utf8_lossy(&bytes).lines().map(|s| s.to_string()).collect())
+        })
+        .await
     }
 
     pub async fn close(self) {

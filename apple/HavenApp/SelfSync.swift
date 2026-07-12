@@ -93,6 +93,18 @@ final class SelfSyncCoordinator {
         // removal record re-severed a re-added friend on every sibling's sync pass, forever.
         for key in ConnectionsStore.shared.circleRemovals { m["removal:\(key)"] = Data([1]) }
         for key in ConnectionsStore.shared.clearedCircleRemovals { m["removal:\(key)"] = Data([0]) }
+        // Relay DELETIONS — LWW by the forget timestamp, so deleting a relay on one device drops it on
+        // all of them (and stops a sibling re-announcing it). Value = the 8-byte forgotAt (ms). Without
+        // this the deletion was device-local and a sibling kept the relay active + re-announcing it,
+        // resurrecting it ("deleted relays keep returning").
+        for (hex, ms) in RelayMailboxStore.shared.forgottenRelays {
+            m["relay-removal:\(hex)"] = withUnsafeBytes(of: ms.littleEndian) { Data($0) }
+        }
+        // …and re-adds as an explicit CLEAR (value 0), a newer write that supersedes a sibling's stale
+        // deletion — so bringing a relay back sticks fleet-wide instead of being re-forgotten each pass.
+        for hex in RelayMailboxStore.shared.clearedRelayForgetRecords.keys {
+            m["relay-removal:\(hex)"] = withUnsafeBytes(of: UInt64(0).littleEndian) { Data($0) }
+        }
         // Circles: name + member bundles + relay nodes, so another device can reconstruct each
         // circle and seal to every member. (Additive in v1 — member/circle removal is a follow-up.)
         if let social = social {
@@ -197,6 +209,20 @@ final class SelfSyncCoordinator {
             social?.removeFromCircle(circleId: circleId, nodeHex: hex)
         }
 
+        // Relay deletions from another of my devices (LWW). Applied BEFORE the circle: records below
+        // re-add relays, so a relay this or a sibling device deleted stays gone. A device that
+        // legitimately re-added it later (its addedAt > the synced forget time) keeps it.
+        for e in live where e.key.hasPrefix("relay-removal:") {
+            let hex = String(e.key.dropFirst("relay-removal:".count))
+            guard !hex.isEmpty, e.value.count == 8 else { continue }
+            let ms = e.value.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self).littleEndian }
+            if ms == 0 {
+                RelayMailboxStore.shared.applyClearedRelayForget(hex)   // re-added elsewhere → un-forget
+            } else {
+                RelayMailboxStore.shared.applyForgottenTombstone(hex, atMs: ms)   // deleted elsewhere → forget
+            }
+        }
+
         // Contact rosters synced from another of my devices → ingest so THIS device can also dial + seal to
         // each friend's CURRENT devices (verified against the account bundle carried inside the wire). This
         // is what lets a linked Mac reach friends it never contacted directly — it inherits their device ids
@@ -229,8 +255,11 @@ final class SelfSyncCoordinator {
                     if conn.isRemovedFromCircle(hex, circleId: id) { continue }
                     _ = try? social.addContactBundle(circleId: id, bundle: bundle)
                 }
-                for node in rec.relays where !RelayMailboxStore.shared.isForgotten(node) {
-                    RelayMailboxStore.shared.add(circleId: id, nodeHex: node)   // skip relays the user forgot
+                for node in rec.relays {
+                    // Non-stamping add: a sync-learned relay must NOT get a fresh addedAt=now() (that
+                    // fabricated stamp is what let a sibling perpetually defeat a deletion's LWW). Skips
+                    // relays we've forgotten. Keeps its real adoption stamp (or 0 = unknown).
+                    RelayMailboxStore.shared.addSynced(circleId: id, nodeHex: node)
                 }
             }
         }

@@ -92,6 +92,18 @@ pub fn current_local(prefs: &Prefs, social: &HavenSocial) -> BTreeMap<String, Ve
         m.insert(format!("removal:{entry}"), vec![0]);
     }
 
+    // Relay DELETIONS + RE-ADDS — LWW per relay across my own devices. Deleting a relay on one device
+    // must drop it on all of them (and stop a sibling re-announcing it), and a stale re-add must NOT
+    // resurrect a relay the user has since deleted. `relay-removal:<hex>` carries the 8-byte forget ms;
+    // `relay-readd:<hex>` carries the 8-byte re-add ms (its OWN timestamp, NOT a bare 0). On apply the
+    // newest of the two wins per relay. Mirrors iOS SelfSync `relay-removal:` / `relay-readd:`.
+    for (hex, ms) in &prefs.forgot_at_relays {
+        m.insert(format!("relay-removal:{hex}"), ms.to_le_bytes().to_vec());
+    }
+    for (hex, ms) in &prefs.cleared_relay_forgets {
+        m.insert(format!("relay-readd:{hex}"), ms.to_le_bytes().to_vec());
+    }
+
     // Circles: name + member bundles + relay nodes, so another device can reconstruct each circle
     // and seal to every member. Encoded via the shared FFI encoder so the bytes are byte-identical
     // to iOS/Android (it base64's the RAW bundles, sorts members/relays, alphabetical-key JSON).
@@ -286,6 +298,49 @@ pub fn apply_local(
         }
         if let Some((cid, hex)) = entry.split_once('|') {
             social.remove_from_circle(cid.to_string(), hex.to_string());
+        }
+    }
+
+    // Relay delete vs re-add from any of my devices, resolved by LWW on the SEMANTIC timestamp (delete
+    // time vs re-add time) — NOT by which device synced last. Gather both sides (max per relay), newest
+    // wins. Applied BEFORE the circle: records below (which re-add a circle's relays), so a relay whose
+    // newest verdict is "deleted" lands in suppressed_relays and the circle loop then skips it. A legacy
+    // `relay-removal:<hex>` = 0 (old bare CLEAR) decodes to del=0/readd=0 → ignored, which is exactly
+    // right. Mirrors iOS SelfSync relay LWW + applyForgottenTombstone / applyClearedRelayForget.
+    {
+        let mut removal_ms: BTreeMap<String, u64> = BTreeMap::new();
+        let mut readd_ms: BTreeMap<String, u64> = BTreeMap::new();
+        for (k, v) in entries {
+            if v.len() != 8 {
+                continue;
+            }
+            let mut a = [0u8; 8];
+            a.copy_from_slice(v);
+            let n = u64::from_le_bytes(a);
+            if let Some(hex) = k.strip_prefix("relay-removal:") {
+                if !hex.is_empty() {
+                    let e = removal_ms.entry(hex.to_string()).or_insert(0);
+                    *e = (*e).max(n);
+                }
+            } else if let Some(hex) = k.strip_prefix("relay-readd:") {
+                if !hex.is_empty() {
+                    let e = readd_ms.entry(hex.to_string()).or_insert(0);
+                    *e = (*e).max(n);
+                }
+            }
+        }
+        let mut hexes: std::collections::BTreeSet<String> = removal_ms.keys().cloned().collect();
+        hexes.extend(readd_ms.keys().cloned());
+        for hex in hexes {
+            let del = removal_ms.get(&hex).copied().unwrap_or(0);
+            let readd = readd_ms.get(&hex).copied().unwrap_or(0);
+            if del > readd {
+                if prefs.apply_forgotten_tombstone(&hex, del) {
+                    changed = true;
+                }
+            } else if readd > 0 && prefs.apply_cleared_relay_forget(&hex, readd) {
+                changed = true;
+            }
         }
     }
 

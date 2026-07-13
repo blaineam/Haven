@@ -560,6 +560,9 @@ impl Engine {
                     };
                     if backfill_due {
                         me.backfill_media_to_relays().await;
+                        // Re-publish our signed device roster to every relay so a headless relay
+                        // (which only knows account ids) keeps authorizing this account's device ids.
+                        me.publish_device_roster().await;
                     }
                     // Daily (first sync tick after launch, then every 24h of uptime): re-assert my event
                     // envelopes in every circle mailbox — upload what a relay never saw, TOUCH what it
@@ -1656,8 +1659,9 @@ impl Engine {
                 if announced_added_at <= p.relay_forgotten_at_ms(&node_hex) {
                     return;
                 }
-                p.suppressed_relays.retain(|h| h != &node_hex);
-                p.forgot_at_relays.remove(&node_hex);
+                // Clear the forget AND record a re-add timestamp so this legit newer re-add propagates
+                // to my other devices via self-sync (relay-readd) — else a sibling keeps it deleted.
+                p.relay_clear_forget(&node_hex);
                 was_reactivated = true;
             } else if is_inactive {
                 // Merely INACTIVE (deactivated, not deleted) — the owner may bring it back, or a newer
@@ -1934,7 +1938,9 @@ impl Engine {
     async fn backfill_media_to_relays(self: &Arc<Self>) {
         let circle_ids: Vec<String> = self.social.circles().into_iter().map(|c| c.id).collect();
         for circle_id in circle_ids {
-            let has_relay = !self.relays_for(&circle_id).is_empty();
+            // Broaden to media_dests (every known relay, not just the circle's own) so media still
+            // backs up when a circle's own relays are all offline but some OTHER relay is reachable.
+            let has_relay = !self.media_dests(&circle_id).is_empty();
             let has_s3 = self.prefs.lock().unwrap().s3.is_some();
             if !has_relay && !has_s3 {
                 continue;
@@ -1964,6 +1970,60 @@ impl Engine {
         }
     }
 
+    /// Publish THIS account's account-SIGNED device roster to EVERY known relay under the permission-free
+    /// key `haven/devroster/<accountHex>`. A device connects to a relay AS its DEVICE id, but a HEADLESS
+    /// relay only knows ACCOUNT ids (from its operator's link), so without this it `ERR forbidden`s every
+    /// one of the account's devices' mailbox ops — "my own NAS relay rejects my PC". The wire (from
+    /// `export_own_roster`) carries the account bundle + an account-signed DeviceList, so the relay
+    /// verifies it WITHOUT decrypting anything and then authorizes the account's device ids. The key is
+    /// permission-free, so this bootstrap write is allowed BEFORE authorization. Idempotent + cheap;
+    /// called on the sync timer so a restarted relay re-learns our devices promptly. Mirrors iOS
+    /// `publishDeviceRoster(social:)`.
+    async fn publish_device_roster(self: &Arc<Self>) {
+        let Some(r) = self.social.export_own_roster().into_iter().next() else { return };
+        let key = format!("haven/devroster/{}", r.account_hex);
+        let wire = r.wire;
+        if wire.is_empty() {
+            return;
+        }
+        let hosted = self.relay_host.lock().unwrap().as_ref().map(|h| h.node_id_hex());
+        let nodes: Vec<String> = {
+            let p = self.prefs.lock().unwrap();
+            p.all_active_relay_hexes().into_iter().filter(|h| !h.starts_with("s3:")).collect()
+        };
+        for node_hex in nodes {
+            // Our OWN hosted relay: write straight into the local store (no iroh self-dial).
+            if hosted.as_deref() == Some(node_hex.as_str()) {
+                if let Some(h) = self.relay_host.lock().unwrap().as_ref() {
+                    h.local_put(key.clone(), wire.clone());
+                }
+                continue;
+            }
+            // Plain-HTTP interface first (the reliable cross-NAT path), else the iroh dial.
+            let http_iface = self.prefs.lock().unwrap().relay_http(&node_hex);
+            if let Some((urls, token)) = http_iface {
+                let mut done = false;
+                for base in urls.iter().filter(|u| !self.http_url_bad(u)) {
+                    if self.http_put(base, &token, &key, wire.clone()).await {
+                        self.mark_relay_ok(&node_hex);
+                        done = true;
+                        break;
+                    }
+                    self.mark_http_url_bad(base);
+                }
+                if done {
+                    continue;
+                }
+            }
+            if let Some(client) = self.relay_client_for(&node_hex).await {
+                match client.put(key.clone(), wire.clone()).await {
+                    Ok(()) => self.mark_relay_ok(&node_hex),
+                    Err(_) => self.relay_failed(&node_hex).await,
+                }
+            }
+        }
+    }
+
     /// Adopt a relay node for all circles (ADDED to the redundant set, not replacing existing
     /// relays) + tell contacts via frame 19. Adopt several for redundancy.
     pub async fn adopt_relay(self: &Arc<Self>, node_hex: String) {
@@ -1975,8 +2035,7 @@ impl Engine {
             // Explicit adoption overrides a prior Forget AND reactivates the entry — re-adding a
             // previously-deactivated relay always works. Mirrors iOS `add(circleId:nodeHex:)`.
             let mut p = self.prefs.lock().unwrap();
-            p.suppressed_relays.retain(|h| h != &hex);
-            p.forgot_at_relays.remove(&hex);   // explicit adoption clears the deletion stamp
+            p.relay_clear_forget(&hex);        // explicit adoption clears the deletion stamp + records re-add
             p.ensure_relay_entry(&hex, None, false, true);
             p.set_relay_added_at(&hex, 0);     // fresh adoption stamp = now()
             let _ = p.save(&self.paths);
@@ -2027,7 +2086,7 @@ impl Engine {
             if !p.suppressed_relays.contains(&hex) {
                 p.suppressed_relays.push(hex.clone());
             }
-            p.forgot_at_relays.insert(hex.clone(), now_ms());   // LWW: re-add only wins if newer
+            p.relay_stamp_forgot(&hex);   // LWW: stamp forgot now (+ syncs the deletion), re-add only wins if newer
             let _ = p.save(&self.paths);
         }
         self.relay_clients.lock().await.remove(&hex);
@@ -2044,8 +2103,7 @@ impl Engine {
         let hex = Self::norm_relay_hex(&node_hex);
         {
             let mut p = self.prefs.lock().unwrap();
-            p.suppressed_relays.retain(|h| h != &hex);
-            p.forgot_at_relays.remove(&hex);   // explicit reactivation clears the deletion stamp
+            p.relay_clear_forget(&hex);        // explicit reactivation clears the deletion stamp + records re-add
             p.ensure_relay_entry(&hex, None, hex.starts_with("s3:"), true);
             p.set_relay_added_at(&hex, 0);     // fresh adoption stamp = now()
             let _ = p.save(&self.paths);
@@ -2103,7 +2161,7 @@ impl Engine {
             if !p.suppressed_relays.contains(&hex) {
                 p.suppressed_relays.push(hex.clone());
             }
-            p.forgot_at_relays.insert(hex.clone(), now_ms());   // LWW deletion stamp
+            p.relay_stamp_forgot(&hex);   // LWW deletion stamp (+ syncs the deletion to my other devices)
             let _ = p.save(&self.paths);
         }
         self.relay_clients.lock().await.remove(&hex);
@@ -2127,7 +2185,7 @@ impl Engine {
         {
             let mut p = self.prefs.lock().unwrap();
             if on {
-                p.suppressed_relays.retain(|h| h != &hex);
+                p.relay_clear_forget(&hex);   // turning a relay on for a circle is an explicit re-add
                 p.ensure_relay_entry(&hex, None, hex.starts_with("s3:"), true);
                 let list = p.relays.entry(circle_id.clone()).or_default();
                 if !list.contains(&hex) {
@@ -2225,6 +2283,29 @@ impl Engine {
     /// default. Mirrors iOS `relays(forCircle:)`.
     fn relays_for(&self, circle_id: &str) -> Vec<String> {
         self.prefs.lock().unwrap().active_relays_for(circle_id)
+    }
+
+    /// Relay hexes to MIRROR media to / FETCH media from — the circle's own active relays PLUS every
+    /// OTHER active relay this device knows (s3 excluded, deduped). Media keys (`haven/media/<ref>`) are
+    /// content-addressed AND permission-free on a relay (unlike membership-gated mailbox keys — a relay
+    /// can `ERR forbidden` a device for messages while still storing its media), so a blob may safely
+    /// live on ANY relay the members can reach. Broadening beyond the circle's own (possibly all-NAT'd)
+    /// relays is what lands media when those are offline but some OTHER known relay is reachable; content
+    /// addressing keeps the extra puts idempotent and mesh anti-entropy replicates it back later. Mirrors
+    /// iOS `mediaDests(_:)`. Leave MAILBOX (message) paths on `relays_for` — those are membership-gated.
+    fn media_dests(&self, circle_id: &str) -> Vec<String> {
+        let p = self.prefs.lock().unwrap();
+        let mut out: Vec<String> = p
+            .active_relays_for(circle_id)
+            .into_iter()
+            .filter(|h| !h.starts_with("s3:"))
+            .collect();
+        for h in p.all_active_relay_hexes() {
+            if !h.starts_with("s3:") && !out.contains(&h) {
+                out.push(h);
+            }
+        }
+        out
     }
 
     fn relay_available(&self, node_hex: &str) -> bool {
@@ -2863,7 +2944,7 @@ impl Engine {
         }
         let mut http_uploads: Vec<(String, String, String)> = vec![]; // (node, base url, token)
         let mut dial_uploads: Vec<(String, Arc<RelayClient>)> = vec![];
-        for node_hex in self.relays_for(circle_id) {
+        for node_hex in self.media_dests(circle_id) {
             if node_hex.starts_with("s3:") { continue; }
             if self.media_backed_up_has(&node_hex, reference) { continue; }
             // Relay HTTP interface — a reachable relay is authoritative (the iroh path serves the
@@ -3005,9 +3086,10 @@ impl Engine {
                 }
             }
         }
-        // Then each relay in turn. Per relay, its plain-HTTP interface is tried FIRST (the reliable
-        // cross-NAT path); the iroh blob dial is the fallback/fast-path.
-        for node_hex in self.relays_for(circle_id) {
+        // Then each relay in turn — the circle's own PLUS every other known relay (media is
+        // permission-free, so a blob can be served by any reachable relay). Per relay, its plain-HTTP
+        // interface is tried FIRST (the reliable cross-NAT path); the iroh blob dial is the fallback.
+        for node_hex in self.media_dests(circle_id) {
             if node_hex.starts_with("s3:") { continue; }
             // Relay HTTP interface — the DEFAULT cross-NAT path. Bind out of the lock FIRST so the
             // MutexGuard is dropped before any `.await` below (a guard held across await isn't Send).
@@ -3175,6 +3257,20 @@ impl Engine {
 
     pub fn add_local_media(&self, circle_id: &str, bytes: &[u8], is_video: bool) -> String {
         self.media.store(&self.social, circle_id, bytes, is_video)
+    }
+
+    /// Stage a media FILE already on disk (drag-drop / file picker) sealed to the circle, via the core's
+    /// off-heap file→file seal so a large video never doubles peak RAM as a plaintext + sealed `Vec` pair
+    /// in this process. Returns the media ref, or `None` on an IO error. Mirrors iOS' file-based backup.
+    pub fn add_local_media_file(&self, circle_id: &str, path: &str, is_video: bool) -> Option<String> {
+        let kind = if is_video {
+            crate::localmedia::MediaKind::Video
+        } else {
+            crate::localmedia::MediaKind::Image
+        };
+        self.media
+            .store_file(&self.social, circle_id, std::path::Path::new(path), kind)
+            .ok()
     }
 
     pub fn add_local_audio(&self, circle_id: &str, bytes: &[u8]) -> String {

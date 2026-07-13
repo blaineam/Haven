@@ -184,6 +184,13 @@ pub struct Prefs {
     /// the user deleted. Mirrors iOS/Android `forgotAt`.
     #[serde(default)]
     pub forgot_at_relays: std::collections::HashMap<String, u64>,
+    /// When each relay was RE-ADDED after a delete (unix ms), for the self-sync LWW gate against a
+    /// sibling's deletion. Published as `relay-readd:<hex>`; a re-add NEWER than a sibling's
+    /// `relay-removal:` un-forgets the relay fleet-wide, while a delete newer than the last re-add keeps
+    /// it dead — so a stale re-add can't resurrect a relay the user has since deleted. Mirrors iOS
+    /// `clearedRelayForgets` (UserDefaults `haven.relay.forgotAt.cleared`).
+    #[serde(default)]
+    pub cleared_relay_forgets: std::collections::HashMap<String, u64>,
     /// Per-relay metadata (name / active / last-seen / isS3), keyed by hex. The config survives a
     /// deactivation here so a relay can be turned back on without re-pasting anything. Mirrors iOS
     /// `RelayMailboxStore.entries` (UserDefaults key `haven.relay.entries`).
@@ -324,6 +331,121 @@ impl Prefs {
     /// When a relay was FORGOTTEN (0 if never), for the LWW reactivation gate.
     pub fn relay_forgotten_at_ms(&self, hex: &str) -> u64 {
         self.forgot_at_relays.get(hex).copied().unwrap_or(0)
+    }
+
+    /// When a relay was last RE-ADDED after a delete (0 if never), for the self-sync LWW gate.
+    pub fn relay_cleared_forget_ms(&self, hex: &str) -> u64 {
+        self.cleared_relay_forgets.get(hex).copied().unwrap_or(0)
+    }
+
+    /// A relay's adoption stamp (0 if unknown/no entry) — the newer-local-re-add side of the LWW gate.
+    pub fn relay_added_at_ms(&self, hex: &str) -> u64 {
+        self.relay_entries.get(hex).map(|e| e.added_at_ms).unwrap_or(0)
+    }
+
+    /// Every distinct ACTIVE relay this device knows (any circle + the all-circles default + every
+    /// relay entry), regardless of which circle it's attached to. Media keys are content-addressed AND
+    /// permission-free on a relay, so a blob may live on ANY reachable relay; and a device roster is
+    /// published to every known relay. Deduped; inactive/forgotten excluded. Mirrors iOS `allRelays()`.
+    pub fn all_active_relay_hexes(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for e in self.relay_entries.values() {
+            if e.active && !out.contains(&e.hex) {
+                out.push(e.hex.clone());
+            }
+        }
+        // Defensive: fold in any relay referenced by a circle / the default that lacks an entry.
+        for hex in self.relays.values().flatten() {
+            if self.relay_is_active(hex) && !out.contains(hex) {
+                out.push(hex.clone());
+            }
+        }
+        if !self.default_relay.is_empty() && self.relay_is_active(&self.default_relay) && !out.contains(&self.default_relay) {
+            out.push(self.default_relay.clone());
+        }
+        out
+    }
+
+    /// Clear a relay's FORGOTTEN state on an explicit/legit RE-ADD, recording a re-add timestamp (now)
+    /// in `cleared_relay_forgets` so self-sync supersedes a sibling's stale deletion tombstone (LWW).
+    /// Returns whether the relay had actually been forgotten. Mirrors iOS `unforget`.
+    pub fn relay_clear_forget(&mut self, hex: &str) -> bool {
+        let had_suppressed = self.suppressed_relays.iter().any(|h| h == hex);
+        self.suppressed_relays.retain(|h| h != hex);
+        let had_forget = self.forgot_at_relays.remove(hex).is_some();
+        if had_suppressed || had_forget {
+            let now = Self::now_ms();
+            let e = self.cleared_relay_forgets.entry(hex.to_string()).or_insert(0);
+            *e = (*e).max(now);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Stamp a relay as FORGOTTEN now (delete/deactivate), superseding any prior re-add clear so a
+    /// fresh delete wins LWW — and so the deletion SYNCS to my other devices via `relay-removal:`.
+    /// Mirrors iOS forget/eraseNow forgotAt stamping.
+    pub fn relay_stamp_forgot(&mut self, hex: &str) {
+        self.forgot_at_relays.insert(hex.to_string(), Self::now_ms());
+        self.cleared_relay_forgets.remove(hex);
+    }
+
+    /// Apply a sibling's relay-DELETION tombstone from self-sync (LWW): forget the relay locally ONLY
+    /// if the deletion is NEWER than our own re-add/adoption of it. Returns true if state changed (so
+    /// the caller can persist + drop cached clients/health). Mirrors iOS `applyForgottenTombstone`.
+    pub fn apply_forgotten_tombstone(&mut self, hex: &str, at_ms: u64) -> bool {
+        if at_ms == 0 {
+            return false;
+        }
+        // A newer local re-add wins (a fresh adoption stamp, or a re-add clear newer than this delete).
+        if self.relay_added_at_ms(hex) > at_ms {
+            return false;
+        }
+        if self.relay_cleared_forget_ms(hex) > at_ms {
+            return false;
+        }
+        // Already forgotten at/after this time → nothing to do.
+        if self.relay_forgotten_at_ms(hex) >= at_ms {
+            return false;
+        }
+        if let Some(e) = self.relay_entries.get_mut(hex) {
+            e.active = false;
+        }
+        if !self.suppressed_relays.iter().any(|h| h == hex) {
+            self.suppressed_relays.push(hex.to_string());
+        }
+        self.forgot_at_relays.insert(hex.to_string(), at_ms);
+        // Drop any stale re-add record so THIS device stops re-broadcasting a clear that this newer
+        // deletion supersedes (otherwise the two ping-pong across the fleet).
+        self.cleared_relay_forgets.remove(hex);
+        true
+    }
+
+    /// Apply a sibling's relay RE-ADD from self-sync (LWW): un-forget the relay locally ONLY if the
+    /// re-add is NEWER than our local deletion. Returns true if state changed. Mirrors iOS
+    /// `applyClearedRelayForget`.
+    pub fn apply_cleared_relay_forget(&mut self, hex: &str, at_ms: u64) -> bool {
+        if at_ms == 0 {
+            return false;
+        }
+        // Our local deletion is newer than this re-add → the delete wins; ignore the stale clear.
+        if self.relay_forgotten_at_ms(hex) > at_ms {
+            return false;
+        }
+        // Already cleared at/after this time (and not currently forgotten) → nothing to do.
+        let suppressed = self.suppressed_relays.iter().any(|h| h == hex);
+        if !suppressed
+            && !self.forgot_at_relays.contains_key(hex)
+            && self.relay_cleared_forget_ms(hex) >= at_ms
+        {
+            return false;
+        }
+        self.suppressed_relays.retain(|h| h != hex);
+        self.forgot_at_relays.remove(hex);
+        let e = self.cleared_relay_forgets.entry(hex.to_string()).or_insert(0);
+        *e = (*e).max(at_ms);
+        true
     }
 
     /// Move a relay's adoption stamp FORWARD (max) — set to now() for `ms == 0` (an explicit local

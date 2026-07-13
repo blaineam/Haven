@@ -104,6 +104,50 @@ impl LocalMedia {
         self.store_kind(social, circle_id, bytes, if is_video { MediaKind::Video } else { MediaKind::Image })
     }
 
+    /// Store a media FILE already on disk, sealed to `circle_id`, using the core's off-heap file→file
+    /// seal (`seal_circle_media_file`) so the plaintext is NEVER loaded into a `Vec` here and the whole
+    /// plaintext + whole sealed envelope are never co-resident in this process — a large video (hundreds
+    /// of MB) otherwise doubled peak RAM through the `store` path (read whole file → seal whole → write).
+    /// The content address is the sha-256 of the PLAINTEXT, STREAMED in 1 MB windows, so the ref is
+    /// byte-identical to an in-memory `store` of the same bytes. Mirrors the iOS `seal_circle_media_file`
+    /// backup path. Returns the media ref, or an IO error.
+    pub fn store_file(
+        &self,
+        social: &Arc<HavenSocial>,
+        circle_id: &str,
+        src: &Path,
+        kind: MediaKind,
+    ) -> std::io::Result<String> {
+        use std::io::Read;
+        let mut hasher = Sha256::new();
+        let mut f = fs::File::open(src)?;
+        let mut buf = vec![0u8; 1024 * 1024];
+        loop {
+            let n = f.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        let hash: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        let dst = self.dir.join(&hash);
+        let sealed = social.seal_circle_media_file(
+            circle_id.to_string(),
+            src.to_string_lossy().into_owned(),
+            dst.to_string_lossy().into_owned(),
+        );
+        if !sealed {
+            // Fallback (unknown circle / IO error in the file seal): mirror `store_kind` — seal in
+            // memory, or store plaintext if even that fails, so the media is at least available locally.
+            let bytes = fs::read(src)?;
+            let to_write = social
+                .seal_circle_media(circle_id.to_string(), bytes.clone())
+                .unwrap_or(bytes);
+            fs::write(&dst, &to_write)?;
+        }
+        Ok(format!("{}{hash}", kind.prefix()))
+    }
+
     /// Load + decrypt a stored media ref, or `None` if we don't have it.
     pub fn load(&self, social: &Arc<HavenSocial>, circle_id: &str, reference: &str) -> Option<Vec<u8>> {
         let f = self.dir.join(bare_id(reference));

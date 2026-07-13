@@ -663,11 +663,14 @@ pub fn add_media(engine: Eng, circle_id: String, data_base64: String, is_video: 
 #[tauri::command]
 pub fn add_media_path(engine: Eng, circle_id: String, path: String) -> R<String> {
     let cid = if circle_id.is_empty() { DEFAULT_CIRCLE.to_string() } else { circle_id };
-    let bytes = std::fs::read(&path).map_err(|e| format!("read {path}: {e}"))?;
     let ext = std::path::Path::new(&path)
         .extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     let is_video = matches!(ext.as_str(), "mp4" | "mov" | "m4v" | "webm" | "avi" | "mkv" | "3gp");
-    Ok(engine.add_local_media(&cid, &bytes, is_video))
+    // Seal the file straight to the at-rest store (off-heap file→file) — a large dropped video is
+    // never loaded into a Vec here, avoiding a plaintext + sealed double-allocation in this process.
+    engine
+        .add_local_media_file(&cid, &path, is_video)
+        .ok_or_else(|| format!("seal/store failed: {path}"))
 }
 
 /// Store a recorded voice note (sealed, content-addressed) and return an `a:` ref.

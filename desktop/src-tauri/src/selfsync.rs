@@ -117,6 +117,13 @@ pub fn current_local(prefs: &Prefs, social: &HavenSocial) -> BTreeMap<String, Ve
     for r in social.export_contact_rosters() {
         m.insert(format!("roster:{}", r.account_hex), r.wire);
     }
+    // My OWN device roster — fixes the own-device bootstrap deadlock (a sibling device that's never
+    // nearby and shares no relay never learned THIS device's id, so its relay rejected us with ERR
+    // forbidden and our relay-deletion tombstones never propagated). Shares the roster: namespace so
+    // the ingest loop union-merges our device id into the sibling's own-account list.
+    for r in social.export_own_roster() {
+        m.insert(format!("roster:{}", r.account_hex), r.wire);
+    }
 
     m
 }

@@ -154,6 +154,13 @@ object SelfSyncCoordinator {
             for (r in runCatching { social.exportContactRosters() }.getOrDefault(emptyList())) {
                 m["roster:${r.accountHex}"] = r.wire
             }
+            // My OWN device roster — fixes the own-device bootstrap deadlock (a sibling device that's
+            // never nearby and shares no relay never learned THIS device's id, so its relay rejected us
+            // with ERR forbidden and our relay-deletion tombstones never propagated). Shares the roster:
+            // namespace so the ingest loop union-merges our device id into the sibling's own-account list.
+            for (r in runCatching { social.exportOwnRoster() }.getOrDefault(emptyList())) {
+                m["roster:${r.accountHex}"] = r.wire
+            }
         }
         return m
     }

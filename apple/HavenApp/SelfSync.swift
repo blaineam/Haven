@@ -120,6 +120,12 @@ final class SelfSyncCoordinator {
             // dead account ids and timing out (the regression that made friend comms fail on the Mac). Keyed
             // by account hex so a newer roster version replaces the old. Additive (never tombstoned).
             for r in social.exportContactRosters() { m["roster:\(r.accountHex)"] = r.wire }
+            // My OWN device roster — the fix for the own-device bootstrap deadlock. Without this a
+            // sibling device never learns THIS device's id, so its relay rejects us (`ERR forbidden`)
+            // and our relay-deletion tombstones never reach it (deleted relays keep returning). Shares
+            // the `roster:` namespace, so the ingest loop already applies it (union-merging our device
+            // id into the sibling's own-account list). Converges over any relay both devices can reach.
+            for r in social.exportOwnRoster() { m["roster:\(r.accountHex)"] = r.wire }
         }
         return m
     }

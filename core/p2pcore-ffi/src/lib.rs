@@ -1738,6 +1738,32 @@ impl HavenSocial {
         out
     }
 
+    /// My OWN device roster, wire-encoded for self-sync — the fix for the own-device "bootstrap
+    /// deadlock". Two of my devices that are never nearby and share no relay never learned each
+    /// other's DEVICE id, because a device connects to a relay AS its device id and a relay only
+    /// authorizes device ids it already holds in `device_lists[myAccount]`; the account id binds no
+    /// endpoint, so there was no fallback and each device rejected the other with `ERR forbidden`
+    /// forever (and relay-deletion tombstones, riding the same dead channel, never propagated → the
+    /// deleted relay kept coming back). `export_contact_rosters` deliberately EXCLUDES my own roster,
+    /// so self-sync never carried it. This does — self-sync publishes it under `roster:<myAccountHex>`
+    /// and the peer ingests it via [`Self::ingest_roster_wire`], whose `acct_id == my_id` branch
+    /// union-merges the sibling's device id into this device's own list → the relay then authorizes it.
+    /// The `haven/self/…` self-sync slots are served permissively by any relay (incl. a headless one),
+    /// so this converges over any shared relay both devices can reach — no relay change required.
+    /// Returns 0 or 1 entries (empty until this device has registered itself).
+    pub fn export_own_roster(&self) -> Vec<ContactRosterWire> {
+        let st = self.state.lock().unwrap();
+        let me_pub = st.me.public();
+        let my_id = me_pub.node_id_bytes();
+        match st.device_lists.get(&my_id) {
+            Some(cd) => vec![ContactRosterWire {
+                account_hex: hex(&my_id),
+                wire: tagged(TAG_DEVICE_ROSTER, &encode_roster(&me_pub, cd)),
+            }],
+            None => Vec::new(),
+        }
+    }
+
     /// Ingest a contact's device roster from tagged wire (what `export_contact_rosters` produces). Same
     /// verification as `receive`'s TAG_DEVICE_ROSTER path, but account-level so no circle context is needed.
     /// Verified against the account bundle carried in the wire; false on a forged / stale (rolled-back) roster.

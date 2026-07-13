@@ -100,10 +100,13 @@ final class SelfSyncCoordinator {
         for (hex, ms) in RelayMailboxStore.shared.forgottenRelays {
             m["relay-removal:\(hex)"] = withUnsafeBytes(of: ms.littleEndian) { Data($0) }
         }
-        // …and re-adds as an explicit CLEAR (value 0), a newer write that supersedes a sibling's stale
-        // deletion — so bringing a relay back sticks fleet-wide instead of being re-forgotten each pass.
-        for hex in RelayMailboxStore.shared.clearedRelayForgetRecords.keys {
-            m["relay-removal:\(hex)"] = withUnsafeBytes(of: UInt64(0).littleEndian) { Data($0) }
+        // …and re-adds under a DISTINCT key carrying their OWN re-add timestamp — NOT a bare `0`. A
+        // delete and a re-add now resolve by LWW on the semantic time (newest wins), instead of the
+        // clear always winning because the grow-only cleared set re-broadcast "0=clear" every sync.
+        // THAT was the "I delete a relay and it keeps coming back" bug: an old re-add un-deleted the
+        // relay forever. Now a delete newer than the last re-add sticks fleet-wide.
+        for (hex, ms) in RelayMailboxStore.shared.clearedRelayForgetRecords {
+            m["relay-readd:\(hex)"] = withUnsafeBytes(of: ms.littleEndian) { Data($0) }
         }
         // Circles: name + member bundles + relay nodes, so another device can reconstruct each
         // circle and seal to every member. (Additive in v1 — member/circle removal is a follow-up.)
@@ -215,17 +218,29 @@ final class SelfSyncCoordinator {
             social?.removeFromCircle(circleId: circleId, nodeHex: hex)
         }
 
-        // Relay deletions from another of my devices (LWW). Applied BEFORE the circle: records below
-        // re-add relays, so a relay this or a sibling device deleted stays gone. A device that
-        // legitimately re-added it later (its addedAt > the synced forget time) keeps it.
-        for e in live where e.key.hasPrefix("relay-removal:") {
-            let hex = String(e.key.dropFirst("relay-removal:".count))
-            guard !hex.isEmpty, e.value.count == 8 else { continue }
-            let ms = e.value.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self).littleEndian }
-            if ms == 0 {
-                RelayMailboxStore.shared.applyClearedRelayForget(hex)   // re-added elsewhere → un-forget
-            } else {
-                RelayMailboxStore.shared.applyForgottenTombstone(hex, atMs: ms)   // deleted elsewhere → forget
+        // Relay delete vs re-add, from any of my devices, resolved by LWW on the SEMANTIC timestamp
+        // (delete time vs re-add time) — NOT by which device synced last. Gather both sides, newest
+        // wins per relay. Applied BEFORE the circle: records below re-add relays, so a relay whose
+        // newest verdict is "deleted" stays gone. A legacy `relay-removal:<hex>` = 0 (old bare CLEAR)
+        // decodes to del=0/readd=0 → ignored, which is exactly right: those were the resurrection bug.
+        func le8(_ d: Data) -> UInt64 { d.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self).littleEndian } }
+        var removalMs: [String: UInt64] = [:]
+        var readdMs: [String: UInt64] = [:]
+        for e in live where e.value.count == 8 {
+            if e.key.hasPrefix("relay-removal:") {
+                let hex = String(e.key.dropFirst("relay-removal:".count))
+                if !hex.isEmpty { removalMs[hex] = max(removalMs[hex] ?? 0, le8(e.value)) }
+            } else if e.key.hasPrefix("relay-readd:") {
+                let hex = String(e.key.dropFirst("relay-readd:".count))
+                if !hex.isEmpty { readdMs[hex] = max(readdMs[hex] ?? 0, le8(e.value)) }
+            }
+        }
+        for hex in Set(removalMs.keys).union(readdMs.keys) {
+            let del = removalMs[hex] ?? 0, readd = readdMs[hex] ?? 0
+            if del > readd {
+                RelayMailboxStore.shared.applyForgottenTombstone(hex, atMs: del)   // deleted, newer than any re-add
+            } else if readd > 0 {
+                RelayMailboxStore.shared.applyClearedRelayForget(hex, atMs: readd) // re-added, newer than any delete
             }
         }
 

@@ -348,16 +348,24 @@ final class RelayMailboxStore: ObservableObject {
     /// deletion tombstone doesn't re-forget a relay we brought back.
     var clearedRelayForgetRecords: [String: UInt64] { clearedRelayForgets }
 
-    /// Apply a relay-deletion CLEAR from another device (the relay was re-added there). Un-forget it
-    /// locally so it can be re-learned. The account-state CRDT already picked the newest write
-    /// (delete-vs-clear) per relay, so we simply apply whatever converged.
-    func applyClearedRelayForget(_ nodeHex: String) {
+    /// Apply a relay-deletion CLEAR (re-add) from another device — un-forget the relay so it can be
+    /// re-learned — but ONLY when the re-add is NEWER than our local deletion (LWW on `atMs`). Without
+    /// this timestamp check a stale re-add un-deleted a relay the user had since deleted, forever (the
+    /// "deleted relays keep coming back" bug: the grow-only cleared set re-broadcast an old re-add every
+    /// sync and it always won). A re-add older than our forget loses and the relay stays gone.
+    func applyClearedRelayForget(_ nodeHex: String, atMs: UInt64) {
         let hex = nodeHex.hasPrefix("s3:") ? nodeHex : nodeHex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard suppressed.contains(hex) || forgotAt[hex] != nil else { return }
+        guard atMs > 0 else { return }
+        // Our local deletion is newer than this re-add → the delete wins; ignore the stale clear.
+        if (forgotAt[hex] ?? 0) > atMs { return }
+        // Already cleared at/after this time → nothing to do.
+        if !suppressed.contains(hex) && forgotAt[hex] == nil && (clearedRelayForgets[hex] ?? 0) >= atMs { return }
         suppressed.remove(hex)
         forgotAt.removeValue(forKey: hex)
+        clearedRelayForgets[hex] = max(clearedRelayForgets[hex] ?? 0, atMs)
         UserDefaults.standard.set(Array(suppressed), forKey: suppressedKey)
         UserDefaults.standard.set(forgotAt, forKey: forgotAtKey)
+        UserDefaults.standard.set(clearedRelayForgets, forKey: clearedRelayForgetsKey)
         objectWillChange.send()
     }
 
@@ -391,16 +399,22 @@ final class RelayMailboxStore: ObservableObject {
     func applyForgottenTombstone(_ nodeHex: String, atMs: UInt64) {
         let hex = nodeHex.hasPrefix("s3:") ? nodeHex : nodeHex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard atMs > 0 else { return }
-        // A newer local re-add wins over the synced deletion.
+        // A newer local re-add wins over the synced deletion (either a fresh adoption stamp, or a
+        // re-add clear newer than this delete).
         if addedAtMs(hex) > atMs { return }
+        if (clearedRelayForgets[hex] ?? 0) > atMs { return }
         // Already forgotten at or after this time → nothing to do.
         if (forgotAt[hex] ?? 0) >= atMs { return }
         if var e = entries[hex] { e.active = false; entries[hex] = e }
         suppressed.insert(hex)
         forgotAt[hex] = atMs
+        // Drop any stale re-add record so THIS device stops re-broadcasting a clear that this newer
+        // deletion supersedes — otherwise the two would ping-pong across the fleet.
+        let hadClear = clearedRelayForgets.removeValue(forKey: hex) != nil
         persistEntries()
         UserDefaults.standard.set(Array(suppressed), forKey: suppressedKey)
         UserDefaults.standard.set(forgotAt, forKey: forgotAtKey)
+        if hadClear { UserDefaults.standard.set(clearedRelayForgets, forKey: clearedRelayForgetsKey) }
         RelayClients.forget(hex)
         RelayHealth.shared.forget(hex)
         objectWillChange.send()

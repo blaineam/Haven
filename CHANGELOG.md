@@ -7,6 +7,26 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.36] — 2026-07-12
+
+### Fixed
+- **Mac rang nonstop for 20+ minutes.** An incoming-call ring had no upper bound: if the caller's
+  fire-and-forget hangup frame never arrived (caller offline, dropped frame, or a stale invite
+  copy delivered late through a relay hop), the looping ringtone played forever. Ringing now
+  always stops after 60s and records a missed call (a "Missed call" notification is also posted
+  when the caller cancels before you answer). Declining can no longer be re-rung by the caller's
+  in-flight invite retransmits (ended sessions are tombstoned past the ~30s retransmit burst),
+  and group invites now carry a send timestamp — a copy older than 3 minutes never rings.
+  The timestamp is a 4th length-prefixed field on frame 21; Android/desktop parsers already
+  ignore trailing fields (locked in by new wire tests on both), so cross-platform calls are
+  unaffected. Android/desktop should adopt the same bounded ring + timestamp next.
+- **Relay-hosting Mac kept the display awake for days.** Hosting the in-app relay held a
+  `PreventUserIdleDisplaySleep` power assertion (misleadingly named "Haven media playback") for
+  the app's entire multi-day lifetime — observed at 69+ hours. The Mac assertion is now
+  `PreventUserIdleSystemSleep` named "Haven relay hosting": the display sleeps normally while
+  the machine stays awake to keep serving the mailbox. (iOS keeps the screen-on behavior — the
+  app only relays while foregrounded.)
+
 ## [0.1.0-beta.35] — 2026-07-12
 
 ### Fixed

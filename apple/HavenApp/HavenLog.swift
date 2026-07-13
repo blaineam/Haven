@@ -9,8 +9,10 @@ enum HavenLog {
     private static let net = Logger(subsystem: "com.blaineam.haven.diag", category: "net")
     private static let relay = Logger(subsystem: "com.blaineam.haven.diag", category: "relay")
     private static let sync = Logger(subsystem: "com.blaineam.haven.diag", category: "sync")
+    private static let call = Logger(subsystem: "com.blaineam.haven.diag", category: "call")
 
     static func net(_ msg: String) { net.log("\(msg, privacy: .public)") }
     static func relay(_ msg: String) { relay.log("\(msg, privacy: .public)") }
     static func sync(_ msg: String) { sync.log("\(msg, privacy: .public)") }
+    static func call(_ msg: String) { call.log("\(msg, privacy: .public)") }
 }

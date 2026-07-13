@@ -168,6 +168,9 @@ final class FeedStore: ObservableObject {
         refresh()
         recomputeUnreadDMs()   // one-time badge compute at startup (kept OFF the per-refresh hot path)
         seedDemoIfNeeded()   // HAVEN_DEMO=1 only — PII-free synthetic dataset for screenshots
+        #if DEBUG
+        CallManager.shared.debugSimulateIncomingRing()   // HAVEN_RING_TEST=1 only — bounded-ring self-test
+        #endif
         guard ProcessInfo.processInfo.environment["HAVEN_NO_NET"] != "1" else { return }
         bringOnline(seed: seed)
         startMailboxPolling()

@@ -104,7 +104,12 @@ final class CallManager: NSObject, ObservableObject {
     // (observed: a Mac rang nonstop for 20+ minutes). Ringing always stops after this timeout and
     // the call is treated as missed.
     private var ringTimeoutTimer: Timer?
-    private static let ringTimeoutSecs: TimeInterval = 60
+    private static var ringTimeoutSecs: TimeInterval {
+        #if DEBUG
+        if let s = ProcessInfo.processInfo.environment["HAVEN_RING_TIMEOUT"], let v = TimeInterval(s) { return v }
+        #endif
+        return 60
+    }
     /// Invites older than this (per the sender's frame-21 timestamp) never start a ring — the
     /// caller stopped dialing long ago. Generous enough to absorb ordinary clock skew.
     private static let inviteMaxAgeSecs: TimeInterval = 180
@@ -311,7 +316,10 @@ final class CallManager: NSObject, ObservableObject {
         // long after the caller gave up. It must not ring (or resurrect a session's roster).
         if let tsData = CallManager.lpRead(body, &off),
            let ts = TimeInterval(String(data: tsData, encoding: .utf8) ?? ""),
-           Date().timeIntervalSince1970 - ts > Self.inviteMaxAgeSecs { return }
+           Date().timeIntervalSince1970 - ts > Self.inviteMaxAgeSecs {
+            HavenLog.call("dropping stale invite (age=\(Int(Date().timeIntervalSince1970 - ts))s session=\(sid2.prefix(12)))")
+            return
+        }
 
         if active {
             // Same session, new roster info → merge (someone learned about more participants).
@@ -393,6 +401,7 @@ final class CallManager: NSObject, ObservableObject {
     /// Nobody answered and no hangup ever arrived — stop ringing and record a missed call.
     private func ringTimedOut() {
         guard active, ringing, !inCall else { return }
+        HavenLog.call("ring timeout after \(Int(Self.ringTimeoutSecs))s — ending as missed (session=\(sessionId.prefix(12)))")
         let who = peerName
         #if !os(macOS)
         if useCallKit, let provider, let uuid = callUUID {
@@ -423,6 +432,7 @@ final class CallManager: NSObject, ObservableObject {
         #if targetEnvironment(macCatalyst) || os(macOS)
         guard !inAppRinging else { return }
         inAppRinging = true
+        HavenLog.call("in-app ring START (session=\(sessionId.prefix(12)))")
         // Ensure the audio session is live so the synthesized ringtone is audible (iOS/Catalyst only;
         // native macOS has no AVAudioSession).
         #if os(iOS)
@@ -439,6 +449,7 @@ final class CallManager: NSObject, ObservableObject {
         #if targetEnvironment(macCatalyst) || os(macOS)
         guard inAppRinging else { return }
         inAppRinging = false
+        HavenLog.call("in-app ring STOP")
         CallTones.shared.stop()
         // Only relax the session if we're not about to bring up the call audio.
         #if os(iOS)
@@ -1164,6 +1175,20 @@ final class CallManager: NSObject, ObservableObject {
     func displayName(for hex: String) -> String {
         ContactsStore.shared.name(forNodePrefix: hex) ?? String(hex.prefix(6))
     }
+
+    #if DEBUG
+    /// HAVEN_RING_TEST=1: simulate an incoming call at launch so the bounded-ring path (ring →
+    /// timeout → missed-call teardown) is verifiable on one machine with no second device. Pair
+    /// with HAVEN_RING_TIMEOUT=<secs> to shorten the wait, and HAVEN_NO_NET=1 to stay offline.
+    func debugSimulateIncomingRing() {
+        guard ProcessInfo.processInfo.environment["HAVEN_RING_TEST"] == "1", !active else { return }
+        sessionId = "ringtest-\(UUID().uuidString.prefix(8))"
+        roster = [String(repeating: "f", count: 64), myHex]
+        peerName = "Ring Test"; isCaller = false; active = true
+        refreshParticipants()
+        reportIncoming(name: peerName)
+    }
+    #endif
 
     /// Put the overlay into a connected group-call state for a screenshot, with no real signaling
     /// or media. HAVEN_DEMO-gated so it can never fire in a shipping build. The participant tiles

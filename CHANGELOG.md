@@ -10,6 +10,32 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [0.1.0-beta.36] — 2026-07-12
 
 ### Fixed
+- **Posting a large video crashed the app instantly.** Sealing a video for backup passed the whole
+  sealed blob back across the Rust↔Swift boundary as one contiguous buffer; on a big clip that single
+  allocation trapped (`EXC_BREAKPOINT`) and killed the app before anything synced. Large media is now
+  sealed **file→file in native memory** (`seal_circle_media_file`, symmetric to the existing decrypt
+  path) and streamed to the mailbox in 8 MB windows, so a 600 MB+ video posts without a memory spike.
+- **DMs couldn't be stored on a shared relay.** A relay configured with any circle's membership
+  rejected every direct-message operation with `ERR forbidden`, because DM conversations are never
+  registered on a relay whose host isn't a DM participant — silently breaking offline DM delivery.
+  DMs are now accepted from any known member of the relay (strangers still refused; DM bodies stay
+  end-to-end sealed, so a relay can carry but never read them).
+- **Media had nowhere to land when a circle's relays were unreachable.** Media is now mirrored to —
+  and fetched from — any reachable relay you share (bootstrap relays, and any reachable known relay
+  when the circle's own relays are down), not only the circle's configured relays. Content-addressed
+  media replicates onto the circle's relays via mesh sync once they return.
+- **"My posts sync again and again" heat/traffic.** Media that couldn't reach any relay was re-read,
+  re-sealed and re-uploaded every 2 minutes forever. It now backs off exponentially (2 min → capped
+  1 h) and clears the moment the blob lands anywhere.
+- **Post camera: sideways portrait video + rough UX.** Portrait clips recorded sideways because the
+  capture rotation was only set when the device rotated; it's now locked from the physical device
+  orientation at record-start, so portrait records portrait. The camera is portrait-locked so the
+  shutter never moves (always one-hand reachable) while rotating still captures landscape/portrait
+  automatically; the filter strip is collapsed by default (a toggle reveals it, clear of the shutter);
+  and pinch-to-zoom was copied over from the story camera.
+- **One bad relay could stall all the others.** Relay operations now time out (12 s dial / 30 s op)
+  so a single hung relay can't freeze the serial fan-out, and a relay is only reported reachable after
+  a real operation succeeds — not merely because a client object was constructed.
 - **Mac rang nonstop for 20+ minutes.** An incoming-call ring had no upper bound: if the caller's
   fire-and-forget hangup frame never arrived (caller offline, dropped frame, or a stale invite
   copy delivered late through a relay hop), the looping ringtone played forever. Ringing now

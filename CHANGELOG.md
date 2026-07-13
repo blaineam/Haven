@@ -7,6 +7,24 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.37] — 2026-07-13
+
+### Fixed
+- **Your own relay rejected your own devices ("ERR forbidden"), and deleted relays kept coming back.**
+  Two symptoms, one cause: a device connects to a relay as its DEVICE id, but your devices didn't
+  reliably learn each other's device ids, so each rejected the other — and relay-deletion tombstones
+  (which ride the same channel) never propagated, so a device kept re-announcing relays you'd deleted.
+  Two fixes: (1) each device now publishes its own device roster over self-sync, so your devices
+  recognise each other over any relay they share; (2) a **headless/docker relay** — which only knows
+  account ids from its invite link and so forbade every device — now accepts an **account-signed device
+  roster** written to `haven/devroster/<account>`, verifies its hybrid signature without decrypting
+  anything, and authorizes that account's device ids. Requires the relay AND the app on beta.37.
+- **Media had nowhere to land is now mirrored to every reachable relay.** Media keys are permission-free
+  on a relay (a relay can forbid a device's messages while still storing its media), so media is now
+  mirrored to — and fetched from — every known relay, not just a circle's own. A video lands on any
+  reachable relay (e.g. a hosted/NAS relay) even when the circle's own relays are offline, and mesh
+  sync replicates it onto the circle's relays when they return.
+
 ## [0.1.0-beta.36] — 2026-07-12
 
 ### Fixed

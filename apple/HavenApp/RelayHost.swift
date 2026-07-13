@@ -360,6 +360,7 @@ final class RelayMailboxStore: ObservableObject {
         if (forgotAt[hex] ?? 0) > atMs { return }
         // Already cleared at/after this time → nothing to do.
         if !suppressed.contains(hex) && forgotAt[hex] == nil && (clearedRelayForgets[hex] ?? 0) >= atMs { return }
+        HavenLog.relay("CLEARED-FORGET \(hex.prefix(8)) atMs=\(atMs) localForgot=\(forgotAt[hex] ?? 0) — self-sync un-forgot")
         suppressed.remove(hex)
         forgotAt.removeValue(forKey: hex)
         clearedRelayForgets[hex] = max(clearedRelayForgets[hex] ?? 0, atMs)
@@ -597,6 +598,14 @@ final class RelayMailboxStore: ObservableObject {
         let hex = nodeHex.hasPrefix("s3:") ? nodeHex : nodeHex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let hadTombstone = suppressed.remove(hex) != nil
         let hadForget = forgotAt.removeValue(forKey: hex) != nil
+        if hadTombstone || hadForget {
+            // DIAGNOSTIC: something is un-forgetting a relay the user deleted. Log the caller chain so
+            // we can find the resurrection path (frames past the RelayMailboxStore internals).
+            let caller = Thread.callStackSymbols.dropFirst(1).prefix(6)
+                .map { $0.components(separatedBy: .whitespaces).filter { !$0.isEmpty }.dropFirst(3).joined(separator: " ") }
+                .joined(separator: " ← ")
+            HavenLog.relay("UNFORGET \(hex.prefix(8)) hadForget=\(hadForget) ⟵ \(caller)")
+        }
         if hadForget { UserDefaults.standard.set(forgotAt, forKey: forgotAtKey) }
         // Record the re-add as a CLEAR so self-sync supersedes a sibling's stale deletion tombstone.
         if hadTombstone || hadForget {

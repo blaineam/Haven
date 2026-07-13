@@ -1139,7 +1139,7 @@ final class FeedStore: ObservableObject {
             // Re-publish our account-signed device roster to every known relay, so a HEADLESS relay
             // (which only knows account ids from its link) authorizes THIS device's id and stops
             // ERR-forbidding our mailbox ops — the "my own NAS relay rejects my phone" fix.
-            if let social { Task { await SharedStore.publishDeviceRoster(social: social) } }
+            Task { await SharedStore.publishDeviceRoster(social: social) }
         }
         // Only push media over nearby when a sibling is actually connected (else it's idle work).
         if nearby?.hasConnectedPeers == true { pushOwnMediaNearby() }

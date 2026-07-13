@@ -255,6 +255,11 @@ impl Node {
     pub fn relay_authorize(&self, circle_id: &str, members: Vec<String>, relays: Vec<String>) {
         if let Some(cfg) = lock(&self.relay).as_ref() {
             lock(&cfg.auth).authorize(circle_id, members, relays);
+            // authorize() sets the member set fresh (account ids only). Re-expand to the accounts'
+            // DEVICE ids from any device rosters already stored on this relay, so a headless relay
+            // that (re)authorizes circles on startup doesn't drop device authorization until the apps
+            // re-publish. Signature-verified inside; safe to call on every authorize.
+            blobstore::rehydrate_device_rosters(&cfg.root, &cfg.auth);
         }
     }
     pub fn relay_deauthorize(&self, circle_id: &str) {

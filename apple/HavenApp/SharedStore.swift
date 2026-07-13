@@ -386,6 +386,42 @@ enum SharedStore {
         else { MediaBackupBackoff.recordLanded(ref) }
     }
 
+    /// Publish this device's account-signed device roster to every known relay under
+    /// `haven/devroster/<myAccountHex>`. A device connects to a relay AS its DEVICE id, but a HEADLESS
+    /// relay only knows ACCOUNT ids (from the operator's link), so without this it `ERR forbidden`s
+    /// every one of the account's devices' mailbox ops — "my own NAS relay rejects my phone". The wire
+    /// (from `exportOwnRoster`) carries the account bundle + an account-SIGNED DeviceList, so the relay
+    /// verifies it WITHOUT decrypting anything and then authorizes the account's device ids (see
+    /// haven-net `verify_devroster`). The key is permission-free, so this write is allowed BEFORE
+    /// authorization (it's the bootstrap). Idempotent + cheap; call on the sync timer so a restarted
+    /// relay re-learns our devices promptly.
+    static func publishDeviceRoster(social: HavenSocial) async {
+        guard let r = social.exportOwnRoster().first else { return }
+        let key = "haven/devroster/\(r.accountHex)"
+        let wire = r.wire
+        for node in RelayMailboxStore.shared.allRelays() where !node.hasPrefix("s3:") {
+            if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
+                _ = RelayHost.shared.localPut(key, wire); continue
+            }
+            // Plain-HTTP interface first (the cross-NAT path), else the iroh dial.
+            if let http = RelayMailboxStore.shared.httpInterface(node) {
+                var done = false
+                for base in http.urls where !httpUrlBad(base) {
+                    if await httpPut(base, http.token, key, wire) {
+                        RelayMailboxStore.shared.markSeen(node); done = true; break
+                    }
+                    markHttpUrlBad(base)
+                }
+                if done { continue }
+            }
+            guard let c = await RelayClients.client(node) else { continue }
+            do {
+                try await c.put(key: key, data: wire)
+                RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
+            } catch { /* unreachable relay backs off elsewhere; retried next sync */ }
+        }
+    }
+
     /// The bucket used for MEDIA in this circle: the owner's own creds for a circle whose pre-signed
     /// pool we mint, else the shared/volunteer mailbox bucket. Same selection as `uploadEvent`.
     private static func mediaS3(for circleId: String) -> S3Client? {

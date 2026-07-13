@@ -296,6 +296,22 @@ impl RelayAuth {
             self.relays.insert(r);
         }
     }
+    /// Expand every circle this account is a member of to ALSO include its DEVICE ids — called after a
+    /// device roster written to `haven/devroster/<account>` is cryptographically verified. A device
+    /// connects to a relay AS its device id, but a HEADLESS relay only knows account ids (from the
+    /// operator's link), so without this it `ERR forbidden`s every one of the account's devices. The
+    /// device ids come from an account-SIGNED DeviceList (see `verify_devroster`), so a stranger can't
+    /// inject ids for someone else's account. Idempotent (HashSet insert).
+    pub(crate) fn authorize_devices(&mut self, account_hex: &str, device_hexes: &[String]) {
+        for members in self.members.values_mut() {
+            if members.contains(account_hex) {
+                for d in device_hexes {
+                    members.insert(d.clone());
+                }
+            }
+        }
+    }
+
     pub(crate) fn deauthorize(&mut self, circle_id: &str) {
         self.members.remove(circle_id);
     }
@@ -597,6 +613,77 @@ fn is_broad_mailbox_prefix(key: &str) -> bool {
 /// served only to that circle's members (or a sibling relay replicating); a broad cross-circle LIST is
 /// restricted to sibling relays; `self/` and content-addressed `media`/other keys are handled elsewhere
 /// / left permissive (media refs are opaque content hashes, self slots are owner-gated above).
+/// The `haven/media/…`-style key prefix under which a device publishes its account-signed device
+/// roster so a headless relay can authorize its device ids. Permissive to WRITE (not a mailbox key);
+/// the trust comes from the signature check in [`verify_devroster`], never from the write gate.
+const DEVROSTER_PREFIX: &str = "haven/devroster/";
+/// Tag byte on the self-sync roster wire (mirror of p2pcore-ffi `TAG_DEVICE_ROSTER`).
+const TAG_DEVICE_ROSTER: u8 = 0x04;
+
+/// Parse + CRYPTOGRAPHICALLY VERIFY a self-describing device-roster blob written to
+/// `haven/devroster/<account>`. The blob is the same wire self-sync publishes under `roster:<acct>`:
+/// a `TAG_DEVICE_ROSTER` byte, then `lp(account_bundle) ‖ lp(device_list) ‖ …` (u32-LE lengths).
+/// Returns the account's currently-authorized device hexes ONLY when the carried bundle's node id
+/// equals `expect_account` (the key) AND the DeviceList carries a valid HYBRID (ed25519+ML-DSA)
+/// account signature. The relay holds only account NODE ids (from the link), which are insufficient
+/// to verify the hybrid signature, so the blob is self-describing (carries the full bundle); binding
+/// bundle→account via the key + verifying the signature means a stranger can neither impersonate the
+/// account nor inject device ids for it. Revoked device ids are excluded.
+fn verify_devroster(expect_account: &str, body: &[u8]) -> Option<(String, Vec<String>)> {
+    use p2pcore::device::DeviceList;
+    use p2pcore::identity::HavenId;
+    let body = match body.split_first() {
+        Some((&TAG_DEVICE_ROSTER, rest)) => rest,
+        _ => return None,
+    };
+    fn lp(b: &[u8]) -> Option<(&[u8], &[u8])> {
+        if b.len() < 4 {
+            return None;
+        }
+        let n = u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize;
+        let b = &b[4..];
+        if b.len() < n {
+            return None;
+        }
+        Some((&b[..n], &b[n..]))
+    }
+    let (bundle_bytes, rest) = lp(body)?;
+    let (dl_bytes, _) = lp(rest)?;
+    let bundle = HavenId::from_bytes(bundle_bytes).ok()?;
+    if hex(&bundle.node_id_bytes()) != expect_account {
+        return None; // the bundle must be the very account named in the key
+    }
+    let dl = DeviceList::from_bytes(dl_bytes).ok()?;
+    dl.verify(&bundle).ok()?; // hybrid account signature — unforgeable
+    let devices = dl
+        .devices
+        .iter()
+        .filter(|d| !dl.revoked.contains(d))
+        .map(|d| hex(d))
+        .collect();
+    Some((expect_account.to_string(), devices))
+}
+
+/// Re-apply every stored `haven/devroster/<account>` blob to `auth` — so a relay that authorizes
+/// circles fresh on startup/reconfigure (account ids only) re-expands to the accounts' device ids
+/// without waiting for the apps to re-publish. Best-effort; unverifiable blobs are skipped.
+pub(crate) fn rehydrate_device_rosters(root: &Path, auth: &Arc<Mutex<RelayAuth>>) {
+    let Ok(dir) = safe_path(root, DEVROSTER_PREFIX) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let acct = e.file_name().to_string_lossy().to_string();
+        if let Ok(body) = std::fs::read(e.path()) {
+            if let Some((account, devices)) = verify_devroster(&acct, &body) {
+                auth.lock().unwrap().authorize_devices(&account, &devices);
+            }
+        }
+    }
+}
+
 fn mailbox_forbidden(auth: &Arc<Mutex<RelayAuth>>, peer: &str, verb: u8, key: &str) -> bool {
     let a = auth.lock().unwrap();
     if a.members.is_empty() {
@@ -702,6 +789,17 @@ pub(crate) async fn handle_request(
             match write_res {
                 Ok(()) => {
                     let _ = send.write_all(b"OK").await;
+                    // Device-roster authorization: when the app writes its account-signed device roster
+                    // to `haven/devroster/<account>`, verify it and expand this account's circle
+                    // membership to include its device ids — so a HEADLESS relay (which only knows
+                    // account ids from the link) stops ERR-forbidding the account's devices' mailbox
+                    // ops. The blob is now persisted, so it also mesh-replicates to sibling relays and
+                    // survives restart (see `rehydrate_device_rosters`).
+                    if let Some(acct) = key.strip_prefix(DEVROSTER_PREFIX) {
+                        if let Some((account, devices)) = verify_devroster(acct, &body) {
+                            auth.lock().unwrap().authorize_devices(&account, &devices);
+                        }
+                    }
                 }
                 Err(_) => {
                     let _ = std::fs::remove_file(&tmp);

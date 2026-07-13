@@ -193,28 +193,21 @@ enum SharedStore {
         relayNodes(circleId).first
     }
 
-    /// Relay node ids to MIRROR media to / FETCH media from — broader than the circle's own relays.
-    /// Media keys (`haven/media/<ref>`) are content-addressed AND permission-free on the relay (unlike
-    /// mailbox keys, which are circle-membership gated), so a blob may safely live on any relay every
-    /// member can reach. When a circle's OWN relays are all home-NAT'd and currently unreachable (the
-    /// P2P dial times out), media would otherwise strand with nowhere to land; here we add:
-    ///   1. shared `__bootstrap__` relays (every member who used the same invite knows them), and
-    ///   2. a fallback — if NONE of the above is reachable right now, any other reachable known relay —
-    /// so the blob lands SOMEWHERE reachable. Mesh anti-entropy then replicates it onto the circle's
-    /// own relays once they return, and a friend who shares any of these relays can fetch it directly.
-    /// s3: pseudo-nodes are excluded (handled by the S3 path).
+    /// Relay node ids to MIRROR media to / FETCH media from — the circle's own relays PLUS every other
+    /// known relay. Media keys (`haven/media/<ref>`) are content-addressed AND permission-free on the
+    /// relay (unlike mailbox keys, which are circle-membership gated — a relay can `ERR forbidden` a
+    /// device for messages while still storing its media), so a blob may safely live on ANY relay the
+    /// members can reach. Mirroring to every known relay is what makes media land when a circle's own
+    /// relays are all offline/NAT-unreachable but some OTHER relay (e.g. a hosted/NAS relay configured
+    /// for a different circle) is reachable — that relay accepts the media even though it forbids the
+    /// device's mailbox writes. Content-addressed keys make the extra puts idempotent, unreachable
+    /// relays fail fast and back off, and mesh anti-entropy replicates the blob onto the circle's own
+    /// relays once they return; a friend who shares any of these relays fetches it directly. `allRelays`
+    /// is already active-only (deleted/forgotten relays excluded); s3: pseudo-nodes are handled by S3.
     private static func mediaDests(_ circleId: String) -> [String] {
         var nodes = relayNodes(circleId).filter { !$0.hasPrefix("s3:") }
-        let store = RelayMailboxStore.shared
-        for b in store.relays(forCircle: "__bootstrap__") where !b.hasPrefix("s3:") && !nodes.contains(b) {
-            nodes.append(b)
-        }
-        let anyReachable = nodes.contains { RelayHealth.shared.available($0) }
-        if !anyReachable {
-            for r in store.allRelays()
-            where !r.hasPrefix("s3:") && !nodes.contains(r) && RelayHealth.shared.available(r) {
-                nodes.append(r)
-            }
+        for r in RelayMailboxStore.shared.allRelays() where !r.hasPrefix("s3:") && !nodes.contains(r) {
+            nodes.append(r)
         }
         return nodes
     }

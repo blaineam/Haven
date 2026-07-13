@@ -396,9 +396,10 @@ enum SharedStore {
     /// authorization (it's the bootstrap). Idempotent + cheap; call on the sync timer so a restarted
     /// relay re-learns our devices promptly.
     static func publishDeviceRoster(social: HavenSocial) async {
-        guard let r = social.exportOwnRoster().first else { return }
+        guard let r = social.exportOwnRoster().first else { HavenLog.sync("devroster SKIP — no own roster yet"); return }
         let key = "haven/devroster/\(r.accountHex)"
         let wire = r.wire
+        HavenLog.sync("devroster publish acct=\(r.accountHex.prefix(8)) size=\(wire.count) → \(RelayMailboxStore.shared.allRelays().count) relays")
         for node in RelayMailboxStore.shared.allRelays() where !node.hasPrefix("s3:") {
             if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
                 _ = RelayHost.shared.localPut(key, wire); continue
@@ -408,17 +409,25 @@ enum SharedStore {
                 var done = false
                 for base in http.urls where !httpUrlBad(base) {
                     if await httpPut(base, http.token, key, wire) {
-                        RelayMailboxStore.shared.markSeen(node); done = true; break
+                        RelayMailboxStore.shared.markSeen(node)
+                        HavenLog.sync("devroster http-put OK relay=\(node.prefix(8))")
+                        done = true; break
                     }
                     markHttpUrlBad(base)
                 }
                 if done { continue }
             }
-            guard let c = await RelayClients.client(node) else { continue }
+            guard let c = await RelayClients.client(node) else {
+                HavenLog.sync("devroster SKIP relay=\(node.prefix(8)) — unreachable")
+                continue
+            }
             do {
                 try await c.put(key: key, data: wire)
                 RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
-            } catch { /* unreachable relay backs off elsewhere; retried next sync */ }
+                HavenLog.sync("devroster blob-put OK relay=\(node.prefix(8)) — relay should now authorize our device")
+            } catch {
+                HavenLog.sync("devroster blob-put FAIL relay=\(node.prefix(8)): \(error.localizedDescription)")
+            }
         }
     }
 

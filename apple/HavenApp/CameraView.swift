@@ -27,39 +27,47 @@ struct CameraView: View {
     @State private var showFilters = false
 
     var body: some View {
-        ZStack {
-            CameraCaptureRepresentable(filter: $liveFilter, onThumbnail: { liveThumb = $0 }) { refs in
-                reviewRefs = refs
-            }
-            .ignoresSafeArea()
+        // A GeometryReader that IGNORES the safe area fills the whole screen (so the camera reaches every
+        // edge) yet still reports the true safe-area insets — which we pad the controls by, so the filter
+        // toggle clears the status bar / Dynamic Island and the strip clears the home indicator. (The
+        // controls previously measured from the screen top and jammed into the status bar.)
+        GeometryReader { geo in
+            ZStack {
+                CameraCaptureRepresentable(filter: $liveFilter, onThumbnail: { liveThumb = $0 }) { refs in
+                    reviewRefs = refs
+                }
 
-            // Filter toggle (top-right, clear of the UIKit close button at top-left) + a collapsible
-            // strip floated ABOVE the shutter so swatches never cover it.
-            #if !os(macOS)
-            VStack {
-                HStack {
-                    Spacer()
-                    Button { withAnimation(.snappy) { showFilters.toggle() } } label: {
-                        Image(systemName: "camera.filters")
-                            .font(.title3.weight(.semibold))
-                            .foregroundStyle(.white)
-                            .padding(11)
-                            .background(showFilters ? AnyShapeStyle(HavenTheme.brandHorizontal)
-                                                    : AnyShapeStyle(.black.opacity(0.35)), in: Circle())
+                // Filter toggle (top-right, clear of the UIKit close button at top-left) + a collapsible
+                // strip floated ABOVE the shutter so swatches never cover it.
+                #if !os(macOS)
+                VStack {
+                    HStack {
+                        Spacer()
+                        Button { withAnimation(.snappy) { showFilters.toggle() } } label: {
+                            Image(systemName: "camera.filters")
+                                .font(.title3.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .padding(11)
+                                .background(showFilters ? AnyShapeStyle(HavenTheme.brandHorizontal)
+                                                        : AnyShapeStyle(.black.opacity(0.35)), in: Circle())
+                        }
+                        .padding(.trailing, 20)
                     }
-                    .padding(.trailing, 20).padding(.top, 12)
+                    .padding(.top, geo.safeAreaInsets.top + 8)   // honor the top safe area
+                    Spacer()
+                    if showFilters, let liveThumb {
+                        FilterStrip(thumbnail: liveThumb, selection: $liveFilter)
+                            .background(.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            .padding(.horizontal, 10)
+                            .padding(.bottom, geo.safeAreaInsets.bottom + 100)   // clear the shutter + home indicator
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
                 }
-                Spacer()
-                if showFilters, let liveThumb {
-                    FilterStrip(thumbnail: liveThumb, selection: $liveFilter)
-                        .background(.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                        .padding(.horizontal, 10)
-                        .padding(.bottom, 150)   // clear the shutter (60pt + safe-area inset) — no collision
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
+                #endif
             }
-            #endif
+            .frame(width: geo.size.width, height: geo.size.height)
         }
+        .ignoresSafeArea()
         // Lock to portrait like the story camera: the shutter/controls never move on rotation, while
         // the capture connection still follows the PHYSICAL device orientation (see shutter handlers),
         // so rotating the phone records landscape/portrait automatically without the button shifting.

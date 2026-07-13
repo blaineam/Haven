@@ -7,6 +7,15 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.39] — 2026-07-13
+
+### Fixed
+- **Android & desktop parity** for the beta.38 relay/media fixes: media now mirrors to (and loads
+  from) any reachable relay you share; each device publishes its account-signed roster so a headless
+  relay authorizes it; deleted relays stay deleted across your own devices (timestamped last-writer-
+  wins on delete-vs-re-add); and large media is sealed file-to-file to keep memory flat. iOS shipped
+  these in beta.38 / App Store 1.0.4.
+
 ## [0.1.0-beta.38] — 2026-07-13
 
 ### Fixed

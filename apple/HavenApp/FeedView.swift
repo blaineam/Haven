@@ -1803,26 +1803,14 @@ final class FeedStore: ObservableObject {
         // sync tick, forever (the "deleted relays keep coming back" zombie loop). Non-owner announces
         // of a tombstoned relay are dropped entirely; brand-new relays still auto-pool below.
         let lower = nodeHex.lowercased()
-        let ownerDevices = social.deviceNodeIdsFor(accountHex: announcerHex).map { $0.lowercased() }
-        let announcerOwnsRelay = lower == announcerHex || ownerDevices.contains(lower)
-        if RelayMailboxStore.shared.isForgotten(lower) {
-            // The user DELIBERATELY DELETED this relay. It comes back ONLY on a genuine re-add whose
-            // adoption stamp is NEWER than our deletion (pure LWW) — NOT because its owner merely
-            // reopened the app (that re-announces the relay's ORIGINAL, older adoption time, which
-            // must lose). Previously an `announcerOwnsRelay` short-circuit let any owner reopen
-            // resurrect a deleted relay — the "deleted relays came back when my mom opened the app"
-            // bug. A stale third-party echo (old stamp) and a legacy announce (addedAt=0) also lose.
-            let forgotMs = RelayMailboxStore.shared.forgottenAtMs(lower)
-            guard announcedAddedAt > forgotMs else { return }
-            RelayMailboxStore.shared.reactivate(lower, adoptedAtMs: announcedAddedAt)
-        } else if !RelayMailboxStore.shared.isActive(lower) {
-            // Merely INACTIVE (deactivated, not deleted) — the owner may bring it back, or a newer
-            // re-add. This keeps a Mac's relay coming back on the iPhone when the Mac re-announces it.
-            let forgotMs = RelayMailboxStore.shared.forgottenAtMs(lower)
-            let newerReAdd = announcedAddedAt > 0 && announcedAddedAt > forgotMs
-            guard announcerOwnsRelay || newerReAdd else { return }
-            RelayMailboxStore.shared.reactivate(lower, adoptedAtMs: announcedAddedAt)
-        }
+        // A relay the user DELETED must STAY deleted — a passive frame-19 re-announce (from ANY
+        // device, including the relay's owner reopening the app) must NEVER auto-resurrect it. That
+        // auto-resurrect was the "I delete a relay and it keeps coming back" loop: an owner echo (or a
+        // re-adopt feedback loop) carried an adoption stamp newer than our deletion and un-forgot it
+        // every sync tick. A deleted relay now comes back ONLY when the USER explicitly re-adds it in
+        // the UI (adoptRelayNode → self-sync `relay-readd`, LWW), never from an announce. So: drop the
+        // announce entirely for a forgotten relay, and never re-add it below.
+        if RelayMailboxStore.shared.isForgotten(lower) { return }
         // A contact advertised their circle relay → ADD it to our redundant set for this circle, so
         // members automatically pool relays (more redundancy, no manual setup) — desktop parity.
         let wasNew = !RelayMailboxStore.shared.relays(forCircle: circleId).contains(lower)

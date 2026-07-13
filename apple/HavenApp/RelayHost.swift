@@ -657,8 +657,15 @@ final class RelayMailboxStore: ObservableObject {
         if defaultNodeHex == hex { defaultNodeHex = nil }
         entries[hex] = nil
         suppressed.insert(hex)
+        // Stamp the deletion so it SYNCS to my other devices (self-sync `relay-removal:` iterates
+        // forgotAt) — otherwise "Delete now" was device-local, a sibling kept the relay and re-announced
+        // it, and it bounced back forever. And drop any stale re-add clear so a fresh delete wins LWW.
+        forgotAt[hex] = nowMs()
+        let hadClear = clearedRelayForgets.removeValue(forKey: hex) != nil
         UserDefaults.standard.set(relaysByCircle, forKey: key)
         UserDefaults.standard.set(Array(suppressed), forKey: suppressedKey)
+        UserDefaults.standard.set(forgotAt, forKey: forgotAtKey)
+        if hadClear { UserDefaults.standard.set(clearedRelayForgets, forKey: clearedRelayForgetsKey) }
         persistEntries()
         MediaBackupLedger.forgetDest(hex)   // relay gone for good → re-mirror if this id ever returns
         RelayClients.forget(hex)
@@ -688,8 +695,11 @@ final class RelayMailboxStore: ObservableObject {
     /// SelfSync pull then learns the real circles and registers their relays. (Doesn't appear in the
     /// circles UI — that comes from the social graph, not this store.)
     func adoptBootstrapRelays(_ hexes: [String]) {
-        for h in hexes { add(circleId: "__bootstrap__", nodeHex: h) }
-        if defaultNodeHex == nil, let first = hexes.first(where: { $0.count == 64 }) { defaultNodeHex = first }
+        // NEVER auto-adopt a relay the user DELETED — add() would un-forget it, resurrecting a deleted
+        // relay on every launch (bootstrap runs at account load). A deleted relay only comes back on an
+        // explicit user re-add.
+        for h in hexes where !isForgotten(h) { add(circleId: "__bootstrap__", nodeHex: h) }
+        if defaultNodeHex == nil, let first = hexes.first(where: { $0.count == 64 && !isForgotten($0) }) { defaultNodeHex = first }
     }
 
     /// Every distinct ACTIVE relay across all circles — for mesh sync / the active transport set.

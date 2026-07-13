@@ -27,47 +27,33 @@ struct CameraView: View {
     @State private var showFilters = false
 
     var body: some View {
-        // A GeometryReader that IGNORES the safe area fills the whole screen (so the camera reaches every
-        // edge) yet still reports the true safe-area insets — which we pad the controls by, so the filter
-        // toggle clears the status bar / Dynamic Island and the strip clears the home indicator. (The
-        // controls previously measured from the screen top and jammed into the status bar.)
-        GeometryReader { geo in
-            ZStack {
-                CameraCaptureRepresentable(filter: $liveFilter, onThumbnail: { liveThumb = $0 }) { refs in
-                    reviewRefs = refs
-                }
-
-                // Filter toggle (top-right, clear of the UIKit close button at top-left) + a collapsible
-                // strip floated ABOVE the shutter so swatches never cover it.
-                #if !os(macOS)
-                VStack {
-                    HStack {
-                        Spacer()
-                        Button { withAnimation(.snappy) { showFilters.toggle() } } label: {
-                            Image(systemName: "camera.filters")
-                                .font(.title3.weight(.semibold))
-                                .foregroundStyle(.white)
-                                .padding(11)
-                                .background(showFilters ? AnyShapeStyle(HavenTheme.brandHorizontal)
-                                                        : AnyShapeStyle(.black.opacity(0.35)), in: Circle())
-                        }
-                        .padding(.trailing, 20)
-                    }
-                    .padding(.top, geo.safeAreaInsets.top + 8)   // honor the top safe area
-                    Spacer()
-                    if showFilters, let liveThumb {
-                        FilterStrip(thumbnail: liveThumb, selection: $liveFilter)
-                            .background(.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                            .padding(.horizontal, 10)
-                            .padding(.bottom, geo.safeAreaInsets.bottom + 100)   // clear the shutter + home indicator
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
-                    }
-                }
-                #endif
+        ZStack {
+            // The filter TOGGLE button lives in the UIKit controller (pinned to the safe-area layout
+            // guide, top-right, mirroring the close button) — a UIViewControllerRepresentable's
+            // ignoresSafeArea zeroes the ZStack's safe area for SwiftUI siblings, so a SwiftUI overlay
+            // button couldn't be positioned reliably. It toggles `showFilters`, which drives the strip.
+            CameraCaptureRepresentable(filter: $liveFilter, onThumbnail: { liveThumb = $0 },
+                                       onToggleFilters: { withAnimation(.snappy) { showFilters.toggle() } }) { refs in
+                reviewRefs = refs
             }
-            .frame(width: geo.size.width, height: geo.size.height)
+            .ignoresSafeArea()
+
+            // The collapsible strip floats above the shutter; 150pt bottom margin clears the shutter +
+            // home indicator regardless of the (representable-consumed) safe area.
+            #if !os(macOS)
+            if showFilters, let liveThumb {
+                VStack {
+                    Spacer()
+                    FilterStrip(thumbnail: liveThumb, selection: $liveFilter)
+                        .background(.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .padding(.horizontal, 10)
+                        .padding(.bottom, 150)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+                .ignoresSafeArea(.container, edges: .bottom)
+            }
+            #endif
         }
-        .ignoresSafeArea()
         // Lock to portrait like the story camera: the shutter/controls never move on rotation, while
         // the capture connection still follows the PHYSICAL device orientation (see shutter handlers),
         // so rotating the phone records landscape/portrait automatically without the button shifting.
@@ -107,18 +93,21 @@ private struct CaptureBatch: Identifiable {
 struct CameraCaptureRepresentable: UIViewControllerRepresentable {
     @Binding var filter: HavenFilter
     var onThumbnail: ((PlatformImage) -> Void)? = nil
+    var onToggleFilters: (() -> Void)? = nil
     var onCaptured: ([String]) -> Void
 
     func makeUIViewController(context: Context) -> CameraViewController {
         let vc = CameraViewController()
         vc.onCaptured = onCaptured
         vc.onThumbnail = onThumbnail
+        vc.onToggleFilters = onToggleFilters
         vc.onFilterChanged = { [b = $filter] in b.wrappedValue = $0 }
         vc.liveFilter = filter
         return vc
     }
     func updateUIViewController(_ vc: CameraViewController, context: Context) {
         vc.onFilterChanged = { [b = $filter] in b.wrappedValue = $0 }
+        vc.onToggleFilters = onToggleFilters
         if vc.liveFilter != filter { vc.liveFilter = filter }
     }
 }
@@ -136,6 +125,7 @@ struct CameraCaptureRepresentable: UIViewControllerRepresentable {
 struct CameraCaptureRepresentable: View {
     @Binding var filter: HavenFilter
     var onThumbnail: ((PlatformImage) -> Void)? = nil
+    var onToggleFilters: (() -> Void)? = nil   // unused on macOS (its filter strip is always shown)
     var onCaptured: ([String]) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -491,6 +481,8 @@ final class CameraViewController: UIViewController,
 
     var onCaptured: (([String]) -> Void)?
     var onThumbnail: ((PlatformImage) -> Void)?
+    /// Fired when the top-right filter button is tapped — toggles the SwiftUI `FilterStrip` visibility.
+    var onToggleFilters: (() -> Void)?
     /// Fired when a swipe on the preview changes the filter, so the SwiftUI `FilterStrip` selection
     /// stays in sync.
     var onFilterChanged: ((HavenFilter) -> Void)?
@@ -651,7 +643,11 @@ final class CameraViewController: UIViewController,
 
         let flip = button(symbol: "arrow.triangle.2.circlepath.camera", action: #selector(flip))
         let close = button(symbol: "xmark", action: #selector(closeTapped))
-        view.addSubview(flip); view.addSubview(close)
+        // Filter toggle — top-right, pinned to the safe-area guide (mirrors `close` top-left), so it
+        // always clears the status bar / Dynamic Island. UIKit-hosted because a SwiftUI overlay can't
+        // be positioned reliably over a UIViewControllerRepresentable that ignores the safe area.
+        let filterToggle = button(symbol: "camera.filters", action: #selector(filterTapped))
+        view.addSubview(flip); view.addSubview(close); view.addSubview(filterToggle)
 
         // Swipe left/right anywhere on the preview to flip through filters (full-frame-rate, unlike
         // the thumbnail strip). The strip stays as a tappable menu and follows along.
@@ -694,8 +690,12 @@ final class CameraViewController: UIViewController,
             flip.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 36),
             close.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
             close.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            filterToggle.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            filterToggle.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
         ])
     }
+
+    @objc private func filterTapped() { onToggleFilters?() }
 
     private func button(symbol: String, action: Selector) -> UIButton {
         let b = UIButton(type: .system)

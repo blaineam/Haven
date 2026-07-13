@@ -1369,7 +1369,36 @@ const call = {
   localStream: null, micOn: true, camOn: true,
   ringing: false, connecting: false, inCall: false, video: true,
   screenOn: false, screenStream: null, camTrack: null,
+  ringTimer: null, ended: new Map(),
 };
+
+// Callee-side bounded ring (iOS parity). The caller gives up dialing at ~30s, but its hangup
+// (frame 12) is fire-and-forget — if it never arrives (caller offline, dropped frame), the
+// incoming-call overlay would sit there forever. Ringing always ends after this timeout and the
+// call is treated as missed.
+const RING_TIMEOUT_MS = 60_000;
+// How long an ended session's tombstone suppresses re-ringing. Just outlasts the caller's ~30s
+// invite retransmit burst: declining mustn't re-ring when our hangup frame is lost, but a
+// deliberate redial — or being re-added to a group call we left — rings normally afterwards.
+const ENDED_TOMBSTONE_MS = 45_000;
+
+/** Arm the bounded ring. Cleared by accept and by teardown (decline, hangup, end). */
+function startRingTimeout() {
+  clearTimeout(call.ringTimer);
+  call.ringTimer = setTimeout(() => {
+    if (!call.ringing || call.inCall) return;
+    toast("Missed call" + (call.name ? " from " + call.name : ""));
+    teardownCall();
+  }, RING_TIMEOUT_MS);
+}
+
+/** Did a session end here recently enough that a fresh invite for it must be ignored? A caller
+ *  retransmits the invite every 2.5s and relay hops can replay copies late — none of those may
+ *  re-ring a session we've already left. */
+function recentlyEnded(sid) {
+  const at = call.ended.get(sid);
+  return at != null && Date.now() - at < ENDED_TOMBSTONE_MS;
+}
 
 /** Call audio priority: true from the first ring/dial until teardown. */
 function callAudioActive() { return call.ringing || call.connecting || call.inCall; }
@@ -1418,6 +1447,7 @@ function addToCallDialog() {
 }
 
 async function callAccept() {
+  clearTimeout(call.ringTimer); call.ringTimer = null;
   call.ringing = false; call.inCall = true;
   await invoke("call_accept", { sessionId: call.session, to: invitees() });
   await startMesh();
@@ -1476,8 +1506,9 @@ async function onCallEvent(payload) {
         if (call.session === c.sessionId) { members.forEach((m) => call.roster.add(m)); if (call.localStream) invitees().forEach(connectPeerIfNeeded); }
         return;
       }
+      if (recentlyEnded(c.sessionId)) return;   // we already left this session — retransmits can't re-ring
       call.session = c.sessionId; call.roster = members; call.name = c.groupName || c.name || displayNameFor(c.from);
-      call.ringing = true; call.video = true; syncFeedVideoSound(); renderCallOverlay();
+      call.ringing = true; call.video = true; startRingTimeout(); syncFeedVideoSound(); renderCallOverlay();
       break;
     }
     case "accept": {
@@ -1528,6 +1559,15 @@ function displayNameFor(hex) {
 }
 
 function teardownCall() {
+  // Remember the session so the caller's still-in-flight invite retransmits can't re-ring it.
+  if (call.session) {
+    call.ended.set(call.session, Date.now());
+    if (call.ended.size > 50) {   // prune long-expired tombstones
+      const now = Date.now();
+      for (const [sid, at] of call.ended) if (now - at >= ENDED_TOMBSTONE_MS) call.ended.delete(sid);
+    }
+  }
+  clearTimeout(call.ringTimer); call.ringTimer = null;
   if (call.screenStream) { call.screenStream.getTracks().forEach((t) => t.stop()); call.screenStream = null; }
   call.screenOn = false; call.camTrack = null;
   call.pcs.forEach((pc) => pc.close()); call.pcs.clear();

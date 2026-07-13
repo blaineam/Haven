@@ -11,24 +11,39 @@ class CallWireTest {
     private val hexB = "b".repeat(64)
 
     @Test fun group_invite_roundtrip() {
-        val frame = CallWire.groupInvite(hexA, "sess-1", "Family", "$hexA,$hexB")
+        val frame = CallWire.groupInvite(hexA, "sess-1", "Family", "$hexA,$hexB", sentAtSecs = 1_770_000_000L)
         val g = CallWire.parseGroupInvite(frame)!!
         assertEquals(hexA, g.from)
         assertEquals("sess-1", g.sessionId)
         assertEquals("Family", g.groupName)
         assertEquals(listOf(hexA, hexB), g.roster)
+        assertEquals(1_770_000_000L, g.sentAt)
     }
 
     @Test fun group_invite_tolerates_trailing_timestamp_field() {
-        // Apple senders append a 4th LP field (unix-seconds send time) so receivers can refuse
-        // stale replayed invites. This parser reads exactly 3 fields — the extra field must be
-        // ignored, not break Android <-> iPhone calls.
-        val ts = "1770000000".toByteArray()
-        val frame = CallWire.groupInvite(hexA, "sess-1", "Family", hexB) +
-            byteArrayOf((ts.size and 0xff).toByte(), (ts.size shr 8).toByte()) + ts
-        val g = CallWire.parseGroupInvite(frame)!!
+        // Senders append a 4th LP field (unix-seconds send time) so receivers can refuse stale
+        // replayed invites. The builder now emits it itself; the parser must surface it, and any
+        // FUTURE unknown 5th field must still be ignored, not break Android <-> iPhone calls.
+        val frame = CallWire.groupInvite(hexA, "sess-1", "Family", hexB, sentAtSecs = 1_770_000_000L)
+        val extra = "future-field".toByteArray()
+        val withExtra = frame + byteArrayOf((extra.size and 0xff).toByte(), (extra.size shr 8).toByte()) + extra
+        val g = CallWire.parseGroupInvite(withExtra)!!
         assertEquals("sess-1", g.sessionId)
         assertEquals(listOf(hexB), g.roster)
+        assertEquals(1_770_000_000L, g.sentAt)
+    }
+
+    @Test fun group_invite_without_timestamp_parses_with_null_sent_at() {
+        // A frame from an OLDER sender (3 fields, no timestamp) must still parse; sentAt is null
+        // so the receiver never treats it as stale.
+        val out = ArrayList<Byte>()
+        hexA.toByteArray().forEach { out.add(it) }
+        Wire.lpAppend(out, "sess-1".toByteArray())
+        Wire.lpAppend(out, "Family".toByteArray())
+        Wire.lpAppend(out, hexB.toByteArray())
+        val g = CallWire.parseGroupInvite(out.toByteArray())!!
+        assertEquals("sess-1", g.sessionId)
+        assertNull(g.sentAt)
     }
 
     @Test fun group_invite_starts_with_raw_sender_hex() {

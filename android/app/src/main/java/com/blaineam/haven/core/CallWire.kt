@@ -7,7 +7,7 @@ package com.blaineam.haven.core
  *
  * All call frames lead with the sender's 64-char node-id hex, so HavenNet can drop blocked senders.
  *
- *   21 group-invite : [hex64][lp sessionId][lp groupName][lp rosterCSV]
+ *   21 group-invite : [hex64][lp sessionId][lp groupName][lp rosterCSV][lp sentAtSecs?]
  *   11 accept       : [hex64][lp sessionId]
  *   12 hangup       : [hex64]
  *   16/17/18 signal : [hex64][lp sessionId][json]      (offer / answer / ice; SDP or candidate JSON)
@@ -31,12 +31,22 @@ object CallWire {
 
     // ---- builders ----
 
-    fun groupInvite(myHex: String, sessionId: String, groupName: String, rosterCsv: String): ByteArray {
+    /** The 4th LP field is the send time (unix seconds, decimal) so receivers can refuse to ring
+     *  for a stale relay-replayed copy; every platform's parser tolerates trailing fields, so
+     *  older receivers are unaffected. */
+    fun groupInvite(
+        myHex: String,
+        sessionId: String,
+        groupName: String,
+        rosterCsv: String,
+        sentAtSecs: Long = System.currentTimeMillis() / 1000,
+    ): ByteArray {
         val out = ArrayList<Byte>()
         myHex.toByteArray(Charsets.UTF_8).forEach { out.add(it) }
         Wire.lpAppend(out, sessionId.toByteArray(Charsets.UTF_8))
         Wire.lpAppend(out, groupName.toByteArray(Charsets.UTF_8))
         Wire.lpAppend(out, rosterCsv.toByteArray(Charsets.UTF_8))
+        Wire.lpAppend(out, sentAtSecs.toString().toByteArray(Charsets.UTF_8))
         return out.toByteArray()
     }
 
@@ -76,7 +86,8 @@ object CallWire {
 
     // ---- parsers ----
 
-    data class GroupInvite(val from: String, val sessionId: String, val groupName: String, val roster: List<String>)
+    /** [sentAt] is null when the sender predates the timestamp field. */
+    data class GroupInvite(val from: String, val sessionId: String, val groupName: String, val roster: List<String>, val sentAt: Long? = null)
 
     fun parseGroupInvite(payload: ByteArray): GroupInvite? {
         val from = hexHead(payload) ?: return null
@@ -86,7 +97,8 @@ object CallWire {
         val rosterStr = r.lp()?.let { String(it, Charsets.UTF_8) } ?: return null
         if (sid.isEmpty()) return null
         val roster = rosterStr.split(",").map { it.trim() }.filter { it.length == 64 }
-        return GroupInvite(from, sid, gname.ifEmpty { "Group call" }, roster)
+        val sentAt = r.lp()?.let { String(it, Charsets.UTF_8).toLongOrNull() }
+        return GroupInvite(from, sid, gname.ifEmpty { "Group call" }, roster, sentAt)
     }
 
     data class Accept(val from: String, val sessionId: String)

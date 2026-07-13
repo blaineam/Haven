@@ -79,6 +79,26 @@ object CallManager {
     private val roster = HashSet<String>()                 // includes me
     private val peers = HashMap<String, WebRTCPeer>()
 
+    // Callee-side bounded ring (iOS parity). The caller gives up dialing at ~30s, but its hangup
+    // (frame 12) is fire-and-forget — if it never arrives (caller offline, dropped frame, or a
+    // stale invite replayed late through a relay hop), we'd ring FOREVER. Ringing always stops
+    // after this timeout and the call is treated as missed.
+    private const val RING_TIMEOUT_MS = 60_000L
+    /** Invites older than this (per the sender's frame-21 timestamp) never start a ring — the
+     *  caller stopped dialing long ago. Generous enough to absorb ordinary clock skew. */
+    private const val INVITE_MAX_AGE_SECS = 180L
+    /** How long an ended session's tombstone suppresses re-ringing. Just outlasts the caller's
+     *  ~30s invite retransmit burst: declining mustn't re-ring when our hangup frame is lost, but
+     *  a deliberate redial — or being re-added to a group call we left (addToCall reuses the
+     *  session id) — rings normally once the burst is over. */
+    private const val ENDED_TOMBSTONE_MS = 45_000L
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val ringTimeoutRunnable = Runnable { ringTimedOut() }
+    /** Sessions that already ended locally (declined / hung up / timed out / completed), with when.
+     *  A caller retransmits the invite every 2.5s and relay hops can replay copies late — none of
+     *  those may re-ring a session we've already left. */
+    private val endedSessions = HashMap<String, Long>()
+
     private val iceServers = listOf(
         PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
         PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer(),
@@ -147,6 +167,7 @@ object CallManager {
         HavenNet.contacts.filter { !roster.contains(it.idHex) && !HavenNet.blocked.contains(it.idHex) }
 
     fun accept() {
+        mainHandler.removeCallbacks(ringTimeoutRunnable)
         ringing.value = false
         inCall.value = true
         invitees().forEach { HavenNet.sendCallFrame(CallWire.ACCEPT, CallWire.accept(myHex, sessionId), it) }
@@ -173,7 +194,15 @@ object CallManager {
     private fun handle(type: Int, body: ByteArray) {
         when (type) {
             CallWire.GROUP_INVITE -> handleGroupInvite(body)
-            CallWire.INVITE -> CallWire.parseInviteName(body)?.let { (from, name) -> if (knownContact(from)) incoming(from, name, "legacy:$from", setOf(from, myHex)) }
+            CallWire.INVITE -> CallWire.parseInviteName(body)?.let { (from, name) ->
+                if (!knownContact(from)) return@let
+                // Already in a call → the sender is joining, not ringing us afresh (iOS parity).
+                if (inCall.value || ringing.value || connecting.value) {
+                    if (roster.add(from)) refreshParticipants()
+                    return@let
+                }
+                incoming(from, name, "legacy:$from", setOf(from, myHex))
+            }
             CallWire.ACCEPT -> handleAccept(body)
             CallWire.HANGUP -> handleHangup(body)
             CallWire.CAMERA -> handleCameraState(body)
@@ -186,6 +215,14 @@ object CallManager {
     private fun handleGroupInvite(body: ByteArray) {
         val g = CallWire.parseGroupInvite(body) ?: return
         if (!knownContact(g.from)) return   // only contacts can invite you (F3)
+        // Optional 4th field (newer senders): the invite's send time. A copy older than the
+        // caller's entire dialing window is a replay — a relay hop or reconnect delivering it
+        // long after the caller gave up. It must not ring (or resurrect a session's roster).
+        val age = g.sentAt?.let { System.currentTimeMillis() / 1000 - it }
+        if (age != null && age > INVITE_MAX_AGE_SECS) {
+            Log.i(TAG, "dropping stale invite (age=${age}s session=${g.sessionId.take(12)})")
+            return
+        }
         val members = (g.roster + g.from + myHex).toSet()
         if (inCall.value || ringing.value || connecting.value) {
             if (sessionId == g.sessionId) {
@@ -199,13 +236,38 @@ object CallManager {
     }
 
     private fun incoming(from: String, name: String, session: String, members: Set<String>) {
+        if (recentlyEnded(session)) return   // we already left this session — retransmits can't re-ring
         sessionId = session
         roster.clear(); roster.addAll(members)
         peerName.value = name
         isCaller = false
         ringing.value = true
+        startRingTimeout()
         com.blaineam.haven.ui.MusicPlayer.stop()   // stop the song preview before the ring
         refreshParticipants()
+    }
+
+    /** Arm the callee-side bounded ring. Cleared by accept and by teardown (decline, hangup, end). */
+    private fun startRingTimeout() {
+        mainHandler.removeCallbacks(ringTimeoutRunnable)
+        mainHandler.postDelayed(ringTimeoutRunnable, RING_TIMEOUT_MS)
+    }
+
+    /** Nobody answered and no hangup ever arrived — stop ringing and record a missed call. */
+    private fun ringTimedOut() {
+        if (!ringing.value || inCall.value) return
+        Log.i(TAG, "ring timeout after ${RING_TIMEOUT_MS / 1000}s — ending as missed (session=${sessionId.take(12)})")
+        val who = peerName.value
+        teardown()
+        runCatching {
+            Notifications.notify(appContext, "Missed call", if (who.isEmpty()) "You missed a call" else "You missed a call from $who")
+        }
+    }
+
+    /** Did a session end here recently enough that a fresh invite for it must be ignored? */
+    private fun recentlyEnded(sid: String): Boolean {
+        val endedAt = endedSessions[sid] ?: return false
+        return System.currentTimeMillis() - endedAt < ENDED_TOMBSTONE_MS
     }
 
     private fun handleAccept(body: ByteArray) {
@@ -404,6 +466,15 @@ object CallManager {
     }
 
     private fun teardown() {
+        // Remember the session so the caller's still-in-flight invite retransmits can't re-ring it.
+        if (sessionId.isNotEmpty()) {
+            endedSessions[sessionId] = System.currentTimeMillis()
+            if (endedSessions.size > 50) {   // prune long-expired tombstones
+                val now = System.currentTimeMillis()
+                endedSessions.entries.removeAll { now - it.value >= ENDED_TOMBSTONE_MS }
+            }
+        }
+        mainHandler.removeCallbacks(ringTimeoutRunnable)
         peers.values.forEach { it.close() }; peers.clear()
         runCatching { screenCapturer?.stopCapture() }
         runCatching { screenCapturer?.dispose() }; screenCapturer = null

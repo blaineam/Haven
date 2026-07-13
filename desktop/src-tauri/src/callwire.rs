@@ -3,7 +3,7 @@
 //! every other (no SFU); the lexicographically smaller hex offers (glare-free). All call frames
 //! lead with the sender's 64-char node-id hex so the engine can drop blocked senders.
 //!
-//!   21 group-invite : [hex64][lp sessionId][lp groupName][lp rosterCSV]
+//!   21 group-invite : [hex64][lp sessionId][lp groupName][lp rosterCSV][lp sentAtSecs?]
 //!   11 accept       : [hex64][lp sessionId]
 //!   12 hangup       : [hex64]
 //!   16/17/18 signal : [hex64][lp sessionId][json]   (offer / answer / ice — SDP or candidate JSON)
@@ -28,11 +28,21 @@ fn hex_head(payload: &[u8]) -> Option<String> {
 
 // ---- builders ----
 
-pub fn group_invite(my_hex: &str, session_id: &str, group_name: &str, roster_csv: &str) -> Vec<u8> {
+/// The 4th LP field is the send time (unix seconds, decimal) so receivers can refuse to ring for
+/// a stale relay-replayed copy; every platform's parser tolerates trailing fields, so older
+/// receivers are unaffected.
+pub fn group_invite(
+    my_hex: &str,
+    session_id: &str,
+    group_name: &str,
+    roster_csv: &str,
+    sent_at_secs: u64,
+) -> Vec<u8> {
     let mut out = my_hex.as_bytes().to_vec();
     lp_append(&mut out, session_id.as_bytes());
     lp_append(&mut out, group_name.as_bytes());
     lp_append(&mut out, roster_csv.as_bytes());
+    lp_append(&mut out, sent_at_secs.to_string().as_bytes());
     out
 }
 
@@ -61,6 +71,8 @@ pub struct GroupInvite {
     pub session_id: String,
     pub group_name: String,
     pub roster: Vec<String>,
+    /// Send time (unix seconds); `None` when the sender predates the timestamp field.
+    pub sent_at: Option<u64>,
 }
 
 pub fn parse_group_invite(payload: &[u8]) -> Option<GroupInvite> {
@@ -78,11 +90,13 @@ pub fn parse_group_invite(payload: &[u8]) -> Option<GroupInvite> {
         .map(|s| s.trim().to_string())
         .filter(|s| s.len() == 64)
         .collect();
+    let sent_at = r.lp().and_then(|b| String::from_utf8_lossy(&b).parse::<u64>().ok());
     Some(GroupInvite {
         from,
         session_id: sid,
         group_name: if gname.is_empty() { "Group call".into() } else { gname },
         roster,
+        sent_at,
     })
 }
 
@@ -147,27 +161,43 @@ mod tests {
     #[test]
     fn group_invite_roundtrip() {
         let me = "a".repeat(64);
-        let p = group_invite(&me, "sess1", "Family call", &format!("{},{}", "b".repeat(64), "c".repeat(64)));
+        let p = group_invite(&me, "sess1", "Family call", &format!("{},{}", "b".repeat(64), "c".repeat(64)), 1_770_000_000);
         let g = parse_group_invite(&p).unwrap();
         assert_eq!(g.from, me);
         assert_eq!(g.session_id, "sess1");
         assert_eq!(g.group_name, "Family call");
         assert_eq!(g.roster.len(), 2);
+        assert_eq!(g.sent_at, Some(1_770_000_000));
     }
 
     #[test]
     fn group_invite_tolerates_trailing_timestamp_field() {
-        // Apple senders append a 4th length-prefixed field (unix-seconds send time) so receivers
-        // can refuse stale replayed invites. This parser reads exactly 3 fields — the trailing
-        // field must be ignored, not break the call.
+        // Senders append a 4th length-prefixed field (unix-seconds send time) so receivers can
+        // refuse stale replayed invites. The builder now emits it itself; the parser must surface
+        // it, and any FUTURE unknown 5th field must still be ignored, not break the call.
         let me = "a".repeat(64);
-        let mut p = group_invite(&me, "sess1", "Family call", &"b".repeat(64));
-        let ts = b"1770000000";
-        p.extend_from_slice(&(ts.len() as u16).to_le_bytes());
-        p.extend_from_slice(ts);
+        let mut p = group_invite(&me, "sess1", "Family call", &"b".repeat(64), 1_770_000_000);
+        let extra = b"future-field";
+        p.extend_from_slice(&(extra.len() as u16).to_le_bytes());
+        p.extend_from_slice(extra);
         let g = parse_group_invite(&p).unwrap();
         assert_eq!(g.session_id, "sess1");
         assert_eq!(g.roster.len(), 1);
+        assert_eq!(g.sent_at, Some(1_770_000_000));
+    }
+
+    #[test]
+    fn group_invite_without_timestamp_parses_with_no_sent_at() {
+        // A frame from an OLDER sender (3 fields, no timestamp) must still parse; sent_at is None
+        // so the receiver never treats it as stale.
+        let me = "a".repeat(64);
+        let mut p = me.as_bytes().to_vec();
+        lp_append(&mut p, b"sess1");
+        lp_append(&mut p, b"Family call");
+        lp_append(&mut p, "b".repeat(64).as_bytes());
+        let g = parse_group_invite(&p).unwrap();
+        assert_eq!(g.session_id, "sess1");
+        assert_eq!(g.sent_at, None);
     }
 
     #[test]

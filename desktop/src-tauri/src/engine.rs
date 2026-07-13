@@ -3197,8 +3197,19 @@ impl Engine {
             wire::CALL_INVITE => callwire::parse_invite_name(body).map(|(from, name)| {
                 serde_json::json!({ "kind": "invite", "from": from, "name": name, "sessionId": format!("legacy:{from}"), "roster": [from] })
             }),
-            wire::GROUP_INVITE => callwire::parse_group_invite(body).map(|g| {
-                serde_json::json!({ "kind": "groupInvite", "from": g.from, "sessionId": g.session_id, "groupName": g.group_name, "roster": g.roster })
+            wire::GROUP_INVITE => callwire::parse_group_invite(body).and_then(|g| {
+                // Optional 4th field (newer senders): the invite's send time. A copy older than
+                // the caller's entire dialing window (180s, generous for clock skew) is a replay —
+                // a relay hop or reconnect delivering it long after the caller gave up. It must
+                // not reach the UI (ring or resurrect a session's roster).
+                if let Some(ts) = g.sent_at {
+                    let age = (now_ms() / 1000).saturating_sub(ts);
+                    if age > 180 {
+                        log::info!("dropping stale call invite (age={age}s session={})", &g.session_id.chars().take(12).collect::<String>());
+                        return None;
+                    }
+                }
+                Some(serde_json::json!({ "kind": "groupInvite", "from": g.from, "sessionId": g.session_id, "groupName": g.group_name, "roster": g.roster }))
             }),
             wire::CALL_ACCEPT => callwire::parse_accept(body).map(|a| {
                 serde_json::json!({ "kind": "accept", "from": a.from, "sessionId": a.session_id })
@@ -3346,7 +3357,7 @@ impl Engine {
 
     pub fn call_group_invite(self: &Arc<Self>, session_id: String, group_name: String, roster: Vec<String>, to: Vec<String>) {
         let me = self.node_id_hex();
-        let frame = callwire::group_invite(&me, &session_id, &group_name, &roster.join(","));
+        let frame = callwire::group_invite(&me, &session_id, &group_name, &roster.join(","), now_ms() / 1000);
         for t in to {
             self.send_call_frame(wire::GROUP_INVITE, &frame, &t);
         }

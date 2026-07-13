@@ -7,6 +7,22 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-beta.38] — 2026-07-13
+
+### Fixed
+- **Deleted relays finally stay deleted.** Deleting a relay ("Delete now" or Deactivate) now writes a
+  proper, timestamped tombstone that syncs across your devices, and *nothing* auto-resurrects it: a
+  passive re-announce from any member (or your own relay reopening) no longer brings it back, a stale
+  re-add can't beat a newer delete (last-writer-wins on the actual timestamp), and launch/bootstrap
+  adopt skips relays you've deleted. A deleted relay returns ONLY when you explicitly re-add it. (Fixes
+  a family of resurrection paths — the "I delete it and it keeps coming back" loop.)
+- **Your own relay accepts your own devices.** A headless/NAS relay authorizes members by account id
+  from its link, but a device connects as its device id, so it was rejecting your phone's messages
+  (`ERR forbidden`). Your device now publishes its account-signed device roster to the relay, which
+  verifies the signature and authorizes your device ids — messages and DMs flow through your own relay.
+- **Media lands on any reachable relay** (permission-free), so a video reaches a hosted/NAS relay over
+  iroh even when a circle's own relays are offline, and replicates from there.
+
 ## [0.1.0-beta.37] — 2026-07-13
 
 ### Fixed

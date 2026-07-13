@@ -104,6 +104,12 @@ object HavenNet : InboundListener {
      *  relay the user deleted. Mirrors iOS `forgotAt`. */
     private val forgotAtRelays = HashMap<String, Long>()
 
+    /** Relays we deliberately RE-ADDED after a deletion (hex → re-add unix ms). Published via self-sync as
+     *  a CLEAR so a sibling's stale deletion tombstone doesn't re-forget a relay we brought back — without
+     *  it a grow-only relay tombstone would re-forget a re-added relay on every sibling's sync pass, forever
+     *  (the "I delete a relay and it keeps coming back" bug in reverse). Mirrors iOS `clearedRelayForgets`. */
+    private val clearedRelayForgets = HashMap<String, Long>()
+
     private fun relayForgottenAtMs(hex: String): Long = forgotAtRelays[hex.lowercase()] ?: 0L
     private fun relayAddedAtMs(hex: String): Long = relayEntries[hex]?.addedAtMs ?: 0L
 
@@ -1047,6 +1053,48 @@ object HavenNet : InboundListener {
             val eventsToo = nowMs - prefs.getLong("lastEventBackfillMs", 0L) > 86_400_000L
             if (eventsToo) prefs.edit().putLong("lastEventBackfillMs", nowMs).apply()
             scope.launch { runCatching { for (c in social.circles()) backfillMailbox(c.id, eventsToo = eventsToo) } }
+            // Re-publish our account-signed device roster to every known relay, so a HEADLESS relay (which
+            // only knows account ids from its operator link) authorizes THIS device's id and stops
+            // ERR-forbidding our mailbox ops — the "my own NAS relay rejects my phone" fix. iOS
+            // SharedStore.publishDeviceRoster parity.
+            scope.launch { runCatching { publishDeviceRoster() } }
+        }
+    }
+
+    /**
+     * Publish this device's account-signed device roster to every known relay under
+     * `haven/devroster/<accountHex>`. A device connects to a relay AS its DEVICE id, but a HEADLESS relay
+     * only knows ACCOUNT ids (from the operator's link), so without this it ERR-forbids every one of the
+     * account's devices' mailbox ops. The wire (from [HavenSocial.exportOwnRoster]) carries the account
+     * bundle + an account-SIGNED DeviceList, so the relay verifies it WITHOUT decrypting anything and then
+     * authorizes the account's device ids (haven-net verify_devroster). The key is permission-free, so
+     * this write is allowed BEFORE authorization (the bootstrap). Idempotent + cheap; called on the sync
+     * timer so a restarted relay re-learns our devices promptly. iOS SharedStore.publishDeviceRoster parity.
+     */
+    private suspend fun publishDeviceRoster() {
+        val r = runCatching { social.exportOwnRoster() }.getOrDefault(emptyList()).firstOrNull() ?: return
+        val wire = r.wire
+        if (wire.isEmpty()) return
+        val key = "haven/devroster/${r.accountHex}"
+        val hostedHex = runCatching { relayHost?.nodeIdHex() }.getOrNull()
+        for (nodeHex in allRelays()) {
+            if (nodeHex.startsWith("s3:")) continue
+            // Our OWN hosted relay: write straight into the local store (no iroh self-dial).
+            if (hostedHex != null && nodeHex == hostedHex) { runCatching { relayHost?.localPut(key, wire) }; continue }
+            // Relay HTTP interface first (the reliable cross-NAT path), else the iroh dial.
+            val entry = relayEntries[nodeHex]
+            if (entry != null && entry.httpToken.isNotEmpty()) {
+                var done = false
+                for (base in httpUrlsFor(entry)) {
+                    if (relayHttpPut(base, entry.httpToken, key, wire)) { markRelaySeen(nodeHex); done = true; break }
+                    markHttpUrlBad(base)
+                }
+                if (done) continue
+            }
+            val client = relayClientFor(nodeHex) ?: continue
+            runCatching { client.put(key, wire) }
+                .onSuccess { markRelayOk(nodeHex) }
+                .onFailure { relayFailed(nodeHex) }
         }
     }
 
@@ -1455,8 +1503,7 @@ object HavenNet : InboundListener {
     fun adoptRelay(nodeHex: String, name: String? = null, setDefault: Boolean = false) {
         val hex = nodeHex.trim().lowercase()
         if (hex.length != 64) return
-        suppressedRelays.remove(hex)   // explicit adoption overrides a prior Forget
-        forgotAtRelays.remove(hex)     // …and clears the deletion timestamp (fresh adoption stamp below)
+        unforgetRelay(hex)   // explicit adoption overrides a prior Forget + records a re-add CLEAR for self-sync
         ensureRelayEntry(hex, name = name, isS3 = false, activate = true)   // adoptedAtMs=0 → stamp now()
         if (setDefault) defaultRelayHex = hex
         scope.launch {
@@ -1488,7 +1535,7 @@ object HavenNet : InboundListener {
         if (!config.isConfigured) return
         StorageStore.save(appContext, config)
         val hex = "s3:${config.bucket.trim()}"
-        suppressedRelays.remove(hex)
+        unforgetRelay(hex)   // explicit re-add overrides a prior Forget + records a self-sync CLEAR
         ensureRelayEntry(hex, name = name, isS3 = true, activate = true)
         if (setDefault) defaultRelayHex = hex
         scope.launch {
@@ -1518,6 +1565,7 @@ object HavenNet : InboundListener {
             // filters inactive entries out, so it stops being dialed/served immediately.
             suppressedRelays.add(hex)   // tombstone so passive auto-learn can't resurrect it
             forgotAtRelays[hex] = relayNow()   // LWW: a re-announce only wins if (re-)added AFTER this
+            clearedRelayForgets.remove(hex)   // a fresh deletion supersedes any prior re-add clear
             saveRelayNodes()
             relayMutex.withLock {
                 runCatching { relayClients.remove(hex)?.close() }
@@ -1531,12 +1579,21 @@ object HavenNet : InboundListener {
      *  `adoptedAtMs`: 0 = explicit local reactivation (stamp now()); non-zero = the announce's stamp. */
     fun reactivateRelay(nodeHex: String, adoptedAtMs: Long = 0) {
         val hex = if (nodeHex.startsWith("s3:")) nodeHex else nodeHex.trim().lowercase()
-        suppressedRelays.remove(hex)
-        forgotAtRelays.remove(hex)
+        unforgetRelay(hex)   // clears suppression/forget + records a re-add CLEAR so self-sync supersedes a stale sibling tombstone
         ensureRelayEntry(hex, activate = true, adoptedAtMs = adoptedAtMs)
         relayHealth.remove(hex)   // clear stale backoff so it's retried immediately
         saveRelayNodes()
         bumpRelays()
+    }
+
+    /** Clear a relay's FORGOTTEN tombstone (an explicit adoption / reactivation overrides a prior Forget)
+     *  and — when it WAS forgotten — record the re-add as a CLEAR (hex → now) so self-sync supersedes a
+     *  sibling's stale deletion tombstone instead of the grow-only tombstone re-forgetting it forever.
+     *  Mirrors iOS `unforget`. Caller persists via saveRelayNodes(). */
+    private fun unforgetRelay(hex: String) {
+        val hadTombstone = suppressedRelays.remove(hex)
+        val hadForget = forgotAtRelays.remove(hex) != null
+        if (hadTombstone || hadForget) clearedRelayForgets[hex] = relayNow()
     }
 
     /** ERASE a relay for good — its associations across every circle, its entry, the default, caches. */
@@ -1549,6 +1606,7 @@ object HavenNet : InboundListener {
             relayEntries.remove(hex)
             suppressedRelays.add(hex)
             forgotAtRelays[hex] = relayNow()   // LWW deletion stamp (a later re-add can still supersede)
+            clearedRelayForgets.remove(hex)   // a fresh deletion supersedes any prior re-add clear
             forgetBackedUp(hex)   // relay gone for good → re-mirror if a relay with this id ever returns
             saveRelayNodes()
             relayMutex.withLock {
@@ -2276,14 +2334,29 @@ object HavenNet : InboundListener {
      * its outbound SendDatagram over a pure-relay (cross-NAT) path, so a blob dial that has to
      * cross a NAT stalls 30s and dies while messaging on the same relay path works. Stable sort.
      */
-    private fun mediaRelaysFor(circleId: String): List<String> =
-        relaysFor(circleId).sortedByDescending { hex ->
+    // Relay node ids to MIRROR media to / FETCH media from — the circle's own relays PLUS every other
+    // known ACTIVE relay. Media keys (haven/media/<ref>) are content-addressed AND permission-free on a
+    // relay (unlike mailbox keys, which are circle-membership gated — a relay can ERR-forbid a device for
+    // messages while still storing its media), so a blob may safely live on ANY relay the members can
+    // reach. Broadening beyond the circle's own (possibly all-NAT'd) relays is what lands media when a
+    // circle's relays are all offline/unreachable but some OTHER known relay is reachable — that relay
+    // accepts the media even though it forbids the device's mailbox writes. Content-addressed keys make
+    // the extra puts idempotent, unreachable relays fail fast + back off, and mesh anti-entropy replicates
+    // the blob onto the circle's own relays once they return. allRelays() is already active-only. Mailbox/
+    // message paths stay on relaysFor(circleId) — those keys ARE permission-gated. iOS SharedStore.mediaDests
+    // parity (s3: pseudo-nodes are kept here because Android's upload/fetch handle them in-list).
+    private fun mediaRelaysFor(circleId: String): List<String> {
+        val nodes = LinkedHashSet<String>()
+        nodes.addAll(relaysFor(circleId))
+        nodes.addAll(allRelays())
+        return nodes.sortedByDescending { hex ->
             when {
                 relayEntries[hex]?.httpUrls?.isNotEmpty() == true -> 2
                 hex.startsWith("s3:") -> 1
                 else -> 0
             }
         }
+    }
 
     // ---- Relay plain-HTTP media interface (client side) ------------------------------------------
     // GET/PUT against a relay's HTTP interface (see core httprelay.rs): `<base>/k/<key>` with the
@@ -2769,6 +2842,7 @@ object HavenNet : InboundListener {
         relayNodes.clear()
         suppressedRelays.clear()
         forgotAtRelays.clear()
+        clearedRelayForgets.clear()
         relayEntries.clear()
         defaultRelayHex = prefs.getString("relayDefault", "") ?: ""
         prefs.getString("relaysSuppressed", null)?.let { raw ->
@@ -2776,6 +2850,9 @@ object HavenNet : InboundListener {
         }
         prefs.getString("relaysForgotAt", null)?.let { raw ->
             runCatching { val o = JSONObject(raw); o.keys().forEach { k -> forgotAtRelays[k] = o.getLong(k) } }
+        }
+        prefs.getString("relaysClearedForgot", null)?.let { raw ->
+            runCatching { val o = JSONObject(raw); o.keys().forEach { k -> clearedRelayForgets[k] = o.getLong(k) } }
         }
         // MIGRATION: relays deleted BEFORE the deletion-timestamp existed are in `suppressed` but have no
         // `forgotAt`. Without a deletion time the LWW gate can't tell a real re-add from a mere reopen, so
@@ -2855,11 +2932,13 @@ object HavenNet : InboundListener {
             })
         }
         val forgotAtJson = JSONObject().apply { forgotAtRelays.forEach { (k, v) -> put(k, v) } }
+        val clearedForgotJson = JSONObject().apply { clearedRelayForgets.forEach { (k, v) -> put(k, v) } }
         // Write the new format and clear the legacy key (completes the migration).
         prefs.edit()
             .putString("relays", o.toString())
             .putString("relaysSuppressed", JSONArray().apply { suppressedRelays.forEach { put(it) } }.toString())
             .putString("relaysForgotAt", forgotAtJson.toString())
+            .putString("relaysClearedForgot", clearedForgotJson.toString())
             .putString("relayEntries", entriesArr.toString())
             .putString("relayDefault", defaultRelayHex)
             .remove("relayNodes").apply()
@@ -2872,7 +2951,7 @@ object HavenNet : InboundListener {
         contacts.clear(); pending.clear(); blocked.clear(); initiated.clear()
         relayNodes.clear(); relayClients.clear(); relayHealth.clear(); seenMailbox.clear()
         runCatching { seenMailboxFile.delete() }   // a new identity must not inherit the seen-set
-        relayEntries.clear(); suppressedRelays.clear(); forgotAtRelays.clear(); defaultRelayHex = ""
+        relayEntries.clear(); suppressedRelays.clear(); forgotAtRelays.clear(); clearedRelayForgets.clear(); defaultRelayHex = ""
         Presign.reset()
         CircleLock.reset()
         AvatarStore.clear()
@@ -2925,6 +3004,59 @@ object HavenNet : InboundListener {
         ensureRelayEntry(hex, isS3 = false, activate = false)
         val list = relayNodes.getOrPut(circleId) { mutableListOf() }
         if (!list.contains(hex)) { list.add(hex); saveRelayNodes() }
+    }
+
+    // ---- Relay deletion LWW self-sync (iOS SelfSync + RelayHost parity) -------------------------
+
+    /** Every relay we've forgotten with its deletion ms — self-synced (as `relay-removal:<hex>` = 8-byte
+     *  LE ms) so a deletion PROPAGATES to my other devices. iOS `forgottenRelays`. */
+    fun relayForgottenRecords(): Map<String, Long> = HashMap(forgotAtRelays)
+
+    /** Relays we deliberately re-added (hex → re-add ms) — self-synced (as `relay-readd:<hex>` = 8-byte LE
+     *  ms) so a sibling's stale deletion tombstone can't re-forget them. iOS `clearedRelayForgetRecords`. */
+    fun relayClearedForgetRecords(): Map<String, Long> = HashMap(clearedRelayForgets)
+
+    /** Apply a relay-deletion tombstone learned from another of my devices (LWW): forget the relay locally
+     *  IFF the sibling's deletion is NEWER than our own adoption / re-add of it — so a deletion on one
+     *  device drops the relay on all of them, but a device that legitimately RE-ADDED it later keeps it.
+     *  A passive re-announce NEVER auto-resurrects it (only an explicit re-add newer than this delete).
+     *  Idempotent. iOS `applyForgottenTombstone`. */
+    fun applyRelayForgottenTombstone(nodeHex: String, atMs: Long) {
+        val hex = if (nodeHex.startsWith("s3:")) nodeHex else nodeHex.trim().lowercase()
+        if (atMs <= 0L) return
+        if (relayAddedAtMs(hex) > atMs) return                        // a newer local re-add wins
+        if ((clearedRelayForgets[hex] ?: 0L) > atMs) return           // a newer local re-add CLEAR wins
+        if ((forgotAtRelays[hex] ?: 0L) >= atMs) return               // already forgotten at/after this time
+        relayEntries[hex]?.let { relayEntries[hex] = it.copy(active = false) }
+        suppressedRelays.add(hex)
+        forgotAtRelays[hex] = atMs
+        clearedRelayForgets.remove(hex)   // stop re-broadcasting a clear this newer deletion supersedes
+        forgetBackedUp(hex)
+        saveRelayNodes()
+        scope.launch {
+            relayMutex.withLock {
+                runCatching { relayClients.remove(hex)?.close() }
+                relayHealth.remove(hex)
+            }
+            withContext(Dispatchers.Main) { bumpRelays() }
+        }
+    }
+
+    /** Apply a relay-deletion CLEAR (re-add) from another device — un-forget the relay so it can be
+     *  re-learned (via the owner's re-announce / the additive circle record) — but ONLY when the re-add is
+     *  NEWER than our local deletion (LWW). A re-add older than our forget loses and the relay stays gone.
+     *  Idempotent. iOS `applyClearedRelayForget`. */
+    fun applyRelayClearedForget(nodeHex: String, atMs: Long) {
+        val hex = if (nodeHex.startsWith("s3:")) nodeHex else nodeHex.trim().lowercase()
+        if (atMs <= 0L) return
+        if ((forgotAtRelays[hex] ?: 0L) > atMs) return   // our local deletion is newer → the delete wins
+        // Already cleared at/after this time and not currently forgotten → nothing to do.
+        if (!suppressedRelays.contains(hex) && forgotAtRelays[hex] == null && (clearedRelayForgets[hex] ?: 0L) >= atMs) return
+        suppressedRelays.remove(hex)
+        forgotAtRelays.remove(hex)
+        clearedRelayForgets[hex] = maxOf(clearedRelayForgets[hex] ?: 0L, atMs)
+        saveRelayNodes()
+        scope.launch(Dispatchers.Main) { bumpRelays() }
     }
 
     /** Connect (cached) to a relay, honoring backoff. Public wrapper so the coordinator can list/get/put. */

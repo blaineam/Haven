@@ -22,14 +22,39 @@ object LocalMedia {
         dir = File(context.applicationContext.filesDir, "media").apply { mkdirs() }
     }
 
+    /** Above this plaintext size, seal file→file (off-heap) instead of holding the sealed envelope in RAM. */
+    private const val SEAL_TO_FILE_THRESHOLD = 4 * 1024 * 1024
+
+    /**
+     * Seal [bytes] to the at-rest file [dst] for [circleId]. LARGE blobs are sealed file→file in NATIVE
+     * memory (`sealCircleMediaFile`) so the whole ~2× sealed envelope never lands on the managed heap — an
+     * in-memory `sealCircleMedia` of a big video allocated the entire sealed buffer at once and OOM-crashed
+     * low-heap phones (the same trap iOS fixed by sealing to a temp file in `backup()`). Small payloads seal
+     * in-memory (simpler, no temp file). On any seal failure we fall back to writing the plaintext, exactly
+     * as the prior in-memory path did, so media is never silently dropped.
+     */
+    private fun sealToFile(circleId: String, bytes: ByteArray, dst: File) {
+        if (bytes.size > SEAL_TO_FILE_THRESHOLD) {
+            val tmp = File(dst.parentFile, "${dst.name}.plain.tmp")
+            val ok = runCatching {
+                tmp.writeBytes(bytes)
+                HavenNet.engine.sealCircleMediaFile(circleId, tmp.absolutePath, dst.absolutePath)
+            }.getOrDefault(false)
+            runCatching { tmp.delete() }
+            if (ok && dst.exists()) return
+            // Seal-to-file failed → fall through to the in-memory path (then raw plaintext).
+        }
+        val toWrite = runCatching { HavenNet.engine.sealCircleMedia(circleId, bytes) }.getOrNull() ?: bytes
+        runCatching { dst.writeBytes(toWrite) }
+    }
+
     /**
      * Store plaintext bytes sealed to [circleId]; returns a media ref. Videos are tagged "v:" so
      * the feed renders them as players (images stay bare for backward compatibility).
      */
     fun store(circleId: String, bytes: ByteArray, isVideo: Boolean = false): String {
         val hash = sha256Hex(bytes)
-        val toWrite = runCatching { HavenNet.engine.sealCircleMedia(circleId, bytes) }.getOrNull() ?: bytes
-        runCatching { File(dir, hash).writeBytes(toWrite) }
+        sealToFile(circleId, bytes, File(dir, hash))   // large blobs seal file→file (off-heap) to avoid OOM
         // Mint the SAME ref scheme as iOS (apple/HavenApp/Media.swift): the kind is encoded in the
         // prefix so a recipient on either platform knows how to render it. iOS hard-rejects any ref
         // without an img_/vid_/aud_ prefix, so bare hashes were being dropped cross-platform.
@@ -39,8 +64,7 @@ object LocalMedia {
     /** Store a recorded voice message; returns an `aud_` ref (sealed at rest like other media). */
     fun storeAudio(circleId: String, bytes: ByteArray): String {
         val hash = sha256Hex(bytes)
-        val toWrite = runCatching { HavenNet.engine.sealCircleMedia(circleId, bytes) }.getOrNull() ?: bytes
-        runCatching { File(dir, hash).writeBytes(toWrite) }
+        sealToFile(circleId, bytes, File(dir, hash))   // large blobs seal file→file (off-heap) to avoid OOM
         return "aud_$hash"
     }
 
@@ -171,8 +195,7 @@ object LocalMedia {
 
     /** Store received plaintext bytes under an exact ref (sealed at rest to the circle). */
     fun storeUnderRef(circleId: String, ref: String, bytes: ByteArray) {
-        val toWrite = runCatching { HavenNet.engine.sealCircleMedia(circleId, bytes) }.getOrNull() ?: bytes
-        runCatching { File(dir, bareId(ref)).writeBytes(toWrite) }
+        sealToFile(circleId, bytes, File(dir, bareId(ref)))   // large blobs seal file→file (off-heap) to avoid OOM
     }
 
     /** The at-rest sealed blob for a ref — uploaded to the relay verbatim (same form iOS stores).

@@ -137,6 +137,15 @@ object SelfSyncCoordinator {
         for (entry in CircleRemovals.allCleared()) {
             m["removal:$entry"] = byteArrayOf(0)
         }
+        // Relay DELETIONS — LWW by the forget timestamp, so deleting a relay on one device drops it on all
+        // of them (and stops a sibling re-announcing it). Value = 8-byte LE forgotAt (ms). Without this the
+        // deletion was device-local and a sibling kept the relay active + re-announcing it (deleted relays
+        // keep returning). iOS SelfSync parity.
+        for ((hex, ms) in HavenNet.relayForgottenRecords()) m["relay-removal:$hex"] = int64LE(ms)
+        // …and re-adds under a DISTINCT key carrying their OWN re-add timestamp (NOT a bare 0), so a delete
+        // and a re-add resolve by LWW on the semantic time (newest wins) instead of a grow-only clear always
+        // winning — the "I delete a relay and it keeps coming back" fix. iOS SelfSync parity.
+        for ((hex, ms) in HavenNet.relayClearedForgetRecords()) m["relay-readd:$hex"] = int64LE(ms)
         // Circles: name + member bundles + relay nodes, so another device can reconstruct each
         // circle and seal to every member. Encoded by the SHARED Rust encoder so the bytes are
         // identical across iOS/Android/desktop (member set is authoritative — see applyLocal).
@@ -239,6 +248,31 @@ object SelfSyncCoordinator {
                     if (social != null) runCatching { social.removeFromCircle(cid, hex) }
                 }
             }
+        }
+
+        // Relay delete vs re-add from any of my devices, resolved by LWW on the SEMANTIC timestamp (delete
+        // time vs re-add time) — NOT by which device synced last. Gather both sides, newest wins per relay.
+        // Applied BEFORE the circle: records below re-add relays, so a relay whose newest verdict is
+        // "deleted" stays gone. A passive re-announce never auto-resurrects it. iOS SelfSync parity.
+        val relayRemovalMs = HashMap<String, Long>()
+        val relayReaddMs = HashMap<String, Long>()
+        for (e in live) if (e.value.size == 8) {
+            when {
+                e.key.startsWith("relay-removal:") -> {
+                    val hex = e.key.removePrefix("relay-removal:")
+                    if (hex.isNotEmpty()) relayRemovalMs[hex] = maxOf(relayRemovalMs[hex] ?: 0L, int64LEValue(e.value))
+                }
+                e.key.startsWith("relay-readd:") -> {
+                    val hex = e.key.removePrefix("relay-readd:")
+                    if (hex.isNotEmpty()) relayReaddMs[hex] = maxOf(relayReaddMs[hex] ?: 0L, int64LEValue(e.value))
+                }
+            }
+        }
+        for (hex in (relayRemovalMs.keys + relayReaddMs.keys)) {
+            val del = relayRemovalMs[hex] ?: 0L
+            val readd = relayReaddMs[hex] ?: 0L
+            if (del > readd) HavenNet.applyRelayForgottenTombstone(hex, del)   // deleted, newer than any re-add
+            else if (readd > 0L) HavenNet.applyRelayClearedForget(hex, readd)  // re-added, newer than any delete
         }
 
         // Circles: reconcile each synced circle — create it + register every member's bundle so this
@@ -419,6 +453,15 @@ object SelfSyncCoordinator {
             ((b[1].toInt() and 0xFF) shl 8) or
             ((b[2].toInt() and 0xFF) shl 16) or
             ((b[3].toInt() and 0xFF) shl 24)
+
+    /** 8-byte little-endian encoding of an unsigned ms timestamp (byte-identical to iOS's LE UInt64). */
+    private fun int64LE(v: Long): ByteArray = ByteArray(8) { i -> ((v ushr (i * 8)) and 0xFF).toByte() }
+
+    private fun int64LEValue(b: ByteArray): Long {
+        var v = 0L
+        for (i in 0 until 8) v = v or ((b[i].toLong() and 0xFF) shl (i * 8))
+        return v
+    }
 
     private fun boolValue(h: AccountStateHandle, key: String): Boolean? {
         val v = h.get(key) ?: return null

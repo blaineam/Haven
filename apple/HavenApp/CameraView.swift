@@ -538,8 +538,6 @@ final class CameraViewController: UIViewController,
     /// Fully stop the capture session and release the camera device so the iOS "in use" (green)
     /// indicator goes off — not just stopRunning, which keeps inputs/outputs (and the device) bound.
     private func teardownSession() {
-        UIDevice.current.endGeneratingDeviceOrientationNotifications()
-        NotificationCenter.default.removeObserver(self, name: UIDevice.orientationDidChangeNotification, object: nil)
         let session = self.session
         DispatchQueue.global(qos: .userInitiated).async {
             if session.isRunning { session.stopRunning() }
@@ -574,34 +572,31 @@ final class CameraViewController: UIViewController,
         mtk.frame = view.bounds
         mtk.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.insertSubview(mtk, at: 0)
+        mtk.orientation = position == .front ? .leftMirrored : .right   // pinned portrait; never rotates
         metalPreview = mtk
 
-        // Keep the preview upright as the device rotates (the old preview layer did this for us).
-        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
-        NotificationCenter.default.addObserver(self, selector: #selector(orientationChanged),
-                                               name: UIDevice.orientationDidChangeNotification, object: nil)
-
+        // No device-orientation observer: the preview stays portrait-upright regardless of how the
+        // phone is held; only the captured file follows the device (set at shutter/record time).
         DispatchQueue.global(qos: .userInitiated).async { self.session.startRunning() }
     }
 
-    /// Orient + mirror the data-output (preview) connection AND the still/movie capture connections
-    /// so the Metal preview matches reality and captured media isn't sideways. The front camera is
-    /// mirrored so the selfie matches the (mirrored) live preview.
+    /// Orient + mirror the capture connections, and pin the live preview to PORTRAIT.
+    ///
+    /// The UI is portrait-locked (like the story camera), so the live feed must ALWAYS show reality
+    /// upright — rotating the phone must NOT spin the preview. The video data-output delivers buffers
+    /// in the sensor's fixed native orientation, so a FIXED portrait `.oriented()` (back `.right`,
+    /// front `.leftMirrored` for a natural selfie) keeps the feed upright no matter how the device is
+    /// held. (The previous code re-derived the preview orientation from `UIDevice.orientation` on every
+    /// rotation, which is exactly what rotated the feed 90°.) The captured FILE still follows the
+    /// physical device orientation — that's applied to the movie/photo connection at shutter/record
+    /// time (see `shutterDown`/`shutterUp`) — so landscape recording keeps working.
     private func configurePreviewConnection() {
-        let angle = havenPreviewRotationAngle()
-        let mirrorFront = position == .front
-        // FILE outputs honor videoRotationAngle + mirror, so captured media is already upright.
-        // The PREVIEW data output does NOT reliably rotate its delivered buffers, so we leave it
-        // un-rotated and orient the CIImage in the Metal preview via `.oriented()` instead.
-        photoOutput.connection(with: .video)?.applyPreviewOrientation(angle: angle, mirroredFront: mirrorFront)
-        movieOutput.connection(with: .video)?.applyPreviewOrientation(angle: angle, mirroredFront: mirrorFront)
-        let orientation = havenCameraOrientation(position: position)
-        DispatchQueue.main.async { [weak self] in self?.metalPreview?.orientation = orientation }
+        let previewOrientation: CGImagePropertyOrientation = position == .front ? .leftMirrored : .right
+        DispatchQueue.main.async { [weak self] in self?.metalPreview?.orientation = previewOrientation }
     }
 
-    @objc private func orientationChanged() {
-        frameQueue.async { [weak self] in self?.configurePreviewConnection() }
-    }
+    // No orientation observer: the preview is pinned to portrait, and capture orientation is set from
+    // the live device orientation at shutter/record time — so nothing needs to re-run on rotation.
 
     private func addCameraInput(position: AVCaptureDevice.Position) {
         guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position),

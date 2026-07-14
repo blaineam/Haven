@@ -889,6 +889,15 @@ fn decode_seed(input: &str) -> R<[u8; 32]> {
 /// welcome screen instead of the app. Takes no engine, so it works before one exists.
 #[tauri::command]
 pub fn needs_onboarding() -> R<bool> {
+    // Demo mode is never fresh: it seeds its own identity into its OWN data dir, so asking the REAL
+    // store whether it's empty answers the wrong question. On a machine that happens to have a real
+    // identity this looked fine — the check returned false and the demo feed appeared. On a CLEAN
+    // machine (a fresh VM, a CI runner, anywhere screenshots get generated) it returned true and the
+    // seeded dataset was hidden behind onboarding. Caught on a first-run Linux VM.
+    #[cfg(debug_assertions)]
+    if crate::demo::is_demo() {
+        return Ok(false);
+    }
     let base = crate::store::Paths::resolve().map_err(|e| e.to_string())?;
     let fresh = crate::store::Identities::load(&base).is_empty()
         && crate::store::load_seed().map_err(|e| e.to_string())?.is_none();

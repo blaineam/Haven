@@ -49,6 +49,23 @@ fn bare_id(reference: &str) -> &str {
 
 /// Sniff an audio container so the WebView gets a playable `data:` MIME. MediaRecorder in
 /// WebKitGTK/WebView2 emits WebM/Opus or Ogg/Opus; Safari/macOS emits MP4/AAC.
+/// Sniff an image's real type from its magic bytes. Refs carry no format, only a kind prefix, so a
+/// hardcoded `image/jpeg` mislabels every PNG we hold (attachments arrive from other platforms and
+/// from the clipboard, not just the JPEG-producing picker).
+pub fn image_mime(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "image/png"
+    } else if bytes.starts_with(b"GIF8") {
+        "image/gif"
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        "image/heic"
+    } else {
+        "image/jpeg" // the picker's own output, and the safe default
+    }
+}
+
 pub fn audio_mime(bytes: &[u8]) -> &'static str {
     if bytes.starts_with(b"OggS") {
         "audio/ogg"
@@ -282,5 +299,15 @@ mod tests {
         assert_eq!(audio_mime(b"\x00\x00\x00\x20ftypM4A "), "audio/mp4");
         assert_eq!(audio_mime(b"ID3\x03..."), "audio/mpeg");
         assert_eq!(audio_mime(b"unknownbytes"), "audio/webm"); // safe default
+    }
+
+    #[test]
+    fn image_mime_sniffing() {
+        assert_eq!(image_mime(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]), "image/png");
+        assert_eq!(image_mime(b"GIF89a..."), "image/gif");
+        assert_eq!(image_mime(b"RIFF\x00\x00\x00\x00WEBPVP8 "), "image/webp");
+        assert_eq!(image_mime(b"\x00\x00\x00\x18ftypheic"), "image/heic");
+        assert_eq!(image_mime(&[0xFF, 0xD8, 0xFF, 0xE0]), "image/jpeg");
+        assert_eq!(image_mime(b"unknownbytes"), "image/jpeg"); // safe default
     }
 }

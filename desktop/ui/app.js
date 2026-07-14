@@ -57,10 +57,134 @@ function initials(name) {
 function modal(node) {
   const root = $("#modal-root");
   const backdrop = el("div", { class: "modal-backdrop", onclick: (e) => { if (e.target === backdrop) root.replaceChildren(); } }, node);
-  node.classList.add("modal");
+  node.classList.add("modal", "plain");
   root.replaceChildren(backdrop);
   return () => root.replaceChildren();
 }
+const closeModal = () => $("#modal-root").replaceChildren();
+
+/** A sheet the Haven way — the port of `HavenMacSheet` (apple/HavenApp/Theme.swift). The brand
+ *  gradient runs to the sheet's EXTREME edges (never a grey band above or below), the title sits
+ *  inline with a glass close circle, and the footer holds the one prominent action. Esc closes,
+ *  same as the Mac's `.keyboardShortcut(.cancelAction)`. */
+function sheet(title, body, foot) {
+  const root = $("#modal-root");
+  const card = el("div", { class: "modal" },
+    el("div", { class: "modal-head" },
+      el("h2", {}, title),
+      el("button", { class: "icon-btn glass", title: "Close", onclick: () => closeModal() }, icon("xmark")),
+    ),
+    el("div", { class: "modal-body" }, ...[body].flat().filter(Boolean)),
+    foot ? el("div", { class: "modal-foot" }, foot) : null,
+  );
+  const backdrop = el("div", { class: "modal-backdrop", onclick: (e) => { if (e.target === backdrop) closeModal(); } }, card);
+  root.replaceChildren(backdrop);
+  return closeModal;
+}
+window.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); closeMenu(); } });
+
+// ---- icons -------------------------------------------------------------------------------
+// Stroked glyphs shaped after the SF Symbols the macOS build names, so the two read as one app.
+// `fill` entries are filled shapes (paperplane.fill, person.2.fill…) — the rest stroke.
+const ICONS = {
+  "chevron.down": { d: "M4 8l6 6 6-6" },
+  "chevron.right": { d: "M9 5l7 7-7 7" },
+  "person.2.fill": { fill: true, d: "M9 11.2a3.4 3.4 0 100-6.8 3.4 3.4 0 000 6.8zm7 .3a2.9 2.9 0 100-5.8 2.9 2.9 0 000 5.8zM9 12.8c-3 0-5.6 1.7-5.6 3.9v1.1a.8.8 0 00.8.8h9.6a.8.8 0 00.8-.8v-1.1c0-2.2-2.6-3.9-5.6-3.9zm7 .2c-.7 0-1.4.1-2 .3 1.2 1 1.9 2.2 1.9 3.4v1.9h4.3a.8.8 0 00.8-.8v-.9c0-2-2.3-3.9-5-3.9z" },
+  // Stroked, not filled: the filled gear's teeth collapse into an unreadable blob at a 16px chip.
+  "gearshape.fill": { w: 1.6, d: "M12 15a3 3 0 100-6 3 3 0 000 6z", extra: "M19.1 14.6a1.6 1.6 0 00.3 1.8l.1.1a1.9 1.9 0 11-2.7 2.7l-.1-.1a1.6 1.6 0 00-1.8-.3 1.6 1.6 0 00-1 1.5v.2a1.9 1.9 0 11-3.8 0v-.1a1.6 1.6 0 00-1-1.5 1.6 1.6 0 00-1.8.3l-.1.1a1.9 1.9 0 11-2.7-2.7l.1-.1a1.6 1.6 0 00.3-1.8 1.6 1.6 0 00-1.5-1h-.2a1.9 1.9 0 110-3.8h.1a1.6 1.6 0 001.5-1 1.6 1.6 0 00-.3-1.8l-.1-.1a1.9 1.9 0 112.7-2.7l.1.1a1.6 1.6 0 001.8.3h.1a1.6 1.6 0 001-1.5v-.2a1.9 1.9 0 113.8 0v.1a1.6 1.6 0 001 1.5 1.6 1.6 0 001.8-.3l.1-.1a1.9 1.9 0 112.7 2.7l-.1.1a1.6 1.6 0 00-.3 1.8v.1a1.6 1.6 0 001.5 1h.2a1.9 1.9 0 110 3.8h-.1a1.6 1.6 0 00-1.5 1z" },
+  "paperplane.fill": { fill: true, d: "M3.2 11.3l16.4-7.2c.7-.3 1.4.4 1.1 1.1l-7.2 16.4c-.3.7-1.3.7-1.5-.1l-1.9-6.3-6.3-1.9c-.8-.2-.8-1.2-.1-1.5z" },
+  "plus": { d: "M12 5v14M5 12h14", w: 2.4 },
+  "xmark": { d: "M6 6l12 12M18 6L6 18", w: 2.2 },
+  "camera.fill": { fill: true, d: "M9.4 4.5l-1.2 2H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2v-9a2 2 0 00-2-2h-3.2l-1.2-2H9.4zM12 17.2a4.1 4.1 0 110-8.2 4.1 4.1 0 010 8.2z" },
+  "ellipsis": { fill: true, d: "M6 10.2a1.8 1.8 0 100 3.6 1.8 1.8 0 000-3.6zm6 0a1.8 1.8 0 100 3.6 1.8 1.8 0 000-3.6zm6 0a1.8 1.8 0 100 3.6 1.8 1.8 0 000-3.6z" },
+  "link": { d: "M9 15l6-6M11 6l1.5-1.5a3.5 3.5 0 015 5L17 11M13 18l-1.5 1.5a3.5 3.5 0 01-5-5L8 13" },
+  "square.and.pencil": { d: "M20 10.5V19a2 2 0 01-2 2H6a2 2 0 01-2-2V7a2 2 0 012-2h8.5", extra: "M18.4 3.6a2 2 0 012.8 2.8L13 14.6l-3.6.9.9-3.6 8.1-8.3z" },
+  "phone.fill": { fill: true, d: "M6.6 3.5c.6-.1 1.2.2 1.5.8l1.3 2.6c.3.6.2 1.3-.3 1.7l-1.2 1a12 12 0 005.5 5.5l1-1.2c.4-.5 1.1-.6 1.7-.3l2.6 1.3c.6.3.9.9.8 1.5l-.4 2.3c-.1.7-.7 1.2-1.4 1.2C9.9 20 4 14.1 3.1 5.3c0-.7.5-1.3 1.2-1.4l2.3-.4z" },
+  "video.fill": { fill: true, d: "M3 7.5A2.5 2.5 0 015.5 5h7A2.5 2.5 0 0115 7.5v9a2.5 2.5 0 01-2.5 2.5h-7A2.5 2.5 0 013 16.5v-9zm14 2.3l3.3-2.2c.6-.4 1.4 0 1.4.8v7.2c0 .8-.8 1.2-1.4.8L17 14.2V9.8z" },
+  "pencil.circle.fill": { fill: true, d: "M12 2a10 10 0 100 20 10 10 0 000-20zm3.9 6.1a1 1 0 010 1.4l-.9.9-2.4-2.4.9-.9a1 1 0 011.4 0l1 1zM8 13.6l3.6-3.6 2.4 2.4L10.4 16H8v-2.4z" },
+  "paperclip": { d: "M20 11.5l-8.2 8.2a4.6 4.6 0 01-6.5-6.5l8.4-8.4a3.1 3.1 0 014.4 4.4l-8.4 8.4a1.5 1.5 0 01-2.2-2.2l7.7-7.7" },
+  "antenna": { d: "M12 9.8a2.2 2.2 0 100 4.4 2.2 2.2 0 000-4.4M7.5 7.5a6 6 0 000 9M16.5 7.5a6 6 0 010 9M4.7 4.7a10 10 0 000 14.6M19.3 4.7a10 10 0 010 14.6" },
+  "photo": { d: "M3 6a2 2 0 012-2h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6zM3 16l5-5 4 4 3-3 6 6" },
+  "folder": { d: "M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" },
+  "mic": { d: "M12 3a3 3 0 00-3 3v6a3 3 0 006 0V6a3 3 0 00-3-3zM5.5 11.5a6.5 6.5 0 0013 0M12 18v3" },
+  "music.note": { d: "M9 18V5l11-2v13", w: 1.7, extra: "M9 18a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0zM20 16a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0z" },
+  "mappin": { d: "M12 21s7-6.3 7-11a7 7 0 10-14 0c0 4.7 7 11 7 11z", extra: "M12 12.5a2.5 2.5 0 100-5 2.5 2.5 0 000 5z" },
+  "timer": { d: "M12 21a8 8 0 100-16 8 8 0 000 16zM12 9v4l2.5 2M9 2h6" },
+  "clock": { d: "M12 21a9 9 0 100-18 9 9 0 000 18zM12 7v5l3.5 2" },
+  "eye": { d: "M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z", extra: "M12 15a3 3 0 100-6 3 3 0 000 6z" },
+  "eye.slash": { d: "M4 4l16 16M9.9 5.7A9.9 9.9 0 0112 5.5c6.4 0 10 6.5 10 6.5a17 17 0 01-3.5 4.2M6.4 7.6A16.6 16.6 0 002 12s3.6 6.5 10 6.5c1 0 1.9-.1 2.7-.4" },
+  "speaker": { d: "M4 9.5h3.5L12 5.5v13L7.5 14.5H4v-5z", extra: "M16 9a4 4 0 010 6M18.8 6.5a8 8 0 010 11" },
+  "speaker.slash": { d: "M4 9.5h3.5L12 5.5v13L7.5 14.5H4v-5z", extra: "M16.5 9.5l5 5M21.5 9.5l-5 5" },
+  "square.and.arrow.up": { d: "M12 15V4M8.5 7.5L12 4l3.5 3.5M5 13v5a2 2 0 002 2h10a2 2 0 002-2v-5" },
+  "flag": { d: "M5 21V4M5 5h11l-2 3.5L16 12H5" },
+  "hand.raised.fill": { fill: true, d: "M12 2a1.4 1.4 0 00-1.4 1.4V11H9.9V4.6a1.4 1.4 0 10-2.8 0v8.9l-1.3-1.9a1.4 1.4 0 00-2.3 1.6l3 4.6A6 6 0 0017.6 20l1.8-3.4c.3-.5.4-1 .4-1.6V6.6a1.4 1.4 0 10-2.8 0V11h-.7V4.6a1.4 1.4 0 10-2.8 0V11h-.7V3.4A1.4 1.4 0 0012 2z" },
+  "person.badge.plus": { d: "M11 12.5a4 4 0 100-8 4 4 0 000 8zM3.5 20a7.5 7.5 0 0112.2-5.8M18 14v6M15 17h6" },
+  "sparkles": { fill: true, d: "M12 2.5l1.7 4.6 4.6 1.7-4.6 1.7L12 15.1l-1.7-4.6L5.7 8.8l4.6-1.7L12 2.5zM19 14l.9 2.4 2.4.9-2.4.9-.9 2.4-.9-2.4-2.4-.9 2.4-.9L19 14zM5.5 14.5l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9L2.9 17l1.9-.7.7-1.8z" },
+  "laptop": { d: "M5 6a1 1 0 011-1h12a1 1 0 011 1v9H5V6zM2.5 18.5h19" },
+  "icloud": { d: "M7 18.5h10.5a3.5 3.5 0 00.4-7A5.5 5.5 0 007.3 9.6 4.5 4.5 0 007 18.5z" },
+  "internaldrive": { d: "M4 6a2 2 0 012-2h12a2 2 0 012 2v12a2 2 0 01-2 2H6a2 2 0 01-2-2V6z", extra: "M8 15.5h.01M4 12h16" },
+  "wrench": { d: "M15.5 3.5a5 5 0 00-4.8 6.4L3.6 17l3.4 3.4 7.1-7.1a5 5 0 006.4-4.8l-3.1 3.1-2.8-.6-.6-2.8 3.1-3.1a5 5 0 00-1.6-.6z" },
+  "arrow.counterclockwise": { d: "M4 4v6h6M4.6 14a8 8 0 103-8.5L4 10" },
+  "moon": { d: "M20 14.5A8.5 8.5 0 019.5 4a8.5 8.5 0 1010.5 10.5z" },
+  "checkmark": { d: "M4.5 12.5l5 5 10-11", w: 2.4 },
+  "circle.dashed": { d: "M12 3.8a8.2 8.2 0 010 16.4 8.2 8.2 0 010-16.4", dash: "2.6 2.6" },
+  "plus.circle": { d: "M12 21a9 9 0 100-18 9 9 0 000 18zM12 8.2v7.6M8.2 12h7.6" },
+  "arrow.uturn.backward": { d: "M9 14l-5-5 5-5M4 9h9a6 6 0 010 12H8" },
+  "lock.shield.fill": { fill: true, d: "M12 2L4 5v6.5c0 5 3.4 9.6 8 10.5 4.6-.9 8-5.5 8-10.5V5l-8-3zm0 6.2a2.3 2.3 0 012.3 2.3v1h.4a.8.8 0 01.8.8v3.4a.8.8 0 01-.8.8H9.3a.8.8 0 01-.8-.8v-3.4a.8.8 0 01.8-.8h.4v-1A2.3 2.3 0 0112 8.2zm0 1.4a.9.9 0 00-.9.9v1h1.8v-1a.9.9 0 00-.9-.9z" },
+};
+/** One glyph as an <svg>. `cls` lands on the element so callers can size it. */
+function icon(name, cls) {
+  const spec = ICONS[name];
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  if (cls) svg.setAttribute("class", cls);
+  if (!spec) return svg;
+  svg.setAttribute("fill", spec.fill ? "currentColor" : "none");
+  if (!spec.fill) {
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", String(spec.w || 1.7));
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+  }
+  for (const d of [spec.d, spec.extra].filter(Boolean)) {
+    const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    p.setAttribute("d", d);
+    if (spec.dash) p.setAttribute("stroke-dasharray", spec.dash);
+    svg.append(p);
+  }
+  return svg;
+}
+
+// ---- anchored menu (SwiftUI `Menu`) ------------------------------------------------------
+// The macOS build uses `Menu` for the circle switcher, the composer's `+`, and a post's `···`.
+// A full modal for those was the wrong weight entirely — this pops a small panel at the control.
+function closeMenu() { $("#menu-root").replaceChildren(); }
+/** items: {label, icon, danger, head, sep, on} — `head` renders a section label, `sep` a rule. */
+function popMenu(anchor, items, opts = {}) {
+  const root = $("#menu-root");
+  const menu = el("div", { class: "menu glass" });
+  for (const it of items.filter(Boolean)) {
+    if (it.sep) { menu.append(el("hr", {})); continue; }
+    if (it.head) { menu.append(el("div", { class: "menu-head" }, it.head)); continue; }
+    menu.append(el("button", { class: it.danger ? "danger" : "", onclick: () => { closeMenu(); it.on && it.on(); } },
+      el("span", { class: "mi" }, it.icon ? icon(it.icon, "mi-svg") : ""),
+      el("span", {}, it.label)));
+  }
+  const backdrop = el("div", { class: "menu-backdrop", onclick: closeMenu });
+  root.replaceChildren(backdrop, menu);
+  // Position under the anchor, flipped to stay on screen.
+  const r = anchor.getBoundingClientRect();
+  const mw = menu.offsetWidth, mh = menu.offsetHeight;
+  let left = opts.align === "right" ? r.right - mw : r.left;
+  left = Math.max(8, Math.min(left, window.innerWidth - mw - 8));
+  let top = r.bottom + 6;
+  if (top + mh > window.innerHeight - 8) top = Math.max(8, r.top - mh - 6);
+  menu.style.left = left + "px";
+  menu.style.top = top + "px";
+}
+// Menu SVGs inherit the row's color and need a concrete size.
+const MENU_ICON_CSS = ".menu .mi-svg{width:15px;height:15px;display:block;margin:0 auto}";
+document.head.append(el("style", {}, MENU_ICON_CSS));
 
 // Decrypt + lazy-load a media ref into an <img>/<video>.
 async function loadMedia(node, circleId, ref) {
@@ -73,7 +197,7 @@ async function loadMedia(node, circleId, ref) {
 
 // ---- app state -------------------------------------------------------------------------
 const state = {
-  view: "feed",
+  view: "circle",
   node: "",
   inviteUri: "",
   inviteLink: "",
@@ -84,28 +208,86 @@ const state = {
 };
 
 // ---- navigation ------------------------------------------------------------------------
+// There are EXACTLY THREE destinations, and they are the macOS build's: Circle | Messages | You
+// (apple/HavenApp/HavenApp.swift ▸ `main`'s TabView). Everything that used to be a sidebar item
+// lives where macOS puts it instead:
+//   • Stories → the stories tray at the TOP OF THE CIRCLE FEED (FeedView ▸ storiesTray)
+//   • Connect → a SHEET off the manage-circle button / the pending banner (ContentView ▸ .sheet)
+//   • Relay   → Settings ▸ Relays, off the You tab's gear (Settings.swift ▸ RelaysView)
 function switchView(view) {
   state.view = view;
-  $$(".nav-btn").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
+  $$(".tab").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
   render();
 }
 
 async function render() {
+  renderTitlebarTrailing();
+  // The floating composer belongs to the Circle feed only; it is pinned to `.content`, so leaving
+  // the tab has to take it down explicitly (renderFeed puts it back). Its 2.5s sync poll goes too,
+  // or it keeps hitting the backend for a circle you're no longer looking at.
+  if (state.view !== "circle") {
+    $("#composer-slot").replaceChildren();
+    if (state.syncTimer) { clearInterval(state.syncTimer); state.syncTimer = null; }
+  }
   switch (state.view) {
-    case "feed": return renderFeed();
-    case "stories": return renderStories();
+    case "circle": return renderFeed();
     case "messages": return renderMessages();
-    case "connect": return renderConnect();
-    case "relay": return renderRelay();
     case "you": return renderYou();
   }
 }
 
+/** The toolbar's trailing slot is PER-TAB, exactly like macOS: the Circle tab carries the circle
+ *  switcher + manage-circle button; the You tab carries the settings gear; Messages carries
+ *  nothing. (macOS: `ToolbarItem(placement: .havenTrailing)` declared inside each tab's view.) */
+function renderTitlebarTrailing() {
+  const slot = $("#tb-right");
+  if (!slot) return;
+  if (state.view === "circle") {
+    const pill = el("button", { class: "circle-pill glass tint-pink", onclick: () => circleMenu(pill) },
+      icon("chevron.down", "chev"), el("span", { id: "tb-circle-name" }, state.activeCircleName || "My Circle"));
+    slot.replaceChildren(pill,
+      el("button", { class: "icon-btn glass tint-pink pink", title: "Manage circle", "aria-label": "Manage circle",
+        onclick: () => circleSheet() }, icon("person.2.fill")));
+  } else if (state.view === "you") {
+    slot.replaceChildren(el("button", { class: "icon-btn glass", title: "Settings", "aria-label": "Settings",
+      onclick: () => settingsSheet() }, icon("gearshape.fill")));
+  } else if (state.view === "messages" && !state.activeDm) {
+    // macOS `MessagesView`'s toolbar: a `square.and.pencil` glass chip that opens the contact picker.
+    slot.replaceChildren(el("button", { class: "icon-btn glass", title: "New message", "aria-label": "New message",
+      onclick: () => newMessageSheet() }, icon("square.and.pencil")));
+  } else {
+    slot.replaceChildren();
+  }
+}
+
+/** The circle switcher menu — macOS `circlePicker`: the circles, then show/hide hidden posts,
+ *  then "New circle…". */
+async function circleMenu(anchor) {
+  const circles = await invoke("circles").catch(() => []);
+  const items = circles.map((c) => ({
+    label: `${c.name} (${c.member_count})`,
+    icon: c.id === state.activeCircle ? "checkmark" : "circle.dashed",
+    on: () => { state.activeCircle = c.id; renderFeed(); renderTitlebarTrailing(); },
+  }));
+  items.push({ sep: true });
+  if (Hidden.ids.size) {
+    items.push({
+      label: Hidden.showHidden ? "Hide hidden posts" : `Show hidden posts (${Hidden.ids.size})`,
+      icon: Hidden.showHidden ? "eye.slash" : "eye",
+      on: () => { Hidden.toggle(); renderFeed(); },
+    });
+  }
+  items.push({ label: "New circle…", icon: "plus.circle", on: newCircleDialog });
+  popMenu(anchor, items, { align: "right" });
+}
+
 async function refreshBadges() {
   try {
+    // The Circle tab carries pending connection requests, exactly like macOS — that's where the
+    // banner that acts on them lives. (HavenApp.swift: `.badge(unseenCircle + pending.count)`.)
     const pend = await invoke("pending");
-    const b = $("#badge-pending");
+    const b = $("#badge-circle");
     b.textContent = pend.length;
     b.classList.toggle("show", pend.length > 0);
   } catch (_) {}
@@ -120,15 +302,27 @@ async function refreshBadges() {
   } catch (_) {}
 }
 
+/** Connection state for the feed's banner (macOS `banner` + `connectionText`) — a green dot and a
+ *  plain sentence at the top of the feed. It is NOT chrome: there is no sidebar to pin it to. */
 async function refreshStatus() {
   try {
     const s = await invoke("relay_status");
-    const dot = $("#status-dot");
-    const txt = $("#status-text");
-    dot.classList.toggle("on", s.started);
-    dot.classList.toggle("relay", s.hosting);
-    txt.textContent = s.hosting ? "relaying" : s.started ? (s.internet_active ? "connected" : "online") : "starting…";
+    state.status = s;
+    const dot = $("#status-dot"), txt = $("#status-text");
+    if (!dot || !txt) return;
+    dot.classList.toggle("on", !!s.started);
+    dot.classList.toggle("relay", !!s.hosting);
+    txt.textContent = connectionText(s);
   } catch (_) {}
+}
+
+function connectionText(s) {
+  if (!s || !s.started) return "Offline — posts sync when you reconnect";
+  const paths = [];
+  if (s.internet_active) paths.push("internet");
+  if (s.hosting) paths.push("relaying here");
+  if (!paths.length) return "Online — looking for your circle…";
+  return "Connected · " + paths.join(" + ");
 }
 
 // ---- Deep links ------------------------------------------------------------------------
@@ -151,6 +345,19 @@ async function refreshStatus() {
 const HAVEN_SITE = { host: "wemiller.com", path: "/apps/haven" };   // apple/HavenApp/ConnectView.swift ▸ HavenSite
 
 const DeepLink = {
+  /** The shareable link for a post — the ONE form we emit (the `haven://` shape stays read-only, so it
+   *  can die out). Mirrors apple/HavenApp/DeepLink.swift ▸ postURL, and round-trips through `post()`
+   *  below. Payload in the #fragment — read the banner above before touching this. */
+  postLink(circleId, postId) {
+    return `https://${HAVEN_SITE.host}${HAVEN_SITE.path}/#p/${this._token(circleId)}.${this._token(postId)}`;
+  },
+  /** Percent-encode one fragment token with Apple's charset (DeepLink.swift ▸ fragmentToken):
+   *  unreserved MINUS `.` and `/`, so our two delimiters stay unambiguous whatever an id contains — a
+   *  DM circle id is `dm:<a>-<b>`, and a `.` in either token would split the pair in the wrong place.
+   *  encodeURIComponent leaves `.!*'()` alone, hence the second pass. */
+  _token(s) {
+    return encodeURIComponent(String(s)).replace(/[.!*'()]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
+  },
   /** → {circleId, postId} for EITHER post form, else null (invites and everything else fall through). */
   post(raw) {
     let u;
@@ -205,7 +412,7 @@ async function openPostLink(circleId, postId) {
     if (Hidden.has(postId)) Hidden.showHidden = true;   // opening a link is an explicit ask — don't hide it
     state.focusPost = postId;
   }
-  switchView("feed");   // land them in the right circle either way — but never pretend we found the post
+  switchView("circle");   // land them in the right circle either way — but never pretend we found the post
   if (!it) toast("That post hasn't reached this device yet, or it isn't in this circle.");
   else if (it.unsent) toast("That post was unsent.");
   else if (it.story) toast("That link points at a story — open it under Stories.");
@@ -348,7 +555,7 @@ function relayWalkthrough(circleId) {
         $("#modal-root").replaceChildren();
         renderFeed();
       } }, "Use this PC as the relay"),
-      el("button", { class: "btn ghost", onclick: () => { $("#modal-root").replaceChildren(); switchView("relay"); } }, "Add a relay I'm running →"),
+      el("button", { class: "btn ghost", onclick: () => relaySheet() }, "Add a relay I'm running →"),
       el("button", { class: "btn ghost", style: "margin-left:auto", onclick: () => $("#modal-root").replaceChildren() }, "Not now"),
     )));
 }
@@ -365,38 +572,33 @@ const Hidden = {
   _save() { localStorage.setItem("haven-hidden", JSON.stringify([...this.ids])); },
 };
 
+/** The Circle feed. Column order is the macOS LazyVStack's, exactly:
+ *    banner → pending requests → relay nudge → STORIES TRAY → posts
+ *  and the composer floats over the lot as a pill pinned to the bottom (FeedView ▸ composerBar). */
 async function renderFeed() {
-  const root = $("#view-feed");
+  const root = $("#view-circle");
   const circles = await invoke("circles");
-  if (!circles.find((c) => c.id === state.activeCircle)) state.activeCircle = "default";
+  const active = circles.find((c) => c.id === state.activeCircle);
+  if (!active) state.activeCircle = "default";
+  state.activeCircleName = (active || {}).name || "My Circle";
+  renderTitlebarTrailing();
 
-  const head = el("div", { class: "view-head" },
-    el("h1", {}, "Feed"),
+  // macOS `banner`: a dot + one plain sentence. No sidebar footer to hide it in any more.
+  const banner = el("div", { class: "feed-banner" },
+    el("span", { class: "dot", id: "status-dot" }),
+    el("span", { class: "txt", id: "status-text" }, connectionText(state.status)),
     el("div", { class: "spacer" }),
-    (() => {
-      const sel = el("select", { style: "width:auto", onchange: (e) => { state.activeCircle = e.target.value; renderFeed(); } });
-      for (const c of circles) sel.append(el("option", { value: c.id, selected: c.id === state.activeCircle || null }, `${c.name} (${c.member_count})`));
-      return sel;
-    })(),
-    el("button", { class: "btn small", onclick: newCircleDialog }, "+ Circle"),
-    el("button", { class: "btn small ghost", title: "Manage circle", onclick: () => manageCircleDialog(circles.find((c) => c.id === state.activeCircle)) }, "⚙︎"),
-    Hidden.ids.size ? el("button", { class: "btn small ghost", title: "Show/hide hidden posts", onclick: () => { Hidden.toggle(); renderFeed(); } },
-      Hidden.showHidden ? "🙈 Hide hidden" : `👁 Show hidden (${Hidden.ids.size})`) : null,
-    el("button", { class: "btn small ghost", title: "Mute/unmute all videos", onclick: async () => {
-      state.videoSoundOn = !state.videoSoundOn;
-      await invoke("set_video_sound", { on: state.videoSoundOn }).catch(() => {});
-      syncFeedVideoSound();
-      renderFeed();
-    } }, state.videoSoundOn ? "🔊" : "🔇"),
-  );
-
-  const composer = buildComposer(
-    (body, music, muteVideo) => invoke("post", { circleId: state.activeCircle, body, media: state.attachments.map((a) => a.ref), music, muteVideo }),
-    "Share something with your circle…",
-    {
-      circleId: state.activeCircle,
-      onSchedule: (body, music, muteVideo, sendAtMs) => invoke("schedule_message", { kind: "post", circleId: state.activeCircle, body, media: state.attachments.map((a) => a.ref), music, muteVideo, sendAtMs }),
-    },
+    // Global video mute — macOS puts this on the media itself; on a pointer-driven desktop feed a
+    // single always-visible control beats a per-card overlay. Circular, like every other control.
+    el("button", {
+      class: "icon-btn glass", title: state.videoSoundOn ? "Mute all videos" : "Unmute all videos",
+      onclick: async () => {
+        state.videoSoundOn = !state.videoSoundOn;
+        await invoke("set_video_sound", { on: state.videoSoundOn }).catch(() => {});
+        syncFeedVideoSound();
+        renderFeed();
+      },
+    }, icon(state.videoSoundOn ? "speaker" : "speaker.slash")),
   );
 
   const items = (await invoke("feed", { circleId: state.activeCircle }))
@@ -408,30 +610,108 @@ async function renderFeed() {
   const reportsByTarget = {};
   for (const r of await invoke("reports", { circleId: state.activeCircle }).catch(() => []))
     (reportsByTarget[r.target] ||= []).push(r);
-  const list = el("div", {});
-  if (!items.length) list.append(el("div", { class: "empty" }, "No posts yet. Say hello to your circle, or connect a friend."));
+
+  const list = el("div", { class: "feed-list" });
+  list.append(banner);
+  const pend = await pendingBanner();
+  if (pend) list.append(pend);
+  const nudge = await relayNudgeBanner(state.activeCircle, (active || {}).member_count || 0);
+  if (nudge) list.append(nudge);
+  list.append(await storiesTray());
+  if (!items.length) {
+    list.append(el("div", { class: "empty" },
+      el("span", { class: "big" }, icon("sparkles", "empty-ic")),
+      el("div", { class: "h" }, "Nothing here yet"),
+      el("div", {}, "Share your first moment below. As your circle connects, their posts show up here too.")));
+  }
   for (const it of items) list.append(postCard(it, state.activeCircle, reportsByTarget[it.id] || []));
 
-  // Sits above the composer, where the circle-level banners live.
-  const nudge = await relayNudgeBanner(state.activeCircle, (circles.find((c) => c.id === state.activeCircle) || {}).member_count || 0);
+  const composer = buildComposer(
+    (body, music, muteVideo) => invoke("post", { circleId: state.activeCircle, body, media: state.attachments.map((a) => a.ref), music, muteVideo }),
+    "Share something…",
+    {
+      circleId: state.activeCircle,
+      floating: true,
+      onSchedule: (body, music, muteVideo, sendAtMs) => invoke("schedule_message", { kind: "post", circleId: state.activeCircle, body, media: state.attachments.map((a) => a.ref), music, muteVideo, sendAtMs }),
+    },
+  );
 
-  root.replaceChildren(...[head, nudge, composer, list].filter(Boolean));
+  root.replaceChildren(el("div", { class: "col-wrap" }, list));
+  $("#composer-slot").replaceChildren(composer);
   hydrateMedia(root, state.activeCircle);
   if (state.focusPost) focusPostCard(root, state.focusPost);   // arrived here from a post link
 }
 
-function buildComposer(onPost, placeholder = "Share something with your circle…", opts = {}) {
+/** Pending connection requests — macOS `pendingBanner`: a brand-gradient card at the top of the
+ *  feed that opens the Connect sheet. This is Connect's discovery path now that it isn't a tab. */
+async function pendingBanner() {
+  const pending = await invoke("pending").catch(() => []);
+  if (!pending.length) return null;
+  return el("div", { class: "nudge-banner", style: "cursor:pointer", onclick: () => connectSheet() },
+    el("div", { class: "nudge-body" },
+      el("span", { class: "nudge-icon" }, icon("person.badge.plus")),
+      el("div", { style: "min-width:0" },
+        el("div", { class: "nudge-title" }, pending.length === 1 ? "1 connection request" : `${pending.length} connection requests`),
+        el("div", { class: "nudge-sub" }, "Click to review who wants to connect"),
+      ),
+    ),
+    el("span", { class: "nudge-icon", style: "opacity:.85" }, icon("chevron.right")),
+  );
+}
+
+/** STORIES — the tray at the TOP OF THE FEED, never a tab. Port of FeedView.swift ▸ storiesTray:
+ *  a gradient-STROKED "Add" ring with a pink camera, then one gradient-filled cover circle per
+ *  author with their name beneath. */
+async function storiesTray() {
+  const tray = el("div", { class: "story-tray" });
+  tray.append(el("button", { class: "story-ring add", title: "Add to your story", onclick: addStoryDialog },
+    el("div", { class: "ring" }, el("div", {}, icon("camera.fill"))),
+    el("div", { class: "nm" }, "Add")));
+  const stories = (await invoke("feed", { circleId: state.activeCircle }).catch(() => []))
+    .filter((i) => i.story && !i.unsent);
+  // One circle per AUTHOR, newest cover — macOS groups by author (`groupedStories`) rather than
+  // showing the same person once per slide.
+  const byAuthor = new Map();
+  for (const s of stories) {
+    const k = s.author_name || "?";
+    const g = byAuthor.get(k);
+    if (!g || Number(s.created_at) > Number(g.created_at)) byAuthor.set(k, s);
+  }
+  for (const [name, it] of byAuthor) {
+    const inner = el("div", {});
+    const cover = (it.media || []).find((r) => !r.startsWith("geo:") && !r.startsWith("a:"));
+    if (cover) inner.append(el("img", { "data-ref": cover }));
+    else inner.append(icon("photo", "story-ph"));
+    tray.append(el("button", { class: "story-ring cover", onclick: () => viewStory(it) },
+      el("div", { class: "ring" }, inner),
+      el("div", { class: "nm" }, it.is_me ? "You" : name.split(" ")[0])));
+  }
+  return tray;
+}
+
+/** The composer — a floating glass PILL, not a card at the top. Port of FeedView.swift ▸
+ *  composerBar: a pink `+` menu on the left, ONE glass field (fixed radius 20, NOT a capsule: a
+ *  capsule's radius grows with height and clips into the text once the field wraps), and a round
+ *  brand-gradient send button. There is deliberately NO band behind the row — each control carries
+ *  its own surface and the feed scrolls under it.
+ *
+ *  `opts.floating` pins it to the bottom of the feed; the story composer reuses the same row
+ *  inline inside its sheet. */
+function buildComposer(onPost, placeholder = "Share something…", opts = {}) {
   const circleId = opts.circleId || state.activeCircle;
   let music = null;
   let muteVideo = false;
-  const ta = el("textarea", { placeholder });
+  const ta = el("textarea", { class: "composer-field glass", placeholder, rows: 1 });
+  // Grow with the text up to the CSS max-height, then scroll — the macOS field is `axis: .vertical`.
+  const autoGrow = () => { ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight, 132) + "px"; };
+  ta.addEventListener("input", autoGrow);
   const previews = el("div", { class: "attach-preview" });
   const musicRow = el("div", {});
   const muteBtn = el("button", { class: "btn small ghost", style: "display:none", onclick: () => { muteVideo = !muteVideo; muteBtn.textContent = muteVideo ? "🔇 Video muted" : "🔊 Mute video"; muteBtn.classList.toggle("primary", muteVideo); } }, "🔊 Mute video");
   const drawPreviews = () => {
     previews.replaceChildren(...state.attachments.map((a, i) =>
       el("div", { class: "chip" },
-        a.isAudio ? el("div", { style: "width:74px;height:74px;border-radius:11px;background:var(--panel2);display:flex;align-items:center;justify-content:center;font-size:26px" }, "🎙️")
+        a.isAudio ? el("div", { style: "width:56px;height:56px;border-radius:10px;background:var(--panel2);display:flex;align-items:center;justify-content:center;font-size:22px" }, "🎙️")
           : a.isVideo ? el("video", { src: a.url, muted: "" }) : el("img", { src: a.url }),
         el("span", { class: "x", onclick: () => { state.attachments.splice(i, 1); drawPreviews(); } }, "×"),
       )));
@@ -456,57 +736,72 @@ function buildComposer(onPost, placeholder = "Share something with your circle�
       : null);
   };
   const fileInput = el("input", { type: "file", accept: "image/*,video/*", style: "display:none", onchange: (e) => handleFiles(e.target.files, drawPreviews) });
-  // Reachability light: can this circle's posts actually reach offline members right now?
-  const syncDot = el("span", { title: "Reachability", style: "width:9px;height:9px;border-radius:50%;display:inline-block;align-self:center;margin-right:4px;background:#22C55E" });
-  const syncLabel = el("span", { class: "muted small", style: "align-self:center;margin-right:6px" }, "");
+
+  // Delivery light for this circle (macOS `SyncStatusBadge`): green = it reached your relay or a
+  // member, yellow = still syncing, red = only on this device. Green says nothing at all.
+  const syncDot = el("span", { class: "dot" });
+  const syncBadge = el("span", { class: "sync-badge glass hide" }, syncDot, el("span", {}, ""));
   const refreshSync = async () => {
     const s = await invoke("sync_status", { circleId }).catch(() => "synced");
-    if (s === "local") { syncDot.style.background = "#EF4444"; syncLabel.textContent = "Device only"; }
-    else if (s === "syncing") { syncDot.style.background = "#F59E0B"; syncLabel.textContent = "Syncing"; }
-    else { syncDot.style.background = "#22C55E"; syncLabel.textContent = ""; }
+    const label = syncBadge.lastChild;
+    if (s === "local") { syncDot.style.background = "#EF4444"; label.textContent = "Device only"; syncBadge.classList.remove("hide"); }
+    else if (s === "syncing") { syncDot.style.background = "#F59E0B"; label.textContent = "Syncing"; syncBadge.classList.remove("hide"); }
+    else syncBadge.classList.add("hide");
   };
   if (state.syncTimer) clearInterval(state.syncTimer);   // only one composer at a time — no leak across re-renders
   refreshSync();
   state.syncTimer = setInterval(refreshSync, 2500);
-  const card = el("div", { class: "card col" },
-    ta,
+
+  const send = async () => {
+    const body = ta.value.trim();
+    if (!body && !state.attachments.length && !music) return;
+    await onPost(body, music, muteVideo);
+    ta.value = ""; autoGrow();
+    state.attachments = [];
+    music = null;
+    muteVideo = false;
+    drawPreviews();
+    drawMusic();
+    toast("Posted");
+  };
+  // Enter sends, Shift+Enter is a newline — the desktop convention, and the field is a pill you
+  // can't see a "Post" button next to at rest.
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+  });
+
+  // The `+` menu — every attachment path the macOS composer's Menu holds, in its order.
+  const plus = el("button", { class: "composer-plus", title: "Attach", "aria-label": "Attach" }, icon("plus"));
+  plus.addEventListener("click", () => popMenu(plus, [
+    { label: "Photo or Video", icon: "photo", on: () => fileInput.click() },
+    { label: "Camera", icon: "camera.fill", on: async () => { const r = await cameraDialog(circleId); if (r) addAttachment(r.ref, r.isVideo, false); } },
+    { label: "Voice", icon: "mic", on: async () => { const r = await recordVoice(circleId); if (r) addAttachment(r, false, true); } },
+    { label: "Add a song", icon: "music.note", on: () => musicDialog((m) => { music = m; drawMusic(); }) },
+    opts.onSchedule ? { sep: true } : null,
+    opts.onSchedule ? { label: "Send later…", icon: "clock", on: () => {
+      const body = ta.value.trim();
+      if (!body && !state.attachments.length && !music) { toast("Write something first"); return; }
+      scheduleDialog((ms) => {
+        opts.onSchedule(body, music, muteVideo, ms);
+        ta.value = ""; autoGrow(); state.attachments = []; music = null; muteVideo = false; drawPreviews(); drawMusic();
+        toast("Scheduled");
+      });
+    } } : null,
+  ]));
+
+  const bar = el("div", { class: "composer" + (opts.floating ? " floating" : "") },
+    el("div", { class: "composer-meta" }, syncBadge),
     previews,
     musicRow,
-    el("div", { class: "row wrap" },
-      el("button", { class: "btn small ghost", onclick: () => fileInput.click() }, "📎 Photo / Video"),
-      el("button", { class: "btn small ghost", onclick: async () => { const r = await cameraDialog(circleId); if (r) addAttachment(r.ref, r.isVideo, false); } }, "📷 Camera"),
-      el("button", { class: "btn small ghost", onclick: async () => { const r = await recordVoice(circleId); if (r) addAttachment(r, false, true); } }, "🎙️ Voice"),
-      el("button", { class: "btn small ghost", onclick: () => musicDialog((m) => { music = m; drawMusic(); }) }, "🎵 Music"),
-      muteBtn,
-      el("div", { class: "spacer", style: "flex:1" }),
-      syncDot, syncLabel,
-      opts.onSchedule ? el("button", { class: "btn small ghost", title: "Send later", onclick: () => {
-        const body = ta.value.trim();
-        if (!body && !state.attachments.length && !music) { toast("Write something first"); return; }
-        scheduleDialog((ms) => {
-          opts.onSchedule(body, music, muteVideo, ms);
-          ta.value = ""; state.attachments = []; music = null; muteVideo = false; drawPreviews(); drawMusic();
-          toast("Scheduled");
-        });
-      } }, "🕓") : null,
-      el("button", {
-        class: "btn primary", onclick: async () => {
-          const body = ta.value.trim();
-          if (!body && !state.attachments.length && !music) return;
-          await onPost(body, music, muteVideo);
-          ta.value = "";
-          state.attachments = [];
-          music = null;
-          muteVideo = false;
-          drawPreviews();
-          drawMusic();
-          toast("Posted");
-        }
-      }, "Post"),
+    el("div", { class: "row wrap", style: "gap:6px" }, muteBtn),
+    el("div", { class: "composer-row" },
+      plus,
+      ta,
+      el("button", { class: "composer-send", title: "Post", "aria-label": "Post", onclick: send }, icon("paperplane.fill")),
     ),
     fileInput,
   );
-  return card;
+  return bar;
 }
 
 // Open a URL in the user's browser (Tauri opener plugin, falling back to window.open).
@@ -894,13 +1189,14 @@ function imageToJpegBase64(file, maxDim = 2048, quality = 0.82) {
 }
 
 function postCard(it, circleId, reports = []) {
+  // macOS `header`: avatar, name and relative time all on ONE line, `···` at the far right.
+  const kebab = el("button", { class: "kebab", title: "More", "aria-label": "More" }, icon("ellipsis"));
+  kebab.addEventListener("click", () => postMenu(kebab, it, circleId));
   const head = el("div", { class: "post-head" },
-    el("div", { class: "avatar" }, initials(it.author_name)),
-    el("div", {},
-      el("div", { class: "name" }, it.author_name),
-      el("div", { class: "muted small" }, relTime(it.created_at) + (it.edited ? " · edited" : "")),
-    ),
-    el("button", { class: "kebab menu-btn", onclick: (e) => postMenu(e, it, circleId) }, "⋯"),
+    el("div", { class: "avatar", style: "width:34px;height:34px;font-size:14px" }, initials(it.author_name)),
+    el("span", { class: "name" }, it.author_name),
+    el("span", { class: "when" }, relTime(it.created_at) + (it.edited ? " · edited" : "")),
+    kebab,
   );
 
   // Another member reported this post → surface the circle's shared moderation signal with
@@ -940,32 +1236,63 @@ function postCard(it, circleId, reports = []) {
     });
   }
 
+  // NowPlayingPill: a full-width pink-tinted glass capsule under the media.
   const song = it.music ? el("a", {
-    class: "song-chip",
+    class: "song-chip glass tint-pink",
     title: it.music.catalog_id && /^https?:/.test(it.music.catalog_id) ? "Open in your music app" : null,
     onclick: () => { if (it.music.catalog_id && /^https?:/.test(it.music.catalog_id)) openExternal(it.music.catalog_id); },
-  }, el("span", { class: "note" }, "🎵"), el("strong", {}, it.music.title), " — ", it.music.artist) : null;
+  }, el("span", { class: "note" }, icon("music.note")),
+     el("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
+       el("strong", {}, it.music.title), " · ", it.music.artist)) : null;
 
+  // macOS `reactionsRow`: chips left (glass capsules, pink-tinted when they're yours, capped at
+  // four so a post can't flood the row), quick-react emoji + `＋` pinned right.
   const actions = el("div", { class: "post-actions" });
-  const heart = el("button", { class: "react-pill" + (hasMine(it.reactions, "❤️") ? " mine" : ""), onclick: () => toggleReact(circleId, it.id, "❤️", it.reactions) }, "❤️", reactCount(it.reactions, "❤️"));
-  actions.append(heart);
-  for (const r of it.reactions || []) {
-    if (r.emoji === "❤️") continue;
-    actions.append(el("span", { class: "react-pill" + (r.mine ? " mine" : ""), onclick: () => toggleReact(circleId, it.id, r.emoji, it.reactions) }, r.emoji, " ", String(r.count)));
+  for (const r of cappedReactions(it.reactions, 4)) {
+    actions.append(el("button", { class: "react-pill glass" + (r.mine ? " tint-pink mine" : ""), title: r.mine ? "Remove your reaction" : "React",
+      onclick: () => toggleReact(circleId, it.id, r.emoji, it.reactions) },
+      el("span", {}, r.emoji), el("span", { class: "n" }, String(r.count))));
   }
-  actions.append(el("button", { class: "react-pill", onclick: (e) => emojiPicker(e, circleId, it.id) }, "＋"));
-  const cmtBtn = el("button", { class: "btn small ghost" }, `💬 ${(it.comments || []).length}`);
-  actions.append(cmtBtn);
+  const hiddenCount = Math.max(0, (it.reactions || []).length - cappedReactions(it.reactions, 4).length);
+  if (hiddenCount > 0) actions.append(el("span", { class: "react-pill glass" }, el("span", { class: "n" }, "+" + hiddenCount)));
+
+  const quick = el("div", { class: "quick" });
+  for (const e of frequentEmoji(3)) quick.append(el("button", { title: "React " + e, onclick: () => quickReact(circleId, it.id, e, it.reactions) }, e));
+  const more = el("button", { class: "more", title: "More reactions", "aria-label": "More reactions" }, icon("plus.circle"));
+  more.addEventListener("click", () => emojiPicker(more, circleId, it.id));
+  quick.append(more);
+  const cmtBtn = el("button", { title: "Comments" }, `💬 ${(it.comments || []).length}`);
+  quick.append(cmtBtn);
+  actions.append(quick);
 
   const comments = el("div", { class: "comments" });
-  for (const c of it.comments || []) {
-    comments.append(el("div", { class: "comment" },
-      el("div", { class: "avatar", style: "width:26px;height:26px;font-size:11px" }, initials(c.author_name)),
-      el("div", { class: "bubble" }, el("div", { class: "small muted" }, c.author_name + " · " + relTime(c.created_at)), el("div", {}, c.body)),
-    ));
+  if ((it.comments || []).length) {
+    const cl = el("div", { class: "comment-list" });
+    for (const c of it.comments || []) {
+      cl.append(el("div", { class: "comment" },
+        el("div", { class: "avatar", style: "width:26px;height:26px;font-size:11px" }, initials(c.author_name)),
+        el("div", { class: "bubble" },
+          el("div", { class: "row", style: "gap:6px" },
+            el("span", { class: "who" + (c.is_me ? " me" : "") }, c.is_me ? "You" : c.author_name),
+            el("span", { class: "when muted small" }, relTime(c.created_at))),
+          el("div", {}, c.body)),
+      ));
+    }
+    comments.append(cl);
   }
-  const cin = el("input", { placeholder: "Add a comment…", onkeydown: async (e) => { if (e.key === "Enter" && e.target.value.trim()) { await invoke("comment", { circleId, target: it.id, body: e.target.value.trim() }); e.target.value = ""; } } });
-  comments.append(el("div", { class: "row" }, cin));
+  // Reply row: paperclip + pill field + circular pink send, straight from macOS `commentField`.
+  const cin = el("input", { placeholder: "Add a reply…", onkeydown: (e) => { if (e.key === "Enter") sendComment(); } });
+  const sendComment = async () => {
+    const b = cin.value.trim();
+    if (!b) return;
+    await invoke("comment", { circleId, target: it.id, body: b });
+    cin.value = "";
+  };
+  comments.append(el("div", { class: "reply-row" },
+    el("button", { class: "icon-btn sm pink", title: "Attach", onclick: () => toast("Attach a photo to a reply from the phone apps for now") }, icon("paperclip")),
+    cin,
+    el("button", { class: "send-sm", title: "Send", "aria-label": "Send reply", onclick: sendComment }, icon("paperplane.fill")),
+  ));
   cmtBtn.addEventListener("click", () => comments.classList.toggle("show"));
 
   const geoNode = geo ? geoChip(geo) : null;
@@ -1064,28 +1391,76 @@ async function toggleReact(circleId, target, emoji, reactions) {
   const mine = hasMine(reactions, emoji);
   await invoke(mine ? "unreact" : "react", { circleId, target, emoji });
 }
-
-function emojiPicker(e, circleId, target) {
-  const choices = ["👍", "😂", "🔥", "😮", "😢", "🎉", "💜", "👏"];
-  const m = el("div", {}, el("h2", {}, "React"),
-    el("div", { class: "row wrap" }, ...choices.map((c) =>
-      el("button", { class: "btn", style: "font-size:22px", onclick: async () => { await invoke("react", { circleId, target, emoji: c }); $("#modal-root").replaceChildren(); } }, c))));
-  modal(m);
+/** Tapping a quick-react glyph adds it (and remembers it) — it never removes, which is what the
+ *  chips are for. Mirrors macOS `react(_:)` → EmojiStore.record. */
+async function quickReact(circleId, target, emoji, reactions) {
+  EmojiStore.record(emoji);
+  if (!hasMine(reactions, emoji)) await invoke("react", { circleId, target, emoji });
 }
 
-function postMenu(e, it, circleId) {
+/** The most-reacted `cap` chips, always keeping the user's own so they can untap it — sorted by
+ *  count descending. Byte-for-byte the rule in FeedView.swift ▸ `cappedReactions`, so a post with
+ *  many distinct emoji can't flood the row on either platform. */
+function cappedReactions(reactions, cap) {
+  const shown = [...(reactions || [])].sort((a, b) => b.count - a.count).slice(0, cap);
+  const mine = (reactions || []).find((r) => r.mine);
+  if (mine && !shown.some((r) => r.emoji === mine.emoji)) {
+    if (shown.length >= cap) shown.pop();
+    shown.push(mine);
+  }
+  return shown;
+}
+
+/** Your most-used reactions, persisted — the port of apple/HavenApp/Emoji.swift ▸ EmojiStore, so
+ *  the quick-react row is yours rather than a fixed list. */
+const EmojiStore = {
+  KEY: "haven-emoji-freq",
+  counts: JSON.parse(localStorage.getItem("haven-emoji-freq") || "{}"),
+  record(e) { this.counts[e] = (this.counts[e] || 0) + 1; localStorage.setItem(this.KEY, JSON.stringify(this.counts)); },
+};
+const DEFAULT_EMOJI = ["❤️", "😂", "👍"];
+function frequentEmoji(n) {
+  const ranked = Object.entries(EmojiStore.counts).sort((a, b) => b[1] - a[1]).map(([e]) => e);
+  for (const d of DEFAULT_EMOJI) if (!ranked.includes(d)) ranked.push(d);
+  return ranked.slice(0, n);
+}
+
+const EMOJI_CHOICES = ["❤️", "👍", "😂", "🔥", "😮", "😢", "🎉", "💜", "👏", "😍", "🙌", "✨"];
+/** The full picker, anchored at the `＋` (macOS `ReactionPicker`). */
+function emojiPicker(anchor, circleId, target) {
+  const root = $("#menu-root");
+  const grid = el("div", { class: "menu glass", style: "min-width:0;padding:8px" },
+    el("div", { style: "display:grid;grid-template-columns:repeat(6,1fr);gap:4px" },
+      ...EMOJI_CHOICES.map((c) => el("button", {
+        style: "font-size:19px;padding:6px;justify-content:center",
+        onclick: async () => { closeMenu(); EmojiStore.record(c); await invoke("react", { circleId, target, emoji: c }); },
+      }, c))));
+  const backdrop = el("div", { class: "menu-backdrop", onclick: closeMenu });
+  root.replaceChildren(backdrop, grid);
+  const r = anchor.getBoundingClientRect();
+  const gw = grid.offsetWidth, gh = grid.offsetHeight;
+  grid.style.left = Math.max(8, Math.min(r.right - gw, window.innerWidth - gw - 8)) + "px";
+  grid.style.top = (r.top - gh - 6 > 8 ? r.top - gh - 6 : r.bottom + 6) + "px";
+}
+
+/** The post's `···` menu — a popover at the glyph, matching macOS `header`'s Menu (not a modal). */
+function postMenu(anchor, it, circleId) {
   const isHidden = Hidden.has(it.id);
-  const m = el("div", {}, el("h2", {}, "Post"),
-    el("div", { class: "col" },
-      it.is_me ? el("button", { class: "btn", onclick: () => { $("#modal-root").replaceChildren(); editPostDialog(it, circleId); } }, "✏️ Edit") : null,
-      it.is_me ? el("button", { class: "btn danger", onclick: async () => { await invoke("unsend_post", { circleId, target: it.id }); $("#modal-root").replaceChildren(); toast("Unsent"); } }, "🚫 Unsend") : null,
-      // Hide any post from my own feed (reversible via "Show hidden").
-      el("button", { class: "btn", onclick: () => { isHidden ? Hidden.unhide(it.id) : Hidden.hide(it.id); $("#modal-root").replaceChildren(); renderFeed(); } },
-        isHidden ? "👁 Unhide" : "🙈 Hide post"),
-      // Report to the whole circle (decentralized moderation — see reportDialog).
-      it.is_me ? null : el("button", { class: "btn danger", onclick: () => { $("#modal-root").replaceChildren(); reportDialog(it, circleId); } }, "🚩 Report"),
-    ));
-  modal(m);
+  popMenu(anchor, [
+    // Share a pointer to this post: the web form, so it crosses to iOS/Android and survives being
+    // pasted into any chat app. It carries no key — only a device already in the circle can open it.
+    { label: "Share post", icon: "square.and.arrow.up", on: async () => {
+      try { await navigator.clipboard.writeText(DeepLink.postLink(circleId, it.id)); toast("Link copied"); }
+      catch (e) { toast("Couldn't copy: " + e); }
+    } },
+    it.is_me ? { label: "Edit", icon: "pencil.circle.fill", on: () => editPostDialog(it, circleId) } : null,
+    it.is_me ? { label: "Unsend", icon: "arrow.uturn.backward", danger: true, on: async () => { await invoke("unsend_post", { circleId, target: it.id }); toast("Unsent"); } } : null,
+    // Hide any post from my own feed (reversible via the circle menu's "Show hidden posts").
+    { label: isHidden ? "Unhide" : "Hide", icon: isHidden ? "eye" : "eye.slash",
+      on: () => { isHidden ? Hidden.unhide(it.id) : Hidden.hide(it.id); renderFeed(); } },
+    // Report to the whole circle (decentralized moderation — see reportDialog).
+    it.is_me ? null : { label: "Report", icon: "flag", danger: true, on: () => reportDialog(it, circleId) },
+  ], { align: "right" });
 }
 
 function editPostDialog(it, circleId) {
@@ -1101,6 +1476,15 @@ function newCircleDialog() {
   modal(el("div", {}, el("h2", {}, "New circle"), inp,
     el("div", { class: "row", style: "margin-top:12px;justify-content:flex-end" },
       el("button", { class: "btn primary", onclick: async () => { if (inp.value.trim()) { state.activeCircle = await invoke("create_circle", { name: inp.value.trim() }); } $("#modal-root").replaceChildren(); renderFeed(); } }, "Create"))));
+}
+
+/** The manage-circle SHEET behind the toolbar's people button — macOS `CircleView`, presented via
+ *  `.sheet` from the Circle tab. This is also where Connect lives now that it isn't a tab: the
+ *  prominent "Invite someone" action opens the Connect sheet (macOS `YouView.actionsRow` ▸
+ *  `showConnect`). */
+async function circleSheet() {
+  const circles = await invoke("circles").catch(() => []);
+  await manageCircleDialog(circles.find((c) => c.id === state.activeCircle));
 }
 
 async function manageCircleDialog(circle) {
@@ -1142,23 +1526,24 @@ async function manageCircleDialog(circle) {
         el("span", { style: "flex:1" }, r.name + (r.is_default ? " — default (all circles)" : "") + (r.is_s3 ? " · S3" : ""))));
     }
   }
-  relaySection.append(el("button", { class: "btn small ghost", style: "align-self:flex-start", onclick: () => { $("#modal-root").replaceChildren(); switchView("relay"); } }, "Manage relays →"));
+  relaySection.append(el("button", { class: "btn small ghost", style: "align-self:flex-start", onclick: () => relaySheet() }, "Manage relays →"));
 
-  modal(el("div", {},
-    el("h2", {}, "Manage circle"),
-    el("div", { class: "col" },
-      el("label", { class: "muted small" }, "Name"),
-      el("div", { class: "row" }, nameInp,
-        el("button", { class: "btn", onclick: async () => { const n = nameInp.value.trim(); if (n && n !== circle.name) { await invoke("rename_circle", { id: circle.id, name: n }); toast("Renamed"); $("#modal-root").replaceChildren(); renderFeed(); } } }, "Rename")),
-      el("label", { class: "muted small", style: "margin-top:6px" }, "Relays for this circle"),
-      el("div", { class: "muted small" }, "Choose which configured relays this circle uses, overriding the default. The default relay (if set) always applies — change it under Relays."),
-      relaySection,
-      el("label", { class: "muted small", style: "margin-top:6px" }, "Members"),
-      memberList,
-      isDefault ? null : el("button", { class: "btn danger", style: "margin-top:6px", onclick: async () => {
-        await invoke("leave_circle", { id: circle.id }); state.activeCircle = "default"; $("#modal-root").replaceChildren(); toast("Left circle"); renderFeed();
-      } }, "Leave this circle"),
-    )));
+  sheet("My Circle", el("div", { class: "col" },
+    // Connect's front door, now that it isn't a tab — the same prominent gradient pill macOS gives
+    // it in YouView.actionsRow.
+    el("button", { class: "btn primary wide", onclick: () => connectSheet() }, "Invite someone to this circle"),
+    el("label", { class: "muted small", style: "margin-top:6px" }, "Name"),
+    el("div", { class: "row" }, nameInp,
+      el("button", { class: "btn", onclick: async () => { const n = nameInp.value.trim(); if (n && n !== circle.name) { await invoke("rename_circle", { id: circle.id, name: n }); toast("Renamed"); closeModal(); renderFeed(); } } }, "Rename")),
+    el("label", { class: "muted small", style: "margin-top:6px" }, "Relays for this circle"),
+    el("div", { class: "muted small" }, "Choose which configured relays this circle uses, overriding the default. The default relay (if set) always applies — change it under Settings ▸ Relays."),
+    relaySection,
+    el("label", { class: "muted small", style: "margin-top:6px" }, "Members"),
+    memberList,
+    isDefault ? null : el("button", { class: "btn danger", style: "margin-top:6px", onclick: async () => {
+      await invoke("leave_circle", { id: circle.id }); state.activeCircle = "default"; closeModal(); toast("Left circle"); renderFeed();
+    } }, "Leave this circle"),
+  ));
 }
 
 function hydrateMedia(root, circleId) {
@@ -1166,24 +1551,8 @@ function hydrateMedia(root, circleId) {
 }
 
 // ---- Stories ---------------------------------------------------------------------------
-async function renderStories() {
-  const root = $("#view-stories");
-  const items = (await invoke("feed", { circleId: "default" })).filter((i) => i.story && !i.unsent);
-  const tray = el("div", { class: "story-tray" });
-  tray.append(el("div", { class: "story-ring", onclick: addStoryDialog },
-    el("div", { class: "ring" }, el("div", {}, "＋")), el("div", { class: "small" }, "Add")));
-  for (const it of items) {
-    const inner = el("div", {});
-    const firstReal = (it.media || []).find((r) => !r.startsWith("geo:") && !r.startsWith("a:"));
-    if (firstReal) { const img = el("img", { "data-ref": firstReal }); inner.append(img); }
-    else inner.append(document.createTextNode("✨"));
-    tray.append(el("div", { class: "story-ring", onclick: () => viewStory(it) },
-      el("div", { class: "ring" }, inner), el("div", { class: "small" }, it.author_name.split(" ")[0])));
-  }
-  root.replaceChildren(el("div", { class: "view-head" }, el("h1", {}, "Stories")), tray,
-    items.length ? el("div", { class: "muted small" }, "Stories disappear after 24 hours.") : el("div", { class: "empty" }, "No active stories."));
-  hydrateMedia(root, "default");
-}
+// Stories have no view of their own: the tray lives at the TOP OF THE CIRCLE FEED (see
+// `storiesTray`), exactly as it does on macOS. These two are what the tray opens.
 
 
 // ---- Story captions (cross-platform wire format) ----------------------------------------
@@ -1253,8 +1622,11 @@ function addStoryDialog() {
     // the caption styled + positioned instead of as plain text.
     const encoded = StoryCaptions.encode(body, { color: 0, font: 0, style: 1, x: 0.5, y: 0.85, size: 1 });
     await invoke("post_story", { body: encoded, media: state.attachments[0] ? state.attachments[0].ref : null, music });
-  }, "Caption your story…", { circleId: "default" });
-  modal(el("div", {}, el("h2", {}, "New story"), composer));
+    closeModal();
+  }, "Caption your story…", { circleId: state.activeCircle });
+  sheet("New story", el("div", { class: "col" },
+    el("div", { class: "muted small" }, "Add a photo or video with the + button. Stories disappear after 24 hours."),
+    composer));
 }
 
 function viewStory(it) {
@@ -1281,6 +1653,8 @@ function viewStory(it) {
 // ---- Messages --------------------------------------------------------------------------
 async function renderMessages() {
   const root = $("#view-messages");
+  renderTitlebarTrailing();   // the compose chip belongs to the LIST, not an open thread
+  root.classList.toggle("thread-mode", !!state.activeDm);
   if (state.activeDm) return renderThread(root, state.activeDm);
   const threads = await invoke("dm_threads");
   const contacts = await invoke("contacts");
@@ -1312,55 +1686,87 @@ async function renderMessages() {
       el("div", { class: "pin-name" + (unread > 0 ? " unread" : "") }, t.name)));
   }
 
+  // One conversation row — macOS `rowLabel`: avatar, name (BOLD while unread), the most recent
+  // message as a one-line preview, unread badge. The pin/delete verbs live in the row's `···`
+  // menu (macOS `conversationMenu`), not as two permanently-visible emoji buttons.
   const threadRow = (t) => {
     const unread = t.unread || 0;
-    const row = el("div", { class: "thread-item", onclick: () => openDm(t) },
+    // (`dm_threads` carries no unsent flag, and src-tauri isn't mine to change — the thread view
+    // renders the "Message unsent" tombstone properly, which is where it matters.)
+    const preview = isSecret(t.last_body) ? "🔒 Secret message" : (t.last_body || "No messages yet");
+    const kebab = el("button", { class: "kebab", title: "More", "aria-label": "More" }, icon("ellipsis"));
+    kebab.addEventListener("click", (e) => {
+      e.stopPropagation();
+      popMenu(kebab, [
+        Pins.has(t.circle_id)
+          ? { label: "Unpin", icon: "mappin", on: () => { Pins.toggle(t.circle_id); renderMessages(); } }
+          : { label: "Pin", icon: "mappin", on: () => { if (Pins.full) { toast("You can pin up to 6 conversations."); return; } Pins.toggle(t.circle_id); renderMessages(); } },
+        { label: "Delete", icon: "eye.slash", danger: true, on: () => del(t) },
+      ], { align: "right" });
+    });
+    return el("div", { class: "thread-item", onclick: () => openDm(t) },
       el("div", { class: "avatar" }, initials(t.name)),
       el("div", { style: "flex:1;min-width:0" },
         el("div", { class: "name" + (unread > 0 ? " unread" : "") }, t.name),
-        el("div", { class: (unread > 0 ? "" : "muted ") + "small", style: "white-space:nowrap;overflow:hidden;text-overflow:ellipsis" }, t.last_body || "No messages yet")),
-      unread > 0 ? unreadPill(unread) : null,
+        el("div", { class: "preview" + (unread > 0 ? " unread" : ""), style: "white-space:nowrap;overflow:hidden;text-overflow:ellipsis" }, preview)),
       el("div", { class: "muted small" }, relTime(t.last_at)),
-      el("button", { class: "btn small ghost", title: Pins.has(t.circle_id) ? "Unpin" : "Pin", onclick: (e) => { e.stopPropagation(); if (!Pins.has(t.circle_id) && Pins.full) { toast("You can pin up to 6 conversations."); return; } Pins.toggle(t.circle_id); renderMessages(); } }, Pins.has(t.circle_id) ? "📌" : "📍"),
-      el("button", { class: "btn small ghost danger", title: "Delete", onclick: (e) => { e.stopPropagation(); del(t); } }, "🗑"),
+      unread > 0 ? unreadPill(unread) : null,
+      kebab,
     );
-    return row;
   };
 
   const list = el("div", { class: "thread-list" });
   if (pinned.length) list.append(grid);
   for (const t of rest) list.append(threadRow(t));
-  if (!threads.length) list.append(el("div", { class: "empty" }, "No conversations yet. Start one from a contact below."));
-  const cl = el("div", { class: "col" });
-  for (const c of contacts) {
-    cl.append(el("div", { class: "list-item" }, el("div", { class: "avatar" }, initials(c.name)), el("div", { style: "flex:1" }, c.name),
-      el("button", { class: "btn small", onclick: async () => { const id = await invoke("start_dm", { contactIdHex: c.id_hex, contactName: c.name }); state.activeDm = { id, name: c.name }; renderMessages(); } }, "Message")));
+  if (!threads.length) {
+    list.append(el("div", { class: "empty" },
+      el("div", { class: "h" }, "No messages yet"),
+      el("div", {}, "Use the compose button to start one.")));
   }
-  root.replaceChildren(
-    el("div", { class: "view-head" }, el("h1", {}, "Messages"),
-      contacts.length >= 2 ? el("button", { class: "btn small ghost", style: "margin-left:auto", onclick: () => groupMessageDialog(contacts) }, "New group") : null),
-    list,
-    contacts.length ? el("h3", { class: "muted" }, "Start a chat") : null, cl);
+  root.replaceChildren(el("div", { class: "col-wrap" },
+    el("div", { class: "view-head" }, el("h1", {}, "Messages")),
+    list));
 }
 
-/** Multi-select contacts to start a GROUP DM (2+ people). */
-function groupMessageDialog(contacts) {
+/** New message / new group — the port of `DMContactPicker`: tap contacts to select, one → a 1:1,
+ *  several → a group DM, with the prominent gradient action in the sheet's footer. */
+async function newMessageSheet() {
+  const contacts = await invoke("contacts").catch(() => []);
   const picked = new Set();
-  const startBtn = el("button", { class: "btn", disabled: true, onclick: async () => {
+  const start = async () => {
     const members = contacts.filter((c) => picked.has(c.id_hex)).map((c) => [c.id_hex, c.name]);
-    const id = await invoke("start_group_dm", { members });
-    $("#modal-root").replaceChildren();
-    state.activeDm = { id, name: members.map((m) => m[1]).join(", ") };
-    switchView("messages"); renderMessages();
-  } }, "Pick 2+");
-  const sync = () => { startBtn.disabled = picked.size < 2; startBtn.textContent = picked.size >= 2 ? `Start (${picked.size})` : "Pick 2+"; };
-  const rows = contacts.map((c) => el("label", { class: "list-item", style: "cursor:pointer" },
-    el("input", { type: "checkbox", onchange: (e) => { e.target.checked ? picked.add(c.id_hex) : picked.delete(c.id_hex); sync(); } }),
-    el("div", { class: "avatar", style: "width:30px;height:30px;font-size:12px" }, initials(c.name)),
-    el("div", { style: "flex:1" }, c.name)));
-  modal(el("div", {}, el("h2", {}, "New group message"),
-    el("div", { class: "col", style: "max-height:360px;overflow:auto" }, ...rows),
-    el("div", { class: "row", style: "margin-top:10px" }, startBtn)));
+    if (!members.length) return;
+    let id, name;
+    if (members.length === 1) { id = await invoke("start_dm", { contactIdHex: members[0][0], contactName: members[0][1] }); name = members[0][1]; }
+    else { id = await invoke("start_group_dm", { members }); name = members.map((m) => m[1]).join(", "); }
+    closeModal();
+    state.activeDm = { id, name };
+    switchView("messages");
+  };
+  const startBtn = el("button", { class: "btn primary wide", disabled: true, onclick: start }, "Start");
+  const title = el("h2", {}, "New message");
+  const sync = () => {
+    startBtn.disabled = picked.size === 0;
+    startBtn.textContent = picked.size > 1 ? "Start group" : "Start";
+    title.textContent = picked.size > 1 ? `New group · ${picked.size}` : "New message";
+  };
+  const col = el("div", { class: "col", style: "gap:2px" });
+  if (!contacts.length) col.append(el("div", { class: "muted small" }, "No contacts yet — invite someone from your circle first."));
+  for (const c of contacts) {
+    const check = el("span", { class: "pick-check" }, icon("checkmark"));
+    const row = el("div", { class: "list-item", style: "cursor:pointer" },
+      el("div", { class: "avatar" }, initials(c.name)),
+      el("div", { style: "flex:1" }, c.name),
+      check);
+    row.addEventListener("click", () => {
+      picked.has(c.id_hex) ? picked.delete(c.id_hex) : picked.add(c.id_hex);
+      row.classList.toggle("picked", picked.has(c.id_hex));
+      sync();
+    });
+    col.append(row);
+  }
+  sheet("New message", col, startBtn);
+  const h = $("#modal-root h2"); if (h) h.replaceWith(title);
 }
 
 async function renderThread(root, dm) {
@@ -1374,45 +1780,147 @@ async function renderThread(root, dm) {
   let relayReachable = false;
   try { const rs = await invoke("relay_status"); relayReachable = !!(rs.hosting || rs.relay_active || (rs.has_relay && rs.internet_active)); } catch (_) {}
   let secretOn = false;
+  let editingId = null;
   const chat = el("div", { class: "chat" });
   for (const m of msgs) {
-    if (m.unsent) continue;
     // A `geo:` ref renders as a map chip, not media (otherwise a broken tile in the bubble).
-    const mediaEls = (m.media || []).map((r) => { const g = parseGeo(r); return g ? geoChip(g) : mediaNode(r, "max-width:220px;border-radius:10px;display:block;margin-top:6px"); });
-    const bubble = isSecret(m.body)
-      ? secretBubble(m.body, m.is_me)
-      : el("div", { class: "chat-bubble" }, m.body || "", ...mediaEls);
-    if (isSecret(m.body) && mediaEls.length) bubble.append(...mediaEls);
+    const mediaEls = (m.media || []).map((r) => { const g = parseGeo(r); return g ? geoChip(g) : mediaNode(r, "max-width:240px;border-radius:12px;display:block"); });
+
+    // An unsent message is a TOMBSTONE, not a hidden row — macOS renders "Message unsent" in
+    // italic on the secondary surface, so the thread still reads as a conversation.
+    let bubble;
+    if (m.unsent) bubble = el("div", { class: "chat-bubble tombstone" }, "Message unsent");
+    else if (isSecret(m.body)) { bubble = secretBubble(m.body, m.is_me); if (mediaEls.length) bubble.append(...mediaEls); }
+    else if (m.body) bubble = el("div", { class: "chat-bubble" + (m.is_me ? " me" : "") }, m.body);
+    else bubble = null;
+
+    const col = el("div", { class: "bubble-col" });
     // In a group DM, label each INCOMING message with who sent it.
-    const senderLabel = (isGroup && !m.is_me) ? el("div", { class: "chat-sender" }, m.author_name || "Someone") : null;
-    // A timestamp + (for my own sent messages) a delivery checkmark under every bubble.
+    if (isGroup && !m.is_me && !m.unsent) col.append(el("div", { class: "chat-sender" }, m.author_name || "Someone"));
+    if (mediaEls.length && !isSecret(m.body)) col.append(el("div", { class: "bubble-media" }, ...mediaEls));
+    if (m.music) {
+      col.append(el("a", { class: "song-chip glass tint-pink", style: "margin-top:0;max-width:260px",
+        onclick: () => { if (m.music.catalog_id && /^https?:/.test(m.music.catalog_id)) openExternal(m.music.catalog_id); } },
+        el("span", { class: "note" }, icon("music.note")),
+        el("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
+          el("strong", {}, m.music.title), " · ", m.music.artist)));
+    }
+    if (bubble) col.append(bubble);
+    // Reaction chips ride UNDER the bubble — the count only shows past 1 (macOS `bubble`).
+    if ((m.reactions || []).length) {
+      const rr = el("div", { class: "bubble-reacts" });
+      for (const r of m.reactions) {
+        rr.append(el("button", { class: "msg-react" + (r.mine ? " mine" : ""), title: r.mine ? "Remove your reaction" : "React",
+          onclick: () => invoke(r.mine ? "unreact" : "react", { circleId: dm.id, target: m.id, emoji: r.emoji }) },
+          r.emoji + (r.count > 1 ? " " + r.count : "")));
+      }
+      col.append(rr);
+    }
     const meta2 = el("div", { class: "chat-meta" }, relTime(m.created_at));
-    if (m.is_me) meta2.append(el("span", { class: "chat-check" + (relayReachable ? " on" : "") }, relayReachable ? "✓✓" : "✓"));
-    chat.append(el("div", { class: "bubble-row" + (m.is_me ? " me" : "") }, el("div", { class: "bubble-col" }, senderLabel, bubble, meta2)));
+    if (m.edited && !m.unsent) meta2.append(el("span", {}, "edited"));
+    // sent → checkmark; reachable on the circle's relay → filled (store-and-forward delivered)
+    if (m.is_me && !m.unsent) meta2.append(el("span", { class: "chat-check" + (relayReachable ? " on" : "") }, relayReachable ? "✓✓" : "✓"));
+    col.append(meta2);
+
+    const row = el("div", { class: "bubble-row" + (m.is_me ? " me" : "") }, col);
+    // Right-click a message: FLAT one-tap quick emoji (never a submenu — that bug was just fixed
+    // on macOS), then the full picker, then edit/delete for my own.
+    if (!m.unsent) {
+      col.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        const anchor = { getBoundingClientRect: () => ({ left: e.clientX, right: e.clientX, top: e.clientY, bottom: e.clientY }) };
+        popMenu(anchor, [
+          ...frequentEmoji(3).map((emo) => ({ label: "React " + emo, on: () => { EmojiStore.record(emo); invoke("react", { circleId: dm.id, target: m.id, emoji: emo }); } })),
+          { label: "More reactions…", icon: "plus.circle", on: () => emojiPicker(anchor, dm.id, m.id) },
+          (m.is_me && m.body && !isSecret(m.body)) ? { sep: true } : null,
+          (m.is_me && m.body && !isSecret(m.body)) ? { label: "Edit", icon: "pencil.circle.fill", on: () => beginEdit(m) } : null,
+          m.is_me ? { label: "Delete", icon: "eye.slash", danger: true, on: () => invoke("unsend_post", { circleId: dm.id, target: m.id }) } : null,
+        ]);
+      });
+    }
+    chat.append(row);
   }
-  const sendText = async (input) => {
-    const t = input.value.trim();
-    if (!t) return;
-    const body = secretOn ? SECRET_MARKER + t : t;
-    await invoke("send_dm", { circleId: dm.id, body, media: [] });
-    input.value = "";
-  };
-  const input = el("input", { placeholder: "Message…", onkeydown: async (e) => { if (e.key === "Enter") await sendText(e.target); } });
-  const secretBtn = el("button", { class: "btn", title: "Send secretly", onclick: () => { secretOn = !secretOn; secretBtn.classList.toggle("primary", secretOn); input.placeholder = secretOn ? "Secret message…" : "Message…"; } }, "🔒");
-  const voiceBtn = el("button", { class: "btn", title: "Voice message", onclick: async () => { const r = await recordVoice(dm.id); if (r) await invoke("send_dm", { circleId: dm.id, body: "", media: [r] }); } }, "🎙️");
-  const partner = dm.id.replace("dm:", "").split("-").find((h) => h !== state.node) || "";
-  root.replaceChildren(
-    el("div", { class: "view-head" },
-      el("button", { class: "btn small ghost", onclick: () => { state.activeDm = null; renderMessages(); } }, "← Back"),
-      el("h1", {}, dm.name),
+
+  const input = el("textarea", { class: "composer-field glass", placeholder: "Message…", rows: 1 });
+  const autoGrow = () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 132) + "px"; };
+  input.addEventListener("input", autoGrow);
+  const editBar = el("div", { class: "edit-bar", style: "display:none" });
+  const beginEdit = (m) => {
+    editingId = m.id;
+    input.value = m.body; autoGrow(); input.focus();
+    editBar.style.display = "";
+    editBar.replaceChildren(
+      el("span", { class: "muted small" }, "Editing message"),
       el("div", { class: "spacer" }),
-      partner ? el("button", { class: "btn small", title: "Audio call", onclick: () => callStart([partner], dm.name, false) }, "📞") : null,
-      partner ? el("button", { class: "btn small", title: "Video call", onclick: () => callStart([partner], dm.name, true) }, "📹") : null,
+      el("button", { class: "pill-btn glass", onclick: () => { editingId = null; input.value = ""; autoGrow(); editBar.style.display = "none"; } }, "Cancel"),
+    );
+  };
+  // A song attached to the NEXT send, shown as a removable chip — same shape as the feed composer.
+  let pendingMusic = null;
+  const musicRow = el("div", {});
+  const drawDmMusic = () => {
+    musicRow.replaceChildren(pendingMusic
+      ? el("div", { class: "song-chip", style: "margin-top:0" },
+          el("span", { class: "note" }, "🎵"),
+          el("div", { style: "flex:1;min-width:0" }, el("strong", {}, pendingMusic.title), " — ", pendingMusic.artist),
+          el("span", { class: "x", style: "position:static;cursor:pointer", onclick: () => { pendingMusic = null; drawDmMusic(); } }, "×"))
+      : null);
+  };
+
+  const sendText = async () => {
+    const t = input.value.trim();
+    // A song on its own is a valid message (the engine's guard allows it), so don't require text.
+    if (!t && !pendingMusic) return;
+    if (editingId) {   // saving an edit — edits don't carry a track
+      if (!t) return;
+      await invoke("edit_post", { circleId: dm.id, target: editingId, body: t });
+      editingId = null; editBar.style.display = "none";
+    } else {
+      await invoke("send_dm", { circleId: dm.id, body: t ? (secretOn ? SECRET_MARKER + t : t) : "", media: [], music: pendingMusic });
+      pendingMusic = null; drawDmMusic();
+    }
+    input.value = ""; autoGrow();
+  };
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendText(); } });
+
+  const setSecret = (on) => {
+    secretOn = on;
+    input.classList.toggle("tint-pink", on);
+    input.placeholder = on ? "Secret message…" : "Message…";
+  };
+  const plus = el("button", { class: "composer-plus", title: "Attach", "aria-label": "Attach" }, icon("plus"));
+  plus.addEventListener("click", () => popMenu(plus, [
+    { label: "Photo or video", icon: "photo", on: async () => { const r = await cameraDialog(dm.id); if (r) await invoke("send_dm", { circleId: dm.id, body: "", media: [r.ref], music: null }); } },
+    { label: "Voice message", icon: "mic", on: async () => { const r = await recordVoice(dm.id); if (r) await invoke("send_dm", { circleId: dm.id, body: "", media: [r], music: null }); } },
+    // Attaches to the NEXT send rather than firing immediately — a song usually accompanies a
+    // message, and the composer shows it as a removable chip until you hit send (same as the feed).
+    { label: "Add a song", icon: "music.note", on: () => musicDialog((m) => { pendingMusic = m; drawDmMusic(); }) },
+    { label: secretOn ? "Secret: on" : "Send secretly", icon: "lock.shield.fill", on: () => setSecret(!secretOn) },
+  ]));
+
+  const partner = dm.id.replace("dm:", "").split("-").find((h) => h !== state.node) || "";
+  const presence = el("div", { class: "dm-presence" }, relayReachable ? "Connected" : "Offline");
+
+  root.replaceChildren(el("div", { class: "thread-wrap" },
+    // macOS pins the DM header (name + presence) to the LEADING edge — the window's centred tabs
+    // own the middle and a centred header shoved them around as the name's width changed.
+    el("div", { class: "dm-head" },
+      el("button", { class: "icon-btn glass", title: "Back", "aria-label": "Back", onclick: () => { state.activeDm = null; renderMessages(); } },
+        icon("chevron.right", "flip")),
+      el("div", { style: "min-width:0" },
+        el("div", { class: "dm-name" }, dm.name),
+        presence),
+      el("div", { class: "spacer" }),
+      partner ? el("button", { class: "icon-btn glass", title: "Audio call", "aria-label": "Audio call", onclick: () => callStart([partner], dm.name, false) }, icon("phone.fill")) : null,
+      partner ? el("button", { class: "icon-btn glass", title: "Video call", "aria-label": "Video call", onclick: () => callStart([partner], dm.name, true) }, icon("video.fill")) : null,
     ),
-    el("div", { class: "card" }, chat,
-      el("div", { class: "chat-input" }, secretBtn, voiceBtn, input,
-        el("button", { class: "btn primary", onclick: () => sendText(input) }, "Send"))),
-  );
+    chat,
+    // Unlike the feed's composer, the DM composer DOES carry a glass band (macOS:
+    // `.havenGlass(in: Rectangle())`) — it's the floor of the thread, not a pill over a gradient.
+    el("div", { class: "dm-composer glass" }, editBar, musicRow,
+      el("div", { class: "composer-row" }, plus, input,
+        el("button", { class: "composer-send", title: "Send", "aria-label": "Send", onclick: sendText }, icon("paperplane.fill")))),
+  ));
   hydrateMedia(root, dm.id);
   chat.scrollTop = chat.scrollHeight;
   // The user is looking at this thread: advance its read watermark. renderThread re-runs on every
@@ -1423,10 +1931,11 @@ async function renderThread(root, dm) {
 }
 
 // ---- Connect ---------------------------------------------------------------------------
-async function renderConnect() {
-  const root = $("#view-connect");
-  const pending = await invoke("pending");
-  const contacts = await invoke("contacts");
+/** CONNECT — a SHEET, not a tab. macOS presents `ConnectView` with `.sheet` from the circle's
+ *  people button and from the pending-requests banner; both of those reach here. */
+async function connectSheet() {
+  const pending = await invoke("pending").catch(() => []);
+  const contacts = await invoke("contacts").catch(() => []);
 
   const qrBox = el("div", { class: "qr-box" });
   try { qrBox.innerHTML = makeQrSvg(state.inviteUri); } catch (_) { qrBox.textContent = "QR unavailable"; }
@@ -1477,20 +1986,19 @@ async function renderConnect() {
     cl.append(el("div", { class: "list-item" },
       el("div", { class: "avatar" }, initials(c.name)),
       el("div", { style: "flex:1" }, el("div", { class: "name" }, c.name), el("div", { class: "muted small mono" }, c.id_hex.slice(0, 16) + "…")),
-      el("button", { class: "btn small", onclick: async () => { const id = await invoke("start_dm", { contactIdHex: c.id_hex, contactName: c.name }); state.activeDm = { id, name: c.name }; switchView("messages"); } }, "Message"),
-      el("button", { class: "kebab", onclick: () => contactMenu(c) }, "⋯"),
+      el("button", { class: "btn small", onclick: async () => { const id = await invoke("start_dm", { contactIdHex: c.id_hex, contactName: c.name }); state.activeDm = { id, name: c.name }; closeModal(); switchView("messages"); } }, "Message"),
+      (() => { const k = el("button", { class: "kebab" }, icon("ellipsis")); k.addEventListener("click", () => contactMenu(k, c)); return k; })(),
     ));
   }
 
-  root.replaceChildren(el("div", { class: "view-head" }, el("h1", {}, "Connect")),
-    el("div", { class: "grid2" }, el("div", {}, mine, add), el("div", {}, pend, cl)));
+  sheet("Connect", el("div", { class: "col", style: "gap:16px" }, mine, add, pend, cl));
 }
 
-function contactMenu(c) {
-  modal(el("div", {}, el("h2", {}, c.name),
-    el("div", { class: "col" },
-      el("button", { class: "btn danger", onclick: async () => { await invoke("block", { idHex: c.id_hex }); $("#modal-root").replaceChildren(); toast("Blocked"); renderConnect(); } }, "Block " + c.name),
-    )));
+function contactMenu(anchor, c) {
+  popMenu(anchor, [
+    { label: "Block " + c.name, icon: "hand.raised.fill", danger: true,
+      on: async () => { await invoke("block", { idHex: c.id_hex }); toast("Blocked"); connectSheet(); } },
+  ], { align: "right" });
 }
 
 function makeQrSvg(text) {
@@ -1531,8 +2039,12 @@ async function startScan() {
 }
 
 // ---- Relay -----------------------------------------------------------------------------
-async function renderRelay() {
-  const root = $("#view-relay");
+// RELAY IS NOT A TAB. macOS keeps it exactly one place — Settings ▸ Relays (Settings.swift's
+// `NavigationLink { RelaysView() }`) — with the per-circle overrides under the circle's own
+// settings. Desktop matches: the gear on the You tab → Relays, plus the "Manage relays →" link
+// inside the circle sheet, plus the relay nudge's walkthrough. Nothing else.
+const renderRelay = () => relaySheet();   // legacy call sites (the walkthrough) keep working
+async function relaySheet() {
   const s = await invoke("relay_status");
   const adoptInput = el("input", { placeholder: "Paste a relay node id (64 hex)…" });
   const hostCard = el("div", { class: "card col" },
@@ -1631,80 +2143,213 @@ async function renderRelay() {
       s3.configured ? el("button", { class: "btn danger small", onclick: async () => { await invoke("erase_relay", { nodeHex: "s3:" + s3.bucket }); await invoke("s3_clear"); toast("S3 relay removed"); renderRelay(); } }, "Remove") : null,
     ),
   );
-  root.replaceChildren(el("div", { class: "view-head" }, el("h1", {}, "Relay")), hostCard, alwaysOn, adoptCard, s3card, headless);
+  sheet("Relays", el("div", { class: "col", style: "gap:16px" }, hostCard, alwaysOn, adoptCard, s3card, headless));
 }
 
 // ---- You / Settings --------------------------------------------------------------------
+/** The You tab — macOS `YouView`, which is a PROFILE, not a pile of settings cards: a centred
+ *  avatar with a gradient ring and a pencil affordance, your name, bio and link, then your own
+ *  stories and your own posts. Everything administrative moved behind the toolbar gear
+ *  (`settingsSheet`), which is exactly where macOS keeps it. */
 async function renderYou() {
   const root = $("#view-you");
-  const p = await invoke("get_profile");
-  const blocked = await invoke("blocked");
-  const roster = await invoke("device_roster").catch(() => ({ enabled: false, this_device_authorized: false, devices: [] }));
-  const name = el("input", { value: p.name || "", placeholder: "Display name" });
-  const emoji = el("input", { value: p.emoji || "", placeholder: "Emoji (optional)", maxlength: 4, style: "width:90px" });
-  const bio = el("textarea", { placeholder: "One-line bio (optional)" }); bio.value = p.bio || "";
-  const link = el("input", { value: p.link || "", placeholder: "A link to show (optional)" });
+  const p = await invoke("get_profile").catch(() => ({}));
+  state.profile = p;
 
-  const profileCard = el("div", { class: "card col" },
-    el("h3", {}, "Your profile"),
-    el("div", { class: "row" }, el("div", { class: "avatar lg" }, p.emoji || initials(p.name)), el("div", { class: "col", style: "flex:1" }, el("div", { class: "row" }, name, emoji))),
-    bio, link,
-    el("div", { class: "muted small mono" }, "id: " + state.node),
-    el("button", { class: "btn primary", onclick: async () => { await invoke("set_profile", { name: name.value.trim(), bio: bio.value.trim(), link: link.value.trim(), emoji: emoji.value.trim(), avatar: p.avatar || "" }); toast("Profile saved & shared"); } }, "Save profile"),
+  const avatar = el("button", { class: "profile-avatar", title: "Edit profile", onclick: () => editProfileSheet(p) },
+    el("div", { class: "disc" }, p.avatar ? el("img", { src: p.avatar }) : (p.emoji || initials(p.name))),
+    el("span", { class: "pencil" }, icon("pencil.circle.fill")),
+  );
+  const head = el("div", { class: "profile-head" },
+    avatar,
+    el("div", { class: "profile-name" }, p.name || "You"),
+    p.bio ? el("div", { class: "profile-bio" }, p.bio) : null,
+    p.link ? el("button", { class: "profile-link", onclick: () => openExternal(p.link) }, icon("link"), p.link) : null,
+    (!p.bio && !p.link) ? el("div", { class: "profile-bio" }, "This is just for the people you choose.") : null,
   );
 
+  // Your own posts and stories, across every circle — macOS `feed.myPosts` / `feed.myStories`.
+  const circles = await invoke("circles").catch(() => []);
+  const mine = [];
+  for (const c of circles) {
+    for (const i of await invoke("feed", { circleId: c.id }).catch(() => [])) {
+      if (i.is_me && !i.unsent) mine.push({ ...i, _circle: c.id });
+    }
+  }
+  mine.sort((a, b) => Number(b.created_at) - Number(a.created_at));
+  const myStories = mine.filter((i) => i.story);
+  const myPosts = mine.filter((i) => !i.story);
+
+  const body = el("div", { class: "feed-list" }, head);
+  if (myStories.length) {
+    const tray = el("div", { class: "story-tray" });
+    for (const s of myStories) {
+      const inner = el("div", {});
+      const cover = (s.media || []).find((r) => !r.startsWith("geo:") && !r.startsWith("a:"));
+      if (cover) inner.append(el("img", { "data-ref": cover }));
+      else inner.append(icon("photo", "story-ph"));
+      tray.append(el("button", { class: "story-ring cover", onclick: () => viewStory(s) }, el("div", { class: "ring" }, inner)));
+    }
+    body.append(el("div", { class: "card" }, el("div", { class: "section-label" }, "Your stories"), tray));
+  }
+  if (!myPosts.length) {
+    body.append(el("div", { class: "card" }, el("div", { class: "empty", style: "padding:28px 10px" },
+      el("div", { class: "h" }, "Your posts show up here"),
+      el("div", {}, "Everything you share lives here — and a copy stays on your device."))));
+  } else {
+    for (const it of myPosts) body.append(postCard(it, it._circle));
+  }
+
+  root.replaceChildren(el("div", { class: "col-wrap" }, body));
+  for (const c of circles) hydrateMedia(root, c.id);   // refs resolve against their own circle's keys
+}
+
+/** Edit profile — macOS `EditProfileSheet`, opened by the avatar's pencil. */
+function editProfileSheet(p) {
+  const name = el("input", { value: p.name || "", placeholder: "Display name" });
+  const emoji = el("input", { value: p.emoji || "", placeholder: "Emoji", maxlength: 4, style: "width:90px" });
+  const bio = el("textarea", { placeholder: "One-line bio (optional)" }); bio.value = p.bio || "";
+  const link = el("input", { value: p.link || "", placeholder: "A link to show (optional)" });
+  sheet("Edit profile", el("div", { class: "col" },
+    el("div", { class: "row" }, name, emoji),
+    bio, link,
+    el("div", { class: "muted small mono" }, "id: " + state.node),
+  ), el("button", { class: "btn primary wide", onclick: async () => {
+    await invoke("set_profile", { name: name.value.trim(), bio: bio.value.trim(), link: link.value.trim(), emoji: emoji.value.trim(), avatar: p.avatar || "" });
+    closeModal(); toast("Profile saved & shared"); renderYou();
+  } }, "Save"));
+}
+
+/** SETTINGS — the gear in the You tab's toolbar. Grouped rows in the macOS order
+ *  (Settings.swift): privacy note, Relays, Blocked people, Identities, Devices, Advanced. This is
+ *  the ONLY home for Relay now. */
+async function settingsSheet() {
+  const row = (label, iconName, on, opts = {}) => el("button", { class: "set-row", onclick: on },
+    el("span", { class: "ri" }, icon(iconName)),
+    el("span", { style: "flex:1" }, label),
+    opts.value ? el("span", { class: "muted small" }, opts.value) : null,
+    el("span", { class: "chev" }, icon("chevron.right")),
+  );
+  const group = (...kids) => el("div", { class: "set-group" }, ...kids.filter(Boolean));
+  const foot = (t) => el("div", { class: "set-foot" }, t);
+
+  const themeNow = document.documentElement.dataset.theme
+    || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+
+  sheet("Settings", el("div", { class: "col", style: "gap:6px" },
+    el("div", { class: "set-group" },
+      el("div", { class: "set-row" },
+        el("span", { class: "ri", style: "color:#34d399" }, icon("lock.shield.fill")),
+        el("span", { style: "flex:1" },
+          el("div", { style: "font-weight:600" }, "Your circle is private"),
+          el("div", { class: "muted small", style: "margin-top:2px" }, "Everything you share is locked so only your people can see it. No ads, no tracking — ever.")))),
+
+    // RELAY LIVES HERE — nowhere else in the chrome.
+    group(row("Relays", "antenna", () => relaySheet())),
+    foot("Manage where your circles' sealed posts & media live so they reach people who were offline. Add unlimited relays (a Haven node or your own S3 bucket), pick a default for every circle, and activate or deactivate each. Each circle can override the default in its own settings."),
+
+    group(row("Blocked people", "hand.raised.fill", () => blockedSheet())),
+    foot("People you've blocked can't see your posts or reach you. Unblock anyone here."),
+
+    group(row("Identities", "icloud", () => identitiesSheet())),
+    foot("Keep more than one identity on this PC and switch between them. Each has its own profile, circles and contacts."),
+
+    group(row("Devices", "laptop", () => devicesSheet())),
+    foot("Link this account to your other devices — each gets its own revocable key and syncs your profile + posts. See which devices are authorized, re-sync, or revoke one."),
+
+    group(row("Scheduled messages", "clock", () => scheduledSheet())),
+    foot("Posts and DMs waiting to send. Compose one with the + menu's “Send later…”."),
+
+    // The Mac follows the system appearance and offers no toggle; desktop keeps one because
+    // Tauri's webview doesn't always inherit the OS theme on Linux/Windows.
+    group(row("Appearance", "moon", () => {
+      const next = themeNow === "light" ? "dark" : "light";
+      document.documentElement.dataset.theme = next;
+      localStorage.setItem("haven-theme", next);
+      settingsSheet();
+    }, { value: themeNow === "light" ? "Light" : "Dark" })),
+
+    group(row("Advanced", "wrench", () => advancedSheet())),
+    foot("Technical details, your identity, and starting over."),
+  ));
+}
+
+async function blockedSheet() {
+  const blocked = await invoke("blocked").catch(() => []);
+  const list = el("div", { class: "col" });
+  if (!blocked.length) list.append(el("div", { class: "muted small" }, "No one is blocked."));
+  for (const b of blocked) {
+    list.append(el("div", { class: "list-item" },
+      el("div", { class: "mono", style: "flex:1" }, b.slice(0, 24) + "…"),
+      el("button", { class: "btn small", onclick: async () => { await invoke("unblock", { idHex: b }); blockedSheet(); } }, "Unblock")));
+  }
+  sheet("Blocked people", list);
+}
+
+async function scheduledSheet() {
+  const sched = await invoke("scheduled").catch(() => []);
+  const list = el("div", { class: "col" });
+  if (!sched.length) list.append(el("div", { class: "muted small" }, "Nothing scheduled. Use the composer's + menu ▸ “Send later…”."));
+  for (const s of sched) {
+    list.append(el("div", { class: "list-item" },
+      el("div", { style: "flex:1;min-width:0" },
+        el("div", {}, (s.kind === "dm" ? "DM · " : "Post · ") + (s.body || (s.media_count ? `${s.media_count} attachment(s)` : "—"))),
+        el("div", { class: "muted small" }, "sends " + new Date(s.send_at_ms).toLocaleString())),
+      el("button", { class: "btn small danger", onclick: async () => { await invoke("cancel_scheduled", { id: s.id }); scheduledSheet(); } }, "Cancel")));
+  }
+  sheet("Scheduled", list);
+}
+
+async function advancedSheet() {
   const security = el("div", { class: "card col" },
     el("h3", {}, "Security"),
     el("div", { class: "muted small" }, "Run the on-device hybrid post-quantum self-test (Ed25519 + ML-DSA, X25519 + ML-KEM-768)."),
     el("button", { class: "btn", onclick: async () => { const r = await invoke("self_test"); modal(el("div", {}, el("h2", {}, r.all_ok ? "✅ All checks passed" : "⚠️ Some checks failed"), el("div", { class: "col small" }, line("Identity", r.identity_ok), line("Hybrid KEM", r.hybrid_kem_ok), line("Signatures", r.signature_ok), line("Reach-me link", r.link_ok)), el("p", { class: "muted small" }, r.summary))); } }, "Run self-test"),
   );
 
-  const blockedCard = el("div", { class: "card col" }, el("h3", {}, `Blocked (${blocked.length})`));
-  if (!blocked.length) blockedCard.append(el("div", { class: "muted small" }, "No one is blocked."));
-  for (const b of blocked) blockedCard.append(el("div", { class: "list-item" }, el("div", { class: "mono", style: "flex:1" }, b.slice(0, 24) + "…"), el("button", { class: "btn small", onclick: async () => { await invoke("unblock", { idHex: b }); renderYou(); } }, "Unblock")));
-
   const danger = el("div", { class: "card col" },
     el("h3", {}, "Start over"),
     el("div", { class: "muted small" }, "Wipe this device's identity, contacts, circles and media. This cannot be undone."),
-    el("button", { class: "btn danger", onclick: () => { modal(el("div", {}, el("h2", {}, "Start over?"), el("p", {}, "This permanently deletes your identity and all local data on this PC."), el("div", { class: "row", style: "justify-content:flex-end" }, el("button", { class: "btn ghost", onclick: () => $("#modal-root").replaceChildren() }, "Cancel"), el("button", { class: "btn danger", onclick: async () => { await invoke("reset"); location.reload(); } }, "Delete everything")))); } }, "Start over"),
+    el("button", { class: "btn danger", onclick: () => { modal(el("div", {}, el("h2", {}, "Start over?"), el("p", {}, "This permanently deletes your identity and all local data on this PC."), el("div", { class: "row", style: "justify-content:flex-end" }, el("button", { class: "btn ghost", onclick: () => closeModal() }, "Cancel"), el("button", { class: "btn danger", onclick: async () => { await invoke("reset"); location.reload(); } }, "Delete everything")))); } }, "Start over"),
   );
 
-  // ---- identities ----
+  const about = el("div", { class: "card col" },
+    el("h3", {}, "This device"),
+    el("div", { class: "muted small mono" }, "node id: " + state.node),
+  );
+
+  sheet("Advanced", el("div", { class: "col", style: "gap:16px" }, about, security, danger));
+}
+
+async function identitiesSheet() {
   const ids = await invoke("identities").catch(() => []);
-  const idCard = el("div", { class: "card col" }, el("h3", {}, "Identities"),
+  const idCard = el("div", { class: "col" },
     el("div", { class: "muted small" }, "Keep more than one identity on this PC and switch between them. Each has its own profile, circles and contacts."));
   for (const id of ids) {
     idCard.append(el("div", { class: "list-item" },
       el("div", { class: "avatar", style: "width:30px;height:30px;font-size:12px" }, initials(id.label)),
       el("div", { style: "flex:1;min-width:0" }, el("div", { class: "name" }, id.label, id.active ? el("span", { class: "tag", style: "margin-left:8px" }, "active") : null), el("div", { class: "muted small mono" }, id.node_hex.slice(0, 18) + "…")),
       id.active ? null : el("button", { class: "btn small primary", onclick: async () => { if (confirm(`Switch to "${id.label}"? Haven will relaunch.`)) await invoke("switch_identity", { nodeHex: id.node_hex }); } }, "Switch"),
-      el("button", { class: "btn small ghost", title: "Rename", onclick: () => { const i = el("input", { value: id.label }); modal(el("div", {}, el("h2", {}, "Rename identity"), i, el("div", { class: "row", style: "justify-content:flex-end;margin-top:10px" }, el("button", { class: "btn primary", onclick: async () => { await invoke("rename_identity", { nodeHex: id.node_hex, label: i.value.trim() || id.label }); $("#modal-root").replaceChildren(); renderYou(); } }, "Save")))); } }, "✏︎"),
-      id.active ? null : el("button", { class: "btn small danger", title: "Remove", onclick: async () => { if (confirm(`Remove "${id.label}" from this PC? Its local data is deleted.`)) { await invoke("remove_identity", { nodeHex: id.node_hex }); renderYou(); } } }, "🗑"),
+      el("button", { class: "btn small ghost", title: "Rename", onclick: () => { const i = el("input", { value: id.label }); modal(el("div", {}, el("h2", {}, "Rename identity"), i, el("div", { class: "row", style: "justify-content:flex-end;margin-top:10px" }, el("button", { class: "btn primary", onclick: async () => { await invoke("rename_identity", { nodeHex: id.node_hex, label: i.value.trim() || id.label }); identitiesSheet(); } }, "Save")))); } }, "Rename"),
+      id.active ? null : el("button", { class: "btn small danger", title: "Remove", onclick: async () => { if (confirm(`Remove "${id.label}" from this PC? Its local data is deleted.`)) { await invoke("remove_identity", { nodeHex: id.node_hex }); identitiesSheet(); } } }, "Remove"),
     ));
   }
-  idCard.append(el("div", { class: "row", style: "margin-top:6px" },
-    el("button", { class: "btn small", onclick: () => { const i = el("input", { placeholder: "Label (e.g. Work)" }); modal(el("div", {}, el("h2", {}, "New identity"), i, el("div", { class: "row", style: "justify-content:flex-end;margin-top:10px" }, el("button", { class: "btn primary", onclick: async () => { await invoke("add_identity", { label: i.value.trim() || "New identity" }); $("#modal-root").replaceChildren(); renderYou(); toast("Identity created"); } }, "Create")))); } }, "+ New identity"),
-    el("button", { class: "btn small ghost", onclick: () => { const lab = el("input", { placeholder: "Label" }); const seed = el("input", { placeholder: "Transfer code (haven-seed:…) or seed" }); modal(el("div", {}, el("h2", {}, "Link an existing identity"), lab, seed, el("div", { class: "row", style: "justify-content:flex-end;margin-top:10px" }, el("button", { class: "btn primary", onclick: async () => { try { await invoke("import_identity", { label: lab.value.trim() || "Imported", seedB64: seed.value.trim() }); $("#modal-root").replaceChildren(); renderYou(); toast("Imported"); } catch (e) { toast("Import failed: " + e); } } }, "Import")))); } }, "Import"),
+  idCard.append(el("div", { class: "row wrap", style: "margin-top:6px" },
+    el("button", { class: "btn small", onclick: () => { const i = el("input", { placeholder: "Label (e.g. Work)" }); modal(el("div", {}, el("h2", {}, "New identity"), i, el("div", { class: "row", style: "justify-content:flex-end;margin-top:10px" }, el("button", { class: "btn primary", onclick: async () => { await invoke("add_identity", { label: i.value.trim() || "New identity" }); identitiesSheet(); toast("Identity created"); } }, "Create")))); } }, "+ New identity"),
+    el("button", { class: "btn small ghost", onclick: () => { const lab = el("input", { placeholder: "Label" }); const seed = el("input", { placeholder: "Transfer code (haven-seed:…) or seed" }); modal(el("div", {}, el("h2", {}, "Link an existing identity"), lab, seed, el("div", { class: "row", style: "justify-content:flex-end;margin-top:10px" }, el("button", { class: "btn primary", onclick: async () => { try { await invoke("import_identity", { label: lab.value.trim() || "Imported", seedB64: seed.value.trim() }); identitiesSheet(); toast("Imported"); } catch (e) { toast("Import failed: " + e); } } }, "Import")))); } }, "Import"),
   ));
+  sheet("Identities", idCard);
+}
 
-  // ---- scheduled ----
-  const sched = await invoke("scheduled").catch(() => []);
-  const schedCard = el("div", { class: "card col" }, el("h3", {}, `Scheduled (${sched.length})`));
-  if (!sched.length) schedCard.append(el("div", { class: "muted small" }, "Nothing scheduled. Use the 🕓 button in the composer to send later."));
-  for (const s of sched) {
-    schedCard.append(el("div", { class: "list-item" },
-      el("div", { style: "flex:1;min-width:0" }, el("div", {}, (s.kind === "dm" ? "DM · " : "Post · ") + (s.body || (s.media_count ? `${s.media_count} attachment(s)` : "—"))), el("div", { class: "muted small" }, "sends " + new Date(s.send_at_ms).toLocaleString())),
-      el("button", { class: "btn small danger", onclick: async () => { await invoke("cancel_scheduled", { id: s.id }); renderYou(); } }, "Cancel")));
-  }
-
-  // ---- Authorized devices (revocable multi-device roster — parity with iOS/Android) ----
+// ---- Authorized devices (revocable multi-device roster — parity with iOS/Android) ----
+async function devicesSheet() {
+  const roster = await invoke("device_roster").catch(() => ({ enabled: false, this_device_authorized: false, devices: [] }));
   const roleTitle = roster.enabled ? "This is your primary device"
     : roster.this_device_authorized ? "This is a linked device" : "This device isn’t linked yet";
   const roleSub = roster.enabled ? "It holds your master key and authorizes or revokes your other devices."
     : roster.this_device_authorized ? "It acts on behalf of your primary device, which can revoke it at any time."
     : "Make it your primary, or link it to the device that already is.";
-  const devicesCard = el("div", { class: "card col" },
-    el("h3", {}, "Authorized devices"),
+  const devicesCard = el("div", { class: "col" },
     el("div", {}, el("strong", {}, roleTitle)),
     el("div", { class: "muted small" }, roleSub));
   if (!roster.devices.length) devicesCard.append(el("div", { class: "muted small" }, "No devices linked yet."));
@@ -1714,17 +2359,17 @@ async function renderYou() {
       el("div", { style: "flex:1" }, el("div", { class: "name" }, d.name),
         el("div", { class: "muted small" }, d.is_primary ? "Master key" : d.is_this_device ? "This device" : "Linked device")),
       d.is_primary ? null : el("button", { class: "btn small danger", onclick: async () => {
-        if (confirm(`Revoke “${d.name}”? It will no longer receive anything posted afterward.`)) { await invoke("revoke_device", { nodeHex: d.node_hex }); renderYou(); }
+        if (confirm(`Revoke “${d.name}”? It will no longer receive anything posted afterward.`)) { await invoke("revoke_device", { nodeHex: d.node_hex }); devicesSheet(); }
       } }, "Revoke")));
   }
-  devicesCard.append(el("div", { class: "row", style: "margin-top:6px" },
+  devicesCard.append(el("div", { class: "row wrap", style: "margin-top:6px" },
     roster.enabled
-      ? el("button", { class: "btn small danger", onclick: async () => { if (confirm("Stop this device acting as the primary?")) { await invoke("step_down_as_primary"); renderYou(); } } }, "This isn’t my primary")
-      : el("button", { class: "btn small", onclick: async () => { await invoke("enable_device_roster"); renderYou(); toast("This is now your primary device"); } }, "Make this my primary"),
+      ? el("button", { class: "btn small danger", onclick: async () => { if (confirm("Stop this device acting as the primary?")) { await invoke("step_down_as_primary"); devicesSheet(); } } }, "This isn’t my primary")
+      : el("button", { class: "btn small", onclick: async () => { await invoke("enable_device_roster"); devicesSheet(); toast("This is now your primary device"); } }, "Make this my primary"),
     roster.enabled ? null : el("button", { class: "btn small ghost", onclick: async () => { await invoke("request_device_enrollment"); toast("Asked your primary device to authorize this one"); } },
       roster.this_device_authorized ? "Re-sync from my primary" : "Make this a linked device")));
 
-  root.replaceChildren(el("div", { class: "view-head" }, el("h1", {}, "You")), profileCard, idCard, devicesCard, schedCard, security, blockedCard, danger);
+  sheet("Devices", devicesCard);
 }
 
 const line = (label, ok) => el("div", { class: "row" }, el("span", { style: "flex:1" }, label), el("span", { class: ok ? "ok-text" : "warn-text" }, ok ? "✓ pass" : "✗ fail"));
@@ -2039,17 +2684,11 @@ function renderCallOverlay() {
 }
 
 // ---- boot ------------------------------------------------------------------------------
+// The theme TOGGLE now lives in Settings ▸ Appearance (there is no sidebar footer to pin it to,
+// and macOS has no such control at all — it follows the system). This just restores the choice.
 function initTheme() {
   const saved = localStorage.getItem("haven-theme");
   if (saved) document.documentElement.dataset.theme = saved;
-  const btn = $("#theme-toggle");
-  if (btn) btn.addEventListener("click", () => {
-    const cur = document.documentElement.dataset.theme
-      || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
-    const next = cur === "light" ? "dark" : "light";
-    document.documentElement.dataset.theme = next;
-    localStorage.setItem("haven-theme", next);
-  });
 }
 
 // First-run welcome (parity with iOS/Android): on a fresh install the backend has NO identity or
@@ -2099,16 +2738,14 @@ async function boot() {
   try {
     if (await invoke("needs_onboarding")) { renderOnboarding(); return; }
   } catch (_) {}
-  $$(".nav-btn").forEach((b) => b.addEventListener("click", () => switchView(b.dataset.view)));
+  $$(".tab").forEach((b) => b.addEventListener("click", () => switchView(b.dataset.view)));
   try {
     const b = await invoke("bootstrap");
     state.node = b.node_id_hex;
     state.inviteUri = b.invite_uri;
     state.inviteLink = b.invite_link;
     state.profile = b.profile;
-    $("#nav-node").textContent = b.node_id_hex.slice(0, 10) + "…";
   } catch (e) {
-    $("#nav-node").textContent = "core error";
     toast("Backend not ready: " + e);
   }
   await refreshStatus();

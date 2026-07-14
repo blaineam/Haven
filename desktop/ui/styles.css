@@ -1,6 +1,16 @@
-/* Haven desktop — visual language tuned to feel like the iOS/macOS SwiftUI app:
-   the sunset brand gradient, glassy translucent surfaces, soft radial brand glows,
-   floating hairline cards, masonry media, spring-like motion, and light + dark mode. */
+/* Haven desktop — a port of the macOS build's look, not an approximation of it.
+   The rules come from apple/HavenApp/Theme.swift and are worth repeating here, because every
+   one of them was broken at some point:
+
+     • the brand gradient runs to the EXTREME edges — never a flat grey/black band top or bottom;
+     • a control gets exactly ONE surface (the glass). Never stack a second background or border;
+     • controls are CIRCLES or PILLS, never bare rounded rects;
+     • motion is spring-shaped, response 0.3–0.5.
+
+   Glass: SwiftUI's .glassEffect has no web equivalent. `backdrop-filter: blur() saturate()` plus a
+   hairline ring is the honest analogue — but it is NOT universal across our three engines (macOS
+   WKWebView, Linux webkit2gtk, Windows WebView2/Chromium), so every glass surface is defined
+   opaque-first and only becomes translucent inside an @supports. See .glass below. */
 
 :root {
   --violet: #7c3aed;
@@ -13,10 +23,14 @@
   --spring: cubic-bezier(0.22, 1, 0.36, 1);
   --bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
 
-  --r-lg: 22px;   /* big cards */
-  --r-md: 16px;   /* media, bubbles, inputs */
+  --r-lg: 24px;   /* HavenCard: RoundedRectangle(cornerRadius: 24) */
+  --r-md: 16px;   /* media, bubbles */
+  --r-field: 20px;/* composer field: RoundedRectangle(cornerRadius: 20) */
   --r-sm: 11px;   /* chips, small controls */
   --radius: var(--r-md);
+
+  --titlebar-h: 52px;
+  --feed-max: 1100px;  /* see "column width" note in .col-wrap */
   font-synthesis: none;
 }
 
@@ -25,19 +39,38 @@
   color-scheme: dark;
   --bg: #0e0b16;
   --bg2: #16121f;
+  --card: rgba(28, 24, 40, 0.82);   /* HavenCard .background(.background) */
   --panel: rgba(32, 26, 48, 0.72);
   --panel-solid: #1c1828;
   --panel2: rgba(44, 37, 64, 0.78);
-  --line: rgba(255, 255, 255, 0.09);
+  --line: rgba(255, 255, 255, 0.08);   /* HavenCard ring: .white.opacity(0.08) */
   --line-strong: rgba(255, 255, 255, 0.16);
   --text: #f3eefb;
   --muted: #a99fc4;
   --ok: #34d399;
   --warn: #fbbf24;
-  --shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
-  --glow1: radial-gradient(900px 600px at 82% -8%, rgba(236, 72, 153, 0.22), transparent 60%);
-  --glow2: radial-gradient(700px 500px at 8% 8%, rgba(124, 58, 237, 0.20), transparent 60%);
-  --nav-bg: rgba(13, 10, 20, 0.55);
+  --shadow: 0 8px 16px rgba(0, 0, 0, 0.10);   /* HavenCard: .shadow(radius:16, y:8) */
+
+  /* HavenBackground: grouped base + pink glow at (0.85, -0.05) r460, violet at (0.05, 0.18) r420. */
+  --glow1: radial-gradient(660px 660px at 85% -5%, rgba(236, 72, 153, 0.22), transparent 62%);
+  --glow2: radial-gradient(600px 600px at 5% 18%, rgba(124, 58, 237, 0.20), transparent 62%);
+
+  /* Glass: opaque fallback first; the @supports block below thins these out where blur works.
+     NOTE the thin value is a NEUTRAL MID film, not a white one and not a black one. A white film
+     turns every control into a bright smear the moment a photo scrolls under it; a black film
+     makes the composer vanish into a dark feed. Real Liquid Glass lands mid-grey over both, so a
+     mid film at moderate alpha is the closest honest approximation — measured against the Mac
+     build's own composer field (~#565358 over dark media). */
+     The alpha is deliberately high (0.72). Liquid Glass keeps its label legible over ANY backdrop
+     because it adapts contrast per-pixel; `backdrop-filter` cannot, so a low-alpha film that looks
+     right over a dark feed turns into an unreadable smear the moment a bright photo scrolls under
+     it. 0.72 lands ~#383442 over dark media and ~#6e6a78 over bright — both legible, and both
+     within a hair of the Mac composer's measured ~#565358. Fidelity over dogma. */
+  --glass: rgba(58, 50, 78, 0.92);
+  --glass-thin: rgba(72, 68, 88, 0.72);
+  --glass-ring: rgba(255, 255, 255, 0.12);   /* havenGlass fallback ring */
+  --glass-pink: rgba(236, 72, 153, 0.22);    /* havenGlass(tint: pink) */
+  --glass-pink-ring: rgba(236, 72, 153, 0.45);
 }
 
 /* ---- Light ---- */
@@ -45,6 +78,7 @@
   color-scheme: light;
   --bg: #f6f4fb;
   --bg2: #ffffff;
+  --card: rgba(255, 255, 255, 0.86);
   --panel: rgba(255, 255, 255, 0.78);
   --panel-solid: #ffffff;
   --panel2: rgba(124, 58, 237, 0.06);
@@ -54,26 +88,36 @@
   --muted: #6b6385;
   --ok: #059669;
   --warn: #b45309;
-  --shadow: 0 16px 36px rgba(80, 40, 120, 0.14);
-  --glow1: radial-gradient(900px 600px at 82% -8%, rgba(236, 72, 153, 0.14), transparent 60%);
-  --glow2: radial-gradient(700px 500px at 8% 8%, rgba(124, 58, 237, 0.12), transparent 60%);
-  --nav-bg: rgba(255, 255, 255, 0.6);
+  --shadow: 0 8px 16px rgba(80, 40, 120, 0.10);
+  --glow1: radial-gradient(660px 660px at 85% -5%, rgba(236, 72, 153, 0.16), transparent 62%);
+  --glow2: radial-gradient(600px 600px at 5% 18%, rgba(124, 58, 237, 0.14), transparent 62%);
+  --glass: rgba(255, 255, 255, 0.94);
+  --glass-thin: rgba(255, 255, 255, 0.62);
+  --glass-ring: rgba(20, 12, 40, 0.10);
+  --glass-pink: rgba(236, 72, 153, 0.14);
+  --glass-pink-ring: rgba(236, 72, 153, 0.38);
 }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
     color-scheme: light;
-    --bg: #f6f4fb; --bg2: #ffffff; --panel: rgba(255,255,255,0.78); --panel-solid: #fff;
+    --bg: #f6f4fb; --bg2: #ffffff; --card: rgba(255,255,255,0.86);
+    --panel: rgba(255,255,255,0.78); --panel-solid: #fff;
     --panel2: rgba(124,58,237,0.06); --line: rgba(20,12,40,0.10); --line-strong: rgba(20,12,40,0.16);
     --text: #1c1430; --muted: #6b6385; --ok: #059669; --warn: #b45309;
-    --shadow: 0 16px 36px rgba(80,40,120,0.14);
-    --glow1: radial-gradient(900px 600px at 82% -8%, rgba(236,72,153,0.14), transparent 60%);
-    --glow2: radial-gradient(700px 500px at 8% 8%, rgba(124,58,237,0.12), transparent 60%);
-    --nav-bg: rgba(255,255,255,0.6);
+    --shadow: 0 8px 16px rgba(80,40,120,0.10);
+    --glow1: radial-gradient(660px 660px at 85% -5%, rgba(236,72,153,0.16), transparent 62%);
+    --glow2: radial-gradient(600px 600px at 5% 18%, rgba(124,58,237,0.14), transparent 62%);
+    --glass: rgba(255,255,255,0.94); --glass-thin: rgba(255,255,255,0.62);
+    --glass-ring: rgba(20,12,40,0.10);
+    --glass-pink: rgba(236,72,153,0.14); --glass-pink-ring: rgba(236,72,153,0.38);
   }
 }
 
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
+
+/* HavenBackground. `fixed` so the glows stay welded to the WINDOW (they're a backdrop, not content)
+   and the gradient reaches the extreme top edge under the transparent title bar. */
 body {
   background: var(--glow1), var(--glow2), var(--bg);
   background-attachment: fixed;
@@ -83,74 +127,142 @@ body {
   letter-spacing: 0.1px;
   overflow: hidden;
 }
-#app { display: grid; grid-template-columns: 244px 1fr; height: 100vh; }
 
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
 button { font-family: inherit; cursor: pointer; }
 
-/* ---- Nav (frosted sidebar) ---- */
-.nav {
-  background: var(--nav-bg);
-  border-right: 1px solid var(--line);
-  display: flex; flex-direction: column; padding: 18px 12px; gap: 10px;
-  backdrop-filter: blur(22px) saturate(1.4);
-  -webkit-backdrop-filter: blur(22px) saturate(1.4);
+/* ---- Glass ------------------------------------------------------------------------------
+   ONE surface per control. Opaque-first: if an engine can't do backdrop-filter (or is
+   compositing it wrong, which webkit2gtk has form for) the control is still a legible solid
+   chip with its hairline ring, never an unreadable transparent smear. */
+.glass { background: var(--glass); border: 1px solid var(--glass-ring); }
+.glass.tint-pink { background: var(--glass-pink); border-color: var(--glass-pink-ring); }
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass {
+    background: var(--glass-thin);
+    backdrop-filter: blur(20px) saturate(1.7);
+    -webkit-backdrop-filter: blur(20px) saturate(1.7);
+  }
+  .glass.tint-pink { background: var(--glass-pink); }
 }
-.brand { display: flex; gap: 11px; align-items: center; padding: 4px 8px 14px; }
-.brand-mark {
-  width: 36px; height: 36px; border-radius: 11px; background: var(--grad);
-  box-shadow: 0 6px 20px rgba(236, 72, 153, 0.45); flex: 0 0 auto;
+
+/* Circular glass icon button — GlassIconButtonStyle, a 34pt chip. The glyph IS the label. */
+.icon-btn {
+  width: 34px; height: 34px; border-radius: 50%; padding: 0; flex: 0 0 auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--text); font-size: 15px; line-height: 1;
+  transition: transform .14s var(--spring), opacity .14s;
+}
+.icon-btn svg { width: 16px; height: 16px; display: block; }
+.icon-btn:active { transform: scale(0.94); opacity: 0.8; }
+.icon-btn.sm { width: 26px; height: 26px; font-size: 11px; }
+.icon-btn.sm svg { width: 12px; height: 12px; }
+.icon-btn.pink { color: var(--pink); }
+
+/* Glass pill button for text actions — GlassPillButtonStyle. */
+.pill-btn {
+  border-radius: 999px; padding: 8px 16px; font-size: 13px; font-weight: 600; color: var(--text);
+  white-space: nowrap; transition: transform .14s var(--spring), opacity .14s;
+}
+.pill-btn:active { transform: scale(0.96); opacity: 0.8; }
+
+/* ---- Title bar = the navigation ---------------------------------------------------------
+   No background: the body gradient runs under it to the extreme top edge. The bar is the drag
+   handle; children opt back OUT of dragging so they stay clickable. */
+.titlebar {
+  position: fixed; top: 0; left: 0; right: 0; height: var(--titlebar-h); z-index: 100;
+  display: flex; align-items: center; gap: 12px; padding: 0 13px; user-select: none;
+  background: transparent;
+}
+.titlebar > * { -webkit-app-region: no-drag; }
+.titlebar .traffic { display: flex; gap: 8px; align-items: center; flex: 0 0 auto; }
+.tl {
+  width: 12px; height: 12px; border-radius: 50%; border: 0; padding: 0; cursor: default;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.20); transition: filter .15s var(--spring);
   display: flex; align-items: center; justify-content: center;
 }
-.brand-mark svg { width: 22px; height: 22px; }
-.brand-text { display: flex; flex-direction: column; line-height: 1.15; }
-.brand-text strong { font-size: 18px; letter-spacing: 0.2px; font-weight: 800; }
-.nav-items { display: flex; flex-direction: column; gap: 3px; margin-top: 4px; }
-.nav-btn {
-  display: flex; align-items: center; gap: 12px; text-align: left;
-  background: transparent; border: 0; color: var(--muted);
-  padding: 11px 12px; border-radius: var(--r-sm); font-size: 14px; font-weight: 600;
-  position: relative; transition: background .2s var(--spring), color .2s, transform .12s var(--spring);
+.tl.close { background: #ff5f57; } .tl.min { background: #febc2e; } .tl.max { background: #28c840; }
+.titlebar:not(:hover) .tl { filter: saturate(0.78) brightness(0.96); }   /* dim until hovered, like macOS */
+.tl:active { filter: brightness(0.82); }
+.tl::before { content: ""; font-size: 10px; line-height: 1; font-weight: 700; color: rgba(0,0,0,0.55); opacity: 0; transition: opacity .12s; }
+.titlebar:hover .tl.close::before { content: "\00d7"; opacity: 1; }
+.titlebar:hover .tl.min::before { content: "\2013"; opacity: 1; }
+.titlebar:hover .tl.max::before { content: "\002b"; opacity: 1; }
+
+/* The segmented pill: Circle | Messages | You. One glass capsule; the ACTIVE segment is a second,
+   lighter capsule inside it. Centred in the window, not in the leftover space — hence absolute
+   positioning, so a wide trailing slot can't shove it off-centre (the exact bug the macOS build
+   hit and fixed by pinning its circle picker to the leading edge). */
+.tabs {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: 999px;
 }
-.nav-btn svg, .nav-btn span.ic { width: 20px; height: 20px; flex: 0 0 auto; }
-.nav-btn:hover { background: var(--panel2); color: var(--text); }
-.nav-btn:active { transform: scale(0.97); }
-.nav-btn.active { background: var(--panel); color: var(--text); box-shadow: var(--shadow); }
-.nav-btn.active::before {
-  content: ""; position: absolute; left: -12px; top: 9px; bottom: 9px; width: 3px;
-  border-radius: 0 3px 3px 0; background: var(--grad-h);
+.tab {
+  position: relative; border: 0; background: transparent; color: var(--muted);
+  padding: 5px 17px; border-radius: 999px; font-size: 13px; font-weight: 500; white-space: nowrap;
+  transition: background .22s var(--spring), color .22s, transform .12s var(--spring);
 }
+.tab:hover { color: var(--text); }
+.tab:active { transform: scale(0.97); }
+/* The active segment is a second, LIGHTER capsule inside the container's glass — the one place a
+   control legitimately carries two surfaces, because the pill and the selection are two things. */
+.tab.active { background: rgba(255, 255, 255, 0.16); color: var(--text); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.18); }
+:root[data-theme="light"] .tab.active { background: #fff; }
+@media (prefers-color-scheme: light) { :root:not([data-theme]) .tab.active { background: #fff; } }
+.tb-right { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+
+/* The circle switcher: a pink-tinted glass pill, chevron first — macOS `circlePicker`. */
+.circle-pill {
+  display: inline-flex; align-items: center; gap: 5px; border-radius: 999px;
+  padding: 7px 14px; font-size: 13px; font-weight: 700; color: var(--pink); white-space: nowrap;
+  transition: transform .14s var(--spring), opacity .14s;
+}
+.circle-pill:active { transform: scale(0.96); opacity: 0.85; }
+.circle-pill .chev { width: 11px; height: 11px; display: block; }
+
 .badge {
-  margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
-  background: var(--grad-h); color: white; font-size: 11px; font-style: normal; font-weight: 700;
-  display: none; align-items: center; justify-content: center; line-height: 18px; text-align: center;
+  margin-left: 6px; min-width: 17px; height: 17px; padding: 0 5px; border-radius: 9px;
+  background: var(--grad-h); color: white; font-size: 10px; font-style: normal; font-weight: 700;
+  display: none; align-items: center; justify-content: center; line-height: 17px; vertical-align: middle;
 }
 .badge.show { display: inline-flex; }
-.nav-footer { margin-top: auto; display: flex; align-items: center; gap: 8px; padding: 8px; }
-.dot { width: 9px; height: 9px; border-radius: 50%; background: #6b7280; transition: all .3s; }
-.dot.on { background: var(--ok); box-shadow: 0 0 10px var(--ok); }
-.dot.relay { background: var(--amber); box-shadow: 0 0 10px var(--amber); }
 
 /* ---- Content ---- */
-.content { overflow: hidden; position: relative; }
-.view { display: none; height: 100vh; overflow-y: auto; padding: 28px 34px 64px; }
+.content { position: relative; height: 100vh; }
+.view {
+  display: none; position: absolute; inset: 0; overflow-y: auto;
+  /* top: clear the title bar. bottom: 130px, so the last card clears the floating composer —
+     the same number the macOS feed uses (.padding(.bottom, 130)). */
+  padding: calc(var(--titlebar-h) + 4px) 0 130px;
+}
 .view.active { display: block; animation: viewIn .42s var(--spring) both; }
 @keyframes viewIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
-.view-head { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; }
-.view-head h1 { font-size: 26px; margin: 0; font-weight: 800; letter-spacing: 0.2px; }
-.view-head .spacer { flex: 1; }
 
+/* Column width. macOS pads the feed 16pt and lets cards fill a ~1050pt window, so at Haven's default
+   desktop window size this cap is a no-op and the cards match the Mac's exactly. It only engages when
+   the window is maximised, where a 3000px-wide post card would be absurd — and centring the column
+   past a cap is what the Mac build itself does for anything wider than it wants (HavenMacSheet). */
+.col-wrap { max-width: var(--feed-max); margin: 0 auto; padding: 0 16px; }
+
+/* Messages keeps an inline title row (macOS gives it a nav title; there is no title bar space left
+   for one, since the tabs own the centre). */
+.view-head { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.view-head h1 { font-size: 22px; margin: 0; font-weight: 700; letter-spacing: 0.2px; }
+.flip { transform: scaleX(-1); }   /* chevron.right → a back chevron (feed + DM headers both) */
+
+/* HavenCard: radius 24, one hairline ring, soft depth. */
 .card {
-  background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg);
-  padding: 18px; margin-bottom: 16px; box-shadow: var(--shadow);
-  backdrop-filter: blur(18px) saturate(1.3); -webkit-backdrop-filter: blur(18px) saturate(1.3);
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--r-lg);
+  padding: 18px; box-shadow: var(--shadow);
 }
+.feed-list { display: flex; flex-direction: column; gap: 16px; }   /* LazyVStack(spacing: 16) */
 .card.post { animation: cardIn .5s var(--spring) both; }
-@keyframes cardIn { from { opacity: 0; transform: translateY(14px) scale(0.99); } to { opacity: 1; transform: none; } }
+@keyframes cardIn { from { opacity: 0; transform: translateY(14px) scale(0.96); } to { opacity: 1; transform: none; } }
 .row { display: flex; gap: 10px; align-items: center; }
 .col { display: flex; flex-direction: column; gap: 10px; }
 .wrap { flex-wrap: wrap; }
+.spacer { flex: 1; }
 
 input, textarea, select {
   background: var(--bg2); border: 1px solid var(--line); color: var(--text);
@@ -164,31 +276,98 @@ input:focus, textarea:focus, select:focus {
 
 .btn {
   background: var(--panel2); border: 1px solid var(--line); color: var(--text);
-  padding: 10px 15px; border-radius: var(--r-sm); font-size: 14px; font-weight: 600; white-space: nowrap;
+  padding: 10px 15px; border-radius: 999px; font-size: 14px; font-weight: 600; white-space: nowrap;
   transition: transform .12s var(--spring), border-color .2s, background .2s, box-shadow .2s;
 }
 .btn:hover { border-color: var(--line-strong); }
 .btn:active { transform: scale(0.95); }
+/* BrandButtonStyle: gradient pill, white text, pink shadow. No glass underneath. */
 .btn.primary {
   background: var(--grad-h); border: 0; color: white;
-  box-shadow: 0 6px 18px rgba(236, 72, 153, 0.38);
+  box-shadow: 0 5px 10px rgba(236, 72, 153, 0.35);
 }
-.btn.primary:hover { box-shadow: 0 8px 22px rgba(236, 72, 153, 0.5); }
+.btn.primary:hover { box-shadow: 0 7px 14px rgba(236, 72, 153, 0.45); }
 .btn.ghost { background: transparent; }
 .btn.danger { color: #fb7185; border-color: rgba(244, 63, 94, 0.4); }
-.btn.small { padding: 7px 11px; font-size: 12px; }
+.btn.small { padding: 7px 13px; font-size: 12px; }
 .btn:disabled { opacity: 0.5; cursor: default; transform: none; }
+.btn.wide { width: 100%; justify-content: center; text-align: center; }
 
 .avatar {
   width: 40px; height: 40px; border-radius: 50%; background: var(--grad);
   display: flex; align-items: center; justify-content: center; font-size: 17px; flex: 0 0 auto;
   color: white; font-weight: 700; box-shadow: 0 2px 8px rgba(124, 58, 237, 0.3);
+  overflow: hidden;
 }
+.avatar img { width: 100%; height: 100%; object-fit: cover; }
 .avatar.lg { width: 68px; height: 68px; font-size: 28px; }
 
-/* ---- Feed ---- */
-.post-head { display: flex; align-items: center; gap: 11px; margin-bottom: 10px; }
-.post-head .name { font-weight: 700; }
+/* ---- Anchored menu (SwiftUI `Menu`) -----------------------------------------------------
+   macOS pops a small menu at the control. A full modal for "Edit / Hide / Report" was the wrong
+   weight entirely. */
+#menu-root:empty { display: none; }
+.menu-backdrop { position: fixed; inset: 0; z-index: 60; }
+.menu {
+  position: fixed; z-index: 61; min-width: 200px; padding: 6px; border-radius: 14px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45); animation: menuIn .18s var(--spring) both;
+  max-height: 70vh; overflow-y: auto;
+}
+@keyframes menuIn { from { opacity: 0; transform: translateY(-6px) scale(0.97); } to { opacity: 1; transform: none; } }
+.menu button {
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+  background: transparent; border: 0; color: var(--text); font-size: 13px; font-weight: 500;
+  padding: 8px 10px; border-radius: 8px;
+}
+.menu button:hover { background: var(--panel2); }
+.menu button.danger { color: #fb7185; }
+.menu button .mi { width: 16px; flex: 0 0 auto; text-align: center; opacity: .85; }
+.menu hr { border: 0; border-top: 1px solid var(--line); margin: 5px 6px; }
+.menu .menu-head { font-size: 11px; font-weight: 700; color: var(--muted); padding: 6px 10px 3px; }
+
+/* ---- Feed banner (macOS `banner`: online dot + connection text) ---- */
+.feed-banner { display: flex; align-items: center; gap: 8px; padding: 4px 2px 0; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); transition: all .3s; flex: 0 0 auto; }
+.dot.on { background: #34d399; }
+.dot.relay { background: var(--amber); }
+.feed-banner .txt { font-size: 12px; color: var(--muted); }
+
+/* ---- Stories tray — TOP OF THE FEED (macOS `storiesTray`), never a tab ---- */
+.story-tray { display: flex; gap: 14px; overflow-x: auto; padding: 2px 4px; scrollbar-width: none; }
+.story-tray::-webkit-scrollbar { display: none; }
+.story-ring { width: 64px; text-align: center; flex: 0 0 auto; cursor: pointer; background: none; border: 0; padding: 0;
+  transition: transform .15s var(--bounce); }
+.story-ring:hover { transform: translateY(-2px) scale(1.04); }
+/* "Add": a 62px ring STROKED with the brand gradient (2px) around a pink camera — not a filled disc.
+   Friend stories: a 64px gradient-FILLED disc with the 56px cover inset. Both straight from
+   FeedView.swift ▸ storiesTray / storyThumb. */
+.story-ring .ring {
+  width: 64px; height: 64px; border-radius: 50%; margin: 0 auto 6px;
+  display: flex; align-items: center; justify-content: center; position: relative;
+}
+.story-ring.add .ring {
+  width: 62px; height: 62px;
+  background: var(--grad); padding: 2px;
+}
+.story-ring.add .ring > div {
+  width: 100%; height: 100%; border-radius: 50%; background: var(--bg);
+  display: flex; align-items: center; justify-content: center; color: var(--pink);
+}
+.story-ring.add .ring svg { width: 21px; height: 21px; }
+.story-ring.cover .ring { background: var(--grad); }
+.story-ring.cover .ring > div {
+  width: 56px; height: 56px; border-radius: 50%; overflow: hidden; background: var(--panel-solid);
+  display: flex; align-items: center; justify-content: center; font-size: 22px; color: var(--muted);
+}
+.story-ring .ring img { width: 100%; height: 100%; object-fit: cover; }
+.story-ring .nm {
+  font-size: 11px; color: var(--muted); max-width: 64px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; margin: 0 auto;
+}
+
+/* ---- Post card ---- */
+.post-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.post-head .name { font-size: 13px; font-weight: 600; }
+.post-head .when { font-size: 11px; color: var(--muted); }
 .post-body { white-space: pre-wrap; word-break: break-word; line-height: 1.5; font-size: 15px; }
 .post-media { margin-top: 12px; display: grid; gap: 7px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
 .post-media img, .post-media video { width: 100%; border-radius: var(--r-md); max-height: 380px; object-fit: cover; background: #000; }
@@ -213,7 +392,7 @@ input:focus, textarea:focus, select:focus {
    when the cap binds, the page just gets wider than the media and the backdrop covers the sides. */
 .post-media .media-page {
   position: relative; overflow: hidden; background: #000;
-  max-height: 520px;
+  max-height: 460px;   /* PostCard.singleMediaMaxHeight on wide layouts (macOS/iPad) */
   display: flex; align-items: center; justify-content: center;
 }
 /* width: the page must stay card-WIDE. Without it, `aspect-ratio` resolves against the height cap and
@@ -256,17 +435,28 @@ input:focus, textarea:focus, select:focus {
 }
 .carousel-dots i.on { background: rgba(255, 255, 255, 0.95); }
 
-.post-actions { display: flex; gap: 7px; margin-top: 12px; align-items: center; flex-wrap: wrap; }
+/* ---- Reactions row (macOS `reactionsRow`) --------------------------------------------------
+   Chips left (glass capsules, pink-tinted when they're YOURS), quick-react emoji + `＋` right. */
+.post-actions { display: flex; gap: 8px; margin-top: 12px; align-items: center; }
 .react-pill {
-  background: var(--panel2); border: 1px solid var(--line); border-radius: 999px;
-  padding: 5px 11px; font-size: 13px; display: inline-flex; gap: 5px; align-items: center;
-  transition: transform .14s var(--bounce), border-color .2s, background .2s;
+  border-radius: 999px; padding: 4px 9px; font-size: 12px;
+  display: inline-flex; gap: 3px; align-items: center; line-height: 1.5;
+  transition: transform .14s var(--bounce), opacity .2s;
 }
-.react-pill:hover { border-color: var(--line-strong); transform: translateY(-1px); }
+.react-pill .n { font-weight: 600; font-variant-numeric: tabular-nums; color: var(--muted); }
+.react-pill:hover { transform: translateY(-1px); }
 .react-pill:active { transform: scale(0.9); }
-.react-pill.mine { border-color: var(--pink); background: rgba(236, 72, 153, 0.16); }
+.react-pill.mine .n { color: var(--pink); }
 .react-pill.pop { animation: pop .4s var(--bounce); }
 @keyframes pop { 0% { transform: scale(1); } 40% { transform: scale(1.35); } 100% { transform: scale(1); } }
+/* Quick-react emoji at the trailing edge: bare glyphs, no chrome (macOS `Button(e)`). */
+.quick { margin-left: auto; display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.quick button {
+  background: none; border: 0; padding: 0; font-size: 15px; line-height: 1; color: var(--muted);
+  transition: transform .14s var(--bounce);
+}
+.quick button:active { transform: scale(0.9); }
+.quick .more svg { width: 16px; height: 16px; display: block; }
 
 /* Double-tap heart burst (Instagram-style), mirrors the iOS gesture. */
 .heart-burst {
@@ -279,55 +469,187 @@ input:focus, textarea:focus, select:focus {
   70% { transform: translate(-50%,-50%) scale(1); opacity: 1; }
   100% { transform: translate(-50%,-60%) scale(1.05); opacity: 0; } }
 
-.comments { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; display: none; }
+/* Comments: the inline list sits on a secondary surface (macOS `commentsList`), and the reply row
+   is a paperclip + pill field + circular pink send. */
+.comments { margin-top: 12px; display: none; }
 .comments.show { display: block; animation: viewIn .3s var(--spring) both; }
-.comment { display: flex; gap: 8px; margin-bottom: 8px; }
-.comment .bubble { background: var(--panel2); border-radius: var(--r-md); padding: 8px 12px; }
+.comment-list { display: flex; flex-direction: column; gap: 10px; padding: 10px; border-radius: 12px; background: var(--panel2); }
+.comment { display: flex; gap: 8px; }
+.comment .bubble { min-width: 0; }
+.comment .bubble .who { font-size: 11px; font-weight: 600; }
+.comment .bubble .who.me { color: var(--pink); }
+.reply-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.reply-row input {
+  border-radius: 999px; border: 1px solid var(--glass-ring); background: var(--panel2);
+  padding: 9px 14px; font-size: 13px;
+}
+.send-sm {
+  width: 30px; height: 30px; border-radius: 50%; border: 0; flex: 0 0 auto;
+  background: var(--grad); color: #fff; display: inline-flex; align-items: center; justify-content: center;
+  box-shadow: 0 3px 8px rgba(236, 72, 153, 0.35); transition: transform .14s var(--spring);
+}
+.send-sm:active { transform: scale(0.92); }
+.send-sm svg { width: 13px; height: 13px; }
+
+/* NowPlayingPill: a full-width pink-tinted glass capsule. */
 .song-chip {
-  display: inline-flex; gap: 9px; align-items: center; margin-top: 12px;
-  background: var(--panel2); border: 1px solid var(--line); border-radius: var(--r-md); padding: 9px 12px;
-  text-decoration: none; color: inherit; transition: border-color .2s;
+  display: flex; gap: 9px; align-items: center; margin-top: 12px; width: 100%;
+  border-radius: 999px; padding: 9px 14px; font-size: 13px;
+  text-decoration: none; color: inherit; transition: transform .14s var(--spring);
 }
-.song-chip:hover { border-color: var(--pink); }
-.song-chip .note { width: 26px; height: 26px; border-radius: 7px; background: var(--grad); display: flex; align-items: center; justify-content: center; }
-.menu-btn { margin-left: auto; }
-.kebab { background: transparent; border: 0; color: var(--muted); font-size: 18px; padding: 2px 8px; border-radius: 8px; transition: background .2s; }
-.kebab:hover { background: var(--panel2); color: var(--text); }
-
-/* ---- Stories ---- */
-.story-tray { display: flex; gap: 16px; overflow-x: auto; padding: 6px 2px 16px; }
-.story-ring { width: 74px; text-align: center; flex: 0 0 auto; cursor: pointer; transition: transform .15s var(--bounce); }
-.story-ring:hover { transform: translateY(-2px) scale(1.04); }
-.story-ring .ring {
-  width: 66px; height: 66px; border-radius: 50%; padding: 3px; background: var(--grad);
-  display: flex; align-items: center; justify-content: center; margin: 0 auto 7px;
-  box-shadow: 0 4px 14px rgba(236, 72, 153, 0.32);
+.song-chip:active { transform: scale(0.99); }
+.song-chip .note { width: 22px; height: 22px; flex: 0 0 auto; display: flex; align-items: center; justify-content: center; }
+.kebab {
+  margin-left: auto; background: transparent; border: 0; color: var(--muted); font-size: 17px;
+  padding: 4px 8px; border-radius: 8px; line-height: 1; transition: color .2s;
 }
-.story-ring .ring > div { width: 100%; height: 100%; border-radius: 50%; background: var(--panel-solid); display: flex; align-items: center; justify-content: center; font-size: 24px; overflow: hidden; }
-.story-ring .ring img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
+.kebab:hover { color: var(--text); }
 
-/* ---- Messages ---- */
-.thread-list { display: flex; flex-direction: column; gap: 4px; }
-.thread-item { display: flex; gap: 11px; align-items: center; padding: 11px; border-radius: var(--r-md); cursor: pointer; transition: background .18s; }
+/* ---- Composer: a floating glass PILL at the BOTTOM ---------------------------------------
+   macOS `composerBar`. Deliberately NO band behind it — a material slab here reads as a detached
+   grey bar pasted under the gradient. The `+`, the field and the send button each carry their own
+   surface and float over the backdrop; the feed scrolls underneath. */
+.composer { padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; }
+/* Pinned to `.content`, NOT to the scrolling `.view` — see the note in index.html. Empty when the
+   tab has no composer, so it must not eat clicks then either. */
+#composer-slot { position: absolute; left: 0; right: 0; bottom: 0; z-index: 20; pointer-events: none; }
+#composer-slot:empty { display: none; }
+.composer.floating { max-width: var(--feed-max); margin: 0 auto; }
+.composer.floating > * { pointer-events: auto; }
+.composer-row { display: flex; gap: 10px; align-items: flex-end; }
+/* plus.circle.fill — a FILLED pink circle with a knocked-out plus. It is its own surface: no glass. */
+.composer-plus {
+  width: 28px; height: 28px; flex: 0 0 auto; border: 0; padding: 0; border-radius: 50%;
+  background: var(--pink); color: #fff; display: inline-flex; align-items: center; justify-content: center;
+  box-shadow: 0 3px 10px rgba(236, 72, 153, 0.4); transition: transform .14s var(--spring);
+  margin-bottom: 7px;
+}
+.composer-plus:active { transform: scale(0.92); }
+.composer-plus svg { width: 15px; height: 15px; }
+/* ONE glass surface, a FIXED-radius rounded rect (not a capsule): a capsule's radius grows with
+   height and clips into the text once the field wraps to multiple lines. Same reasoning, and the
+   same number, as FeedView.swift. */
+.composer-field {
+  flex: 1; min-width: 0; border-radius: var(--r-field);
+  padding: 10px 14px; font-size: 14px; color: var(--text); font-family: inherit;
+  resize: none; min-height: 40px; max-height: 132px; line-height: 1.4;
+  box-shadow: none;
+}
+.composer-field:focus { outline: none; border-color: var(--glass-ring); box-shadow: none; }
+.composer-field::placeholder { color: var(--muted); }
+.composer-send {
+  width: 42px; height: 42px; flex: 0 0 auto; border: 0; padding: 0; border-radius: 50%;
+  background: var(--grad); color: #fff; display: inline-flex; align-items: center; justify-content: center;
+  box-shadow: 0 4px 8px rgba(236, 72, 153, 0.4); transition: transform .14s var(--spring), opacity .2s;
+}
+.composer-send:active { transform: scale(0.94); opacity: 0.9; }
+.composer-send svg { width: 17px; height: 17px; }
+.composer-meta { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+.sync-badge {
+  display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 4px 10px;
+  font-size: 11px; font-weight: 600; color: var(--muted);
+}
+.sync-badge.hide { display: none; }
+
+/* ---- You tab (macOS `YouView`) ----------------------------------------------------------
+   A centred avatar with a gradient ring + pencil affordance, name, bio, link — then your own
+   posts below. Not a stack of settings cards. */
+.profile-head { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 8px 0 4px; text-align: center; }
+.profile-avatar {
+  position: relative; width: 92px; height: 92px; border-radius: 50%; border: 0; padding: 0;
+  background: none; cursor: pointer; transition: transform .14s var(--spring);
+  filter: drop-shadow(0 8px 16px rgba(236, 72, 153, 0.35));
+}
+.profile-avatar:active { transform: scale(0.96); }
+.profile-avatar .disc {
+  width: 92px; height: 92px; border-radius: 50%; background: var(--grad); overflow: hidden;
+  display: flex; align-items: center; justify-content: center; color: #fff; font-size: 38px; font-weight: 700;
+}
+.profile-avatar .disc img { width: 100%; height: 100%; object-fit: cover; }
+.profile-avatar .pencil {
+  position: absolute; right: -2px; bottom: -2px; width: 26px; height: 26px; border-radius: 50%;
+  background: var(--bg); color: var(--pink); display: flex; align-items: center; justify-content: center;
+}
+.profile-avatar .pencil svg { width: 15px; height: 15px; }
+.profile-name { font-size: 21px; font-weight: 700; }
+.profile-bio { font-size: 13px; color: var(--muted); max-width: 460px; }
+.profile-link { font-size: 12px; font-weight: 600; color: var(--pink); background: none; border: 0; display: inline-flex; gap: 5px; align-items: center; }
+.profile-link svg { width: 12px; height: 12px; }
+.section-label { font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 8px; }
+
+/* ---- Settings sheet rows (macOS grouped Form) ---- */
+.set-group { border-radius: var(--r-md); overflow: hidden; border: 1px solid var(--line); background: var(--panel2); }
+.set-row {
+  display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+  padding: 12px 14px; background: transparent; border: 0; color: var(--text); font-size: 14px; font-weight: 500;
+  transition: background .18s;
+}
+.set-row + .set-row { border-top: 1px solid var(--line); }
+button.set-row:hover { background: var(--panel); }
+.set-row .ri { width: 18px; flex: 0 0 auto; text-align: center; color: var(--pink); }
+.set-row .chev { margin-left: auto; color: var(--muted); font-size: 12px; }
+.set-foot { font-size: 11px; color: var(--muted); padding: 6px 4px 0; line-height: 1.45; }
+
+/* ---- Messages (port of apple/HavenApp/Messages.swift) ---- */
+.thread-list { display: flex; flex-direction: column; gap: 2px; }
+.thread-item { display: flex; gap: 12px; align-items: center; padding: 10px 11px; border-radius: var(--r-md); cursor: pointer; transition: background .18s; }
 .thread-item:hover { background: var(--panel2); }
-.chat { display: flex; flex-direction: column; gap: 7px; padding: 6px 2px; }
+.thread-item .name { font-size: 13px; font-weight: 500; }
+.thread-item .name.unread { font-weight: 700; }
+.thread-item .preview { font-size: 12px; color: var(--muted); }
+.thread-item .preview.unread { color: var(--text); }
+.thread-item .kebab { opacity: 0; transition: opacity .15s; }
+.thread-item:hover .kebab { opacity: 1; }
+
+/* An open thread is a fixed column — header, SCROLLING bubbles, composer floor — so the composer
+   is pinned and only the messages move. The view itself must stop scrolling (and drop the feed's
+   130px composer gutter) or we'd have two nested scrollers fighting. */
+#view-messages.thread-mode { overflow: hidden; padding-bottom: 0; }
+#view-messages.thread-mode > .col-wrap { height: 100%; }
+.thread-wrap { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.dm-head { display: flex; align-items: center; gap: 12px; padding: 0 0 12px; flex: 0 0 auto; }
+.dm-name { font-size: 15px; font-weight: 600; }
+.dm-presence { font-size: 11px; color: var(--muted); }
+.chat { display: flex; flex-direction: column; gap: 8px; padding: 6px 2px 16px; flex: 1 1 auto; overflow-y: auto; }
 .bubble-row { display: flex; animation: bubbleIn .35s var(--spring) both; }
 @keyframes bubbleIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 .bubble-row.me { justify-content: flex-end; }
+/* A fixed-radius ROUNDED RECT, never a capsule: a capsule's radius grows with the bubble's height
+   and clips into multi-line text. Same reasoning, and the same 16, as Messages.swift. */
 .chat-bubble {
-  max-width: 70%; padding: 10px 14px; border-radius: 20px 20px 20px 6px; background: var(--panel2);
-  line-height: 1.4;
+  padding: 8px 12px; border-radius: 16px; background: var(--panel2); line-height: 1.4;
+  font-size: 14px; word-break: break-word; white-space: pre-wrap;
 }
-.bubble-row.me .chat-bubble { background: var(--grad-h); color: white; border-radius: 20px 20px 6px 20px; box-shadow: 0 4px 14px rgba(236, 72, 153, 0.3); }
-.bubble-col { display: flex; flex-direction: column; max-width: 70%; }
+.chat-bubble.me { background: var(--grad); color: #fff; box-shadow: 0 4px 12px rgba(236, 72, 153, 0.28); }
+.chat-bubble.tombstone { font-style: italic; color: var(--muted); background: var(--panel2); }
+/* Spacer(minLength: 50) either side — a bubble never spans the full column. */
+.bubble-col { display: flex; flex-direction: column; gap: 4px; max-width: calc(100% - 50px); align-items: flex-start; }
 .bubble-row.me .bubble-col { align-items: flex-end; }
-.bubble-col .chat-bubble { max-width: 100%; }
-.chat-sender { font-size: 11px; font-weight: 700; color: var(--pink); margin: 0 4px 2px; }
-.chat-meta { display: flex; gap: 5px; align-items: center; font-size: 10px; color: var(--muted); margin: 3px 4px 0; }
+.bubble-media img, .bubble-media video { max-width: 240px; border-radius: 12px; display: block; }
+.chat-sender { font-size: 11px; font-weight: 600; color: var(--pink); padding-left: 4px; }
+.bubble-reacts { display: flex; gap: 4px; flex-wrap: wrap; }
+.msg-react {
+  font-size: 11px; padding: 2px 6px; border-radius: 999px; border: 1px solid transparent;
+  background: var(--panel2); color: var(--text); transition: transform .14s var(--bounce);
+}
+.msg-react.mine { border-color: var(--glass-pink-ring); background: var(--glass-pink); }
+.msg-react:active { transform: scale(0.9); }
+.chat-meta { display: flex; gap: 5px; align-items: center; font-size: 10px; color: var(--muted); padding: 0 4px; }
 .chat-check { color: var(--muted); }
 .chat-check.on { color: var(--pink); }
-.chat-input { display: flex; gap: 8px; margin-top: 14px; }
 .chat-bubble.secret { cursor: pointer; user-select: none; border: 1px dashed var(--pink); }
+/* The DM composer DOES carry a glass band (macOS `.havenGlass(in: Rectangle())`) — unlike the
+   feed's, which floats bare over the gradient. It's the floor of the thread. */
+.dm-composer { flex: 0 0 auto; padding: 10px 14px; border-radius: var(--r-lg) var(--r-lg) 0 0; border-bottom: 0; }
+.dm-composer .edit-bar { display: flex; align-items: center; gap: 8px; padding: 0 4px 8px; }
+/* Secret mode reads as a pink tint on the SAME single glass surface — not a second one. */
+.composer-field.tint-pink { background: var(--glass-pink); border-color: var(--glass-pink-ring); }
+
+/* New-message picker rows (DMContactPicker): tap to select, pink check when picked. */
+.pick-check { opacity: 0; color: var(--pink); display: flex; }
+.pick-check svg { width: 16px; height: 16px; }
+.list-item.picked .pick-check { opacity: 1; }
+.list-item.picked { background: var(--glass-pink); }
 
 /* Pinned-conversation grid (iMessage-style) above the DM list */
 .pin-grid { display: flex; flex-wrap: wrap; gap: 16px; padding: 4px 4px 12px; }
@@ -335,7 +657,7 @@ input:focus, textarea:focus, select:focus {
 .pin-tile .avatar.big { width: 60px; height: 60px; font-size: 24px; }
 .pin-tile .avatar-wrap { position: relative; }
 .pin-tile .unread-pill { position: absolute; top: -4px; right: -8px; }
-/* Unread-count pill on thread rows / pinned tiles (same gradient as the nav badge). */
+/* Unread-count pill on thread rows / pinned tiles (same gradient as the tab badge). */
 .unread-pill {
   min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px; background: var(--grad-h);
   color: white; font-size: 11px; font-weight: 700; flex: 0 0 auto;
@@ -355,6 +677,8 @@ input:focus, textarea:focus, select:focus {
 
 /* ---- misc ---- */
 .empty { text-align: center; color: var(--muted); padding: 48px 10px; }
+.empty .big { font-size: 34px; color: var(--pink); display: block; margin-bottom: 10px; }
+.empty .h { font-size: 15px; font-weight: 600; color: var(--text); }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
 @media (max-width: 980px) { .grid2 { grid-template-columns: 1fr; } }
 
@@ -373,21 +697,34 @@ input:focus, textarea:focus, select:focus {
   align-items: center; justify-content: center; z-index: 40;
   backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); animation: viewIn .2s ease both;
 }
+/* HavenMacSheet: the brand gradient runs to the sheet's EXTREME edges — never a grey system band
+   above or below the content — with an inline title row and a glass close circle. */
 .modal {
-  background: var(--panel); border: 1px solid var(--line-strong); border-radius: var(--r-lg); padding: 22px;
-  width: min(520px, 92vw); max-height: 86vh; overflow-y: auto; box-shadow: var(--shadow);
-  backdrop-filter: blur(28px) saturate(1.4); -webkit-backdrop-filter: blur(28px) saturate(1.4);
+  position: relative; overflow: hidden;
+  background: var(--glow1), var(--glow2), var(--bg);
+  border: 1px solid var(--line-strong); border-radius: var(--r-lg);
+  width: min(560px, 92vw); max-height: 86vh; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+  display: flex; flex-direction: column;
   animation: modalIn .4s var(--bounce) both;
 }
 @keyframes modalIn { from { opacity: 0; transform: translateY(16px) scale(0.96); } to { opacity: 1; transform: none; } }
-.modal h2 { margin-top: 0; font-weight: 800; }
+/* Dialogs that predate the sheet scaffold (report, edit, scan…) still pass a bare node — they get
+   the same gradient shell, just self-padded. */
+.modal.plain { display: block; padding: 22px; overflow-y: auto; }
+.modal.plain > h2:first-child { margin-top: 0; }
+.modal-head { display: flex; align-items: center; gap: 12px; padding: 18px 18px 10px 22px; flex: 0 0 auto; }
+.modal-head h2 { margin: 0; font-size: 19px; font-weight: 600; flex: 1; }
+.modal-body { padding: 0 22px 16px; overflow-y: auto; flex: 1 1 auto; }
+.modal-foot { padding: 10px 22px 18px; flex: 0 0 auto; }
+.modal h2 { font-weight: 700; }
 .tag { display: inline-block; padding: 3px 9px; border-radius: 999px; background: var(--panel2); border: 1px solid var(--line); font-size: 11px; }
 .ok-text { color: var(--ok); }
 .warn-text { color: var(--warn); }
-.attach-preview { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.attach-preview { display: flex; gap: 8px; flex-wrap: wrap; }
+.attach-preview:empty { display: none; }
 .attach-preview .chip { position: relative; }
-.attach-preview img, .attach-preview video { width: 74px; height: 74px; object-fit: cover; border-radius: var(--r-sm); }
-.attach-preview .x { position: absolute; top: -6px; right: -6px; background: var(--panel-solid); border: 1px solid var(--line-strong); border-radius: 50%; width: 20px; height: 20px; line-height: 18px; text-align: center; font-size: 12px; }
+.attach-preview img, .attach-preview video { width: 56px; height: 56px; object-fit: cover; border-radius: 10px; }
+.attach-preview .x { position: absolute; top: -6px; right: -6px; background: var(--panel-solid); border: 1px solid var(--line-strong); border-radius: 50%; width: 20px; height: 20px; line-height: 18px; text-align: center; font-size: 12px; cursor: pointer; }
 
 /* ---- Reports (decentralized moderation) ---- */
 .reported-banner {
@@ -397,21 +734,26 @@ input:focus, textarea:focus, select:focus {
 }
 .btn.reason { text-align: left; justify-content: flex-start; }
 
-/* ---- Relay nudge (app.js RelayNudge) ---- */
-/* The brand-gradient sibling of .reported-banner: same slot, louder, because it's an offer not a warning. */
+/* ---- Feed banners: relay nudge + pending requests (app.js RelayNudge / pendingBanner) ----
+   Both are gradient cards at radius 16 with a glass ✕ / chevron — RelayNudge.swift and
+   FeedView.swift ▸ pendingBanner draw exactly this, so desktop draws it too. They are NOT
+   full-bleed bars: they sit inside the feed's 16px column like every other card. */
 .nudge-banner {
-  display: flex; align-items: flex-start; gap: 10px; padding: 13px 14px; margin-bottom: 14px;
+  display: flex; align-items: flex-start; gap: 10px; padding: 14px;
   background: var(--grad-h); border-radius: var(--r-md); color: #fff;
   box-shadow: 0 6px 18px rgba(236, 72, 153, 0.3);
   animation: cardIn .4s var(--spring) both;
 }
-.nudge-body { display: flex; align-items: flex-start; gap: 11px; flex: 1; min-width: 0; cursor: pointer; }
-.nudge-icon { font-size: 19px; line-height: 1.35; }
-.nudge-title { font-weight: 650; font-size: 14px; }
-.nudge-sub { font-size: 12px; opacity: 0.88; margin-top: 2px; }
+.nudge-body { display: flex; align-items: flex-start; gap: 12px; flex: 1; min-width: 0; cursor: pointer; }
+.nudge-icon { flex: 0 0 auto; display: flex; align-items: center; }
+.nudge-icon svg { width: 21px; height: 21px; }
+.nudge-title { font-weight: 600; font-size: 13px; }
+.nudge-sub { font-size: 12px; opacity: 0.85; margin-top: 2px; line-height: 1.4; }
+/* The ✕ is a glass circle ON the gradient — its own surface, per GlassIconButtonStyle(size: 26). */
 .nudge-x {
   flex: 0 0 auto; width: 26px; height: 26px; border-radius: 50%; font-size: 11px; color: #fff;
   background: rgba(255, 255, 255, 0.18); border: 1px solid rgba(255, 255, 255, 0.3);
+  display: inline-flex; align-items: center; justify-content: center;
   transition: background .2s, transform .12s var(--spring);
 }
 .nudge-x:hover { background: rgba(255, 255, 255, 0.3); }
@@ -438,11 +780,6 @@ input:focus, textarea:focus, select:focus {
 .call-name { position: absolute; left: 8px; bottom: 8px; background: rgba(0, 0, 0, 0.55); padding: 3px 9px; border-radius: 8px; font-size: 12px; }
 .call-controls { display: flex; gap: 12px; justify-content: center; margin-top: 16px; }
 
-/* Theme toggle pill in the nav footer. */
-.theme-toggle { background: transparent; border: 0; color: var(--muted); padding: 4px; border-radius: 8px; margin-left: auto; }
-.theme-toggle:hover { background: var(--panel2); color: var(--text); }
-.theme-toggle svg { width: 16px; height: 16px; display: block; }
-
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
@@ -450,7 +787,7 @@ input:focus, textarea:focus, select:focus {
 /* ---- macOS feel on Windows/Linux ----
    The native chrome is the biggest "this isn't a Mac" tell, so approximate it in the webview:
    thin overlay scrollbars (not the chunky GTK/Win32 ones), brand-tinted selection, smooth momentum
-   scrolling, and no tap-highlight/text-size-adjust quirks. Mac users run the native HavenMac app. */
+   scrolling, and no tap-highlight/text-size-adjust quirks. */
 * {
   scrollbar-width: thin;                      /* Firefox / WebKitGTK */
   scrollbar-color: var(--line-strong) transparent;
@@ -467,42 +804,15 @@ input:focus, textarea:focus, select:focus {
 .view { scroll-behavior: smooth; overscroll-behavior: contain; }   /* momentum-y, no rubber-band bleed */
 ::selection { background: rgba(236, 72, 153, 0.32); color: var(--text); }
 html { -webkit-text-size-adjust: 100%; }
-/* macOS-style inset on text controls + a calmer focus ring than the browser default. */
 input, textarea, select { box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.06); }
 :focus-visible { outline: none; }
-
-/* ---- macOS-style custom title bar ----
-   Native Win32/GTK frames are the single most "not a Mac" element, so we hide the OS decorations
-   (tauri.conf decorations:false) and draw a slim draggable bar with left-aligned traffic lights.
-   The bar spans the full width and is the window drag handle; the dots float over the frosted
-   sidebar at the left. nav/view get top padding so their content clears it. */
-.titlebar {
-  position: fixed; top: 0; left: 0; right: 0; height: 30px; z-index: 100;
-  display: flex; align-items: center; padding: 0 13px; user-select: none;
-}
-.titlebar .traffic { display: flex; gap: 8px; align-items: center; }
-.tl {
-  width: 12px; height: 12px; border-radius: 50%; border: 0; padding: 0; cursor: default;
-  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.20); transition: filter .15s var(--spring);
-  display: flex; align-items: center; justify-content: center;
-}
-.tl.close { background: #ff5f57; } .tl.min { background: #febc2e; } .tl.max { background: #28c840; }
-.titlebar:not(:hover) .tl { filter: saturate(0.78) brightness(0.96); }   /* dim until hovered, like macOS */
-.tl:active { filter: brightness(0.82); }
-/* Glyphs reveal on hover (close ×, minimize –, zoom +), matching macOS. */
-.tl::before { content: ""; font-size: 10px; line-height: 1; font-weight: 700; color: rgba(0,0,0,0.55); opacity: 0; transition: opacity .12s; }
-.titlebar:hover .tl.close::before { content: "\00d7"; opacity: 1; }
-.titlebar:hover .tl.min::before { content: "\2013"; opacity: 1; }
-.titlebar:hover .tl.max::before { content: "\002b"; opacity: 1; }
-.nav { padding-top: 40px; }     /* clear the traffic lights */
-.view { padding-top: 42px; }    /* clear the drag strip so headers/buttons stay clickable */
 
 /* Drag-and-drop media onto the window: subtle full-window cue while a file is hovering. */
 body.drop-target::after {
   content: "Drop photos or videos to attach";
   position: fixed; inset: 8px; z-index: 9999; pointer-events: none;
   display: flex; align-items: center; justify-content: center;
-  font-weight: 600; color: var(--accent, #ff2d92);
-  background: color-mix(in srgb, var(--accent, #ff2d92) 10%, transparent);
-  border: 2px dashed var(--accent, #ff2d92); border-radius: 16px;
+  font-weight: 600; color: var(--pink);
+  background: rgba(236, 72, 153, 0.10);
+  border: 2px dashed var(--pink); border-radius: 16px;
 }

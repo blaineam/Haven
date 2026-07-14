@@ -1377,6 +1377,7 @@ fun PostCard(
     // The feed passes true for the ONE centred card; single-post screens default to no autoplay.
     videoActive: Boolean = false,
 ) {
+    val context = LocalContext.current
     var showComment by remember(item.id) { mutableStateOf(false) }
     var postMenu by remember(item.id) { mutableStateOf(false) }
     var showReport by remember(item.id) { mutableStateOf(false) }
@@ -1428,6 +1429,22 @@ fun PostCard(
                     modifier = Modifier.padding(start = 4.dp).size(20.dp).clickable { postMenu = true })
                 DropdownMenu(expanded = postMenu, onDismissRequest = { postMenu = false },
                     modifier = Modifier.background(HavenTheme.card)) {
+                    // No link for an unsent post (nothing to land on), a story (gone by the time
+                    // anyone taps), or a DM — a dm: circle id is literally both members' node ids,
+                    // so the link would leak the pair to whoever you sent it to, and no one outside
+                    // the DM could ever open it anyway.
+                    val shareUrl = if (item.unsent || item.story || circleId.startsWith("dm:")) null
+                                   else com.blaineam.haven.core.DeepLink.postUrl(circleId, item.id)
+                    shareUrl?.let { url ->
+                        DropdownMenuItem(
+                            text = { Text("Share post", color = Color.White) },
+                            onClick = { postMenu = false; sharePost(context, url) },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Copy link", color = Color.White) },
+                            onClick = { postMenu = false; copyPostLink(context, url) },
+                        )
+                    }
                     val hidden = com.blaineam.haven.core.HiddenStore.isHidden(item.id)
                     DropdownMenuItem(
                         text = { Text(if (hidden) "Unhide post" else "Hide post", color = Color.White) },
@@ -1639,4 +1656,20 @@ private fun relativeTime(createdAtMs: kotlin.ULong): String {
         s < 604_800 -> "${s / 86_400}d"
         else -> "${s / 604_800}w"
     }
+}
+
+/** The share sheet is the point: a post link only earns its keep once it can reach a friend's
+ *  Messages/Signal/mail, on whichever platform they're on. (Same idiom as YouScreen's invite.) */
+private fun sharePost(context: android.content.Context, url: String) {
+    val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(android.content.Intent.EXTRA_TEXT, url)
+    }
+    context.startActivity(android.content.Intent.createChooser(send, "Share post"))
+}
+
+private fun copyPostLink(context: android.content.Context, url: String) {
+    (context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager)
+        .setPrimaryClip(android.content.ClipData.newPlainText("haven post link", url))
+    android.widget.Toast.makeText(context, "Link copied", android.widget.Toast.LENGTH_SHORT).show()
 }

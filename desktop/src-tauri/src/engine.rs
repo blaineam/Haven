@@ -677,7 +677,7 @@ impl Engine {
                     self.post(it.circle_id, it.body, it.media, music, it.mute_video);
                 }
                 crate::scheduled::SchedKind::Dm => {
-                    self.send_dm(it.circle_id, it.body, it.media);
+                    self.send_dm(it.circle_id, it.body, it.media, music);
                 }
             }
         }
@@ -1155,11 +1155,15 @@ impl Engine {
         self.leave_circle(circle_id);
     }
 
-    pub fn send_dm(self: &Arc<Self>, circle_id: String, body: String, media: Vec<String>) {
-        if body.trim().is_empty() && media.is_empty() {
+    /// A DM carries a song exactly like a post does — the core's `post` has always taken a track
+    /// (see `Engine::post`), this wrapper just never passed one, so the DM composer had no Song
+    /// row and a SCHEDULED DM silently dropped the track the scheduler had already built for it.
+    pub fn send_dm(self: &Arc<Self>, circle_id: String, body: String, media: Vec<String>, music: Option<TrackRefFfi>) {
+        // A song alone is a valid message — mirrors `post`'s guard.
+        if body.trim().is_empty() && media.is_empty() && music.is_none() {
             return;
         }
-        if let Ok(env) = self.social.post(circle_id.clone(), body, media.clone(), None, None, false, false, now_ms()) {
+        if let Ok(env) = self.social.post(circle_id.clone(), body, media.clone(), music, None, false, false, now_ms()) {
             self.after_author(&circle_id, &env);
             let me = self.clone();
             tauri::async_runtime::spawn(async move {
@@ -3489,6 +3493,41 @@ impl Engine {
         if let Err(e) = store::write_state(&self.paths, &self.social.export_state()) {
             log::error!("persist failed: {e}");
         }
+    }
+
+    // ---- demo/screenshot seeding (debug builds only — see demo.rs) ----------------------
+    //
+    // The seeder drives this engine offline, which the public API can't express: authoring needs a
+    // backdated `created_at` and a friend's sync bundle needs a raw `receive`, while every public
+    // wrapper (`post`, `set_profile`, …) also talks to the wire. These hand out the internals it
+    // needs; they compile out of release entirely, along with their only caller.
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn demo_social(&self) -> &Arc<HavenSocial> {
+        &self.social
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn demo_persist(&self) {
+        self.persist();
+    }
+
+    /// Mutate + save prefs directly, skipping the networked broadcast `set_profile` does.
+    #[cfg(debug_assertions)]
+    pub(crate) fn demo_with_prefs(&self, f: impl FnOnce(&mut Prefs)) {
+        let mut p = self.prefs.lock().unwrap();
+        f(&mut p);
+        if let Err(e) = p.save(&self.paths) {
+            log::error!("demo prefs save failed: {e}");
+        }
+    }
+
+    /// Report the node as started without one: demo mode never binds it, and the status dot reads
+    /// `dyn_state`, so the UI would otherwise sit on "starting…" through every screenshot.
+    #[cfg(debug_assertions)]
+    pub(crate) fn demo_mark_started(&self) {
+        self.dyn_state.lock().unwrap().started = true;
+        self.emit_changed();
     }
 
     // ---- multi-device self-sync (D16, Phase 3 — port of iOS SelfSync.swift) -------------

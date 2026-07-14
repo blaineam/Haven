@@ -448,8 +448,8 @@ pub fn messages(engine: Eng, circle_id: String) -> Vec<FeedItemDto> {
 }
 
 #[tauri::command]
-pub fn send_dm(engine: Eng, circle_id: String, body: String, media: Vec<String>) {
-    engine.send_dm(circle_id, body, media);
+pub fn send_dm(engine: Eng, circle_id: String, body: String, media: Vec<String>, music: Option<TrackInput>) {
+    engine.send_dm(circle_id, body, media, music.map(|m| m.into_ffi()));
 }
 
 // ---- connect / contacts ------------------------------------------------------------------
@@ -702,7 +702,7 @@ pub fn media_data_url(engine: Eng, circle_id: String, reference: String) -> Opti
     } else if reference.starts_with("a:") {
         crate::localmedia::audio_mime(&bytes)
     } else {
-        "image/jpeg"
+        crate::localmedia::image_mime(&bytes)
     };
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Some(format!("data:{mime};base64,{b64}"))

@@ -10,75 +10,41 @@
     <script src="app.js" type="module" defer></script>
   </head>
   <body>
+    <!-- The title bar IS the navigation, exactly like the macOS build: traffic lights at the far
+         left, the Circle/Messages/You segmented pill centred, and a per-tab trailing slot on the
+         right (circle switcher + manage-circle on Circle; the settings gear on You). It draws no
+         background of its own — the body's brand gradient runs underneath it to the extreme top
+         edge, which is the whole point. -->
     <div class="titlebar" data-tauri-drag-region>
       <div class="traffic">
         <button class="tl close" id="win-close" aria-label="Close window"></button>
         <button class="tl min" id="win-min" aria-label="Minimize window"></button>
         <button class="tl max" id="win-max" aria-label="Zoom window"></button>
       </div>
-    </div>
-    <div id="app">
-      <aside class="nav">
-        <div class="brand">
-          <div class="brand-mark">
-            <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="6" cy="7" r="1.6" fill="white"/><circle cx="18" cy="6" r="1.6" fill="white"/>
-              <circle cx="12" cy="13" r="1.8" fill="white"/><circle cx="5" cy="17" r="1.6" fill="white"/>
-              <circle cx="19" cy="17" r="1.6" fill="white"/>
-              <path d="M6 7l6 6 6-7M12 13l-7 4M12 13l7 4" opacity="0.85"/>
-            </svg>
-          </div>
-          <div class="brand-text">
-            <strong>Haven</strong>
-            <span id="nav-node" class="muted small"></span>
-          </div>
-        </div>
-        <nav class="nav-items">
-          <button class="nav-btn active" data-view="feed">
-            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5L12 3l9 7.5"/><path d="M5 9.5V20h14V9.5"/><path d="M9.5 20v-5h5v5"/></svg>
-            Feed
-          </button>
-          <button class="nav-btn" data-view="stories">
-            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.2" stroke-dasharray="2.6 2.6"/><circle cx="12" cy="12" r="3.2"/></svg>
-            Stories
-          </button>
-          <button class="nav-btn" data-view="messages">
-            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11H8l-4 4z"/></svg>
-            Messages <i class="badge" id="badge-messages"></i>
-          </button>
-          <button class="nav-btn" data-view="connect">
-            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 15l6-6"/><path d="M11 6l1.5-1.5a3.5 3.5 0 015 5L17 11"/><path d="M13 18l-1.5 1.5a3.5 3.5 0 01-5-5L8 13"/></svg>
-            Connect <i class="badge" id="badge-pending"></i>
-          </button>
-          <button class="nav-btn" data-view="relay">
-            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2.2"/><path d="M7.5 7.5a6 6 0 000 9M16.5 7.5a6 6 0 010 9M4.7 4.7a10 10 0 000 14.6M19.3 4.7a10 10 0 010 14.6"/></svg>
-            Relay
-          </button>
-          <button class="nav-btn" data-view="you">
-            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8.5" r="3.5"/><path d="M5.5 19a6.5 6.5 0 0113 0"/></svg>
-            You
-          </button>
-        </nav>
-        <div class="nav-footer">
-          <span class="dot" id="status-dot"></span>
-          <span id="status-text" class="muted small">starting…</span>
-          <button class="theme-toggle" id="theme-toggle" title="Toggle light / dark">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5 5l1.4 1.4M17.6 17.6L19 19M19 5l-1.4 1.4M6.4 17.6L5 19"/></svg>
-          </button>
-        </div>
-      </aside>
 
-      <main class="content">
-        <section id="view-feed" class="view active"></section>
-        <section id="view-stories" class="view"></section>
-        <section id="view-messages" class="view"></section>
-        <section id="view-connect" class="view"></section>
-        <section id="view-relay" class="view"></section>
-        <section id="view-you" class="view"></section>
-      </main>
+      <nav class="tabs glass" id="tabs" role="tablist" aria-label="Haven">
+        <button class="tab active" data-view="circle" role="tab">Circle<i class="badge" id="badge-circle"></i></button>
+        <button class="tab" data-view="messages" role="tab">Messages<i class="badge" id="badge-messages"></i></button>
+        <button class="tab" data-view="you" role="tab">You</button>
+      </nav>
+
+      <!-- Per-tab trailing controls, rendered by app.js (macOS toolbar `.havenTrailing`). -->
+      <div class="tb-right" id="tb-right"></div>
     </div>
+
+    <main class="content">
+      <section id="view-circle" class="view active"></section>
+      <section id="view-messages" class="view"></section>
+      <section id="view-you" class="view"></section>
+      <!-- The floating composer lives OUTSIDE the scrolling view on purpose: as a child of
+           `.view` (which is the scroll container) an absolutely-positioned bar is placed against
+           the scrolled padding box, so it scrolled away with the feed instead of floating over
+           it. Here it's a sibling pinned to `.content`, and the feed genuinely passes underneath. -->
+      <div id="composer-slot"></div>
+    </main>
 
     <div id="toast" class="toast"></div>
     <div id="modal-root"></div>
+    <div id="menu-root"></div>
   </body>
 </html>

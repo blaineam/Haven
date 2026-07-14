@@ -1,7 +1,9 @@
 <!doctype html>
 <!-- Static style gallery for verifying the desktop UI look-and-feel WITHOUT the Tauri runtime.
      Mirrors the real markup app.js produces so styles.css renders representatively.
-     Not shipped — dev-only (underscore-prefixed). -->
+     Not shipped — dev-only (underscore-prefixed).
+
+     Open ?view=circle (default) / ?view=messages / ?view=thread / ?view=you to see each tab. -->
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -16,154 +18,205 @@
         <button class="tl min" aria-label="Minimize window"></button>
         <button class="tl max" aria-label="Zoom window"></button>
       </div>
+      <nav class="tabs glass" role="tablist">
+        <button class="tab" data-view="circle" role="tab">Circle</button>
+        <button class="tab" data-view="messages" role="tab">Messages</button>
+        <button class="tab" data-view="you" role="tab">You</button>
+      </nav>
+      <div class="tb-right" id="tb-right"></div>
     </div>
-    <div id="app">
-      <aside class="nav">
-        <div class="brand">
-          <div class="brand-mark">
-            <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="6" cy="7" r="1.6" fill="white"/><circle cx="18" cy="6" r="1.6" fill="white"/>
-              <circle cx="12" cy="13" r="1.8" fill="white"/><circle cx="5" cy="17" r="1.6" fill="white"/>
-              <circle cx="19" cy="17" r="1.6" fill="white"/>
-              <path d="M6 7l6 6 6-7M12 13l-7 4M12 13l7 4" opacity="0.85"/>
-            </svg>
-          </div>
-          <div class="brand-text"><strong>Haven</strong><span class="muted small">b6f1c2a9…</span></div>
-        </div>
-        <nav class="nav-items">
-          <button class="nav-btn active"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5L12 3l9 7.5"/><path d="M5 9.5V20h14V9.5"/><path d="M9.5 20v-5h5v5"/></svg> Feed</button>
-          <button class="nav-btn"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.2" stroke-dasharray="2.6 2.6"/><circle cx="12" cy="12" r="3.2"/></svg> Stories</button>
-          <button class="nav-btn">
-            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11H8l-4 4z"/></svg>
-            Messages <i class="badge show">3</i>
-          </button>
-          <button class="nav-btn">
-            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 15l6-6"/><path d="M11 6l1.5-1.5a3.5 3.5 0 015 5L17 11"/><path d="M13 18l-1.5 1.5a3.5 3.5 0 01-5-5L8 13"/></svg>
-            Connect <i class="badge show">1</i>
-          </button>
-          <button class="nav-btn"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2.2"/><path d="M7.5 7.5a6 6 0 000 9M16.5 7.5a6 6 0 010 9M4.7 4.7a10 10 0 000 14.6M19.3 4.7a10 10 0 010 14.6"/></svg> Relay</button>
-          <button class="nav-btn"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8.5" r="3.5"/><path d="M5.5 19a6.5 6.5 0 0113 0"/></svg> You</button>
-        </nav>
-        <div class="nav-footer">
-          <span class="dot on"></span><span class="muted small">connected</span>
-          <button class="theme-toggle" onclick="document.documentElement.dataset.theme = document.documentElement.dataset.theme==='light'?'dark':'light'">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5 5l1.4 1.4M17.6 17.6L19 19M19 5l-1.4 1.4M6.4 17.6L5 19"/></svg>
-          </button>
-        </div>
-      </aside>
 
-      <main class="content">
-        <section class="view active">
-          <div class="view-head"><h1>Feed</h1><div class="spacer"></div>
-            <select style="width:auto"><option>Family (5)</option></select>
-            <button class="btn small">+ Circle</button>
-          </div>
+    <main class="content">
+      <section id="view-circle" class="view"></section>
+      <section id="view-messages" class="view"></section>
+      <section id="view-you" class="view"></section>
+      <div id="composer-slot"></div>
+    </main>
+    <div id="menu-root"></div>
 
-          <div class="story-tray">
-            <div class="story-ring"><div class="ring"><div>＋</div></div><div class="small">Add</div></div>
-            <div class="story-ring"><div class="ring"><div style="background:linear-gradient(135deg,#f59e0b,#ec4899)"></div></div><div class="small">Mia</div></div>
-            <div class="story-ring"><div class="ring"><div style="background:linear-gradient(135deg,#7c3aed,#22d3ee)"></div></div><div class="small">Leo</div></div>
-            <div class="story-ring"><div class="ring"><div>✨</div></div><div class="small">Ada</div></div>
-          </div>
+    <script type="module">
+      // app.js boots against Tauri, so this gallery re-declares the few icon paths it needs and
+      // leans on styles.css + the same class names for everything that matters visually.
+      const el = (t, p = {}, ...k) => {
+        const e = document.createElement(t);
+        for (const [a, v] of Object.entries(p)) {
+          if (a === "class") e.className = v; else if (v != null) e.setAttribute(a, v);
+        }
+        for (const c of k.flat()) if (c != null) e.append(c.nodeType ? c : document.createTextNode(String(c)));
+        return e;
+      };
+      const svg = (d, fill, w) => {
+        const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        s.setAttribute("viewBox", "0 0 24 24");
+        s.setAttribute("fill", fill ? "currentColor" : "none");
+        if (!fill) { s.setAttribute("stroke", "currentColor"); s.setAttribute("stroke-width", w || 1.7); s.setAttribute("stroke-linecap", "round"); s.setAttribute("stroke-linejoin", "round"); }
+        for (const one of [].concat(d)) { const p = document.createElementNS("http://www.w3.org/2000/svg", "path"); p.setAttribute("d", one); s.append(p); }
+        return s;
+      };
+      const I = {
+        chevron: () => svg("M4 8l6 6 6-6"),
+        people: () => svg("M9 11.2a3.4 3.4 0 100-6.8 3.4 3.4 0 000 6.8zm7 .3a2.9 2.9 0 100-5.8 2.9 2.9 0 000 5.8zM9 12.8c-3 0-5.6 1.7-5.6 3.9v1.1a.8.8 0 00.8.8h9.6a.8.8 0 00.8-.8v-1.1c0-2.2-2.6-3.9-5.6-3.9zm7 .2c-.7 0-1.4.1-2 .3 1.2 1 1.9 2.2 1.9 3.4v1.9h4.3a.8.8 0 00.8-.8v-.9c0-2-2.3-3.9-5-3.9z", true),
+        gear: () => svg(["M12 15a3 3 0 100-6 3 3 0 000 6z", "M19.1 14.6a1.6 1.6 0 00.3 1.8l.1.1a1.9 1.9 0 11-2.7 2.7l-.1-.1a1.6 1.6 0 00-1.8-.3 1.6 1.6 0 00-1 1.5v.2a1.9 1.9 0 11-3.8 0v-.1a1.6 1.6 0 00-1-1.5 1.6 1.6 0 00-1.8.3l-.1.1a1.9 1.9 0 11-2.7-2.7l.1-.1a1.6 1.6 0 00.3-1.8 1.6 1.6 0 00-1.5-1h-.2a1.9 1.9 0 110-3.8h.1a1.6 1.6 0 001.5-1 1.6 1.6 0 00-.3-1.8l-.1-.1a1.9 1.9 0 112.7-2.7l.1.1a1.6 1.6 0 001.8.3h.1a1.6 1.6 0 001-1.5v-.2a1.9 1.9 0 113.8 0v.1a1.6 1.6 0 001 1.5 1.6 1.6 0 001.8-.3l.1-.1a1.9 1.9 0 112.7 2.7l-.1.1a1.6 1.6 0 00-.3 1.8v.1a1.6 1.6 0 001.5 1h.2a1.9 1.9 0 110 3.8h-.1a1.6 1.6 0 00-1.5 1z"], false, 1.6),
+        pencilSq: () => svg(["M20 10.5V19a2 2 0 01-2 2H6a2 2 0 01-2-2V7a2 2 0 012-2h8.5", "M18.4 3.6a2 2 0 012.8 2.8L13 14.6l-3.6.9.9-3.6 8.1-8.3z"]),
+        plane: () => svg("M3.2 11.3l16.4-7.2c.7-.3 1.4.4 1.1 1.1l-7.2 16.4c-.3.7-1.3.7-1.5-.1l-1.9-6.3-6.3-1.9c-.8-.2-.8-1.2-.1-1.5z", true),
+        plus: () => svg("M12 5v14M5 12h14", false, 2.4),
+        camera: () => svg("M9.4 4.5l-1.2 2H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2v-9a2 2 0 00-2-2h-3.2l-1.2-2H9.4zM12 17.2a4.1 4.1 0 110-8.2 4.1 4.1 0 010 8.2z", true),
+        ellipsis: () => svg("M6 10.2a1.8 1.8 0 100 3.6 1.8 1.8 0 000-3.6zm6 0a1.8 1.8 0 100 3.6 1.8 1.8 0 000-3.6zm6 0a1.8 1.8 0 100 3.6 1.8 1.8 0 000-3.6z", true),
+        antenna: () => svg("M12 9.8a2.2 2.2 0 100 4.4 2.2 2.2 0 000-4.4M7.5 7.5a6 6 0 000 9M16.5 7.5a6 6 0 010 9M4.7 4.7a10 10 0 000 14.6M19.3 4.7a10 10 0 010 14.6"),
+        back: () => { const s = svg("M9 5l7 7-7 7"); s.setAttribute("class", "flip"); return s; },
+        phone: () => svg("M6.6 3.5c.6-.1 1.2.2 1.5.8l1.3 2.6c.3.6.2 1.3-.3 1.7l-1.2 1a12 12 0 005.5 5.5l1-1.2c.4-.5 1.1-.6 1.7-.3l2.6 1.3c.6.3.9.9.8 1.5l-.4 2.3c-.1.7-.7 1.2-1.4 1.2C9.9 20 4 14.1 3.1 5.3c0-.7.5-1.3 1.2-1.4l2.3-.4z", true),
+        video: () => svg("M3 7.5A2.5 2.5 0 015.5 5h7A2.5 2.5 0 0115 7.5v9a2.5 2.5 0 01-2.5 2.5h-7A2.5 2.5 0 013 16.5v-9zm14 2.3l3.3-2.2c.6-.4 1.4 0 1.4.8v7.2c0 .8-.8 1.2-1.4.8L17 14.2V9.8z", true),
+        plusCircle: () => svg("M12 21a9 9 0 100-18 9 9 0 000 18zM12 8.2v7.6M8.2 12h7.6"),
+        speaker: () => svg(["M4 9.5h3.5L12 5.5v13L7.5 14.5H4v-5z", "M16.5 9.5l5 5M21.5 9.5l-5 5"]),
+        link: () => svg("M9 15l6-6M11 6l1.5-1.5a3.5 3.5 0 015 5L17 11M13 18l-1.5 1.5a3.5 3.5 0 01-5-5L8 13"),
+        pencil: () => svg("M12 2a10 10 0 100 20 10 10 0 000-20zm3.9 6.1a1 1 0 010 1.4l-.9.9-2.4-2.4.9-.9a1 1 0 011.4 0l1 1zM8 13.6l3.6-3.6 2.4 2.4L10.4 16H8v-2.4z", true),
+        music: () => svg(["M9 18V5l11-2v13", "M9 18a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0zM20 16a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0z"]),
+      };
 
-          <div class="card col">
-            <textarea placeholder="Share something with your circle…"></textarea>
-            <div class="row">
-              <button class="btn small ghost">📎 Photo / Video</button>
-              <button class="btn small ghost">🎵 Music</button>
-              <div class="spacer" style="flex:1"></div>
-              <button class="btn primary">Post</button>
-            </div>
-          </div>
+      const view = new URLSearchParams(location.search).get("view") || "circle";
+      const tabFor = view === "thread" ? "messages" : view;
+      document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.view === tabFor));
+      document.getElementById("view-" + tabFor).classList.add("active");
 
-          <div class="card post">
-            <div class="post-head">
-              <div class="avatar">MR</div>
-              <div><div class="name">Mia Rivera</div><div class="muted small">12m · edited</div></div>
-              <button class="kebab menu-btn">⋯</button>
-            </div>
-            <div class="post-body">Sunday hike with the crew 🌄 the views were unreal.</div>
-            <div class="post-media masonry">
-              <img src="https://picsum.photos/seed/h1/500/640" />
-              <img src="https://picsum.photos/seed/h2/500/360" />
-              <img src="https://picsum.photos/seed/h3/500/420" />
-              <img src="https://picsum.photos/seed/h4/500/560" />
-            </div>
-            <a class="song-chip"><span class="note">🎵</span><strong>Holocene</strong> — Bon Iver</a>
-            <div class="post-actions">
-              <button class="react-pill mine">❤️ 12</button>
-              <span class="react-pill">🔥 4</span>
-              <span class="react-pill">😮 2</span>
-              <button class="react-pill">＋</button>
-              <button class="btn small ghost">💬 3</button>
-            </div>
-          </div>
+      const tb = document.getElementById("tb-right");
+      if (tabFor === "circle") {
+        tb.append(el("button", { class: "circle-pill glass tint-pink" }, I.chevron(), el("span", {}, "My Circle")),
+                  el("button", { class: "icon-btn glass tint-pink pink" }, I.people()));
+      } else if (tabFor === "you") {
+        tb.append(el("button", { class: "icon-btn glass" }, I.gear()));
+      } else if (view === "messages") {
+        tb.append(el("button", { class: "icon-btn glass" }, I.pencilSq()));
+      }
 
-          <div class="card post">
-            <div class="post-head">
-              <div class="avatar">LC</div>
-              <div><div class="name">Leo Chen</div><div class="muted small">just now</div></div>
-            </div>
-            <div class="post-body">New single-shot of the studio setup.</div>
-            <div class="post-media single"><img src="https://picsum.photos/seed/studio/900/520" /></div>
-            <div class="post-actions">
-              <button class="react-pill">❤️</button>
-              <button class="react-pill">＋</button>
-              <button class="btn small ghost">💬 0</button>
-            </div>
-          </div>
+      const IMG = "data:image/svg+xml;utf8," + encodeURIComponent(
+        `<svg xmlns='http://www.w3.org/2000/svg' width='800' height='500'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='#e8b98c'/><stop offset='1' stop-color='#b3745a'/></linearGradient></defs><rect width='800' height='500' fill='url(#g)'/></svg>`);
 
-          <div class="card">
-            <h3 style="margin-top:0">Messages</h3>
-            <div class="pin-grid">
-              <div class="pin-tile">
-                <div class="avatar-wrap">
-                  <div class="avatar big">AM</div>
-                  <span class="unread-pill">2</span>
-                </div>
-                <div class="pin-name unread">Avery M</div>
-              </div>
-              <div class="pin-tile">
-                <div class="avatar-wrap"><div class="avatar big">JR</div></div>
-                <div class="pin-name">Jo R</div>
-              </div>
-            </div>
-            <div class="thread-list">
-              <div class="thread-item">
-                <div class="avatar">AM</div>
-                <div style="flex:1;min-width:0">
-                  <div class="name unread">Avery M</div>
-                  <div class="small" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">See you at 7!</div>
-                </div>
-                <span class="unread-pill">2</span>
-                <div class="muted small">5m</div>
-              </div>
-              <div class="thread-item">
-                <div class="avatar">JR</div>
-                <div style="flex:1;min-width:0">
-                  <div class="name">Jo R</div>
-                  <div class="muted small" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Sounds good</div>
-                </div>
-                <div class="muted small">2h</div>
-              </div>
-              <div class="thread-item">
-                <div class="avatar">PK</div>
-                <div style="flex:1;min-width:0">
-                  <div class="name unread">Pat K</div>
-                  <div class="small" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Long unread preview that should ellipsize rather than wrap the row</div>
-                </div>
-                <span class="unread-pill">99+</span>
-                <div class="muted small">1d</div>
-              </div>
-            </div>
-            <div class="chat">
-              <div class="bubble-row"><div class="chat-bubble">Are we still on for tonight?</div></div>
-              <div class="bubble-row me"><div class="chat-bubble">Yep! Bringing the photos from the hike 📸</div></div>
-              <div class="bubble-row"><div class="chat-bubble">Perfect — see you at 7</div></div>
-            </div>
-          </div>
-        </section>
-      </main>
-    </div>
+      // ---- Circle -------------------------------------------------------------------------
+      if (view === "circle") {
+        const list = el("div", { class: "feed-list" });
+        list.append(el("div", { class: "feed-banner" },
+          el("span", { class: "dot on" }), el("span", { class: "txt" }, "Connected · internet"),
+          el("div", { class: "spacer" }), el("button", { class: "icon-btn glass" }, I.speaker())));
+        list.append(el("div", { class: "nudge-banner" },
+          el("div", { class: "nudge-body" }, el("span", { class: "nudge-icon" }, I.antenna()),
+            el("div", {}, el("div", { class: "nudge-title" }, "Give this circle a relay"),
+              el("div", { class: "nudge-sub" }, "A few of you are here now — a relay holds your sealed posts so nobody has to be online at the same time."))),
+          el("button", { class: "nudge-x" }, "✕")));
+        const tray = el("div", { class: "story-tray" });
+        tray.append(el("button", { class: "story-ring add" }, el("div", { class: "ring" }, el("div", {}, I.camera())), el("div", { class: "nm" }, "Add")));
+        for (const n of ["You", "Maya", "Theo"]) {
+          tray.append(el("button", { class: "story-ring cover" }, el("div", { class: "ring" }, el("div", {}, el("img", { src: IMG }))), el("div", { class: "nm" }, n)));
+        }
+        list.append(tray);
+        const card = el("div", { class: "card post" },
+          el("div", { class: "post-head" },
+            el("div", { class: "avatar", style: "width:34px;height:34px;font-size:14px" }, "SR"),
+            el("span", { class: "name" }, "Sam Rivera"), el("span", { class: "when" }, "12m"),
+            el("button", { class: "kebab" }, I.ellipsis())),
+          el("div", { class: "post-body" }, "sunday slow brunch — the sourdough finally rose 🍞"));
+        const media = el("div", { class: "post-media single" });
+        media.append(el("div", { class: "media-page" }, el("img", { class: "media-backdrop", src: IMG }), el("img", { "data-ref": "x", src: IMG })));
+        card.append(media);
+        card.append(el("a", { class: "song-chip glass tint-pink" }, el("span", { class: "note" }, I.music()),
+          el("span", { style: "flex:1;min-width:0" }, el("strong", {}, "FATHER'S HOUSE"), " · Forrest Frank")));
+        const acts = el("div", { class: "post-actions" });
+        acts.append(el("button", { class: "react-pill glass tint-pink mine" }, el("span", {}, "❤️"), el("span", { class: "n" }, "1")));
+        acts.append(el("button", { class: "react-pill glass" }, el("span", {}, "😂"), el("span", { class: "n" }, "3")));
+        const q = el("div", { class: "quick" });
+        for (const e of ["❤️", "😂", "👍"]) q.append(el("button", {}, e));
+        q.append(el("button", { class: "more" }, I.plusCircle()));
+        q.append(el("button", {}, "💬 1"));
+        acts.append(q);
+        card.append(acts);
+        list.append(card);
+        document.getElementById("view-circle").append(el("div", { class: "col-wrap" }, list));
+
+        const composer = el("div", { class: "composer floating" },
+          el("div", { class: "composer-meta" }, el("span", { class: "sync-badge glass" }, el("span", { class: "dot", style: "background:#EF4444" }), el("span", {}, "Device only"))),
+          el("div", { class: "composer-row" },
+            el("button", { class: "composer-plus" }, I.plus()),
+            el("textarea", { class: "composer-field glass", placeholder: "Share something…", rows: "1" }),
+            el("button", { class: "composer-send" }, I.plane())));
+        document.getElementById("composer-slot").append(composer);
+      }
+
+      // ---- Messages list ------------------------------------------------------------------
+      if (view === "messages") {
+        const list = el("div", { class: "thread-list" });
+        const row = (n, p, unread, t) => el("div", { class: "thread-item" },
+          el("div", { class: "avatar" }, n.split(" ").map((x) => x[0]).join("")),
+          el("div", { style: "flex:1;min-width:0" },
+            el("div", { class: "name" + (unread ? " unread" : "") }, n),
+            el("div", { class: "preview" + (unread ? " unread" : "") }, p)),
+          el("div", { class: "muted small" }, t),
+          unread ? el("span", { class: "unread-pill" }, String(unread)) : null,
+          el("button", { class: "kebab" }, I.ellipsis()));
+        list.append(row("Maya Quinn", "always ☕️", 2, "4h"));
+        list.append(row("Theo Park", "🙌", 0, "8h"));
+        list.append(row("Nina Brooks", "🔒 Secret message", 0, "2d"));
+        document.getElementById("view-messages").append(el("div", { class: "col-wrap" },
+          el("div", { class: "view-head" }, el("h1", {}, "Messages")), list));
+      }
+
+      // ---- Messages thread ----------------------------------------------------------------
+      if (view === "thread") {
+        const vm = document.getElementById("view-messages");
+        vm.classList.add("thread-mode");
+        const chat = el("div", { class: "chat" });
+        const bub = (text, me, opts = {}) => {
+          const col = el("div", { class: "bubble-col" });
+          if (opts.sender) col.append(el("div", { class: "chat-sender" }, opts.sender));
+          if (opts.media) col.append(el("div", { class: "bubble-media" }, el("img", { src: IMG })));
+          if (opts.tomb) col.append(el("div", { class: "chat-bubble tombstone" }, "Message unsent"));
+          else if (text) col.append(el("div", { class: "chat-bubble" + (me ? " me" : "") }, text));
+          if (opts.reacts) {
+            const rr = el("div", { class: "bubble-reacts" });
+            for (const r of opts.reacts) rr.append(el("button", { class: "msg-react" + (r.mine ? " mine" : "") }, r.e + (r.n > 1 ? " " + r.n : "")));
+            col.append(rr);
+          }
+          const m = el("div", { class: "chat-meta" }, opts.t || "2m");
+          if (opts.edited) m.append(el("span", {}, "edited"));
+          if (me && !opts.tomb) m.append(el("span", { class: "chat-check on" }, "✓✓"));
+          col.append(m);
+          return el("div", { class: "bubble-row" + (me ? " me" : "") }, col);
+        };
+        chat.append(bub("morning! did the sourdough work out?", false, { t: "9:02" }));
+        chat.append(bub("it did — best crumb yet. photo incoming", true, { t: "9:03" }));
+        chat.append(bub("", true, { media: true, t: "9:03", reacts: [{ e: "🔥", n: 2 }, { e: "❤️", n: 1, mine: true }] }));
+        chat.append(bub("that looks unreal. recipe?", false, { t: "9:05" }));
+        chat.append(bub("", false, { tomb: true, t: "9:06" }));
+        chat.append(bub("sending it over now — it's a long one so bear with me, there are a few folds involved", true, { t: "9:07", edited: true }));
+        vm.append(el("div", { class: "col-wrap" }, el("div", { class: "thread-wrap" },
+          el("div", { class: "dm-head" },
+            el("button", { class: "icon-btn glass" }, I.back()),
+            el("div", { style: "min-width:0" }, el("div", { class: "dm-name" }, "Maya Quinn"), el("div", { class: "dm-presence" }, "Connected")),
+            el("div", { class: "spacer" }),
+            el("button", { class: "icon-btn glass" }, I.phone()), el("button", { class: "icon-btn glass" }, I.video())),
+          chat,
+          el("div", { class: "dm-composer glass" },
+            el("div", { class: "composer-row" },
+              el("button", { class: "composer-plus" }, I.plus()),
+              el("textarea", { class: "composer-field glass", placeholder: "Message…", rows: "1" }),
+              el("button", { class: "composer-send" }, I.plane()))))));
+      }
+
+      // ---- You ----------------------------------------------------------------------------
+      if (view === "you") {
+        const body = el("div", { class: "feed-list" },
+          el("div", { class: "profile-head" },
+            el("button", { class: "profile-avatar" }, el("div", { class: "disc" }, "🌿"), el("span", { class: "pencil" }, I.pencil())),
+            el("div", { class: "profile-name" }, "Riley Avery"),
+            el("div", { class: "profile-bio" }, "designer · plant hoarder · weekend hiker 🏔"),
+            el("button", { class: "profile-link" }, I.link(), "rileyavery.studio")));
+        const tray = el("div", { class: "story-tray" });
+        tray.append(el("button", { class: "story-ring cover" }, el("div", { class: "ring" }, el("div", {}, el("img", { src: IMG })))));
+        body.append(el("div", { class: "card" }, el("div", { class: "section-label" }, "Your stories"), tray));
+        body.append(el("div", { class: "card post" },
+          el("div", { class: "post-head" }, el("div", { class: "avatar", style: "width:34px;height:34px;font-size:14px" }, "Y"),
+            el("span", { class: "name" }, "You"), el("span", { class: "when" }, "1h"), el("button", { class: "kebab" }, I.ellipsis())),
+          el("div", { class: "post-body" }, "new little corner of the studio came together today 🌿")));
+        document.getElementById("view-you").append(el("div", { class: "col-wrap" }, body));
+      }
+    </script>
   </body>
 </html>

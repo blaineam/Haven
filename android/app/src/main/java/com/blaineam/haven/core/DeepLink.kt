@@ -21,7 +21,39 @@ object DeepLink {
     private const val HOST = "wemiller.com"
     private const val PATH_PREFIX = "/apps/haven"
 
+    /** Fragment-safe token charset: unreserved characters *minus* `.` and `/`, so those two stay
+     *  unambiguous as our delimiters no matter what an id carries. Must stay byte-identical to
+     *  `fragmentToken` in `apple/HavenApp/DeepLink.swift` — a link one platform emits has to split
+     *  the same way on the other. */
+    private const val TOKEN_SAFE =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_~"
+    private const val HEX = "0123456789ABCDEF"
+
     data class Post(val circleId: String, val postId: String)
+
+    /**
+     * The link a post's share sheet hands out — web-routed so it crosses to iOS/Android and
+     * survives being pasted anywhere. Inverse of [webPost]; null for empty ids.
+     *
+     * ⚠️ The payload goes AFTER the `#` on purpose — see this file's header before "fixing" it.
+     * Moving `p/<circle>.<post>` into the path would ship every reader's IP × circle × post to
+     * wemiller.com's access logs. Keep it in the fragment.
+     */
+    fun postUrl(circleId: String, postId: String): String? {
+        if (circleId.isEmpty() || postId.isEmpty()) return null
+        return "https://$HOST$PATH_PREFIX/#p/${encodeToken(circleId)}.${encodeToken(postId)}"
+    }
+
+    /** Not `Uri.encode` — its unreserved set keeps `.` literal, which would let a `dm:<a>-<b>`
+     *  style id slide the split and hand our own parser the wrong circle. */
+    private fun encodeToken(s: String): String = buildString {
+        for (b in s.toByteArray(Charsets.UTF_8)) {
+            val i = b.toInt() and 0xFF
+            val c = i.toChar()
+            if (i < 0x80 && TOKEN_SAFE.indexOf(c) >= 0) append(c)
+            else append('%').append(HEX[i shr 4]).append(HEX[i and 0xF])
+        }
+    }
 
     /** Both link generations normalize to this one route, so links shared years ago keep working. */
     fun parsePost(raw: String?): Post? {

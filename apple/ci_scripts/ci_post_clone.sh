@@ -172,6 +172,26 @@ command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
 cd "$APPLE_DIR"
 xcodegen generate
 
+# ---------------------------------------------------------------------------
+# 4. Package.resolved — Xcode Cloud disables automatic dependency resolution and demands a
+#    committed resolved file at:
+#      apple/Haven.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+#    …which lives INSIDE the gitignored .xcodeproj, so it can never be committed there — git
+#    cannot un-ignore a file inside an ignored directory. (The build error's advice, "check that
+#    Package.resolved is committed", is impossible as written for a generated project.)
+#    So the pinned versions are committed at apple/Package.resolved and copied into the freshly
+#    generated project here. Update that file whenever an SPM dependency changes:
+#      cp apple/Haven.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved apple/Package.resolved
+# ---------------------------------------------------------------------------
+SPM_DIR="$APPLE_DIR/Haven.xcodeproj/project.xcworkspace/xcshareddata/swiftpm"
+if [ -f "$APPLE_DIR/Package.resolved" ]; then
+  mkdir -p "$SPM_DIR"
+  cp "$APPLE_DIR/Package.resolved" "$SPM_DIR/Package.resolved"
+  echo "  Package.resolved → $(basename "$SPM_DIR")/ ✅"
+else
+  echo "⚠️  apple/Package.resolved missing — Xcode Cloud will fail to resolve packages"
+fi
+
 echo "=== ci_post_clone: done ==="
 ls -d "$XCFW" >/dev/null 2>&1 && echo "  HavenFFI.xcframework ✅" || { echo "  HavenFFI.xcframework MISSING ❌"; exit 1; }
 ls -d "$APPLE_DIR/Generated" >/dev/null 2>&1 && echo "  Generated/ ✅" || { echo "  Generated/ MISSING ❌"; exit 1; }

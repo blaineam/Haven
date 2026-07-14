@@ -4,6 +4,10 @@
 
 mod callwire;
 mod commands;
+// The PII-free screenshot dataset. `cfg` — NOT a runtime check — so the seeder and every synthetic
+// identity in it are absent from a release binary: no env var can reach code that isn't compiled.
+#[cfg(debug_assertions)]
+mod demo;
 mod engine;
 mod localmedia;
 mod relayhealth;
@@ -124,10 +128,34 @@ fn active_identity_if_exists() -> Result<Option<([u8; 32], Paths)>> {
     Ok(Some((seed, Paths::resolve_for(&entry.dir)?)))
 }
 
+/// True when this run must never bring the P2P node online (the demo/screenshot capture, which has a
+/// synthetic cast that must never reach a real peer). Always false in release: the module that reads
+/// the env var doesn't exist there.
+fn no_net() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        demo::no_net()
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
+    }
+}
+
+/// The identity to run as: normally the roster's active one, but `HAVEN_DEMO=1` (debug only) swaps in
+/// the demo identity, which lives in its OWN data dir — so seeding can't write into the real store.
+fn startup_identity() -> Result<Option<([u8; 32], Paths)>> {
+    #[cfg(debug_assertions)]
+    if demo::is_demo() {
+        return demo::identity().map(Some);
+    }
+    active_identity_if_exists()
+}
+
 /// Run the full GUI app.
 pub fn run() {
     // Fresh install → no engine; the frontend shows the welcome screen and `onboard_*` relaunches.
-    let existing = active_identity_if_exists().expect("resolve identity");
+    let existing = startup_identity().expect("resolve identity");
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -181,8 +209,17 @@ pub fn run() {
                         }
                     });
                 }
+                // Seed the demo dataset BEFORE the node would come up, and only ever instead of it —
+                // `no_net()` is true whenever the seeder runs, so the synthetic cast has no wire to
+                // reach. No-op unless HAVEN_DEMO=1 (and absent entirely from release).
+                #[cfg(debug_assertions)]
+                demo::seed(&setup_engine);
+
                 let e = setup_engine.clone();
                 tauri::async_runtime::spawn(async move {
+                    if no_net() {
+                        return; // offline demo/capture run: never bind the node
+                    }
                     e.start().await;
                     // If the user opted in, host the relay automatically — combined with
                     // launch-on-login this makes the desktop app a reboot-surviving relay.
@@ -193,6 +230,11 @@ pub fn run() {
 
                 // System tray: show the window, toggle the relay, or quit. The relay keeps running
                 // when the window is closed, so the tray is the "invisible background relay" surface.
+                //
+                // This is the ONLY tray. tauri.conf.json must NOT also declare a `trayIcon` block:
+                // Tauri auto-creates one from that at startup, so declaring it there AND building
+                // one here put TWO icons in the macOS menu bar — and the config-declared one has no
+                // menu, so it was a dead duplicate.
                 let show = MenuItem::with_id(app, "show", "Open Haven", true, None::<&str>)?;
                 let relay = MenuItem::with_id(app, "relay", "Host relay", true, None::<&str>)?;
                 let quit = MenuItem::with_id(app, "quit", "Quit Haven", true, None::<&str>)?;

@@ -178,6 +178,7 @@ struct CircleLockView: View {
                         .font(.headline).padding(.horizontal, 24).padding(.vertical, 12)
                         .background(HavenTheme.pink, in: Capsule()).foregroundStyle(.white)
                 }
+                .buttonStyle(.plain)   // the pill IS the button — no macOS bezel behind it
                 if let err = gate.lastError {
                     Text(err).font(.caption).foregroundStyle(.red)
                 }
@@ -199,6 +200,7 @@ struct PrivacyBlurView: View {
                 Text("Haven is locked").font(.headline)
             }
         }
+        .ignoresSafeArea()   // a privacy cover that stops at the safe area isn't one
     }
 }
 
@@ -210,10 +212,30 @@ struct CircleSettingsView: View {
     @ObservedObject private var circleSettings = CircleSettingsStore.shared
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
+    @State private var showRelays = false   // macOS only — "Manage relays" is a NavigationLink on iOS
 
     private var isDefault: Bool { circleId == "default" }
 
     var body: some View {
+        platformBody
+            .onAppear { name = store.circles.first { $0.id == circleId }?.name ?? "" }
+            .onDisappear { store.renameCircle(circleId, to: name) }   // persist a rename made without hitting return
+    }
+
+    @ViewBuilder private var platformBody: some View {
+        #if os(macOS)
+        // Presented as a nested SHEET from CircleView, not pushed: a NavigationStack inside a sheet
+        // paints gray bands above and below the content on macOS. HavenMacSheet runs the gradient to
+        // the sheet's extreme edges, so relays open as one more sheet rather than a push.
+        HavenMacSheet("Circle settings") { settingsColumn }
+            .sheet(isPresented: $showRelays) { RelaysView().macSheetClose() }
+        #else
+        formBody
+        #endif
+    }
+
+    #if !os(macOS)
+    private var formBody: some View {
         ZStack {
             HavenBackground()
             Form {
@@ -309,9 +331,108 @@ struct CircleSettingsView: View {
         }
         .navigationTitle("Circle settings")
         .havenInlineNavTitle()
-        .onAppear { name = store.circles.first { $0.id == circleId }?.name ?? "" }
-        .onDisappear { store.renameCircle(circleId, to: name) }   // persist a rename made without hitting return
     }
+    #endif
+
+    #if os(macOS)
+    /// A hand-rolled column, not a Form — HavenMacSheet's content lives in a ScrollView, which gives
+    /// a Form no height to lay out against. Same rows, same order, same bindings as the iOS Form.
+    private var settingsColumn: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 8) {
+                sectionHeader("Name")
+                TextField("Circle name", text: $name)
+                    .onSubmit { store.renameCircle(circleId, to: name) }
+                    .havenPillField()
+                footnote("What this circle is called for you and everyone in it.")
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                sectionHeader("Privacy")
+                togglePill(Binding(get: { circleSettings.spotlightEnabled(circleId) },
+                                   set: { circleSettings.setSpotlight($0, for: circleId) }),
+                           "Index in Spotlight", "magnifyingglass")
+                    .disabled(circleSettings.biometricRequired(circleId))
+                if CircleSettingsStore.biometricsAvailable {
+                    togglePill(Binding(get: { circleSettings.biometricRequired(circleId) },
+                                       set: { circleSettings.setBiometric($0, for: circleId) }),
+                               "Require Face ID to open", "faceid")
+                }
+                footnote(circleSettings.biometricRequired(circleId)
+                         ? "Locked — hidden from Spotlight, and notifications won't show content until you unlock with Face ID."
+                         : "Spotlight finds this circle's posts in system search (on-device only). Face ID locks the circle each time you open the app.")
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                sectionHeader("Media in this circle")
+                Picker(selection: Binding(get: { circleSettings.ownOverride(circleId) },
+                                          set: { circleSettings.setSaveOwn($0, for: circleId) })) {
+                    Text("Default (\(SettingsStore.shared.saveToPhotos ? "On" : "Off"))").tag(Bool?.none)
+                    Text("On").tag(Bool?.some(true)); Text("Off").tag(Bool?.some(false))
+                } label: { Label("Save your posts", systemImage: "square.and.arrow.down") }
+                Picker(selection: Binding(get: { circleSettings.othersOverride(circleId) },
+                                          set: { circleSettings.setSaveOthers($0, for: circleId) })) {
+                    Text("Default (\(SettingsStore.shared.saveOthersToPhotos ? "On" : "Off"))").tag(Bool?.none)
+                    Text("On").tag(Bool?.some(true)); Text("Off").tag(Bool?.some(false))
+                } label: { Label("Save others' posts", systemImage: "square.and.arrow.down.on.square") }
+                Picker(selection: Binding(get: { circleSettings.optimizeOverride(circleId) },
+                                          set: { circleSettings.setOptimize($0, for: circleId) })) {
+                    Text("Default (\(SettingsStore.shared.autoOptimize ? "On" : "Off"))").tag(Bool?.none)
+                    Text("On").tag(Bool?.some(true)); Text("Off").tag(Bool?.some(false))
+                } label: { Label("Auto-optimize media", systemImage: "wand.and.stars") }
+                Picker(selection: Binding(get: { circleSettings.retentionOverride(circleId) },
+                                          set: { circleSettings.setRetention($0, for: circleId) })) {
+                    Text("Default").tag(Int?.none)
+                    Text("Off").tag(Int?.some(0)); Text("After 1 week").tag(Int?.some(7))
+                    Text("After 1 month").tag(Int?.some(30)); Text("After 3 months").tag(Int?.some(90))
+                    Text("After 1 year").tag(Int?.some(365))
+                } label: { Label("Auto-delete old posts", systemImage: "trash") }
+                if circleSettings.hasMediaOverride(circleId) {
+                    Button("Use the app defaults here") { circleSettings.clearMediaOverrides(for: circleId) }
+                        .buttonStyle(GlassPillButtonStyle(tint: HavenTheme.pink))
+                }
+                footnote("Override the app-wide Photos / optimize / auto-delete defaults just for this circle.")
+            }
+
+            CircleRelayOverrideSection(circleId: circleId)
+            VStack(alignment: .leading, spacing: 8) {
+                Button { showRelays = true } label: {
+                    Label("Manage relays", systemImage: "antenna.radiowaves.left.and.right")
+                }
+                .buttonStyle(GlassPillButtonStyle(tint: HavenTheme.pink))
+                footnote("Add, name, deactivate, or set a default relay under Settings ▸ Relays.")
+            }
+
+            if !isDefault {
+                Button { store.leaveActiveCircle(); dismiss() } label: {
+                    Label("Leave this circle", systemImage: "rectangle.portrait.and.arrow.right")
+                }
+                .buttonStyle(GlassPillButtonStyle(tint: .red))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Label leading, switch trailing — a bare Toggle glues them together and reads lost in a pill.
+    private func togglePill(_ isOn: Binding<Bool>, _ title: String, _ icon: String) -> some View {
+        HStack {
+            Label(title, systemImage: icon)
+            Spacer()
+            Toggle("", isOn: isOn).labelsHidden().toggleStyle(.switch).tint(HavenTheme.pink)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+        .havenGlass(in: Capsule())
+    }
+
+    private func sectionHeader(_ text: String) -> some View {
+        Text(text).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+    }
+
+    private func footnote(_ text: String) -> some View {
+        Text(text).font(.footnote).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)   // wrap fully; don't truncate on macOS
+    }
+    #endif
 }
 
 /// Per-circle relay OVERRIDE: toggle which of your configured relays THIS circle uses. The all-circles
@@ -324,35 +445,67 @@ struct CircleRelayOverrideSection: View {
     private var configured: [RelayEntry] { store.allEntries().filter { $0.active } }
     private var explicit: Set<String> { Set(store.explicitRelays(forCircle: circleId)) }
 
+    private let footerText = "Choose which configured relays this circle uses, overriding the default. Posts are mirrored to every relay turned on here and read from any that's reachable. The default relay (if set) always applies — change it under Settings ▸ Relays."
+
     var body: some View {
         if configured.isEmpty {
             EmptyView()
         } else {
+            #if os(macOS)
+            // The mac settings screen is a plain column inside HavenMacSheet's ScrollView — a Form
+            // Section has nothing to lay out in there.
+            relayColumn
+            #else
             Section {
-                ForEach(configured) { e in
-                    let isDefault = store.defaultNodeHex == e.hex
-                    Toggle(isOn: Binding(
-                        get: { explicit.contains(e.hex) || isDefault },
-                        set: { FeedStore.shared.setCircleRelay(e.hex, circleId: circleId, on: $0) }
-                    )) {
-                        HStack(spacing: 6) {
-                            Image(systemName: e.isS3 ? "externaldrive.fill" : "antenna.radiowaves.left.and.right")
-                                .foregroundStyle(.secondary)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(e.name).font(.subheadline)
-                                if isDefault { Text("Default — inherited by every circle").font(.caption2).foregroundStyle(.secondary) }
-                            }
-                        }
-                    }
-                    .tint(HavenTheme.pink)
-                    .disabled(isDefault)   // the default is always on; manage it under Settings ▸ Relays
-                }
+                ForEach(configured) { e in relayToggle(e) }
             } header: {
                 Text("Relays for this circle")
             } footer: {
-                Text("Choose which configured relays this circle uses, overriding the default. Posts are mirrored to every relay turned on here and read from any that's reachable. The default relay (if set) always applies — change it under Settings ▸ Relays.")
+                Text(footerText)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            #endif
         }
+    }
+
+    #if os(macOS)
+    private var relayColumn: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Relays for this circle").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+            ForEach(configured) { e in
+                relayToggle(e)
+                    .padding(.horizontal, 16).padding(.vertical, 10)
+                    .havenGlass(in: Capsule())
+            }
+            Text(footerText).font(.footnote).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    #endif
+
+    private func relayToggle(_ e: RelayEntry) -> some View {
+        let isDefault = store.defaultNodeHex == e.hex
+        return Toggle(isOn: Binding(
+            get: { explicit.contains(e.hex) || isDefault },
+            set: { FeedStore.shared.setCircleRelay(e.hex, circleId: circleId, on: $0) }
+        )) {
+            HStack(spacing: 6) {
+                Image(systemName: e.isS3 ? "externaldrive.fill" : "antenna.radiowaves.left.and.right")
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(e.name).font(.subheadline)
+                    if isDefault { Text("Default — inherited by every circle").font(.caption2).foregroundStyle(.secondary) }
+                }
+                #if os(macOS)
+                Spacer()   // the pill is full-width — push the switch to its trailing edge
+                #endif
+            }
+        }
+        #if os(macOS)
+        .toggleStyle(.switch)   // a switch reads modern in the pill; the checkbox looked dated
+        #endif
+        .tint(HavenTheme.pink)
+        .disabled(isDefault)   // the default is always on; manage it under Settings ▸ Relays
     }
 }

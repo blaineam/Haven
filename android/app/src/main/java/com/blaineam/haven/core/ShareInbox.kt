@@ -45,8 +45,21 @@ object InviteInbox {
         private set
     fun offer(uri: String?) {
         val u = uri?.trim().orEmpty()
+        // A POST link rides the same domain and the same #fragment as an invite, so shape can't tell
+        // them apart — only grammar can. Reject it here as well as at the MainActivity fork, so a
+        // future caller can't silently re-route posts into Connect (where they fail).
+        if (DeepLink.parsePost(u) != null) return
         // Only invite-shaped links (payload rides the #fragment). Anything else is a plain share.
         if (u.contains('#') && (u.startsWith("haven://") || u.contains("wemiller.com"))) pending = u
     }
     fun consume(): String? = pending.also { pending = null }
+}
+
+/// A post deep link the app was OPENED with (`https://…/#p/<c>.<p>` or legacy `haven://p/<c>/<p>`).
+/// RootScreen observes it, presents the post, and clears it — the [InviteInbox] of post links.
+object PostLinkInbox {
+    var pending by mutableStateOf<DeepLink.Post?>(null)
+        private set
+    fun offer(post: DeepLink.Post?) { if (post != null) pending = post }
+    fun consume(): DeepLink.Post? = pending.also { pending = null }
 }

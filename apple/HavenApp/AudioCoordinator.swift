@@ -116,8 +116,11 @@ final class AudioCoordinator: ObservableObject {
     /// Toggle the video's own audio, crossfading against the song. Flips the GLOBAL video-sound toggle
     /// so the choice applies to every video and persists across loops/scroll (not just this one post).
     func toggleVideoAudio() {
-        guard !SettingsStore.shared.silent, !callActive else { return }   // app muted / call owns audio
+        guard !callActive else { return }   // call owns audio
         let on = !videoUnmuted
+        // Tapping the speaker IS the intent to hear it, so lift the global mute instead of no-op'ing.
+        // This used to bail while silent — a dead button, and now macOS launches silent by default.
+        if on, SettingsStore.shared.silent { SettingsStore.shared.silent = false }
         videoUnmuted = on
         SettingsStore.shared.videoSoundOn = on
         if on {
@@ -174,7 +177,9 @@ final class AudioCoordinator: ObservableObject {
     func videoFinished() {
         if videoUnmuted {
             videoPlayer?.volume = 1   // stay unmuted on the looped playback
-        } else if !backgrounded {
+        } else if !backgrounded, !SettingsStore.shared.silent {
+            // A muted app must stay muted across loops — resume() itself doesn't know about `silent`,
+            // so every loop was quietly re-starting the song the viewer had just muted.
             MusicPlayback.shared.resume()
         }
     }
@@ -217,7 +222,25 @@ final class MusicPlayback {
     /// here at the chokepoint so every entry point (feed, stories, DM song pill) is covered.
     private var callActive: Bool { CallManager.shared.callInProgress }
 
+    /// Bumped by everything that means "stop wanting audio" (duck/stop/a newer play). macOS playback
+    /// is unavoidably async — we await authorization and a catalog fetch before the song ever starts —
+    /// and during that window `duck()` sees nothing playing and no-ops, so the song started anyway once
+    /// the fetch landed (mute the video, hear it play a beat later). An in-flight play() captures this
+    /// generation and re-checks it after EVERY await; if it's been superseded, it bails.
+    private var generation = 0
+    /// Supersede any in-flight play() — the caller no longer wants audio (or wants a different track).
+    private func invalidate() { generation &+= 1 }
+
+    /// The single authoritative "is this play still wanted" test. Cheap re-checks of `silent` alone
+    /// weren't enough: ducking for a video unmute leaves `silent` false, so the Task sailed past them.
+    private func stillWanted(_ gen: Int, _ track: TrackRefFfi) -> Bool {
+        gen == generation && current?.catalogId == track.catalogId
+            && appFrontmost && !SettingsStore.shared.silent && !callActive
+    }
+
     func play(_ track: TrackRefFfi) {
+        invalidate()                                         // this play supersedes any earlier one
+        let gen = generation
         current = track
         guard appFrontmost else { return }                   // background wake must stay silent
         guard !SettingsStore.shared.silent else { return }   // app is muted
@@ -237,18 +260,17 @@ final class MusicPlayback {
                 _ = await MusicAuthorization.request()
                 authed = true
             }
-            // Bail if the track was swapped out or the app muted while we awaited auth.
-            guard current?.catalogId == track.catalogId, !SettingsStore.shared.silent else { return }
+            guard stillWanted(gen, track) else { return }
             do {
                 let id = MusicItemID(store)
                 var request = MusicCatalogResourceRequest<Song>(matching: \.id, equalTo: id)
                 request.limit = 1
                 let response = try await request.response()
-                guard let song = response.items.first else { return }
-                // Re-check after the network fetch; user may have scrolled / muted.
-                guard current?.catalogId == track.catalogId, !SettingsStore.shared.silent else { return }
+                guard stillWanted(gen, track), let song = response.items.first else { return }
                 player.queue = [song]
                 try await player.play()
+                // play() is itself a suspension point — if we were superseded while it started, undo it.
+                guard stillWanted(gen, track) else { player.pause(); return }
                 if let startSeconds {
                     player.playbackTime = startSeconds
                 }
@@ -258,16 +280,26 @@ final class MusicPlayback {
         }
     }
     func duck() {
+        invalidate()   // kill any in-flight play() — pausing can't stop a song that hasn't started yet
         if player.state.playbackStatus == .playing { player.pause() }
     }
     func unduck() {
-        guard current != nil, appFrontmost, !callActive else { return }
-        Task { @MainActor in try? await player.play() }
+        guard current != nil, appFrontmost, !callActive, !SettingsStore.shared.silent else { return }
+        raise()
     }
     /// Resume the queued song if it's paused (e.g. a video had ducked it).
     func resume() {
-        guard current != nil, appFrontmost, !callActive, player.state.playbackStatus != .playing else { return }
-        Task { @MainActor in try? await player.play() }
+        guard current != nil, appFrontmost, !callActive, !SettingsStore.shared.silent,
+              player.state.playbackStatus != .playing else { return }
+        raise()
+    }
+    /// Start the already-queued song, honouring the generation token across the await.
+    private func raise() {
+        let gen = generation
+        Task { @MainActor in
+            try? await player.play()
+            if gen != generation { player.pause() }   // ducked/stopped while we were starting
+        }
     }
     /// Fully (re)queue and start the current track — used on unmute, when the song may never
     /// have been queued (play() bails while the app is silent, so resume() has nothing to do).
@@ -276,6 +308,7 @@ final class MusicPlayback {
         play(track)
     }
     func stop() {
+        invalidate()
         current = nil
         if player.state.playbackStatus == .playing { player.pause() }
     }
@@ -334,11 +367,12 @@ final class MusicPlayback {
         if player.playbackState == .playing { player.pause() }
     }
     func unduck() {
-        if current != nil, appFrontmost, !callActive { player.play() }
+        if current != nil, appFrontmost, !callActive, !SettingsStore.shared.silent { player.play() }
     }
     /// Resume the queued song if it's paused (e.g. a video had ducked it).
     func resume() {
-        guard current != nil, appFrontmost, !callActive, player.playbackState != .playing else { return }
+        guard current != nil, appFrontmost, !callActive, !SettingsStore.shared.silent,
+              player.playbackState != .playing else { return }
         player.play()
     }
     /// Fully (re)queue and start the current track — used on unmute, when the song may never

@@ -62,10 +62,11 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="haven" />
             </intent-filter>
-            <!-- The invite WEB link (https://wemiller.com/apps/haven/#…) — offers "Open with
-                 Haven" so a tapped invite lands in the app even without the custom scheme.
-                 (Not autoVerify: no assetlinks.json on the domain; the chooser is fine.) -->
-            <intent-filter android:autoVerify="false">
+            <!-- The WEB links (https://wemiller.com/apps/haven/#…) — invites and post links, so a
+                 tapped link lands in the app with no chooser. Verified against
+                 web/.well-known/assetlinks.json on the domain. The payload stays in the fragment,
+                 which the browser never sends to the host — see docs/LINK-SYSTEM.md. -->
+            <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />

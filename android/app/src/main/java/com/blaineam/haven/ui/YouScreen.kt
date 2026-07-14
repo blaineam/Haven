@@ -64,7 +64,7 @@ fun YouScreen(onAddFriend: () -> Unit) {
         runCatching {
             com.blaineam.haven.core.HavenNet.engine
                 .feed(com.blaineam.haven.core.DEFAULT_CIRCLE, com.blaineam.haven.core.nowMs(), null)
-                .filter { it.isMe && !it.story }
+                .filter { it.isMe && !it.story && !it.unsent }
         }.getOrDefault(emptyList())
     }
 

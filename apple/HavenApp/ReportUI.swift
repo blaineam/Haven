@@ -201,6 +201,11 @@ struct ReportedBanner: View {
             } label: {
                 Text("Act").font(.caption.weight(.semibold)).foregroundStyle(HavenTheme.pink)
             }
+            // Borderless or macOS wraps the bare label in a popup-button bezel.
+            #if os(macOS)
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            #endif
         }
         .padding(10)
         .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))

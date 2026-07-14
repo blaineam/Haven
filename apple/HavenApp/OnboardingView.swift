@@ -78,16 +78,17 @@ struct OnboardingView: View {
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+            // Glass pills, not bare Buttons — bare ones pick up macOS's default rectangular
+            // push-button bezel, and the house style is circles and pills everywhere.
             VStack(spacing: 10) {
                 Button { showLink = true } label: {
                     Label("Link this as another of my devices", systemImage: "laptopcomputer.and.iphone")
-                        .font(.subheadline.weight(.medium))
                 }
                 Button { showRestore = true } label: {
-                    Text("Restore my identity from a code").font(.subheadline.weight(.medium))
+                    Text("Restore my identity from a code")
                 }
             }
-            .tint(HavenTheme.pink)
+            .buttonStyle(GlassPillButtonStyle(tint: HavenTheme.pink))
             Spacer()
         }
     }

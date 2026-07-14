@@ -188,20 +188,23 @@ struct StoryViewer: View {
                         Label("Keep", systemImage: "bookmark.fill")
                             .font(.caption.weight(.semibold)).foregroundStyle(.white)
                             .padding(.horizontal, 10).padding(.vertical, 5)
-                            .background(.white.opacity(0.22), in: Capsule())
+                            // Real glass, not a hand-rolled white scrim — and .plain so macOS
+                            // paints no bezel behind the pill.
+                            .havenGlass(in: Capsule())
                     }
+                    .buttonStyle(.plain)
                     // Unsend (delete) your own story — removes it everywhere it was shared.
                     Button {
                         paused = true; player?.pause(); confirmDeleteStory = true
                     } label: {
                         Image(systemName: "trash").font(.caption.weight(.semibold)).foregroundStyle(.white)
                             .padding(.horizontal, 10).padding(.vertical, 5)
-                            .background(.white.opacity(0.22), in: Capsule())
+                            .havenGlass(in: Capsule())
                     }
+                    .buttonStyle(.plain)
                 }
-                Button { dismiss() } label: {
-                    Image(systemName: "xmark").font(.headline).foregroundStyle(.white)
-                }
+                Button { dismiss() } label: { Image(systemName: "xmark") }
+                    .buttonStyle(GlassIconButtonStyle(size: 30, tint: .white))
             }
             .padding(.horizontal).padding(.top, 4)
             .confirmationDialog("Delete this story?", isPresented: $confirmDeleteStory, titleVisibility: .visible) {
@@ -278,13 +281,15 @@ struct StoryViewer: View {
                     }
                 }
                 .padding(.horizontal, 16).padding(.vertical, 11)
-                .background(.white.opacity(0.14), in: Capsule())
-                .overlay(Capsule().strokeBorder(.white.opacity(0.25)))
+                // ONE surface: real glass. (Was a hand-rolled white scrim + its own stroked
+                // capsule — two surfaces on one control.)
+                .havenGlass(in: Capsule())
             if !replyText.trimmingCharacters(in: .whitespaces).isEmpty {
                 Button { sendReply(to: s) } label: {
                     Image(systemName: "paperplane.fill").foregroundStyle(.white).padding(10)
                         .background(HavenTheme.brand, in: Circle())
                 }
+                .buttonStyle(.plain)   // gradient circle is the surface; no bezel behind it
             }
         }
         .padding(.horizontal, 16)

@@ -127,7 +127,7 @@ struct BlockedPeopleView: View {
                             }
                             Spacer()
                             Button("Unblock") { connections.unblock(idHex) }
-                                .font(.subheadline.weight(.medium)).tint(HavenTheme.pink)
+                                .buttonStyle(GlassPillButtonStyle(tint: HavenTheme.pink))
                         }
                         .listRowBackground(Color.clear)
                     }
@@ -148,6 +148,37 @@ struct ConnectionRequestsView: View {
     @State private var approveTarget: ConnectionRequest?
 
     var body: some View {
+        Group {
+            #if os(macOS)
+            // A NavigationStack toolbar puts Done on a gray system band here (and doubled up with the
+            // sheet's own close), so macOS gets the sheet scaffold + a plain column instead of a List.
+            HavenMacSheet("Connection requests") {
+                if connections.pending.isEmpty {
+                    Text("No pending requests.").foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity).padding(.top, 40)
+                } else {
+                    VStack(alignment: .leading, spacing: 16) {
+                        ForEach(connections.pending) { req in requestCard(req) }
+                    }
+                }
+            }
+            #else
+            iosBody
+            #endif
+        }
+        .confirmationDialog("Share your past posts with \(approveTarget?.name ?? "them")?",
+                            isPresented: Binding(get: { approveTarget != nil }, set: { if !$0 { approveTarget = nil } }),
+                            titleVisibility: .visible) {
+            Button("Add & share history") { if let r = approveTarget { store.approveConnection(r, shareHistory: true) } }
+            Button("Add — new posts only") { if let r = approveTarget { store.approveConnection(r, shareHistory: false) } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Choose whether they can see what you've already shared, or only what you post from now on.")
+        }
+    }
+
+    #if !os(macOS)
+    private var iosBody: some View {
         NavigationStack {
             ZStack {
                 HavenBackground()
@@ -156,27 +187,9 @@ struct ConnectionRequestsView: View {
                 } else {
                     List {
                         ForEach(connections.pending) { req in
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(req.name).font(.headline)
-                                Text(req.safetyWords.joined(separator: " · "))
-                                    .font(.caption.monospaced()).foregroundStyle(HavenTheme.pink)
-                                Text("Check these safety words match what they see before adding.")
-                                    .font(.caption2).foregroundStyle(.secondary)
-                                HStack(spacing: 12) {
-                                    Button { approveTarget = req } label: {
-                                        Label("Add", systemImage: "checkmark.circle.fill")
-                                            .foregroundStyle(.white)   // white label+symbol on the filled pink, not a pink glyph
-                                    }
-                                    .buttonStyle(.borderedProminent).tint(HavenTheme.pink)
-                                    Button(role: .destructive) { store.blockConnection(req.idHex) } label: {
-                                        Label("Block", systemImage: "hand.raised.fill")
-                                            .foregroundStyle(.white)
-                                    }
-                                    .buttonStyle(.borderedProminent).tint(.red)   // filled red; no ambient tint flipping to iOS blue
-                                }
-                            }
-                            .padding(.vertical, 6)
-                            .listRowBackground(Color.clear)
+                            requestCard(req)
+                                .padding(.vertical, 6)
+                                .listRowBackground(Color.clear)
                         }
                     }
                     .scrollContentBackground(.hidden)
@@ -185,14 +198,28 @@ struct ConnectionRequestsView: View {
             .navigationTitle("Connection requests")
             .havenInlineNavTitle()
             .toolbar { ToolbarItem(placement: .havenConfirmTrailing) { Button("Done") { dismiss() }.havenToolbarPill() } }
-            .confirmationDialog("Share your past posts with \(approveTarget?.name ?? "them")?",
-                                isPresented: Binding(get: { approveTarget != nil }, set: { if !$0 { approveTarget = nil } }),
-                                titleVisibility: .visible) {
-                Button("Add & share history") { if let r = approveTarget { store.approveConnection(r, shareHistory: true) } }
-                Button("Add — new posts only") { if let r = approveTarget { store.approveConnection(r, shareHistory: false) } }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Choose whether they can see what you've already shared, or only what you post from now on.")
+        }
+    }
+    #endif
+
+    private func requestCard(_ req: ConnectionRequest) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(req.name).font(.headline)
+            Text(req.safetyWords.joined(separator: " · "))
+                .font(.caption.monospaced()).foregroundStyle(HavenTheme.pink)
+            Text("Check these safety words match what they see before adding.")
+                .font(.caption2).foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                Button { approveTarget = req } label: {
+                    Label("Add", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.white)   // white label+symbol on the filled pink, not a pink glyph
+                }
+                .buttonStyle(.borderedProminent).tint(HavenTheme.pink)
+                Button(role: .destructive) { store.blockConnection(req.idHex) } label: {
+                    Label("Block", systemImage: "hand.raised.fill")
+                        .foregroundStyle(.white)
+                }
+                .buttonStyle(.borderedProminent).tint(.red)   // filled red; no ambient tint flipping to iOS blue
             }
         }
     }

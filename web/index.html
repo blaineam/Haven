@@ -40,7 +40,7 @@
 
 <main id="main">
 
-  <!-- ── Invite slot: filled by JS when the URL carries an invite payload ── -->
+  <!-- ── Invite slot: filled by JS when the URL fragment carries an invite or a post link ── -->
   <div class="container" id="invite-slot"></div>
 
   <!-- ════════════════════════════════════════════════════════════════════
@@ -470,43 +470,87 @@ var DOWNLOADS = {
 };
 
 /* ──────────────────────────────────────────────────────────────────────────
-   Invite handling — preserved from the original landing page.
-   An invite payload "<id>.<verify>" rides in the URL fragment. When present,
-   we surface an "open in the app" card at the top and tuck the hero below it.
-   Haven is a NATIVE app; the browser can't be a peer, so this page's job is to
-   carry invite links into the app and to introduce Haven to newcomers.
+   Fragment handling — preserved from the original landing page, now covering
+   two payloads, both of which ride in the URL fragment:
+
+     #<id>.<verify>          an invite       → haven://invite#<id>.<verify>
+     #p/<circle>.<post>      a shared post   → haven://p/<circle>/<post>
+
+   When present we surface an "open in the app" card at the top and tuck the
+   hero below it. Haven is a NATIVE app; the browser can't be a peer, so this
+   page's job is to carry links into the app and to introduce Haven to newcomers.
+
+   ⚠️ The payload MUST stay in the #fragment — never move it into the path. ⚠️
+   The browser never sends a fragment to the server, so this host's logs (and any
+   CDN in front of it) can never learn which post someone opened, or which circle
+   they were invited to. A path like /apps/haven/p/<circle>/<post> would build
+   exactly that readership map. The fragment is the privacy guarantee.
+
+   A post link is a POINTER, not a key: it grants nothing. Only a device already
+   in the circle can decrypt the post; anyone else gets "post not found".
 ────────────────────────────────────────────────────────────────────────── */
 (function () {
   var APP_STORE_URL = DOWNLOADS.APP_STORE_URL;   // from the DOWNLOADS config above
   var GET_URL = "features/";
 
-  function detectInvite() {
+  // Copy per link kind — the card below is identical apart from these strings.
+  var COPY = {
+    invite: {
+      icon: "👋",
+      title: "You've been invited to Haven",
+      blurb: "Open this invite in the Haven app to join the circle securely. Your acceptance is end-to-end encrypted.",
+      open: "Open in the Haven app",
+      missing: "Don't have Haven yet? Install it, then tap the invite link again."
+    },
+    post: {
+      icon: "🔗",
+      title: "Someone shared a post with you",
+      blurb: "Open it in the Haven app. The post is end-to-end encrypted — this link just points at it, so only your circle can read it.",
+      open: "Open the post in Haven",
+      missing: "Don't have Haven yet? Install it, then tap the link again."
+    }
+  };
+
+  function detectLink() {
     var h = location.hash.replace(/^#/, "");
+    // Post links first: "p/<circle>.<post>" also contains a dot, so the invite
+    // check below would otherwise swallow it.
+    if (h.indexOf("p/") === 0) {
+      var body = h.slice(2);
+      var d = body.indexOf(".");
+      if (d < 1) return null;
+      var circle = body.slice(0, d), post = body.slice(d + 1);
+      if (!circle || !post) return null;
+      // Tokens are percent-encoded by the app with "." and "/" excluded, so this
+      // re-split is exact. Hand the app the path form it has always understood.
+      return { kind: "post", appUrl: "haven://p/" + circle + "/" + post };
+    }
     var dot = h.indexOf(".");
     if (dot < 1) return null;
     var id = h.slice(0, dot), verify = h.slice(dot + 1);
     if (!id || !verify) return null;
-    return { appUrl: "haven://invite#" + id + "." + verify };
+    return { kind: "invite", appUrl: "haven://invite#" + id + "." + verify };
   }
 
-  function openInApp(appUrl, statusEl) {
+  function openInApp(link, statusEl) {
     var left = false;
     var onHide = function () { left = true; };
     document.addEventListener("visibilitychange", onHide, { once: true });
     setTimeout(function () {
       document.removeEventListener("visibilitychange", onHide);
       if (!left && statusEl) {
-        statusEl.textContent = "Don't have Haven yet? Install it, then tap the invite link again.";
+        statusEl.textContent = COPY[link.kind].missing;
       }
     }, 1500);
-    window.location.href = appUrl;
+    window.location.href = link.appUrl;
   }
 
   function render() {
     var slot = document.getElementById("invite-slot");
     var hero = document.getElementById("hero");
-    var inv = detectInvite();
-    if (!inv) { slot.innerHTML = ""; if (hero) hero.style.display = ""; return; }
+    var link = detectLink();
+    if (!link) { slot.innerHTML = ""; if (hero) hero.style.display = ""; return; }
+    var copy = COPY[link.kind];
 
     if (hero) hero.style.display = "none";
     var getBtn = APP_STORE_URL
@@ -516,12 +560,10 @@ var DOWNLOADS = {
     slot.innerHTML =
       '<section class="section" style="padding-top:54px">' +
         '<div class="card reveal in center" style="max-width:560px;margin:0 auto;padding:34px 26px">' +
-          '<div style="font-size:46px">👋</div>' +
-          '<h2 style="font-size:26px;margin:10px 0 6px">You\'ve been invited to Haven</h2>' +
-          '<p class="muted" style="margin:6px auto 18px;max-width:40ch">' +
-            'Open this invite in the Haven app to join the circle securely. Your acceptance is end-to-end encrypted.' +
-          '</p>' +
-          '<button class="btn" id="open-app" style="width:100%">Open in the Haven app</button>' +
+          '<div style="font-size:46px">' + copy.icon + '</div>' +
+          '<h2 style="font-size:26px;margin:10px 0 6px">' + copy.title + '</h2>' +
+          '<p class="muted" style="margin:6px auto 18px;max-width:40ch">' + copy.blurb + '</p>' +
+          '<button class="btn" id="open-app" style="width:100%">' + copy.open + '</button>' +
           '<div style="height:10px"></div>' +
           getBtn.replace('class="btn"', 'class="btn ghost" style="width:100%"') +
           '<p id="invite-status" class="dim" style="font-size:13px;margin-top:14px;min-height:18px"></p>' +
@@ -530,7 +572,7 @@ var DOWNLOADS = {
 
     var btn = document.getElementById("open-app");
     var status = document.getElementById("invite-status");
-    if (btn) btn.addEventListener("click", function () { openInApp(inv.appUrl, status); });
+    if (btn) btn.addEventListener("click", function () { openInApp(link, status); });
   }
 
   render();

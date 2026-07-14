@@ -1,0 +1,19 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["8ZVSPZYSVF.com.blaineam.kith"],
+        "components": [
+          {
+            "/": "/apps/haven/*",
+            "comment": "Invite links and post links (https://wemiller.com/apps/haven/#…) open Haven. The payload rides in the URL fragment, which iOS matches on the device — it is never sent to this host."
+          },
+          {
+            "/": "/apps/haven",
+            "comment": "The bare page without a trailing slash."
+          }
+        ]
+      }
+    ]
+  }
+}

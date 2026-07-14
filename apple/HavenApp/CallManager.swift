@@ -1376,6 +1376,17 @@ struct AddToCallPicker: View {
     @ObservedObject private var call = CallManager.shared
     @Environment(\.dismiss) private var dismiss
     var body: some View {
+        #if os(macOS)
+        // Mac scaffold instead of a NavigationStack toolbar — Cancel landed on a gray system band.
+        HavenMacSheet("Add to call") {
+            let people = call.addableContacts()
+            if people.isEmpty {
+                Text("Everyone you know is already on the call.").foregroundStyle(.secondary).padding()
+            } else {
+                VStack(spacing: 8) { ForEach(people, id: \.hex) { row($0) } }
+            }
+        }
+        #else
         NavigationStack {
             ZStack {
                 HavenBackground()
@@ -1384,15 +1395,7 @@ struct AddToCallPicker: View {
                     Text("Everyone you know is already on the call.").foregroundStyle(.secondary).padding()
                 } else {
                     List(people, id: \.hex) { p in
-                        Button { CallManager.shared.addToCall(p.hex); dismiss() } label: {
-                            HStack(spacing: 12) {
-                                PeerAvatar(nodeHex: p.hex, name: p.name, size: 40)
-                                Text(p.name).foregroundStyle(.primary)
-                                Spacer()
-                                Image(systemName: "plus.circle.fill").foregroundStyle(HavenTheme.pink)
-                            }.contentShape(Rectangle())
-                        }
-                        .listRowBackground(Color.clear)
+                        row(p).listRowBackground(Color.clear)
                     }
                     .scrollContentBackground(.hidden)
                 }
@@ -1401,6 +1404,19 @@ struct AddToCallPicker: View {
             .havenInlineNavTitle()
             .toolbar { ToolbarItem(placement: .havenCancelLeading) { Button("Cancel") { dismiss() }.havenToolbarPill() } }
         }
+        #endif
+    }
+
+    private func row(_ p: (hex: String, name: String)) -> some View {
+        Button { CallManager.shared.addToCall(p.hex); dismiss() } label: {
+            HStack(spacing: 12) {
+                PeerAvatar(nodeHex: p.hex, name: p.name, size: 40)
+                Text(p.name).foregroundStyle(.primary)
+                Spacer()
+                Image(systemName: "plus.circle.fill").foregroundStyle(HavenTheme.pink)
+            }.contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)   // the row is the button; no bezel behind it
     }
 }
 
@@ -1435,6 +1451,7 @@ struct CallOverlay: View {
                             .frame(width: 70, height: 70).background(Color.green, in: Circle())
                     }
                 }
+                .buttonStyle(.plain)   // answer/decline supply their own circles; drop macOS's bezel
                 .padding(.bottom, 60)
             }
         }
@@ -1485,11 +1502,8 @@ struct CallOverlay: View {
                     .shadow(color: .black.opacity(0.4), radius: 4)
                     // Minimize sits at the top-leading, level with the name (was floating mid-screen).
                     HStack {
-                        Button { call.minimized = true } label: {
-                            Image(systemName: "chevron.down")
-                                .font(.headline.weight(.semibold)).foregroundStyle(.white)
-                                .frame(width: 40, height: 40).background(.black.opacity(0.3), in: Circle())
-                        }
+                        Button { call.minimized = true } label: { Image(systemName: "chevron.down") }
+                            .buttonStyle(GlassIconButtonStyle(size: 40, tint: .white))
                         Spacer()
                     }
                 }
@@ -1701,7 +1715,13 @@ struct CallOverlay: View {
         }
         .padding(.horizontal, 12)
         .buttonStyle(.plain)   // the call buttons supply their own circles; drop macOS's rectangular chrome
-        .sheet(isPresented: $showAddPicker) { AddToCallPicker().macSheetFrame() }
+        .sheet(isPresented: $showAddPicker) {
+            #if os(macOS)
+            AddToCallPicker()   // HavenMacSheet already brings its own frame + gradient
+            #else
+            AddToCallPicker().macSheetFrame()
+            #endif
+        }
     }
 
     #if targetEnvironment(macCatalyst)
@@ -1776,9 +1796,11 @@ struct CallOverlay: View {
         #endif
     }
 
+    /// One glass circle per control — `on` brightens the same surface with a tint instead of
+    /// swapping in a second hand-rolled scrim.
     private func callButton(_ symbol: String, on: Bool) -> some View {
         Image(systemName: symbol).font(.title3).foregroundStyle(.white).frame(width: 52, height: 52)
-            .background(Color.white.opacity(on ? 0.3 : 0.16), in: Circle())
+            .havenGlass(in: Circle(), tint: on ? Color.white.opacity(0.3) : nil)
     }
 }
 
@@ -1866,31 +1888,41 @@ struct ScreenPickerSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
+        #if os(macOS)
+        // Mac scaffold instead of NavigationView + toolbar — the list sat on the bare gray window
+        // background with a system band under Cancel. The close circle (or Esc) cancels.
+        HavenMacSheet("Share screen") {
+            VStack(alignment: .leading, spacing: 6) { sources }
+        }
+        #else
         NavigationView {
-            List {
-                let displays = call.screenSources.filter { $0.kind == .display }
-                let windows = call.screenSources.filter { $0.kind == .window }
-                if !displays.isEmpty {
-                    Section("Displays") {
-                        ForEach(displays) { src in row(src, icon: "display") }
-                    }
-                }
-                if !windows.isEmpty {
-                    Section("Windows") {
-                        ForEach(windows) { src in row(src, icon: "macwindow") }
-                    }
-                }
-                if call.screenSources.isEmpty {
-                    Text("No shareable content found. Grant Screen Recording permission in System Settings ▸ Privacy & Security.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                }
-            }
+            List { sources }
             .navigationTitle("Share screen")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { call.showScreenPicker = false; dismiss() }
                 }
             }
+        }
+        #endif
+    }
+
+    @ViewBuilder private var sources: some View {
+        let displays = call.screenSources.filter { $0.kind == .display }
+        let windows = call.screenSources.filter { $0.kind == .window }
+        if !displays.isEmpty {
+            Section("Displays") {
+                ForEach(displays) { src in row(src, icon: "display") }
+            }
+        }
+        if !windows.isEmpty {
+            Section("Windows") {
+                ForEach(windows) { src in row(src, icon: "macwindow") }
+            }
+        }
+        if call.screenSources.isEmpty {
+            Text("No shareable content found. Grant Screen Recording permission in System Settings ▸ Privacy & Security.")
+                .font(.footnote).foregroundStyle(.secondary)
         }
     }
 
@@ -1905,8 +1937,12 @@ struct ScreenPickerSheet: View {
                     Text(src.title).lineLimit(1)
                     Text(src.subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
+                Spacer()
             }
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            .contentShape(Capsule())
         }
+        .buttonStyle(PressableStyle())
     }
 }
 #endif

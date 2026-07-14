@@ -79,10 +79,14 @@ struct VideoTrimmer: View {
 
             HStack {
                 Button("Cancel") { dismiss() }
+                    .buttonStyle(GlassPillButtonStyle())
                 Spacer()
                 Button(exporting ? "Trimming…" : "Trim") { Task { await export() } }
+                    .buttonStyle(BrandButtonStyle())
+                    .frame(width: 150)   // the style fills its width; pin the confirm pill's size
                     .keyboardShortcut(.defaultAction)
                     .disabled(exporting || duration == 0)
+                    .opacity(exporting || duration == 0 ? 0.5 : 1)
             }
         }
         .padding(20)

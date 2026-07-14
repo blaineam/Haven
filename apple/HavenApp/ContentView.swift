@@ -63,7 +63,7 @@ struct YouView: View {
             .sheet(isPresented: $showConnect) {
                 ConnectView(account: account, contacts: contacts).macSheetFrame()
             }
-            .sheet(isPresented: $showEditProfile) { EditProfileSheet().macSheetFrame() }   // has its own toolbar Done
+            .sheet(isPresented: $showEditProfile) { EditProfileSheet() }   // brings its own chrome (HavenMacSheet / iOS toolbar Done)
             .havenFullScreenCover(isPresented: $showStories) {
                 StoryViewer(stories: feed.myStories, index: storyIndex, friendName: "Friend")
             }
@@ -436,6 +436,12 @@ struct IdentityBackupView: View {
         }
         .navigationTitle("Identity & backup")
         .havenInlineNavTitle()
+        #if os(macOS)
+        // Let the gradient show through instead of the toolbar's default gray band. This view keeps
+        // its NavigationStack (Transfer/Restore push from here, and Settings pushes it too), so it
+        // can't be a HavenMacSheet.
+        .toolbarBackground(.hidden, for: .windowToolbar)
+        #endif
         .onAppear { accountStore.rememberCurrentLabel(); reload() }
         .confirmationDialog(switchTarget.map { "Switch to “\($0.name)”?" } ?? "",
                             isPresented: Binding(get: { switchTarget != nil }, set: { if !$0 { switchTarget = nil } }),

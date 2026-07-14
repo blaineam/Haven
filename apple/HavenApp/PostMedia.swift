@@ -134,6 +134,12 @@ private struct CarouselVideo: View {
     @State private var player: AVPlayer?
     @State private var looper: Any?
 
+    /// The viewer's global video-sound choice, gated by the app-wide mute and by call audio
+    /// (a call owns the stage) — the same conditions AudioCoordinator.start applies inline.
+    private var soundOn: Bool {
+        !SettingsStore.shared.silent && SettingsStore.shared.videoSoundOn && !CallManager.shared.callInProgress
+    }
+
     var body: some View {
         // The SAME custom gesture player as the inline feed (hold-to-pause, drag-to-scrub, clean chrome)
         // rather than AVKit's VideoPlayer with its stock airplay/volume/scrubber bar.
@@ -143,6 +149,10 @@ private struct CarouselVideo: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onAppear {
                 let p = AVPlayer(url: url)
+                // Start SILENT unless the viewer has actually asked for video sound — opening a video
+                // full-screen used to blast it at full volume regardless of the app's mute switch, the
+                // global video-sound choice, or a live call. Same rule as the inline feed player.
+                p.volume = soundOn ? 1 : 0
                 looper = NotificationCenter.default.addObserver(
                     forName: .AVPlayerItemDidPlayToEndTime, object: p.currentItem, queue: .main) { [weak p] _ in
                     p?.seek(to: .zero); p?.play()

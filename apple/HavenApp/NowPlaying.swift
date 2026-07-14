@@ -42,8 +42,9 @@ struct NowPlayingPill: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(.ultraThinMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(HavenTheme.pink.opacity(0.35)))
+        // The chip is a control (tap = mute), so it gets ONE glass surface — the pink now rides the
+        // glass as a tint rather than a stroke stacked on a material.
+        .havenGlass(in: Capsule(), tint: HavenTheme.pink.opacity(0.35))
         .contentShape(Capsule())
         // Tapping the chip toggles the global mute (post music + video audio).
         .onTapGesture { settings.silent.toggle() }

@@ -196,7 +196,65 @@ input:focus, textarea:focus, select:focus {
 .post-media.masonry { display: block; column-count: 2; column-gap: 7px; }
 .post-media.masonry img, .post-media.masonry video { margin-bottom: 7px; max-height: none; height: auto; object-fit: cover; break-inside: avoid; }
 .post-media.single { grid-template-columns: 1fr; }
-.post-media.single img, .post-media.single video { max-height: 520px; object-fit: contain; }
+
+/* ---- Media pages: carousel (2…10 items) + single, both with a blurred backdrop ---- */
+/* A scroll-snap pager, not a grid: mixed aspect ratios no longer force the masonry, because every
+   page fits inside one shared shape and its own blurred backdrop masks the difference. */
+.post-media.carousel { display: block; position: relative; }
+.post-media.carousel .track {
+  display: flex; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x mandatory;
+  border-radius: var(--r-md); scrollbar-width: none;
+}
+.post-media.carousel .track::-webkit-scrollbar { display: none; }
+.post-media.carousel .media-page { flex: 0 0 100%; scroll-snap-align: center; }
+
+/* The page is the WHOLE shape; the media fits inside it (never cropped) and the backdrop fills
+   whatever the fit leaves over. Height-capped so a portrait item can't run a wide card off-screen —
+   when the cap binds, the page just gets wider than the media and the backdrop covers the sides. */
+.post-media .media-page {
+  position: relative; overflow: hidden; background: #000;
+  max-height: 520px;
+  display: flex; align-items: center; justify-content: center;
+}
+/* width: the page must stay card-WIDE. Without it, `aspect-ratio` resolves against the height cap and
+   shrinks the box to the media's own shape — the portrait then fits it exactly (so no backdrop ever
+   draws) and the dead space just moves outside the page, into the card. Pinning the width puts the
+   gap back INSIDE the page, which is the only place the backdrop can fill it.
+   radius: a single page is the whole thing, so it rounds itself; the carousel's track rounds instead,
+   because per-page corners would show up on both half-pages mid-swipe. */
+.post-media.single .media-page { width: 100%; border-radius: var(--r-md); }
+/* [data-ref] is the FITTED media specifically — the backdrop is an <img> child of the same page, so
+   a bare `> img` here would capture it too and (being more specific) override its own rule below.
+   The box is sized BY the media (max-* + auto, flex-centred), never stretched to the page with
+   object-fit. A <video> paints its own opaque black into any part of its box the frame doesn't
+   cover — no CSS background can clear it — so a page-sized video box would black out the backdrop
+   it's meant to sit on. Fitting the box to the frame leaves the gap to the backdrop instead. */
+.post-media .media-page > img[data-ref], .post-media .media-page > video[data-ref] {
+  position: relative; z-index: 1;
+  width: auto; height: auto; max-width: 100%; max-height: 100%;
+  border-radius: 0; background: transparent;
+}
+/* A blurred, cropped-to-fill copy of the SAME media behind the fitted one, so the letterboxed gap
+   reads as an extension of the content instead of flat black. scale(1.1) pushes the blur's soft
+   edge past the page bounds, which .media-page's overflow:hidden then clips.
+   will-change + translateZ promote it to its own layer so the blur rasterizes ONCE instead of being
+   recomputed every scroll frame; contain:paint keeps it from invalidating the card around it. The
+   source is a 64px still (see stillFrom), so that one raster is nearly free. */
+.post-media .media-page > .media-backdrop {
+  position: absolute; inset: 0; z-index: 0; width: 100%; height: 100%;
+  max-height: none; object-fit: cover; filter: blur(24px);
+  transform: scale(1.1) translateZ(0); will-change: transform; contain: paint;
+  border-radius: 0; pointer-events: none;
+}
+.carousel-dots {
+  position: absolute; left: 0; right: 0; bottom: 9px; z-index: 3;
+  display: flex; justify-content: center; gap: 6px; pointer-events: none;
+}
+.carousel-dots i {
+  width: 6px; height: 6px; border-radius: 50%; background: rgba(255, 255, 255, 0.4);
+  transition: background .2s; box-shadow: 0 1px 3px rgba(0, 0, 0, .4);
+}
+.carousel-dots i.on { background: rgba(255, 255, 255, 0.95); }
 
 .post-actions { display: flex; gap: 7px; margin-top: 12px; align-items: center; flex-wrap: wrap; }
 .react-pill {
@@ -338,6 +396,39 @@ input:focus, textarea:focus, select:focus {
   border-radius: var(--r-sm);
 }
 .btn.reason { text-align: left; justify-content: flex-start; }
+
+/* ---- Relay nudge (app.js RelayNudge) ---- */
+/* The brand-gradient sibling of .reported-banner: same slot, louder, because it's an offer not a warning. */
+.nudge-banner {
+  display: flex; align-items: flex-start; gap: 10px; padding: 13px 14px; margin-bottom: 14px;
+  background: var(--grad-h); border-radius: var(--r-md); color: #fff;
+  box-shadow: 0 6px 18px rgba(236, 72, 153, 0.3);
+  animation: cardIn .4s var(--spring) both;
+}
+.nudge-body { display: flex; align-items: flex-start; gap: 11px; flex: 1; min-width: 0; cursor: pointer; }
+.nudge-icon { font-size: 19px; line-height: 1.35; }
+.nudge-title { font-weight: 650; font-size: 14px; }
+.nudge-sub { font-size: 12px; opacity: 0.88; margin-top: 2px; }
+.nudge-x {
+  flex: 0 0 auto; width: 26px; height: 26px; border-radius: 50%; font-size: 11px; color: #fff;
+  background: rgba(255, 255, 255, 0.18); border: 1px solid rgba(255, 255, 255, 0.3);
+  transition: background .2s, transform .12s var(--spring);
+}
+.nudge-x:hover { background: rgba(255, 255, 255, 0.3); }
+.nudge-x:active { transform: scale(0.9); }
+.nudge-point {
+  display: flex; align-items: flex-start; gap: 11px; padding: 12px;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: var(--r-md);
+}
+.nudge-point-icon { font-size: 15px; line-height: 1.4; width: 20px; flex: 0 0 auto; }
+
+/* A post reached by a link: flash its outline once so it's obvious which one the link meant.
+   Outline, not box-shadow — .card's shadow is its own and mustn't blink out mid-animation. */
+.post.focus-flash { animation: focusFlash 1.6s var(--spring); }
+@keyframes focusFlash {
+  0%, 100% { outline: 2px solid transparent; outline-offset: 3px; }
+  15%, 60% { outline: 2px solid var(--pink); outline-offset: 3px; }
+}
 
 /* ---- Calls ---- */
 .call-overlay-full { width: min(960px, 94vw); max-height: 92vh; display: flex; flex-direction: column; }

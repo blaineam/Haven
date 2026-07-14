@@ -459,6 +459,15 @@ pub fn connect_by_link(engine: Eng, uri: String) -> bool {
     engine.connect_by_link(uri)
 }
 
+/// Drain the `haven://` URLs the OS handed us. The FRONTEND routes them (app.js `routeDeepLink`), because
+/// a post link and an invite link are different destinations and only one parser may decide which.
+/// Draining is destructive so a link is never acted on twice — the frontend calls this both at boot and
+/// on the `haven:deep-link` ping, and either may win.
+#[tauri::command]
+pub fn take_deep_links(links: tauri::State<'_, crate::DeepLinks>) -> Vec<String> {
+    std::mem::take(&mut *links.0.lock().unwrap())
+}
+
 #[tauri::command]
 pub fn pending(engine: Eng) -> Vec<PendingDto> {
     engine

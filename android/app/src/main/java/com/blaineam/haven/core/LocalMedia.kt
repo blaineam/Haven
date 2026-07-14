@@ -166,6 +166,49 @@ object LocalMedia {
         }.getOrNull().also { runCatching { mmr.release() } }
     }
 
+    /** Video pixel dimensions from MMR metadata, swapped when the clip carries a 90/270° rotation. */
+    private fun mmrSize(mmr: android.media.MediaMetadataRetriever): Pair<Int, Int>? {
+        fun tag(k: Int) = mmr.extractMetadata(k)?.toIntOrNull()
+        val w = tag(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH) ?: return null
+        val h = tag(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT) ?: return null
+        if (w <= 0 || h <= 0) return null
+        val rot = tag(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION) ?: 0
+        return if (rot == 90 || rot == 270) h to w else w to h
+    }
+
+    /** Memoized: a ref's pixel size never changes, and the image path costs a full decrypt to read
+     *  the header. Absent entries are cached as null too, so a missing ref isn't retried per scroll. */
+    private val sizeCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Int>>()
+    private val UNKNOWN_SIZE = 0 to 0   // a cached miss (ConcurrentHashMap can't hold a null value)
+
+    /**
+     * Pixel dimensions of a media ref, or null if unknown (bytes not here yet, oversized, or an
+     * un-played video with no decrypted cache file). Callers treat null as "assume it letterboxes".
+     * Blocking — call it off the main thread.
+     */
+    fun pixelSize(circleId: String, ref: String): Pair<Int, Int>? {
+        sizeCache[ref]?.let { return if (it == UNKNOWN_SIZE) null else it }
+        val size = if (isVideo(ref)) {
+            val file = File(dir.parentFile, "vid_${bareId(ref)}.mp4")
+            if (!file.exists()) null else {
+                val mmr = android.media.MediaMetadataRetriever()
+                runCatching { mmr.setDataSource(file.absolutePath); mmrSize(mmr) }
+                    .getOrNull().also { runCatching { mmr.release() } }
+            }
+        } else {
+            load(circleId, ref)?.let { bytes ->
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                if (bounds.outWidth > 0 && bounds.outHeight > 0) bounds.outWidth to bounds.outHeight else null
+            }
+        }
+        // Memoize a MISS only when it can't later become a hit: an image whose bytes are already here
+        // is undecodable for good, but a video is sizeless purely until it's decrypted to cache, and an
+        // in-flight download hasn't landed yet — re-ask for those.
+        if (size != null || (!isVideo(ref) && has(ref))) sizeCache[ref] = size ?: UNKNOWN_SIZE
+        return size
+    }
+
     fun has(ref: String): Boolean = File(dir, bareId(ref)).exists()
 
     /**

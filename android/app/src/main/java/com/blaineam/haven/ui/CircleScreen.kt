@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -59,6 +60,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -71,6 +73,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -142,7 +145,9 @@ fun CircleScreen(onAddFriend: () -> Unit) {
         }
     }
     val storyGroups = remember(items) { groupStories(items) }
-    val posts = remember(items) { items.filter { !it.story } }
+    // Stories live in the tray, not the list. Unsent posts are gone too — a "Message unsent" tombstone
+    // in the feed is clutter, not information (PostCard still renders it for a deep link / comment sheet).
+    val posts = remember(items) { items.filter { !it.story && !it.unsent } }
     // Reports filed by ANY member — the circle's shared moderation signal, grouped per post.
     val reportsByTarget = remember(version, active) { HavenNet.reports(active) }
     var viewingStory by remember { mutableStateOf<Int?>(null) }
@@ -218,9 +223,26 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                     }
                 }
             } else {
+                // Exactly ONE post plays its video at a time — the one nearest the viewport centre
+                // (iOS AudioCoordinator/centeredPostId parity). derivedStateOf so a scroll only
+                // recomposes the two cards whose active-ness actually flipped, not the feed per frame.
+                val feedState = androidx.compose.foundation.lazy.rememberLazyListState()
+                val centeredPost by remember(feedState) {
+                    androidx.compose.runtime.derivedStateOf {
+                        val info = feedState.layoutInfo
+                        val mid = (info.viewportStartOffset + info.viewportEndOffset) / 2
+                        // Posts are the only items keyed by a String (their id) — the tray/banner
+                        // items carry Compose's generated keys, so they can never become active.
+                        info.visibleItemsInfo
+                            .filter { it.key is String }
+                            .minByOrNull { kotlin.math.abs(it.offset + it.size / 2 - mid) }
+                            ?.key as? String
+                    }
+                }
                 // Stories + pending scroll WITH the posts so there's maximum room to browse.
                 LazyColumn(
                     Modifier.fillMaxWidth().weight(1f),
+                    state = feedState,
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
@@ -228,6 +250,8 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                     if (HavenNet.pending.isNotEmpty()) item {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { HavenNet.pending.forEach { PendingCard(it) } }
                     }
+                    // Renders nothing until the circle outgrows a pair and still has no relay of its own.
+                    item { RelayNudgeBanner(active) }
                     if (posts.isEmpty()) item {
                         Column(Modifier.fillMaxWidth().height(260.dp).padding(24.dp),
                             horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
@@ -240,7 +264,9 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                                 color = HavenTheme.textSecondary, fontSize = 14.sp, textAlign = TextAlign.Center,
                             )
                         }
-                    } else items(posts, key = { it.id }) { PostCard(it, active, reportsByTarget[it.id].orEmpty()) }
+                    } else items(posts, key = { it.id }) {
+                        PostCard(it, active, reportsByTarget[it.id].orEmpty(), videoActive = it.id == centeredPost)
+                    }
                 }
             }
 
@@ -620,18 +646,39 @@ private fun PendingCard(req: PendingRequest) {
 @Composable
 fun MediaImage(circleId: String, id: String, modifier: Modifier = Modifier,
                contentScale: ContentScale = ContentScale.FillWidth) {
-    var bmp by remember(id) { mutableStateOf<ImageBitmap?>(null) }
-    var done by remember(id) { mutableStateOf(false) }
-    LaunchedEffect(id, circleId) {
-        bmp = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            val b = if (LocalMedia.isVideo(id)) LocalMedia.videoPoster(circleId, id)
-                    else LocalMedia.imageBitmap(circleId, id)
-            b?.asImageBitmap()
+    val (bmp, done) = rememberMediaBitmap(circleId, id)
+    MediaBitmapContent(bmp, done, modifier, contentScale)
+}
+
+/** Decrypt + decode a media ref's bitmap off the main thread, ONCE per (ref, circle) — `load()` is a
+ *  full AEAD open of the whole file, so anything that wants these pixels shares this rather than
+ *  asking again. Returns the bitmap (null = nothing to show) plus a done flag, so a caller can tell
+ *  "still loading" from "there is no bitmap". */
+@Composable
+private fun rememberMediaBitmap(circleId: String, ref: String, reloadKey: Any? = null): Pair<ImageBitmap?, Boolean> {
+    var bmp by remember(ref, circleId) { mutableStateOf<ImageBitmap?>(null) }
+    var done by remember(ref, circleId) { mutableStateOf(false) }
+    // `reloadKey` re-asks WITHOUT clearing what's already drawn: a video's poster only becomes
+    // readable once the clip has been decrypted to cache, and blinking the page out to go fetch it
+    // would be worse than showing it a beat late.
+    LaunchedEffect(ref, circleId, reloadKey) {
+        val b = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val raw = if (LocalMedia.isVideo(ref)) LocalMedia.videoPoster(circleId, ref)
+                      else LocalMedia.imageBitmap(circleId, ref)
+            raw?.asImageBitmap()
         }
+        if (b != null || !done) bmp = b
         done = true
     }
+    return bmp to done
+}
+
+/** The three states of a media bitmap: the image, a plain tile, or a spinner. */
+@Composable
+private fun MediaBitmapContent(bmp: ImageBitmap?, done: Boolean, modifier: Modifier,
+                               contentScale: ContentScale) {
     when {
-        bmp != null -> Image(bmp!!, contentDescription = "Photo", modifier = modifier, contentScale = contentScale)
+        bmp != null -> Image(bmp, contentDescription = "Photo", modifier = modifier, contentScale = contentScale)
         // Finished loading with no bitmap (video with no poster, or media too big to decode here) →
         // a plain tile, NOT a perpetual spinner. MediaThumb overlays the play glyph for videos.
         done -> Box(modifier.background(HavenTheme.card))
@@ -688,10 +735,198 @@ fun LocationChip(ref: String) {
     }
 }
 
+/** A ref's aspect ratio (w/h), or null while it's still being read / unknowable. Resolved off the
+ *  main thread; LocalMedia.pixelSize memoizes, so a scroll back doesn't re-decrypt. */
 @Composable
-fun MediaGallery(circleId: String, refs: List<String>, onOpen: (Int) -> Unit) {
+private fun rememberAspect(circleId: String, ref: String): Float? {
+    var aspect by remember(ref, circleId) { mutableStateOf<Float?>(null) }
+    LaunchedEffect(ref, circleId) {
+        aspect = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            LocalMedia.pixelSize(circleId, ref)?.let { (w, h) -> if (h > 0) w.toFloat() / h else null }
+        }
+    }
+    return aspect
+}
+
+private const val DEFAULT_ASPECT = 4f / 3f
+
+/** Above this sealed size the feed won't autoplay a clip. Scrolling past something shouldn't buy a
+ *  hundreds-of-MB native decrypt + cache write the user never asked for; over the cap the page keeps
+ *  its poster + play glyph and the tap-to-open viewer (an explicit intent) does the work instead. */
+private const val FEED_AUTOPLAY_MAX_BYTES = 128L * 1024 * 1024
+
+/** Tallest a feed media tile may get before it starts eating the whole screen (iOS parity: a portrait
+ *  phone lets a tall photo fill the column; wider layouts fit it inside a shorter cap). */
+@Composable
+private fun mediaMaxHeight(): androidx.compose.ui.unit.Dp {
+    val cfg = androidx.compose.ui.platform.LocalConfiguration.current
+    return if (cfg.screenWidthDp < cfg.screenHeightDp) 620.dp else 420.dp
+}
+
+/**
+ * The carousel's page shape (parity with iOS `carouselAspect`). A uniform set keeps its exact aspect;
+ * a MIXED set takes the TALLEST item's so no page is ever cropped — clamped so one 9:16 clip can't
+ * squeeze the whole card into a narrow column (the other pages letterbox onto their backdrop instead).
+ */
+private fun carouselAspect(aspects: List<Float>): Float {
+    val first = aspects.firstOrNull() ?: return DEFAULT_ASPECT
+    val tallest = aspects.minOrNull() ?: DEFAULT_ASPECT
+    val uniform = aspects.all { kotlin.math.abs(it - first) < 0.06f }
+    return if (uniform) tallest else tallest.coerceIn(0.8f, 1.91f)
+}
+
+/**
+ * A blurred, centre-cropped copy of the media filling the page behind the fitted copy, so a
+ * letterboxed portrait reads as an extension of the content instead of a slab of card grey.
+ *
+ * The source is the page's OWN bitmap, not a second load: it's already resident, it costs no extra
+ * decrypt, and the backdrop therefore cannot go missing while the page has something to draw. On 31+
+ * `Modifier.blur` is a RenderEffect on a graphicsLayer — it blurs the (page-sized) layer, so a bigger
+ * source costs nothing. Below 31 there's no RenderEffect and Modifier.blur silently no-ops, so fake it
+ * by upscaling a tiny copy — derived once per bitmap, never per frame.
+ */
+@Composable
+private fun MediaBackdrop(source: ImageBitmap, modifier: Modifier = Modifier) {
+    val blurable = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S
+    val src = if (blurable) source else remember(source) { source.downscaled(24) }
+    Image(
+        src, contentDescription = null,
+        modifier = modifier.then(if (blurable) Modifier.blur(24.dp) else Modifier),
+        contentScale = ContentScale.Crop,   // fill the page; the fitted copy sits on top
+    )
+}
+
+/** A tiny copy of a bitmap — the pre-31 blur stand-in, where the upscale itself IS the blur. */
+private fun ImageBitmap.downscaled(maxDim: Int): ImageBitmap {
+    val b = asAndroidBitmap()
+    val s = maxDim.toFloat() / maxOf(b.width, b.height)
+    if (s >= 1f) return this
+    return android.graphics.Bitmap
+        .createScaledBitmap(b, maxOf(1, (b.width * s).toInt()), maxOf(1, (b.height * s).toInt()), true)
+        .asImageBitmap()
+}
+
+/**
+ * One media page: the item fitted WHOLE inside a `containerAspect`-shaped box over its own blurred
+ * backdrop, so the letterboxed area reads as the media's own colours instead of the card's grey.
+ * The backdrop is drawn ONLY on a real aspect mismatch — media that already fills pays nothing.
+ *
+ * A video autoplays inline only while [playing] — i.e. only the visible page of the ONE centred post
+ * (see the feed's `centeredPost`). A LazyColumn composes several posts at once, so playing every
+ * composed page would mean N MediaPlayers decoding while you scroll; iOS avoids that same cost by
+ * only ever playing the centred card's visible page. Everything else stays a poster + play glyph.
+ */
+@Composable
+private fun MediaPage(circleId: String, ref: String, containerAspect: Float?, playing: Boolean, onOpen: () -> Unit) {
+    val aspect = rememberAspect(circleId, ref)
+    val isVideo = LocalMedia.isVideo(ref)
+    // Decrypting is what MAKES the poster + backdrop possible (videoPoster can only read an already
+    // decrypted cache file), so the active page decrypts here rather than only inside VideoTile —
+    // whose own videoFile() then just hits the cache. Never eager: only the ONE active page pays it.
+    var vid by remember(ref, circleId) { mutableStateOf<java.io.File?>(null) }
+    LaunchedEffect(ref, circleId, playing) {
+        if (!playing || !isVideo || vid != null) return@LaunchedEffect
+        // Scroll away first and this coroutine is cancelled — the assignment never lands and no
+        // player is ever built for a page that's no longer active.
+        vid = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val size = LocalMedia.sealedSize(ref)
+            if (size > FEED_AUTOPLAY_MAX_BYTES) null else LocalMedia.videoFile(circleId, ref)
+        }
+    }
+    val plays = playing && isVideo && vid != null
+    // ONE decode for the page AND its backdrop — they draw the same pixels, so the backdrop can never
+    // silently drop out from under media that IS showing. Re-asked once `vid` lands: that decrypt is
+    // precisely what turns a video's poster from null into a real frame.
+    val (bmp, done) = rememberMediaBitmap(circleId, ref, reloadKey = vid)
+    // `containerAspect` MUST be the page's real (measured) shape, never the media's own — comparing the
+    // media against itself always yields ~0 and the backdrop could never draw. null = draw it regardless
+    // (the single-media path: if the media does fill the page, the backdrop is simply covered).
+    val letterboxes = when {
+        containerAspect == null -> true
+        // An un-played video has no known aspect yet — assume it letterboxes; that's the tall-clip case.
+        aspect == null -> isVideo
+        else -> kotlin.math.abs(aspect - containerAspect) > 0.02f
+    }
+    // clip() keeps the fill copy from bleeding onto the neighbouring page.
+    Box(Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)).clickable { onOpen() }) {
+        // Drawn under everything and never clickable → it can't intercept a tap or the pager's drag.
+        if (letterboxes && bmp != null) MediaBackdrop(bmp, Modifier.matchParentSize())
+        if (plays) {
+            // VideoTile fits the clip inside the bounds it's GIVEN (its own matrix transform), so
+            // handing it the page verbatim letterboxes the video onto the backdrop exactly like a
+            // photo — the page keeps its own pageHeight/pageAspect sizing either way.
+            VideoTile(circleId, ref, Modifier.matchParentSize(), resolved = vid)
+        } else {
+            MediaBitmapContent(bmp, done, Modifier.fillMaxSize(), ContentScale.Fit)
+            if (isVideo) {
+                // A scrim only behind the glyph — a full-page one would grey out the backdrop we just drew.
+                Box(Modifier.align(Alignment.Center).size(52.dp).clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.35f)), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Filled.PlayCircle, "Play", tint = Color.White, modifier = Modifier.size(40.dp))
+                }
+            }
+        }
+    }
+}
+
+/** A full-width swipeable pager with page dots — the ≤10-item layout, any mix of aspect ratios. */
+@Composable
+private fun MediaCarousel(circleId: String, refs: List<String>, videoActive: Boolean, onOpen: (Int) -> Unit) {
+    val aspects = refs.map { rememberAspect(circleId, it) ?: DEFAULT_ASPECT }
+    val aspect = carouselAspect(aspects)
+    val pager = androidx.compose.foundation.pager.rememberPagerState(initialPage = 0) { refs.size }
+    val cap = mediaMaxHeight()
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val h = minOf(cap, maxWidth / aspect)
+        // The page's REAL shape — what each item letterboxes against. Equal to `aspect` until the cap
+        // bites, and wider than it after.
+        val pageAspect = maxWidth / h
+        Box(Modifier.fillMaxWidth().height(h).clip(RoundedCornerShape(16.dp))) {
+            androidx.compose.foundation.pager.HorizontalPager(state = pager, modifier = Modifier.fillMaxSize()) { page ->
+                // Only the SETTLED page of an active card plays — the pager keeps neighbours composed
+                // mid-swipe, and currentPage flips only once a page has actually won the viewport.
+                MediaPage(circleId, refs[page], pageAspect, playing = videoActive && page == pager.currentPage) {
+                    onOpen(page)
+                }
+            }
+            Row(
+                Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                repeat(refs.size) { i ->
+                    Box(
+                        Modifier.size(6.dp).clip(CircleShape)
+                            .background(Color.White.copy(alpha = if (i == pager.currentPage) 0.95f else 0.4f)),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun MediaGallery(circleId: String, refs: List<String>, videoActive: Boolean = false, onOpen: (Int) -> Unit) {
+    // A location-only post has a non-empty `media` but NO real media — anything here would be an
+    // empty grey box, so it must render nothing at all.
+    if (refs.isEmpty()) return
     if (refs.size == 1) {
-        MediaThumb(circleId, refs[0], Modifier.fillMaxWidth().height(240.dp)) { onOpen(0) }
+        // Fit the media whole (no crop) inside a page that SPANS the card, as tall as the media needs
+        // up to the cap — sizing the page to the media's aspect would shrink it to a narrow centre
+        // column on a wide layout and put the card's grey either side of it. Backdrop always on: pass
+        // null rather than the media's own aspect, which would compare against itself and never draw.
+        val aspect = rememberAspect(circleId, refs[0]) ?: DEFAULT_ASPECT
+        val cap = mediaMaxHeight()
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            Box(Modifier.fillMaxWidth().height(minOf(cap, maxWidth / aspect))) {
+                MediaPage(circleId, refs[0], null, playing = videoActive) { onOpen(0) }
+            }
+        }
+        return
+    }
+    if (refs.size <= 10) {
+        // Mixed aspects no longer force the grid — each page fits inside a shared shape and its own
+        // blurred backdrop masks the difference, which beats a 2-photo masonry.
+        MediaCarousel(circleId, refs, videoActive, onOpen)
         return
     }
     androidx.compose.foundation.lazy.grid.LazyHorizontalGrid(
@@ -1011,18 +1246,34 @@ private fun SyncDetailRow(
 /** Plays an attached video from its decrypted cache file, with controls. Videos start MUTED; the
  *  corner button toggles sound for ALL videos (global ProfileStore.videoSoundOn — iOS parity). */
 @Composable
-fun VideoTile(circleId: String, ref: String, modifier: Modifier = Modifier) {
+fun VideoTile(
+    circleId: String, ref: String, modifier: Modifier = Modifier,
+    // A caller that already decrypted the clip (the feed, which needs the file for its poster anyway)
+    // hands it over, so we skip a frame of the placeholder tile on top of its blurred backdrop.
+    resolved: java.io.File? = null,
+) {
     val context = LocalContext.current
     val profile = remember { ProfileStore.get(context) }
     val soundOn = profile.videoSoundOn
-    var file by remember(ref) { mutableStateOf<java.io.File?>(null) }
+    var file by remember(ref) { mutableStateOf(resolved) }
     val player = remember(ref) { mutableStateOf<android.media.MediaPlayer?>(null) }
     android.util.Log.i("VideoTile", "COMPOSE ref=$ref circle=${circleId.take(14)} isVideo=${LocalMedia.isVideo(ref)}")
     LaunchedEffect(ref, circleId) {
+        if (file != null) return@LaunchedEffect
         file = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             LocalMedia.videoFile(circleId, ref)
         }
         android.util.Log.i("VideoTile", "FILE ref=$ref file=${file?.absolutePath ?: "NULL"} exists=${file?.exists() == true} size=${file?.length() ?: -1}")
+    }
+    // The feed swaps tiles in and out on every scroll, so a MediaPlayer that outlives its composable
+    // would be a per-post decode leak. onSurfaceTextureDestroyed already releases, but it's the
+    // VIEW's callback — this is the composition's own guarantee. Whichever fires first nulls the ref.
+    androidx.compose.runtime.DisposableEffect(ref) {
+        onDispose {
+            player.value?.let { runCatching { it.release() } }
+            player.value = null
+            android.util.Log.i("VideoTile", "DISPOSE ref=$ref")
+        }
     }
     // Re-apply the global mute state whenever it flips, a call starts/ends, or the player becomes
     // ready. While a call is ringing/connecting/live the video is FORCED silent (call audio
@@ -1119,7 +1370,13 @@ private val QUICK_EMOJI = listOf("❤️", "😂", "🔥", "👍", "🎉", "😮
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun PostCard(item: FeedItemFfi, circleId: String = DEFAULT_CIRCLE, reports: List<uniffi.haven_ffi.ReportFfi> = emptyList()) {
+fun PostCard(
+    item: FeedItemFfi,
+    circleId: String = DEFAULT_CIRCLE,
+    reports: List<uniffi.haven_ffi.ReportFfi> = emptyList(),
+    // The feed passes true for the ONE centred card; single-post screens default to no autoplay.
+    videoActive: Boolean = false,
+) {
     var showComment by remember(item.id) { mutableStateOf(false) }
     var postMenu by remember(item.id) { mutableStateOf(false) }
     var showReport by remember(item.id) { mutableStateOf(false) }
@@ -1220,7 +1477,8 @@ fun PostCard(item: FeedItemFfi, circleId: String = DEFAULT_CIRCLE, reports: List
         val mediaRefs = item.media.filter { !com.blaineam.haven.core.LocationShare.isLocation(it) }
         if (mediaRefs.isNotEmpty()) {
             Spacer(Modifier.height(10.dp))
-            MediaGallery(circleId, mediaRefs) { viewerStart = it }
+            // A card whose viewer is open stops autoplaying underneath it — one decode, not two.
+            MediaGallery(circleId, mediaRefs, videoActive = videoActive && viewerStart == null) { viewerStart = it }
         }
 
         // Attached song — artwork + 30s preview playback, resolved via iTunes Search.

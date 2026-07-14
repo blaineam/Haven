@@ -7,10 +7,12 @@ import androidx.activity.enableEdgeToEdge
 import androidx.fragment.app.FragmentActivity
 import android.net.Uri
 import androidx.core.content.IntentCompat
+import com.blaineam.haven.core.DeepLink
 import com.blaineam.haven.core.DemoEnv
 import com.blaineam.haven.core.HavenNet
 import com.blaineam.haven.core.InviteInbox
 import com.blaineam.haven.core.LocalMedia
+import com.blaineam.haven.core.PostLinkInbox
 import com.blaineam.haven.core.ShareInbox
 import com.blaineam.haven.core.isVideoUri
 import com.blaineam.haven.core.loadAndDownscale
@@ -68,9 +70,14 @@ class MainActivity : FragmentActivity() {
     /** Text / links / photos / videos shared into Haven → prefill the composer + attach media. */
     private fun handleShare(intent: Intent?) {
         when (intent?.action) {
-            // A haven:// or https invite link the app was opened with (tap in a browser/DM) —
-            // parity with the iOS URL-scheme flow: route to the Connect screen, prefilled.
-            Intent.ACTION_VIEW -> InviteInbox.offer(intent.data?.toString())
+            // A haven:// or https link the app was opened with (tap in a browser/DM). Invites and
+            // post links share a domain AND both ride the #fragment, so discriminate on grammar
+            // BEFORE routing — otherwise a post link lands in Connect and dies there.
+            Intent.ACTION_VIEW -> {
+                val link = intent.data?.toString()
+                val post = DeepLink.parsePost(link)
+                if (post != null) PostLinkInbox.offer(post) else InviteInbox.offer(link)
+            }
             Intent.ACTION_SEND -> {
                 if (intent.type?.startsWith("text") == true) {
                     ShareInbox.offer(intent.getStringExtra(Intent.EXTRA_TEXT))

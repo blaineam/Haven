@@ -276,7 +276,9 @@ struct AuthorizedDevicesView: View {
                 // just the roster + revoke above.
                 if hasSeed && !roster.isEnabled {
                     Section {
+                        // Glass pill on macOS (a bare Form Button bezels there); iOS row unchanged.
                         Button { store.enableDeviceRoster() } label: { Label("Make this my primary device", systemImage: "checkmark.shield") }
+                            .havenToolbarPill()
                     } footer: { Text("The primary holds the master key and authorizes/revokes your other devices. Do this on ONE device (e.g. your iPhone).")
                         .fixedSize(horizontal: false, vertical: true) }
                 }
@@ -286,6 +288,7 @@ struct AuthorizedDevicesView: View {
                         Button(role: .destructive) { confirmStepDown = true } label: {
                             Label("This isn’t my primary device", systemImage: "arrow.uturn.backward")
                         }
+                        .havenToolbarPill(tint: .red)   // keep the destructive red the mac pill would drop
                     } footer: { Text("Stop this device acting as the primary (master key). Use it on your iPhone instead, then link this device to it.")
                         .fixedSize(horizontal: false, vertical: true) }
                 }
@@ -295,6 +298,7 @@ struct AuthorizedDevicesView: View {
                             Label(thisDeviceAuthorized ? "Re-sync from my primary device" : "Make this a secure linked device",
                                   systemImage: thisDeviceAuthorized ? "arrow.triangle.2.circlepath" : "link.badge.plus")
                         }
+                        .havenToolbarPill()
                     } footer: { Text(thisDeviceAuthorized
                         ? "This device is authorized. Pull your profile + posts from your primary device again (keep it nearby or online)."
                         : "Asks your primary device (keep it nearby or online) to authorize this device with its own revocable key and send your profile + posts.")

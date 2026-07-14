@@ -11,6 +11,9 @@ struct ReactionDetailView: View {
     private func mine(_ r: ReactionFfi) -> Bool { r.mine || r.authors.contains(FeedStore.shared.myNodeHex) }
 
     var body: some View {
+        #if os(macOS)
+        HavenMacSheet("Who reacted") { rosterColumn } footer: { EmptyView() }
+        #else
         NavigationStack {
             ZStack {
                 HavenBackground()
@@ -42,7 +45,36 @@ struct ReactionDetailView: View {
             .havenInlineNavTitle()
             .toolbar { ToolbarItem(placement: .havenConfirmTrailing) { Button("Done") { dismiss() }.havenToolbarPill() } }
         }
+        #endif
     }
+
+    #if os(macOS)
+    /// A hand-rolled column, not a List — HavenMacSheet's content lives in a ScrollView, which
+    /// gives a List no height to lay out against. The sheet's glass close circle is the only Done.
+    private var rosterColumn: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            ForEach(reactions, id: \.emoji) { r in
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("\(r.emoji)   \(r.count)").font(.title3)
+                    ForEach(r.authors, id: \.self) { hex in
+                        HStack(spacing: 10) {
+                            avatar(hex)
+                            Text(name(hex)).font(.subheadline)
+                            Spacer()
+                        }
+                    }
+                    if mine(r), let onUnreact {
+                        Button { onUnreact(r.emoji); dismiss() } label: {
+                            Label("Remove my \(r.emoji)", systemImage: "minus.circle")
+                        }
+                        .buttonStyle(GlassPillButtonStyle(tint: .red))
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    #endif
 
     private func name(_ hex: String) -> String {
         if hex == FeedStore.shared.myNodeHex { return "You" }

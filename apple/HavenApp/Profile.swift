@@ -235,81 +235,93 @@ struct EditProfileSheet: View {
     }
 
     var body: some View {
+        #if os(macOS)
+        HavenMacSheet("Edit profile") {
+            editColumn
+        } footer: {
+            Button("Done") { commit(); dismiss() }
+                .buttonStyle(BrandButtonStyle())
+                .keyboardShortcut(.defaultAction)
+        }
+        #else
         NavigationStack {
             ZStack {
                 HavenBackground()
-                ScrollView {
-                    VStack(spacing: 22) {
-                        Color.clear.frame(height: 0)
-                            .onDisappear { commit(); FeedStore.shared.rebroadcastProfile() }   // save edits + sync to contacts
-                        HavenAvatar(image: profile.avatar, emoji: profile.emoji, size: 110)
-                            .shadow(color: HavenTheme.pink.opacity(0.3), radius: 14, y: 8)
-
-                        HStack(spacing: 12) {
-                            Button { showPhotoPicker = true } label: {
-                                Label(profile.avatar == nil ? "Add photo" : "Change photo", systemImage: "photo")
-                            }.buttonStyle(.bordered).tint(HavenTheme.pink)
-                            if profile.avatar != nil {
-                                Button(role: .destructive) { profile.setAvatar(nil) } label: {
-                                    Label("Remove", systemImage: "trash")
-                                }.buttonStyle(.bordered)
-                            }
-                        }
-
-                        // Fields carry exactly ONE surface (glass) — the default macOS field style
-                        // painted its own bezel + focus ring inside the custom shapes.
-                        TextField("Your name", text: $name)
-                            .font(.title3).multilineTextAlignment(.center)
-                            .havenPillField()
-                            .padding(.horizontal, 30)
-
-                        VStack(spacing: 10) {
-                            TextField("Add a short bio", text: $bio, axis: .vertical)
-                                .lineLimit(1...3)
-                                .havenAutocap(.sentences)
-                                .textFieldStyle(.plain)
-                                .padding(12)
-                                .havenGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                            TextField("Add a link (e.g. yoursite.com)", text: $link)
-                                .havenAutocap(.never)
-                                .autocorrectionDisabled()
-                                .havenURLKeyboard()
-                                .textFieldStyle(.plain)
-                                .padding(12)
-                                .havenGlass(in: Capsule())
-                        }
-                        .font(.subheadline).padding(.horizontal, 24)
-                        Text("Your bio and link show on your profile for the people in your circle.")
-                            .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                            .padding(.horizontal, 30)
-
-                        Text(profile.avatar == nil ? "Pick an emoji" : "Emoji (used if you remove your photo)")
-                            .font(.footnote).foregroundStyle(.secondary)
-                        LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 6), spacing: 12) {
-                            ForEach(ProfileStore.avatarChoices, id: \.self) { e in
-                                Text(e).font(.system(size: 30)).frame(width: 44, height: 44)
-                                    .background(profile.emoji == e ? AnyShapeStyle(HavenTheme.brandHorizontal.opacity(0.25)) : AnyShapeStyle(Color(.secondarySystemFill)), in: Circle())
-                                    .overlay(Circle().strokeBorder(profile.emoji == e ? HavenTheme.pink : .clear, lineWidth: 2))
-                                    .onTapGesture { withAnimation(HavenTheme.snappy) { profile.emoji = e } }
-                            }
-                        }.padding(.horizontal, 20)
-                    }
-                    .padding(.vertical, 20)
-                    .frame(maxWidth: 520)                     // one readable column on wide macOS windows
-                    .frame(maxWidth: .infinity)
-                }
+                ScrollView { editColumn }
             }
             .navigationTitle("Edit profile")
             .havenInlineNavTitle()
-            .onAppear {
-                guard !loaded else { return }   // seed once; later syncs won't clobber what you're typing
-                name = profile.displayName; bio = profile.bio; link = profile.link
-                loaded = true
-            }
             .toolbar { ToolbarItem(placement: .havenConfirmTrailing) { Button("Done") { commit(); dismiss() }.havenToolbarPill(tint: HavenTheme.pink) } }
-            .sheet(isPresented: $showPhotoPicker) {
-                SingleImagePicker { profile.setAvatar($0) }.macSheetFrame()
+        }
+        #endif
+    }
+
+    private var editColumn: some View {
+        VStack(spacing: 22) {
+            Color.clear.frame(height: 0)
+                .onDisappear { commit(); FeedStore.shared.rebroadcastProfile() }   // save edits + sync to contacts
+            HavenAvatar(image: profile.avatar, emoji: profile.emoji, size: 110)
+                .shadow(color: HavenTheme.pink.opacity(0.3), radius: 14, y: 8)
+
+            HStack(spacing: 12) {
+                Button { showPhotoPicker = true } label: {
+                    Label(profile.avatar == nil ? "Add photo" : "Change photo", systemImage: "photo")
+                }.buttonStyle(.bordered).tint(HavenTheme.pink)
+                if profile.avatar != nil {
+                    Button(role: .destructive) { profile.setAvatar(nil) } label: {
+                        Label("Remove", systemImage: "trash")
+                    }.buttonStyle(.bordered)
+                }
             }
+
+            // Fields carry exactly ONE surface (glass) — the default macOS field style
+            // painted its own bezel + focus ring inside the custom shapes.
+            TextField("Your name", text: $name)
+                .font(.title3).multilineTextAlignment(.center)
+                .havenPillField()
+                .padding(.horizontal, 30)
+
+            VStack(spacing: 10) {
+                TextField("Add a short bio", text: $bio, axis: .vertical)
+                    .lineLimit(1...3)
+                    .havenAutocap(.sentences)
+                    .textFieldStyle(.plain)
+                    .padding(12)
+                    .havenGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                TextField("Add a link (e.g. yoursite.com)", text: $link)
+                    .havenAutocap(.never)
+                    .autocorrectionDisabled()
+                    .havenURLKeyboard()
+                    .textFieldStyle(.plain)
+                    .padding(12)
+                    .havenGlass(in: Capsule())
+            }
+            .font(.subheadline).padding(.horizontal, 24)
+            Text("Your bio and link show on your profile for the people in your circle.")
+                .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                .padding(.horizontal, 30)
+
+            Text(profile.avatar == nil ? "Pick an emoji" : "Emoji (used if you remove your photo)")
+                .font(.footnote).foregroundStyle(.secondary)
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 6), spacing: 12) {
+                ForEach(ProfileStore.avatarChoices, id: \.self) { e in
+                    Text(e).font(.system(size: 30)).frame(width: 44, height: 44)
+                        .background(profile.emoji == e ? AnyShapeStyle(HavenTheme.brandHorizontal.opacity(0.25)) : AnyShapeStyle(Color(.secondarySystemFill)), in: Circle())
+                        .overlay(Circle().strokeBorder(profile.emoji == e ? HavenTheme.pink : .clear, lineWidth: 2))
+                        .onTapGesture { withAnimation(HavenTheme.snappy) { profile.emoji = e } }
+                }
+            }.padding(.horizontal, 20)
+        }
+        .padding(.vertical, 20)
+        .frame(maxWidth: 520)                     // one readable column on wide macOS windows
+        .frame(maxWidth: .infinity)
+        .onAppear {
+            guard !loaded else { return }   // seed once; later syncs won't clobber what you're typing
+            name = profile.displayName; bio = profile.bio; link = profile.link
+            loaded = true
+        }
+        .sheet(isPresented: $showPhotoPicker) {
+            SingleImagePicker { profile.setAvatar($0) }.macSheetFrame()
         }
     }
 }

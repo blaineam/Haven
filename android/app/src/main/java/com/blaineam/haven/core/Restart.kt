@@ -18,6 +18,7 @@ fun startOver(context: Context) {
     // old identity survives the wipe (in-memory state is gone via the hard process restart below).
     runCatching { AvatarStore.clear() }
     runCatching { CircleLock.reset() }
+    runCatching { RelayNudge.reset() }
     runCatching { CircleRemovals.clear() }
     runCatching { Presign.reset() }
     runCatching { SelfSyncCoordinator.reset() }

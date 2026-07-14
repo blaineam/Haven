@@ -20,10 +20,18 @@ use anyhow::{anyhow, Result};
 use haven_ffi::Account;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use crate::engine::Engine;
 use crate::store::Paths;
+
+/// `haven://…` URLs the OS has handed us that the frontend hasn't routed yet.
+///
+/// A queue rather than an event payload because a deep link is often what LAUNCHED Haven: it arrives
+/// before the webview exists, and an event emitted then is dropped on the floor. The frontend drains
+/// this at boot AND on the `haven:deep-link` ping, so either order works.
+#[derive(Default)]
+pub struct DeepLinks(pub std::sync::Mutex<Vec<String>>);
 
 /// Load the master seed from the secure store, or mint + persist a new identity.
 fn ensure_seed() -> Result<[u8; 32]> {
@@ -129,7 +137,9 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
-        ));
+        ))
+        // Managed before the identity check so `take_deep_links` answers even on the welcome screen.
+        .manage(DeepLinks::default());
 
     let builder = match existing {
         Some((seed, paths)) => {
@@ -138,23 +148,36 @@ pub fn run() {
             builder.manage(engine).setup(move |app| {
                 let handle = app.handle().clone();
                 setup_engine.set_app(handle.clone());
-                // haven:// deep links (a tapped invite): connect straight away + surface the window
-                // (parity with the iOS URL scheme / Android intent filter). Windows/Linux register
-                // the scheme at install time via the plugin; register_all covers dev builds.
+                // haven:// deep links (a tapped invite, or a shared post) — surface the window and hand
+                // the URL to the frontend (parity with the iOS URL scheme / Android intent filter).
+                // Windows/Linux register the scheme at install time via the plugin; register_all covers
+                // dev builds.
+                //
+                // The URL is QUEUED for the frontend rather than routed here: `haven://p/<c>/<p>` (a post)
+                // and `haven://invite#<id>.<verify>` are different destinations, and one parser has to
+                // decide which — feeding them all to `connect_by_link` is how a post link gets swallowed
+                // by the invite flow. That parser lives in app.js (`DeepLink`), next to the UI it drives.
+                //
+                // NOTE: the OS only ever gives us `haven://` links. Desktop CANNOT claim
+                // https://wemiller.com/apps/haven/… — the deep-link plugin matches on scheme only on
+                // desktop (its config takes `schemes`, and Universal Links / App Links are mobile-only),
+                // so the shareable https post link reaches us the same way an https invite already does:
+                // the landing page resolves the fragment client-side and bounces to `haven://p/…`
+                // (web/index.html), or the user pastes it into Connect. app.js parses both forms.
                 {
                     use tauri_plugin_deep_link::DeepLinkExt;
                     #[cfg(any(target_os = "linux", windows))]
                     let _ = app.deep_link().register_all();
-                    let link_engine = setup_engine.clone();
                     let link_handle = handle.clone();
                     app.deep_link().on_open_url(move |event| {
-                        for url in event.urls() {
-                            if link_engine.connect_by_link(url.to_string()) {
-                                if let Some(w) = link_handle.get_webview_window("main") {
-                                    let _ = w.show();
-                                    let _ = w.set_focus();
-                                }
-                            }
+                        if let Some(q) = link_handle.try_state::<DeepLinks>() {
+                            let mut pending = q.0.lock().unwrap();
+                            pending.extend(event.urls().iter().map(|u| u.to_string()));
+                        }
+                        let _ = link_handle.emit("haven:deep-link", ());
+                        if let Some(w) = link_handle.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.set_focus();
                         }
                     });
                 }
@@ -246,6 +269,7 @@ pub fn run() {
             commands::messages,
             commands::send_dm,
             commands::connect_by_link,
+            commands::take_deep_links,
             commands::pending,
             commands::approve,
             commands::dismiss,

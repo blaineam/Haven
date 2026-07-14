@@ -1,0 +1,13 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.blaineam.haven",
+      "sha256_cert_fingerprints": [
+        "62:24:04:7F:79:30:2A:DE:96:AF:1F:72:BE:BE:D4:32:65:23:76:F0:53:61:84:78:E8:B2:C0:EF:E9:26:4D:6E",
+        "F7:22:EF:7C:94:BC:0D:B0:DD:7F:7D:41:FC:6A:79:42:99:F2:11:04:57:F3:B9:0B:D0:15:10:22:C8:57:70:94"
+      ]
+    }
+  }
+]

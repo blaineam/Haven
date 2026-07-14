@@ -34,6 +34,100 @@ Three deliberate properties:
    that promotes installing the native app. (There is no web *client* — a browser can't
    be an iroh peer; see [`WEB-PARITY.md`](WEB-PARITY.md).)
 
+## Post links
+
+Sharing a post produces a **web** link, so it crosses the iOS/Android boundary and
+survives being pasted into any chat app:
+
+```
+https://wemiller.com/apps/haven/#p/<circleId>.<postId>
+                    └─ static page ─┘  └─ never leaves the browser ─┘
+
+haven://p/<circleId>/<postId>            (legacy / custom-scheme form — still accepted)
+```
+
+Same rules as the identity link, for the same reasons:
+
+* **The payload is in the `#fragment`.** A browser never sends the fragment to the
+  server, so wemiller.com's logs — and every CDN and proxy on the way — see only
+  `GET /apps/haven/`. They cannot learn *which* post was opened, or by whom. A path
+  form (`/apps/haven/p/<circle>/<post>`) would hand the host a readership map: reader
+  IP × circle × post. That map is precisely what Haven exists not to create. **Do not
+  "tidy" the fragment into a path.**
+* **The link is a pointer, not a capability.** It carries no key. Access is governed
+  entirely by circle membership in the core: a device already in the circle decrypts
+  the post as usual, and everyone else — including anyone who intercepts the link —
+  gets "post not found". Nothing about the link grants access, so a leaked link leaks
+  only the fact that *some* post exists.
+* **Locked circles stay locked.** A post link into a biometric-locked circle routes to
+  the lock screen, never to the post.
+* **Graceful degradation.** With the app installed the link opens it directly
+  (Universal Link / App Link). Without it, the static page shows an "open in Haven /
+  get Haven" card. The page resolves the fragment client-side and bounces to
+  `haven://p/…`; no server-side compute anywhere.
+
+The delimiters are `p/` and `.`, matching the invite link's `<id>.<verify>`. Both
+tokens are percent-encoded with `.` and `/` excluded from the allowed set, so the split
+is exact regardless of what an id contains.
+
+## Hosting the association files
+
+Two static files make the phones open the app instead of the browser:
+
+| File | Serves | Notes |
+|---|---|---|
+| `web/.well-known/apple-app-site-association` | iOS / macOS Universal Links | JSON, **no extension**, must be served as `application/json`, scoped to `/apps/haven/*` |
+| `web/.well-known/assetlinks.json` | Android App Links (`autoVerify="true"`) | needs the **Play App Signing** SHA-256 fingerprint |
+
+Both must be served from the **domain root** — `https://wemiller.com/.well-known/…` —
+not from `/apps/haven/.well-known/…`. Apple and Google only ever look at the root. Since
+this repo's `web/` is mirrored into the portfolio site *under `/apps/haven/`*, the two
+files have to land at the root of whatever serves `wemiller.com` (see
+`.github/workflows/notify-portfolio.yml`). They're kept here as the source of truth.
+
+`.nojekyll` sits alongside them because GitHub Pages' Jekyll pass drops dotfiles, which
+would silently delete `.well-known/` from the published site.
+
+### Why `assetlinks.json` lists TWO fingerprints
+>
+> Android verifies the cert that signed the **installed** app. Haven reaches devices two
+> ways, signed by two different keys, so `sha256_cert_fingerprints` lists both — drop
+> either and that audience silently falls back to the "open with" chooser:
+>
+> | Install path | Cert on the device | Fingerprint |
+> |---|---|---|
+> | Google Play | Google's **app-signing** cert (Play strips the upload signature and re-signs) | `62:24:04:7F:…` |
+> | Direct APK — the site's "Or download APK" → GitHub Releases | the **release keystore** | `F7:22:EF:7C:…` |
+>
+> The release keystore and the Play **upload** key are the SAME key here: both
+> `assembleRelease` (→ the GitHub-release APK) and `bundleRelease` (→ the Play AAB) sign
+> with `ANDROID_KEYSTORE_BASE64` in `.github/workflows/android.yml`. So Play Console's
+> "Upload key certificate" is also the direct-download APK's cert — which is why it
+> belongs here even though Play itself never serves it.
+>
+> **Do not paste Play Console's generated Digital Asset Links JSON verbatim.** It lists
+> only the app-signing cert, because Google has no idea Haven is also distributed as a
+> direct APK. It is correct-but-incomplete for us.
+>
+> To re-derive either, UI-independently:
+> ```
+> # release keystore / upload key (the F7:22 one)
+> keytool -list -v -keystore <release.keystore> -alias <alias> | grep -A1 'SHA256:'
+>
+> # Play app-signing cert (the 62:24 one), read off a build installed FROM PLAY
+> adb shell pm path com.blaineam.haven      # → /data/app/.../base.apk
+> adb pull <path> /tmp/play.apk
+> apksigner verify --print-certs /tmp/play.apk | grep -i 'SHA-256'
+> ```
+> A *sideloaded* APK reports the keystore cert, not Google's — so that second one only
+> works on a genuine Play install. In the console, SEARCH for "app signing" rather than
+> following a menu path; the layout moves.
+>
+> Verification happens at INSTALL time, so existing installs won't re-verify until they
+> update. Check with `adb shell pm get-app-links com.blaineam.haven` — you want
+> `verified` beside wemiller.com. Anything else usually means the file isn't reachable at
+> the domain root, or the installed build's cert isn't in the list.
+
 ## On your own website
 
 Just drop an `<a href="https://yoursite/u/...#...">`. No backend. The only static

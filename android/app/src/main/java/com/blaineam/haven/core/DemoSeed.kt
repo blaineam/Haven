@@ -121,6 +121,7 @@ object DemoSeeder {
 
         // ── Demo media (the same real, PII-free photos iOS bundles) ─────────────────────────
         installPhotos(context)
+        installVideos(context)
 
         // ── Stories tray (two friends + me) ─────────────────────────────────────────────────
         story(main, valid.getOrNull(0), listOf("img_demo_sunset"), "golden hour at the cove 🌅", mins(40))
@@ -138,6 +139,12 @@ object DemoSeeder {
             listOf("img_demo_trail"), track("Sunrun", "The Wanderers"), mins(140))
         val p3 = myPost(main, "new little corner of the studio came together today 🌿",
             listOf("img_demo_plant"), mins(75))
+        // Two ADJACENT video posts + a mixed carousel — the feed autoplays only the centred card's
+        // visible page, so this is what makes that coordinator visible in the demo.
+        myPost(main, "the cove at golden hour, on repeat 🌊", listOf("vid_demo_cove"), mins(58))
+        myPost(main, "ridge wind — sound off, obviously 🏔️", listOf("vid_demo_ridge"), mins(52))
+        myPost(main, "a clip and a still from the same afternoon",
+            listOf("img_demo_sunset", "vid_demo_cove"), mins(46))
         val p4 = friendPost(main, valid, 2, "everyone, meet the newest member of the crew 🐾",
             listOf("img_demo_pup"), null, mins(30))
         val p5 = friendPost(main, valid, 3, "sunday slow brunch — the sourdough finally rose 🍞",
@@ -205,6 +212,21 @@ object DemoSeeder {
 
     // MARK: - Authoring helpers
 
+    /**
+     * Replay a friend's whole sync bundle (their key commit + re-sealed events) into my engine,
+     * exactly like a real hello back-fill does.
+     *
+     * An epoch-sealed event can only be opened with the AUTHOR's key commit, so handing `receive`
+     * a bare post envelope silently fails to open — the post is accepted and then never appears.
+     * That's why the demo cast was invisible: the feed had 3 posts instead of 8, and every seeded
+     * reaction/comment was a no-op. Apple hit this same bug when group keying landed (see
+     * DemoSeed.swift's replayIntoMain); this is the Kotlin port of that fix.
+     */
+    private fun replayIntoMain(main: HavenSocial, friend: HavenSocial, circleId: String = DEFAULT_CIRCLE) {
+        runCatching { friend.syncEnvelopes(circleId) }.getOrDefault(emptyList())
+            .forEach { env -> runCatching { main.receive(circleId, env) } }
+    }
+
     /** A friend authors a post into the default circle; it's received into my engine. Returns the post id. */
     private fun friendPost(
         main: HavenSocial, valid: List<Persona>, by: Int, body: String,
@@ -212,10 +234,10 @@ object DemoSeeder {
     ): String? {
         val engine = valid.getOrNull(by)?.engine ?: return null
         val ts = msAgo(minutesAgo)
-        val env = runCatching {
+        runCatching {
             engine.post(DEFAULT_CIRCLE, body, media, music, null, false, false, ts)
         }.getOrNull() ?: return null
-        if (runCatching { main.receive(DEFAULT_CIRCLE, env) }.getOrDefault(false) != true) return null
+        replayIntoMain(main, engine)
         return idForCreatedAt(main, ts)
     }
 
@@ -258,7 +280,8 @@ object DemoSeeder {
         val engine = persona?.engine ?: return
         runCatching {
             engine.post(DEFAULT_CIRCLE, caption, refs, null, 86_400UL, true, false, msAgo(minutesAgo))
-        }.getOrNull()?.let { env -> runCatching { main.receive(DEFAULT_CIRCLE, env) } }
+        }.getOrNull() ?: return
+        replayIntoMain(main, engine)   // commit + re-sealed events (see replayIntoMain)
     }
 
     private class DmLine(val mine: Boolean, val body: String, val mins: Int, val music: TrackRefFfi?)
@@ -278,7 +301,8 @@ object DemoSeeder {
             } else {
                 runCatching {
                     engine.post(dmId, line.body, emptyList(), line.music, null, false, false, ts)
-                }.getOrNull()?.let { env -> runCatching { main.receive(dmId, env) } }
+                }.getOrNull() ?: continue
+                replayIntoMain(main, engine, dmId)   // epoch-sealed: needs their key commit too
             }
         }
     }
@@ -326,6 +350,19 @@ object DemoSeeder {
             val bytes = runCatching { context.assets.open(asset).use { it.readBytes() } }.getOrNull()
                 ?: gradientJpeg(hues.first, hues.second)
             LocalMedia.storeUnderRef(DEFAULT_CIRCLE, ref, bytes)
+        }
+    }
+
+    /**
+     * Install the demo VIDEOS under fixed `vid_` refs — synthetic, silent gradient clips (no people,
+     * no audio, no PII). One portrait + one landscape, so the feed's inline autoplay is exercised
+     * both letterboxing onto its blurred backdrop and filling the page.
+     */
+    private fun installVideos(context: Context) {
+        for (name in listOf("cove", "ridge")) {
+            val bytes = runCatching { context.assets.open("demo/video-$name.mp4").use { it.readBytes() } }.getOrNull()
+                ?: continue   // no asset → simply no video post; never a broken ref
+            LocalMedia.storeUnderRef(DEFAULT_CIRCLE, "vid_demo_$name", bytes)
         }
     }
 

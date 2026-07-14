@@ -71,7 +71,11 @@ final class SelfSyncCoordinator {
         m["setting:saveToPhotos"] = Data([s.saveToPhotos ? 1 : 0])
         m["setting:saveOthersToPhotos"] = Data([s.saveOthersToPhotos ? 1 : 0])
         m["setting:autoOptimize"] = Data([s.autoOptimize ? 1 : 0])
-        m["setting:silent"] = Data([s.silent ? 1 : 0])
+        // NOT `setting:silent` — global mute is DEVICE-LOCAL (see SettingsStore.silent). It's seeded from
+        // each device's own hardware silent switch / platform default, so syncing it made devices fight:
+        // the phone's ringer state muted the Mac, and the Mac's converged value landed AFTER the feed had
+        // already started a song — audible playback, then an abrupt cut once sync applied the mute. Like
+        // `videoSoundOn`, this preference belongs to the device you're holding.
         m["setting:retentionDays"] = withUnsafeBytes(of: Int32(s.retentionDays).littleEndian) { Data($0) }
         // Pinned DM conversations (ordered) sync across my devices, last-writer-wins. Only broadcast when
         // non-empty so a fresh device can't blank a sibling's pins (absence ≠ authoritative).
@@ -161,7 +165,8 @@ final class SelfSyncCoordinator {
         if let b = boolValue(h, "setting:saveToPhotos"), b != s.saveToPhotos { s.saveToPhotos = b }
         if let b = boolValue(h, "setting:saveOthersToPhotos"), b != s.saveOthersToPhotos { s.saveOthersToPhotos = b }
         if let b = boolValue(h, "setting:autoOptimize"), b != s.autoOptimize { s.autoOptimize = b }
-        if let b = boolValue(h, "setting:silent"), b != s.silent { s.silent = b }
+        // `setting:silent` is deliberately NOT applied (see currentLocal): a stale value left in an old
+        // base by a previous build must not reach in and mute/unmute this device long after the fact.
         if let v = h.get(key: "setting:retentionDays"), v.count == 4 {
             let n = Int(Int32(littleEndian: v.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }))
             if n != s.retentionDays { s.retentionDays = n }

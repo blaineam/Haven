@@ -20,7 +20,10 @@ final class SettingsStore: ObservableObject {
     @Published var retentionDays: Int { didSet { d.set(retentionDays, forKey: kRet) } }
     /// When auto-delete is on, keep MY OWN posts even after they'd age out for others (my archive).
     @Published var keepMyPosts: Bool { didSet { d.set(keepMyPosts, forKey: kKeepMine) } }
-    /// Global mute — silences post music + video audio so you can browse quietly.
+    /// Global mute — silences post music + video audio so you can browse quietly. DEVICE-LOCAL: it's
+    /// seeded from this device's hardware silent switch (iOS) or defaults muted (macOS, which has no
+    /// such switch), so it must never sync to your other devices — muting your Mac isn't muting your
+    /// phone. Same rule as `videoSoundOn` below.
     @Published var silent: Bool {
         didSet { d.set(silent, forKey: kSilent); AudioCoordinator.shared.setSilent(silent) }
     }
@@ -43,7 +46,14 @@ final class SettingsStore: ObservableObject {
         autoOptimize = d.object(forKey: kOpt) as? Bool ?? true
         retentionDays = d.object(forKey: kRet) as? Int ?? 0       // default forever
         keepMyPosts = d.object(forKey: kKeepMine) as? Bool ?? true   // default: always keep my own archive
-        silent = d.object(forKey: kSilent) as? Bool ?? false
+        #if os(macOS)
+        // No hardware silent switch to seed from, so there's no signal that the user wants sound:
+        // start MUTED and let one explicit unmute stick (same precedent as videoSoundOn — quiet by
+        // default, tap once to turn it on). Anything else means a Mac window can start singing at you.
+        silent = d.object(forKey: kSilent) as? Bool ?? true
+        #else
+        silent = d.object(forKey: kSilent) as? Bool ?? false   // re-seeded from the silent switch on open
+        #endif
         videoSoundOn = d.object(forKey: kVideoSound) as? Bool ?? false   // default muted; tap any video to unmute all
     }
 

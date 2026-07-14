@@ -21,6 +21,12 @@
 	<true/>
 	<key>aps-environment</key>
 	<string>production</string>
+	<!-- Universal Links: invite + post links at wemiller.com/apps/haven/#… open the Mac app.
+	     See web/.well-known/apple-app-site-association. -->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:wemiller.com</string>
+	</array>
 	<key>keychain-access-groups</key>
 	<array>
 		<string>$(AppIdentifierPrefix)com.blaineam.kith</string>

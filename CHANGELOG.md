@@ -7,6 +7,57 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased] — 2026-07-14
+
+### Added
+- **Blurred media backdrop.** A tall photo or clip no longer sits in a narrow column with the card's
+  grey either side — the page now spans the card and a blurred, cropped copy of the media fills the
+  letterbox. All four clients. Video uses the poster still, not a second live layer: an `AVPlayer`
+  only ever feeds one `AVPlayerLayer` (and `MediaPlayer`/`ExoPlayer` drive one surface), and behind a
+  24pt blur a still is indistinguishable from a moving copy at zero extra decode.
+- **Carousel for 2–10 items of any aspect**, replacing the two-row masonry for small mixed sets. Pages
+  take the tallest item's shape (clamped) so nothing crops; the backdrop masks the difference.
+- **Web-routed post links** — `https://wemiller.com/apps/haven/#p/<circle>.<post>`. The payload rides
+  the URL **fragment**, so the host never learns which post is being read. Legacy `haven://p/…` still
+  parses. Universal Links / App Links now verify against association files at the domain root.
+- **Relay nudge**: a dismissable banner (>2 members, no relay of the circle's own) plus a walkthrough
+  covering what a relay does and how the encryption works. All clients.
+- **Android: inline feed autoplay** with a centered-post coordinator — exactly one player alive at a
+  time (measured via `dumpsys media.player`), muted by default, capped at 128 MB per clip.
+
+### Fixed
+- **Relay walkthrough claimed adding a member rotates the circle key. It doesn't** — rotation happens
+  on removal/block, device-roster changes, and the periodic `rotate_circle`. The old wording implied a
+  new member was cryptographically fenced off from earlier posts; they aren't. Traced to
+  `GROUP-KEYING.md` saying "every membership change", which is now corrected at the source.
+- **Unsent posts no longer clutter the feed** — and the profile/You screen now filters them too, which
+  it never did while other people's profiles always had.
+- **macOS: real Liquid Glass adopted throughout.** Sheets that rendered grey bands above and below the
+  gradient (Connect, Edit profile, circle + circle settings, reaction detail, DM picker, new circle,
+  edit post, connection requests, react picker, share screen, add-to-call, video trimmer) now use
+  `HavenMacSheet`; ~20 controls that drew a custom circle/pill without a button style — including every
+  emoji in the reaction grid — no longer get macOS's rectangular bezel behind them.
+- **Reaction menu** no longer hides its quick emoji behind a submenu (a `ControlGroup` collapsed to
+  `❤️ 😎 👍 ›` on macOS); the emoji react on tap.
+- **macOS audio**: `silent` is device-local again. It was syncing, so a phone's ringer switch dictated
+  the Mac's audio and a late-arriving synced value restarted a song you'd muted. macOS now starts
+  muted; the async `play()` path got a real generation token; the speaker button was dead while muted;
+  a looping video restarted the song on every loop.
+- **macOS post camera** now tucks its filter strip behind a toggle, matching the story camera.
+- **Desktop**: video backdrops captured a black frame (`loadeddata` fires before a frame is drawable)
+  and `requestVideoFrameCallback` never fires for a paused video, so every video backdrop would have
+  shipped black; the blur ran on a full-resolution bitmap (1152×2048 → now 36×64).
+- **Android demo seed**: friend posts, stories and DM lines never landed — a bare `receive(envelope)`
+  can't open an epoch-sealed event without the author's key commit, so the demo feed had 3 posts
+  instead of 8 and every seeded reaction was a no-op. Ported Apple's `replayIntoMain`.
+
+### Infrastructure
+- **Xcode Cloud** could never build: `apple/*.xcodeproj`, `apple/Generated/` and `*.xcframework` are
+  all generated and gitignored, and no `ci_scripts/` existed. Added `ci_post_clone.sh` that restores
+  `HavenFFI.xcframework` from a GitHub Release keyed by the `core/` tree hash (build only on a miss),
+  then runs XcodeGen — so a full Rust compile doesn't burn the free monthly compute allowance. Set
+  `GITHUB_TOKEN` on the workflow to enable the cache.
+
 ## [0.1.0-beta.39] — 2026-07-13
 
 ### Fixed

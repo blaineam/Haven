@@ -21,38 +21,48 @@ struct CameraView: View {
     // the default. `liveThumb` is a downscaled still off the live feed for the swatches.
     @State private var liveFilter: HavenFilter = .original
     @State private var liveThumb: PlatformImage?
-    // The filter strip is COLLAPSED by default (matches the story camera) — an always-open strip
-    // crowded the live view and collided with the shutter. Swipe left/right on the preview still
-    // cycles filters without opening it; this toggle reveals the tappable swatches when wanted.
+    // The filter strip is COLLAPSED by default on BOTH platforms (matches the story camera) — an
+    // always-open strip crowded the live view and collided with the shutter. The top-right toggle
+    // reveals the tappable swatches when wanted. On iOS, swiping left/right on the preview also
+    // cycles filters without opening it (a UIKit gesture; the Mac story camera has no swipe either).
     @State private var showFilters = false
+
+    /// Bottom margin that keeps the open strip clear of the shutter. iOS also has to clear the home
+    /// indicator; the Mac shutter sits 28pt off the bottom inside a 78pt ring, so 120pt is enough.
+    #if os(macOS)
+    private static let filterStripBottomInset: CGFloat = 120
+    #else
+    private static let filterStripBottomInset: CGFloat = 150
+    #endif
 
     var body: some View {
         ZStack {
-            // The filter TOGGLE button lives in the UIKit controller (pinned to the safe-area layout
-            // guide, top-right, mirroring the close button) — a UIViewControllerRepresentable's
-            // ignoresSafeArea zeroes the ZStack's safe area for SwiftUI siblings, so a SwiftUI overlay
-            // button couldn't be positioned reliably. It toggles `showFilters`, which drives the strip.
+            // The filter TOGGLE button lives inside the capture surface — on iOS in the UIKit controller
+            // (pinned to the safe-area layout guide, top-right, mirroring the close button), because a
+            // UIViewControllerRepresentable's ignoresSafeArea zeroes the ZStack's safe area for SwiftUI
+            // siblings and an overlay button couldn't be positioned reliably; on macOS in the native
+            // view's own top row. Either way it calls `onToggleFilters`, flipping `showFilters` here.
             CameraCaptureRepresentable(filter: $liveFilter, onThumbnail: { liveThumb = $0 },
-                                       onToggleFilters: { withAnimation(.snappy) { showFilters.toggle() } }) { refs in
+                                       onToggleFilters: { withAnimation(HavenTheme.smooth) { showFilters.toggle() } }) { refs in
                 reviewRefs = refs
             }
             .ignoresSafeArea()
 
-            // The collapsible strip floats above the shutter; 150pt bottom margin clears the shutter +
-            // home indicator regardless of the (representable-consumed) safe area.
-            #if !os(macOS)
+            // The collapsible strip floats above the shutter; the bottom margin clears the shutter (and
+            // on iOS the home indicator) regardless of the (representable-consumed) safe area. Rendered
+            // HERE for both platforms so the collapse behavior has exactly one implementation — macOS
+            // feeds `liveThumb` up through the same `onThumbnail` callback iOS does.
             if showFilters, let liveThumb {
                 VStack {
                     Spacer()
                     FilterStrip(thumbnail: liveThumb, selection: $liveFilter)
                         .background(.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                         .padding(.horizontal, 10)
-                        .padding(.bottom, 150)
+                        .padding(.bottom, Self.filterStripBottomInset)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
                 .ignoresSafeArea(.container, edges: .bottom)
             }
-            #endif
         }
         // Lock to portrait like the story camera: the shutter/controls never move on rotation, while
         // the capture connection still follows the PHYSICAL device orientation (see shutter handlers),
@@ -114,23 +124,41 @@ struct CameraCaptureRepresentable: UIViewControllerRepresentable {
 #endif
 
 #if os(macOS)
+/// The one chrome chip both macOS cameras (post + story) hang in their top row: a single glass
+/// circle with a white glyph, pink while the control is `active`. `GlassIconButtonStyle` supplies
+/// the whole surface — it replaces AppKit's default button style, so there's no rounded-rect bezel
+/// behind the circle, and nothing else may stack a second background on top of it.
+struct CameraChromeButton: View {
+    let symbol: String
+    var active = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) { Image(systemName: symbol) }
+            .buttonStyle(GlassIconButtonStyle(size: 40, tint: active ? HavenTheme.pink : .white))
+    }
+}
+
 /// Native macOS camera capture surface. Mirrors the iOS `CameraCaptureRepresentable` public
 /// surface (`filter` binding, optional `onThumbnail`, `onCaptured: ([String]) -> Void`) so the
 /// shared `CameraView` call site compiles unchanged.
 ///
-/// A live, Metal-filtered camera preview (`FilteredCameraPreview`) with a `FilterStrip`, a shutter
-/// (click = photo, click-and-hold = video), and a Close button. Stills go through
-/// `AVCapturePhotoOutput`, video through `AVCaptureMovieFileOutput`; each is stored in `MediaStore`
-/// and handed up via `onCaptured`, then filtered in the shared `CaptureReviewView`.
+/// A live, Metal-filtered camera preview (`FilteredCameraPreview`), a shutter (click = photo,
+/// click-and-hold = video), a Close button, and a `camera.filters` toggle that reveals the
+/// collapsed `FilterStrip`. Stills go through `AVCapturePhotoOutput`, video through
+/// `AVCaptureMovieFileOutput`; each is stored in `MediaStore` and handed up via `onCaptured`, then
+/// filtered in the shared `CaptureReviewView`.
 struct CameraCaptureRepresentable: View {
     @Binding var filter: HavenFilter
     var onThumbnail: ((PlatformImage) -> Void)? = nil
-    var onToggleFilters: (() -> Void)? = nil   // unused on macOS (its filter strip is always shown)
+    /// Tapped from the top-right `camera.filters` chip — flips the shared `CameraView`'s
+    /// `showFilters`, which reveals/hides the strip (same collapsed-by-default deal as the story
+    /// camera; the strip itself is rendered by `CameraView`, not here).
+    var onToggleFilters: (() -> Void)? = nil
     var onCaptured: ([String]) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @StateObject private var engine = MacCameraEngine()
-    @State private var liveThumb: PlatformImage?
 
     var body: some View {
         ZStack {
@@ -138,7 +166,7 @@ struct CameraCaptureRepresentable: View {
             if engine.ready {
                 FilteredCameraPreview(tap: engine.frameTap, filter: filter,
                                       orientation: .up,
-                                      onThumbnail: { img in liveThumb = img; onThumbnail?(img) })
+                                      onThumbnail: { onThumbnail?($0) })
                     .ignoresSafeArea()
             } else {
                 VStack(spacing: 12) {
@@ -150,22 +178,19 @@ struct CameraCaptureRepresentable: View {
 
             VStack {
                 HStack {
-                    Button { dismiss() } label: {
-                        Image(systemName: "xmark").font(.title2.weight(.semibold)).foregroundStyle(.white)
-                            .padding(10).background(.black.opacity(0.35), in: Circle())
-                    }
-                    .buttonStyle(.plain)
+                    CameraChromeButton(symbol: "xmark") { dismiss() }
                     Spacer()
+                    // Filter toggle — top-right, mirroring the close chip, exactly like the story
+                    // camera. The strip stays tucked away until this is tapped; the chip goes pink
+                    // while a non-original look is live, so a collapsed strip still reads as "on".
+                    if engine.ready {
+                        CameraChromeButton(symbol: "camera.filters", active: filter != .original) {
+                            onToggleFilters?()
+                        }
+                    }
                 }
                 .padding(.horizontal, 20).padding(.top, 12)
                 Spacer()
-
-                // Live filter strip (off the live feed thumbnail), like iOS.
-                if let liveThumb {
-                    FilterStrip(thumbnail: liveThumb, selection: $filter)
-                        .background(.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                        .padding(.horizontal, 10).padding(.bottom, 6)
-                }
 
                 // Shutter: click = photo, click-and-hold (≥0.35s) = video.
                 ZStack {
@@ -414,10 +439,12 @@ struct CaptureReviewView: View {
             Color.black.ignoresSafeArea()
             VStack(spacing: 0) {
                 HStack {
+                    // .plain or macOS paints its default rounded-rect bezel behind the circle.
                     Button { onRetake() } label: {
                         Image(systemName: "chevron.left").font(.title2.weight(.semibold)).foregroundStyle(.white)
                             .padding(10).background(.black.opacity(0.4), in: Circle())
                     }
+                    .buttonStyle(.plain)
                     Spacer()
                     Text("Retake or filter").font(.caption.weight(.semibold)).foregroundStyle(.white)
                         .padding(.horizontal, 10).padding(.vertical, 6).background(.black.opacity(0.4), in: Capsule())
@@ -454,6 +481,7 @@ struct CaptureReviewView: View {
                     .padding(.vertical, 14)
                     .background(HavenTheme.brandHorizontal, in: Capsule())
                 }
+                .buttonStyle(.plain)   // ditto: no system bezel behind the gradient pill
                 .disabled(working)
                 .padding(.horizontal, 20).padding(.top, 6).padding(.bottom, 20)
             }

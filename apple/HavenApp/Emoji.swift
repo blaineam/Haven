@@ -51,21 +51,28 @@ struct ReactionPicker: View {
     private let cols = Array(repeating: GridItem(.flexible(), spacing: 6), count: 8)
 
     var body: some View {
+        #if os(macOS)
+        // The Mac sheet scaffold instead of a NavigationStack toolbar — its Done button landed on a
+        // gray system band above the grid. The scaffold's glass close circle (and Esc) dismisses.
+        HavenMacSheet("React") { grid }
+        #else
         NavigationStack {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18, pinnedViews: []) {
-                    section("Frequently used", store.frequent(16))
-                    ForEach(EmojiCatalog.groups, id: \.0) { (name, emojis) in
-                        section(name, emojis)
-                    }
-                }
-                .padding()
-            }
+            ScrollView { grid.padding() }
             .navigationTitle("React")
             .havenInlineNavTitle()
             .toolbar { ToolbarItem(placement: .havenConfirmTrailing) { Button("Done") { dismiss() }.havenToolbarPill() } }
         }
         .presentationDetents([.medium, .large])
+        #endif
+    }
+
+    private var grid: some View {
+        LazyVStack(alignment: .leading, spacing: 18, pinnedViews: []) {
+            section("Frequently used", store.frequent(16))
+            ForEach(EmojiCatalog.groups, id: \.0) { (name, emojis) in
+                section(name, emojis)
+            }
+        }
     }
 
     private func section(_ title: String, _ emojis: [String]) -> some View {
@@ -78,6 +85,8 @@ struct ReactionPicker: View {
                         onPick(e)
                         dismiss()
                     } label: { Text(e).font(.system(size: 30)) }
+                        // The glyph IS the button — without a style macOS bezels every emoji.
+                        .buttonStyle(PressableStyle())
                 }
             }
         }

@@ -9,6 +9,9 @@
 	    • aps-environment        — APNs push; the direct .dmg has no push (no NSE on macOS anyway).
 	    • keychain-access-groups — the SHARED group exists only to feed the iOS NSE; on macOS the
 	                               app uses its own default keychain, so the group isn't needed.
+	    • associated-domains     — Universal Links. The direct .dmg opens web links via the
+	                               `haven://` scheme instead (the landing page falls back to it),
+	                               so the profile-bound entitlement isn't worth the CI cost.
 	  The App Store build (rocket) keeps the full Haven.macOS.entitlements.
 	-->
 	<key>com.apple.security.app-sandbox</key>

@@ -1,9 +1,14 @@
 import SwiftUI
 
-/// Where Haven's web invite links live. The static landing page at
-/// `wemiller.com/apps/haven/` resolves `/#<id>.<verify>` into an "open in Haven" page.
+/// Where Haven's web links live. The static landing page at `wemiller.com/apps/haven/` resolves
+/// the URL fragment — `/#<id>.<verify>` for an invite, `/#p/<circle>.<post>` for a shared post —
+/// into an "open in Haven" page. Everything sensitive stays in the fragment, which the browser
+/// never sends to the host; see DeepLink.swift.
 enum HavenSite {
     static let inviteDomain = "wemiller.com/apps/haven"
+    /// `inviteDomain` split for matching an incoming Universal Link.
+    static var host: String { String(inviteDomain.prefix { $0 != "/" }) }
+    static var path: String { String(inviteDomain.drop { $0 != "/" }) }
 }
 
 /// The guided "make a connection" flow: show your invite, or add a friend from
@@ -25,22 +30,30 @@ struct ConnectView: View {
     @State private var showScanner = false
 
     var body: some View {
+        #if os(macOS)
+        // HavenMacSheet, not NavigationStack — its toolbar renders as grey system bands above and
+        // below the gradient. The sheet scaffold runs the gradient to the sheet's extreme edges.
+        HavenMacSheet("Connect") {
+            connectColumn
+        } footer: {
+            // The "added!" confirmation screen has its own prominent Done — don't also show this one.
+            if addedName == nil {
+                Button("Done") { dismiss() }
+                    .buttonStyle(BrandButtonStyle())
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .sheet(isPresented: $showScanner) { scannerSheet }
+        .onAppear { seedIncomingLink() }
+        #else
         NavigationStack {
             ZStack {
                 HavenBackground()
                 ScrollView {
-                    VStack(spacing: 20) {
-                        Picker("", selection: $mode) {
-                            Text("Invite a friend").tag(0)
-                            Text("Add a friend").tag(1)
-                        }
-                        .pickerStyle(.segmented)
-
-                        if mode == 0 { invite } else { addFriend }
-                    }
-                    .padding(20)
-                    .frame(maxWidth: 560)                     // one readable column on wide macOS windows
-                    .frame(maxWidth: .infinity)
+                    connectColumn
+                        .padding(20)
+                        .frame(maxWidth: 560)             // one readable column on wide windows
+                        .frame(maxWidth: .infinity)
                 }
             }
             .navigationTitle("Connect")
@@ -48,13 +61,30 @@ struct ConnectView: View {
             // The "added!" confirmation screen has its own prominent Done — don't also show the toolbar one.
             .toolbar { if addedName == nil { ToolbarItem(placement: .havenConfirmTrailing) { Button("Done") { dismiss() }.havenToolbarPill() } } }
             .sheet(isPresented: $showScanner) { scannerSheet }
-            .onAppear {
-                guard let link = incomingLink, !link.isEmpty else { return }
-                mode = 1
-                pasted = link
-                lookup()
-            }
+            .onAppear { seedIncomingLink() }
         }
+        #endif
+    }
+
+    /// The sheet's content, shared by both platforms' scaffolds.
+    @ViewBuilder private var connectColumn: some View {
+        VStack(spacing: 20) {
+            Picker("", selection: $mode) {
+                Text("Invite a friend").tag(0)
+                Text("Add a friend").tag(1)
+            }
+            .pickerStyle(.segmented)
+
+            if mode == 0 { invite } else { addFriend }
+        }
+    }
+
+    /// Opened with an invite link → jump straight to "Add a friend" and resolve it.
+    private func seedIncomingLink() {
+        guard let link = incomingLink, !link.isEmpty else { return }
+        mode = 1
+        pasted = link
+        lookup()
     }
 
     private var scannerSheet: some View {

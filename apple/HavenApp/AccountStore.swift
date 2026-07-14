@@ -568,6 +568,7 @@ final class AccountStore: ObservableObject {
         ConnectionsStore.shared.wipe()
         ContactsStore.shared.wipe()
         CircleSettingsStore.shared.wipe()
+        RelayNudgeStore.shared.wipe()
         HiddenStore.shared.wipe()
         DMReadStore.shared.wipe()
         EmojiStore.shared.wipe()

@@ -88,11 +88,24 @@ private fun MainScaffold() {
     val context = LocalContext.current
     var tab by remember { mutableStateOf(demoTab() ?: Tab.Circle) }
     var showConnect by remember { mutableStateOf(false) }
+    var openPost by remember { mutableStateOf<com.blaineam.haven.core.DeepLink.Post?>(null) }
 
     // Deep-linked invite (haven:// or the invite web page) → surface the Connect screen, which
     // consumes the pending link and connects (parity with iOS's incomingLink flow).
     LaunchedEffect(com.blaineam.haven.core.InviteInbox.pending) {
         if (com.blaineam.haven.core.InviteInbox.pending != null) showConnect = true
+    }
+
+    // Deep-linked post (https #p/<c>.<p> or legacy haven://p/<c>/<p>) → present that post.
+    // A locked circle takes precedence: switch to it and let CircleScreen's lock screen take over
+    // rather than revealing the post — a link can never be used to peek past the lock.
+    LaunchedEffect(com.blaineam.haven.core.PostLinkInbox.pending) {
+        com.blaineam.haven.core.PostLinkInbox.consume()?.let { p ->
+            if (com.blaineam.haven.core.CircleLock.needsUnlock(p.circleId)) {
+                HavenNet.setActiveCircle(p.circleId)
+                tab = Tab.Circle
+            } else openPost = p
+        }
     }
 
     // Bring the transport up once we're past onboarding; re-sync on resume. In demo mode the
@@ -214,6 +227,20 @@ private fun MainScaffold() {
         exit = slideOutVertically { it },
     ) {
         ConnectScreen(onDone = { showConnect = false })
+    }
+
+    // Deep-linked post sheet (same slide-up as Connect).
+    val postSheet = openPost
+    AnimatedVisibility(
+        visible = postSheet != null,
+        enter = slideInVertically { it },
+        exit = slideOutVertically { it },
+    ) {
+        // Latch the post so it survives the exit animation — reading `openPost` directly would blank
+        // the sheet the instant it's cleared, mid-slide.
+        val shown = remember { mutableStateOf(postSheet) }
+        if (postSheet != null) shown.value = postSheet
+        shown.value?.let { PostLinkScreen(it.circleId, it.postId, onDone = { openPost = null }) }
     }
 
     // Call overlay (incoming ring / in-call mesh grid) sits above everything.

@@ -74,7 +74,12 @@ sealing it to the **new** member set:
 True per-message FS (Double Ratchet) is incompatible with multi-recipient, offline, eventually-consistent
 delivery. Instead:
 
-- Epoch keys rotate on every membership change **and** on a periodic schedule (time/-volume based).
+- Epoch keys rotate on **removal/block**, on a device-roster change, **and** on a periodic schedule
+  (time/-volume based). Adding a member does NOT rotate — and doesn't need to: a joiner is handed the
+  *current* epoch, so earlier epochs stay unreadable to them without rotating anything. Rotation exists
+  to revoke, not to admit. (Said precisely because "rotates on every membership change" once leaked into
+  the relay walkthrough's UI copy as "add or remove someone and the key rotates", which is not true and
+  implies a guarantee the code doesn't make.)
 - Clients **delete** epoch keys older than the circle's retention window. A seed/device compromise then
   reveals only the *current* epoch plus retained-history epochs — not all history forever.
 

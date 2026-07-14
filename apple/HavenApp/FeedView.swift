@@ -929,7 +929,7 @@ final class FeedStore: ObservableObject {
     }
 
     /// The current user's own posts — their personal archive.
-    var myPosts: [FeedItemFfi] { items.filter { $0.isMe && !$0.story } }
+    var myPosts: [FeedItemFfi] { items.filter { $0.isMe && !$0.story && !$0.unsent } }
     var myStories: [FeedItemFfi] { items.filter { $0.isMe && $0.story && !$0.unsent && !$0.media.isEmpty } }
 
     // MARK: - Authoring (seal locally, then broadcast to contacts)
@@ -978,8 +978,9 @@ final class FeedStore: ObservableObject {
     func storyStartIndex(forGroup g: Int) -> Int {
         groupedStories.prefix(g).reduce(0) { $0 + $1.items.count }
     }
-    /// The regular feed (stories live in the tray, not the main list).
-    var feedItems: [FeedItemFfi] { items.filter { !$0.story } }
+    /// The regular feed (stories live in the tray, not the main list). Unsent posts are gone —
+    /// a "Message unsent" tombstone in the feed is clutter, not information.
+    var feedItems: [FeedItemFfi] { items.filter { !$0.story && !$0.unsent } }
     func comment(_ id: String, _ body: String, _ media: [String] = []) {
         guard let social, let env = try? social.comment(circleId: activeCircleId, target: id, body: body, media: media, createdAt: now()) else { return }
         broadcastEvent(activeCircleId, env); refresh()
@@ -2551,7 +2552,7 @@ struct SyncStatusBadge: View {
                         Text(s.label).font(.caption2).foregroundStyle(.secondary)
                     }
                     .padding(.horizontal, 8).padding(.vertical, 3)
-                    .background(.ultraThinMaterial, in: Capsule())
+                    .havenGlass(in: Capsule())
                 }
                 .buttonStyle(.plain)
                 .help("Tap for live sync detail. Yellow: still syncing. Red: only on this device.")
@@ -2662,6 +2663,10 @@ struct FeedView: View {
             .foregroundStyle(.primary)
         }
         .menuIndicator(.hidden)   // macOS adds its own chevron; keep only our styled one
+        #if os(macOS)
+        .menuStyle(.borderlessButton)   // else macOS wraps the title+chevron in a popup-button bezel
+        .fixedSize()
+        #endif
     }
 
     var body: some View {
@@ -2675,6 +2680,7 @@ struct FeedView: View {
                     LazyVStack(spacing: 16) {
                         banner
                         if !connections.pending.isEmpty { pendingBanner }
+                        RelayNudgeBanner(circleId: store.activeCircleId)
                         storiesTray
                         if store.feedItems.isEmpty {
                             emptyState
@@ -2753,10 +2759,18 @@ struct FeedView: View {
                 }
             }
             .sheet(isPresented: $showCircle) {
+                #if os(macOS)
+                CircleView(account: account)   // HavenMacSheet brings its own frame, gradient, and close
+                #else
                 NavigationStack { CircleView(account: account) }.macSheetClose()
+                #endif
             }
             .sheet(isPresented: $showNewCircle) {
+                #if os(macOS)
+                NewCircleView { name, members in store.createCircle(name: name, memberIds: members) }
+                #else
                 NewCircleView { name, members in store.createCircle(name: name, memberIds: members) }.macSheetClose()
+                #endif
             }
             .onAppear {
                 store.configure(seed: seed)
@@ -2823,7 +2837,7 @@ struct FeedView: View {
                     }
                 }
             }
-            .sheet(isPresented: $showRequests) { ConnectionRequestsView().macSheetClose() }
+            .sheet(isPresented: $showRequests) { ConnectionRequestsView() }
             .havenFullScreenCover(isPresented: $showStories) {
                 // `.id(storyIndex)` forces a fresh StoryViewer per tapped user — otherwise SwiftUI reuses
                 // the view identity and its @State `index` sticks at the first value, so every tap opened
@@ -2991,10 +3005,10 @@ struct FeedView: View {
                         .focused($composeFocused)
                         .textFieldStyle(.plain)   // drop the macOS system focus ring/border — matches iOS
                         .padding(.horizontal, 14).padding(.vertical, 10)
-                        // A fixed-radius rounded rect — a Capsule's radius grows with height and
-                        // clips into the text once the field wraps to multiple lines.
-                        .background(.background, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Color.white.opacity(0.08)))
+                        // ONE glass surface. A fixed-radius rounded rect (not havenPillField's Capsule):
+                        // a Capsule's radius grows with height and clips into the text once the field
+                        // wraps to multiple lines.
+                        .havenGlass(in: RoundedRectangle(cornerRadius: 20, style: .continuous))
 
                     Button { send() } label: {
                         Image(systemName: "paperplane.fill").foregroundStyle(.white)
@@ -3006,7 +3020,10 @@ struct FeedView: View {
                 }
             }
             .padding(.horizontal, 16).padding(.vertical, 12)
-            .background(.ultraThinMaterial)
+            // NO band behind the composer: a material slab here read as a detached grey bar pasted
+            // under the gradient. The field / + / send each carry their own surface and float over
+            // the backdrop instead. contentShape keeps the whole bar a drop target without one.
+            .contentShape(Rectangle())
             .overlay(alignment: .top) {
                 if dropActive {
                     Rectangle().fill(HavenTheme.pink.opacity(0.12))
@@ -3102,7 +3119,7 @@ struct FeedView: View {
                         Image(systemName: "music.note")
                         Text(track.title).font(.caption2).lineLimit(1)
                         Button { attachedTrack = nil } label: { Image(systemName: "xmark.circle.fill") }
-                            .foregroundStyle(.secondary)
+                            .buttonStyle(.plain).foregroundStyle(.secondary)
                     }
                     .padding(.horizontal, 10).padding(.vertical, 8)
                     .background(HavenTheme.brandHorizontal.opacity(0.18), in: Capsule())
@@ -3127,7 +3144,7 @@ struct FeedView: View {
                         Image(systemName: "timer")
                         Text("Disappears: \(Self.retentionLabel(secs))").font(.caption2).lineLimit(1)
                         Button { composeRetention = nil } label: { Image(systemName: "xmark.circle.fill") }
-                            .foregroundStyle(.secondary)
+                            .buttonStyle(.plain).foregroundStyle(.secondary)
                     }
                     .padding(.horizontal, 10).padding(.vertical, 8)
                     .background(Color(.tertiarySystemFill), in: Capsule())
@@ -3150,6 +3167,7 @@ struct FeedView: View {
             Image(systemName: "xmark.circle.fill").foregroundStyle(.white)
                 .background(Circle().fill(.black.opacity(0.5)))
         }
+        .buttonStyle(.plain)   // the glyph IS the circle — no macOS bezel behind it
         .padding(3)
     }
 
@@ -3164,8 +3182,13 @@ struct FeedView: View {
             }
         } label: {
             Image(systemName: "slider.horizontal.3").font(.caption2).foregroundStyle(.white)
-                .padding(4).background(.ultraThinMaterial, in: Circle())
+                .padding(4).havenGlass(in: Circle())
         }
+        .menuIndicator(.hidden)
+        #if os(macOS)
+        .menuStyle(.borderlessButton)   // just the glass circle — no popup-button bezel behind it
+        .fixedSize()
+        #endif
         .padding(3)
     }
 
@@ -3269,6 +3292,11 @@ struct PostCard: View {
     struct CommentReactTarget: Identifiable { let id: String }
     @State private var currentPage = 0
     @State private var carouselScrubbing = false   // hides the carousel dots while a video is being scrubbed
+    /// The card's content width, measured. The media page spans it EDGE TO EDGE: sizing the page to the
+    /// media's own aspect (the old `.aspectRatio(_, .fit)`) parked a tall clip in a narrow centre column
+    /// with the card's grey either side on any wide window — the page must own the width, and the media
+    /// letterboxes INSIDE it against its own blurred copy.
+    @State private var mediaWidth: CGFloat = 0
     @State private var showHeart = false
     @State private var showReactionDetail = false
 
@@ -3377,7 +3405,7 @@ struct PostCard: View {
         .onDisappear { teardownPlayers() }
         .onChange(of: audio.centeredPostId) { syncPlayback() }
         .onChange(of: currentPage) { if isActive { playVisibleVideo() } }
-        .sheet(isPresented: $showEdit) { EditPostSheet(item: item).macSheetFrame() }
+        .sheet(isPresented: $showEdit) { EditPostSheet(item: item) }
         .sheet(isPresented: $showReport) { ReportSheet(item: item, authorName: authorName) }
         .havenFullScreenCover(item: $zoomTarget, wide: true) { t in MediaZoomViewer(refs: t.refs, index: t.index) }
         .alert("Edit comment", isPresented: Binding(get: { editCommentId != nil }, set: { if !$0 { editCommentId = nil } })) {
@@ -3392,6 +3420,19 @@ struct PostCard: View {
     /// degrades to a forever-spinner tile (MediaStore has no file for it).
     private var realMedia: [String] { item.media.filter { SharedLocation.parse($0) == nil } }
 
+    /// A full-width media page's height: as tall as the media needs, capped. A page WIDER than the media's
+    /// own shape is the point — the exposed strip either side is where the blurred backdrop shows.
+    private func pageHeight(_ aspect: CGFloat) -> CGFloat {
+        guard mediaWidth > 0 else { return singleMediaMaxHeight }
+        return min(singleMediaMaxHeight, mediaWidth / aspect)
+    }
+
+    /// The page's ACTUAL aspect once it spans the card — what the letterbox test must compare against.
+    private func pageAspect(_ aspect: CGFloat) -> CGFloat {
+        guard mediaWidth > 0 else { return aspect }
+        return mediaWidth / pageHeight(aspect)
+    }
+
     @ViewBuilder private var mediaView: some View {
         VStack(spacing: 8) {
             if let geo = item.media.first(where: { SharedLocation.parse($0) != nil }),
@@ -3402,37 +3443,56 @@ struct PostCard: View {
             if media.count == 1, let ref = media.first {
                 let video = isVideo(ref)
                 ZStack(alignment: .bottomTrailing) {
-                    mediaPage(ref)
-                    if video { muteButton }
+                    // containerAspect == the media's own aspect ⇒ the inner per-page gate stays off; the
+                    // outer backdrop below covers the whole page, so we don't blur the same thing twice.
+                    mediaPage(ref, containerAspect: singleAspect(ref))
+                    if video { muteButton(ref) }
                 }
-                // Size to the media's own aspect. On a portrait phone the taller cap lets a tall photo fill
-                // the column width (was capped at 480 → a narrow "square" sliver); wider layouts fit the
-                // whole image within a shorter cap.
-                .aspectRatio(singleAspect(ref), contentMode: .fit)
-                .frame(maxWidth: .infinity, maxHeight: singleMediaMaxHeight)
+                .frame(maxWidth: .infinity)
+                .frame(height: pageHeight(singleAspect(ref)))
+                .background { blurredBackdrop(ref) }
                 .clipShape(RoundedRectangle(cornerRadius: 16))
                 // Tap-to-zoom only for images. For a video, the player owns the single tap
                 // (mute) / hold (pause) / drag (scrub); a zoom tap here would swallow them.
                 .modifier(ConditionalTap(enabled: !video) { zoomTarget = ZoomTarget(refs: media, index: 0) })
-            } else if media.count <= 7, allSameAspect(media) {
-                mediaCarousel(media)   // uniform-aspect set → a swipeable pager (autoplays the visible video)
+            } else if (2...10).contains(media.count) {
+                // Mixed aspects no longer force the grid — each page fits inside a shared shape and
+                // its own blurred backdrop masks the difference, which beats a 2-photo masonry.
+                // (A location-only post has NO real media: it must fall through to nothing.)
+                mediaCarousel(media)
             } else if !media.isEmpty {
-                masonry   // mixed aspects or a big set → the staggered grid; tap any to zoom
+                masonry   // a big set → the staggered grid; tap any to zoom
             }
         }
+        // Measure the card's content width — pageHeight/pageAspect need it to span the card. maxWidth
+        // resolves from the PARENT's proposal, so reading it back here can't feed itself.
+        .frame(maxWidth: .infinity)
+        .background(GeometryReader { g in
+            Color.clear.preference(key: MediaWidthKey.self, value: g.size.width)
+        })
+        .onPreferenceChange(MediaWidthKey.self) { w in if w > 0 { mediaWidth = w } }
     }
 
-    /// True when a small media set all share (near-)equal aspect ratios — the case where a full-width
-    /// swipeable carousel looks clean (vs a staggered grid for mixed shapes).
+    /// True when a media set all share (near-)equal aspect ratios — such a set keeps its exact shape
+    /// in the carousel (no backdrop needed, since nothing letterboxes).
     private func allSameAspect(_ media: [String]) -> Bool {
         guard let a0 = media.first.map(singleAspect) else { return false }
         return media.allSatisfy { abs(singleAspect($0) - a0) < 0.06 }
     }
 
-    /// A full-width swipeable pager for a uniform-aspect set. The visible page's video autoplays as you
-    /// swipe (playVisibleVideo keys off `currentPage`), matching the single-media behavior.
+    /// The carousel's page shape. A uniform set keeps its exact aspect; a MIXED set takes the TALLEST
+    /// item's, so no page is ever cropped — clamped so one 9:16 clip can't squeeze the whole card into
+    /// a narrow column (the remaining pages letterbox against their own blurred backdrop instead).
+    private func carouselAspect(_ media: [String]) -> CGFloat {
+        guard let tallest = media.map(singleAspect).min() else { return 4.0 / 3.0 }
+        if allSameAspect(media) { return tallest }
+        return min(1.91, max(0.8, tallest))
+    }
+
+    /// A full-width swipeable pager. The visible page's video autoplays as you swipe
+    /// (playVisibleVideo keys off `currentPage`), matching the single-media behavior.
     @ViewBuilder private func mediaCarousel(_ media: [String]) -> some View {
-        let aspect = singleAspect(media[0])
+        let aspect = carouselAspect(media)
         // A ScrollView pager (NOT TabView) so it works on macOS too — a TabView renders its pages as
         // tab-bar items on macOS, dumping the dots into the nav toolbar. Custom dots overlay the carousel.
         // showsIndicators:false in the initializer (not just the .scrollIndicators modifier) — on macOS the
@@ -3443,8 +3503,9 @@ struct PostCard: View {
                     ZStack(alignment: .bottomTrailing) {
                         // The player scrubs only from the bottom 1/3 (top 2/3 pages the carousel); a photo
                         // page has no scrub strip so the whole page pages.
-                        mediaPage(ref, inCarousel: true, onScrubbing: { carouselScrubbing = $0 })
-                        if isVideo(ref) { muteButton }
+                        mediaPage(ref, containerAspect: pageAspect(aspect), inCarousel: true,
+                                  onScrubbing: { carouselScrubbing = $0 })
+                        if isVideo(ref) { muteButton(ref) }
                     }
                     .containerRelativeFrame(.horizontal)   // each page == the carousel's width
                     .modifier(ConditionalTap(enabled: !isVideo(ref)) { zoomTarget = ZoomTarget(refs: media, index: i) })
@@ -3452,13 +3513,23 @@ struct PostCard: View {
                 }
             }
             .scrollTargetLayout()
+            #if os(macOS)
+            .background(KillHorizontalScroller().frame(width: 0, height: 0))
+            #endif
         }
         .scrollTargetBehavior(.paging)
         .scrollPosition(id: Binding<Int?>(get: { currentPage }, set: { currentPage = $0 ?? currentPage }))
-        .scrollIndicators(.hidden)
+        // .never, not .hidden: on macOS .hidden still leaves AppKit's legacy scroller drawing a bar
+        // across the bottom of the carousel.
+        .scrollIndicators(.never)
+        // Pages are containerRelativeFrame'd to this ScrollView — clip to it so a neighbouring page's
+        // backdrop can't bleed past the edge mid-swipe.
+        .clipped()
         .scrollDisabled(carouselScrubbing)   // while scrubbing a video, don't let a swipe page the carousel
-        .aspectRatio(aspect, contentMode: .fit)
-        .frame(maxWidth: .infinity, maxHeight: singleMediaMaxHeight)
+        // Full-width pages (NOT .aspectRatio(_, .fit), which shrank the whole carousel to a centre column
+        // on a wide window) — each page letterboxes inside against its own blurred backdrop.
+        .frame(maxWidth: .infinity)
+        .frame(height: pageHeight(aspect))
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .overlay(alignment: .bottom) {
             // Dots hide while scrubbing so the scrub bar doesn't collide with them.
@@ -3535,14 +3606,15 @@ struct PostCard: View {
         }
     }
 
-    @ViewBuilder private func mediaPage(_ ref: String, inCarousel: Bool = false,
+    @ViewBuilder private func mediaPage(_ ref: String, containerAspect: CGFloat,
+                                        inCarousel: Bool = false,
                                         onScrubbing: @escaping (Bool) -> Void = { _ in }) -> some View {
         if isVideo(ref) {
             // No contextMenu for videos — the long-press is reserved for the player's
             // hold-to-pause. Save/Share live in the mute control's menu instead.
-            mediaPageContent(ref, inCarousel: inCarousel, onScrubbing: onScrubbing)
+            mediaPageContent(ref, containerAspect: containerAspect, inCarousel: inCarousel, onScrubbing: onScrubbing)
         } else {
-            mediaPageContent(ref)
+            mediaPageContent(ref, containerAspect: containerAspect)
                 .contextMenu {
                     Button { MediaSaver.save(ref) } label: { Label("Save to Photos", systemImage: "square.and.arrow.down") }
                     if let url = shareURL(ref) {
@@ -3558,21 +3630,27 @@ struct PostCard: View {
         return m.kind == .video ? m.videoURL : MediaStore.shared.storagePath(for: ref)
     }
 
-    @ViewBuilder private func mediaPageContent(_ ref: String, inCarousel: Bool = false,
+    @ViewBuilder private func mediaPageContent(_ ref: String, containerAspect: CGFloat,
+                                               inCarousel: Bool = false,
                                                onScrubbing: @escaping (Bool) -> Void = { _ in }) -> some View {
         if let m = MediaStore.shared.item(ref) {
             if m.kind == .video, let url = m.videoURL {
+                let player = playerFor(ref, url)
                 // The player owns its gestures: tap → mute, double-tap → heart,
                 // hold → pause, horizontal drag → scrub. Letterboxed, loops continuously.
-                GestureVideoPlayer(player: playerFor(ref, url),
+                GestureVideoPlayer(player: player,
                                    onTap: { togglePostMute() },
                                    onDoubleTap: { heartIt() },
                                    inCarousel: inCarousel,
                                    onScrubbing: onScrubbing)
+                    .background { pageBackdrop(ref, containerAspect: containerAspect) }
             } else if let img = MediaStore.shared.thumbnail(ref, maxDimension: 1200) ?? m.image {
                 // A ~1200px thumbnail (not the 2560px original) keeps the single-image post crisp at the
                 // feed's ≤480pt frame without re-sampling a giant bitmap every scroll frame. Zoom uses full-res.
                 Image(platformImage: img).resizable().scaledToFit()      // show the whole image (no crop)
+                    // Take the WHOLE page so the backdrop fills the letterbox, not just the fitted image.
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background { pageBackdrop(ref, containerAspect: containerAspect) }
             } else {
                 mediaLoadingPlaceholder(ref)
             }
@@ -3582,7 +3660,86 @@ struct PostCard: View {
         }
     }
 
-    /// Shown for a media reference whose bytes haven't arrived yet, so the post doesn't look
+    /// True when this page's media can't fill a `containerAspect`-shaped page — it letterboxes, exposing
+    /// the card's grey behind it. A video whose poster hasn't been generated yet has no known aspect
+    /// (singleAspect falls back to 4:3), so assume it letterboxes: that's the tall-clip case exactly.
+    private func letterboxes(_ ref: String, in containerAspect: CGFloat) -> Bool {
+        guard let sz = MediaStore.shared.pixelSize(ref), sz.height > 0 else { return true }
+        return abs(sz.width / sz.height - containerAspect) > 0.02
+    }
+
+    /// A blurred, cropped-to-fill copy of the media behind the fitted one — the letterboxed area reads as
+    /// the media's own colors instead of the card's grey. A 64px thumbnail is all a heavy blur can show;
+    /// for a video that thumbnail is its poster.
+    ///
+    /// The poster, NOT a second live layer: an AVPlayer only ever feeds ONE AVPlayerLayer, so hanging a
+    /// second (fill-gravity) layer off the same player renders nothing — only the most recently associated
+    /// layer draws. A blurred still is the honest trade: no second decode, and behind a 24pt blur the
+    /// difference between a still and a moving copy isn't visible anyway.
+    @ViewBuilder private func blurredBackdrop(_ ref: String) -> some View {
+        if let img = backdropSource(ref) {
+            Color.clear
+                .overlay { Image(platformImage: img).resizable().scaledToFill().blur(radius: 24, opaque: true) }
+                .clipped()
+                // Rasterize the blur ONCE instead of re-running it every scroll frame — a 24pt blur
+                // re-composited per frame is what made scrolling past a post chop.
+                .drawingGroup()
+                .allowsHitTesting(false)
+        }
+    }
+
+    /// The bitmap to blur. Falls back through sizes because the 64px thumb ALONE is not dependable: it
+    /// lives in an NSCache that evicts under pressure (the backdrop would vanish from a post that had
+    /// one a moment ago), and for a video it's nil until the poster finishes generating off-thread.
+    /// The 1200px thumb is already resident — it's what the page itself draws — so the fallback is
+    /// free in the case that matters. Blurring a bigger bitmap costs nothing extra once rasterized.
+    private func backdropSource(_ ref: String) -> PlatformImage? {
+        MediaStore.shared.thumbnail(ref, maxDimension: 64)
+            ?? MediaStore.shared.thumbnail(ref, maxDimension: 1200)
+            ?? MediaStore.shared.item(ref)?.image
+    }
+
+    /// The carousel's per-page backdrop: only pay for it when the page's media actually letterboxes
+    /// inside the shared page shape. (Single media gates on the page frame instead — see `mediaView`.)
+    @ViewBuilder private func pageBackdrop(_ ref: String, containerAspect: CGFloat) -> some View {
+        if letterboxes(ref, in: containerAspect) { blurredBackdrop(ref) }
+    }
+
+    /// The measured width of a post's media column, so a page can span the card rather than shrink to the
+/// media's own shape. `max` because the reducer sees one value per card.
+private struct MediaWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+#if os(macOS)
+/// Reaches the enclosing NSScrollView and turns its horizontal scroller off for good.
+///
+/// SwiftUI can't do this on macOS: with "Show scroll bars: Always" in System Settings, AppKit forces
+/// LEGACY (non-overlay) scrollers and neither `showsIndicators: false` nor `.scrollIndicators(.never)`
+/// suppresses them — a grey bar draws across the bottom of the carousel. The dots already say which
+/// page you're on, so the scroller is pure noise.
+private struct KillHorizontalScroller: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { NSView(frame: .zero) }
+    func updateNSView(_ v: NSView, context: Context) {
+        // async: the view isn't in the hierarchy yet at make time, so there's no scroll view to find.
+        DispatchQueue.main.async {
+            var node: NSView? = v
+            while let cur = node {
+                if let sv = cur as? NSScrollView {
+                    sv.hasHorizontalScroller = false
+                    sv.horizontalScroller = nil
+                    sv.scrollerStyle = .overlay
+                    return
+                }
+                node = cur.superview
+            }
+        }
+    }
+}
+#endif
+
+/// Shown for a media reference whose bytes haven't arrived yet, so the post doesn't look
     /// broken while it's still downloading from the sender, a relay, or the shared mailbox.
     @ViewBuilder private func mediaLoadingPlaceholder(_ ref: String) -> some View {
         ZStack {
@@ -3606,8 +3763,8 @@ struct PostCard: View {
         return 4.0 / 3.0
     }
 
-    @ViewBuilder private var muteButton: some View {
-        let ref = item.media.first
+    /// The speaker chip over a video page — plus that page's Save/Share menu.
+    @ViewBuilder private func muteButton(_ ref: String) -> some View {
         Button {
             if audio.activePostId != item.id { audio.start(postId: item.id, track: item.music, video: primaryVideoPlayer, muteVideo: item.muteVideo) }
             audio.toggleVideoAudio()
@@ -3620,13 +3777,13 @@ struct PostCard: View {
         .buttonStyle(GlassIconButtonStyle(tint: .white))
         .padding(10)
         // Save/Share lives here for videos (the player's long-press is hold-to-pause, so the
-        // video itself no longer carries a contextMenu).
+        // video itself no longer carries a contextMenu). It acts on THIS page's video — it used to
+        // take item.media.first, which is the wrong item on any page but the first (and is the
+        // synthetic geo: ref on a post that also pins a location).
         .contextMenu {
-            if let ref {
-                Button { MediaSaver.save(ref) } label: { Label("Save to Photos", systemImage: "square.and.arrow.down") }
-                if let url = shareURL(ref) {
-                    ShareLink(item: url) { Label("Share…", systemImage: "square.and.arrow.up") }
-                }
+            Button { MediaSaver.save(ref) } label: { Label("Save to Photos", systemImage: "square.and.arrow.down") }
+            if let url = shareURL(ref) {
+                ShareLink(item: url) { Label("Share…", systemImage: "square.and.arrow.up") }
             }
         }
     }
@@ -3771,6 +3928,11 @@ struct PostCard: View {
                         }
                     }
                 } label: { Image(systemName: "ellipsis").foregroundStyle(.secondary).padding(6) }
+                .menuIndicator(.hidden)
+                #if os(macOS)
+                .menuStyle(.borderlessButton)   // else macOS paints a rounded-rect bezel behind the glyph
+                .fixedSize()
+                #endif
             }
         }
     }
@@ -3803,8 +3965,9 @@ struct PostCard: View {
                         .foregroundStyle(r.mine ? AnyShapeStyle(HavenTheme.pink) : AnyShapeStyle(.secondary))
                 }
                 .padding(.horizontal, 9).padding(.vertical, 4)
-                .background(.ultraThinMaterial, in: Capsule())
-                .overlay(Capsule().strokeBorder(r.mine ? HavenTheme.pink.opacity(0.6) : Color.white.opacity(0.08), lineWidth: 1))
+                // One glass capsule, tinted pink when it's YOUR reaction (the count is pink too) —
+                // was a material + hand-rolled ring, i.e. havenGlass's fallback, minus the real glass.
+                .havenGlass(in: Capsule(), tint: r.mine ? HavenTheme.pink : nil)
                 .contentShape(Capsule())
                 .onTapGesture { if r.mine { onUnreact(r.emoji) } else { react(r.emoji) } }
                 .onLongPressGesture(minimumDuration: 0.3) { showReactionDetail = true }
@@ -3814,8 +3977,7 @@ struct PostCard: View {
                 Text("+\(hiddenReactionCount)")
                     .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
                     .padding(.horizontal, 9).padding(.vertical, 4)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
+                    .havenGlass(in: Capsule())
                     .contentShape(Capsule())
                     .onTapGesture { showReactionDetail = true }
                     .transition(.scale.combined(with: .opacity))
@@ -3831,10 +3993,10 @@ struct PostCard: View {
         }
         .animation(HavenTheme.bouncy, value: item.reactions.count)
         .sheet(isPresented: $showReactionPicker) {
-            ReactionPicker { e in onReact(e) }.macSheetFrame()
+            ReactionPicker { e in onReact(e) }
         }
         .sheet(isPresented: $showReactionDetail) {
-            ReactionDetailView(reactions: item.reactions, onUnreact: { e in onUnreact(e) }).macSheetFrame()
+            ReactionDetailView(reactions: item.reactions, onUnreact: { e in onUnreact(e) })
         }
     }
 
@@ -3859,7 +4021,7 @@ struct PostCard: View {
                 .macSheetFrame()
         }
         .sheet(item: $commentReactTarget) { t in
-            ReactionPicker { e in feed.react(t.id, e) }.macSheetFrame()
+            ReactionPicker { e in feed.react(t.id, e) }
         }
     }
 
@@ -3889,10 +4051,11 @@ struct PostCard: View {
         }
         .contextMenu {
             if !c.unsent {
-                ControlGroup {
-                    ForEach(EmojiStore.shared.frequent(3), id: \.self) { e in
-                        Button(e) { EmojiStore.shared.record(e); feed.react(c.id, e) }
-                    }
+                // Flat rows, each reacting on TAP. A ControlGroup here collapsed into a
+                // "❤️ 😎 👍 ›" SUBMENU on macOS: it showed the emoji, then made you open a
+                // second menu to actually pick one.
+                ForEach(EmojiStore.shared.frequent(3), id: \.self) { e in
+                    Button("React \(e)") { EmojiStore.shared.record(e); feed.react(c.id, e) }
                 }
                 Button { commentReactTarget = CommentReactTarget(id: c.id) } label: { Label("More reactions…", systemImage: "face.smiling") }
                 if c.isMe {
@@ -4205,32 +4368,24 @@ struct NewCircleView: View {
     @State private var selected: Set<String> = []
 
     var body: some View {
+        #if os(macOS)
+        // HavenMacSheet, not NavigationStack — a stack inside a macOS sheet paints a grey band above
+        // (nav bar) and below (where macOS parks sheet toolbar items). Cancel is the glass X circle.
+        HavenMacSheet("New circle") {
+            memberColumn
+        } footer: {
+            Button("Create") { create() }
+                .buttonStyle(BrandButtonStyle())
+                .keyboardShortcut(.defaultAction)
+                .disabled(trimmedName.isEmpty)
+        }
+        #else
         NavigationStack {
             ZStack {
                 HavenBackground()
                 Form {
                     Section("Name") { TextField("Circle name (e.g. Family)", text: $name) }
-                    Section("Who's in it") {
-                        if contacts.contacts.isEmpty {
-                            Text("Add some people first.").foregroundStyle(.secondary)
-                        }
-                        ForEach(contacts.contacts) { c in
-                            Button {
-                                if selected.contains(c.idHex) { selected.remove(c.idHex) } else { selected.insert(c.idHex) }
-                            } label: {
-                                HStack(spacing: 12) {
-                                    Circle().fill(LinearGradient(colors: [HavenTheme.amber, HavenTheme.pink], startPoint: .top, endPoint: .bottom))
-                                        .frame(width: 34, height: 34)
-                                        .overlay(Text(String(c.displayName.prefix(1)).uppercased()).font(.subheadline.bold()).foregroundStyle(.white))
-                                    Text(c.displayName).foregroundStyle(.primary)
-                                    Spacer()
-                                    Image(systemName: selected.contains(c.idHex) ? "checkmark.circle.fill" : "circle")
-                                        .foregroundStyle(selected.contains(c.idHex) ? HavenTheme.pink : .secondary)
-                                }
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
+                    Section("Who's in it") { memberRows }
                 }
                 .formStyle(.grouped)   // grouped sections (not macOS right-aligned columns)
                 .scrollContentBackground(.hidden)
@@ -4240,15 +4395,54 @@ struct NewCircleView: View {
             .toolbar {
                 ToolbarItem(placement: .havenCancelLeading) { Button("Cancel") { dismiss() }.havenToolbarPill() }
                 ToolbarItem(placement: .havenTrailing) {
-                    Button("Create") {
-                        onCreate(name.trimmingCharacters(in: .whitespaces), Array(selected))
-                        dismiss()
-                    }
+                    Button("Create") { create() }
                     .havenToolbarPill(tint: HavenTheme.pink)
                     .fontWeight(.semibold)
-                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .disabled(trimmedName.isEmpty)
                 }
             }
+        }
+        #endif
+    }
+
+    private var trimmedName: String { name.trimmingCharacters(in: .whitespaces) }
+
+    private func create() {
+        onCreate(trimmedName, Array(selected))
+        dismiss()
+    }
+
+    /// macOS column: a Form can't lay out inside HavenMacSheet's ScrollView, so the same rows are
+    /// hand-stacked with glass surfaces. Same bindings, same order as the iOS Form.
+    @ViewBuilder private var memberColumn: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Name").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+            TextField("Circle name (e.g. Family)", text: $name).havenPillField()
+            Text("Who's in it").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+            memberRows
+        }
+    }
+
+    @ViewBuilder private var memberRows: some View {
+        if contacts.contacts.isEmpty {
+            Text("Add some people first.").foregroundStyle(.secondary)
+        }
+        ForEach(contacts.contacts) { c in
+            Button {
+                if selected.contains(c.idHex) { selected.remove(c.idHex) } else { selected.insert(c.idHex) }
+            } label: {
+                HStack(spacing: 12) {
+                    Circle().fill(LinearGradient(colors: [HavenTheme.amber, HavenTheme.pink], startPoint: .top, endPoint: .bottom))
+                        .frame(width: 34, height: 34)
+                        .overlay(Text(String(c.displayName.prefix(1)).uppercased()).font(.subheadline.bold()).foregroundStyle(.white))
+                    Text(c.displayName).foregroundStyle(.primary)
+                    Spacer()
+                    Image(systemName: selected.contains(c.idHex) ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(selected.contains(c.idHex) ? HavenTheme.pink : .secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
     }
 }

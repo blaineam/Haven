@@ -131,6 +131,97 @@ async function refreshStatus() {
   } catch (_) {}
 }
 
+// ---- Deep links ------------------------------------------------------------------------
+// Three shapes reach us, and they must be told apart BEFORE anything routes them:
+//   https://wemiller.com/apps/haven/#p/<circleId>.<postId>   a shared post — the form we emit
+//   haven://p/<circleId>/<postId>                            the same post, legacy scheme — parsed forever
+//   https://wemiller.com/apps/haven/#<id>.<verify>           an invite (also haven://invite#<id>.<verify>)
+// An invite's payload is ALSO `<a>.<b>` in the fragment, so an unguarded invite check swallows every
+// post link — that exact bug is live in android/…/ShareInbox.kt:49. Hence: post marker first, always.
+// Grammar mirrors apple/HavenApp/DeepLink.swift; see docs/LINK-SYSTEM.md ▸ "Post links".
+//
+// ⚠️ THE PAYLOAD RIDES IN THE #FRAGMENT — DO NOT "TIDY" IT INTO A PATH. ⚠️
+// A browser never sends a fragment to the server, so wemiller.com's logs — and every CDN and proxy in
+// between — see only `GET /apps/haven/`, never which post nor whose circle. A path form
+// (`/apps/haven/p/<circle>/<post>`) would hand the host a readership map: reader IP × circle × post.
+// That map is precisely what Haven exists not to create. The fragment IS the privacy property.
+//
+// The link is a pointer, not a capability: it carries no key. Only a device already in the circle can
+// decrypt the post — everyone else gets "not found" from the core, link or no link.
+const HAVEN_SITE = { host: "wemiller.com", path: "/apps/haven" };   // apple/HavenApp/ConnectView.swift ▸ HavenSite
+
+const DeepLink = {
+  /** → {circleId, postId} for EITHER post form, else null (invites and everything else fall through). */
+  post(raw) {
+    let u;
+    try { u = new URL((raw || "").trim()); } catch (_) { return null; }
+    if (u.protocol === "haven:") {
+      // haven://p/<circle>/<post> — "p" parses as the host, the two ids as the path.
+      if (u.hostname !== "p") return null;
+      const parts = u.pathname.split("/").filter(Boolean);
+      return parts.length >= 2 ? this._decode(parts[0], parts[1]) : null;
+    }
+    if (u.protocol !== "https:") return null;
+    if (u.hostname.toLowerCase() !== HAVEN_SITE.host || !u.pathname.startsWith(HAVEN_SITE.path)) return null;
+    // `u.hash` keeps the RAW percent-encoding, so we decode exactly once — after splitting on the
+    // delimiters. Apple encodes both tokens with a charset that EXCLUDES `.` and `/`
+    // (DeepLink.swift ▸ fragmentToken), so the split is exact whatever an id contains.
+    const frag = u.hash.replace(/^#/, "");
+    if (!frag.startsWith("p/")) return null;
+    const body = frag.slice(2);
+    const dot = body.indexOf(".");
+    return dot > 0 ? this._decode(body.slice(0, dot), body.slice(dot + 1)) : null;
+  },
+  _decode(c, p) {
+    try {
+      const circleId = decodeURIComponent(c), postId = decodeURIComponent(p);
+      return circleId && postId ? { circleId, postId } : null;
+    } catch (_) { return null; }   // malformed %-escape
+  },
+};
+
+/** Route a link from the OS or the Connect paste box. Post links are discriminated FIRST, so one can
+ *  never be mistaken for an invite. Returns "post" | "invite" | null (null = not a Haven link). */
+async function routeDeepLink(raw) {
+  const p = DeepLink.post(raw);
+  if (p) { await openPostLink(p.circleId, p.postId); return "post"; }
+  try { return (await invoke("connect_by_link", { uri: (raw || "").trim() })) ? "invite" : null; }
+  catch (_) { return null; }
+}
+
+// Open the post a link points at: switch to its circle, then surface that post in the feed. Desktop has
+// no single-post view (iOS opens a PostLinkView sheet), so "surface" = scroll it into view and flash it.
+// Every way this can fail says WHICH way it failed — a link that quietly does nothing reads as a broken
+// app, and the post genuinely may not be here: the link is a pointer, not a key.
+async function openPostLink(circleId, postId) {
+  const circles = await invoke("circles").catch(() => []);
+  if (!circles.some((c) => c.id === circleId)) { toast("That post is in a circle you're not in."); return; }
+  state.activeCircle = circleId;
+  state.activeDm = null;
+  state.focusPost = null;
+  const items = await invoke("feed", { circleId }).catch(() => []);
+  const it = items.find((i) => i.id === postId);
+  if (it && !it.unsent && !it.story) {
+    if (Hidden.has(postId)) Hidden.showHidden = true;   // opening a link is an explicit ask — don't hide it
+    state.focusPost = postId;
+  }
+  switchView("feed");   // land them in the right circle either way — but never pretend we found the post
+  if (!it) toast("That post hasn't reached this device yet, or it isn't in this circle.");
+  else if (it.unsent) toast("That post was unsent.");
+  else if (it.story) toast("That link points at a story — open it under Stories.");
+}
+
+// Scroll a linked-to post into view and flash it once. Consumed on the first render: the feed re-renders
+// on every haven:changed, and a sticky focus would keep yanking the scroll position back.
+function focusPostCard(root, postId) {
+  state.focusPost = null;
+  const card = $$("[data-post]", root).find((n) => n.dataset.post === postId);
+  if (!card) return;
+  card.scrollIntoView({ behavior: "smooth", block: "center" });
+  card.classList.add("focus-flash");
+  setTimeout(() => card.classList.remove("focus-flash"), 1800);
+}
+
 // ---- Pinned conversations --------------------------------------------------------------
 // Up to 6 pinned DM circle ids, kept at the top of the Messages list (iMessage-style). Order in the
 // array is pin order; persisted so pins survive relaunch. Mirrors iOS `DMPinStore`.
@@ -151,6 +242,116 @@ const Pins = {
   },
   _save() { localStorage.setItem("haven-dm-pinned", JSON.stringify(this.ids)); },
 };
+
+// ---- Relay nudge -----------------------------------------------------------------------
+// Port of apple/HavenApp/RelayNudge.swift. A circle with a handful of people stops being a
+// two-devices-both-online proposition: the more members, the less often everyone overlaps, and the
+// longer a post waits on its author to come back. A relay is the fix (relay/README.md).
+//
+// The bar is deliberately conservative: >2 OTHER members AND the circle has no relay of its OWN. The
+// all-circles DEFAULT relay does NOT satisfy it — the whole point is a mailbox somebody in THIS circle
+// runs, and the default is a global setting the user may never revisit.
+const RelayNudge = {
+  KEY: "haven-relay-nudge-dismissed",
+  /// Members beyond which a circle is "several people" rather than a pair — >2 OTHERS, i.e. at least
+  /// four counting you. `member_count` is the circle's members excluding me, exactly like iOS
+  /// `memberHexes` (both are core `Circle::members`), so the threshold ports across unchanged.
+  THRESHOLD: 2,
+  ids: new Set(JSON.parse(localStorage.getItem("haven-relay-nudge-dismissed") || "[]")),
+  isDismissed(id) { return this.ids.has(id); },
+  /// One-way and persisted, like iOS: nothing here ever un-dismisses, so we never nag twice.
+  dismiss(id) { this.ids.add(id); localStorage.setItem(this.KEY, JSON.stringify([...this.ids])); },
+
+  /// The single gate the feed needs (iOS `shouldShow(for:)`).
+  async shouldShow(circleId, memberCount) {
+    if (!circleId || this.isDismissed(circleId)) return false;
+    if (!(memberCount > this.THRESHOLD)) return false;
+    // This PC relaying — now, or armed to on every launch — already counts as the circle having one.
+    // (`host_on_launch` is desktop's persisted opt-in, i.e. iOS `RelayHost.enabled`; `hosting` is
+    // `serving`.)
+    const st = await invoke("relay_status").catch(() => ({}));
+    if (st.hosting) return false;
+    const au = await invoke("autostart_status").catch(() => ({}));
+    if (au.host_on_launch) return false;
+    // ACTIVE + EXPLICITLY associated only — desktop's `circle_relays` is the per-circle override list
+    // and excludes the inherited default (renderFeed's ⚙ dialog re-adds the default for display, we
+    // must not), which is exactly the distinction this nudge exists to make. It DOES include
+    // deactivated ones, so cross-check `relays()` for active — iOS `activeExplicitRelays(forCircle:)`.
+    const explicit = await invoke("circle_relays", { circleId }).catch(() => []);
+    if (!explicit.length) return true;
+    const all = await invoke("relays").catch(() => []);
+    return !explicit.some((h) => all.some((r) => r.node_hex === h && r.active));
+  },
+};
+
+/// The nudge: a brand-gradient card at the top of the feed. Clicking it opens the walkthrough; the ✕
+/// dismisses it for this circle for good. Returns null when the gate says no, so the call site is one line.
+async function relayNudgeBanner(circleId, memberCount) {
+  if (!(await RelayNudge.shouldShow(circleId, memberCount))) return null;
+  const card = el("div", { class: "nudge-banner" },
+    el("div", { class: "nudge-body", onclick: () => relayWalkthrough(circleId) },
+      el("span", { class: "nudge-icon" }, "📡"),
+      el("div", { style: "min-width:0" },
+        el("div", { class: "nudge-title" }, "Give this circle a relay"),
+        el("div", { class: "nudge-sub" }, "A few of you are here now — a relay holds your sealed posts so nobody has to be online at the same time."),
+      ),
+    ),
+    el("button", { class: "nudge-x", title: "Dismiss", onclick: () => { RelayNudge.dismiss(circleId); card.remove(); } }, "✕"),
+  );
+  return card;
+}
+
+/// Why a relay helps, how to get one here, and the plain-language version of Haven's encryption.
+/// Every claim is bounded by what this repo's code actually does — relay/README.md for what the relay
+/// holds, core/p2pcore/src/crypto.rs + identity.rs for the primitives, and
+/// core/p2pcore-ffi/src/lib.rs `purge_member_from_circle` for the rekey-on-removal. Desktop's hosting
+/// story is a genuinely stronger one than the phones' (it survives reboot, and runs windowless), so
+/// the "how" says that instead of iOS's "fine on a charger".
+function relayWalkthrough(circleId) {
+  const point = (icon, title, body) => el("div", { class: "nudge-point" },
+    el("span", { class: "nudge-point-icon" }, icon),
+    el("div", { style: "min-width:0" },
+      el("div", { style: "font-weight:600" }, title),
+      el("div", { class: "muted small", style: "margin-top:3px;white-space:pre-line" }, body)));
+  const heading = (t) => el("div", { class: "muted small", style: "font-weight:600;margin-top:6px" }, t);
+
+  modal(el("div", { style: "max-width:560px" },
+    el("h2", {}, "Set up a relay"),
+    el("div", { class: "col", style: "max-height:64vh;overflow:auto;gap:8px" },
+      point("📥", "Nobody has to be online at once",
+        "Your posts and media go up sealed. Anyone in the circle picks them up whenever they next open Haven — even if you closed it hours ago."),
+      point("🖼️", "Photos and videos actually arrive",
+        "Media is fetched from the relay instead of waiting on the person who posted it, so it still lands when two devices' networks can't reach each other directly."),
+      point("🔀", "It routes around home routers",
+        "When a member can't be dialed directly, the relay forwards their sealed messages onward. No port forwarding, no domain, no ports to open."),
+      point("🔒", "The relay can't read a thing",
+        "It only ever holds sealed blobs and a small routing header — destination node ids, a hop budget, and an id used to drop duplicates. No content key ever goes near it, so hosting one can never turn it into a reader."),
+
+      heading("How to set one up"),
+      point("🖥️", "The easy way — this PC",
+        "One click below and this PC holds the circle's sealed mailbox. Unlike a phone it can keep doing it: under Relay, switch on “Start Haven when I log in” and “Host the relay automatically on launch”, and it survives a reboot."),
+      point("⌨️", "Or with no window at all",
+        "haven-desktop --headless runs just the relay and your scheduled messages — a small always-on server on any machine you own."),
+      point("📦", "Or a spare machine",
+        "On a Mac, Linux box, or Raspberry Pi:\ncurl -fsSL https://wemiller.com/apps/haven/relay/install.sh | sh\n\nOn Windows, in PowerShell:\nirm https://wemiller.com/apps/haven/relay/install.ps1 | iex\n\nIt sets itself to start on every reboot; paste its node id under Relay to adopt it."),
+
+      heading("What everyone in the circle can count on"),
+      point("🔑", "Only the people you added can read it",
+        "Everything you post is sealed on this PC to your circle's members. Remove someone and the circle's key rotates, so they can't read anything posted afterwards."),
+      point("⚛️", "Encrypted for the long haul",
+        "Haven pairs today's proven encryption with post-quantum encryption — X25519 with ML-KEM-768, signed with Ed25519 and ML-DSA-65. An attacker has to break both halves, so ciphertext captured today isn't a bet on a future quantum computer. No promises beyond that: your keys live on your devices, and Haven never holds them."),
+    ),
+    // wrap: three buttons don't fit the sheet on a narrow window, and a clipped "Not now" is a trap.
+    el("div", { class: "row wrap", style: "margin-top:14px" },
+      el("button", { class: "btn primary", onclick: async () => {
+        try { await invoke("start_hosting"); toast("This PC is now the relay"); } catch (e) { toast("" + e); }
+        $("#modal-root").replaceChildren();
+        renderFeed();
+      } }, "Use this PC as the relay"),
+      el("button", { class: "btn ghost", onclick: () => { $("#modal-root").replaceChildren(); switchView("relay"); } }, "Add a relay I'm running →"),
+      el("button", { class: "btn ghost", style: "margin-left:auto", onclick: () => $("#modal-root").replaceChildren() }, "Not now"),
+    )));
+}
 
 // ---- Feed ------------------------------------------------------------------------------
 // Posts the user hid from their own feed — local + per-device, never touches the circle/relay.
@@ -199,7 +400,9 @@ async function renderFeed() {
   );
 
   const items = (await invoke("feed", { circleId: state.activeCircle }))
-    .filter((i) => !i.story)
+    // An unsent post is dropped from the LIST — a row of "This post was unsent" is clutter, not
+    // content. postCard still renders the tombstone for a post reached directly (comments open).
+    .filter((i) => !i.story && !i.unsent)
     .filter((i) => Hidden.showHidden || !Hidden.has(i.id));   // personal per-post hide (reversible)
   // Reports filed by ANY member — the circle's shared moderation signal, grouped per post.
   const reportsByTarget = {};
@@ -209,8 +412,12 @@ async function renderFeed() {
   if (!items.length) list.append(el("div", { class: "empty" }, "No posts yet. Say hello to your circle, or connect a friend."));
   for (const it of items) list.append(postCard(it, state.activeCircle, reportsByTarget[it.id] || []));
 
-  root.replaceChildren(head, composer, list);
+  // Sits above the composer, where the circle-level banners live.
+  const nudge = await relayNudgeBanner(state.activeCircle, (circles.find((c) => c.id === state.activeCircle) || {}).member_count || 0);
+
+  root.replaceChildren(...[head, nudge, composer, list].filter(Boolean));
   hydrateMedia(root, state.activeCircle);
+  if (state.focusPost) focusPostCard(root, state.focusPost);   // arrived here from a post link
 }
 
 function buildComposer(onPost, placeholder = "Share something with your circle…", opts = {}) {
@@ -376,6 +583,154 @@ function mediaNode(ref, imgStyle) {
   if (ref.startsWith("v:")) return el("video", Object.assign({ "data-ref": ref, "data-video": "1", controls: "" }, state.videoSoundOn && !callAudioActive() ? {} : { muted: "" }));
   if (ref.startsWith("a:")) return el("audio", { "data-ref": ref, controls: "", style: "width:100%;margin-top:6px;display:block" });
   return el("img", Object.assign({ "data-ref": ref, loading: "lazy" }, imgStyle ? { style: imgStyle } : {}));
+}
+
+// ---- Media pages: the carousel + single-item pager --------------------------------------
+// Ports the iOS feed's page model (apple/HavenApp/FeedView.swift): each item is fitted WHOLE inside
+// a shared page shape, and a blurred, cropped copy of itself fills whatever the fit leaves over — so
+// a letterboxed portrait reads as an extension of its own content instead of a flat black gap.
+// Unlike iOS there's no MediaStore.pixelSize here: aspects aren't known until the bytes decode, so
+// pages report theirs on load and the shape settles once.
+
+// One 9:16 clip must not squeeze a whole card into a narrow column, so a MIXED set's shared shape is
+// clamped; the items that don't fit it letterbox against their own backdrop instead.
+const PAGE_ASPECT_MIN = 0.8, PAGE_ASPECT_MAX = 1.91;
+
+// The carousel's page shape. A uniform set keeps its exact aspect (nothing letterboxes); a MIXED set
+// takes the TALLEST item's, so no page is ever cropped.
+function carouselAspect(aspects) {
+  const known = aspects.filter((a) => a > 0);
+  if (!known.length) return 4 / 3;
+  const tallest = Math.min(...known);
+  // Uniform only once EVERY item has reported — a half-decoded set isn't known to be uniform yet.
+  const uniform = known.length === aspects.length && known.every((a) => Math.abs(a - known[0]) < 0.06);
+  return uniform ? tallest : Math.min(PAGE_ASPECT_MAX, Math.max(PAGE_ASPECT_MIN, tallest));
+}
+
+// Photos and videos share ONE backdrop path (iOS parity): the blurred still is always derived from
+// the element the page is ALREADY drawing, never a second request that could fail or lag on its own.
+// Downscaled to 64px — a 24px blur can't resolve more than that anyway, and blurring a tiny source
+// makes the raster nearly free, where blurring a full-res bitmap is a real scroll-jank cost.
+// (Never a second <video> either: that's a second decode of the same stream per post, and behind a
+// blur this heavy a still and a moving copy are indistinguishable.)
+// Returns null only when there's genuinely nothing to draw yet; images fall back to their own URL so
+// a decorative layer degrades rather than vanishing.
+function stillFrom(node) {
+  const isVid = node.tagName === "VIDEO";
+  const w = isVid ? node.videoWidth : node.naturalWidth;
+  const h = isVid ? node.videoHeight : node.naturalHeight;
+  if (!w || !h) return isVid ? null : (node.src || null);
+  const scale = Math.min(1, 64 / Math.max(w, h));
+  const c = el("canvas");
+  c.width = Math.max(1, Math.round(w * scale));
+  c.height = Math.max(1, Math.round(h * scale));
+  try {
+    c.getContext("2d").drawImage(node, 0, 0, c.width, c.height);
+    return c.toDataURL("image/jpeg", 0.7);
+  } catch (_) {
+    return isVid ? null : (node.src || null);   // no decoded frame yet — retry on a later trigger
+  }
+}
+
+// Get a drawable frame out of a PAUSED video. Neither obvious event works: `loadeddata` promises
+// decoded data, not a painted one (drawing there captures a BLACK rectangle — precisely the flat gap
+// the backdrop exists to remove), and requestVideoFrameCallback needs the compositor, so it never
+// fires while paused, which is every feed video before it's played. A seek forces the decoder to
+// produce that exact frame and `seeked` fires once it's drawable, regardless of playback or
+// visibility; we restore the head so the clip still starts from the beginning.
+// `fn` returns true once it has its still. The seek is the primary path but isn't guaranteed (decode
+// errors, odd codecs), so rVFC and `timeupdate` stay armed as later chances — a backdrop that shows
+// up when the clip is finally played beats one that never shows up at all.
+function onFirstFrame(v, fn) {
+  const grab = () => { if (fn()) stop(); };
+  const stop = () => {
+    v.removeEventListener("seeked", grab);
+    v.removeEventListener("timeupdate", grab);
+  };
+  v.addEventListener("seeked", grab);
+  v.addEventListener("timeupdate", grab);
+  if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(grab);
+  const seek = () => {
+    // Restore the head on OUR seek, on a listener of its own: whichever trigger ends up producing the
+    // still calls stop(), and if that happens first (a visible clip presents a frame before the seek
+    // lands) a restore hung off the capture path would be torn down with it — parking the clip at 0.1.
+    v.addEventListener("seeked", () => { v.currentTime = 0; }, { once: true });
+    v.currentTime = Math.min(0.1, (v.duration || 1) / 4);
+  };
+  if (v.readyState >= 2) seek();
+  else v.addEventListener("loadeddata", seek, { once: true });
+}
+
+// Attach a page's backdrop, but only on a REAL mismatch between the media and the shape the page
+// actually rendered at (the 520px height cap can widen a page past the set's nominal aspect, and that
+// widening is exactly what needs covering). Torn down when there's no gap — an always-on blurred
+// layer is a compositing cost per post for nothing.
+function applyBackdrop(p) {
+  const pw = p.page.clientWidth, ph = p.page.clientHeight;
+  const gap = p.aspect > 0 && pw > 0 && ph > 0 && Math.abs(p.aspect - pw / ph) > 0.02;
+  if (!gap) {
+    if (p.backdrop) { p.backdrop.remove(); p.backdrop = null; }
+    return;
+  }
+  // The still is produced once (p.poster). A video's may not exist yet — a later trigger retries it.
+  if (!p.poster || p.backdrop) return;
+  p.backdrop = el("img", { class: "media-backdrop", src: p.poster, alt: "", "aria-hidden": "true" });
+  p.page.prepend(p.backdrop);
+}
+
+// Build the fitted pages for `refs`. `onAspects` fires as items decode, so the caller can settle the
+// shared shape. Backdrops re-evaluate on decode and whenever the card is resized.
+function buildMediaPages(refs, container, onAspects) {
+  const pages = refs.map((ref) => {
+    const node = mediaNode(ref);
+    return { ref, node, page: el("div", { class: "media-page" }, node), aspect: 0, poster: null, backdrop: null };
+  });
+  const sync = () => pages.forEach(applyBackdrop);
+  for (const p of pages) {
+    const isVid = p.node.tagName === "VIDEO";
+    // Shape comes from the metadata; a photo can give its still right away, a video only later.
+    p.node.addEventListener(isVid ? "loadedmetadata" : "load", () => {
+      const w = isVid ? p.node.videoWidth : p.node.naturalWidth;
+      const h = isVid ? p.node.videoHeight : p.node.naturalHeight;
+      if (w && h) { p.aspect = w / h; onAspects(pages.map((x) => x.aspect)); }
+      if (!isVid) p.poster = stillFrom(p.node);
+      sync();
+    }, { once: true });
+    if (isVid) onFirstFrame(p.node, () => {
+      if (!p.poster) p.poster = stillFrom(p.node);
+      if (p.poster) sync();
+      return !!p.poster;
+    });
+  }
+  if (window.ResizeObserver) new ResizeObserver(sync).observe(container);
+  return pages;
+}
+
+// A single item takes its OWN exact aspect (iOS parity — no clamp). Where the 520px cap bites, the
+// page stays card-wide and the backdrop fills the sides: that's the portrait-photo case.
+function mediaSingle(ref, container) {
+  const [p] = buildMediaPages([ref], container, ([a]) => { p.page.style.aspectRatio = String(a || 4 / 3); });
+  p.page.style.aspectRatio = String(4 / 3);
+  container.append(p.page);
+}
+
+// A full-width scroll-snap pager for 2…10 items of ANY aspect. Mixed aspects no longer force the
+// masonry — each page fits inside the shared shape and its backdrop masks the difference, which
+// beats a 2-column grid for a handful of photos.
+function mediaCarousel(refs, container) {
+  const track = el("div", { class: "track" });
+  const dots = el("div", { class: "carousel-dots" }, ...refs.map(() => el("i")));
+  const pages = buildMediaPages(refs, container, (aspects) => {
+    const a = String(carouselAspect(aspects));
+    for (const p of pages) p.page.style.aspectRatio = a;
+  });
+  for (const p of pages) { p.page.style.aspectRatio = String(4 / 3); track.append(p.page); }
+  dots.firstChild.classList.add("on");
+  track.addEventListener("scroll", () => {
+    const i = Math.round(track.scrollLeft / Math.max(1, track.clientWidth));
+    [...dots.children].forEach((d, j) => d.classList.toggle("on", j === i));
+  }, { passive: true });
+  container.append(track, dots);
 }
 
 // A concealed secret bubble: tap to reveal, auto-conceals after 5s. (Webviews can't truly block
@@ -564,8 +919,14 @@ function postCard(it, circleId, reports = []) {
   const geo = mediaRefs.map(parseGeo).find(Boolean) || null;
   const visualRefs = mediaRefs.filter((r) => !r.startsWith("a:") && !r.startsWith("geo:"));
   const mediaCount = visualRefs.length;
-  const media = el("div", { class: "post-media" + (mediaCount > 1 ? " masonry" : mediaCount === 1 ? " single" : ""), style: "position:relative" });
-  for (const ref of visualRefs) media.append(mediaNode(ref));
+  // 2…10 real items → the carousel (any aspect); a bigger set → the masonry grid. The count is of
+  // VISUAL refs, never `it.media`: a location-only post has a non-empty media array and no visual
+  // refs at all, and must render neither pager (a bare `<= 10` there is an empty grey box).
+  const carousel = mediaCount >= 2 && mediaCount <= 10;
+  const media = el("div", { class: "post-media" + (carousel ? " carousel" : mediaCount > 1 ? " masonry" : mediaCount === 1 ? " single" : ""), style: "position:relative" });
+  if (carousel) mediaCarousel(visualRefs, media);
+  else if (mediaCount === 1) mediaSingle(visualRefs[0], media);
+  else for (const ref of visualRefs) media.append(mediaNode(ref));
   const audio = el("div", {});
   for (const ref of audioRefs) audio.append(mediaNode(ref));
   // Double-tap a photo to ❤️ it (Instagram-style), like the iOS gesture.
@@ -608,7 +969,9 @@ function postCard(it, circleId, reports = []) {
   cmtBtn.addEventListener("click", () => comments.classList.toggle("show"));
 
   const geoNode = geo ? geoChip(geo) : null;
-  return el("div", { class: "card post" }, head, banner, body, media.children.length ? media : null, geoNode, audio.children.length ? audio : null, song, actions, comments);
+  // data-post is how a post link finds its card (focusPostCard) — ids can hold anything, so it's an
+  // attribute lookup rather than an id selector that would need escaping.
+  return el("div", { class: "card post", "data-post": it.id }, head, banner, body, media.children.length ? media : null, geoNode, audio.children.length ? audio : null, song, actions, comments);
 }
 
 // ---- Reports (decentralized moderation) --------------------------------------------------
@@ -1082,10 +1445,18 @@ async function renderConnect() {
     ),
   );
 
-  const linkInput = el("input", { placeholder: "Paste a haven:// or https:// invite…" });
+  const linkInput = el("input", { placeholder: "Paste a haven:// or https:// invite or post link…" });
   const add = el("div", { class: "card col" },
     el("h3", {}, "Connect a friend"),
-    el("div", { class: "row" }, linkInput, el("button", { class: "btn primary", onclick: async () => { if (await invoke("connect_by_link", { uri: linkInput.value.trim() })) { toast("Invite sent — they'll appear once they accept"); linkInput.value = ""; } else toast("That doesn't look like a Haven link"); } }, "Connect")),
+    // Pasted links go through routeDeepLink, so a post link opens the post instead of being fed to the
+    // invite handshake — an invite's payload has the same `<a>.<b>` fragment shape, so only the `p/`
+    // check tells them apart.
+    el("div", { class: "row" }, linkInput, el("button", { class: "btn primary", onclick: async () => {
+      const kind = await routeDeepLink(linkInput.value);
+      if (kind === "invite") { toast("Invite sent — they'll appear once they accept"); linkInput.value = ""; }
+      else if (kind === "post") linkInput.value = "";
+      else toast("That doesn't look like a Haven link");
+    } }, "Connect")),
     el("button", { class: "btn ghost small", onclick: startScan }, "📷 Scan a QR with your camera"),
   );
 
@@ -1759,6 +2130,18 @@ async function boot() {
     await render();
   });
   listen("haven:notify", (e) => { const p = e.payload || {}; toast(`${p.title}: ${p.body}`); });
+  // Deep links (`haven://…` from the OS). The backend QUEUES them and pings us rather than putting the
+  // URL in the event, because a link that launched Haven arrives long before this webview has a
+  // listener — so we drain once at boot too, or a cold-start link is silently dropped.
+  const drainDeepLinks = async () => {
+    for (const url of await invoke("take_deep_links").catch(() => [])) {
+      const kind = await routeDeepLink(url);
+      if (kind === "invite") toast("Invite sent — they'll appear once they accept");
+      else if (!kind) toast("That doesn't look like a Haven link");
+    }
+  };
+  listen("haven:deep-link", drainDeepLinks);
+  drainDeepLinks();
   listen("haven:call", (e) => onCallEvent(e.payload));
   // Drag photos/videos from the file manager onto the window → attach to the active composer.
   const MEDIA_RE = { img: /\.(jpe?g|png|gif|heic|heif|webp|bmp|tiff?)$/i, vid: /\.(mp4|mov|m4v|webm|avi|mkv|3gp)$/i };

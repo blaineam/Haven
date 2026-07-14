@@ -886,11 +886,9 @@ struct StoryCameraView: View {
 
             VStack {
                 HStack {
-                    Button { dismiss() } label: {
-                        Image(systemName: "xmark").font(.title2.weight(.semibold)).foregroundStyle(.white)
-                            .padding(10).background(.black.opacity(0.35), in: Circle())
-                    }
-                    .buttonStyle(.plain)
+                    // Shared `CameraChromeButton` (see CameraView.swift) — same glass chips the macOS
+                    // post camera uses, so the two cameras' top rows are identical by construction.
+                    CameraChromeButton(symbol: "xmark") { dismiss() }
                     Spacer()
                     if capture.isFull {
                         Text("Max length").font(.caption.weight(.semibold)).foregroundStyle(.white)
@@ -899,17 +897,10 @@ struct StoryCameraView: View {
                     Spacer()
                     if cam.ready {
                         HStack(spacing: 10) {
-                            Button { withAnimation(HavenTheme.smooth) { showLiveFilters.toggle() } } label: {
-                                Image(systemName: "camera.filters").font(.title3.weight(.semibold))
-                                    .foregroundStyle(liveFilter != .original ? HavenTheme.pink : .white)
-                                    .padding(10).background(.black.opacity(0.35), in: Circle())
+                            CameraChromeButton(symbol: "camera.filters", active: liveFilter != .original) {
+                                withAnimation(HavenTheme.smooth) { showLiveFilters.toggle() }
                             }
-                            .buttonStyle(.plain)
-                            Button { cam.flip() } label: {
-                                Image(systemName: "arrow.triangle.2.circlepath.camera").font(.title3.weight(.semibold))
-                                    .foregroundStyle(.white).padding(10).background(.black.opacity(0.35), in: Circle())
-                            }
-                            .buttonStyle(.plain)
+                            CameraChromeButton(symbol: "arrow.triangle.2.circlepath.camera") { cam.flip() }
                         }
                     }
                 }

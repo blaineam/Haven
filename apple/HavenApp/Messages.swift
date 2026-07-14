@@ -139,7 +139,7 @@ struct MessagesView: View {
         // on the Messages list, not the picker.
         .navigationDestination(item: $pushedDM) { id in DMThreadView(circleId: id) }
         .sheet(isPresented: $showPicker, onDismiss: { if let id = newDM { newDM = nil; pushedDM = id } }) {
-            DMContactPicker { id in newDM = id; showPicker = false }.macSheetFrame()
+            DMContactPicker { id in newDM = id; showPicker = false }   // HavenMacSheet brings its own frame on macOS
         }
         .onAppear {
             // Screenshot harness: open the first DM thread for its hero shot.
@@ -257,6 +257,17 @@ struct DMContactPicker: View {
     @State private var selected: Set<String> = []   // pick one → 1:1, pick several → group DM
 
     var body: some View {
+        #if os(macOS)
+        HavenMacSheet(selected.count > 1 ? "New group · \(selected.count)" : "New message") {
+            contactColumn
+        } footer: {
+            Button(selected.count > 1 ? "Start group" : "Start") { start() }
+                .buttonStyle(BrandButtonStyle())
+                .disabled(selected.isEmpty)
+                .opacity(selected.isEmpty ? 0.5 : 1)
+                .keyboardShortcut(.defaultAction)
+        }
+        #else
         NavigationStack {
             ZStack {
                 HavenBackground()
@@ -286,7 +297,33 @@ struct DMContactPicker: View {
                 }
             }
         }
+        #endif
     }
+
+    #if os(macOS)
+    /// A column of glass pills, not a List — HavenMacSheet's content lives in a ScrollView, which
+    /// gives a List no height to lay out against.
+    private var contactColumn: some View {
+        VStack(spacing: 8) {
+            ForEach(contacts.contacts) { c in
+                Button { toggle(c.idHex) } label: {
+                    HStack(spacing: 12) {
+                        PeerAvatar(nodeHex: c.idHex, name: c.displayName, size: 40)
+                        Text(c.displayName).font(.body).foregroundStyle(.primary)
+                        Spacer()
+                        if selected.contains(c.idHex) {
+                            Image(systemName: "checkmark.circle.fill").foregroundStyle(HavenTheme.pink)
+                        }
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 8)
+                    .havenGlass(in: Capsule(), tint: selected.contains(c.idHex) ? HavenTheme.pink.opacity(0.35) : nil)
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+    #endif
 
     private func toggle(_ hex: String) {
         if selected.contains(hex) { selected.remove(hex) } else { selected.insert(hex) }
@@ -393,7 +430,7 @@ struct DMThreadView: View {
         .onDisappear { MusicPlayback.shared.stop() }   // leaving the thread silences any DM song
         .havenFullScreenCover(item: $zoom, wide: true) { t in MediaZoomViewer(refs: t.refs, index: t.index) }
         .sheet(item: $reactTarget) { t in
-            ReactionPicker { e in store.reactMessage(in: circleId, t.id, e) }.macSheetFrame()
+            ReactionPicker { e in store.reactMessage(in: circleId, t.id, e) }
         }
     }
 
@@ -491,10 +528,11 @@ struct DMThreadView: View {
                 if !m.unsent {
                     // Your most-used emoji as a single horizontal palette row (4 fits without
                     // wrapping to a second stacked row), then the full picker.
-                    ControlGroup {
-                        ForEach(EmojiStore.shared.frequent(3), id: \.self) { e in
-                            Button(e) { EmojiStore.shared.record(e); store.reactMessage(in: circleId, m.id, e) }
-                        }
+                    // Flat rows, each reacting on TAP. A ControlGroup here collapsed into a
+                    // "❤️ 😎 👍 ›" SUBMENU on macOS: it showed the emoji, then made you open a
+                    // second menu to actually pick one.
+                    ForEach(EmojiStore.shared.frequent(3), id: \.self) { e in
+                        Button("React \(e)") { EmojiStore.shared.record(e); store.reactMessage(in: circleId, m.id, e) }
                     }
                     Button { reactTarget = ReactTarget(id: m.id) } label: {
                         Label("More reactions…", systemImage: "face.smiling")
@@ -545,6 +583,7 @@ struct DMThreadView: View {
                                 HStack(spacing: 5) {
                                     Image(systemName: "mic.fill"); Text("Voice").font(.caption)
                                     Button { attachedMedia.removeAll { $0 == ref } } label: { Image(systemName: "xmark.circle.fill") }
+                                        .buttonStyle(.plain)   // the glyph IS the button — no macOS bezel behind it
                                 }
                                 .padding(.horizontal, 8).padding(.vertical, 8)
                                 .background(HavenTheme.pink.opacity(0.18), in: Capsule())
@@ -553,7 +592,9 @@ struct DMThreadView: View {
                                     Image(platformImage: img).resizable().scaledToFill().frame(width: 52, height: 52).clipShape(RoundedRectangle(cornerRadius: 10))
                                     Button { attachedMedia.removeAll { $0 == ref } } label: {
                                         Image(systemName: "xmark.circle.fill").foregroundStyle(.white).background(Circle().fill(.black.opacity(0.5)))
-                                    }.padding(2)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .padding(2)
                                 }
                             }
                         }
@@ -562,6 +603,7 @@ struct DMThreadView: View {
                                 Image(systemName: "music.note")
                                 Text(t.title).lineLimit(1)
                                 Button { attachedTrack = nil } label: { Image(systemName: "xmark.circle.fill") }
+                                    .buttonStyle(.plain)
                             }
                             .font(.caption).padding(.horizontal, 8).padding(.vertical, 6)
                             .background(HavenTheme.pink.opacity(0.18), in: Capsule())
@@ -592,19 +634,21 @@ struct DMThreadView: View {
                 #endif
                 TextField(secret ? "Secret message…" : "Message…", text: $text, axis: .vertical)
                     .focused($focused)
-                    .textFieldStyle(.plain)   // drop macOS's default field border (was doubling with the overlay)
+                    .textFieldStyle(.plain)   // drop macOS's default field border (was doubling with the glass)
                     .padding(.horizontal, 14).padding(.vertical, 10)
-                    // Fixed-radius rounded rect — a Capsule clips into multi-line text.
-                    .background(.background, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(secret ? HavenTheme.pink.opacity(0.6) : Color.white.opacity(0.08)))
+                    // Fixed-radius rounded rect, not havenPillField — a Capsule clips into multi-line text.
+                    // Secret mode reads as a pink tint on the same single glass surface.
+                    .havenGlass(in: RoundedRectangle(cornerRadius: 20, style: .continuous),
+                                tint: secret ? HavenTheme.pink.opacity(0.35) : nil)
                 Button { send() } label: {
                     Image(systemName: "arrow.up.circle.fill").font(.title).foregroundStyle(HavenTheme.pink)
                 }
+                .buttonStyle(PressableStyle())
                 .disabled(text.trimmingCharacters(in: .whitespaces).isEmpty && attachedMedia.isEmpty && attachedTrack == nil)
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
-        .background(.ultraThinMaterial)
+        .havenGlass(in: Rectangle())
         .sheet(isPresented: $showMedia) { MediaPicker { refs in attachedMedia.append(contentsOf: refs) }.macSheetFrame() }
         .sheet(isPresented: $showSongs) { SongPicker { t in attachedTrack = t }.macSheetFrame() }
         .sheet(isPresented: $showAudio) { AudioRecorderView { ref in attachedMedia.append(ref) }.macSheetFrame() }

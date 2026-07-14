@@ -64,8 +64,12 @@ struct LocationMapView: View {
                 Label("Open in Maps", systemImage: "arrow.up.forward.app.fill")
                     .font(.caption2.weight(.semibold)).foregroundStyle(.white)
                     .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(.black.opacity(0.55), in: Capsule())
-            }.padding(8)
+                    // Real glass over the map, not a hand-rolled black scrim; .plain keeps macOS
+                    // from painting a bezel behind the pill.
+                    .havenGlass(in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .padding(8)
         }
     }
 

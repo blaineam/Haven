@@ -166,6 +166,18 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        // Closing the window HIDES it; it must not be destroyed. The relay keeps serving in the
+        // background (that's the whole point of the tray), and the tray's "Open Haven" brings the
+        // window back with `get_webview_window("main")`. Without this, closing DESTROYS the window,
+        // that lookup returns None, and "Open Haven" silently does nothing forever — the window can
+        // never be reopened and the only way back is to kill and relaunch the app. Quit goes through
+        // the tray's Quit item (or Cmd-Q), which calls `app.exit` and bypasses this.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         // Managed before the identity check so `take_deep_links` answers even on the welcome screen.
         .manage(DeepLinks::default());
 
@@ -248,6 +260,9 @@ pub fn run() {
                     .on_menu_event(move |app, event| match event.id().as_ref() {
                         "show" => {
                             if let Some(w) = app.get_webview_window("main") {
+                                // unminimize before show: a MINIMISED window is already "shown", so
+                                // show()+set_focus() alone leaves it in the dock/taskbar.
+                                let _ = w.unminimize();
                                 let _ = w.show();
                                 let _ = w.set_focus();
                             }

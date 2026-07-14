@@ -117,27 +117,49 @@ if [ "$CACHE_HIT" -eq 0 ]; then
   # doesn't depend on the runner's default toolchain.
   bash "$APPLE_DIR/build-rust-xcframework.sh"
 
-  if [ -n "${GITHUB_TOKEN:-}" ] && [ -n "$CACHE_TAG" ] && [ -d "$XCFW" ]; then
+  # Publishing the cache is a PURE OPTIMISATION — the xcframework is already built and on disk by
+  # this point. Nothing in here may fail the build. It lives in a function called with `|| true`
+  # because `set -euo pipefail` makes that easy to get wrong: a `grep -o` that simply finds no
+  # match exits 1, pipefail propagates it, and `set -e` then kills the whole script — throwing
+  # away a successful 9-minute build over a missed cache upload. That is exactly what happened.
+  publish_cache() {
+    set +e            # local to this function; the rest of the script keeps strict mode
     echo "--- publishing cache ($CACHE_TAG) ---"
-    CREATE=$(curl -sS -X POST \
+    local create upload_base http
+    create=$(curl -sS -X POST \
       -H "Authorization: Bearer $GITHUB_TOKEN" \
       -H "Accept: application/vnd.github+json" \
       "https://api.github.com/repos/$CACHE_REPO/releases" \
-      -d "{\"tag_name\":\"$CACHE_TAG\",\"name\":\"$CACHE_TAG\",\"body\":\"Cached HavenFFI.xcframework + Swift bindings for core@${CORE_TREE:0:8}. Build artifact — safe to delete.\",\"draft\":false,\"prerelease\":true}" \
-      || echo "")
-    UPLOAD_BASE=$(echo "$CREATE" | grep -o '"upload_url":[[:space:]]*"https://[^{]*' | grep -o 'https://[^"]*' | head -1)
+      -d "{\"tag_name\":\"$CACHE_TAG\",\"name\":\"$CACHE_TAG\",\"body\":\"Cached HavenFFI.xcframework + Swift bindings for core@${CORE_TREE:0:8}. Build artifact — safe to delete.\",\"draft\":false,\"prerelease\":true}" 2>/dev/null)
+    upload_base=$(printf '%s' "$create" | grep -o '"upload_url":[[:space:]]*"https://[^{]*' | grep -o 'https://[^"]*' | head -1)
 
-    if [ -n "$UPLOAD_BASE" ]; then
-      tar -czf "$TARBALL" -C "$APPLE_DIR" HavenFFI.xcframework Generated
-      curl -sS -X POST \
-        -H "Authorization: Bearer $GITHUB_TOKEN" \
-        -H "Content-Type: application/gzip" \
-        --data-binary @"$TARBALL" \
-        "${UPLOAD_BASE}?name=havenffi.tar.gz" >/dev/null \
-        && echo "✅ cache published" || echo "⚠️  cache upload failed (non-fatal)"
-    else
-      echo "⚠️  could not create release — cache skipped (non-fatal)"
+    # A release for this tag may already exist (a concurrent or retried run) — reuse it.
+    if [ -z "$upload_base" ]; then
+      create=$(curl -sS -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/$CACHE_REPO/releases/tags/$CACHE_TAG" 2>/dev/null)
+      upload_base=$(printf '%s' "$create" | grep -o '"upload_url":[[:space:]]*"https://[^{]*' | grep -o 'https://[^"]*' | head -1)
     fi
+
+    if [ -z "$upload_base" ]; then
+      echo "⚠️  no upload URL — cache not published (non-fatal)"
+      return 0
+    fi
+    tar -czf "$TARBALL" -C "$APPLE_DIR" HavenFFI.xcframework Generated 2>/dev/null || {
+      echo "⚠️  tar failed — cache not published (non-fatal)"; return 0; }
+    http=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+      -H "Authorization: Bearer $GITHUB_TOKEN" \
+      -H "Content-Type: application/gzip" \
+      --data-binary @"$TARBALL" \
+      "${upload_base}?name=havenffi.tar.gz" 2>/dev/null)
+    case "$http" in
+      2*) echo "✅ cache published (HTTP $http) — later runs restore instead of rebuilding" ;;
+      *)  echo "⚠️  cache upload returned HTTP $http — not published (non-fatal)" ;;
+    esac
+    return 0
+  }
+
+  if [ -n "${GITHUB_TOKEN:-}" ] && [ -n "$CACHE_TAG" ] && [ -d "$XCFW" ]; then
+    publish_cache || true
   fi
 fi
 

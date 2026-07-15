@@ -13,7 +13,10 @@
 <meta property="og:image:height" content="630" />
 <meta name="twitter:card" content="summary_large_image" />
 <meta name="twitter:image" content="https://wemiller.com/apps/haven/assets/og-image.jpg?v=1" />
-<link rel="stylesheet" href="../styles.css?v=3" />
+<link rel="stylesheet" href="../styles.css?v=4" />
+<!-- .reveal starts at opacity:0 and is un-hidden by app.js. With JS off nothing would ever
+     paint, so opt straight into the revealed state — the page is static and reads fine. -->
+<noscript><style>.reveal{opacity:1;transform:none}</style></noscript>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>

@@ -260,8 +260,10 @@ a.inline:hover{text-decoration:underline}
 
 /* ═══════════════════════════════════════════════════════════════════════
    MAGAZINE LAYOUT — editorial grid, device renders, pull-quotes
-   Device render PNGs already carry their own bezel + gradient backdrop
-   (rendered headlessly via Monkr), so we treat them as floating art.
+   Device render PNGs carry their own bezel but are TRANSPARENT — no baked-in
+   backdrop — so they float on the page background and .render supplies the
+   drop-shadow below. Never add a render with a background baked in: it turns
+   the frame into an opaque rectangle sitting on the gradient.
 ═══════════════════════════════════════════════════════════════════════ */
 
 /* ── Magazine masthead / hero ─────────────────────────────────────────── */
@@ -286,7 +288,7 @@ a.inline:hover{text-decoration:underline}
   margin-top:22px;font-size:13.5px;color:var(--text3);font-weight:600;letter-spacing:.02em;
 }
 .mag-byline b{color:var(--text2)}
-/* Hero disclaimer under the download button — free beta / paid-at-launch, honest and calm. */
+/* Hero disclaimer under the download button — price + per-platform availability, honest and calm. */
 .hero-note{margin-top:20px;font-size:14px;color:var(--text2);max-width:52ch;line-height:1.55}
 .hero-note b{color:var(--text)}
 
@@ -446,7 +448,34 @@ a:focus-visible,button:focus-visible,summary:focus-visible,.btn:focus-visible{
   .foot-grid{grid-template-columns:1fr}
 }
 
-/* ── Download the beta ──────────────────────────────────────────────────── */
+/* ── Device lineup (download section) ───────────────────────────────────
+   The one spot where Android/Windows/Linux get art. Bottom-aligned so the
+   laptops and phones sit on a common floor; the iPhone (.lu-hero) is centre
+   and deliberately the largest — Apple stays the lead, the rest answer
+   "does it run on mine?". Renders are transparent; .render adds the shadow. */
+.lineup{
+  display:flex;align-items:flex-end;justify-content:center;
+  gap:clamp(8px,2vw,28px);margin-top:44px;
+}
+.lineup .lu{margin:0;flex:0 0 auto;text-align:center}
+.lineup .lu figcaption{
+  margin-top:12px;font-size:12.5px;font-weight:700;letter-spacing:.02em;color:var(--text3);
+}
+.lineup .lu-hero figcaption{color:var(--text2)}
+.lineup .lu .render{width:100%}
+.lineup .lu-lap{width:clamp(140px,25%,290px)}
+.lineup .lu-phone{width:clamp(58px,9.5%,108px)}
+.lineup .lu-hero{width:clamp(76px,12.5%,146px)}
+@media (max-width:640px){
+  /* 2×2: a laptop and a phone per row, so nothing shrinks to an unreadable smudge.
+     .lu-hero is kept wide enough that its "iPhone & iPad" caption stays on one line. */
+  .lineup{flex-wrap:wrap;gap:18px 14px}
+  .lineup .lu-lap{width:44%}
+  .lineup .lu-hero{width:30%}
+  .lineup .lu-phone{width:24%}
+}
+
+/* ── Download ───────────────────────────────────────────────────────────── */
 .dl-grid{
   display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
   gap:16px;margin-top:32px;

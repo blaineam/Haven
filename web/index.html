@@ -17,7 +17,10 @@
 <meta property="og:image:height" content="630" />
 <meta name="twitter:image" content="https://wemiller.com/apps/haven/assets/og-image.jpg?v=1" />
 <link rel="canonical" href="https://wemiller.com/apps/haven/" />
-<link rel="stylesheet" href="styles.css?v=3" />
+<link rel="stylesheet" href="styles.css?v=4" />
+<!-- .reveal starts at opacity:0 and is un-hidden by app.js. With JS off nothing would ever
+     paint, so opt straight into the revealed state — the page is static and reads fine. -->
+<noscript><style>.reveal{opacity:1;transform:none}</style></noscript>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -78,8 +81,8 @@
           </div>
           <p class="hero-note">
             <b>$9.99, once.</b> Now on the App&nbsp;Store for iPhone, iPad &amp; Mac — no
-            subscription, no ads, no tracking. Android &amp; desktop betas are free while they
-            finish. <a class="inline" href="#pricing">Why paid?</a>
+            subscription, no ads, no tracking. Android, Windows &amp; Linux are free downloads
+            today. <a class="inline" href="#pricing">Why paid?</a>
           </p>
         </div>
 
@@ -273,23 +276,45 @@
       </div>
 
       <div class="grid cols-2 reveal" style="margin-top:34px">
+        <!-- The four claims stay visible — they're the load-bearing promise. The proof and the
+             caveats sit one click down, so trust doesn't arrive as a wall of prose. -->
         <div class="card">
           <h3 style="font-size:20px;margin-bottom:8px">What stays private</h3>
           <ul class="points" style="margin-top:6px">
             <li><span class="dot"></span><span>Every post, message, photo, video and call is <b>encrypted on your device</b> before it's sent.</span></li>
-            <li><span class="dot"></span><span>The secret keys that unlock your content <b>stay on your own devices</b> — in the Secure Enclave on Apple devices, the OS secure store elsewhere. The only way they sync between <i>your</i> devices is Apple's end-to-end-encrypted iCloud Keychain, which we can't read either. <b>We never hold them.</b></span></li>
+            <li><span class="dot"></span><span>The secret keys that unlock your content <b>stay on your own devices</b>. <b>We never hold them.</b></span></li>
             <li><span class="dot"></span><span>There's <b>no central account</b>, no profile database, no advertising ID, no analytics.</span></li>
-            <li><span class="dot"></span><span>Choose <b>your own storage</b> — a Haven relay you (or a friend) run, or your own S3 bucket (S3/R2/B2). We run no storage and hold no credentials.</span></li>
+            <li><span class="dot"></span><span>Choose <b>your own storage</b> — a relay you run, or your own S3 bucket. We run no storage and hold no credentials.</span></li>
           </ul>
+          <details class="tech">
+            <summary><span class="tag-tech">Where the keys actually live</span><span class="chev">›</span></summary>
+            <div class="tbody">
+              <p>In the Secure Enclave on Apple devices, the OS secure store elsewhere. The only way
+                they sync between <i>your</i> devices is Apple's end-to-end-encrypted iCloud Keychain,
+                which we can't read either.</p>
+              <p>“Your own storage” means a Haven relay you (or a friend) run, or your own S3 bucket
+                (S3/R2/B2) — we hold no credentials for any of it.</p>
+            </div>
+          </details>
         </div>
         <div class="card">
           <h3 style="font-size:20px;margin-bottom:8px">The honest limits</h3>
           <ul class="points" style="margin-top:6px">
             <li><span class="dot"></span><span>A <b>relay</b> (an optional helper) can see that <em>some</em> encrypted bytes passed through, but never what they say.</span></li>
-            <li><span class="dot"></span><span>To deliver bytes to you, a relay <b>briefly handles your IP address</b> — that's just how the internet works. It's never logged, and never tied to who you are.</span></li>
-            <li><span class="dot"></span><span>Friends <b>never see each other's IP</b> when a relay is in the path — only the relay does, briefly. For full IP hiding today, run Haven behind your own VPN; a built-in onion/Tor mode is on the roadmap, not shipped.</span></li>
+            <li><span class="dot"></span><span>To deliver bytes to you, a relay <b>briefly handles your IP address</b> — never logged, never tied to who you are.</span></li>
+            <li><span class="dot"></span><span>Friends <b>never see each other's IP</b> when a relay is in the path — only the relay does, briefly.</span></li>
             <li><span class="dot"></span><span>If someone steals your unlocked, malware-infected device, they have your device. No app on earth fixes that.</span></li>
           </ul>
+          <details class="tech">
+            <summary><span class="tag-tech">What that means for your IP</span><span class="chev">›</span></summary>
+            <div class="tbody">
+              <p>A relay handling your IP for a moment is just how the internet works — every app you
+                own does the same thing. The difference is that Haven's relay never logs it and can't
+                tie it to who you are, because it doesn't know who you are.</p>
+              <p>For full IP hiding today, run Haven behind your own VPN; a built-in onion/Tor mode is
+                on the roadmap, <b>not shipped</b>.</p>
+            </div>
+          </details>
         </div>
       </div>
 
@@ -310,11 +335,18 @@
             <h2 style="font-size:clamp(23px,4vw,32px)">Be the bridge for your circle.</h2>
             <p class="muted" style="margin-top:12px;font-size:16px">
               Every Haven app can be a relay: flip <b>“Be your circle's relay”</b> in Settings and your
-              device quietly holds your circle's <em>sealed</em> messages for friends who are offline —
-              running reliably in the background, always end-to-end encrypted with post-quantum
-              cryptography it can never open. Leave a Mac or desktop app running and your whole circle
-              gets more resilient. No terminal, no server, nothing to install.
+              device quietly holds your circle's <em>sealed</em> messages for friends who are offline.
+              No terminal, no server, nothing to install.
             </p>
+            <details class="tech">
+              <summary><span class="tag-tech">What your device is actually doing</span><span class="chev">›</span></summary>
+              <div class="tbody">
+                <p>It runs reliably in the background, holding messages that stay end-to-end encrypted
+                  with post-quantum cryptography it can never open — your device is a post box, not a
+                  reader.</p>
+                <p>Leave a Mac or desktop app running and your whole circle gets more resilient.</p>
+              </div>
+            </details>
             <div class="btn-row" style="justify-content:flex-start">
               <a class="btn" href="relay/">Turn yours on</a>
             </div>
@@ -361,37 +393,81 @@ haven-relay run --link "haven-relay://circle#…"</code></pre>
         <h2 style="font-size:clamp(24px,4vw,34px)">You're the customer, not the product.</h2>
         <p class="muted" style="font-size:17px;margin-top:14px">
           Haven is a <b>one-time $9.99 purchase</b> on the App&nbsp;Store — buy it once, own it,
-          no subscription and no monthly cost, ever. The <b>Android and desktop betas are free</b>
-          while they finish; they'll be the same one-time purchase at launch.
+          no subscription and no monthly cost, ever. <b>Android, Windows and Linux are free
+          downloads</b> from the latest GitHub release; they'll be the same one-time purchase
+          if and when they reach their own stores.
         </p>
         <p class="muted" style="font-size:17px;margin-top:14px">
-          That price is the whole business model. Haven makes money from the purchase, <b>not</b> from
-          ads, tracking, or selling your data — because it holds no data to sell. No ads, no behavioral
-          tracking, no analytics, no data harvesting. When you pay for the app, your privacy is the
+          That price is the whole business model. When you pay for the app, your privacy is the
           product you're buying — not the thing being sold.
         </p>
+        <!-- The elaboration people only want once the claim above has landed. -->
+        <details class="tech">
+          <summary><span class="tag-tech">How a $9.99 app stays free of ads</span><span class="chev">›</span></summary>
+          <div class="tbody">
+            <p>Haven makes money from the purchase, <b>not</b> from ads, tracking, or selling your
+              data — because it holds no data to sell. No ads, no behavioral tracking, no analytics,
+              no data harvesting.</p>
+            <p>It's also the only model that works here: Haven runs no servers, so there's no monthly
+              bill to cover and nothing to monetise you for. A one-time price is what a serverless
+              app costs to keep honest.</p>
+          </div>
+        </details>
       </div>
     </div>
   </section>
 
   <!-- ── Final CTA ── -->
   <!-- ════════════════════════════════════════════════════════════════════
-       DOWNLOAD THE BETA — per-platform links pulled live from the GitHub release
+       DOWNLOAD — per-platform links pulled live from the GitHub release.
+       Apple ships on the App Store; everything else ships as a real installer
+       from the latest release. Neither is a "beta" — see the note below the grid.
   ═════════════════════════════════════════════════════════════════════ -->
   <section class="section" id="download">
     <div class="container">
       <div class="center reveal">
         <span class="eyebrow">Now on the App&nbsp;Store</span>
         <h2 style="font-size:clamp(26px,4.5vw,40px)">Get <span class="h-grad">Haven</span> on every screen</h2>
-        <p class="lead">iPhone, iPad &amp; Mac on the App&nbsp;Store; Windows, Linux and Steam&nbsp;Deck straight from the latest release; a tiny relay for a Pi or server.</p>
+        <p class="lead">iPhone, iPad &amp; Mac on the App&nbsp;Store; Android, Windows, Linux and Steam&nbsp;Deck straight from the latest release; a tiny relay for a Pi or server.</p>
       </div>
+
+      <!-- Device lineup — the one place the non-Apple platforms get their own art. The iPhone
+           stays the hero (front, centre, largest); the rest are there to answer one question:
+           "does this run on my machine?" Renders are transparent PNGs — .render adds the shadow. -->
+      <div class="lineup reveal" role="list">
+        <figure class="lu lu-lap" role="listitem">
+          <img class="render" src="assets/renders/windows-feed.png?v=1"
+               alt="Haven running on a Windows laptop — the circle feed in the desktop app"
+               loading="lazy" width="2056" height="1326" />
+          <figcaption>Windows</figcaption>
+        </figure>
+        <figure class="lu lu-hero" role="listitem">
+          <img class="render" src="assets/renders/phone-feed.png?v=4"
+               alt="Haven running on iPhone — the circle feed"
+               loading="lazy" width="1274" height="2639" />
+          <figcaption>iPhone &amp; iPad</figcaption>
+        </figure>
+        <figure class="lu lu-phone" role="listitem">
+          <img class="render" src="assets/renders/android-feed.png?v=1"
+               alt="Haven running on an Android phone — the circle feed"
+               loading="lazy" width="879" height="1854" />
+          <figcaption>Android</figcaption>
+        </figure>
+        <figure class="lu lu-lap" role="listitem">
+          <img class="render" src="assets/renders/linux-feed.png?v=1"
+               alt="Haven running on a Linux laptop — the circle feed in the desktop app"
+               loading="lazy" width="2056" height="1326" />
+          <figcaption>Linux</figcaption>
+        </figure>
+      </div>
+
       <div class="dl-grid reveal" id="download-grid" aria-live="polite">
         <p class="muted center" id="download-loading">Loading the latest release…</p>
       </div>
       <p class="muted small center" style="margin-top:16px">
-        Desktop &amp; relay builds come from the
-        <a class="inline" id="download-release-link" href="https://github.com/blaineam/haven/releases/latest" rel="noopener">latest GitHub release</a>.
-        Desktop &amp; Android are still beta — expect rough edges there.
+        Android, desktop &amp; relay builds come from the
+        <a class="inline" id="download-release-link" href="https://github.com/blaineam/haven/releases/latest" rel="noopener">latest GitHub release</a>
+        — real installers, not a preview. They're just not in their own stores yet.
       </p>
     </div>
   </section>
@@ -450,20 +526,21 @@ haven-relay run --link "haven-relay://circle#…"</code></pre>
 /* ══════════════════════════════════════════════════════════════════════════
    DOWNLOADS — the ONE place to edit every store / download URL for Haven.
    Fill these in as each destination goes live. Leave "" (empty) for anything
-   not yet available and the UI will show an honest "beta / building" state
-   instead of a dead link. Placeholders below are marked TODO — do NOT ship a
-   made-up URL; paste the real one when you have it.
+   not yet available and the UI falls back to an honest state (a direct download,
+   or "Building…") instead of a dead link. Placeholders below are marked TODO —
+   do NOT ship a made-up URL; paste the real one when you have it.
    ────────────────────────────────────────────────────────────────────────── */
 var DOWNLOADS = {
-  // Apple: public TestFlight invite link (set once external testing is enabled
-  // in App Store Connect). While in beta iOS + macOS ship via TestFlight.
-  APPLE_BETA_URL: "",        /* TODO: paste public TestFlight invite URL when external testing is on */
-  // App Store product URL — 1.0.0 submitted for review 2026-07-04 (iOS + macOS, build 166);
-  // this link goes live the moment Apple approves.
+  // Apple: legacy public TestFlight invite link. Now vestigial — iOS + macOS are LIVE on the
+  // App Store, so APP_STORE_URL below always wins. Kept only as the fallback if that ever 404s.
+  APPLE_BETA_URL: "",        /* TODO: paste public TestFlight invite URL only if external testing reopens */
+  // App Store product URL — live since 1.0.0; 1.0.4 is the current public build (iOS + macOS).
   APP_STORE_URL: "https://apps.apple.com/app/id6782147901",
   MAC_APP_STORE_URL: "https://apps.apple.com/app/id6782147901",
-  // Android closed beta: the Google Play testing opt-in ("Become a tester") URL.
-  PLAY_BETA_URL: "https://play.google.com/store/apps/details?id=com.blaineam.haven",  /* Google Play listing (com.blaineam.haven) */
+  // Android: the Play listing is NOT public yet — the app is on a closed testing track, so the
+  // store URL 404s for anyone who isn't already a tester. Deliberately "" until the opt-in is
+  // public: the card then leads with the direct APK, which is real and works today.
+  PLAY_BETA_URL: "",         /* TODO: paste the Play "Become a tester" opt-in URL when testing goes public */
   // Desktop / Linux / relay builds are served from the latest GitHub release and
   // resolved automatically by the download script below — no fixed URL needed.
   GITHUB_RELEASE_URL: "https://github.com/blaineam/haven/releases/latest"
@@ -597,7 +674,7 @@ var DOWNLOADS = {
     if (!hero) return;
     var plat = detectPlatform();
     var labels = { ios: "Download for iPhone & iPad", macos: "Download for Mac",
-                   android: "Get the Android beta", windows: "Download for Windows", linux: "Download for Linux" };
+                   android: "Download for Android", windows: "Download for Windows", linux: "Download for Linux" };
     var target = { // preferred destination per platform; "#" / "" both mean "not ready"
       ios: DOWNLOADS.APP_STORE_URL || DOWNLOADS.APPLE_BETA_URL,
       macos: DOWNLOADS.MAC_APP_STORE_URL || DOWNLOADS.APPLE_BETA_URL,
@@ -627,7 +704,7 @@ var DOWNLOADS = {
     var bs = [];
     if (DOWNLOADS.APP_STORE_URL) bs.push(btn(DOWNLOADS.APP_STORE_URL, "Download on the App&nbsp;Store", true));
     else if (APPLE_BETA_URL) bs.push(btn(APPLE_BETA_URL, "Join the TestFlight beta", true));
-    else bs.push('<span class="muted small">TestFlight beta — invite required for now</span>');
+    else bs.push('<span class="muted small">Building…</span>');
     return card("iPhone &amp; iPad", "iOS · iPadOS — App&nbsp;Store", bs, recommended);
   }
   // macOS ships on the App Store (the native SwiftUI app — direct .dmg downloads retired at launch).
@@ -682,14 +759,19 @@ var DOWNLOADS = {
 
       var plat = detectPlatform();
       var rec = function (k) { return plat === k; };
-      // Android: closed-beta (Play opt-in) is the primary path; direct APK is the fallback.
-      // PLAY_BETA_URL === "#" means "not filled yet" — show an honest placeholder, not a dead link.
+      // Android: the direct APK is the primary path — it's a real, signed build that works today.
+      // Play is still a closed testing track, so PLAY_BETA_URL is "" and we say so plainly rather
+      // than linking a listing the public can't open. Fill PLAY_BETA_URL in and it leads again.
       function androidCard(recommended) {
         var abtns = [];
-        if (PLAY_BETA_URL && PLAY_BETA_URL !== "#") abtns.push(btn(PLAY_BETA_URL, "Join the Play closed beta", true));
-        else abtns.push('<span class="muted small">Play closed beta — invite/opt-in coming soon</span>');
-        if (apk) abtns.push(btn(apk, "Or download APK", false));
-        return card("Android", "Google Play closed beta · or sideload the APK", abtns, recommended);
+        if (PLAY_BETA_URL && PLAY_BETA_URL !== "#") {
+          abtns.push(btn(PLAY_BETA_URL, "Join the Play test", true));
+          if (apk) abtns.push(btn(apk, "Or download APK", false));
+        } else {
+          abtns.push(apk ? btn(apk, "Download APK", true) : btn(null));
+        }
+        return card("Android", PLAY_BETA_URL ? "Google Play test · or sideload the APK"
+                                             : "Signed APK · not on Google Play yet", abtns, recommended);
       }
       // Each entry tagged with its platform key; the matching card gets the badge and floats first.
       var entries = [
@@ -697,7 +779,9 @@ var DOWNLOADS = {
         { p: "macos",   html: macCard(rec("macos")) },
         { p: "android", html: androidCard(rec("android")) },
         { p: "windows", html: card("Windows", "x86-64", winBtns.length ? winBtns : [btn(null)], rec("windows")) },
-        { p: "linux",   html: card("Linux", "Ubuntu · Debian · Fedora · Arch", linuxBtns.length ? linuxBtns : [btn(null)], rec("linux")) },
+        /* Distro list mirrors the assets we actually publish (.deb/.rpm/AppImage). No AUR package
+           exists, so Arch is covered by the AppImage — say that, don't imply a repo we don't ship. */
+        { p: "linux",   html: card("Linux", "Debian · Ubuntu · Fedora · AppImage anywhere", linuxBtns.length ? linuxBtns : [btn(null)], rec("linux")) },
         { p: null,      html: card("SteamOS · Steam Deck", "Flatpak", [flat ? btn(flat, "Download Flatpak", true) : (rel.html_url ? btn(rel.html_url, "Get on GitHub", false) : btn(null))]) },
         { p: null,      html: card("Headless relay", "Pi · server · always-on", [hasRelay ? btn(rel.html_url, "All relay binaries", false) : btn(null)]) }
       ];

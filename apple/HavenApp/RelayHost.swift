@@ -83,8 +83,10 @@ final class RelayHost: ObservableObject {
 
     /// Serve the relay's store over plain HTTP — the DEFAULT cross-NAT media transport (the iroh
     /// blob ALPN drops its datagrams over a pure-relay cross-NAT path, so blob dials that must
-    /// cross a NAT stall ~30s and die while messaging works). Bearer-token gated; the token travels
-    /// ONLY inside the sealed frame-19 announce, so only circle members hold it. Reachable URLs =
+    /// cross a NAT stall ~30s and die while messaging works). Gated on a per-request signature over
+    /// the caller's transport key + circle membership — the same check the iroh path runs; the token
+    /// travels ONLY inside the sealed frame-19 announce and is mixed into that signature rather than
+    /// sent, so it is a pre-filter and never the authorization. Reachable URLs =
     /// the optional user-configured public URL (UserDefaults `haven.relay.publicURL` — set it when
     /// this host is port-forwarded / reverse-proxied / tunneled) first, then every LAN IPv4.
     private func startHttpInterface(_ h: RelayServerHandle) {
@@ -251,9 +253,14 @@ final class RelayHost: ObservableObject {
 
     /// Register/unregister Haven as a macOS login item. Throws on failure (e.g. unsigned dev
     /// builds, or when the user has disabled the item in System Settings) so the UI can surface
-    /// the error. No-op off Catalyst.
+    /// the error. No-op on iOS.
+    ///
+    /// Gated on `os(macOS)` too, not Catalyst alone: Catalyst was dropped for the native HavenMac
+    /// target, so the Catalyst-only gate compiled this body out of the shipping Mac app entirely —
+    /// `loginItemSupported` and `startsAtLogin` both answered for native macOS while the setter
+    /// silently did nothing. SMAppService is the native path and needs no Catalyst.
     func setStartAtLogin(_ on: Bool) throws {
-        #if targetEnvironment(macCatalyst)
+        #if os(macOS) || targetEnvironment(macCatalyst)
         if on {
             // Already enabled? `register()` is idempotent but throws if the user disabled it in
             // System Settings; treat "already enabled" as success.
@@ -296,7 +303,8 @@ struct RelayEntry: Codable, Identifiable, Equatable {
     /// media transport (the iroh blob ALPN drops datagrams on pure-relay cross-NAT paths).
     /// Learned from the sealed frame-19 announce; nil/empty = iroh-only relay.
     var httpUrls: [String]?
-    /// Bearer token the relay's HTTP interface requires (travels ONLY inside sealed announces).
+    /// Shared relay secret folded into each request signature (travels ONLY inside sealed announces,
+    /// and is never put on the wire — see SharedStore.httpAuth).
     var httpToken: String?
     /// When this relay was last (re-)ADOPTED into a circle (unix ms). Rides the announce so a member
     /// who FORGOT it earlier reactivates on a NEWER re-add (LWW), while a stale third-party echo —

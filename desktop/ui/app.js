@@ -2800,8 +2800,20 @@ function initTheme() {
 const TERMS_VERSION = 1;
 const Terms = {
   KEY: "haven-terms-accepted-version",
-  accepted() { return Number(localStorage.getItem(this.KEY) || 0) >= TERMS_VERSION; },
-  accept() { localStorage.setItem(this.KEY, String(TERMS_VERSION)); },
+  // In-memory mirror. localStorage is the RECORD, but it cannot be the only copy: if it fails or
+  // isn't persisting, accept() writes nothing, boot() re-reads false, and the gate re-renders —
+  // agree, gate, agree, gate, with no way into the app. A gate that can't be passed is worse than
+  // no gate. Measured: the installed .deb had no localstorage/ dir and did exactly this.
+  _mem: 0,
+  accepted() {
+    let v = this._mem;
+    try { v = Math.max(v, Number(localStorage.getItem(this.KEY) || 0)); } catch (_) {}
+    return v >= TERMS_VERSION;
+  },
+  accept() {
+    this._mem = TERMS_VERSION;
+    try { localStorage.setItem(this.KEY, String(TERMS_VERSION)); } catch (_) {}
+  },
 };
 
 /// The profile the user typed during onboarding, held until there's an engine to receive it.
@@ -2809,11 +2821,13 @@ const Terms = {
 /// be called inline — nothing is listening yet. Stash it, apply it on the next boot.
 const PendingProfile = {
   KEY: "haven-pending-profile",
-  stash(v) { localStorage.setItem(this.KEY, JSON.stringify(v)); },
+  _mem: null,
+  stash(v) { this._mem = v; try { localStorage.setItem(this.KEY, JSON.stringify(v)); } catch (_) {} },
   take() {
-    const raw = localStorage.getItem(this.KEY);
-    if (!raw) return null;
-    localStorage.removeItem(this.KEY);
+    let raw = null;
+    try { raw = localStorage.getItem(this.KEY); localStorage.removeItem(this.KEY); } catch (_) {}
+    if (!raw) { const m = this._mem; this._mem = null; return m; }
+    this._mem = null;
     try { return JSON.parse(raw); } catch (_) { return null; }
   },
 };

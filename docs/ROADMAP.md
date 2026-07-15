@@ -235,7 +235,12 @@ push.
   publishes them, and there is no Flathub submission step. See `LINUX.md`.
 - **Microsoft Store listing** — blocked only on creating the 4 Azure AD secrets.
 - **Group-gossip cache** for the fallback chain.
-- **Xcode Cloud CI** (local rocket CI is fine).
+- ~~**Xcode Cloud CI**~~ — **shipped.** The `Main` workflow archives iOS + macOS and distributes to
+  TestFlight (`apple/ci_scripts/ci_post_clone.sh` builds the xcframework; a root shim execs it).
+  It is now the ONLY way to ship Apple builds while this Mac is on a beta OS: a locally-archived
+  binary is auto-rejected with ITMS-90301 ("not currently accepting applications built with this
+  version of the OS"). Build 191 shipped 1.0.5 this way. Scoped to `apple/`, `core/`, `ci_scripts/`
+  so unrelated pushes don't burn compute.
 
 ## Toolchain (this machine)
 

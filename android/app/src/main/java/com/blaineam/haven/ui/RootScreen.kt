@@ -73,9 +73,12 @@ fun RootScreen() {
 
     Crossfade(targetState = profile.onboarded, label = "root") { onboarded ->
         if (!onboarded) {
-            OnboardingScreen { name, emoji ->
+            OnboardingScreen { name, emoji, avatarB64 ->
                 HavenCore.get(context)           // generate + persist identity on first run
                 profile.completeOnboarding(name, emoji)
+                // After completeOnboarding: setAvatar mirrors into AvatarStore under our node id,
+                // which only exists once HavenCore has generated the identity above.
+                if (avatarB64.isNotBlank()) profile.setAvatar(avatarB64)
             }
         } else {
             MainScaffold()

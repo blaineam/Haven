@@ -1,10 +1,16 @@
 package com.blaineam.haven.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -27,7 +33,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -36,20 +45,32 @@ import androidx.compose.ui.unit.sp
 import com.blaineam.haven.core.HavenCore
 import com.blaineam.haven.core.HavenNet
 import com.blaineam.haven.core.ProfileStore
+import com.blaineam.haven.core.loadAvatarB64
 import com.blaineam.haven.core.restartApp
 
 /**
  * First-run welcome, gating the app (parity with the iOS OnboardingView). The identity is
- * generated lazily by HavenCore the moment we touch it; here we collect a name + emoji so the
- * circle has a friendly face.
+ * generated lazily by HavenCore the moment we touch it; here we collect a name, a photo and an
+ * emoji so the circle has a friendly face.
  */
 @Composable
-fun OnboardingScreen(onDone: (name: String, emoji: String) -> Unit) {
+fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) -> Unit) {
     var name by remember { mutableStateOf("") }
     var emoji by remember { mutableStateOf("🌅") }
+    var avatarB64 by remember { mutableStateOf("") }
     val emojis = listOf("🌅", "🌙", "⭐️", "🔥", "🌊", "🌸", "🦊", "🐦", "🍃", "💜")
 
     val context = LocalContext.current
+    val avatarBmp = remember(avatarB64) {
+        if (avatarB64.isBlank()) null else runCatching {
+            val b = android.util.Base64.decode(avatarB64, android.util.Base64.DEFAULT)
+            android.graphics.BitmapFactory.decodeByteArray(b, 0, b.size)?.asImageBitmap()
+        }.getOrNull()
+    }
+    // The system photo picker — no storage permission, so first run never asks for one.
+    val pickAvatar = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) loadAvatarB64(context, uri)?.let { avatarB64 = it }
+    }
     var showLink by remember { mutableStateOf(false) }
     var showScan by remember { mutableStateOf(false) }
     var code by remember { mutableStateOf("") }
@@ -86,12 +107,39 @@ fun OnboardingScreen(onDone: (name: String, emoji: String) -> Unit) {
                 textAlign = TextAlign.Center,
                 fontSize = 15.sp,
             )
-            Spacer(Modifier.height(36.dp))
+            Spacer(Modifier.height(28.dp))
+
+            // Your face: a real photo if you want one, the emoji otherwise (iOS parity).
+            Box(
+                Modifier.size(96.dp).clip(CircleShape).background(HavenTheme.brand)
+                    .clickable { pickAvatar.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+                contentAlignment = Alignment.Center,
+            ) {
+                if (avatarBmp != null) {
+                    Image(avatarBmp, "Your photo", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                } else {
+                    Text(emoji, fontSize = 44.sp)
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = {
+                    pickAvatar.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                }) {
+                    Text(if (avatarB64.isBlank()) "Add a photo" else "Change photo", color = HavenTheme.pink, fontSize = 14.sp)
+                }
+                if (avatarB64.isNotBlank()) {
+                    TextButton(onClick = { avatarB64 = "" }) {
+                        Text("Remove", color = HavenTheme.textSecondary, fontSize = 14.sp)
+                    }
+                }
+            }
+            Spacer(Modifier.height(14.dp))
 
             Text(
-                "Pick a face",
-                color = HavenTheme.textPrimary,
-                fontSize = 14.sp,
+                if (avatarB64.isBlank()) "Or pick an emoji" else "Emoji (shown if you remove your photo)",
+                color = HavenTheme.textSecondary,
+                fontSize = 13.sp,
                 modifier = Modifier.fillMaxWidth(),
                 textAlign = TextAlign.Start,
             )
@@ -136,7 +184,7 @@ fun OnboardingScreen(onDone: (name: String, emoji: String) -> Unit) {
             BrandButton(
                 text = "Create my Haven",
                 enabled = name.isNotBlank(),
-            ) { onDone(name.trim(), emoji) }
+            ) { onDone(name.trim(), emoji, avatarB64) }
             Spacer(Modifier.height(6.dp))
             TextButton(onClick = { code = ""; linkError = false; showLink = true }) {
                 Text("Already use Haven? Link this device", color = HavenTheme.pink, fontSize = 14.sp)

@@ -391,3 +391,14 @@ fun loadAndDownscale(
 
     ByteArrayOutputStream().also { bmp.compress(Bitmap.CompressFormat.JPEG, quality, it) }.toByteArray()
 }.getOrElse { android.util.Log.e("LocalMedia", "loadAndDownscale failed", it); null }
+
+/**
+ * A picked photo as a base64 JPEG ready for [ProfileStore.setAvatar] — null if the decode failed.
+ *
+ * 192px @ 70% is the iOS wire spec (Profile.swift `avatarBase64`): this blob rides the signed
+ * profile card to every circle member, so it stays small on purpose. Onboarding and Edit profile
+ * both go through here so the two can't drift.
+ */
+fun loadAvatarB64(context: Context, uri: Uri): String? =
+    loadAndDownscale(context, uri, maxDim = 192, quality = 70)
+        ?.let { android.util.Base64.encodeToString(it, android.util.Base64.NO_WRAP) }

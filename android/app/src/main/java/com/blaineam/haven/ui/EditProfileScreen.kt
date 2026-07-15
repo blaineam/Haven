@@ -57,9 +57,7 @@ fun EditProfileScreen(onDone: () -> Unit) {
     }
     val pickAvatar = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) com.blaineam.haven.core.loadAndDownscale(context, uri, maxDim = 320, quality = 82)?.let {
-            avatarB64 = android.util.Base64.encodeToString(it, android.util.Base64.NO_WRAP)
-        }
+        if (uri != null) com.blaineam.haven.core.loadAvatarB64(context, uri)?.let { avatarB64 = it }
     }
 
     HavenBackground {

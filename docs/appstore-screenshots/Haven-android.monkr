@@ -1,0 +1,54 @@
+{
+  "version": 3,
+  "background": {
+    "type": "gradient",
+    "solidColor": "#1d1233",
+    "gradientCss": "linear-gradient(160deg, #1a1030 0%, #3a1c5e 42%, #7a2f6e 78%, #b85a3e 100%)",
+    "gradientName": "Haven Dusk",
+    "imageUrl": null
+  },
+  "canvasSize": {
+    "width": 1242,
+    "height": 2208,
+    "presetName": "Custom"
+  },
+  "padding": 60,
+  "exportConfig": {
+    "scale": 1,
+    "format": "png"
+  },
+  "textOverlay": {},
+  "sceneObjects": [
+    {
+      "id": "obj-1",
+      "deviceId": "pixel-7-pro",
+      "deviceColorId": "obsidian",
+      "screenshotUrl": null,
+      "screenshotFile": null,
+      "extraScreenshots": [],
+      "x": 50,
+      "y": 50,
+      "scale": 1.55,
+      "rotation": 0,
+      "tiltX": 0,
+      "tiltY": 0,
+      "shadow": {
+        "enabled": true,
+        "color": "rgba(0,0,0,0.45)",
+        "blur": 70,
+        "spread": 0,
+        "offsetX": 0,
+        "offsetY": 0
+      },
+      "frameStyle": "default",
+      "borderRadius": 0,
+      "glow": {
+        "enabled": false,
+        "color": "rgba(255,255,255,0.6)",
+        "blur": 20,
+        "spread": 2
+      }
+    }
+  ],
+  "textBlocks": []
+}

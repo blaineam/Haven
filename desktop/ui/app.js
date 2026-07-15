@@ -2795,41 +2795,181 @@ function initTheme() {
 // First-run welcome (parity with iOS/Android): on a fresh install the backend has NO identity or
 // engine, so we must show this BEFORE calling any engine command. "Create" mints a new identity;
 // "Link" adopts a transfer code from another device. Both relaunch the app into the normal flow.
+/// Terms acceptance, versioned — mirrors TermsStore (apple/HavenApp/TermsView.swift). Bump
+/// TERMS_VERSION when the terms change materially and everyone re-agrees on next launch.
+const TERMS_VERSION = 1;
+const Terms = {
+  KEY: "haven-terms-accepted-version",
+  accepted() { return Number(localStorage.getItem(this.KEY) || 0) >= TERMS_VERSION; },
+  accept() { localStorage.setItem(this.KEY, String(TERMS_VERSION)); },
+};
+
+/// The profile the user typed during onboarding, held until there's an engine to receive it.
+/// onboard_create restarts the process (a new identity means a new engine), so set_profile can't
+/// be called inline — nothing is listening yet. Stash it, apply it on the next boot.
+const PendingProfile = {
+  KEY: "haven-pending-profile",
+  stash(v) { localStorage.setItem(this.KEY, JSON.stringify(v)); },
+  take() {
+    const raw = localStorage.getItem(this.KEY);
+    if (!raw) return null;
+    localStorage.removeItem(this.KEY);
+    try { return JSON.parse(raw); } catch (_) { return null; }
+  },
+};
+
+/// The ground rules (App Review 1.2). Copy is TermsContent's, verbatim — apple/HavenApp/TermsView.swift.
+function termsContent() {
+  const rule = (icon, title, body) => el("div", { class: "row", style: "align-items:flex-start;gap:14px;text-align:left" },
+    el("div", { style: "font-size:30px;line-height:1" }, icon),
+    el("div", { class: "col", style: "gap:3px" },
+      el("div", { style: "font-weight:600" }, title),
+      el("div", { class: "muted small" }, body)));
+  return el("div", { class: "col", style: "gap:18px;text-align:left" },
+    el("h2", { style: "font-size:26px;font-weight:800;margin:0;text-align:center" }, "The ground rules"),
+    el("p", { class: "muted small", style: "margin:0" },
+      "Haven is yours and your people's — nobody else can see inside, so keeping it good is on all of us. There is zero tolerance for objectionable content or abusive behavior."),
+    rule("🚫", "Never allowed", "Harassment or bullying, hate, threats or violence, sexual content involving minors, non-consensual intimate content, scams, impersonation, or anything illegal."),
+    rule("🛡️", "Your circle enforces it", "Anyone can report a post — the whole circle sees the report and can hide it, remove the person, or block them instantly."),
+    rule("📒", "Actions are on the record", "Reports and blocks are logged permanently — who acted against whom and the category, never the content itself. Repeated abuse costs an identity its service."),
+    rule("💜", "You own what you share", "Everything is end-to-end encrypted, so only your circle sees it — and you're responsible for it."),
+    el("a", { href: "https://github.com/blaineam/haven/blob/main/docs/TERMS.md", target: "_blank",
+              class: "small", style: "text-align:center;text-decoration:underline;color:var(--pink)" },
+       "Read the full terms of use"));
+}
+
+/// The standalone gate for identities that exist but never agreed (upgraders, linked devices).
+/// Apple has the same thing at HavenApp.swift:268 — there is no other way in.
+function renderTermsGate() {
+  const card = el("div", { class: "col", style: "max-width:520px;width:100%;gap:20px" },
+    el("div", { style: "max-height:60vh;overflow:auto" }, termsContent()),
+    el("button", { class: "btn primary", style: "width:100%;padding:12px", onclick: () => {
+      Terms.accept();
+      document.getElementById("onboard-overlay")?.remove();
+      boot();
+    } }, "I agree"));
+  document.body.appendChild(el("div", { id: "onboard-overlay", style: "position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:32px;background:var(--bg, #0d0b1a)" }, card));
+}
+
+/// Onboarding — the same four steps as iOS/macOS (OnboardingView.swift): welcome, who are you,
+/// how it works, the ground rules. Desktop used to be a single "Create my Haven" button: no name,
+/// no avatar, no explanation, and — the one that mattered — no terms at all, so a desktop user had
+/// never agreed to the rules the whole moderation model assumes everyone signed up to.
 function renderOnboarding() {
-  const brandMark = el("div", { class: "brand-mark", style: "width:64px;height:64px;border-radius:20px" });
-  brandMark.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="width:34px;height:34px">
+  let step = 0;
+  let name = "";
+  let emoji = "🌿";
+  let avatar = "";
+  let showLink = false;
+
+  const brandMark = () => {
+    const m = el("div", { style: "width:112px;height:112px;border-radius:56px;background:var(--grad);"
+      + "display:flex;align-items:center;justify-content:center;box-shadow:0 10px 20px rgba(236,72,153,0.4)" });
+    m.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="width:66px;height:66px">
       <circle cx="6" cy="7" r="1.6" fill="white"/><circle cx="18" cy="6" r="1.6" fill="white"/>
       <circle cx="12" cy="13" r="1.8" fill="white"/><circle cx="5" cy="17" r="1.6" fill="white"/>
       <circle cx="19" cy="17" r="1.6" fill="white"/>
       <path d="M6 7l6 6 6-7M12 13l-7 4M12 13l7 4" opacity="0.85"/></svg>`;
+    return m;
+  };
 
-  const code = el("input", { placeholder: "haven-seed:…", style: "width:100%;margin-top:10px" });
-  const linkBox = el("div", { class: "col", style: "display:none;width:100%;margin-top:14px;gap:8px" },
+  const code = el("input", { class: "field-capsule", placeholder: "haven-seed:…", style: "width:100%" });
+  const linkBox = () => el("div", { class: "col", style: "width:100%;gap:8px" },
     el("div", { class: "muted small" }, "On your other device open You ▸ Link a new device, copy its transfer code, then paste it here."),
     code,
     el("button", { class: "btn primary", style: "width:100%", onclick: async () => {
       const c = code.value.trim();
       if (!c) { toast("Paste a transfer code first"); return; }
-      try { await invoke("onboard_link", { code: c }); } // relaunches into the linked identity
+      // A linked device inherits an identity that already agreed elsewhere — but acceptance is
+      // per-device local state, so record it here too rather than drop them on the gate.
+      Terms.accept();
+      try { await invoke("onboard_link", { code: c }); }
       catch (e) { toast("Couldn't link: " + e); }
-    } }, "Link this device"),
-  );
+    } }, "Link this device"));
 
-  const card = el("div", { style: "max-width:420px;width:100%;display:flex;flex-direction:column;align-items:center;text-align:center;gap:6px" },
-    brandMark,
-    el("h1", { style: "font-size:34px;font-weight:800;margin:10px 0 0" }, "Haven"),
-    el("p", { class: "muted", style: "margin:0 0 6px" }, "Your friends and your family. That's the whole product."),
-    el("button", { class: "btn primary", style: "width:100%;margin-top:18px;padding:12px", onclick: async () => {
-      try { await invoke("onboard_create"); } // relaunches into the new identity
-      catch (e) { toast("Couldn't create: " + e); }
-    } }, "Create my Haven"),
-    el("button", { class: "btn ghost", style: "width:100%", onclick: () => { linkBox.style.display = "flex"; code.focus(); } }, "Already use Haven? Link this device"),
-    linkBox,
-    el("p", { class: "muted small", style: "margin-top:18px" }, "No phone number. No email. Your keys never leave this device."),
-  );
+  const welcome = () => el("div", { class: "col", style: "align-items:center;gap:20px;text-align:center" },
+    brandMark(),
+    el("h1", { style: "font-size:34px;font-weight:800;margin:6px 0 0" }, "Welcome to Haven"),
+    el("p", { class: "muted", style: "margin:0;white-space:pre-line" },
+      "A private little place for the people you love.\nNo ads. No tracking. No strangers. Just your people."),
+    showLink ? linkBox()
+             : el("button", { class: "btn ghost", style: "width:100%", onclick: () => { showLink = true; draw(); } },
+                  "Link this as another of my devices"));
 
-  const overlay = el("div", { id: "onboard-overlay", style: "position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:32px;background:var(--bg, #0d0b1a)" }, card);
-  document.body.append(overlay);
+  const pickName = () => {
+    const field = el("input", { class: "pill-field", style: "text-align:center;font-size:18px", placeholder: "Your name or nickname", value: name,
+                                oninput: (e) => { name = e.target.value; next.disabled = !name.trim(); next.style.opacity = name.trim() ? 1 : 0.5; } });
+    const picker = el("input", { type: "file", accept: "image/*", style: "display:none", onchange: async (e) => {
+      const f = e.target.files[0];
+      if (!f) return;
+      try { avatar = await avatarDataUrl(f); draw(); }
+      catch (_) { toast("That file isn't an image Haven can read"); }
+    } });
+    const grid = el("div", { class: "emoji-grid" });
+    for (const em of AVATAR_EMOJI) {
+      grid.appendChild(el("button", { class: "emoji-cell" + (emoji === em ? " on" : ""), onclick: () => { emoji = em; draw(); } }, em));
+    }
+    return el("div", { class: "col", style: "align-items:center;gap:16px;text-align:center" },
+      el("h2", { style: "font-size:26px;font-weight:800;margin:0;white-space:pre-line" }, "What should your\npeople call you?"),
+      el("div", { class: "disc", style: "width:96px;height:96px;font-size:40px" },
+         avatar ? el("img", { src: avatar }) : emoji),
+      el("div", { class: "row", style: "justify-content:center;gap:8px" },
+        el("button", { class: "btn small tint-pink", onclick: () => picker.click() }, avatar ? "Change photo" : "Add a photo"),
+        avatar ? el("button", { class: "btn small danger", onclick: () => { avatar = ""; draw(); } }, "Remove") : null,
+        picker),
+      field,
+      el("div", { class: "muted small" }, avatar ? "Emoji (shown if you remove your photo)" : "Or pick an emoji"),
+      grid);
+  };
+
+  const howItWorks = () => {
+    const point = (icon, title, body) => el("div", { class: "row", style: "align-items:flex-start;gap:14px;text-align:left" },
+      el("div", { style: "font-size:30px;line-height:1" }, icon),
+      el("div", { class: "col", style: "gap:3px" },
+        el("div", { style: "font-weight:600" }, title),
+        el("div", { class: "muted small" }, body)));
+    return el("div", { class: "col", style: "gap:22px" },
+      el("h2", { style: "font-size:26px;font-weight:800;margin:0;text-align:center" }, "How Haven works"),
+      point("🔒", "Private by design", "Everything you share is locked so only the people in your circle can ever see it."),
+      point("🚫", "No ads, no tracking", "There's no algorithm and no company watching. Haven doesn't collect anything about you."),
+      point("🤝", "You choose your circle", "Nothing happens with strangers. You invite the people you want, one at a time."));
+  };
+
+  const next = el("button", { class: "btn primary", style: "width:100%;padding:12px" });
+
+  const advance = async () => {
+    if (step < 3) { step += 1; draw(); return; }
+    // Agreeing IS the door in — same as iOS. Record acceptance and the typed profile BEFORE
+    // onboard_create, which restarts the process out from under us.
+    Terms.accept();
+    PendingProfile.stash({ name: name.trim(), emoji, avatar });
+    try { await invoke("onboard_create"); }
+    catch (e) { toast("Couldn't create: " + e); }
+  };
+  next.onclick = advance;
+
+  const body = el("div", { class: "col", style: "width:100%;gap:6px" });
+  const dots = el("div", { class: "row", style: "justify-content:center;gap:7px;margin-top:4px" });
+
+  function draw() {
+    body.innerHTML = "";
+    body.appendChild([welcome, pickName, howItWorks, () => el("div", { style: "max-height:52vh;overflow:auto" }, termsContent())][step]());
+    next.textContent = step === 0 ? "Get started" : step === 3 ? "I agree — enter Haven" : "Continue";
+    const needName = step === 1 && !name.trim();
+    next.disabled = needName;
+    next.style.opacity = needName ? 0.5 : 1;
+    dots.innerHTML = "";
+    for (let i = 0; i < 4; i++) dots.appendChild(el("div", { class: "dot" + (i === step ? " on" : "") }));
+  }
+
+  const card = el("div", { class: "col", style: "max-width:520px;width:100%;align-items:center;gap:14px" },
+    body, next, dots,
+    el("p", { class: "muted small", style: "margin-top:10px;text-align:center" },
+      "No phone number. No email. Your keys never leave this device."));
+
+  document.getElementById("onboard-overlay")?.remove();
+  document.body.appendChild(el("div", { id: "onboard-overlay", style: "position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:32px;overflow:auto;background:var(--bg, #0d0b1a)" }, card));
+  draw();
 }
 
 async function boot() {
@@ -2839,6 +2979,18 @@ async function boot() {
   try {
     if (await invoke("needs_onboarding")) { renderOnboarding(); return; }
   } catch (_) {}
+  // An identity exists. Two things onboarding couldn't do until now, because both need an engine:
+  //
+  // 1. The profile typed at onboarding. onboard_create restarts the process, so set_profile had
+  //    nowhere to land at the time — this is the first moment it does.
+  const pending = PendingProfile.take();
+  if (pending && pending.name) {
+    await invoke("set_profile", { name: pending.name, bio: "", link: "", emoji: pending.emoji || "🌿", avatar: pending.avatar || "" })
+      .catch(() => PendingProfile.stash(pending));   // keep it for the next boot rather than lose the name
+  }
+  // 2. The ground rules, for identities that predate them — upgraders and linked devices never saw
+  //    an onboarding flow. Same standalone gate as HavenApp.swift:268: there is no other way in.
+  if (!Terms.accepted()) { renderTermsGate(); return; }
   // The demo cast starts PAST the relay nudge, exactly like the phones' seeders
   // (DemoSeed.swift ▸ `RelayNudgeStore.shared.dismiss`, DemoSeed.kt ▸ `RelayNudge.dismiss`). It's a
   // problem-state banner — "this circle has no relay yet" — and a seeded circle trips it purely

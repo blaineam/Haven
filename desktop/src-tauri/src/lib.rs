@@ -167,6 +167,20 @@ fn restore_window(app: &tauri::AppHandle) {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let _ = w.unminimize();
         let _ = w.set_focus();
+        // …and on Wayland even that isn't enough. set_focus() is a focus-STEAL request, and a
+        // compositor only honours one from a client holding an xdg-activation token — which a tray
+        // click has no way to get (the app grid's does, which is why launching from there "opens it
+        // again" while the tray appears dead). GNOME silently drops the request; the window sits
+        // mapped and unraised behind everything, indistinguishable from nothing happening.
+        //
+        // Toggling always-on-top is a WINDOW STATE change, not a focus request, so the compositor
+        // applies it — and applying it raises the window. Dropped again immediately so it doesn't
+        // actually stay pinned above other windows. X11 doesn't need this and doesn't mind it.
+        #[cfg(target_os = "linux")]
+        {
+            let _ = w.set_always_on_top(true);
+            let _ = w.set_always_on_top(false);
+        }
     });
 }
 

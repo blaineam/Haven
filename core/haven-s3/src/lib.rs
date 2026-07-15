@@ -221,15 +221,32 @@ fn parse_list_keys(xml: &str) -> Vec<String> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
     let mut keys = vec![];
-    let mut in_key = false;
+    // quick-xml 0.41 emits an entity ref as its own `GeneralRef` event, splitting the text
+    // around it, and `BytesText::unescape()` is gone. So a key is accumulated across events
+    // and flushed at `</Key>` — pushing per Text event would shatter `a&amp;b` into two keys.
+    let mut cur: Option<String> = None;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) if e.name().as_ref() == b"Key" => in_key = true,
-            Ok(Event::End(e)) if e.name().as_ref() == b"Key" => in_key = false,
-            Ok(Event::Text(t)) if in_key => {
-                if let Ok(s) = t.unescape() {
-                    keys.push(s.into_owned());
+            Ok(Event::Start(e)) if e.name().as_ref() == b"Key" => cur = Some(String::new()),
+            Ok(Event::End(e)) if e.name().as_ref() == b"Key" => {
+                if let Some(k) = cur.take() {
+                    keys.push(k);
+                }
+            }
+            Ok(Event::Text(t)) => {
+                if let (Some(k), Ok(s)) = (cur.as_mut(), t.xml10_content()) {
+                    k.push_str(&s);
+                }
+            }
+            // `&amp;` arrives as GeneralRef("amp"). Re-wrap and let quick-xml resolve it, so
+            // named and numeric (`&#38;`) refs both go through the crate's own table.
+            Ok(Event::GeneralRef(r)) => {
+                if let (Some(k), Ok(name)) = (cur.as_mut(), r.decode()) {
+                    match quick_xml::escape::unescape(&format!("&{name};")) {
+                        Ok(s) => k.push_str(&s),
+                        Err(_) => return keys, // malformed entity: stop, don't emit a corrupt key
+                    }
                 }
             }
             Ok(Event::Eof) => break,
@@ -278,5 +295,14 @@ mod tests {
         let xml = r#"<?xml version="1.0"?><ListBucketResult><Contents><Key>haven/mailbox/default/aaa</Key></Contents><Contents><Key>haven/mailbox/default/bbb</Key></Contents></ListBucketResult>"#;
         let keys = parse_list_keys(xml);
         assert_eq!(keys, vec!["haven/mailbox/default/aaa", "haven/mailbox/default/bbb"]);
+    }
+
+    /// S3 XML-escapes `&`, `<`, `>` inside `<Key>`, so the parser MUST expand entities or it
+    /// hands back a key that round-trips to a 404. Pins the behaviour across the quick-xml
+    /// 0.36 -> 0.41 port, where `BytesText::unescape()` split into decode + `escape::unescape`.
+    #[test]
+    fn list_xml_unescapes_entities_in_keys() {
+        let xml = r#"<ListBucketResult><Contents><Key>haven/a&amp;b/c&lt;d&gt;e&quot;f&apos;g</Key></Contents></ListBucketResult>"#;
+        assert_eq!(parse_list_keys(xml), vec![r#"haven/a&b/c<d>e"f'g"#]);
     }
 }

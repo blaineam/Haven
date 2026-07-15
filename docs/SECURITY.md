@@ -6,10 +6,11 @@ circles — directly over Bluetooth/Wi-Fi/iroh P2P, or store-and-forwarded throu
 that one of the circle's own members runs. Every relay and server is **blind**: it holds only
 ciphertext.
 
-"No content" is the exact scope, and the qualifier is load-bearing: reporting or blocking someone
+"No content" is the exact scope, and the qualifier is load-bearing: explicitly **reporting** someone
 sends a **content-free** ledger entry to the developer (see *Moderation & reporting* below), and the
 push Worker necessarily handles routing metadata. Those are the only things that reach the developer,
-and neither includes a byte of what anyone said or shared.
+and neither includes a byte of what anyone said or shared. **Blocking someone sends nothing** — it is
+local and private.
 
 This document records what Haven protects, how, and the limits — including the two features that are
 **privacy deterrents, not cryptographic guarantees**. It reflects the post-audit state (2026-07).
@@ -76,30 +77,49 @@ claims, and only the first is about cryptography:
   to review, filter, or take down. Nothing in this section changes that.
 - **Reporting is shipped on all three platforms**, and it is *member*-scoped. A report is sealed to
   the **whole circle** as an ordinary event (`EventKind::Report` —
-  `core/p2pcore/src/social.rs:70`, authored at `core/p2pcore-ffi/src/lib.rs:1862`), because circles
+  `core/p2pcore/src/social.rs:70`, authored at `core/p2pcore-ffi/src/lib.rs:1960`), because circles
   have no owner: every member judges it and acts with the power they already hold — hide, remove, or
   block. The reporter's free-text comment goes **only** to the circle.
-- **A content-free entry is also sent to the developer.** Reporting
-  (`apple/HavenApp/FeedView.swift:926`) and — today, automatically and silently — blocking
-  (`apple/HavenApp/FeedView.swift:542`; Android: `android/.../core/Moderation.kt:37`) `POST /flag` to
-  the push Worker, which appends a permanent KV row of `{actor, subject, action, reason}`
-  (`push/worker.js:146-163`): two pseudonymous identity keys, the action, and an offense category.
-  **Never content, never PII.** See `MODERATION.md` for the design and `TERMS.md` §3 for the
-  consequences attached to it (possible refusal of developer-operated services, disclosure where
+- **An explicit report also sends a content-free entry to the developer**, via `POST /flag` to the
+  push Worker (`apple/HavenApp/ReportUI.swift:15-30`; Android:
+  `android/.../core/Moderation.kt:34`). The stored row is `{subject, action, reason}`
+  (`push/worker.js:146-175`) — the reported identity key, the literal string `report`, and an offense
+  category. **Never content, never PII.** See `MODERATION.md` for the design and `TERMS.md` §3 for
+  the consequences attached to it (possible refusal of developer-operated services, disclosure where
   legally required).
+- **Blocking sends nothing, and cannot.** It is local and private on Apple
+  (`apple/HavenApp/FeedView.swift:540-547`) and Android (`Moderation.kt` exposes report only), and a
+  block is not representable on the Worker at all: `/flag` hard-rejects every action but `report`
+  (`push/worker.js:159`), so no block can be stored even by an old or modified client. *(The desktop
+  client still POSTs on block — `desktop/src-tauri/src/engine.rs:1311` — but the Worker refuses it,
+  so nothing is recorded. It should stop asking; tracked below.)*
 
-**Honest limits of the ledger**, so no one over-reads it:
+**What the ledger does and does not hold** (all four properties are enforced in code, per audit F1):
 
-- It is a record the developer holds *about identities*, which is the one place Haven's
-  "the developer holds nothing" instinct does not hold. It is content-free, but it is not nothing.
-- `/flag` is **unauthenticated** — `actor` is self-asserted and not signature-checked
-  (`push/worker.js:154` validates only hex shape). Entries are therefore forgeable and should not be
-  treated as evidence about any identity.
-- Blocking is a private, defensive act, yet it currently notifies the developer without asking.
+- **No actor is stored.** The row carries no reporter identity — not even hashed. Node ids are
+  enumerable, so any hash the Worker could compute, the operator could invert; not storing it is the
+  only honest way to not hold the "A reported B" edge (`push/worker.js:153-156,174`). Be precise
+  about the limit: the reporter's key **is** transmitted, because verifying the signature requires
+  it, so the Worker *observes* the actor in memory and only *persistence* is ruled out by code. That
+  is the same operator-policy boundary as the IP metadata above, not a cryptographic one.
+- **Signed, so not forgeable.** The reporter must prove their identity key over
+  `flag-v1:<subject>:report:<category>` + timestamp, checked with the same Ed25519 `verifyReg` the
+  `/register` routes use (`push/worker.js:168`; signed client-side at `ReportUI.swift:25`). An
+  unauthenticated POST cannot plant a row against anyone, and the signature binds subject, action,
+  and category, so a captured report cannot be re-aimed or re-labelled.
+- **Replay-inert.** The key derives from the signed timestamp + signature, so re-POSTing a captured
+  report rewrites the same row instead of inflating the "many reporters" count
+  (`push/worker.js:171-173`); outside `verifyReg`'s 5-minute window it is rejected outright.
+- **Expiring.** Rows carry a 90-day TTL (`push/worker.js:175`). Not permanent.
 
-Signing `/flag`, dropping the automatic block report, and bounding entry lifetime are tracked as
-audit finding **F1** (`SECURITY-AUDIT-2026-07.md`). This section describes what ships **today**, not
-what should.
+Still worth stating plainly: this is a record the developer holds *about a reported identity*. It is
+content-free, actor-free, and expiring — but it is not nothing, and it is the one place the "the
+developer holds nothing" instinct needs a qualifier.
+
+**Known gap:** the desktop client has not caught up to the signing above — it still sends the old
+unsigned `{actor, subject, action, reason}` body (`desktop/src-tauri/src/engine.rs:1056-1076`). The
+Worker rejects it (401), so desktop reports currently reach the *circle* but never the ledger, and
+desktop's block POST is refused (400). No data is exposed by this; it is a parity bug, not a leak.
 
 ## Deterrents, not guarantees (do not over-rely)
 

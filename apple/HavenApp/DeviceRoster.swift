@@ -14,13 +14,43 @@ enum DeviceKeyStore {
     private static let service = "com.blaineam.kith"
     private static let accountKey = "haven.device-key-seed"
 
+    /// The identity handed out this process. Cached so repeated calls return the SAME device key
+    /// (callers derive `deviceNodeHex()` from it and compare it against the signed roster).
+    private static var cached: Account?
+    /// True when the keychain was unreadable and we handed out a throwaway: the real seed was NOT
+    /// touched. Retried on the next call, so it settles onto the real key once the device unlocks.
+    private(set) static var usingTemporaryIdentity = false
+
     /// This device's stable device Account — created once (32-byte seed in the data-protection keychain,
     /// device-local, never iCloud-synced).
     static func deviceAccount() -> Account {
-        if let seed = loadSeed(), let acct = try? Account.fromSeed(seed: seed) { return acct }
-        let fresh = Account.generate()
-        saveSeed(fresh.secretSeed())
-        return fresh
+        if let acct = cached, !usingTemporaryIdentity { return acct }   // settled on the real key
+        switch loadSeedStatus() {
+        case .found(let seed):
+            guard let acct = try? Account.fromSeed(seed: seed) else {
+                // Seed present but un-deriveable — NEVER overwrite it (mirrors AccountStore:35-38).
+                return temporaryIdentity()
+            }
+            cached = acct; usingTemporaryIdentity = false
+            return acct
+        case .notFound:
+            // Genuinely no seed → first run on this device. The ONLY case allowed to write.
+            let fresh = Account.generate()
+            saveSeed(fresh.secretSeed())
+            cached = fresh; usingTemporaryIdentity = false
+            return fresh
+        case .lockedOrError:
+            return temporaryIdentity()
+        }
+    }
+
+    /// A throwaway used only while the real seed is unreadable. Never saved, and cached so this
+    /// process keeps one stable id instead of minting a fresh key on every call.
+    private static func temporaryIdentity() -> Account {
+        if let acct = cached, usingTemporaryIdentity { return acct }
+        let temp = Account.generate()
+        cached = temp; usingTemporaryIdentity = true
+        return temp
     }
     static func deviceNodeHex() -> String { deviceAccount().nodeIdHex() }
     static func deviceBundle() -> Data { deviceAccount().publicBundle() }
@@ -38,10 +68,30 @@ enum DeviceKeyStore {
         [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
          kSecAttrAccount as String: accountKey, kSecUseDataProtectionKeychain as String: true]
     }
-    private static func loadSeed() -> Data? {
+    /// The load result must distinguish three cases so we never wipe a live device key:
+    ///   • `.found`         — seed is present and readable now.
+    ///   • `.notFound`      — genuinely no seed (first run) → the only case allowed to generate.
+    ///   • `.lockedOrError` — unreadable RIGHT NOW (locked / errSecInteractionNotAllowed). A real
+    ///                        seed almost certainly exists; regenerating would destroy it.
+    private enum SeedStatus { case found(Data), notFound, lockedOrError }
+
+    /// A nil read is NOT absence. The item is `AfterFirstUnlockThisDeviceOnly` (`saveSeed`), so a
+    /// read before first unlock returns `errSecInteractionNotAllowed` — indistinguishable from
+    /// "new device" if the OSStatus is dropped. Only `errSecItemNotFound` means absent.
+    private static func loadSeedStatus() -> SeedStatus {
         var q = query(); q[kSecReturnData as String] = true; q[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
-        return SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess ? item as? Data : nil
+        let status = SecItemCopyMatching(q as CFDictionary, &item)
+        switch status {
+        case errSecSuccess:
+            // Success with no/again-unreadable data: present, not absent.
+            guard let data = item as? Data, data.count == 32 else { return .lockedOrError }
+            return .found(data)
+        case errSecItemNotFound:
+            return .notFound
+        default:
+            return .lockedOrError
+        }
     }
     private static func saveSeed(_ seed: Data) {
         SecItemDelete(query() as CFDictionary)

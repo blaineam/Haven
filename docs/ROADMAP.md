@@ -237,10 +237,15 @@ push.
 - **Group-gossip cache** for the fallback chain.
 - ~~**Xcode Cloud CI**~~ — **shipped.** The `Main` workflow archives iOS + macOS and distributes to
   TestFlight (`apple/ci_scripts/ci_post_clone.sh` builds the xcframework; a root shim execs it).
-  It is now the ONLY way to ship Apple builds while this Mac is on a beta OS: a locally-archived
-  binary is auto-rejected with ITMS-90301 ("not currently accepting applications built with this
-  version of the OS"). Build 191 shipped 1.0.5 this way. Scoped to `apple/`, `core/`, `ci_scripts/`
-  so unrelated pushes don't burn compute.
+  Scoped to `apple/`, `core/`, `ci_scripts/` so unrelated pushes don't burn compute.
+
+  Both paths are valid, and which one you need depends on the build machine's OS:
+  - **Local rocket CI works by design** on an official OS release, and is the faster loop.
+  - **Xcode Cloud is required while the build Mac runs a BETA OS.** Apple rejects locally-archived
+    binaries with ITMS-90301 ("not currently accepting applications built with this version of the
+    OS") — that's what stopped 1.0.5 on 2026-07-15 (macOS 27.0 beta), and build 191 shipped through
+    Xcode Cloud instead. Note 187 shipped from the same beta Mac two days earlier: Apple tightened
+    acceptance in between, so this is a moving line, not a fixed rule.
 
 ## Toolchain (this machine)
 

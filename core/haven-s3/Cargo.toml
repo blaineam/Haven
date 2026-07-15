@@ -19,7 +19,9 @@ hex = "0.4"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 percent-encoding = "2"
-quick-xml = "0.36"
+# >=0.41: 0.36 carries RUSTSEC-2026-0194/-0195 (quadratic attr parsing, unbounded ns-decl
+# alloc). We parse XML from a user-configured S3 endpoint, so that input is attacker-shaped.
+quick-xml = "0.41"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

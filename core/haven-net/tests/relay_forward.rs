@@ -90,3 +90,69 @@ async fn relay_forwards_sealed_post_between_indirect_peers() {
     alice_node.close().await;
     bob_node.close().await;
 }
+
+/// Audit F10: a relay is a switchboard for ITS circle, not an open reflector. A stranger who
+/// learns the relay's node id must not be able to aim its bandwidth at third parties of their
+/// choosing — while the circle's own traffic keeps flowing.
+#[tokio::test]
+async fn relay_refuses_to_forward_between_two_strangers() {
+    let member = Identity::generate();
+    let attacker = Identity::generate();
+    let victim = Identity::generate(); // an arbitrary third party the attacker picks
+    let relay_id = Identity::generate();
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let victim_node = Node::spawn(victim.node_secret_bytes(), Arc::new(move |_: [u8; 32], p: Vec<u8>| {
+        let _ = tx.send(RoutingFrame::parse(&p).map(|f| f.payload).unwrap_or(p));
+    }))
+    .await
+    .unwrap();
+
+    let relay = RelayNode::spawn(relay_id.node_secret_bytes(), None).await.unwrap();
+    relay.authorize_forwarding(vec![hex(&member.public().node_id_bytes())]);
+    let relay_hex = relay.node_id_hex();
+
+    // The victim is reachable from the relay (a live connection to reflect onto).
+    let relay_addr = relay.local_dial_addr().await.unwrap();
+    victim_node.send(relay_addr, b"register").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // The attacker asks the relay to fling bytes at the victim. Neither of them is a member.
+    let attacker_node = Node::spawn(attacker.node_secret_bytes(), Arc::new(|_: [u8; 32], _: Vec<u8>| {})).await.unwrap();
+    let relay_dial = relay.local_dial_addr().await.unwrap();
+    attacker_node.send(relay_dial, b"hello-relay").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    attacker_node
+        .send_via_relay(&relay_hex, vec![victim.public().node_id_bytes()], b"AMPLIFY-ME")
+        .await
+        .unwrap();
+
+    assert!(
+        timeout(Duration::from_secs(3), rx.recv()).await.is_err(),
+        "the relay reflected a stranger's frame at a third party"
+    );
+
+    // The circle's own traffic is untouched: a frame TOWARD a member still forwards.
+    let (mtx, mut mrx) = tokio::sync::mpsc::unbounded_channel();
+    let member_node = Node::spawn(member.node_secret_bytes(), Arc::new(move |_: [u8; 32], p: Vec<u8>| {
+        let _ = mtx.send(RoutingFrame::parse(&p).map(|f| f.payload).unwrap_or(p));
+    }))
+    .await
+    .unwrap();
+    member_node.send(relay.local_dial_addr().await.unwrap(), b"register").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    attacker_node
+        .send_via_relay(&relay_hex, vec![member.public().node_id_bytes()], b"FOR-A-MEMBER")
+        .await
+        .unwrap();
+    let got = timeout(Duration::from_secs(10), mrx.recv()).await.expect("member delivery timed out");
+    assert_eq!(got.as_deref(), Some(&b"FOR-A-MEMBER"[..]), "a frame toward a member still forwards");
+
+    attacker_node.close().await;
+    victim_node.close().await;
+    member_node.close().await;
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}

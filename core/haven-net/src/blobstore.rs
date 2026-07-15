@@ -139,14 +139,14 @@ pub const GC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600
 // GET/LIST stream the body directly (the body *is* the reply), so there is no length
 // prefix to read on the happy path; a MISS is the 5-byte sentinel `\0MISS`.
 
-const VERB_PUT: u8 = b'P';
-const VERB_GET: u8 = b'G';
-const VERB_HAS: u8 = b'H';
-const VERB_LIST: u8 = b'L';
+pub(crate) const VERB_PUT: u8 = b'P';
+pub(crate) const VERB_GET: u8 = b'G';
+pub(crate) const VERB_HAS: u8 = b'H';
+pub(crate) const VERB_LIST: u8 = b'L';
 /// Refresh liveness of a batch of keys (body = newline-joined keys under the header prefix).
-const VERB_TOUCH: u8 = b'T';
+pub(crate) const VERB_TOUCH: u8 = b'T';
 /// LIST with idle ages ("<age-secs> <key>" lines) — for age-preserving mesh sync.
-const VERB_AGES: u8 = b'A';
+pub(crate) const VERB_AGES: u8 = b'A';
 
 /// Sentinel returned by GET when the key is absent. Chosen to be distinguishable from a
 /// stored blob: it begins with a NUL and is exactly these 5 bytes.
@@ -275,13 +275,19 @@ const MAX_SYNC_PULL: usize = 20_000;
 /// non-empty root is also required by the wire protocol.
 pub(crate) const SYNC_PREFIX: &str = "haven";
 
-/// Per-circle authorization for the mailbox (audit transport-F4). When a host populates this (the
-/// Haven apps do, from each circle's known membership), the relay serves a circle's mailbox keys ONLY
-/// to that circle's members — a stranger who merely learns the relay's node id can no longer enumerate
-/// or fetch a circle's blobs. Sibling relays are allowed broad LIST so mesh anti-entropy still works.
-/// An EMPTY map means "unconfigured" → fully permissive (a standalone/self-host relay is unchanged).
+/// Per-circle authorization for the whole `haven/` namespace (audit F2/F4). The relay serves a
+/// circle's keys ONLY to that circle's members — a stranger who merely learns the relay's node id
+/// (or captures its shared token off the wire) can no longer enumerate or fetch anything. Sibling
+/// relays are allowed broad LIST so mesh anti-entropy still works.
+///
+/// **This fails CLOSED.** An empty map does not mean "permissive", it means the relay has no
+/// members yet and therefore serves nobody: a relay that has not been told who belongs cannot
+/// possibly know that a caller does. (The pre-F4 code returned "allowed" for every unclassified
+/// key and for the unconfigured map, which is exactly how the auditor read `haven/devroster/**`
+/// with no token at all.) The only ungated verb is a devroster PUT — see [`verify_devroster`],
+/// where an account signature, not the write gate, is the trust.
 #[derive(Default)]
-pub(crate) struct RelayAuth {
+pub struct RelayAuth {
     /// circleId → authorized member node hexes.
     members: HashMap<String, HashSet<String>>,
     /// Sibling relay node hexes allowed to replicate via broad LIST (mesh anti-entropy).
@@ -290,7 +296,7 @@ pub(crate) struct RelayAuth {
 
 impl RelayAuth {
     /// Authorize a circle's mailbox to exactly `members` + the circle's sibling `relays`. Idempotent.
-    pub(crate) fn authorize(&mut self, circle_id: &str, members: Vec<String>, relays: Vec<String>) {
+    pub fn authorize(&mut self, circle_id: &str, members: Vec<String>, relays: Vec<String>) {
         self.members.insert(circle_id.to_string(), members.into_iter().collect());
         for r in relays {
             self.relays.insert(r);
@@ -465,9 +471,12 @@ impl BlobServer {
 
     /// Authorize a circle's mailbox to exactly `members` (their node hexes), plus the circle's sibling
     /// `relays` (allowed to replicate). Idempotent; call again on any membership change to update the
-    /// set. Once ANY circle is authorized, the relay enforces membership on every mailbox request (and
-    /// rejects strangers); before that it stays permissive for backward compatibility (audit
-    /// transport-F4).
+    /// set.
+    ///
+    /// A relay serves ONLY what it has been authorized to serve — until this is called it has no
+    /// members and therefore serves nobody (audit F4: "not configured yet" used to mean "allow
+    /// everyone", which is how a stranger read a circle's blobs). Every host calls it: the daemon
+    /// from the pasted link, the apps from each circle's roster.
     pub fn authorize(&self, circle_id: &str, members: Vec<String>, relays: Vec<String>) {
         let mut a = self.auth.lock().unwrap();
         a.members.insert(circle_id.to_string(), members.into_iter().collect());
@@ -603,16 +612,23 @@ fn mailbox_circle(key: &str) -> Option<&str> {
     (!circle.is_empty()).then_some(circle)
 }
 
-/// A LIST prefix that spans more than one circle's mailbox — mesh-sync territory (sibling relays only).
-fn is_broad_mailbox_prefix(key: &str) -> bool {
-    matches!(key, "haven" | "haven/" | "haven/mailbox" | "haven/mailbox/")
+/// A prefix that spans more than one circle (or a whole namespace) — enumerating it is mesh-sync
+/// territory, so only a sibling relay may. Naming a namespace ROOT is what makes a LIST broad;
+/// `haven/mailbox/<circle>/` is narrow and stays member-gated.
+fn is_broad_prefix(key: &str) -> bool {
+    matches!(
+        key,
+        "haven"
+            | "haven/"
+            | "haven/mailbox"
+            | "haven/mailbox/"
+            | "haven/media"
+            | "haven/media/"
+            | "haven/devroster"
+            | "haven/devroster/"
+    )
 }
 
-/// Circle-membership authorization (audit transport-F4). Returns true if `peer` may NOT touch `key`.
-/// Permissive while no circle is authorized; once the host configures membership, a mailbox key is
-/// served only to that circle's members (or a sibling relay replicating); a broad cross-circle LIST is
-/// restricted to sibling relays; `self/` and content-addressed `media`/other keys are handled elsewhere
-/// / left permissive (media refs are opaque content hashes, self slots are owner-gated above).
 /// The `haven/media/…`-style key prefix under which a device publishes its account-signed device
 /// roster so a headless relay can authorize its device ids. Permissive to WRITE (not a mailbox key);
 /// the trust comes from the signature check in [`verify_devroster`], never from the write gate.
@@ -684,29 +700,56 @@ pub(crate) fn rehydrate_device_rosters(root: &Path, auth: &Arc<Mutex<RelayAuth>>
     }
 }
 
-fn mailbox_forbidden(auth: &Arc<Mutex<RelayAuth>>, peer: &str, verb: u8, key: &str) -> bool {
+/// Authorization for one `haven/` blob op. Returns true if `peer` may NOT touch `key`.
+///
+/// Shared by BOTH transports: the iroh path passes the QUIC-verified `conn.remote_id()`, the HTTP
+/// path passes the node hex proven by a per-request signature (see [`crate::httprelay`]). Neither
+/// transport gets its own policy — a relay may not be a stronger boundary on one port than another.
+///
+/// Every branch is an explicit allow; the fallthrough is DENY (audit F4 — the old `None => false`
+/// meant an unrecognized key, and every key outside `haven/mailbox/`, was public).
+pub(crate) fn blob_forbidden(auth: &Arc<Mutex<RelayAuth>>, peer: &str, verb: u8, key: &str) -> bool {
     let a = auth.lock().unwrap();
-    if a.members.is_empty() {
-        return false; // unconfigured / standalone relay → unchanged behavior
-    }
     if a.relays.contains(peer) {
         return false; // sibling relay → may sync freely (mesh anti-entropy)
     }
-    if (verb == VERB_LIST || verb == VERB_AGES || verb == VERB_TOUCH) && is_broad_mailbox_prefix(key) {
+    // A device roster is self-authenticating: `verify_devroster` refuses any blob whose signature
+    // doesn't bind it to the account named in the key, so an unauthenticated write can inject
+    // nothing. It must stay open — publishing the roster is how a device that the headless relay
+    // has never heard of (it holds account ids only) becomes authorized in the first place.
+    if verb == VERB_PUT && key.starts_with(DEVROSTER_PREFIX) && key.len() > DEVROSTER_PREFIX.len() {
+        return false;
+    }
+    // Everything below requires the caller to be a member of SOME circle this relay serves. This
+    // is the check that was entirely absent on the HTTP transport, and it is what a shared bearer
+    // token can never establish: the token says "someone gave me a secret", not "I am Alice".
+    let known = a.members.values().any(|m| m.contains(peer));
+    if !known {
+        return true;
+    }
+    if (verb == VERB_LIST || verb == VERB_AGES || verb == VERB_TOUCH) && is_broad_prefix(key) {
         return true; // a non-relay may not enumerate (or keep-alive) across circles
     }
-    match mailbox_circle(key) {
+    if let Some(circle) = mailbox_circle(key) {
         // DM mailboxes (`dm:<a>-<b>[-<c>…]`) are keyed by their PARTICIPANTS' account ids and are never
         // registered via authorize() on a SHARED/default relay whose host isn't a DM participant — so
         // `members.get("dm:…")` is None and every DM op returns ERR forbidden, silently breaking offline
-        // DM store-and-forward. Gate DMs on known-membership instead: allow any peer that is a member of
-        // SOME circle this relay serves (a stranger who merely learns the relay id is still refused). DM
+        // DM store-and-forward. Gate DMs on known-membership instead (already established above). DM
         // bodies are E2E-sealed and keys are content-addressed, so a co-member can neither read nor forge
         // another member's DM — only relay it. (Real circle keys keep the exact per-circle check.)
-        Some(circle) if circle.starts_with("dm:") => !a.members.values().any(|m| m.contains(peer)),
-        Some(circle) => !a.members.get(circle).map(|m| m.contains(peer)).unwrap_or(false),
-        None => false, // not a circle mailbox key
+        // Audit F18 tracks narrowing this to the participants via a keyed mailbox prefix.
+        if circle.starts_with("dm:") {
+            return false;
+        }
+        return !a.members.get(circle).map(|m| m.contains(peer)).unwrap_or(false);
     }
+    // Media refs and device rosters are not per-circle addressable (a ref is an opaque handle that
+    // names no circle), so members-of-this-relay is the tightest boundary available here. It is
+    // still the difference between "any stranger" and "someone we serve".
+    if key.starts_with("haven/media/") || key.starts_with(DEVROSTER_PREFIX) {
+        return false;
+    }
+    true // unrecognized key under haven/ → deny
 }
 
 /// Serve one request stream against the on-disk store. Pure ciphertext I/O — the body is
@@ -739,19 +782,18 @@ pub(crate) async fn handle_request(
     // Self-sync slots (`self/<accountHex>/state/<device>`) are private to their owning account — only
     // the account owner (the verified connecting peer) may read/write/list them (audit F3). Without
     // this, any node that learns the relay id could enumerate + fetch another account's device slots.
-    if let Some(rest) = key.strip_prefix("self/") {
-        let account = rest.split('/').next().unwrap_or("");
-        if account != peer {
-            let _ = send.write_all(b"ERR forbidden").await;
-            let _ = send.finish();
-            return Ok(());
-        }
-    }
-
-    // Circle-membership authorization: once the host configures any circle's membership, only that
-    // circle's members (or a sibling relay) may touch its mailbox; strangers are refused (audit
-    // transport-F4). No-op while unconfigured.
-    if mailbox_forbidden(&auth, &peer, verb, &key) {
+    // `self/` is owner-gated and `haven/` is membership-gated; a key in neither namespace belongs to
+    // no one and is refused, so a new namespace can't arrive pre-authorized (audit F4).
+    let allowed = if let Some(rest) = key.strip_prefix("self/") {
+        rest.split('/').next().unwrap_or("") == peer
+    } else if key == SYNC_PREFIX || key.starts_with("haven/") {
+        // Circle-membership authorization: only a circle's members (or a sibling relay) may touch
+        // its keys (audit F2/F4). `peer` here is the QUIC-verified endpoint id.
+        !blob_forbidden(&auth, &peer, verb, &key)
+    } else {
+        false
+    };
+    if !allowed {
         let _ = send.write_all(b"ERR forbidden").await;
         let _ = send.finish();
         return Ok(());
@@ -1301,25 +1343,47 @@ mod tests {
         let sibling = "cc".repeat(32);
         let mbkey = format!("haven/mailbox/fam/{}", "00".repeat(32));
 
-        // Unconfigured relay → permissive for everyone (standalone/self-host unchanged).
-        assert!(!mailbox_forbidden(&auth, &stranger, VERB_GET, &mbkey));
+        // An unconfigured relay knows no members, so it serves nobody. (This asserted the
+        // OPPOSITE before audit F4: "unconfigured" was read as "allow everything".)
+        assert!(blob_forbidden(&auth, &stranger, VERB_GET, &mbkey));
 
         // Configure circle 'fam' with one member + one sibling relay.
         auth.lock().unwrap().members.insert("fam".into(), [member.clone()].into_iter().collect());
         auth.lock().unwrap().relays.insert(sibling.clone());
 
         // The member may read their circle; a stranger may not (read, nor scoped enumerate).
-        assert!(!mailbox_forbidden(&auth, &member, VERB_GET, &mbkey));
-        assert!(mailbox_forbidden(&auth, &stranger, VERB_GET, &mbkey));
-        assert!(mailbox_forbidden(&auth, &stranger, VERB_LIST, "haven/mailbox/fam/"));
+        assert!(!blob_forbidden(&auth, &member, VERB_GET, &mbkey));
+        assert!(blob_forbidden(&auth, &stranger, VERB_GET, &mbkey));
+        assert!(blob_forbidden(&auth, &stranger, VERB_LIST, "haven/mailbox/fam/"));
 
         // A stranger can't enumerate across circles; a sibling relay can (mesh anti-entropy).
-        assert!(mailbox_forbidden(&auth, &stranger, VERB_LIST, "haven/"));
-        assert!(!mailbox_forbidden(&auth, &sibling, VERB_LIST, "haven/"));
-        assert!(!mailbox_forbidden(&auth, &sibling, VERB_GET, &mbkey));
+        assert!(blob_forbidden(&auth, &stranger, VERB_LIST, "haven/"));
+        assert!(!blob_forbidden(&auth, &sibling, VERB_LIST, "haven/"));
+        assert!(!blob_forbidden(&auth, &sibling, VERB_GET, &mbkey));
 
-        // Content-addressed media (opaque hash) stays permissive; an unknown circle is refused.
-        assert!(!mailbox_forbidden(&auth, &stranger, VERB_GET, "haven/media/blob1"));
-        assert!(mailbox_forbidden(&auth, &stranger, VERB_GET, "haven/mailbox/other/xyz"));
+        // A member may not enumerate a whole namespace either — only a sibling relay may.
+        assert!(blob_forbidden(&auth, &member, VERB_LIST, "haven/media/"));
+        assert!(blob_forbidden(&auth, &member, VERB_LIST, "haven/devroster/"));
+        assert!(!blob_forbidden(&auth, &member, VERB_LIST, "haven/mailbox/fam/"));
+
+        // Media and rosters are readable by the members this relay serves — and by no one else.
+        // (F4: the stranger cases below both asserted "allowed" before the fix.)
+        assert!(!blob_forbidden(&auth, &member, VERB_GET, "haven/media/blob1"));
+        assert!(blob_forbidden(&auth, &stranger, VERB_GET, "haven/media/blob1"));
+        assert!(!blob_forbidden(&auth, &member, VERB_GET, "haven/devroster/deadbeef"));
+        assert!(blob_forbidden(&auth, &stranger, VERB_GET, "haven/devroster/deadbeef"));
+        assert!(blob_forbidden(&auth, &stranger, VERB_GET, "haven/mailbox/other/xyz"));
+
+        // A roster WRITE stays open — that is how an unknown device becomes known, and
+        // `verify_devroster` (not this gate) is what makes it unforgeable.
+        assert!(!blob_forbidden(&auth, &stranger, VERB_PUT, "haven/devroster/deadbeef"));
+        assert!(blob_forbidden(&auth, &stranger, VERB_PUT, DEVROSTER_PREFIX), "the prefix is not a roster");
+
+        // Unrecognized keys under haven/ are denied rather than defaulted open.
+        assert!(blob_forbidden(&auth, &member, VERB_GET, "haven/whatever/new"));
+
+        // DMs are keyed by participant, never authorize()d, so they gate on known-membership.
+        assert!(!blob_forbidden(&auth, &member, VERB_GET, "haven/mailbox/dm:a-b/x"));
+        assert!(blob_forbidden(&auth, &stranger, VERB_GET, "haven/mailbox/dm:a-b/x"));
     }
 }

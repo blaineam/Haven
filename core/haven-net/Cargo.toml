@@ -14,8 +14,10 @@ anyhow = "1"
 serde_json = "1.0.150"
 data-encoding = "2.11.0"
 rand = "0.8"
+# Per-request signatures on the HTTP relay transport: the node id IS an ed25519 public key, so
+# verifying a request signature is how that transport learns who the caller is (`httprelay`).
+ed25519-dalek = "2"
+blake3 = "1"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-# Content-addressing in the blob-store integration test (mailbox key = hash of ciphertext).
-blake3 = "1"

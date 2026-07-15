@@ -393,6 +393,26 @@ pub fn parse_relay_link(uri: String) -> Option<RelayLinkInfo> {
     Some(RelayLinkInfo { circle, members })
 }
 
+/// Build the `Authorization` header value for ONE request to a relay's HTTP media interface
+/// (`http://<relay>:8674`) — the default cross-NAT media transport.
+///
+/// Every HTTP client on every platform must call this per request; there is no longer a static
+/// credential to reuse. `seed` is the account master seed (the node key is derived from it, so the
+/// relay sees the same identity it sees over iroh); `token` is the relay's shared secret from the
+/// sealed relay announce; `method` is the HTTP verb; `key` is the STORE KEY, i.e. the request path
+/// with its `/k/`, `/l/`, or `/t/` prefix removed; `body` is the exact request body (empty for
+/// GET/HEAD/LIST). The result goes in `Authorization:` verbatim.
+///
+/// The signature is bound to method+key+body+time+nonce, so it authorizes that one request and
+/// nothing else: it cannot be replayed, retargeted at another key, or reused after ~5 minutes.
+/// Requests must therefore be signed at send time, not cached.
+#[uniffi::export]
+pub fn http_auth_header(seed: Vec<u8>, token: String, method: String, key: String, body: Vec<u8>) -> Result<String, HavenError> {
+    let seed: [u8; 32] = seed.try_into().map_err(|_| HavenError::Invalid { msg: "seed must be 32 bytes".into() })?;
+    let id = Identity::from_seed(&seed);
+    Ok(haven_net::httprelay::auth_header(&id.node_secret_bytes(), &token, &method, &key, &body))
+}
+
 /// Client to a circle's blob mailbox (a relay's local-disk store, reached over Haven Net /
 /// iroh). Used to upload a circle-sealed media blob and fetch it later — no shared bucket
 /// credentials, just the relay's node id. The relay never sees content (blobs are sealed).
@@ -516,10 +536,13 @@ impl RelayServerHandle {
     }
 
     /// Serve this relay's store over plain HTTP on `bind` (e.g. "0.0.0.0:8674"; port 0 =
-    /// ephemeral) with `token` as the required bearer token — the DEFAULT cross-NAT media
-    /// transport (the iroh blob ALPN drops datagrams on pure-relay cross-NAT paths). Returns
-    /// the bound port. Idempotent while serving. The token is distributed to circle members
-    /// inside the sealed relay announce; `self/…` keys are never served over HTTP.
+    /// ephemeral) — the DEFAULT cross-NAT media transport (the iroh blob ALPN drops datagrams on
+    /// pure-relay cross-NAT paths). Returns the bound port. Idempotent while serving.
+    ///
+    /// Requests are authorized by the caller's per-request node-key signature against this relay's
+    /// circle membership — the same gate as the iroh path. `token` is the shared relay secret from
+    /// the sealed relay announce, folded into each signature (never sent). Clients build their
+    /// header with [`http_auth_header`]. `self/…` keys are never served over HTTP.
     pub async fn serve_http(&self, bind: String, token: String) -> Result<u16, HavenError> {
         self.node
             .node
@@ -981,6 +1004,10 @@ struct Circle {
     /// my blobs; distributed in my key commits. Peers' secrets are stored so I can find their blobs.
     my_circle_secret: [u8; 32],
     peer_circle_secrets: HashMap<String, [u8; 32]>,
+    /// Unix seconds when my epoch last advanced (0 = not yet stamped — legacy state, or a circle that
+    /// has never rotated). Drives the periodic rotation in [`Circle::rotate_if_stale`]; persisted, so
+    /// relaunching doesn't restart the window.
+    rotated_at: u64,
     /// Session cache of the last sealed key commit: (context hash over epoch/key/secret/recipients,
     /// tagged wire bytes). The KEM inside a commit is necessarily random, so re-sealing one for the
     /// SAME context produces different bytes — and the content-addressed mailbox then stores a new
@@ -988,6 +1015,45 @@ struct Circle {
     /// mailbox key stable (events are handled separately: their sealing is fully deterministic).
     cached_commit: Option<([u8; 32], Vec<u8>)>,
 }
+
+/// How long an epoch may live before the periodic rotation retires it (audit C2). SEVEN DAYS —
+/// chosen against the delivery model, not for feel:
+///
+/// * **Floor — it must not outrun the full re-seal.** Only a full-history bundle carries the new key
+///   commit *and* every one of my events re-sealed under it. Between a rotation and the next full
+///   bundle, a relay-only peer holds mailbox envelopes sealed under an epoch whose commit it may not
+///   have (they sit in `pending_epoch`). Clients run the full bundle roughly daily, so a weekly
+///   rotation leaves ~7x margin. Rotating *faster* than the re-seal cadence would strand readers.
+/// * **Offline peers are safe at any cadence.** A peer gone for weeks is handed the CURRENT commit
+///   plus my whole history re-sealed under it — it never needs a key it slept through. That's what
+///   frees the interval to be conservative; correctness doesn't pull it shorter.
+/// * **Ceiling — cost.** Every rotation re-seals and re-uploads my history (a hybrid signature per
+///   event, then a fresh content-addressed mailbox entry per envelope). Weekly keeps that bounded on
+///   phone batteries and metered data; daily would pay it 7x to shrink a window that
+///   `prune_epoch_keys` (KEEP_EPOCHS = 4) already bounds.
+///
+/// Net effect: a later seed compromise decrypts at most the current epoch plus the 3 retained ones
+/// (~4 weeks) of captured wire/relay ciphertext, instead of the circle's entire history.
+const ROTATE_INTERVAL_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Wall clock in unix seconds (0 if the clock predates the epoch — treated as "unstamped").
+/// Rotation is time-driven, so tests override this to jump weeks ahead without sleeping.
+fn now_secs() -> u64 {
+    let real = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    #[cfg(test)]
+    {
+        real + TEST_CLOCK_SKEW.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(not(test))]
+    real
+}
+
+/// Test-only clock offset in seconds — lets the rotation tests advance time deliberately.
+#[cfg(test)]
+static TEST_CLOCK_SKEW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl Circle {
     fn bare(id: String, name: String) -> Self {
@@ -1003,6 +1069,7 @@ impl Circle {
             pending_epoch: vec![],
             my_circle_secret: [0u8; 32],
             peer_circle_secrets: HashMap::new(),
+            rotated_at: 0,
             cached_commit: None,
         }
     }
@@ -1031,7 +1098,32 @@ impl Circle {
         self.ensure_epoch();
         self.my_epoch += 1;
         self.my_epoch_keys.insert(self.my_epoch, new_epoch_key());
+        // ANY rotation restarts the periodic window — a membership change already gave us a fresh
+        // epoch, so the timer shouldn't immediately hand out another.
+        self.rotated_at = now_secs();
         self.prune_epoch_keys();
+    }
+
+    /// Advance the epoch if the current one has outlived [`ROTATE_INTERVAL_SECS`] — the PERIODIC case
+    /// of forward secrecy (audit C2). Returns true if it rotated.
+    ///
+    /// Callers must only invoke this where a FULL re-seal of my history follows in the same bundle
+    /// (see [`HavenSocial::epoch_sync_bundle_inner`]); rotating anywhere else publishes an epoch
+    /// without the re-seal that makes old content readable under it.
+    fn rotate_if_stale(&mut self) -> bool {
+        self.ensure_epoch();
+        let now = now_secs();
+        // Not yet stamped (legacy state / first bundle), or a wall clock that jumped BACKWARDS: start
+        // the window here. Without the backwards guard a clock skew would rotate on every call.
+        if self.rotated_at == 0 || self.rotated_at > now {
+            self.rotated_at = now;
+            return false;
+        }
+        if now - self.rotated_at < ROTATE_INTERVAL_SECS {
+            return false;
+        }
+        self.rotate_epoch(); // stamps rotated_at
+        true
     }
 
     /// Bounded forward secrecy (audit C2): keep only the most recent epoch keys (mine + each peer's)
@@ -1370,6 +1462,12 @@ struct PersistCircle {
     my_circle_secret: [u8; 32],
     #[serde(default)]
     peer_circle_secrets: Vec<(String, [u8; 32])>,
+    /// Unix seconds of the last epoch advance, so the periodic rotation window survives a relaunch
+    /// (otherwise every launch would restart the week and a frequently-restarted client would never
+    /// rotate). Defaulted to 0 on older state files: the next full bundle stamps it and starts the
+    /// window rather than rotating every existing circle at once on upgrade.
+    #[serde(default)]
+    rotated_at: u64,
     /// The last sealed key commit (context hash, tagged wire bytes) — persisted so a daily backfill
     /// re-uses the SAME commit bytes across launches while the context (epoch/key/secret/recipient
     /// devices) is unchanged. Without this the KEM's randomness minted a new content-addressed
@@ -1989,7 +2087,18 @@ impl HavenSocial {
         let mut st = self.state.lock().unwrap();
         let me_hex = hex(&st.me.public().node_id_bytes());
         let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return vec![] };
-        st.circles[idx].ensure_epoch();
+        // PERIODIC forward-secrecy rotation (audit C2) — the trigger for `rotate_if_stale`. This is the
+        // only safe place for it: a full bundle (`sync_envelopes` on the P2P path, `export_my_envelopes`
+        // on the relay backfill) emits the new key commit AND re-seals my entire history under it in the
+        // same batch, so no peer is ever left with an event whose key it can't obtain. Both are reached
+        // by every client on a schedule, so no platform timer is needed and no client can forget to
+        // rotate. head-only/limited bundles must NOT rotate — they'd publish an epoch without the
+        // re-seal and strand relay-only readers until the next backfill.
+        if !head_only && mine_only && limit == 0 {
+            st.circles[idx].rotate_if_stale();
+        } else {
+            st.circles[idx].ensure_epoch();
+        }
         let epoch = st.circles[idx].my_epoch;
         let Some(key) = st.circles[idx].current_key() else { return vec![] };
         let secret = st.circles[idx].my_circle_secret;
@@ -2327,6 +2436,7 @@ impl HavenSocial {
                 peer_epoch_keys: c.peer_epoch_keys.iter().map(|((a, e), k)| (a.clone(), *e, *k)).collect(),
                 my_circle_secret: c.my_circle_secret,
                 peer_circle_secrets: c.peer_circle_secrets.iter().map(|(a, s)| (a.clone(), *s)).collect(),
+                rotated_at: c.rotated_at,
                 cached_commit: c.cached_commit.clone(),
                 pending_epoch: c.pending_epoch.clone(),
             }).collect(),
@@ -2376,6 +2486,7 @@ impl HavenSocial {
                 peer_epoch_keys: vec![],
                 my_circle_secret: [0u8; 32],
                 peer_circle_secrets: vec![],
+                rotated_at: 0,
                 cached_commit: None,
                 pending_epoch: vec![],
             });
@@ -2421,6 +2532,11 @@ impl HavenSocial {
         }
         for (a, s) in pc.peer_circle_secrets {
             st.circles[idx].peer_circle_secrets.entry(a).or_insert(s);
+        }
+        // Keep the LATEST rotation stamp (multi-device: my other device may have rotated more
+        // recently). Taking the max can only delay the next rotation, never skip one.
+        if pc.rotated_at > st.circles[idx].rotated_at {
+            st.circles[idx].rotated_at = pc.rotated_at;
         }
         // Restore the sealed-commit cache so a daily backfill reuses the same commit bytes across
         // launches (context-hash-gated: a stale one is simply ignored and re-sealed on next export).
@@ -2910,6 +3026,95 @@ mod net_tests {
         // A plain (unsigned) seal_media blob — the old spoofable form — can't pass as signed.
         let plain = alice.seal_media(bob.my_node_hex(), b"spoof".to_vec()).unwrap();
         assert!(open_signed_notification_with_seed([31u8; 32].to_vec(), plain).is_none());
+    }
+
+    /// Advance the test clock by `secs` for the duration of the closure, then restore it. Serialized
+    /// so concurrently-running time-dependent tests can't observe each other's skew.
+    fn with_clock_advanced<T>(secs: u64, f: impl FnOnce() -> T) -> T {
+        use std::sync::atomic::Ordering;
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        TEST_CLOCK_SKEW.fetch_add(secs, Ordering::Relaxed);
+        let out = f();
+        TEST_CLOCK_SKEW.fetch_sub(secs, Ordering::Relaxed);
+        out
+    }
+
+    /// The PERIODIC rotation (audit C2): a circle with NO membership churn must still advance its
+    /// epoch once `ROTATE_INTERVAL_SECS` passes, driven by the ordinary sync bundle rather than by any
+    /// platform timer — and a peer must keep reading straight through the rotation.
+    #[test]
+    fn quiet_circle_rotates_on_schedule_and_peer_still_reads() {
+        let alice = HavenSocial::new([44u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([45u8; 32].to_vec()).unwrap();
+        let cid = DEFAULT_CIRCLE.to_string();
+        alice.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+        bob.add_contact_bundle(cid.clone(), alice.my_bundle()).unwrap();
+
+        alice.post(cid.clone(), "before".into(), vec![], None, None, false, false, 1).unwrap();
+        let sync = |from: &HavenSocial, to: &HavenSocial| {
+            for env in from.sync_envelopes(cid.clone()) {
+                to.receive(cid.clone(), env).unwrap();
+            }
+        };
+        sync(&alice, &bob);
+        let epoch_before = alice.state.lock().unwrap().circles[0].my_epoch;
+
+        // A sync BEFORE the interval elapses must not rotate — otherwise every sync would re-seal
+        // history and the epoch would run away.
+        sync(&alice, &bob);
+        assert_eq!(
+            alice.state.lock().unwrap().circles[0].my_epoch,
+            epoch_before,
+            "a quiet circle must not rotate before the interval elapses"
+        );
+
+        // Cross the interval with NO membership change at all: the next sync bundle must rotate.
+        with_clock_advanced(ROTATE_INTERVAL_SECS + 1, || {
+            alice.post(cid.clone(), "after".into(), vec![], None, None, false, false, 2).unwrap();
+            sync(&alice, &bob);
+        });
+        let epoch_after = alice.state.lock().unwrap().circles[0].my_epoch;
+        assert!(
+            epoch_after > epoch_before,
+            "quiet circle rotated on schedule ({epoch_before} -> {epoch_after})"
+        );
+
+        // The whole point: Bob reads ACROSS the rotation. The post from the old epoch is still
+        // readable (re-sealed forward under the new one), and so is the new post.
+        let texts: Vec<String> = bob.feed(cid.clone(), 9_000, None).into_iter().map(|e| e.body).collect();
+        assert!(texts.iter().any(|t| t == "before"), "pre-rotation post survived: {texts:?}");
+        assert!(texts.iter().any(|t| t == "after"), "post-rotation post readable: {texts:?}");
+
+        // And a peer that slept through the ENTIRE rotation still catches up from cold: rotation
+        // frequency can't strand an offline member, because history re-seals under the current epoch.
+        let carol = HavenSocial::new([46u8; 32].to_vec()).unwrap();
+        alice.add_contact_bundle(cid.clone(), carol.my_bundle()).unwrap();
+        carol.add_contact_bundle(cid.clone(), alice.my_bundle()).unwrap();
+        with_clock_advanced(ROTATE_INTERVAL_SECS + 1, || sync(&alice, &carol));
+        let seen: Vec<String> = carol.feed(cid.clone(), 9_000, None).into_iter().map(|e| e.body).collect();
+        assert!(seen.iter().any(|t| t == "before"), "late peer got pre-rotation history: {seen:?}");
+        assert!(seen.iter().any(|t| t == "after"), "late peer got post-rotation content: {seen:?}");
+    }
+
+    /// A head-only bundle must NEVER rotate: it carries no re-seal, so bumping the epoch there would
+    /// strand relay-only readers on `pending_epoch` until the next full backfill.
+    #[test]
+    fn head_only_bundle_does_not_rotate() {
+        let alice = HavenSocial::new([47u8; 32].to_vec()).unwrap();
+        let cid = DEFAULT_CIRCLE.to_string();
+        alice.post(cid.clone(), "x".into(), vec![], None, None, false, false, 1).unwrap();
+        let _ = alice.sync_envelopes(cid.clone()); // stamps the rotation window
+        let epoch = alice.state.lock().unwrap().circles[0].my_epoch;
+        with_clock_advanced(ROTATE_INTERVAL_SECS * 3, || {
+            let _ = alice.export_epoch_head(cid.clone());
+            let _ = alice.export_recent_envelopes(cid.clone(), 5);
+        });
+        assert_eq!(
+            alice.state.lock().unwrap().circles[0].my_epoch,
+            epoch,
+            "head-only / limited bundles carry no re-seal, so they must not rotate"
+        );
     }
 
     #[test]

@@ -19,7 +19,11 @@ use tokio::time::{timeout, Duration};
 /// from the sealed bytes, namespaced under the circle's mailbox path.
 fn mailbox_key(circle: &str, sealed: &[u8]) -> String {
     let hash = blake3::hash(sealed);
-    format!("mailbox/{circle}/{}", hash.to_hex())
+    format!("haven/mailbox/{circle}/{}", hash.to_hex())
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 #[tokio::test]
@@ -42,6 +46,14 @@ async fn sealed_blob_put_to_local_disk_relay_is_fetched_by_another_node_and_rela
     let server = BlobServer::spawn(relay_id.node_secret_bytes(), store_dir.clone())
         .await
         .unwrap();
+    // A relay serves the circles it was told about — the mailbox is member-gated, so a relay
+    // with no membership serves nobody. Every shipped host does this (`runner.rs` from the
+    // pasted link; the apps from each circle's roster).
+    server.authorize(
+        "fam",
+        vec![hex(&alice.public().node_id_bytes()), hex(&bob.public().node_id_bytes())],
+        vec![],
+    );
     // Same-machine: dial the relay's loopback address directly (no discovery needed).
     let relay_addr = server.local_dial_addr().await.unwrap();
 
@@ -93,14 +105,14 @@ async fn sealed_blob_put_to_local_disk_relay_is_fetched_by_another_node_and_rela
     );
 
     // LIST surfaces the key under the circle prefix (mailbox poll).
-    let listed = timeout(Duration::from_secs(10), bob_client.list("mailbox/fam"))
+    let listed = timeout(Duration::from_secs(10), bob_client.list("haven/mailbox/fam"))
         .await
         .expect("list timed out")
         .unwrap();
     assert!(listed.contains(&key), "the stored key shows up in a mailbox LIST");
 
     // A missing key is a clean MISS, not an error.
-    let miss = bob_client.get("mailbox/fam/deadbeef").await.unwrap();
+    let miss = bob_client.get("haven/mailbox/fam/deadbeef").await.unwrap();
     assert!(miss.is_none(), "absent key returns None");
 
     alice_client.close().await;
@@ -121,6 +133,8 @@ async fn touch_refreshes_liveness_and_ttl_sweep_prunes_only_untouched_mailbox_en
     let store_dir = std::env::temp_dir().join(format!("haven-relay-gctest-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&store_dir);
     let server = BlobServer::spawn(relay_id.node_secret_bytes(), store_dir.clone()).await.unwrap();
+    // The mailbox is member-gated, so the relay must know whose circle it serves.
+    server.authorize("fam", vec![hex(&member.public().node_id_bytes())], vec![]);
     let relay_addr = server.local_dial_addr().await.unwrap();
     let client = BlobClient::connect_addr(member.node_secret_bytes(), relay_addr).await.unwrap();
 
@@ -180,13 +194,18 @@ async fn touch_refreshes_liveness_and_ttl_sweep_prunes_only_untouched_mailbox_en
         .unwrap();
     assert_eq!(gc_sweep(&store_dir, MAILBOX_TTL, GC_GRACE), 1, "exactly the dead entry is deleted");
 
-    let listed = timeout(Duration::from_secs(10), client.list("haven/"))
+    // Read back through the member's own circle prefix — a bare `haven/` LIST spans every circle
+    // on the relay, which only a sibling relay may do (mesh anti-entropy).
+    let listed = timeout(Duration::from_secs(10), client.list("haven/mailbox/fam/"))
         .await
         .expect("list timed out")
         .unwrap();
     assert!(listed.contains(&live), "the touched entry survives");
-    assert!(listed.contains(&media), "media is never swept (HAS also re-stamped it)");
     assert!(!listed.contains(&dead), "the never-touched duplicate is gone");
+    assert!(
+        timeout(Duration::from_secs(10), client.has(&media)).await.expect("has timed out").unwrap(),
+        "media is never swept (HAS also re-stamped it)"
+    );
 
     client.close().await;
     let _ = std::fs::remove_dir_all(&store_dir);

@@ -35,7 +35,8 @@
 //! hands the inner `payload` to the normal `receive()` path. A bare (un-prefixed)
 //! payload is still accepted for direct peer-to-peer delivery, so this is additive.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -45,6 +46,15 @@ pub const RELAY_MAGIC: &[u8; 4] = b"HVR1";
 /// budget keeps fan-out bounded while tolerating a relay-to-relay hop.
 pub const DEFAULT_TTL: u8 = 4;
 const MAX_DEST: usize = 32;
+
+/// Cap on a payload this relay will FORWARD (audit F10). Routed frames are messages — media moved
+/// to the HTTP/S3 transports — so the 256 MB endpoint cap was 256 MB × 32 destinations of
+/// third-party-directed amplification for anyone who learned a relay's node id. Local delivery to
+/// ourselves is not affected by this.
+pub const MAX_RELAY_PAYLOAD: usize = 4 * 1024 * 1024;
+
+/// How long a `msg_id` stays remembered. See [`SeenSet`].
+const SEEN_WINDOW: Duration = Duration::from_secs(600);
 
 /// A parsed mesh-relay frame: a cleartext routing header wrapping an opaque payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,27 +126,43 @@ impl RoutingFrame {
     }
 }
 
-/// Bounded loop/replay guard: remembers recently-seen `msg_id`s. RAM-only, capped, no
-/// persistence — consistent with the hardened no-log posture (nothing is written to
-/// disk and the set self-trims).
+/// Loop/replay guard: remembers recently-seen `msg_id`s. RAM-only, no persistence — consistent
+/// with the hardened no-log posture (nothing is written to disk and the set self-trims).
+///
+/// Primarily **time**-windowed ([`SEEN_WINDOW`]), because a count-only cap is attacker-controlled:
+/// pushing `cap` distinct ids evicts the whole window and re-admits the id you were deduping
+/// (audit F10). `cap` remains as a hard memory ceiling for the pathological case, but under a
+/// flood the window — not the flooder — decides what is forgotten.
 pub struct SeenSet {
-    seen: HashSet<[u8; 16]>,
+    seen: HashMap<[u8; 16], Instant>,
     order: std::collections::VecDeque<[u8; 16]>,
     cap: usize,
+    window: Duration,
 }
 
 impl SeenSet {
     pub fn new(cap: usize) -> Self {
-        Self { seen: HashSet::new(), order: std::collections::VecDeque::new(), cap }
+        Self { seen: HashMap::new(), order: std::collections::VecDeque::new(), cap, window: SEEN_WINDOW }
     }
 
     /// Record a msg_id. Returns `true` the first time it's seen, `false` on a repeat
     /// (which the caller should drop to break loops / replays).
     pub fn insert(&mut self, id: [u8; 16]) -> bool {
-        if self.seen.contains(&id) {
+        let now = Instant::now();
+        // Retire whatever aged out, so the live window is what occupies the cap.
+        while let Some(front) = self.order.front() {
+            match self.seen.get(front) {
+                Some(t) if now.duration_since(*t) > self.window => {
+                    let old = self.order.pop_front().unwrap();
+                    self.seen.remove(&old);
+                }
+                _ => break,
+            }
+        }
+        if self.seen.contains_key(&id) {
             return false;
         }
-        self.seen.insert(id);
+        self.seen.insert(id, now);
         self.order.push_back(id);
         if self.order.len() > self.cap {
             if let Some(old) = self.order.pop_front() {

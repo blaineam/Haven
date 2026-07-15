@@ -229,19 +229,22 @@ impl Node {
     }
 
     /// Serve the hosted relay's store over plain HTTP on `bind` (see [`httprelay`]) — the default
-    /// cross-NAT media transport. `token` is the bearer token clients must present (distributed to
-    /// circle members inside the sealed relay announce). Returns the bound port. Idempotent while
-    /// already serving (returns the existing port). Errors if no relay is hosted here.
+    /// cross-NAT media transport. `token` is the shared relay secret clients fold into each request
+    /// signature (distributed to circle members inside the sealed relay announce). Returns the bound
+    /// port. Idempotent while already serving (returns the existing port). Errors if no relay is
+    /// hosted here.
     pub async fn relay_serve_http(&self, bind: &str, token: &str) -> Result<u16> {
-        let root = {
+        let (root, auth) = {
             let g = lock(&self.relay);
             let Some(cfg) = g.as_ref() else { return Err(anyhow!("relay not hosted")) };
             if let Some(h) = cfg.http.as_ref() {
                 return Ok(h.port());
             }
-            cfg.root.clone()
+            // The HTTP transport shares the iroh path's membership map — one relay, one policy,
+            // whichever port a member arrives on (audit F2).
+            (cfg.root.clone(), cfg.auth.clone())
         };
-        let server = httprelay::serve(root, bind, token.to_string()).await?;
+        let server = httprelay::serve(root, bind, token.to_string(), auth).await?;
         let port = server.port();
         if let Some(cfg) = lock(&self.relay).as_mut() {
             cfg.http = Some(Arc::new(server));
@@ -488,6 +491,8 @@ pub struct RelayNode {
     node: Arc<Node>,
     me_hex: String,
     seen: Arc<Mutex<relay::SeenSet>>,
+    /// Node hexes this relay will forward for / toward (see [`RelayNode::authorize_forwarding`]).
+    fwd_members: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 impl RelayNode {
@@ -516,7 +521,7 @@ impl RelayNode {
 
         let node = Arc::new(Node::spawn(secret, handler).await?);
         let me_hex = node.node_id_hex();
-        let relay = Arc::new(RelayNode { node, me_hex, seen });
+        let relay = Arc::new(RelayNode { node, me_hex, seen, fwd_members: Arc::new(Mutex::new(Default::default())) });
         *lock(&holder) = Some(relay.clone());
         Ok(relay)
     }
@@ -544,6 +549,30 @@ impl RelayNode {
     /// the programmatic entry used in tests / when wrapping locally.)
     pub async fn forward(&self, frame: relay::RoutingFrame) {
         self.handle_inbound([0u8; 32], frame.to_bytes(), None).await;
+    }
+
+    /// Restrict forwarding to this circle's members (audit F10). Until this is called the relay
+    /// forwards for anyone — which is only safe for a relay nobody else knows the node id of, so
+    /// every shipped host calls it. Idempotent; call again to replace the set.
+    pub fn authorize_forwarding(&self, members: Vec<String>) {
+        *lock(&self.fwd_members) = members.into_iter().collect();
+    }
+
+    /// May we forward this frame? A relay is a switchboard for ITS circle, not for the internet:
+    /// without this, one 256 MB frame from any stranger who learned the node id became up to 32
+    /// outbound sends (~8 GB) aimed at node ids of the stranger's choosing — a DoS reflector
+    /// pointed at third parties (audit F10). Either end must belong to us: we forward what a
+    /// member sends, and we forward toward a member. A locally-injected frame (`from` all-zeros,
+    /// i.e. our own `forward()`) is ours by definition.
+    fn may_forward(&self, from: [u8; 32], frame: &relay::RoutingFrame) -> bool {
+        let members = lock(&self.fwd_members);
+        if members.is_empty() {
+            return true; // unconfigured forwarder — no membership to check against
+        }
+        if from == [0u8; 32] || members.contains(&relay::RoutingFrame::dest_hex(&from)) {
+            return true;
+        }
+        frame.dest.iter().any(|d| members.contains(&relay::RoutingFrame::dest_hex(d)))
     }
 
     async fn handle_inbound(&self, from: [u8; 32], bytes: Vec<u8>, deliver: Option<InboundHandler>) {
@@ -579,6 +608,14 @@ impl RelayNode {
 
         if frame.ttl == 0 {
             return;
+        }
+        // Amplification gates (audit F10). Local delivery above already happened — these bound only
+        // what we re-send on someone else's behalf.
+        if !self.may_forward(from, &frame) {
+            return;
+        }
+        if frame.payload.len() > relay::MAX_RELAY_PAYLOAD {
+            return; // media rides the HTTP/S3 transports; a routed frame this big is not a message
         }
         let next_ttl = frame.ttl - 1;
 

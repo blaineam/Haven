@@ -35,14 +35,15 @@ pub async fn run(cfg: Config) -> Result<()> {
     let relay = RelayNode::spawn(id.node_secret_bytes(), None)
         .await
         .map_err(|e| anyhow!("start relay: {e}"))?;
-    let _ = cfg.link.member_bytes(); // (warmup hook; reverse paths form when members dial in)
+    // Forward only for/toward this circle's members — the link the operator pasted defines them.
+    // Without this the relay is an open reflector for anyone who learns its node id (audit F10).
+    relay.authorize_forwarding(cfg.link.members.clone());
     println!("✓ connection relay live — forwarding sealed frames toward circle members.");
 
     // --- Media store-and-forward --------------------------------------------------
     // Keep the started servers/guards alive for the process lifetime.
     let mut _s3_guard: Option<std::sync::Arc<S3Server>> = None;
     let mut _rclone_guard: Option<RcloneChild> = None;
-    let mut _http_guard: Option<haven_net::httprelay::HttpRelay> = None;
 
     match &cfg.backend {
         StoreBackend::Local => {
@@ -86,13 +87,15 @@ pub async fn run(cfg: Config) -> Result<()> {
             }
 
             // Plain-HTTP blob interface — the DEFAULT cross-NAT media transport (the iroh blob
-            // ALPN drops datagrams on pure-relay cross-NAT paths). Serves the SAME store dir;
-            // bearer-token gated; blobs are E2E-sealed so the wire carries only ciphertext.
+            // ALPN drops datagrams on pure-relay cross-NAT paths). Served through the node so it
+            // shares the membership map authorized just above: same circle gate as the iroh path,
+            // per-request signatures instead of a shared bearer token (audit F2/F9). Blobs are
+            // E2E-sealed, so the wire still carries only ciphertext.
             if let Some(bind) = &cfg.http_bind {
-                let http = haven_net::httprelay::serve(store.clone(), bind, cfg.http_token.clone())
+                let port = node
+                    .relay_serve_http(bind, &cfg.http_token)
                     .await
                     .map_err(|e| anyhow!("start http blob interface: {e}"))?;
-                let port = http.port();
                 println!("✓ http media interface live on {bind} (port {port}).");
                 match &cfg.http_url {
                     Some(url) => println!("  public URL : {url}"),
@@ -103,7 +106,6 @@ pub async fn run(cfg: Config) -> Result<()> {
                     ),
                 }
                 println!("  http token : {}", cfg.http_token);
-                _http_guard = Some(http);
             }
         }
         StoreBackend::S3 | StoreBackend::Rclone { .. } => {

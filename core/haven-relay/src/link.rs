@@ -89,6 +89,9 @@ impl RelayLink {
     }
 
     /// Member node ids as 32-byte arrays (for building routing frames).
+    // Forwarding authorization takes the hex form (`RelayNode::authorize_forwarding`), so nothing
+    // in the daemon needs the decoded bytes today. Kept as the link's canonical decoder.
+    #[allow(dead_code)]
     pub fn member_bytes(&self) -> Vec<[u8; 32]> {
         self.members
             .iter()

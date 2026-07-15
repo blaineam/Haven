@@ -1,0 +1,54 @@
+{
+  "version": 3,
+  "background": {
+    "type": "transparent",
+    "solidColor": "#00000000",
+    "gradientCss": null,
+    "gradientName": null,
+    "imageUrl": null
+  },
+  "canvasSize": {
+    "width": 1242,
+    "height": 2208,
+    "presetName": "Custom"
+  },
+  "padding": 0,
+  "exportConfig": {
+    "scale": 1,
+    "format": "png"
+  },
+  "textOverlay": {},
+  "sceneObjects": [
+    {
+      "id": "obj-1",
+      "deviceId": "pixel-7-pro",
+      "deviceColorId": "obsidian",
+      "screenshotUrl": null,
+      "screenshotFile": null,
+      "extraScreenshots": [],
+      "x": 50,
+      "y": 50,
+      "scale": 1.7,
+      "rotation": 0,
+      "tiltX": 0,
+      "tiltY": 0,
+      "shadow": {
+        "enabled": false,
+        "color": "rgba(0,0,0,0.45)",
+        "blur": 70,
+        "spread": 0,
+        "offsetX": 0,
+        "offsetY": 0
+      },
+      "frameStyle": "default",
+      "borderRadius": 0,
+      "glow": {
+        "enabled": false,
+        "color": "rgba(255,255,255,0.6)",
+        "blur": 20,
+        "spread": 2
+      }
+    }
+  ],
+  "textBlocks": []
+}

@@ -1,0 +1,54 @@
+{
+  "version": 3,
+  "background": {
+    "type": "transparent",
+    "solidColor": "#00000000",
+    "gradientCss": null,
+    "gradientName": null,
+    "imageUrl": null
+  },
+  "canvasSize": {
+    "width": 1320,
+    "height": 2868,
+    "presetName": "Custom"
+  },
+  "padding": 0,
+  "exportConfig": {
+    "scale": 1,
+    "format": "png"
+  },
+  "textOverlay": {},
+  "textBlocks": [],
+  "sceneObjects": [
+    {
+      "id": "obj-1",
+      "deviceId": "iphone-17-pro-max",
+      "deviceColorId": "deep-blue",
+      "screenshotUrl": null,
+      "screenshotFile": null,
+      "extraScreenshots": [],
+      "x": 50,
+      "y": 50,
+      "scale": 2.45,
+      "rotation": 0,
+      "tiltX": 0,
+      "tiltY": 0,
+      "shadow": {
+        "enabled": false,
+        "color": "rgba(0,0,0,0.45)",
+        "blur": 70,
+        "spread": 0,
+        "offsetX": 0,
+        "offsetY": 0
+      },
+      "frameStyle": "default",
+      "borderRadius": 0,
+      "glow": {
+        "enabled": false,
+        "color": "rgba(255,255,255,0.6)",
+        "blur": 20,
+        "spread": 2
+      }
+    }
+  ]
+}

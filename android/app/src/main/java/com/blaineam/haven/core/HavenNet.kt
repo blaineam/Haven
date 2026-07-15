@@ -22,6 +22,7 @@ import uniffi.haven_ffi.HavenNode
 import uniffi.haven_ffi.HavenSocial
 import uniffi.haven_ffi.InboundListener
 import uniffi.haven_ffi.RelayClient
+import uniffi.haven_ffi.httpAuthHeader
 import uniffi.haven_ffi.parseLink
 import java.io.File
 import java.security.MessageDigest
@@ -131,7 +132,8 @@ object HavenNet : InboundListener {
          *  media transport (the iroh blob ALPN drops datagrams on pure-relay cross-NAT paths).
          *  Learned from the sealed announce; empty = iroh-only relay. */
         val httpUrls: List<String> = emptyList(),
-        /** Bearer token the relay's HTTP interface requires (travels ONLY inside sealed announces). */
+        /** Shared relay secret folded into each request signature (travels ONLY inside sealed
+         *  announces, and is never put on the wire — see httpAuth). */
         val httpToken: String = "",
         /** When this relay was last (re-)ADOPTED (unix ms). Rides the announce so a member who FORGOT
          *  it earlier reactivates only on a NEWER re-add (LWW); a stale echo carries the older stamp and
@@ -1821,8 +1823,9 @@ object HavenNet : InboundListener {
     /**
      * Serve the hosted relay's store over plain HTTP — the DEFAULT cross-NAT media transport (the
      * iroh blob ALPN drops datagrams on pure-relay cross-NAT paths, so blob dials that must cross a
-     * NAT stall ~30s and die). Bearer-token gated; the token travels only inside the sealed frame-19
-     * announce, so only circle members ever hold it. The reachable URLs (LAN + an optional
+     * NAT stall ~30s and die). Gated on a per-request signature over the caller's transport key +
+     * circle membership — the same check the iroh path runs; the frame-19 token is mixed into that
+     * signature rather than sent, so it is a pre-filter and never the authorization. The reachable URLs (LAN + an optional
      * user-configured public URL for port-forward/reverse-proxy/tunnel setups, prefs key
      * `relayPublicUrl`) are stored on our own RelayEntry so every announce carries them.
      */
@@ -2388,10 +2391,18 @@ object HavenNet : InboundListener {
     }
 
     // ---- Relay plain-HTTP media interface (client side) ------------------------------------------
-    // GET/PUT against a relay's HTTP interface (see core httprelay.rs): `<base>/k/<key>` with the
-    // relay's bearer token. Result semantics: failure = URL unreachable (back it off + try the next
-    // URL), success(null) = relay reached but doesn't hold the key (a real MISS — the iroh path
-    // serves the same store, so don't bother dialing it for the same key).
+    // GET/PUT against a relay's HTTP interface (see core httprelay.rs): `<base>/k/<key>`. Result
+    // semantics: failure = URL unreachable (back it off + try the next URL), success(null) = relay
+    // reached but doesn't hold the key (a real MISS — the iroh path serves the same store, so don't
+    // bother dialing it for the same key).
+    //
+    // AUTHORIZATION: each request is SIGNED by this device's transport key rather than gated on a
+    // shared bearer token. The relay verifies the signature to learn WHO is asking, then runs the
+    // same circle-membership check as the iroh path. The frame-19 token is mixed into the signed
+    // transcript instead of being sent, so it never crosses the wire.
+    //
+    // The seed MUST be the one HavenNode.start binds the transport to (DeviceKeyStore's per-device
+    // seed), or the relay sees a node id in no roster and answers 403.
 
     private val httpUrlBad = HashMap<String, Long>()   // url -> retry-after epoch ms (2-min backoff)
     private fun httpUrlsFor(e: RelayEntry): List<String> =
@@ -2401,10 +2412,21 @@ object HavenNet : InboundListener {
 
     private fun httpKeyUrl(base: String, key: String) = "${base.trimEnd('/')}/k/${android.net.Uri.encode(key, "/")}"
 
+    /**
+     * Sign ONE request. Never cache the result: it carries a timestamp, a one-shot nonce and a
+     * digest of THIS body, so a reused header is a replay and the relay refuses it. `key` is the raw
+     * (un-encoded) store key — the relay percent-decodes the path before it verifies.
+     */
+    private fun httpAuth(token: String, method: String, key: String, body: ByteArray): String? =
+        runCatching {
+            httpAuthHeader(DeviceKeyStore.deviceAccount().secretSeed(), token, method, key, body)
+        }.getOrNull()
+
     private fun relayHttpGet(base: String, token: String, key: String): Result<ByteArray?> = runCatching {
+        val auth = httpAuth(token, "GET", key, ByteArray(0)) ?: throw java.io.IOException("cannot sign relay GET")
         val c = (java.net.URL(httpKeyUrl(base, key)).openConnection() as java.net.HttpURLConnection).apply {
             connectTimeout = 4000; readTimeout = 60000
-            setRequestProperty("Authorization", "Bearer $token")
+            setRequestProperty("Authorization", auth)
         }
         try {
             when (c.responseCode) {
@@ -2416,9 +2438,11 @@ object HavenNet : InboundListener {
     }
 
     private fun relayHttpPut(base: String, token: String, key: String, body: ByteArray): Boolean = runCatching {
+        // Digest over the EXACT bytes written below — `body` is streamed verbatim, unmodified.
+        val auth = httpAuth(token, "PUT", key, body) ?: return@runCatching false
         val c = (java.net.URL(httpKeyUrl(base, key)).openConnection() as java.net.HttpURLConnection).apply {
             requestMethod = "PUT"; doOutput = true; connectTimeout = 4000; readTimeout = 120000
-            setRequestProperty("Authorization", "Bearer $token")
+            setRequestProperty("Authorization", auth)
             setRequestProperty("Content-Type", "application/octet-stream")
             setFixedLengthStreamingMode(body.size)
         }

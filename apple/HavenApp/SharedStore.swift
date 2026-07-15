@@ -480,10 +480,18 @@ enum SharedStore {
 
     // MARK: - Relay plain-HTTP media interface (client side)
     //
-    // GET/PUT against a relay's HTTP interface (core httprelay.rs): `<base>/k/<key>` with the
-    // relay's bearer token (learned from the sealed frame-19 announce). This is the DEFAULT
-    // cross-NAT media transport; a URL that doesn't answer is backed off for 2 minutes so a dead
-    // LAN address doesn't cost a connect-timeout per chunk.
+    // GET/PUT against a relay's HTTP interface (core httprelay.rs): `<base>/k/<key>`. This is the
+    // DEFAULT cross-NAT media transport; a URL that doesn't answer is backed off for 2 minutes so a
+    // dead LAN address doesn't cost a connect-timeout per chunk.
+    //
+    // AUTHORIZATION: each request is SIGNED by this device's transport key, not gated on a shared
+    // bearer token. The relay verifies the signature to learn WHO is asking and then runs the same
+    // circle-membership check the iroh path runs (core httprelay.rs). The token from the sealed
+    // frame-19 announce is still required — but it is now mixed into the signed transcript instead
+    // of being sent, so it never crosses the wire.
+    //
+    // The seed MUST be the same one `HavenNode.start` binds the transport to (DeviceKeyStore's
+    // per-device seed), or the relay sees a node id that is in no roster and answers 403.
 
     private static var httpUrlBadUntil: [String: Date] = [:]
     private static func httpUrlBad(_ base: String) -> Bool { (httpUrlBadUntil[base] ?? .distantPast) > Date() }
@@ -495,12 +503,21 @@ enum SharedStore {
         return URL(string: "\(trimmed)/k/\(enc)")
     }
 
+    /// Sign ONE request. Never cache the result: it carries a timestamp, a one-shot nonce and a
+    /// digest of THIS body, so a reused header is a replay and the relay refuses it.
+    /// `key` is the raw (un-percent-encoded) store key — the relay decodes the path before verifying.
+    private static func httpAuth(_ token: String, _ method: String, _ key: String, _ body: Data) -> String? {
+        try? httpAuthHeader(seed: DeviceKeyStore.deviceAccount().secretSeed(),
+                            token: token, method: method, key: key, body: body)
+    }
+
     /// GET one key. `.success(nil)` = relay reached but doesn't hold it (a real MISS — the iroh
     /// path serves the same store, so don't dial it for the same key); `.failure` = unreachable.
     private static func httpGet(_ base: String, _ token: String, _ key: String) async -> Result<Data?, Error> {
         guard let url = httpKeyURL(base, key) else { return .failure(URLError(.badURL)) }
+        guard let auth = httpAuth(token, "GET", key, Data()) else { return .failure(URLError(.userAuthenticationRequired)) }
         var req = URLRequest(url: url, timeoutInterval: 60)
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue(auth, forHTTPHeaderField: "Authorization")
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
             switch (resp as? HTTPURLResponse)?.statusCode ?? 0 {
@@ -513,9 +530,11 @@ enum SharedStore {
 
     private static func httpPut(_ base: String, _ token: String, _ key: String, _ body: Data) async -> Bool {
         guard let url = httpKeyURL(base, key) else { return false }
+        // Digest over the EXACT bytes that go on the wire — `upload(for:from:)` sends `body` verbatim.
+        guard let auth = httpAuth(token, "PUT", key, body) else { return false }
         var req = URLRequest(url: url, timeoutInterval: 120)
         req.httpMethod = "PUT"
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue(auth, forHTTPHeaderField: "Authorization")
         req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         do {
             let (_, resp) = try await URLSession.shared.upload(for: req, from: body)

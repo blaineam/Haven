@@ -20,12 +20,16 @@
 //!   forms) with tamper-detection material kept in the URL fragment.
 //! * [`transport`] — the path-selector seam: Bluetooth → local WiFi → relay.
 //!   Trait-only for now; concrete impls (iroh, CoreBluetooth) land next.
+//! * [`mediaref`] — media refs as content addresses, and the check that binds a
+//!   blob to the ref a signed post named. Without it, whoever stores the bytes
+//!   chooses what a post shows.
 
 pub mod crypto;
 pub mod device;
 pub mod groupkey;
 pub mod identity;
 pub mod link;
+pub mod mediaref;
 pub mod selfsync;
 pub mod social;
 pub mod transport;

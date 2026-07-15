@@ -3,6 +3,7 @@ import AVFoundation
 import AVKit
 import CoreImage
 import CoreLocation
+import CryptoKit
 import ImageIO
 #if canImport(UIKit)
 import UIKit
@@ -125,6 +126,7 @@ struct VideoTrimmer: View {
         }
         session.outputURL = dst
         session.outputFileType = .mp4
+        session.stripIdentifyingMetadata()   // trimmed clips are shared media too
         session.timeRange = CMTimeRange(
             start: CMTime(seconds: start, preferredTimescale: 600),
             duration: CMTime(seconds: end - start, preferredTimescale: 600))
@@ -182,6 +184,24 @@ struct VideoTrimmer: UIViewControllerRepresentable {
 }
 #endif
 
+extension AVAssetExportSession {
+    /// Drop identifying metadata — GPS above all — from an exported video. EVERY video export that
+    /// produces bytes we share must call this.
+    ///
+    /// `metadata = []` alone is NOT enough, and that was the actual bug: it governs only the movie's
+    /// top-level metadata, while AVFoundation independently copies the source's location into the
+    /// output's QuickTime **UserData `loci` box**. Verified with exiftool — an export with
+    /// `metadata = []` still carried `UserData:LocationInformation` with the exact capture
+    /// coordinates. `metadataItemFilter = .forSharing()` is the knob that actually removes it (it's
+    /// Apple's own "safe to hand to someone else" filter: strips location/device/capture identifiers,
+    /// keeps benign descriptive tags). Both are set here — the filter does the real work, and the
+    /// empty array keeps us from ever propagating movie-level metadata a future filter might allow.
+    func stripIdentifyingMetadata() {
+        metadata = []
+        metadataItemFilter = .forSharing()
+    }
+}
+
 enum MediaKind: String {
     case image, video, audio
     var ext: String {
@@ -189,6 +209,15 @@ enum MediaKind: String {
         case .image: return "jpg"
         case .video: return "mp4"
         case .audio: return "m4a"
+        }
+    }
+    /// The kind is encoded in the ref prefix so a recipient knows how to render it. Matches
+    /// `p2pcore::mediaref::MediaKind::prefix` and Android's `LocalMedia` byte-for-byte.
+    var prefix: String {
+        switch self {
+        case .image: return "img_"
+        case .video: return "vid_"
+        case .audio: return "aud_"
         }
     }
     /// The kind is encoded in the ref prefix so a recipient knows how to render it.
@@ -289,6 +318,113 @@ final class MediaStore: ObservableObject {
         return dir.appendingPathComponent("\(ref).\(kind.ext)")
     }
 
+    // MARK: - Content addressing
+    //
+    // A ref is the sha-256 of the media's PLAINTEXT, so the bytes a relay hands back can be held to
+    // account for the ref the signed post named. This store used to mint `img_<UUID()>` — a random
+    // name that says nothing about the bytes — and then rendered whatever arrived under it. A relay
+    // operator (always an ordinary circle member) could therefore PUT one member's sealed photo at
+    // another member's ref and every client would render it: the seal opens, the signature verifies,
+    // and nothing ever compared the bytes to the ref. Signing the post but not binding its media
+    // meant whoever stored the bytes chose what the post showed.
+    //
+    // The digest is over the plaintext, not the sealed bytes, because sealing is non-deterministic
+    // (fresh key + nonce per seal, recipients vary with the roster) — a ciphertext address would
+    // change on every re-seal and differ per device, orphaning the media its own post points at.
+    // Plaintext hashing gives one stable address per photo on every platform. This mirrors
+    // `p2pcore::mediaref` exactly, and Android/desktop have minted these same sha-256 refs since
+    // they shipped; iOS was the odd one out.
+
+    nonisolated static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Stream a file's digest in 1 MB windows — a 600 MB video must never land in a `Data` whole
+    /// (that single allocation is what traps in `__DataStorage.init`).
+    nonisolated static func sha256Hex(fileAt url: URL) -> String? {
+        guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? h.close() }
+        var hasher = SHA256()
+        while let chunk = try? h.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+            // Pool per iteration: `read` retains its buffers, which is what walked a strip loop
+            // through the whole file's worth of RAM.
+            autoreleasepool { hasher.update(data: chunk) }
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The ref to publish for these bytes.
+    nonisolated static func contentRef(_ kind: MediaKind, _ data: Data) -> String {
+        "\(kind.prefix)\(sha256Hex(data))"
+    }
+    /// The ref to publish for a file already on disk (streamed).
+    nonisolated static func contentRef(_ kind: MediaKind, fileAt url: URL) -> String? {
+        sha256Hex(fileAt: url).map { "\(kind.prefix)\($0)" }
+    }
+
+    /// The ref's unique part with any kind prefix stripped — the content hash. NOT a storage key:
+    /// it's kind-blind, so `img_X` and `vid_X` reduce to the same string (`fileURL` keeps the whole
+    /// ref, kind included, which is what stops a photo and a video sharing one file).
+    nonisolated static func bareId(_ ref: String) -> String {
+        for p in ["img_", "vid_", "aud_", "v:", "i:", "a:"] where ref.hasPrefix(p) {
+            return String(ref.dropFirst(p.count))
+        }
+        return ref
+    }
+
+    /// Can bytes be checked against this ref? True only for content addresses. The UUID refs this
+    /// store used to mint carry no digest, so there is nothing to check and they are taken on faith
+    /// — see `verify`.
+    nonisolated static func isVerifiable(_ ref: String) -> Bool {
+        guard !isSynthetic(ref) else { return false }
+        let id = bareId(ref)
+        return id.count == 64 && id.allSatisfy { $0.isHexDigit && !$0.isUppercase }
+    }
+
+    /// Do these bytes account for this ref? This is the check that makes a signed post's media
+    /// actually its own.
+    ///
+    /// Legacy refs pass: real posts out there name `img_<uuid>`, there is no digest in them to hold
+    /// bytes to, and the only alternative to accepting them is every existing post's media going
+    /// blank. That hole is closed by construction — minting is content-addressed now, so the
+    /// unverifiable population is exactly what was already minted, and it only shrinks. It also
+    /// can't be used to downgrade: the ref comes from the author-signed post, so nobody can swap a
+    /// verifiable ref for a legacy-shaped one without the author's key.
+    nonisolated static func verify(_ ref: String, _ data: Data) -> Bool {
+        guard isVerifiable(ref) else { return true }
+        return sha256Hex(data) == bareId(ref)
+    }
+    /// `verify` for a plaintext file, streamed. An unreadable file under a verifiable ref fails closed.
+    nonisolated static func verify(_ ref: String, fileAt url: URL) -> Bool {
+        guard isVerifiable(ref) else { return true }
+        return sha256Hex(fileAt: url) == bareId(ref)
+    }
+
+    /// A scratch file inside the protected media dir, for producing media before its ref is known.
+    /// Content addressing inverts the old order: the bytes have to exist before they can be named.
+    private func scratchURL(_ ext: String) -> URL {
+        dir.appendingPathComponent("mint_\(UUID().uuidString).\(ext)")
+    }
+
+    /// Move a just-produced file to its content address and return the ref. The scratch file is
+    /// always consumed. An identical file already in place is left alone — same bytes, same ref,
+    /// so the put is idempotent (which is the other thing content addressing buys).
+    private func adoptProduced(_ kind: MediaKind, from scratch: URL) -> String? {
+        guard let ref = Self.contentRef(kind, fileAt: scratch), let dst = fileURL(ref) else {
+            try? FileManager.default.removeItem(at: scratch)
+            return nil
+        }
+        if FileManager.default.fileExists(atPath: dst.path) {
+            try? FileManager.default.removeItem(at: scratch)
+            return ref
+        }
+        do { try FileManager.default.moveItem(at: scratch, to: dst) } catch {
+            try? FileManager.default.removeItem(at: scratch)
+            return nil
+        }
+        return ref
+    }
+
     /// Total bytes of synced media on disk (the `haven-media` dir), and the file count. Walked lazily
     /// off the caller's thread by the Settings screen so it never blocks. Photos/videos/audio dominate;
     /// the small event log lives elsewhere and isn't counted here.
@@ -308,7 +444,6 @@ final class MediaStore: ObservableObject {
 
     @discardableResult
     func addImage(_ image: PlatformImage) -> String {
-        let ref = "img_\(UUID().uuidString)"
         // Optimize: downscale very large photos + compress, so they're light to send —
         // but keep it high-res (longest edge up to 2560, well above 1080p).
         let optimize = CircleSettingsStore.shared.autoOptimize(FeedStore.shared.activeCircleId)
@@ -317,9 +452,15 @@ final class MediaStore: ObservableObject {
         // Auto-optimize → 2048px JPEG @ 70% (small + universally compatible). Off → original quality.
         let img = Self.normalizedUp(optimize ? Self.downscale(image, maxDimension: 2048) : image)
         let quality: CGFloat = optimize ? 0.70 : 0.95
-        if let data = img.jpegData(compressionQuality: quality), let url = fileURL(ref) {
-            try? data.write(to: url)
+        // The ref is minted from the ENCODED bytes we actually store and send — the same bytes a
+        // recipient will hash — so it has to be produced before the ref exists.
+        guard let data = img.jpegData(compressionQuality: quality) else {
+            // No bytes, no content address. Keep the old shape (a ref is always returned) but make
+            // it obviously kind-tagged and unfetchable rather than minting a bogus address.
+            return "img_\(UUID().uuidString)"
         }
+        let ref = Self.contentRef(.image, data)
+        if let url = fileURL(ref) { try? data.write(to: url) }
         cachePut(ref, MediaItem(id: ref, kind: .image, image: img, videoURL: nil))
         return ref
     }
@@ -328,14 +469,15 @@ final class MediaStore: ObservableObject {
     /// this, full-size originals (often 50–200MB) are too big to seal + send P2P.
     @discardableResult
     func addVideo(url src: URL) async -> String {
-        let ref = "vid_\(UUID().uuidString)"
-        guard let dst = fileURL(ref) else { return ref }
-        try? FileManager.default.removeItem(at: dst)
+        // Transcode into scratch first: the ref is the digest of the FINAL bytes, so it can only be
+        // known once the export has produced them.
+        let scratch = scratchURL("mp4")
+        try? FileManager.default.removeItem(at: scratch)
         var ok = false
         if CircleSettingsStore.shared.autoOptimize(FeedStore.shared.activeCircleId) {
             // Auto-optimize (default): re-encode to 1080p H.264 with a faststart moov atom — small and
             // universally playable, including on Androids that can't decode the iPhone's native HEVC.
-            ok = await Self.optimizeVideo(src, to: dst)
+            ok = await Self.optimizeVideo(src, to: scratch)
         }
         // Auto-optimize OFF: share in the ORIGINAL format + quality (no transcode). Still do a lossless
         // passthrough remux to strip GPS/device metadata AND move the moov atom to the front (faststart),
@@ -343,10 +485,19 @@ final class MediaStore: ObservableObject {
         // (Note: with optimize off, an HEVC source stays HEVC, so it may not play on HEVC-less devices —
         //  that's the explicit trade for "original quality as-is".)
         if !ok {
-            ok = await Self.stripVideoMetadata(src, to: dst)
+            try? FileManager.default.removeItem(at: scratch)
+            ok = await Self.stripVideoMetadata(src, to: scratch)
         }
+        // LAST RESORT — raw bytes, metadata and all. Only reachable when BOTH exports above failed,
+        // i.e. AVFoundation can't export the asset at all; the alternative is a post whose video is
+        // simply missing. This is the one path that can still carry the source's GPS, so it stays a
+        // fallback and must never become the ordinary route.
         if !ok {
-            try? FileManager.default.copyItem(at: src, to: dst)
+            try? FileManager.default.removeItem(at: scratch)
+            try? FileManager.default.copyItem(at: src, to: scratch)
+        }
+        guard let ref = adoptProduced(.video, from: scratch), let dst = fileURL(ref) else {
+            return "vid_\(UUID().uuidString)"   // export produced nothing addressable
         }
         cachePut(ref, MediaItem(id: ref, kind: .video, image: Self.poster(for: dst), videoURL: dst))
         return ref
@@ -361,7 +512,7 @@ final class MediaStore: ObservableObject {
         export.outputURL = dst
         // .mp4 (not .mov/QuickTime): Android's MediaPlayer reliably plays MP4; some builds choke on MOV.
         export.outputFileType = .mp4
-        export.metadata = []   // no location/maker metadata travels with shared media
+        export.stripIdentifyingMetadata()   // no location/maker metadata travels with shared media
         // FASTSTART: move the moov atom to the FRONT of the file. Android's VideoView/MediaPlayer needs the
         // moov early to initialize — a moov-at-the-end file (AVFoundation's default) often won't play or
         // stalls. This is a lossless container rewrite (no re-encode), so it's safe even for "share original".
@@ -394,17 +545,21 @@ final class MediaStore: ObservableObject {
     }
 
     private func exportSegment(asset: AVAsset, start: Double, duration: Double) async -> String? {
-        let newRef = "vid_\(UUID().uuidString)"
-        guard let dst = fileURL(newRef),
-              let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPreset1920x1080) else { return nil }
-        export.outputURL = dst
+        let scratch = scratchURL("mp4")
+        guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPreset1920x1080) else { return nil }
+        export.outputURL = scratch
         export.outputFileType = .mp4
+        export.stripIdentifyingMetadata()   // a story slide is shared media like any other
         export.timeRange = CMTimeRange(start: CMTime(seconds: start, preferredTimescale: 600),
                                        duration: CMTime(seconds: duration, preferredTimescale: 600))
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             export.exportAsynchronously { c.resume() }
         }
-        guard export.status == .completed else { return nil }
+        guard export.status == .completed else {
+            try? FileManager.default.removeItem(at: scratch)
+            return nil
+        }
+        guard let newRef = adoptProduced(.video, from: scratch), let dst = fileURL(newRef) else { return nil }
         cachePut(newRef, MediaItem(id: newRef, kind: .video, image: Self.poster(for: dst), videoURL: dst))
         return newRef
     }
@@ -420,28 +575,33 @@ final class MediaStore: ObservableObject {
         let dur = (try? await asset.load(.duration)) ?? .zero
         try? compV.insertTimeRange(CMTimeRange(start: .zero, duration: dur), of: vTrack, at: .zero)
         if let xf = try? await vTrack.load(.preferredTransform) { compV.preferredTransform = xf }
-        let newRef = "vid_\(UUID().uuidString)"
-        guard let dst = fileURL(newRef),
-              let export = AVAssetExportSession(asset: comp, presetName: AVAssetExportPresetHighestQuality)
+        let scratch = scratchURL("mp4")
+        guard let export = AVAssetExportSession(asset: comp, presetName: AVAssetExportPresetHighestQuality)
         else { return nil }
-        export.outputURL = dst
+        export.outputURL = scratch
         export.outputFileType = .mp4
+        export.stripIdentifyingMetadata()   // muting re-exports the movie — location rides along otherwise
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             export.exportAsynchronously { c.resume() }
         }
-        guard export.status == .completed else { return nil }
+        guard export.status == .completed else {
+            try? FileManager.default.removeItem(at: scratch)
+            return nil
+        }
+        guard let newRef = adoptProduced(.video, from: scratch), let dst = fileURL(newRef) else { return nil }
         cachePut(newRef, MediaItem(id: newRef, kind: .video, image: Self.poster(for: dst), videoURL: dst))
         return newRef
     }
 
     /// Adopt an externally-trimmed video file as a new ref.
     func importTrimmed(_ url: URL) -> String {
-        let ref = "vid_\(UUID().uuidString)"
-        if let dst = fileURL(ref) {
-            try? FileManager.default.removeItem(at: dst)
-            try? FileManager.default.copyItem(at: url, to: dst)
-            cachePut(ref, MediaItem(id: ref, kind: .video, image: Self.poster(for: dst), videoURL: dst))
+        let scratch = scratchURL("mp4")
+        try? FileManager.default.removeItem(at: scratch)
+        try? FileManager.default.copyItem(at: url, to: scratch)
+        guard let ref = adoptProduced(.video, from: scratch), let dst = fileURL(ref) else {
+            return "vid_\(UUID().uuidString)"
         }
+        cachePut(ref, MediaItem(id: ref, kind: .video, image: Self.poster(for: dst), videoURL: dst))
         return ref
     }
 
@@ -460,7 +620,11 @@ final class MediaStore: ObservableObject {
         case .image:
             guard let img = item.image else { return ref }
             let filtered = FilterEngine.apply(filter, to: img)
-            return replaceImage(ref: ref, with: filtered) ? ref : ref
+            // A filter changes the bytes, so it changes the address: mint a NEW ref rather than
+            // rewriting under the old one. Overwriting in place is exactly the thing a content
+            // address forbids — the ref would name bytes that no longer exist, and a recipient
+            // hashing what arrived would (rightly) reject it. Videos already worked this way.
+            return storeFiltered(filtered) ?? ref
         case .video:
             return await filteredVideo(ref, filter: filter) ?? ref
         case .audio:
@@ -468,18 +632,18 @@ final class MediaStore: ObservableObject {
         }
     }
 
-    /// Overwrite an image ref's bytes + cache with a new image (same ref). Returns whether it
-    /// stuck.
-    @discardableResult
-    private func replaceImage(ref: String, with image: PlatformImage) -> Bool {
-        guard MediaKind(ref: ref) == .image, let url = fileURL(ref) else { return false }
+    /// Encode a filtered image under its own content address. Same optimize/quality rules as
+    /// `addImage`, minus the orientation normalize (the source ref was already normalized).
+    private func storeFiltered(_ image: PlatformImage) -> String? {
         let optimize = CircleSettingsStore.shared.autoOptimize(FeedStore.shared.activeCircleId)
         let img = optimize ? Self.downscale(image, maxDimension: 2048) : image
         let quality: CGFloat = optimize ? 0.70 : 0.95
-        guard let data = img.jpegData(compressionQuality: quality) else { return false }
-        do { try data.write(to: url) } catch { return false }
+        guard let data = img.jpegData(compressionQuality: quality) else { return nil }
+        let ref = Self.contentRef(.image, data)
+        guard let url = fileURL(ref) else { return nil }
+        do { try data.write(to: url) } catch { return nil }
         cachePut(ref, MediaItem(id: ref, kind: .image, image: img, videoURL: nil))
-        return true
+        return ref
     }
 
     /// Export a new video ref with `filter` baked into every frame via
@@ -495,23 +659,24 @@ final class MediaStore: ObservableObject {
             let output = FilterEngine.apply(spec, to: source).cropped(to: request.sourceImage.extent)
             request.finish(with: output, context: nil)
         }
-        let newRef = "vid_\(UUID().uuidString)"
-        guard let dst = fileURL(newRef),
-              let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPreset1920x1080) else {
+        let scratch = scratchURL("mp4")
+        guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPreset1920x1080) else {
             return nil
         }
-        try? FileManager.default.removeItem(at: dst)
-        export.outputURL = dst
+        try? FileManager.default.removeItem(at: scratch)
+        export.outputURL = scratch
         export.outputFileType = .mp4
         export.shouldOptimizeForNetworkUse = true
+        export.stripIdentifyingMetadata()   // a filter changes pixels, not metadata — strip it here too
         export.videoComposition = composition
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             export.exportAsynchronously { c.resume() }
         }
         guard export.status == .completed else {
-            try? FileManager.default.removeItem(at: dst)
+            try? FileManager.default.removeItem(at: scratch)
             return nil
         }
+        guard let newRef = adoptProduced(.video, from: scratch), let dst = fileURL(newRef) else { return nil }
         cachePut(newRef, MediaItem(id: newRef, kind: .video, image: Self.poster(for: dst), videoURL: dst))
         return newRef
     }
@@ -557,6 +722,10 @@ final class MediaStore: ObservableObject {
         export.outputURL = dst
         export.outputFileType = .mp4
         export.shouldOptimizeForNetworkUse = true
+        // The DEFAULT share path — re-encoding does NOT drop the source's location; AVFoundation
+        // copies it into the output. Without this, auto-optimize (on by default) shipped the capture
+        // GPS to the circle while the non-default "share original" path was the one that tried to strip.
+        export.stripIdentifyingMetadata()
         // BAKE the camera rotation into the pixels: a passthrough CI composition renders each frame in
         // its display orientation, so the output is upright with an identity transform. Otherwise the
         // rotation rides as track metadata that Android ignores → portrait iPhone video shows sideways.
@@ -590,12 +759,13 @@ final class MediaStore: ObservableObject {
     /// Audio reuses `videoURL` as the file URL.
     @discardableResult
     func addAudio(url src: URL) -> String {
-        let ref = "aud_\(UUID().uuidString)"
-        if let dst = fileURL(ref) {
-            try? FileManager.default.removeItem(at: dst)
-            try? FileManager.default.copyItem(at: src, to: dst)
-            cachePut(ref, MediaItem(id: ref, kind: .audio, image: nil, videoURL: dst))
+        let scratch = scratchURL("m4a")
+        try? FileManager.default.removeItem(at: scratch)
+        try? FileManager.default.copyItem(at: src, to: scratch)
+        guard let ref = adoptProduced(.audio, from: scratch), let dst = fileURL(ref) else {
+            return "aud_\(UUID().uuidString)"
         }
+        cachePut(ref, MediaItem(id: ref, kind: .audio, image: nil, videoURL: dst))
         return ref
     }
 
@@ -626,14 +796,25 @@ final class MediaStore: ObservableObject {
     }
 
     /// Store media bytes received from a peer, reconstructing the item for rendering.
-    func store(_ ref: String, _ bytes: Data) {
-        guard let kind = MediaKind(ref: ref), let url = fileURL(ref) else { return }
+    ///
+    /// This is the inbound chokepoint — every relay restore, peer chunk transfer and own-device sync
+    /// lands here — so this is where bytes are held to account for the ref that named them. Bytes
+    /// that don't hash to a content-addressed ref are DROPPED, not stored: they are, by definition,
+    /// not the media this post is about.
+    @discardableResult
+    func store(_ ref: String, _ bytes: Data) -> Bool {
+        guard let kind = MediaKind(ref: ref), let url = fileURL(ref) else { return false }
+        guard Self.verify(ref, bytes) else {
+            HavenLog.relay("media REJECTED \(ref.prefix(12)): \(bytes.count)B do not match its content address")
+            return false
+        }
         try? bytes.write(to: url)
         switch kind {
         case .image: cachePut(ref, MediaItem(id: ref, kind: .image, image: PlatformImage(data: bytes), videoURL: nil))
         case .video: cachePut(ref, MediaItem(id: ref, kind: .video, image: Self.poster(for: url), videoURL: url))
         case .audio: cachePut(ref, MediaItem(id: ref, kind: .audio, image: nil, videoURL: url))
         }
+        return true
     }
 
     /// Final on-disk path for a ref (sender reads chunks from here).
@@ -647,14 +828,27 @@ final class MediaStore: ObservableObject {
     }
 
     /// Move a fully-reassembled temp file into place under `ref` and cache the item.
-    func adopt(_ ref: String, from temp: URL) {
-        guard MediaKind(ref: ref) != nil, let dst = fileURL(ref) else { return }
+    ///
+    /// The other inbound chokepoint (chunked transfers, which never hold the blob in RAM). Verified
+    /// by STREAMING the digest off the temp file — so a 600 MB video is checked without ever being
+    /// materialized — and the temp is dropped rather than adopted on a mismatch. This is what binds
+    /// chunked media: the chunks and their HVCHUNK1 manifest only carry the bytes, and any tamper in
+    /// them lands here as a digest that doesn't match.
+    @discardableResult
+    func adopt(_ ref: String, from temp: URL) -> Bool {
+        guard MediaKind(ref: ref) != nil, let dst = fileURL(ref) else { return false }
+        guard Self.verify(ref, fileAt: temp) else {
+            HavenLog.relay("media REJECTED \(ref.prefix(12)): reassembled bytes do not match its content address")
+            try? FileManager.default.removeItem(at: temp)
+            return false
+        }
         try? FileManager.default.removeItem(at: dst)
-        do { try FileManager.default.moveItem(at: temp, to: dst) } catch { return }
+        do { try FileManager.default.moveItem(at: temp, to: dst) } catch { return false }
         // Do NOT eagerly decode the full image here. With own-device media sync, a burst of received blobs
         // each got decoded to a ~20MB bitmap on arrival → memory spike → iOS jetsam (SIGKILL) on launch.
         // Just drop any stale cache entry; item()/thumbnail() decode lazily (and downsampled) when rendered.
         cacheRemove(ref)
+        return true
     }
 
     /// A separate, bounded cache of DOWNSCALED thumbnails for feed tiles / avatars. Rendering a full-res

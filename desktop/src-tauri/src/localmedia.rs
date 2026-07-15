@@ -3,12 +3,18 @@
 //! on every device for the cross-device MediaReq/Chunk fetch) and kept **sealed at rest** to the
 //! circle. Videos carry a `v:` ref prefix and voice notes an `a:` prefix so the feed renders the
 //! right player; bare refs (or `i:`) are images.
+//!
+//! Being content-addressed was never enough on its own: nothing CHECKED that the bytes behind a ref
+//! were the bytes it named, so a relay operator could serve one member's photo under another's ref
+//! and it rendered. Refs are minted and verified through `p2pcore::mediaref` now — one definition of
+//! the address shared with iOS, Android and the relay-side tests, rather than three that can drift.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use haven_ffi::HavenSocial;
+use p2pcore::mediaref;
 use sha2::{Digest, Sha256};
 
 pub struct LocalMedia {
@@ -165,35 +171,67 @@ impl LocalMedia {
         Ok(format!("{}{hash}", kind.prefix()))
     }
 
-    /// Load + decrypt a stored media ref, or `None` if we don't have it.
+    /// Load + decrypt a stored media ref, or `None` if we don't have it — or if the bytes we hold
+    /// are not the bytes the ref names.
+    ///
+    /// Verification lives on the READ side here, not the write side, because this store keeps media
+    /// sealed at rest: the plaintext only exists at open time, so that's the one place it can be
+    /// hashed without paying for an extra decrypt. It also means a blob is checked at the point it
+    /// is USED, so tampering with the at-rest file is caught too, not just tampering in flight. The
+    /// digest is a few ms against a decrypt of the same bytes we just did.
     pub fn load(&self, social: &Arc<HavenSocial>, circle_id: &str, reference: &str) -> Option<Vec<u8>> {
         let f = self.dir.join(bare_id(reference));
         let stored = fs::read(&f).ok()?;
-        Some(
-            social
-                .open_circle_media(circle_id.to_string(), stored.clone())
-                .unwrap_or(stored),
-        )
+        let opened = social
+            .open_circle_media(circle_id.to_string(), stored.clone())
+            .unwrap_or(stored);
+        Self::checked(reference, opened)
+    }
+
+    /// Gate plaintext on it accounting for the ref that named it. `None` = a substitution: the seal
+    /// opened, but these are not the bytes the signed post pointed at, so nothing may render them.
+    /// Legacy (non-content-addressed) refs pass — see `p2pcore::mediaref`.
+    fn checked(reference: &str, plaintext: Vec<u8>) -> Option<Vec<u8>> {
+        if mediaref::verify(reference, &plaintext) {
+            Some(plaintext)
+        } else {
+            eprintln!(
+                "media REJECTED {}: {} plaintext bytes do not match its content address",
+                &reference[..reference.len().min(12)],
+                plaintext.len()
+            );
+            None
+        }
     }
 
     pub fn has(&self, reference: &str) -> bool {
         self.dir.join(bare_id(reference)).exists()
     }
 
-    /// Load decrypted bytes trying every circle's key (for serving a media request).
+    /// Load decrypted bytes trying every circle's key (for serving a media request). Verified too:
+    /// we must never RE-SERVE a substituted blob onward as if it were the ref it claims — that would
+    /// make every honest device a second-hop launderer for the relay's swap.
     pub fn load_any_circle(&self, social: &Arc<HavenSocial>, reference: &str) -> Option<Vec<u8>> {
         let f = self.dir.join(bare_id(reference));
         let stored = fs::read(&f).ok()?;
         for c in social.circles() {
             if let Some(open) = social.open_circle_media(c.id, stored.clone()) {
-                return Some(open);
+                return Self::checked(reference, open);
             }
         }
-        Some(stored)
+        Self::checked(reference, stored)
     }
 
-    /// Store received plaintext bytes under an exact ref (sealed at rest to the circle).
+    /// Store received plaintext bytes under an exact ref (sealed at rest to the circle). Bytes that
+    /// don't account for `reference` are dropped at the door rather than sealed and kept.
     pub fn store_under_ref(&self, social: &Arc<HavenSocial>, circle_id: &str, reference: &str, bytes: &[u8]) {
+        if !mediaref::verify(reference, bytes) {
+            eprintln!(
+                "media REJECTED {}: inbound bytes do not match its content address",
+                &reference[..reference.len().min(12)]
+            );
+            return;
+        }
         let to_write = social
             .seal_circle_media(circle_id.to_string(), bytes.to_vec())
             .unwrap_or_else(|_| bytes.to_vec());

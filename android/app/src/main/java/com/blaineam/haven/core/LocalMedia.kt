@@ -14,6 +14,13 @@ import kotlin.math.max
  * the same on every device — ready for the cross-device MediaReq/Chunk fetch later) and kept
  * **sealed at rest** to the circle, mirroring the iOS MediaStore. Cross-device transfer of the
  * bytes themselves is the remaining Wave-3 piece (mailbox / type-3/5 frames).
+ *
+ * Being content-addressed was never enough on its own: nothing CHECKED that the bytes behind a ref
+ * were the bytes it named. A relay operator — always an ordinary circle member — could PUT one
+ * member's sealed blob at another member's ref, and every client rendered it: the seal opens, the
+ * signature verifies, the sender is a member, and nobody ever hashed the plaintext back against the
+ * ref. Signing a post but not binding its media meant whoever stored the bytes chose what the post
+ * showed. [verifiesRef] is that missing check, applied on every read (see [load]).
  */
 object LocalMedia {
     private lateinit var dir: File
@@ -146,13 +153,20 @@ object LocalMedia {
     }
 
     /** Load + decrypt a stored media ref, or null if we don't have it (or it's too big to hold in
-     *  RAM on this device — see [fitsInMemory]; oversized media is skipped, never OOM-crashed). */
+     *  RAM on this device — see [fitsInMemory]; oversized media is skipped, never OOM-crashed), or
+     *  if the bytes we hold are not the bytes the ref names.
+     *
+     *  Verification lives on the READ side, not the write side, because media is kept SEALED at rest:
+     *  the plaintext only exists at open time, so this is the one place it can be hashed without
+     *  paying for a second decrypt. It also means a blob is checked at the point it is USED, so a
+     *  tampered at-rest file is caught too, not just a swap in flight. */
     fun load(circleId: String, ref: String): ByteArray? {
         val f = mediaFile(ref)
         if (!f.exists()) return null
         if (f.length() > maxInMemoryBytes()) return null   // too big to decrypt in RAM here → skip
         val stored = f.readBytes()
-        return runCatching { HavenNet.engine.openCircleMedia(circleId, stored) }.getOrNull() ?: stored
+        val opened = runCatching { HavenNet.engine.openCircleMedia(circleId, stored) }.getOrNull() ?: stored
+        return checked(ref, opened)
     }
 
     /** Decrypt a video ref to a cache file VideoView/MediaPlayer can read; null if missing/undecodable.
@@ -168,7 +182,16 @@ object LocalMedia {
         val ok = runCatching {
             HavenNet.engine.openCircleMediaFile(circleId, sealed.absolutePath, out.absolutePath)
         }.getOrDefault(false)
-        return if (ok && out.exists()) out else null
+        if (!ok || !out.exists()) return null
+        // Hold the video to its ref too — a swapped 600 MB blob must not be handed to the player just
+        // because it was too big to check in RAM. The digest streams off the decrypted file, so the
+        // check costs no heap; a failure deletes the cache file rather than leaving it to be replayed.
+        if (!verifiesRef(ref, out)) {
+            android.util.Log.w("LocalMedia", "media REJECTED ${ref.take(12)}: decrypted video does not match its content address")
+            runCatching { out.delete() }
+            return null
+        }
+        return out
     }
 
     /** Decode a stored IMAGE ref to a DOWNSAMPLED bitmap (long edge ≤ [reqDim]) so even a large
@@ -260,20 +283,24 @@ object LocalMedia {
     fun isSynthetic(ref: String): Boolean = ref.indexOf(':') > 1
 
     /** Load decrypted bytes trying each circle's key (for serving a media request). Null if the
-     *  media is too big to hold in RAM here (skipped rather than OOM — a relay/other device serves it). */
+     *  media is too big to hold in RAM here (skipped rather than OOM — a relay/other device serves it).
+     *  Verified as well: we must never RE-SERVE a substituted blob onward under the ref it claims —
+     *  that would make every honest device a second-hop launderer for the relay's swap. */
     fun loadAnyCircle(ref: String): ByteArray? {
         val f = mediaFile(ref)
         if (!f.exists()) return null
         if (f.length() > maxInMemoryBytes()) return null
         val stored = f.readBytes()
         for (c in HavenNet.engine.circles()) {
-            runCatching { HavenNet.engine.openCircleMedia(c.id, stored) }.getOrNull()?.let { return it }
+            runCatching { HavenNet.engine.openCircleMedia(c.id, stored) }.getOrNull()?.let { return checked(ref, it) }
         }
-        return stored   // fall back to raw (was stored unsealed)
+        return checked(ref, stored)   // fall back to raw (was stored unsealed)
     }
 
-    /** Store received plaintext bytes under an exact ref (sealed at rest to the circle). */
+    /** Store received plaintext bytes under an exact ref (sealed at rest to the circle). Bytes that
+     *  don't account for [ref] are dropped at the door rather than sealed and kept. */
     fun storeUnderRef(circleId: String, ref: String, bytes: ByteArray) {
+        if (checked(ref, bytes) == null) return
         sealToFile(circleId, bytes, mediaFile(ref))   // large blobs seal file→file (off-heap) to avoid OOM
     }
 
@@ -325,16 +352,146 @@ object LocalMedia {
 
     private fun sha256Hex(bytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
+    /** Stream a file's digest in 1 MB windows — a hundreds-of-MB video must never be read into a
+     *  ByteArray just to hash it (that's the managed-heap OOM this store spends so much effort
+     *  avoiding elsewhere). Null if unreadable. */
+    private fun sha256Hex(file: File): String? = runCatching {
+        val md = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { ins ->
+            val buf = ByteArray(1024 * 1024)
+            while (true) {
+                val n = ins.read(buf)
+                if (n <= 0) break
+                md.update(buf, 0, n)
+            }
+        }
+        md.digest().joinToString("") { "%02x".format(it) }
+    }.getOrNull()
+
+    /**
+     * Is [ref] a content address — i.e. is there a digest in it to hold bytes to?
+     *
+     * False for the legacy UUID refs iOS used to mint and for synthetic attachments. This is the
+     * migration hinge: verifiable refs are enforced, everything older is grandfathered, because
+     * `img_<uuid>` contains nothing to check and the only alternative to accepting it is every
+     * existing post's media going blank. It can't be abused to downgrade — the ref is a field of the
+     * author-SIGNED post, so nobody can substitute a legacy-shaped ref without the author's key —
+     * and the unverifiable population only shrinks, since minting is content-addressed everywhere now.
+     * Mirrors `p2pcore::mediaref::is_verifiable`.
+     */
+    private fun isRefVerifiable(ref: String): Boolean {
+        if (isSynthetic(ref)) return false
+        val id = bareId(ref)
+        return id.length == 64 && id.all { it in '0'..'9' || it in 'a'..'f' }
+    }
+
+    /** Do these plaintext bytes account for [ref]? True for legacy refs (nothing to check). */
+    private fun verifiesRef(ref: String, plaintext: ByteArray): Boolean =
+        !isRefVerifiable(ref) || sha256Hex(plaintext) == bareId(ref)
+
+    /** [verifiesRef] for a decrypted file, streamed. Unreadable under a verifiable ref = fail closed. */
+    private fun verifiesRef(ref: String, plaintext: File): Boolean =
+        !isRefVerifiable(ref) || sha256Hex(plaintext) == bareId(ref)
+
+    /** Gate plaintext on it accounting for the ref that named it. Null = a substitution: the seal
+     *  opened, but these are not the bytes the signed post pointed at, so nothing may render them. */
+    private fun checked(ref: String, plaintext: ByteArray): ByteArray? =
+        if (verifiesRef(ref, plaintext)) plaintext else {
+            android.util.Log.w("LocalMedia", "media REJECTED ${ref.take(12)}: ${plaintext.size}B do not match its content address")
+            null
+        }
 }
 
-/** Read a picked video's raw bytes, capped to avoid huge attachments (default 60 MB). */
-fun readVideoBytes(context: Context, uri: Uri, maxBytes: Int = 60 * 1024 * 1024): ByteArray? =
-    runCatching {
+/**
+ * Read a picked video, capped to avoid huge attachments (default 60 MB), with its identifying
+ * container metadata REMOVED — GPS above all.
+ *
+ * This used to hand the picker's raw bytes straight to [LocalMedia.store], so a clip recorded with
+ * location on carried its capture coordinates to everyone in the circle. Photos were stripped
+ * ([loadAndDownscale] re-encodes from a decoded bitmap); video was the hole. iOS strips via
+ * `AVAssetExportSession.metadataItemFilter`; this is the Android half.
+ *
+ * The strip is a [MediaExtractor] → [MediaMuxer] passthrough remux: samples are copied verbatim, so
+ * there is NO re-encode (same codec, same quality, no CPU burn on a big clip), but the muxer writes a
+ * fresh container and only the boxes we ask for. Location rides in the container's `loci`/`udta`
+ * userdata, which a new muxer emits only via `setLocation` — never called here, so it's simply gone.
+ * The rotation hint IS carried across ([MediaMuxer.setOrientationHint]); it's display geometry, not
+ * an identifier, and dropping it would turn every portrait clip sideways.
+ *
+ * Falls back to the raw bytes only if the remux fails outright (an unmuxable source) — the same
+ * "post something rather than nothing" tradeoff iOS makes, and the one path that can still carry
+ * metadata.
+ */
+fun readVideoBytes(context: Context, uri: Uri, maxBytes: Int = 60 * 1024 * 1024): ByteArray? {
+    val raw = runCatching {
         context.contentResolver.openInputStream(uri)?.use { input ->
             val bytes = input.readBytes()
             if (bytes.size > maxBytes) null else bytes
         }
-    }.getOrNull()
+    }.getOrNull() ?: return null
+    return stripVideoMetadata(context, uri, maxBytes) ?: raw
+}
+
+/** The remux behind [readVideoBytes]. Null if the source can't be remuxed (caller falls back). */
+private fun stripVideoMetadata(context: Context, uri: Uri, maxBytes: Int): ByteArray? {
+    val out = File.createTempFile("strip", ".mp4", context.cacheDir)
+    var extractor: android.media.MediaExtractor? = null
+    var muxer: android.media.MediaMuxer? = null
+    return try {
+        extractor = android.media.MediaExtractor().apply { setDataSource(context, uri, null) }
+        muxer = android.media.MediaMuxer(out.absolutePath, android.media.MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+
+        // Map every source track to the output, remembering the largest sample so one buffer fits all.
+        val trackMap = HashMap<Int, Int>()
+        var bufSize = 256 * 1024
+        for (i in 0 until extractor.trackCount) {
+            val format = extractor.getTrackFormat(i)
+            val mime = format.getString(android.media.MediaFormat.KEY_MIME) ?: continue
+            if (!mime.startsWith("video/") && !mime.startsWith("audio/")) continue  // drop timed-metadata tracks
+            if (format.containsKey(android.media.MediaFormat.KEY_MAX_INPUT_SIZE)) {
+                bufSize = max(bufSize, format.getInteger(android.media.MediaFormat.KEY_MAX_INPUT_SIZE))
+            }
+            trackMap[i] = muxer.addTrack(format)
+            extractor.selectTrack(i)
+        }
+        if (trackMap.isEmpty()) return null
+
+        // Preserve display rotation (geometry, not identity) — without it portrait clips play sideways.
+        val rotation = runCatching {
+            android.media.MediaMetadataRetriever().use { r ->
+                r.setDataSource(context, uri)
+                r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull()
+            }
+        }.getOrNull() ?: 0
+        if (rotation != 0) muxer.setOrientationHint(rotation)
+
+        muxer.start()
+        val buffer = java.nio.ByteBuffer.allocate(bufSize)
+        val info = android.media.MediaCodec.BufferInfo()
+        while (true) {
+            info.offset = 0
+            info.size = extractor.readSampleData(buffer, 0)
+            if (info.size < 0) break
+            val dst = trackMap[extractor.sampleTrackIndex]
+            if (dst != null) {
+                info.presentationTimeUs = extractor.sampleTime
+                info.flags = extractor.sampleFlags
+                muxer.writeSampleData(dst, buffer, info)
+            }
+            extractor.advance()
+        }
+        muxer.stop()
+        if (out.length() > maxBytes) null else out.readBytes()
+    } catch (t: Throwable) {
+        android.util.Log.w("LocalMedia", "video metadata strip failed: ${t.message}")
+        null
+    } finally {
+        runCatching { muxer?.release() }
+        runCatching { extractor?.release() }
+        out.delete()
+    }
+}
 
 /** True if the picked uri is a video (by MIME type). */
 fun isVideoUri(context: Context, uri: Uri): Boolean =

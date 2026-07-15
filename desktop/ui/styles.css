@@ -177,7 +177,12 @@ button { font-family: inherit; cursor: pointer; }
   background: transparent;
 }
 .titlebar > * { -webkit-app-region: no-drag; }
-.titlebar .traffic { display: flex; gap: 8px; align-items: center; flex: 0 0 auto; }
+/* Traffic lights are macOS's chrome and ONLY macOS's. Windows and Linux run decorated, so their OS
+   draws the real controls (right-aligned, platform-shaped) and these must not exist at all — drawing
+   them there is what put round red/amber/green lights on the left of the Windows build. Hidden by
+   DEFAULT so a late `data-os` can only delay them on macOS, never flash them onto Windows. */
+.titlebar .traffic { display: none; }
+:root[data-os="macos"] .titlebar .traffic { display: flex; gap: 8px; align-items: center; flex: 0 0 auto; }
 .tl {
   width: 12px; height: 12px; border-radius: 50%; border: 0; padding: 0; cursor: default;
   box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.20); transition: filter .15s var(--spring);
@@ -265,6 +270,17 @@ button { font-family: inherit; cursor: pointer; }
 .wrap { flex-wrap: wrap; }
 .spacer { flex: 1; }
 
+/* ---- Nothing in this UI ever overflows horizontally --------------------------------------
+   A flex item defaults to `min-width: auto`, which refuses to shrink below its CONTENT's minimum
+   width. `.btn` is `white-space: nowrap`, so a row of two buttons had a min-content width nothing
+   could satisfy: it forced its `flex: 1` parent wide, shoved the "Your invite" card past the
+   sheet's edge (clipping the invite URI mid-character and slicing "Copy web link" in half) and put
+   a horizontal scrollbar on the modal. The same shape sits behind every long unbreakable token we
+   render — invite URIs, relay links, node ids, safety codes.
+   So: flex children may always shrink, and anything monospaced may always break mid-token. A row
+   that still can't fit wraps (`.wrap`) — it never clips. */
+.row > *, .col > * { min-width: 0; }
+
 input, textarea, select {
   background: var(--bg2); border: 1px solid var(--line); color: var(--text);
   border-radius: var(--r-sm); padding: 11px 13px; font-size: 14px; font-family: inherit; width: 100%;
@@ -289,6 +305,9 @@ input:focus, textarea:focus, select:focus {
 }
 .btn.primary:hover { box-shadow: 0 7px 14px rgba(236, 72, 153, 0.45); }
 .btn.ghost { background: transparent; }
+/* SwiftUI `.buttonStyle(.bordered).tint(HavenTheme.pink)` — a tinted fill, NOT the brand gradient:
+   it's a secondary action sitting under a prominent one. */
+.btn.tint-pink { background: var(--glass-pink); border-color: var(--glass-pink-ring); color: var(--pink); }
 .btn.danger { color: #fb7185; border-color: rgba(244, 63, 94, 0.4); }
 .btn.small { padding: 7px 13px; font-size: 12px; }
 .btn:disabled { opacity: 0.5; cursor: default; transform: none; }
@@ -574,9 +593,52 @@ input:focus, textarea:focus, select:focus {
 .profile-avatar .pencil svg { width: 15px; height: 15px; }
 .profile-name { font-size: 21px; font-weight: 700; }
 .profile-bio { font-size: 13px; color: var(--muted); max-width: 460px; }
-.profile-link { font-size: 12px; font-weight: 600; color: var(--pink); background: none; border: 0; display: inline-flex; gap: 5px; align-items: center; }
+/* A profile link is user-supplied and can be any length — it wraps rather than widening the head. */
+.profile-link { font-size: 12px; font-weight: 600; color: var(--pink); background: none; border: 0; display: inline-flex; gap: 5px; align-items: center; max-width: 100%; overflow-wrap: anywhere; text-align: left; }
 .profile-link svg { width: 12px; height: 12px; }
 .section-label { font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 8px; }
+
+/* ---- Edit profile ------------------------------------------------------------------------
+   The port of macOS `EditProfileSheet` (Profile.swift:259-317), whose numbers these are: one
+   centred ungrouped column (VStack spacing 22) capped at 520 so it stays one readable measure,
+   a 110pt avatar over a pink shadow, a centred title3 pill for the name, and the bio/link pair
+   grouped together — a rounded rect for the bio, a capsule for the link — under one caption. */
+.edit-profile {
+  display: flex; flex-direction: column; align-items: center; gap: 22px;
+  max-width: 520px; margin: 0 auto; padding: 8px 0 4px; text-align: center;
+}
+.edit-profile > * { width: 100%; }
+.ep-avatar {
+  width: 110px; height: 110px; flex: 0 0 auto; border-radius: 50%; background: var(--grad);
+  overflow: hidden; display: flex; align-items: center; justify-content: center;
+  font-size: 55px; line-height: 1; color: #fff;
+  filter: drop-shadow(0 8px 14px rgba(236, 72, 153, 0.35));
+}
+.ep-avatar img { width: 100%; height: 100%; object-fit: cover; }
+/* macOS: `.font(.title3)`, centred, `.havenPillField()`, inset 30 — the name is the headline of the
+   sheet, not just another row, which is the whole reason it doesn't look like the bio and link. */
+.edit-profile .pill-field {
+  border-radius: 999px; text-align: center; font-size: 17px; font-weight: 600;
+  padding: 11px 18px; width: auto; margin: 0 30px; align-self: stretch;
+}
+.edit-profile .field-soft { border-radius: 18px; min-height: 56px; padding: 12px; font-size: 13px; resize: vertical; }
+.edit-profile .field-capsule { border-radius: 999px; padding: 12px 16px; font-size: 13px; }
+.edit-profile .col { margin: 0 24px; align-self: stretch; width: auto; }
+.ep-caption { font-size: 11px; color: var(--muted); padding: 0 30px; line-height: 1.4; }
+.ep-label { font-size: 12px; color: var(--muted); }
+/* 6 columns × 44pt cells, spacing 12 — macOS's LazyVGrid, inset 20. */
+.emoji-grid {
+  display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; justify-items: center;
+  padding: 0 20px; width: auto; align-self: stretch; margin: 0;
+}
+.emoji-cell {
+  width: 44px; height: 44px; border-radius: 50%; border: 2px solid transparent; padding: 0;
+  background: var(--panel2); font-size: 26px; line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: transform .14s var(--spring), background .2s, border-color .2s;
+}
+.emoji-cell:hover { transform: scale(1.08); }
+.emoji-cell.on { background: var(--glass-pink); border-color: var(--pink); }
 
 /* ---- Settings sheet rows (macOS grouped Form) ---- */
 .set-group { border-radius: var(--r-md); overflow: hidden; border: 1px solid var(--line); background: var(--panel2); }
@@ -670,7 +732,7 @@ button.set-row:hover { background: var(--panel); }
 /* ---- Connect / QR ---- */
 .qr-box { background: white; padding: 16px; border-radius: var(--r-md); width: max-content; box-shadow: var(--shadow); }
 .qr-box img, .qr-box canvas { display: block; image-rendering: pixelated; }
-.mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; word-break: break-all; }
+.mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; word-break: break-all; overflow-wrap: anywhere; }
 .list-item { display: flex; align-items: center; gap: 11px; padding: 11px; border-radius: var(--r-md); transition: background .18s; }
 .list-item:hover { background: var(--panel2); }
 .pending-item { border: 1px solid var(--pink); border-radius: var(--r-md); padding: 12px; margin-bottom: 8px; background: rgba(236, 72, 153, 0.06); }
@@ -711,11 +773,13 @@ button.set-row:hover { background: var(--panel); }
 @keyframes modalIn { from { opacity: 0; transform: translateY(16px) scale(0.96); } to { opacity: 1; transform: none; } }
 /* Dialogs that predate the sheet scaffold (report, edit, scan…) still pass a bare node — they get
    the same gradient shell, just self-padded. */
-.modal.plain { display: block; padding: 22px; overflow-y: auto; }
+.modal.plain { display: block; padding: 22px; overflow-y: auto; overflow-x: hidden; }
 .modal.plain > h2:first-child { margin-top: 0; }
 .modal-head { display: flex; align-items: center; gap: 12px; padding: 18px 18px 10px 22px; flex: 0 0 auto; }
 .modal-head h2 { margin: 0; font-size: 19px; font-weight: 600; flex: 1; }
-.modal-body { padding: 0 22px 16px; overflow-y: auto; flex: 1 1 auto; }
+/* overflow-x hidden is the backstop, not the fix — anything that would scroll sideways here is a
+   layout bug (see the min-width note above). This only guarantees the user never sees the symptom. */
+.modal-body { padding: 0 22px 16px; overflow-y: auto; overflow-x: hidden; flex: 1 1 auto; }
 .modal-foot { padding: 10px 22px 18px; flex: 0 0 auto; }
 .modal h2 { font-weight: 700; }
 .tag { display: inline-block; padding: 3px 9px; border-radius: 999px; background: var(--panel2); border: 1px solid var(--line); font-size: 11px; }

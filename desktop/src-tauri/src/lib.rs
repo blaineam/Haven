@@ -128,6 +128,48 @@ fn active_identity_if_exists() -> Result<Option<([u8; 32], Paths)>> {
     Ok(Some((seed, Paths::resolve_for(&entry.dir)?)))
 }
 
+/// Give the main window the chrome its OS actually uses.
+///
+/// Only macOS wants `decorations: false` (the config's default): its traffic lights sit in the same
+/// row as the tab pill, and the brand gradient runs to the top edge. Windows and Linux get the OS's
+/// OWN titlebar, because a hand-drawn one can only ever imitate theirs — and ours imitated *macOS*,
+/// so Windows shipped round red/amber/green lights on the left. Native decorations also carry what
+/// we cannot draw: Win11 Snap Layouts on maximize-hover, the Alt-Space system menu, the user's
+/// titlebar accent/high-contrast colours, and RTL mirroring. The tab pill is unaffected either way —
+/// it lives in our own bar, which is why `decorations` was never what put it there.
+fn apply_window_chrome(app: &tauri::AppHandle) {
+    #[cfg(not(target_os = "macos"))]
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.set_decorations(true);
+    }
+    #[cfg(target_os = "macos")]
+    let _ = app;
+}
+
+/// Bring the main window back — from the tray's "Open Haven" or a `haven://` deep link.
+///
+/// The order, and the second attempt, are both Linux's doing. tao's GTK `set_focus` early-returns
+/// unless the window is ALREADY visible (`tao/src/platform_impl/linux/window.rs`: `if !minimized &&
+/// self.window.get_visible()`), but `show()` and `unminimize()` only QUEUE a request onto the GTK
+/// main loop — nothing has run by the time the next line executes. So show+focus issued in one tick
+/// asks for focus while the window is still hidden, tao drops the request on the floor, and the
+/// window is mapped but never presented: it comes back unraised, behind everything, which is what
+/// "can't open Haven into a full window" was. Hence: show first, then re-assert focus from a short
+/// timer, once GTK has actually mapped it. The re-assert is idempotent when the first one landed.
+fn restore_window(app: &tauri::AppHandle) {
+    let Some(w) = app.get_webview_window("main") else {
+        return;
+    };
+    let _ = w.unminimize();
+    let _ = w.show();
+    let _ = w.set_focus();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    });
+}
+
 /// True when this run must never bring the P2P node online (the demo/screenshot capture, which has a
 /// synthetic cast that must never reach a real peer). Always false in release: the module that reads
 /// the env var doesn't exist there.
@@ -187,6 +229,7 @@ pub fn run() {
             let setup_engine = engine.clone();
             builder.manage(engine).setup(move |app| {
                 let handle = app.handle().clone();
+                apply_window_chrome(&handle);
                 setup_engine.set_app(handle.clone());
                 // haven:// deep links (a tapped invite, or a shared post) — surface the window and hand
                 // the URL to the frontend (parity with the iOS URL scheme / Android intent filter).
@@ -215,10 +258,7 @@ pub fn run() {
                             pending.extend(event.urls().iter().map(|u| u.to_string()));
                         }
                         let _ = link_handle.emit("haven:deep-link", ());
-                        if let Some(w) = link_handle.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.set_focus();
-                        }
+                        restore_window(&link_handle);
                     });
                 }
                 // Seed the demo dataset BEFORE the node would come up, and only ever instead of it —
@@ -258,15 +298,7 @@ pub fn run() {
                     .menu(&menu)
                     .show_menu_on_left_click(true)
                     .on_menu_event(move |app, event| match event.id().as_ref() {
-                        "show" => {
-                            if let Some(w) = app.get_webview_window("main") {
-                                // unminimize before show: a MINIMISED window is already "shown", so
-                                // show()+set_focus() alone leaves it in the dock/taskbar.
-                                let _ = w.unminimize();
-                                let _ = w.show();
-                                let _ = w.set_focus();
-                            }
-                        }
+                        "show" => restore_window(app),
                         "relay" => {
                             let e = tray_engine.clone();
                             tauri::async_runtime::spawn(async move {
@@ -282,12 +314,17 @@ pub fn run() {
         }
         // No identity yet: bring up the window with no engine. The frontend's `needs_onboarding`
         // check renders the welcome screen; `onboard_create`/`onboard_link` relaunch into the app.
-        None => builder.setup(|_app| Ok(())),
+        // The welcome screen is a real window, so it needs its platform chrome too.
+        None => builder.setup(|app| {
+            apply_window_chrome(app.handle());
+            Ok(())
+        }),
     };
 
     builder
         .invoke_handler(tauri::generate_handler![
             commands::needs_onboarding,
+            commands::demo_mode,
             commands::onboard_create,
             commands::onboard_link,
             commands::bootstrap,

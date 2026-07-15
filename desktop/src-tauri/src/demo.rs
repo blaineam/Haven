@@ -118,17 +118,21 @@ pub fn seed(engine: &Arc<Engine>) -> Option<usize> {
         people.push(Persona { name, engine: friend, hex });
     }
 
-    // ── Demo media (abstract, unmistakably synthetic gradient "photos") ───────────────────
-    // Generated, not bundled: desktop ships no demo assets, and a gradient is provably PII-free.
-    let photo = |i: usize| -> String {
-        engine.add_local_media(DEFAULT_CIRCLE, &art::gradient(i), false)
-    };
-    let (sunset, ridge, coffee) = (photo(0), photo(1), photo(2));
-    let (pottery, trail, plant, pup) = (photo(3), photo(4), photo(5), photo(6));
-    let (brunch_a, brunch_b, brunch_c) = (photo(7), photo(8), photo(9));
+    // ── Demo media (the same real, PII-free photos iOS and Android bundle) ────────────────
+    let photo = |bytes: &[u8]| -> String { engine.add_local_media(DEFAULT_CIRCLE, bytes, false) };
+    let video = |bytes: &[u8]| -> String { engine.add_local_media(DEFAULT_CIRCLE, bytes, true) };
+    let (sunset, ridge, coffee) = (photo(assets::SUNSET), photo(assets::RIDGE), photo(assets::COFFEE));
+    let (pottery, trail, plant, pup) =
+        (photo(assets::POTTERY), photo(assets::TRAIL), photo(assets::PLANT), photo(assets::PUP));
+    let brunch = photo(assets::BRUNCH);
+    let (vid_cove, vid_ridge) = (video(assets::VIDEO_COVE), video(assets::VIDEO_RIDGE));
+
+    // Own avatar: local-only on desktop (prefs, never broadcast), but it's what the You tab draws.
+    let me_avatar = assets::data_url(assets::AVATAR_ME, "image/jpeg");
+    engine.demo_with_prefs(|p| p.profile.avatar = me_avatar);
 
     // ── Stories tray (two friends + me) ───────────────────────────────────────────────────
-    story(&main, people.first(), &[sunset], "golden hour at the cove 🌅", 40);
+    story(&main, people.first(), &[sunset.clone()], "golden hour at the cove 🌅", 40);
     story(&main, people.get(1), &[ridge], "made it to the ridge 🥾", 95);
     let _ = main.post(DEFAULT_CIRCLE.into(), "studio fuel ☕️".into(), vec![coffee], None,
                       Some(86_400), true, false, ms_ago(20));
@@ -138,10 +142,16 @@ pub fn seed(engine: &Arc<Engine>) -> Option<usize> {
     let p2 = friend_post(&main, &people, 1, "12 miles before breakfast. trail magic is real.", &[trail],
                          Some(track("Sunrun", "The Wanderers")), 140);
     let p3 = my_post(&main, "new little corner of the studio came together today 🌿", &[plant], 75);
+    // Two ADJACENT video posts + a mixed carousel — Android's demo shape (DemoSeed.kt). The feed
+    // autoplays only the centred card's visible page, so this is what makes that coordinator visible;
+    // the still+clip pair is also the only genuinely MIXED-aspect carousel now that every bundled
+    // photo is the same 1080x1350, so it's what exercises the fit + blurred-backdrop path.
+    my_post(&main, "the cove at golden hour, on repeat 🌊", &[vid_cove.clone()], 58);
+    my_post(&main, "ridge wind — sound off, obviously 🏔️", &[vid_ridge], 52);
+    my_post(&main, "a clip and a still from the same afternoon", &[sunset, vid_cove], 46);
     let p4 = friend_post(&main, &people, 2, "everyone, meet the newest member of the crew 🐾", &[pup], None, 30);
-    // Multi-photo: exercises the feed carousel + its blurred backdrop.
     let p5 = friend_post(&main, &people, 3, "sunday slow brunch — the sourdough finally rose 🍞",
-                         &[brunch_a, brunch_b, brunch_c], None, 12);
+                         &[brunch], None, 12);
 
     react(&main, &people, &p1, "🔥", &[1, 2, 3]);
     react(&main, &people, &p1, "🪴", &[0]);
@@ -367,137 +377,122 @@ fn seed_bytes(b: u8) -> [u8; 32] {
 
 // ---- demo art --------------------------------------------------------------------------------
 //
-// Abstract gradient "photos", generated here rather than bundled. iOS ships real (people-free)
-// stock photography as assets; desktop has no asset pipeline, and a generated gradient is provably
-// PII-free — there is no image of anything. Encoded as PNG by hand: an encoder for a two-stop
-// gradient is ~40 lines of stored-deflate, which is cheaper than taking an image-crate dependency
-// that a release build would then carry for a debug-only feature.
-mod art {
-    /// One demo photo: a two-stop palette (RGB start → end) and its pixel size.
-    ///
-    /// The SIZES are deliberate, not incidental — `app.js` picks a carousel's page shape from the
-    /// aspects it decodes:
-    ///   • stories are portrait, because the story viewer is full-bleed;
-    ///   • single-photo posts are 3:2 landscape, so a 1180px-wide window shows a post AND its
-    ///     reactions AND the next author, rather than one giant card (0.8 is `PAGE_ASPECT_MIN` —
-    ///     the tallest page the feed allows, and the worst case for a screenshot);
-    ///   • the three brunch photos are MIXED on purpose. A uniform set keeps its exact aspect and
-    ///     nothing letterboxes, so the blurred backdrop never draws — the mixed set is what actually
-    ///     exercises the carousel's fit + blur-backdrop path.
-    const PHOTOS: [(([u8; 3], [u8; 3]), usize, usize); 10] = [
-        (([255, 154, 92], [122, 47, 122]), 900, 1200),  // sunset  — story, portrait
-        (([104, 168, 196], [38, 61, 92]), 900, 1200),   // ridge   — story, portrait
-        (([196, 148, 104], [74, 46, 34]), 900, 1200),   // coffee  — my story, portrait
-        (([214, 132, 108], [92, 54, 68]), 1200, 800),   // pottery — 3:2
-        (([126, 176, 116], [34, 66, 58]), 1200, 800),   // trail   — 3:2
-        (([146, 196, 138], [40, 78, 62]), 1200, 800),   // plant   — 3:2
-        (([228, 186, 132], [110, 74, 52]), 1200, 800),  // pup     — 3:2
-        (([238, 172, 128], [124, 62, 62]), 1200, 800),  // brunch a — landscape ┐ mixed set:
-        (([222, 196, 140], [96, 82, 52]), 1000, 1000),  // brunch b — square    ├ letterboxes,
-        (([196, 156, 168], [72, 48, 78]), 900, 1200),   // brunch c — portrait  ┘ blur draws
-    ];
+// The SAME real, royalty-free, people-free photos iOS and Android bundle — not gradients. Desktop
+// generated two-stop gradients here instead, on the theory that it had no asset pipeline; the result
+// was a screenshot set where every "photo" was a flat tan rectangle while the phones showed an actual
+// brunch. `include_bytes!` IS the asset pipeline: this module is `#[cfg(debug_assertions)]`, so not
+// one of these bytes reaches a release binary.
+//
+// Byte-for-byte copies of `apple/HavenApp/DemoAssets` (+ Android's two demo clips), checked in HERE
+// rather than `include_bytes!`d across the tree. Reaching into `../../../apple/…` was the first
+// instinct — one set of bytes, no drift — and it broke immediately: desktop is routinely checked out
+// as core/ + desktop/ alone (that's all the Windows build box has), and coupling the Windows build to
+// the Apple tree fails it for a debug-only screenshot feature. Android duplicates the same files for
+// the same reason. If these ever need refreshing, copy them from Apple again — that's the source.
+#[rustfmt::skip]
+mod assets {
+    pub const SUNSET:  &[u8] = include_bytes!("../demo-assets/photo-sunset.jpg");
+    pub const RIDGE:   &[u8] = include_bytes!("../demo-assets/photo-ridge.jpg");
+    pub const COFFEE:  &[u8] = include_bytes!("../demo-assets/photo-coffee.jpg");
+    pub const POTTERY: &[u8] = include_bytes!("../demo-assets/photo-pottery.jpg");
+    pub const TRAIL:   &[u8] = include_bytes!("../demo-assets/photo-trail.jpg");
+    pub const PLANT:   &[u8] = include_bytes!("../demo-assets/photo-plant.jpg");
+    pub const PUP:     &[u8] = include_bytes!("../demo-assets/photo-pup.jpg");
+    pub const BRUNCH:  &[u8] = include_bytes!("../demo-assets/photo-brunch.jpg");
+    pub const AVATAR_ME: &[u8] = include_bytes!("../demo-assets/avatar-me.jpg");
+    pub const VIDEO_COVE:  &[u8] = include_bytes!("../demo-assets/video-cove.mp4");
+    pub const VIDEO_RIDGE: &[u8] = include_bytes!("../demo-assets/video-ridge.mp4");
 
-    /// A diagonal two-stop gradient PNG for photo `i` (wraps).
-    pub fn gradient(i: usize) -> Vec<u8> {
-        let ((a, b), w, h) = PHOTOS[i % PHOTOS.len()];
-        let mut raw = Vec::with_capacity(h * (1 + w * 3));
-        for y in 0..h {
-            raw.push(0); // filter: none
-            for x in 0..w {
-                // Diagonal ramp, so the blur backdrop behind a carousel has something to work with.
-                // Signed throughout: every palette ramps at least one channel DOWN, and that
-                // difference underflows if it ever touches an unsigned type.
-                let t = (x + y) as i32 * 255 / (w + h - 2) as i32;
-                for c in 0..3 {
-                    let (from, to) = (a[c] as i32, b[c] as i32);
-                    raw.push((from + (to - from) * t / 255) as u8);
+    /// A `data:` URL — the shape the frontend's `img src` wants for a prefs-stored avatar.
+    pub fn data_url(bytes: &[u8], mime: &str) -> String {
+        format!("data:{mime};base64,{}", b64(bytes))
+    }
+
+    /// Standard base64. Hand-rolled to keep a debug-only convenience from adding a dependency the
+    /// release tree would carry.
+    fn b64(input: &[u8]) -> String {
+        const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+        for c in input.chunks(3) {
+            let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
+            let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+            for i in 0..4 {
+                // Past the real bytes each 6-bit group is padding, not data.
+                if i <= c.len() {
+                    out.push(T[(n >> (18 - i * 6)) as usize & 0x3F] as char);
+                } else {
+                    out.push('=');
                 }
             }
         }
-        png(&raw, w, h)
-    }
-
-    fn png(raw: &[u8], w: usize, h: usize) -> Vec<u8> {
-        let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-        let mut ihdr = Vec::new();
-        ihdr.extend((w as u32).to_be_bytes());
-        ihdr.extend((h as u32).to_be_bytes());
-        ihdr.extend([8, 2, 0, 0, 0]); // 8-bit, truecolour RGB, no interlace
-        chunk(&mut out, b"IHDR", &ihdr);
-        chunk(&mut out, b"IDAT", &zlib_stored(raw));
-        chunk(&mut out, b"IEND", &[]);
         out
-    }
-
-    fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
-        out.extend((data.len() as u32).to_be_bytes());
-        out.extend(kind);
-        out.extend(data);
-        let mut crc_in = kind.to_vec();
-        crc_in.extend(data);
-        out.extend(crc32(&crc_in).to_be_bytes());
-    }
-
-    /// zlib stream of DEFLATE *stored* (uncompressed) blocks — no compressor needed.
-    fn zlib_stored(raw: &[u8]) -> Vec<u8> {
-        let mut out = vec![0x78, 0x01];
-        let mut rest = raw;
-        loop {
-            let n = rest.len().min(65_535);
-            let last = n == rest.len();
-            out.push(if last { 1 } else { 0 }); // BFINAL, BTYPE=00 (stored)
-            out.extend((n as u16).to_le_bytes());
-            out.extend((!(n as u16)).to_le_bytes());
-            out.extend(&rest[..n]);
-            rest = &rest[n..];
-            if last {
-                break;
-            }
-        }
-        out.extend(adler32(raw).to_be_bytes());
-        out
-    }
-
-    fn crc32(buf: &[u8]) -> u32 {
-        let mut c = 0xFFFF_FFFFu32;
-        for &b in buf {
-            c ^= b as u32;
-            for _ in 0..8 {
-                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
-            }
-        }
-        !c
-    }
-
-    fn adler32(buf: &[u8]) -> u32 {
-        let (mut a, mut b) = (1u32, 0u32);
-        for &x in buf {
-            a = (a + x as u32) % 65_521;
-            b = (b + a) % 65_521;
-        }
-        (b << 16) | a
     }
 }
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Every bundled still, by the name the seeder uses for it.
+    const ALL_PHOTOS: [(&str, &[u8]); 8] = [
+        ("sunset", assets::SUNSET), ("ridge", assets::RIDGE), ("coffee", assets::COFFEE),
+        ("pottery", assets::POTTERY), ("trail", assets::TRAIL), ("plant", assets::PLANT),
+        ("pup", assets::PUP), ("brunch", assets::BRUNCH),
+    ];
+
+    /// The bundled photos must be REAL photos. `include_bytes!` guarantees the files exist (the build
+    /// fails otherwise) — what it can't guarantee is that they're still decodable images rather than,
+    /// say, a Git LFS pointer or a truncated copy, which would silently put an empty frame in every
+    /// screenshot exactly like the gradients did.
     #[test]
-    fn gradient_is_a_valid_png() {
-        let p = art::gradient(0);
-        assert_eq!(&p[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
-        assert_eq!(&p[12..16], b"IHDR");
-        assert!(p.ends_with(&[0xAE, 0x42, 0x60, 0x82])); // IEND crc
-        assert_eq!(crate::localmedia::image_mime(&p), "image/png");
+    fn bundled_demo_photos_are_real_jpegs() {
+        for (name, bytes) in ALL_PHOTOS {
+            assert_eq!(crate::localmedia::image_mime(bytes), "image/jpeg", "{name} is not a JPEG");
+            assert!(bytes.len() > 10_000, "{name} is {} bytes — truncated?", bytes.len());
+        }
     }
 
     #[test]
-    fn palettes_are_distinct() {
-        // Each demo photo must look different — identical refs would also collide in the
-        // content-addressed media store and render the carousel as one repeated image.
-        let refs: std::collections::HashSet<_> = (0..10).map(|i| art::gradient(i)).collect();
-        assert_eq!(refs.len(), 10);
+    fn bundled_demo_videos_are_real_mp4s() {
+        for (name, bytes) in [("cove", assets::VIDEO_COVE), ("ridge", assets::VIDEO_RIDGE)] {
+            assert_eq!(&bytes[4..8], b"ftyp", "{name} is not an MP4");
+            assert!(bytes.len() > 10_000, "{name} is {} bytes — truncated?", bytes.len());
+        }
+    }
+
+    /// Every demo photo must be a DIFFERENT image. The media store is content-addressed, so two
+    /// identical files would collapse to one ref and render the carousel as the same picture twice.
+    #[test]
+    fn bundled_demo_photos_are_distinct() {
+        let set: std::collections::HashSet<_> = ALL_PHOTOS.iter().map(|(_, b)| *b).collect();
+        assert_eq!(set.len(), ALL_PHOTOS.len());
+    }
+
+    /// The avatar has to reach the frontend as something `img src` will actually load.
+    #[test]
+    fn avatar_data_url_is_a_loadable_jpeg() {
+        let u = assets::data_url(assets::AVATAR_ME, "image/jpeg");
+        assert!(u.starts_with("data:image/jpeg;base64,/9j/"), "unexpected prefix: {}", &u[..40]);
+        let b64 = u.strip_prefix("data:image/jpeg;base64,").unwrap();
+        assert_eq!(b64.len() % 4, 0, "base64 must be whole quanta");
+        // '=' is not in the alphabet, so it may only ever appear as trailing padding.
+        assert_eq!(b64.trim_end_matches('=').find('='), None, "padding inside the body");
+    }
+
+    /// Base64 is hand-rolled here (no dependency for a debug-only file), so pin it to RFC 4648's own
+    /// vectors — including each padding length, which is the only part that's easy to get wrong.
+    #[test]
+    fn base64_matches_rfc4648() {
+        let u = |b: &[u8]| assets::data_url(b, "x").strip_prefix("data:x;base64,").unwrap().to_string();
+        assert_eq!(u(b""), "");
+        assert_eq!(u(b"f"), "Zg==");
+        assert_eq!(u(b"fo"), "Zm8=");
+        assert_eq!(u(b"foo"), "Zm9v");
+        assert_eq!(u(b"foob"), "Zm9vYg==");
+        assert_eq!(u(b"fooba"), "Zm9vYmE=");
+        assert_eq!(u(b"foobar"), "Zm9vYmFy");
+        assert_eq!(u(&[0xFF, 0xFF, 0xFF]), "////"); // the high bits of the alphabet
     }
 
     #[test]

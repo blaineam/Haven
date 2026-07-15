@@ -10,11 +10,12 @@
     <script src="app.js" type="module" defer></script>
   </head>
   <body>
-    <!-- The title bar IS the navigation, exactly like the macOS build: traffic lights at the far
-         left, the Circle/Messages/You segmented pill centred, and a per-tab trailing slot on the
-         right (circle switcher + manage-circle on Circle; the settings gear on You). It draws no
-         background of its own — the body's brand gradient runs underneath it to the extreme top
-         edge, which is the whole point. -->
+    <!-- The title bar IS the navigation, exactly like the macOS build: the Circle/Messages/You
+         segmented pill centred, and a per-tab trailing slot on the right (circle switcher +
+         manage-circle on Circle; the settings gear on You). It draws no background of its own — the
+         body's brand gradient runs underneath it.
+         The traffic lights below are macOS-ONLY (CSS gates them on `data-os`): Windows and Linux run
+         decorated and get their OS's own titlebar above this bar. -->
     <div class="titlebar" data-tauri-drag-region>
       <div class="traffic">
         <button class="tl close" id="win-close" aria-label="Close window"></button>

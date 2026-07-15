@@ -904,6 +904,20 @@ pub fn needs_onboarding() -> R<bool> {
     Ok(fresh)
 }
 
+/// True when this run is the demo/screenshot capture. Always false in release, where the module that
+/// reads the env var doesn't exist — so the frontend can gate capture-only behaviour on it safely.
+#[tauri::command]
+pub fn demo_mode() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        crate::demo::is_demo()
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
+    }
+}
+
 /// Persist `seed` as the first (active, legacy-root) identity, mirroring the legacy `master-seed`.
 fn save_first_identity(seed: [u8; 32]) -> R<()> {
     let base = crate::store::Paths::resolve().map_err(|e| e.to_string())?;

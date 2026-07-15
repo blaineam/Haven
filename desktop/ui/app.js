@@ -6,6 +6,19 @@ const TAURI = window.__TAURI__ || {};
 const invoke = TAURI.core ? TAURI.core.invoke : async () => { throw new Error("Tauri not ready"); };
 const listen = TAURI.event ? TAURI.event.listen : async () => {};
 
+// Whose window chrome are we inside? Only macOS draws its own titlebar (`decorations: false`);
+// Windows and Linux are handed their OS's real one by `apply_window_chrome`, so this decides
+// exactly one thing: whether to draw the traffic lights.
+//
+// The UA is deliberate. It is the only SYNCHRONOUS signal — `plugin-os`'s `platform()` and a
+// bespoke `invoke` are both an IPC round-trip, and the titlebar has to be right on the first paint
+// or the controls visibly rearrange. The CSS defaults to NO traffic lights, so the worst this can
+// do is show them a frame late on macOS; it can never flash them onto Windows.
+const HOST_OS = /Windows|Win64|WOW64/i.test(navigator.userAgent) ? "windows"
+  : /Macintosh|Mac OS X/i.test(navigator.userAgent) ? "macos"
+  : "linux";
+document.documentElement.dataset.os = HOST_OS;
+
 // ---- tiny helpers ----------------------------------------------------------------------
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -1634,10 +1647,17 @@ function viewStory(it) {
   const storyRef = (it.media || []).find((r) => !r.startsWith("geo:") && !r.startsWith("a:"));
   const cap = StoryCaptions.overlay(it.body);
   if (storyRef) {
-    const m = storyRef.startsWith("v:") ? el("video", { "data-ref": storyRef, controls: "", autoplay: "" }) : el("img", { "data-ref": storyRef, style: "max-width:100%;border-radius:12px" });
-    // container-query height units size the caption relative to the MEDIA, like the phones do.
-    const wrap = el("div", { style: "position:relative;max-width:100%;container-type:size;display:inline-block" }, m);
-    if (cap) wrap.append(cap);
+    const m = storyRef.startsWith("v:") ? el("video", { "data-ref": storyRef, controls: "", autoplay: "", style: "max-width:100%;border-radius:12px;display:block" }) : el("img", { "data-ref": storyRef, style: "max-width:100%;border-radius:12px;display:block" });
+    // The caption's cqh units size it against the MEDIA, like the phones do — but `container-type:
+    // size` applies `contain: size`, which tells the box to lay out as if it had NO contents. On the
+    // wrapper itself that is fatal: an auto-sized inline-block collapses to 0x0, taking the image
+    // with it, and the whole story viewer renders BLANK. WebKitGTK/WebKit tolerated it; Chromium —
+    // i.e. WebView2, i.e. every Windows user — does not.
+    // So the containment lives on an absolutely-positioned overlay INSTEAD: `inset: 0` takes its
+    // size from the wrapper rather than from its contents, so `contain: size` costs nothing and cqh
+    // still resolves to the media's height.
+    const wrap = el("div", { style: "position:relative;max-width:100%;display:inline-block" }, m);
+    if (cap) wrap.append(el("div", { style: "position:absolute;inset:0;container-type:size;pointer-events:none" }, cap));
     inner.append(wrap);
   } else if (cap) {
     const solo = el("div", { style: "position:relative;width:100%;min-height:200px;container-type:size" }, cap);
@@ -1901,7 +1921,13 @@ async function renderThread(root, dm) {
   const partner = dm.id.replace("dm:", "").split("-").find((h) => h !== state.node) || "";
   const presence = el("div", { class: "dm-presence" }, relayReachable ? "Connected" : "Offline");
 
-  root.replaceChildren(el("div", { class: "thread-wrap" },
+  // `.col-wrap` is what every other view's root render puts here (the feed, the DM list, You), and
+  // it is the ONE thing this one was missing: `.view` has NO horizontal padding of its own, so the
+  // thread ran flush to both window edges — bubbles and composer touching the glass. col-wrap is the
+  // 16px inset macOS gives the thread (`Messages.swift` ▸ `.padding(16)`) plus the same centred
+  // column cap as the feed. The `#view-messages.thread-mode > .col-wrap` height rule below has been
+  // waiting for it.
+  root.replaceChildren(el("div", { class: "col-wrap" }, el("div", { class: "thread-wrap" },
     // macOS pins the DM header (name + presence) to the LEADING edge — the window's centred tabs
     // own the middle and a centred header shoved them around as the name's width changed.
     el("div", { class: "dm-head" },
@@ -1920,7 +1946,7 @@ async function renderThread(root, dm) {
     el("div", { class: "dm-composer glass" }, editBar, musicRow,
       el("div", { class: "composer-row" }, plus, input,
         el("button", { class: "composer-send", title: "Send", "aria-label": "Send", onclick: sendText }, icon("paperplane.fill")))),
-  ));
+  )));
   hydrateMedia(root, dm.id);
   chat.scrollTop = chat.scrollHeight;
   // The user is looking at this thread: advance its read watermark. renderThread re-runs on every
@@ -1943,10 +1969,13 @@ async function connectSheet() {
   const mine = el("div", { class: "card col" },
     el("h3", {}, "Your invite"),
     el("div", { class: "muted small" }, "Have a friend scan this, or send them the link. Verify the safety code matches on both devices."),
-    el("div", { class: "row", style: "align-items:flex-start" }, qrBox,
-      el("div", { class: "col", style: "flex:1" },
+    // `wrap` on both rows, not just one: the QR is a fixed 200-odd px and the two Copy buttons are
+    // nowrap pills, so on a narrow sheet the text column has to be allowed to drop BELOW the QR and
+    // the buttons below each other. Without it they only had one way out — through the card's edge.
+    el("div", { class: "row wrap", style: "align-items:flex-start" }, qrBox,
+      el("div", { class: "col", style: "flex:1 1 260px" },
         el("div", { class: "mono" }, state.inviteUri),
-        el("div", { class: "row" },
+        el("div", { class: "row wrap" },
           el("button", { class: "btn small", onclick: () => { navigator.clipboard.writeText(state.inviteUri); toast("Invite copied"); } }, "Copy haven:// link"),
           el("button", { class: "btn small", onclick: () => { navigator.clipboard.writeText(state.inviteLink); toast("Web link copied"); } }, "Copy web link"),
         ),
@@ -2053,7 +2082,7 @@ async function relaySheet() {
     s.hosting
       ? el("div", { class: "col" },
           el("div", { class: "ok-text" }, "● Relaying"),
-          s.relay_link ? el("div", { class: "row" }, el("div", { class: "mono", style: "flex:1" }, s.relay_link), el("button", { class: "btn small", onclick: () => { navigator.clipboard.writeText(s.relay_link); toast("Relay id copied"); } }, "Copy")) : null,
+          s.relay_link ? el("div", { class: "row wrap" }, el("div", { class: "mono", style: "flex:1 1 200px" }, s.relay_link), el("button", { class: "btn small", onclick: () => { navigator.clipboard.writeText(s.relay_link); toast("Relay id copied"); } }, "Copy")) : null,
           el("div", { class: "muted small" }, "Share this id with your circle so they adopt the same relay."),
           el("button", { class: "btn danger small", onclick: async () => { await invoke("stop_hosting"); renderRelay(); } }, "Stop hosting"),
         )
@@ -2204,20 +2233,92 @@ async function renderYou() {
   for (const c of circles) hydrateMedia(root, c.id);   // refs resolve against their own circle's keys
 }
 
-/** Edit profile — macOS `EditProfileSheet`, opened by the avatar's pencil. */
+/** The emoji palette, in macOS's order — `ProfileStore.avatarChoices` (Profile.swift:120). */
+const AVATAR_EMOJI = ["🌿", "🌸", "🔥", "⭐️", "🦊", "🐢", "🌊", "🍯", "🎈", "🪴", "🦋", "🌙"];
+
+/** Downscale a picked image to an avatar and return it as a `data:` URL.
+ *
+ *  The 192px cap and JPEG q0.7 are macOS's numbers (`ProfileStore.avatarBase64`), not invented ones —
+ *  desktop stores the avatar LOCALLY today (see `editProfileSheet`), but producing the same pixels
+ *  means the day the profile card carries a photo, this side already speaks it. */
+function avatarDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onerror = () => reject(new Error("read failed"));
+    fr.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("not an image"));
+      img.onload = () => {
+        const s = Math.min(1, 192 / Math.max(img.width, img.height));
+        const c = el("canvas");
+        c.width = Math.max(1, Math.round(img.width * s));
+        c.height = Math.max(1, Math.round(img.height * s));
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        resolve(c.toDataURL("image/jpeg", 0.7));
+      };
+      img.src = fr.result;
+    };
+    fr.readAsDataURL(file);
+  });
+}
+
+/** Edit profile — the port of macOS `EditProfileSheet` (Profile.swift:219-327), opened by the You
+ *  tab's pencil. Same order and same grouping: avatar, photo buttons, name, bio + link, the caption
+ *  that explains who sees them, then the emoji grid; Done sits in the sheet's FOOTER
+ *  (`HavenMacSheet`'s footer + `BrandButtonStyle`).
+ *
+ *  Two deliberate differences from what was here before, both from reading the Mac:
+ *   • the raw `id: <64 hex>` line is GONE. macOS never shows the node id on this sheet — it belongs
+ *     to the identity switcher, and only as a 16-char prefix.
+ *   • the avatar is real. Photo/emoji write through immediately (macOS does the same: only the text
+ *     fields defer to Done), which is why the avatar buttons re-render the sheet in place.
+ *
+ *  NOTE: the avatar is stored in local prefs and is NOT broadcast — `set_profile` re-greets contacts
+ *  with the name card, and neither the desktop `Contact` nor the profile card carries an avatar. So
+ *  your circle still sees your initials. That gap is in the backend/wire, not here. */
 function editProfileSheet(p) {
-  const name = el("input", { value: p.name || "", placeholder: "Display name" });
-  const emoji = el("input", { value: p.emoji || "", placeholder: "Emoji", maxlength: 4, style: "width:90px" });
-  const bio = el("textarea", { placeholder: "One-line bio (optional)" }); bio.value = p.bio || "";
-  const link = el("input", { value: p.link || "", placeholder: "A link to show (optional)" });
-  sheet("Edit profile", el("div", { class: "col" },
-    el("div", { class: "row" }, name, emoji),
-    bio, link,
-    el("div", { class: "muted small mono" }, "id: " + state.node),
+  const name = el("input", { class: "pill-field", value: p.name || "", placeholder: "Your name" });
+  const bio = el("textarea", { class: "field-soft", placeholder: "Add a short bio", rows: 2 }); bio.value = p.bio || "";
+  const link = el("input", { class: "field-capsule", value: p.link || "", placeholder: "Add a link (e.g. yoursite.com)" });
+  let avatar = p.avatar || "";
+  let emoji = p.emoji || "🌿";
+
+  const save = (extra) => invoke("set_profile", {
+    name: name.value.trim(), bio: bio.value.trim(), link: link.value.trim(), emoji, avatar, ...extra,
+  });
+  // Re-open with the current draft so a photo/emoji change repaints without discarding typed text.
+  const redraw = () => editProfileSheet({ ...p, name: name.value, bio: bio.value, link: link.value, emoji, avatar });
+
+  const picker = el("input", { type: "file", accept: "image/*", style: "display:none", onchange: async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    try { avatar = await avatarDataUrl(f); await save(); redraw(); renderYou(); }
+    catch (_) { toast("That file isn't an image Haven can read"); }
+  } });
+
+  const photoRow = el("div", { class: "row wrap", style: "justify-content:center" },
+    el("button", { class: "btn small tint-pink", onclick: () => picker.click() }, avatar ? "Change photo" : "Add photo"),
+    avatar ? el("button", { class: "btn small danger", onclick: async () => { avatar = ""; await save(); redraw(); renderYou(); } }, "Remove") : null,
+    picker,
+  );
+
+  const grid = el("div", { class: "emoji-grid" });
+  for (const e of AVATAR_EMOJI) {
+    grid.append(el("button", { class: "emoji-cell" + (emoji === e ? " on" : ""), onclick: async () => { emoji = e; await save(); redraw(); renderYou(); } }, e));
+  }
+
+  sheet("Edit profile", el("div", { class: "edit-profile" },
+    el("div", { class: "ep-avatar" }, avatar ? el("img", { src: avatar }) : el("span", {}, emoji)),
+    photoRow,
+    name,
+    el("div", { class: "col", style: "gap:10px" }, bio, link),
+    el("div", { class: "ep-caption" }, "Your bio and link show on your profile for the people in your circle."),
+    el("div", { class: "ep-label" }, avatar ? "Emoji (used if you remove your photo)" : "Pick an emoji"),
+    grid,
   ), el("button", { class: "btn primary wide", onclick: async () => {
-    await invoke("set_profile", { name: name.value.trim(), bio: bio.value.trim(), link: link.value.trim(), emoji: emoji.value.trim(), avatar: p.avatar || "" });
+    await save();
     closeModal(); toast("Profile saved & shared"); renderYou();
-  } }, "Save"));
+  } }, "Done"));
 }
 
 /** SETTINGS — the gear in the You tab's toolbar. Grouped rows in the macOS order
@@ -2738,6 +2839,13 @@ async function boot() {
   try {
     if (await invoke("needs_onboarding")) { renderOnboarding(); return; }
   } catch (_) {}
+  // The demo cast starts PAST the relay nudge, exactly like the phones' seeders
+  // (DemoSeed.swift ▸ `RelayNudgeStore.shared.dismiss`, DemoSeed.kt ▸ `RelayNudge.dismiss`). It's a
+  // problem-state banner — "this circle has no relay yet" — and a seeded circle trips it purely
+  // because the seeder never hosts, so it would head every screenshot with a complaint. Desktop
+  // dismisses it HERE rather than in the seeder because this nudge's state is localStorage, which
+  // the Rust side can't reach.
+  if (await invoke("demo_mode").catch(() => false)) RelayNudge.dismiss("default");
   $$(".tab").forEach((b) => b.addEventListener("click", () => switchView(b.dataset.view)));
   try {
     const b = await invoke("bootstrap");
@@ -2807,7 +2915,8 @@ async function boot() {
 
 window.addEventListener("DOMContentLoaded", boot);
 
-// macOS-style titlebar window controls (traffic lights). `withGlobalTauri` exposes the window API.
+// The macOS traffic lights (hidden everywhere else — see `HOST_OS`). `withGlobalTauri` exposes the
+// window API. Close goes through `close()` on purpose: the backend turns it into hide-to-tray.
 (() => {
   const w = window.__TAURI__?.window?.getCurrentWindow?.();
   if (!w) return; // not running under Tauri (e.g. the browser style gallery) — buttons are inert

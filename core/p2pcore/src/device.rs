@@ -362,9 +362,16 @@ pub fn recipients_with_devices(
         if seen.insert(acct) {
             out.push(m.clone());
         }
-        // PLUS each currently-authorized device bundle, so a LINK-FLOW device (which does NOT hold the
-        // account seed) can also open — and revocation still cuts it off: a revoked device is dropped from
-        // here AND lacks the account seed, so it can open neither path.
+        // PLUS each currently-authorized device bundle, so a LINK-FLOW device can also open.
+        //
+        // ⚠️ Revocation cuts a device off ONLY if that device does not hold the account seed. Dropping it
+        // from here closes the device-key path, but the account-key path above stays open to anyone
+        // holding the seed. NO SUCH LINK FLOW SHIPS TODAY: linking copies the master seed
+        // (`haven-seed:` / `haven-link:`), and enrollment only ADDS a device key to a device that already
+        // has the seed. So against a device whose seed was extracted, revoking is advisory — it stops a
+        // lost phone, not a compromised one. Closing this needs the D16 Phase 2 seed-drop (a linked device
+        // runs under its device key + credential and holds no seed); until then, do not describe
+        // revocation as cryptographic. See MULTI-DEVICE.md.
         if let Some(d) = devices_by_account.get(&acct) {
             for b in d.authorized_bundles() {
                 if seen.insert(b.node_id_bytes()) {

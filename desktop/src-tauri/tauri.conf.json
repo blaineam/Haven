@@ -76,14 +76,16 @@
         "recommends": [
           "pipewire",
           "xdg-desktop-portal"
-        ]
+        ],
+        "desktopTemplate": "main.desktop"
       },
       "rpm": {
         "depends": [
           "webkit2gtk4.1",
           "gtk3",
           "libappindicator-gtk3"
-        ]
+        ],
+        "desktopTemplate": "main.desktop"
       }
     },
     "category": "SocialNetworking",

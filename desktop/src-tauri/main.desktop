@@ -1,0 +1,15 @@
+[Desktop Entry]
+Categories=Network;InstantMessaging;
+Comment=Serverless, post-quantum, peer-to-peer social for friends and family
+Exec={{exec}} {{exec_arg}}
+Icon={{icon}}
+Name={{name}}
+Terminal=false
+Type=Application
+Keywords=social;chat;private;encrypted;p2p;
+# MUST equal the binary's real WM_CLASS. GTK derives it from the program name, so it is
+# "haven-desktop" — NOT {{name}} ("Haven"), which is what Tauri's default template emits.
+# GNOME matches a window to its .desktop via this key; the mismatch left every Linux package
+# (deb/rpm/AppImage) showing a generic dock icon with no app name, even though the window
+# itself carries _NET_WM_ICON. Verified with: xprop -id <win> WM_CLASS
+StartupWMClass=haven-desktop

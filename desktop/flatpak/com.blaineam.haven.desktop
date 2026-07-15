@@ -8,4 +8,8 @@ Icon=com.blaineam.haven
 Terminal=false
 Categories=Network;InstantMessaging;
 Keywords=social;chat;private;encrypted;p2p;
-StartupWMClass=Haven
+# MUST equal the binary's actual WM_CLASS, which GTK derives from the program name — measured as
+# `WM_CLASS(STRING) = "haven-desktop", "Haven-desktop"`, NOT the product name. GNOME matches a
+# window to its .desktop through this; with "Haven" it never matched, so the dock showed a generic
+# icon and no app name even though the window itself carries _NET_WM_ICON.
+StartupWMClass=haven-desktop

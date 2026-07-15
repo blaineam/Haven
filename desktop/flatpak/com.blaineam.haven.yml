@@ -28,9 +28,8 @@ finish-args:
   # Audio (calls, music, voice notes).
   - --socket=pulseaudio
   # Camera + screen share go through the desktop portals (PipeWire); no raw /dev/video grab.
-  - --talk-name=org.freedesktop.portal.Camera
-  - --talk-name=org.freedesktop.portal.ScreenCast
-  - --talk-name=org.freedesktop.portal.Desktop
+  # No --talk-name needed for those: every Flatpak can talk to org.freedesktop.portal.* by
+  # default, so listing them is redundant and a Flathub reviewer will ask you to drop them.
   # Secret Service for the identity seed (same "keys never leave device" rule as iOS).
   - --talk-name=org.freedesktop.secrets
   # System tray on the Deck desktop.

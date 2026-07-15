@@ -309,7 +309,7 @@ jobs:
           if-no-files-found: error
 
   flatpak:
-    needs: desktop
+    needs: [meta, desktop]
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-47
@@ -334,6 +334,42 @@ jobs:
               t, flags=re.S)
           m.write_text(t)
           PY
+      # The AppStream <release> is what a Flatpak/Flathub client shows as "what version is
+      # this?". Hand-maintaining it is how it ended up pinned at 0.1.0 for 40 releases, so
+      # stamp it from the tag exactly like tauri.conf.json and the relay crate above.
+      - name: Stamp the metainfo release
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re, pathlib, datetime
+          v = os.environ["VERSION"]
+          d = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+          p = pathlib.Path("desktop/flatpak/com.blaineam.haven.metainfo.xml")
+          t = p.read_text()
+          t, n = re.subn(r'<release version="[^"]*" date="[^"]*"\s*/>',
+                         f'<release version="{v}" date="{d}"/>', t, count=1)
+          if n != 1:
+              raise SystemExit("metainfo <release> line not found — did its shape change?")
+          p.write_text(t)
+          print(f"stamped {v} ({d})")
+          PY
+      # flatpak-builder only warns on bad AppStream data; a Flathub reviewer will not. Fail the
+      # release here instead — shipping a broken listing is worse than not shipping. A *missing
+      # validator* is not itself a reason to block, so that case only warns.
+      # --no-net: the screenshot URLs are remote and the builder has no business fetching them.
+      - name: Validate the metainfo
+        run: |
+          set -euo pipefail
+          f=desktop/flatpak/com.blaineam.haven.metainfo.xml
+          if command -v appstreamcli >/dev/null 2>&1; then
+            appstreamcli validate --no-net "$f"
+          elif command -v appstream-util >/dev/null 2>&1; then
+            appstream-util validate-relax "$f"
+          else
+            echo "::warning::no appstreamcli/appstream-util in the image; skipped validation"
+          fi
       - name: Build Flatpak bundle
         uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:

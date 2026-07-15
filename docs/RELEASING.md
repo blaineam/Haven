@@ -38,7 +38,7 @@ same code. That's fixed by the gate in `release.yml`, not by convention.
 | Desktop `.msi`/`.exe`/`.deb`/`.rpm`/AppImage/MSIX | **product** | `release.yml` stamps `desktop/src-tauri/tauri.conf.json` |
 | `haven-relay` binary + `.deb` | **product** | `release.yml` (and `relay-release.yml`) stamps `core/haven-relay/Cargo.toml` |
 | AUR `haven-desktop` / `haven-relay` `pkgver` | **product** | `release.yml`'s `aur` job stamps it from the tag |
-| Flatpak / metainfo `<release version=…>` | **product** | hand-updated (see [Flathub](#flathub)) |
+| Flatpak / metainfo `<release version=…>` | **product** | `release.yml`'s `flatpak` job stamps `desktop/flatpak/com.blaineam.haven.metainfo.xml` from the tag |
 
 ### What deliberately does NOT
 
@@ -228,20 +228,35 @@ build-from-source rule binds, regardless of PolyForm Noncommercial not being an 
 3. Confirm the **GNOME 47 runtime** still carries the WebKitGTK the Tauri WebView needs when
    building from source rather than consuming the `.deb`'s deps.
 
-### Metainfo — what's actually missing
+### Metainfo — done
 
-`desktop/flatpak/com.blaineam.haven.metainfo.xml` is close. Required fixes:
+`desktop/flatpak/com.blaineam.haven.metainfo.xml` is submission-ready; the four gaps that were
+listed here are closed. What changed and what to keep in mind:
 
-- **`<releases>` is stale** — says `version="0.1.0" date="2026-06-23"`. Must reflect the
-  released version.
-- **`project_license`** is `LicenseRef-proprietary=https://…`. Should be
-  `LicenseRef-PolyForm-Noncommercial-1.0.0`, matching what the PKGBUILDs already declare.
-- **No `<screenshots>`.** Not strictly required for publication — Flathub's quality guidelines
-  are explicitly "not required for submission" — but no screenshots means no curation, no
-  banner, and a bad store listing. `desktop/screenshots/linux/` already has six good captures
-  (`feed`, `messages`, `thread`, `invite`, `you`, `editprofile`); they need hosting at a
-  stable URL.
-- **No `<developer id="…">`** block.
+- **`<releases>` is stamped by CI.** It said `0.1.0` for 40 releases because it was
+  hand-maintained. `release.yml`'s `flatpak` job now rewrites the `<release>` line from the tag
+  before `flatpak-builder` runs, exactly like `tauri.conf.json`. The number in-tree only has to
+  be right for local builds. That job also runs `appstreamcli validate` and **fails the
+  release** on bad AppStream data — flatpak-builder only warns, a Flathub reviewer won't.
+- **`project_license`** is now `LicenseRef-PolyForm-Noncommercial-1.0.0`, matching the
+  PKGBUILDs and the actual LICENSE.
+- **`<developer id="com.blaineam">`** is present.
+- **`<screenshots>`** references three captures — `feed`, `thread`, `you`.
+  ⚠️ **The hosting is the fragile part.** `desktop/screenshots/linux/` is **gitignored**
+  capture scratch, so those files have no URL and can't be referenced. The copies that the
+  metainfo actually points at live in **`web/assets/screenshots/linux/`**, which
+  `static.yml` deploys to GitHub Pages (`https://blaineam.github.io/haven/assets/…`).
+  **Re-capturing does not update the listing** — copy the new PNGs into `web/` too.
+  (Not `https://wemiller.com/apps/haven/…`: that's the portfolio page, and it does not serve
+  this repo's assets — the paths 404.)
+
+Three of the six captures are deliberately **not** published:
+
+| Capture | Why not |
+|---|---|
+| `invite` | Renders a real invite QR + `haven://invite?d=…#<key material>`. It's a throwaway demo identity, but a permanent public URL for a live invite link is not a thing to publish without a reason. |
+| `editprofile` | Capture artifact — a stray "Edit profile" tooltip sits over the avatar. |
+| `messages` | ~80% empty space at 1280×805; `thread` shows messaging properly. |
 
 Fine as-is: app-id matches the `.desktop`/`identifier` (`com.blaineam.haven`) everywhere,
 `launchable`, `content_rating`, `categories`, and both `url`s are present, and a 256px icon
@@ -253,9 +268,9 @@ exists.
 wildcards, no `--device=all`. Camera and screen share go through portals rather than grabbing
 `/dev/video*` raw, which is exactly what reviewers look for. Two notes:
 
-- The four `--talk-name=org.freedesktop.portal.*` lines are **redundant** — portal access is
-  granted to every Flatpak by default. Harmless, but a reviewer will likely ask you to drop
-  them.
+- The four `--talk-name=org.freedesktop.portal.*` lines were **redundant** — portal access is
+  granted to every Flatpak by default — and have been **dropped**. `org.freedesktop.secrets`
+  and `org.kde.StatusNotifierWatcher` stay; those are not portals and are not default.
 - `--filesystem=xdg-download` is justifiable (saving media) but a reviewer may push toward the
   file-chooser portal instead. Easy to defend or concede.
 

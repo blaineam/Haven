@@ -2,9 +2,12 @@
 <component type="desktop-application">
   <id>com.blaineam.haven</id>
   <metadata_license>CC0-1.0</metadata_license>
-  <project_license>LicenseRef-proprietary=https://github.com/blaineam/haven/blob/main/LICENSE</project_license>
+  <project_license>LicenseRef-PolyForm-Noncommercial-1.0.0</project_license>
   <name>Haven</name>
   <summary>Private, post-quantum, peer-to-peer social</summary>
+  <developer id="com.blaineam">
+    <name>Blaine Miller</name>
+  </developer>
   <description>
     <p>
       Haven is a serverless, end-to-end encrypted social network for the people you
@@ -26,11 +29,36 @@
   </categories>
   <url type="homepage">https://wemiller.com/apps/haven</url>
   <url type="bugtracker">https://github.com/blaineam/haven/issues</url>
+  <!--
+    Hosted out of `web/`, which .github/workflows/static.yml deploys to GitHub Pages on every
+    push to main. Sources live in `web/assets/screenshots/linux/` — the captures under
+    `desktop/screenshots/linux/` are gitignored capture scratch and have no stable URL, so
+    referencing them directly would not resolve. Re-capturing? Copy the new PNGs into `web/`
+    too, or these go stale.
+  -->
+  <screenshots>
+    <screenshot type="default">
+      <image type="source" width="1280" height="805">https://blaineam.github.io/haven/assets/screenshots/linux/feed.png</image>
+      <caption>Your circle's feed — photos, video, and music, end-to-end encrypted</caption>
+    </screenshot>
+    <screenshot>
+      <image type="source" width="1280" height="805">https://blaineam.github.io/haven/assets/screenshots/linux/thread.png</image>
+      <caption>Direct messages, with voice and video calls one tap away</caption>
+    </screenshot>
+    <screenshot>
+      <image type="source" width="1280" height="805">https://blaineam.github.io/haven/assets/screenshots/linux/you.png</image>
+      <caption>Your profile and stories, shared only with the people you invited</caption>
+    </screenshot>
+  </screenshots>
   <content_rating type="oars-1.1">
     <content_attribute id="social-chat">intense</content_attribute>
     <content_attribute id="social-audio">intense</content_attribute>
   </content_rating>
+  <!--
+    release.yml's `flatpak` job rewrites this line from the tag at build time (same as it
+    stamps tauri.conf.json), so the number here only has to be right for local builds.
+  -->
   <releases>
-    <release version="0.1.0" date="2026-06-23"/>
+    <release version="1.0.5" date="2026-07-15"/>
   </releases>
 </component>

@@ -134,8 +134,11 @@ iCloud-Keychain backup/restore of identity history; multi-token push. **Phase 1*
 trust layer (`p2pcore::device`). **Phase 3** `AccountState` CRDT convergence engine
 (`p2pcore::selfsync`) — wired end to end on iOS/iPadOS, macOS, Android, and desktop — plus
 own-device event convergence (per-device transport ids + epoch-key convergence). **Phase 2** FFI
-export done; enrollment QR/verify flow + UI ship. *(Phase 2's remaining seed-drop: Outstanding #1.
-Phase 4 personal forwarder + Phase 5 MLS hardening: not started.)*
+export done; enrollment QR/verify flow + UI ship. **Phase 4b** live device-to-device delivery
+(`haven_net::livedelivery`) — an authored event goes straight to your other online devices instead of
+waiting out their mailbox poll; strictly additive (the mailbox put is unchanged), core + iOS/macOS +
+Android. *(Phase 2's remaining seed-drop: Outstanding #1. Phase 4b's personal forwarder + Phase 5 MLS
+hardening: not started; live delivery is not wired on desktop yet.)*
 
 ### ✅ Apple apps (M3)
 iOS/iPadOS + native macOS SwiftUI on the Rust core via a UniFFI XCFramework. **Live on the App
@@ -226,8 +229,9 @@ push.
 - **MLS hardening** (`mls-rs` + a hybrid-PQ ciphersuite) — per-message forward secrecy and
   post-compromise secrecy. Gated on a PQ ciphersuite (D3). This is the single largest outstanding
   *cryptographic* item, and every doc above is now honest about not having it.
-- **D16 Phase 4**: live device-to-device delivery + always-on personal store-and-forward (ordered
-  backlog cache).
+- **D16 Phase 4b**: the always-on personal store-and-forward node (ordered backlog cache). The live
+  device-to-device half is **done** (`haven_net::livedelivery`, core + iOS/macOS + Android); what's
+  left is the forwarder, plus wiring live delivery on desktop.
 - **OpenTofu modules** for one-command relay deploy (AWS / GCP / Azure / Hetzner / Fly / DO / R2 /
   Oracle / bare VPS). Confirmed absent — no `.tf` anywhere in the repo.
 - **Relay self-registration to discovery**; true two-machine field run.

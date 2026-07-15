@@ -959,6 +959,26 @@ object HavenNet : InboundListener {
         return out.toList()
     }
 
+    /** My OWN other devices' transport ids — the live-delivery fan-out set (D16 Phase 4b).
+     *  Excludes this device (dialing our own id loops iroh's path discovery unboundedly — the
+     *  self-connect leak) and the account id (a contact handle that resolves to NO endpoint under
+     *  per-device transport seeds, so dialing it is a guaranteed timeout, not a sibling).
+     *  Parity with iOS myOtherDeviceTargets. */
+    private fun myOtherDeviceTargets(): List<String> {
+        val mineAcct = runCatching { social.myNodeHex() }.getOrNull()?.lowercase() ?: return emptyList()
+        val mineDev = runCatching { social.myDeviceNodeHex() }.getOrNull()?.lowercase()
+        return runCatching { social.deviceNodeIdsFor(mineAcct) }.getOrDefault(emptyList())
+            .map { it.lowercase() }
+            .filter { it != mineAcct && it != mineDev }
+    }
+
+    /** Push a frame straight to my own other devices while they're online (see `haven_net::livedelivery`).
+     *  Best-effort by contract: a sibling that's asleep is the EXPECTED case, not an error — the caller's
+     *  durable mailbox path always runs regardless of what happens here. */
+    private fun liveDeliverToMyDevices(type: Int, payload: ByteArray) {
+        for (t in myOtherDeviceTargets()) sendFrame(type, payload, t)
+    }
+
     fun unblock(idHex: String) {
         blocked.removeAll { it == idHex }
         saveBlocked()
@@ -1202,6 +1222,11 @@ object HavenNet : InboundListener {
         scope.launch(Dispatchers.Main) { feedVersion.value++ }
         val payload = Wire.eventPayload(circleId, env)
         for (idHex in dialTargets(circleId)) sendFrame(Wire.EVENT, payload, idHex)
+        // Live delivery (D16 Phase 4b): dialTargets deliberately excludes us, so my OTHER devices only
+        // ever learned about this from the mailbox poll (30s+, stretching to 180s when idle). Hand it to
+        // them now while they're online. Strictly an optimisation — the uploadEvent below is
+        // unconditional and stays what a sleeping/not-yet-linked device gets. iOS parity.
+        liveDeliverToMyDevices(Wire.EVENT, payload)
         // Store-and-forward via the circle relay so offline members still get it. The epoch HEAD
         // (roster + current key commit) rides along: with the full-history backfill throttled to
         // daily, a relay-only peer could otherwise pull this event long before the commit that opens

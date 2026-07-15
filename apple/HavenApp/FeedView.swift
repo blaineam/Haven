@@ -1282,6 +1282,11 @@ final class FeedStore: ObservableObject {
         // Deliver the event to each member's DEVICE node ids (+ account id for old-build peers) — the account
         // id alone no longer resolves under device-seed. Notification sealing below stays per-ACCOUNT recipient.
         for t in dialTargets(circleId) { sendIroh(1, payload, to: t) }
+        // Live delivery (D16 Phase 4b): dialTargets deliberately excludes us, so my OTHER devices only
+        // ever learned about this post from the mailbox poll (~120s) or an APNs wake. Hand it to them
+        // now while they're online. Strictly an optimisation — the mailbox enqueue below is unconditional
+        // and remains what a sleeping/not-yet-linked device gets.
+        liveDeliverToMyDevices(1, payload)
         for nodeHex in members {
             // Seal + SIGN the banner to this recipient; the relay forwards it blind, their NSE
             // decrypts AND verifies it really came from us (audit H2).
@@ -1446,6 +1451,32 @@ final class FeedStore: ObservableObject {
             await MainActor.run { self?.lastSendError = anyOk ? nil : lastErr }
         }
     }
+    /// My OWN other devices' transport ids — the live-delivery fan-out set (D16 Phase 4b).
+    /// Excludes this device (dialing our own id loops iroh's path discovery unboundedly — the
+    /// self-connect leak) and the account id (a contact handle that resolves to NO endpoint under
+    /// per-device transport seeds, so dialing it is a guaranteed ~30s timeout, not a sibling).
+    private func myOtherDeviceTargets() -> [String] {
+        guard let social else { return [] }
+        let mineAcct = social.myNodeHex().lowercased()
+        let mineDev = social.myDeviceNodeHex().lowercased()
+        return social.deviceNodeIdsFor(accountHex: social.myNodeHex())
+            .map { $0.lowercased() }
+            .filter { $0 != mineAcct && $0 != mineDev }
+    }
+
+    /// Push a frame straight to my own other devices while they're online (see `haven_net::livedelivery`).
+    /// Best-effort by contract: a sibling that's asleep is the EXPECTED case, not an error — so this
+    /// never touches `lastSendError` (that surfaces "we couldn't reach your contact", which this isn't)
+    /// and the caller's durable mailbox path always runs regardless of what happens here.
+    private func liveDeliverToMyDevices(_ type: UInt8, _ payload: Data) {
+        let targets = myOtherDeviceTargets()
+        guard !targets.isEmpty, let node else { return }
+        let f = frame(type, payload)
+        Task {
+            for t in targets { try? await node.sendToNode(nodeIdHex: t, payload: f) }
+        }
+    }
+
     private func nearbyBroadcast(_ type: UInt8, _ payload: Data) {
         nearby?.broadcast(frame(type, payload))
     }

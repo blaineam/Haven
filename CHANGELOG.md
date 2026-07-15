@@ -10,6 +10,19 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased] — 2026-07-14
 
 ### Added
+- **Live device-to-device delivery** (multi-device D16, Phase 4b). A post authored on your phone now
+  lands on your Mac *while you're looking at it*, instead of after its next mailbox poll — up to 120s
+  on iOS, 30–180s on Android/desktop. The fan-out lists that reach your contacts deliberately exclude
+  you, so your own devices previously had no direct path at all and depended on that poll (or, on iOS
+  only, a push wake). Core: `haven_net::livedelivery`; wired on iOS/macOS + Android.
+  **Strictly additive:** the mailbox upload is unchanged and unconditional, so live delivery only
+  changes how *fast* a sibling learns, never *whether* — a sleeping device, or one you link tomorrow,
+  gets exactly what it always did. Attempts are bounded (3s/device, 5s total) so a sleeping sibling
+  never holds a post behind iroh's ~30s dial timeout, and never dial our own id (the self-connect
+  path-discovery leak) or the account id (a contact handle that resolves to no endpoint under
+  per-device transport seeds). Proven both ways in `core/haven-net/tests/live_delivery.rs`: delivery
+  with **no relay in the test at all**, and the identical event still arriving when the direct path
+  is dead.
 - **Blurred media backdrop.** A tall photo or clip no longer sits in a narrow column with the card's
   grey either side — the page now spans the card and a blurred, cropped copy of the media fills the
   letterbox. All four clients. Video uses the poster still, not a second live layer: an `AVPlayer`

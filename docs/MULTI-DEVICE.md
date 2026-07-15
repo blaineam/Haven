@@ -34,9 +34,16 @@
 > drain and future re-seals use the agreed key. Consistent across iOS/macOS, Android (shared `.so`),
 > and desktop (links the crate directly).
 >
-> **Still ahead:** enrollment flow + UI (Phase 2), live device-to-device delivery + a personal
-> forwarder (Phase 4), and the MLS leaf/commit hardening for per-message forward secrecy +
-> post-compromise security (Phase 5). See **Implementation phases** below.
+> **Live delivery (shipped, Phase 4b):** an event authored on one device is now handed **straight to
+> the user's other online devices** over iroh, instead of waiting out their next mailbox poll (~120s
+> iOS / 30s+ Android/desktop). It is strictly additive — the mailbox put is unchanged and
+> unconditional, so a sleeping device loses nothing. See
+> [Live device-to-device delivery](#live-device-to-device-delivery-phase-4b).
+>
+> **Still ahead:** enrollment flow + UI (Phase 2), the **personal forwarder** half of Phase 4b (an
+> always-on Mac as the user's own store-and-forward node — designed below, not built), and the MLS
+> leaf/commit hardening for per-message forward secrecy + post-compromise security (Phase 5). See
+> **Implementation phases** below.
 
 ## Implementation phases (D16)
 
@@ -46,7 +53,7 @@
 | **2. Enrollment & UI** | FFI export (done): `issue/verify_device_credential`, `sign/verify_device_list`, `device_list_is_authorized`, plus an `AccountStateHandle` object + `seal/open_account_state`. Ahead: QR/short-code link of a new device + out-of-band verification phrase; the authorizing device issues the credential and publishes a new `DeviceList`; "Blaine linked a new device" notice. Per-client (iOS → Android → desktop). | `p2pcore-ffi::multidevice` + clients | 🟡 **FFI export done**; enrollment QR/verify + UI ahead |
 | **3. Account-state self-sync** | A per-account state blob (roster, circles, contacts, profile, settings, blocked list, read state, **pinned conversations**) **self-sealed to the account's own devices** and synced via the mailbox; CRDT/LWW merge so devices converge. Gives "my devices show the same thing." Plus **own-device event convergence** (per-device epoch keys converge on the numerically-larger key) so authored/received posts + DMs sync across devices. | `p2pcore::selfsync` + `p2pcore-ffi::receive_key_commit` + relay/nearby channel | ✅ **all platforms**: iOS/macOS + desktop (relay+S3) + Android (relay) converge profile + settings + contacts + blocked + circles + message-pins, and own-device posts/DMs sync |
 | **4. Device-aware circle sealing + revocation** | A circle's epoch key seals to each member's AUTHORIZED **device** bundles (`recipients_with_devices`), never a revoked one; receive accepts a member's authorized device as committer/sender; ingest/store signed rosters (rollback-defended) + rotate epochs on add/revoke; rosters ride the sync bundle (`TAG_DEVICE_ROSTER`). | `p2pcore::device` + `p2pcore-ffi` | ✅ **core done & tested** — `linked_device_receives_then_revocation_cuts_it_off` proves a device receives content and revocation cuts it off. App side ahead: enrollment (device keypair + issue credential on link) + Authorized-Devices UI/revoke. |
-| **4b. Live delivery + personal forwarder** | Real-time device-to-device push when both are online; an always-on device (Mac) as the user's ordered store-and-forward node, complementing the relay. | `haven-net` + clients | ⏭️ |
+| **4b. Live delivery + personal forwarder** | Real-time device-to-device push when both are online ([`haven_net::livedelivery`](../core/haven-net/src/livedelivery.rs)): an event authored on one device is handed straight to the user's other online devices, instead of waiting out their next mailbox poll. **Strictly additive** — the mailbox put is unchanged and unconditional, so live delivery only changes *how fast* a sibling learns, never *whether* (see below). Personal forwarder: not started. | `haven-net` + clients | 🟡 **live delivery done** (core + iOS/macOS + Android); forwarder ⏭️ |
 | **5. MLS hardening** | Each device becomes an MLS leaf; Add/Remove **commits** give forward secrecy + post-compromise security on link/revoke. Gated on the separate MLS (D3) work. | `p2pcore` (mls-rs) | ⏭️ (after MLS) |
 
 ### Self-sync mailbox channel (the recipe clients implement)
@@ -158,9 +165,56 @@ hybrid KEM. So a message is decryptable by **all** of the user's authorized devi
 multi-recipient public-key encryption — it works, it's tested, and it gives cryptographic
 revocation, but it does **not** give per-message forward secrecy or post-compromise security.
 
+## Live device-to-device delivery (Phase 4b)
+
+Own-device sync is mailbox-mediated: a device writes to its slot / the circle mailbox, and its
+siblings find out **on their next poll** — ~120s on iOS, 30s base on Android/desktop (stretching to
+180s when idle). Correct, durable, and slow enough to feel broken when both devices are sitting on
+the same desk.
+
+Live delivery closes that gap: on authoring an event, a device also hands it **straight to its own
+other devices** over iroh ([`livedelivery::deliver_to_own_devices`](../core/haven-net/src/livedelivery.rs)).
+Note the client fan-out lists deliberately *exclude* self (`dialTargets`), because they're built for
+reaching contacts — so before this, your own devices had no direct path at all and depended on the
+poll (or, on iOS only, an APNs wake).
+
+**It is an optimisation, and never a replacement.** The mailbox put stays unconditional:
+
+- **The sender cannot know the recipient set.** A device that's offline now, or linked tomorrow, can
+  only ever be served by the durable mailbox. "I reached both devices I know about" is not "everyone
+  has it", so a successful live push can never license skipping the put.
+- **Absence is not deletion.** A device that missed a live push has learned *nothing* — least of all
+  that a record is gone. Everything here converges through the [`selfsync`](../core/p2pcore/src/selfsync.rs)
+  CRDT, where a missed message is indistinguishable from one not yet sent and only an explicit,
+  newer-stamped tombstone removes anything. Nothing may read "you didn't get it live" as information.
+  (This is the same class of bug as the fresh-restored device that had its circles wiped; see
+  `safeToTombstone`.)
+
+So the failure mode of the whole path is "the sibling finds out on its next poll, as it always did".
+Attempts are bounded (3s per device, 5s total) — something slower than that has already lost to the
+poll it was meant to beat, and must not hold a user-triggered post behind iroh's ~30s dial timeout.
+Targets are **device** ids only: the account id resolves to no endpoint under per-device transport
+seeds (it's a contact handle), and our own id is filtered because dialing yourself loops iroh's path
+discovery unboundedly.
+
+**What ordering actually buys.** Phase 4b is sketched as "ordered store-and-forward", but for account
+state that oversells it: `AccountState::merge` is commutative, associative and idempotent, so a live
+push that arrives out of order, twice, or never converges to the same state anyway. Ordering matters
+for the **epoch KeyCommit backlog** — a device must see a commit to hold the key that opens content
+sealed under it — and that is a property of the mailbox backlog, not of this path. Live delivery
+therefore promises no order and doesn't invent one the engine doesn't need.
+
+Proven by `core/haven-net/tests/live_delivery.rs`: a post reaches a sibling with **no relay node in
+the test at all**, and with the direct path dead the identical event still arrives via the mailbox.
+
 ## The always-on device as a personal forwarder
 
-An always-on device (typically a **Mac** — a web tab is a weak always-on node) doubles
+> **Design sketch — not built.** This is the second half of Phase 4b and no code implements it. What
+> exists today is the live-delivery half above, plus the fact that a Mac can already host the
+> ordinary circle relay/mailbox in-process (`enable_relay`), which covers much of the intent below.
+> Treat this section as the plan, in the future tense.
+
+An always-on device (typically a **Mac** — a web tab is a weak always-on node) would double
 as the user's **personal store-and-forward node**, advancing the $0 goal because it's
 infrastructure the user already owns:
 

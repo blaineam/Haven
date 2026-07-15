@@ -186,7 +186,9 @@ impl HavenEngine {
 
     /// The reduced feed as JSON (posts + comments + reactions), newest-first per the engine.
     pub fn feed_json(&self, now_ms: u64) -> String {
-        let items = build_feed(self.events.clone(), now_ms, None);
+        // No viewer retention in the wasm engine, so nothing auto-deletes and `keep_own_author`
+        // (which only exempts my posts FROM viewer retention) has nothing to exempt: None.
+        let items = build_feed(self.events.clone(), now_ms, None, None);
         serde_json::to_string(&items).unwrap_or_else(|_| "[]".into())
     }
 

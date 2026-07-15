@@ -21,6 +21,7 @@ use iroh::{
 
 pub mod blobstore;
 pub mod httprelay;
+pub mod livedelivery;
 pub mod relay;
 pub mod s3tunnel;
 

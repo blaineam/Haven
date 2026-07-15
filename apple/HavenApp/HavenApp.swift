@@ -33,7 +33,13 @@ final class HavenAppDelegate: NSObject, UIApplicationDelegate {
         // since boot. Synchronous on purpose (a queued Task can land after launch returns);
         // didFinishLaunching runs on the main thread, so main-actor isolation holds. The
         // onAppear call remains — startVoip is idempotent.
-        MainActor.assumeIsolated { PushManager.shared.startVoip() }
+        // …except under the offline/screenshot harness: HAVEN_NO_NET means "never bring the node
+        // online or touch the push relay", and PushKit registration does exactly that (it goes on
+        // to register a VoIP token with the relay). The onAppear startVoip below is already gated
+        // the same way — this is the launch path that wasn't.
+        if ProcessInfo.processInfo.environment["HAVEN_NO_NET"] != "1" {
+            MainActor.assumeIsolated { PushManager.shared.startVoip() }
+        }
         #if os(iOS)
         // Bring up the Apple Watch companion bridge (thin client over WCSession). No-op if
         // there's no paired Watch; it just vends recent threads + accepts quick replies.

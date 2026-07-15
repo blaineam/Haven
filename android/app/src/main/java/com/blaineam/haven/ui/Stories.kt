@@ -41,6 +41,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -50,6 +51,18 @@ import uniffi.haven_ffi.FeedItemFfi
 
 /** One author's active stories, grouped for the tray + viewer. */
 data class StoryGroup(val authorShort: String, val isMe: Boolean, val items: List<FeedItemFfi>)
+
+/** Story age, matching iOS `relativeTimeShort` — stories only ever live 24h, so m/h is enough. */
+private fun storyAge(createdAtMs: ULong): String {
+    val secs = (System.currentTimeMillis() - createdAtMs.toLong()) / 1000
+    return when {
+        secs < 5 -> "now"
+        secs < 60 -> "${secs}s"
+        secs < 3600 -> "${secs / 60}m"
+        secs < 86_400 -> "${secs / 3600}h"
+        else -> "${secs / 86_400}d"
+    }
+}
 
 fun groupStories(items: List<FeedItemFfi>): List<StoryGroup> =
     items.filter { it.story }
@@ -125,9 +138,9 @@ private fun StoryActionChip(label: String, onClick: () -> Unit) {
 }
 
 @Composable
-fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit) {
+fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, startItem: Int = 0) {
     var groupIdx by remember { mutableIntStateOf(startGroup) }
-    var itemIdx by remember { mutableIntStateOf(0) }
+    var itemIdx by remember { mutableIntStateOf(startItem) }
     var replyText by remember { mutableStateOf("") }
     var replying by remember { mutableStateOf(false) }   // pauses auto/tap-advance while typing
     var confirmDelete by remember { mutableStateOf(false) }
@@ -167,7 +180,9 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit) 
             if (com.blaineam.haven.core.LocalMedia.isVideo(mediaId)) {
                 VideoTile(DEFAULT_CIRCLE, mediaId, Modifier.fillMaxSize())
             } else {
-                MediaImage(DEFAULT_CIRCLE, mediaId, Modifier.fillMaxSize())
+                // MediaImage defaults to FillWidth, which letterboxed the story into black bands.
+                // A story is full-bleed on iOS (scaledToFill), so crop to the frame instead.
+                MediaImage(DEFAULT_CIRCLE, mediaId, Modifier.fillMaxSize(), ContentScale.Crop)
             }
         }
         // Decode the iOS-authored caption (was shown raw → gibberish): position + colour it, with
@@ -222,11 +237,24 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit) 
                 )
             }
         }
-        androidx.compose.material3.Text(
-            if (group.isMe) "You" else com.blaineam.haven.core.HavenNet.displayName(group.authorShort),
-            color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.align(Alignment.TopStart).padding(start = 14.dp, top = 28.dp),
-        )
+        // Who + when, over the media (iOS parity: avatar, name, age). Always white — this sits on
+        // the story itself, not on a themed surface.
+        Row(
+            Modifier.align(Alignment.TopStart).padding(start = 14.dp, top = 26.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            val authorName = if (group.isMe) "You"
+                else com.blaineam.haven.core.HavenNet.displayName(group.authorShort)
+            HavenAvatar(group.authorShort, authorName, 28.dp, isMe = group.isMe)
+            androidx.compose.material3.Text(
+                if (group.isMe) "Your story" else authorName,
+                color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+            )
+            androidx.compose.material3.Text(
+                storyAge(item.createdAt), color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp,
+            )
+        }
         Row(
             Modifier.align(Alignment.TopEnd).padding(14.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -269,6 +297,15 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit) 
         }
 
         // Reply privately — DMs the author with this story attached so they know which one.
+        //
+        // KNOWN BROKEN (needs a caller fix): the padding below is a no-op. This viewer is hosted in
+        // FullScreenOverlay's Compose Dialog, whose window reports every inset as zero — measured on
+        // a Pixel 8: navBottom=0 imeBottom=0 statusTop=0, with the root Box spanning the full 2399px
+        // screen. So this row is laid out under the gesture pill (reply field measured 32px tall)
+        // and cannot lift above the IME. The fix belongs in FullScreenOverlay (CircleScreen.kt):
+        // DialogProperties(..., decorFitsSystemWindows = false), which restores inset dispatch and
+        // makes these two modifiers behave as written. Deliberately NOT worked around with a manual
+        // inset here — that would double-pad the row the moment the Dialog is fixed.
         if (!group.isMe) {
             Row(
                 Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().imePadding()

@@ -34,7 +34,9 @@ import com.blaineam.haven.core.ProfileStore
 fun HavenAvatar(idOrShort: String, name: String, size: Dp, isMe: Boolean = false, emojiOverride: String? = null) {
     val v by AvatarStore.version
     val context = LocalContext.current
-    val key = if (isMe) HavenNet.nodeIdHex else idOrShort
+    // HavenNet's `core` is lateinit, and the You header composes before HavenNet.init() — fall back
+    // to the caller's id (which for isMe is the same node id, read straight off HavenCore).
+    val key = if (isMe) runCatching { HavenNet.nodeIdHex }.getOrDefault(idOrShort) else idOrShort
     // For my own avatar, ProfileStore is the source of truth (what the You tab shows) — read it
     // directly so the feed/own-post avatar can't diverge from the profile picture.
     val myB64 = if (isMe) ProfileStore.get(context).avatarB64 else ""

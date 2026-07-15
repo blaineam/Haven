@@ -60,7 +60,8 @@
      turns every control into a bright smear the moment a photo scrolls under it; a black film
      makes the composer vanish into a dark feed. Real Liquid Glass lands mid-grey over both, so a
      mid film at moderate alpha is the closest honest approximation — measured against the Mac
-     build's own composer field (~#565358 over dark media). */
+     build's own composer field (~#565358 over dark media).
+
      The alpha is deliberately high (0.72). Liquid Glass keeps its label legible over ANY backdrop
      because it adapts contrast per-pixel; `backdrop-filter` cannot, so a low-alpha film that looks
      right over a dark feed turns into an unreadable smear the moment a bright photo scrolls under

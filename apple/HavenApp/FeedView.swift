@@ -3279,6 +3279,7 @@ struct PostCard: View {
     @State private var showAudioRecorder = false
     @State private var showEdit = false
     @State private var showReport = false
+    @State private var linkCopied = false
     @State private var zoomTarget: ZoomTarget?
     @State private var players: [String: AVPlayer] = [:]
     @State private var playerObservers: [String: NSObjectProtocol] = [:]   // loop observers, removed on teardown
@@ -3909,8 +3910,22 @@ private struct KillHorizontalScroller: NSViewRepresentable {
             Spacer()
             if !item.unsent {
                 Menu {
-                    if let url = DeepLink.postURL(circleId: feed.activeCircleId, postId: item.id) {
+                    // No link for a story (gone by the time anyone taps it) or a DM — a dm: circle
+                    // id is literally both members' node ids, so the link would leak the pair to
+                    // whoever you sent it to, and nobody outside the DM could ever open it anyway.
+                    if !item.story, !feed.activeCircleId.hasPrefix("dm:"),
+                       let url = DeepLink.postURL(circleId: feed.activeCircleId, postId: item.id) {
                         ShareLink(item: url) { Label("Share post", systemImage: "square.and.arrow.up") }
+                        Button {
+                            PlatformPasteboard.string = url.absoluteString
+                            linkCopied = true
+                            // Unlike the app's other copy buttons this one has to un-stick: the menu
+                            // closes on tap, so a reopen a minute later must not still read "Copied".
+                            Task { try? await Task.sleep(nanoseconds: 2_000_000_000); linkCopied = false }
+                        } label: {
+                            Label(linkCopied ? "Copied" : "Copy link",
+                                  systemImage: linkCopied ? "checkmark" : "doc.on.doc")
+                        }
                     }
                     if item.isMe {
                         Button { showEdit = true } label: { Label("Edit", systemImage: "pencil") }

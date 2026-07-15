@@ -256,8 +256,8 @@ object DemoSeeder {
         for (i in by) {
             val engine = valid.getOrNull(i)?.engine ?: continue
             ensureHasCircleHistory(main, engine)
-            runCatching { engine.react(DEFAULT_CIRCLE, id, emoji, msAgo(mins(5))) }.getOrNull()
-                ?.let { env -> runCatching { main.receive(DEFAULT_CIRCLE, env) } }
+            runCatching { engine.react(DEFAULT_CIRCLE, id, emoji, msAgo(mins(5))) }.getOrNull() ?: continue
+            replayIntoMain(main, engine)
         }
     }
 
@@ -265,11 +265,19 @@ object DemoSeeder {
         if (id == null) return
         val engine = valid.getOrNull(by)?.engine ?: return
         ensureHasCircleHistory(main, engine)
-        runCatching { engine.comment(DEFAULT_CIRCLE, id, body, emptyList(), msAgo(minutesAgo)) }.getOrNull()
-            ?.let { env -> runCatching { main.receive(DEFAULT_CIRCLE, env) } }
+        runCatching { engine.comment(DEFAULT_CIRCLE, id, body, emptyList(), msAgo(minutesAgo)) }.getOrNull() ?: return
+        replayIntoMain(main, engine)
     }
 
-    /** Replay my whole default-circle history into a friend's engine so they can react/comment. */
+    /**
+     * Replay my whole default-circle history into a friend's engine so they can react/comment.
+     *
+     * This runs AFTER friendPost already replayed that friend into main, and receiving my commits can
+     * advance the friend's epoch — leaving main holding a STALE commit for them. So every caller must
+     * replayIntoMain AGAIN once the friend authors, or the reaction/comment is accepted and then never
+     * opens (the same epoch-seal trap replayIntoMain exists for). Missing that is why the demo feed
+     * showed zero reaction chips and zero seeded comments.
+     */
     private fun ensureHasCircleHistory(main: HavenSocial, friend: HavenSocial) {
         for (env in runCatching { main.syncEnvelopes(DEFAULT_CIRCLE) }.getOrDefault(emptyList())) {
             runCatching { friend.receive(DEFAULT_CIRCLE, env) }
@@ -357,6 +365,10 @@ object DemoSeeder {
      * Install the demo VIDEOS under fixed `vid_` refs — synthetic, silent gradient clips (no people,
      * no audio, no PII). One portrait + one landscape, so the feed's inline autoplay is exercised
      * both letterboxing onto its blurred backdrop and filling the page.
+     *
+     * "ridge" deliberately ALSO exists as a photo (`img_demo_ridge`, above) — that img_/vid_ pair on
+     * one name is what caught LocalMedia keying its files by the kind-stripped ref, serving the video
+     * for both. Keep both variants so the demo keeps covering that collision.
      */
     private fun installVideos(context: Context) {
         for (name in listOf("cove", "ridge")) {

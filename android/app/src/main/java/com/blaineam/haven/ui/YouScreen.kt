@@ -1,11 +1,11 @@
 package com.blaineam.haven.ui
 
-import android.content.Intent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,8 +20,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Cancel
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -34,15 +33,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.blaineam.haven.core.HavenCore
 import com.blaineam.haven.core.HavenNet
 import com.blaineam.haven.core.ProfileStore
-import uniffi.haven_ffi.SelfTestReport
 
 /**
  * The "You" screen — your profile + identity + an invite, plus the on-device privacy check.
@@ -54,19 +52,22 @@ fun YouScreen(onAddFriend: () -> Unit) {
     val context = LocalContext.current
     val core = remember { HavenCore.get(context) }
     val profile = remember { ProfileStore.get(context) }
-    var report by remember { mutableStateOf<SelfTestReport?>(null) }
     var showEdit by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var showPeople by remember { mutableStateOf(false) }
+    var storyIndex by remember { mutableStateOf<Int?>(null) }   // non-null = viewer open at that story
     val contactCount = com.blaineam.haven.core.HavenNet.contacts.size
     val feedVersion by com.blaineam.haven.core.HavenNet.feedVersion
-    val myPosts = remember(feedVersion) {
+    val mine = remember(feedVersion) {
         runCatching {
             com.blaineam.haven.core.HavenNet.engine
                 .feed(com.blaineam.haven.core.DEFAULT_CIRCLE, com.blaineam.haven.core.nowMs(), null)
-                .filter { it.isMe && !it.story && !it.unsent }
+                .filter { it.isMe && !it.unsent }
         }.getOrDefault(emptyList())
     }
+    val myPosts = mine.filter { !it.story }
+    // Stories expire on their own, so this section simply disappears when the last one ages out.
+    val myStories = mine.filter { it.story }.sortedBy { it.createdAt }
 
     HavenBackground {
         Column(
@@ -83,19 +84,28 @@ fun YouScreen(onAddFriend: () -> Unit) {
                     Icon(Icons.Filled.Settings, "Settings", tint = HavenTheme.textSecondary)
                 }
             }
-            // Avatar — tap to edit your profile.
-            Box(
-                Modifier
-                    .size(92.dp)
-                    .clip(CircleShape)
-                    .background(HavenTheme.brand, CircleShape)
-                    .clickable { showEdit = true },
-                contentAlignment = Alignment.Center,
-            ) { Text(profile.emoji, fontSize = 44.sp) }
+            // Avatar — tap to edit your profile. Must go through HavenAvatar (which prefers the
+            // real photo from ProfileStore): hand-rolling the emoji here meant the header showed
+            // the 🌿 fallback while this same user's post bylines — which DO use HavenAvatar —
+            // showed the photo, on one screen.
+            Box(contentAlignment = Alignment.BottomEnd) {
+                Box(Modifier.clip(CircleShape).clickable { showEdit = true }) {
+                    // core.nodeIdHex, not HavenNet.nodeIdHex: this composes before HavenNet.init()
+                    // and HavenNet's backing `core` is lateinit. Same value, always available.
+                    HavenAvatar(core.nodeIdHex, profile.displayName, 92.dp, isMe = true)
+                }
+                // The pencil badge is the only hint the avatar is editable (iOS parity).
+                Box(
+                    Modifier.size(28.dp).clip(CircleShape).background(HavenTheme.background)
+                        .padding(2.dp).clip(CircleShape).background(HavenTheme.pink)
+                        .clickable { showEdit = true },
+                    contentAlignment = Alignment.Center,
+                ) { Icon(Icons.Filled.Edit, "Edit profile", tint = Color.White, modifier = Modifier.size(15.dp)) }
+            }
             Spacer(Modifier.height(12.dp))
             Text(
                 profile.displayName.ifBlank { "You" },
-                color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold,
+                color = HavenTheme.textPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold,
             )
             if (profile.bio.isNotBlank()) {
                 Spacer(Modifier.height(6.dp))
@@ -121,10 +131,36 @@ fun YouScreen(onAddFriend: () -> Unit) {
             Text("Share invite link", color = HavenTheme.pink, fontSize = 13.sp,
                 modifier = Modifier.clickable { shareInvite(context, HavenNet.inviteUri()) }.padding(6.dp))
 
+            // Your stories — the disappearing half of your profile (iOS parity).
+            if (myStories.isNotEmpty()) {
+                Spacer(Modifier.height(20.dp))
+                Text("Your stories", color = HavenTheme.textSecondary, fontWeight = FontWeight.SemiBold,
+                    fontSize = 14.sp, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    myStories.forEachIndexed { idx, s ->
+                        Box(
+                            Modifier.size(64.dp).clip(CircleShape).background(HavenTheme.brand)
+                                .clickable { storyIndex = idx },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            val mediaId = s.media.firstOrNull()
+                            if (mediaId != null) {
+                                MediaImage(com.blaineam.haven.core.DEFAULT_CIRCLE, mediaId,
+                                    Modifier.size(56.dp).clip(CircleShape), ContentScale.Crop)
+                            }
+                        }
+                    }
+                }
+            }
+
             // Your posts — this screen is your profile, like iOS.
             if (myPosts.isNotEmpty()) {
                 Spacer(Modifier.height(20.dp))
-                Text("Your posts", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 16.sp,
+                Text("Your posts", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp,
                     modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(10.dp))
                 myPosts.forEach { post ->
@@ -144,48 +180,13 @@ fun YouScreen(onAddFriend: () -> Unit) {
     if (showPeople) FullScreenOverlay(onDismiss = { showPeople = false }) {
         PeopleScreen(onAddFriend = { showPeople = false; onAddFriend() }, onClose = { showPeople = false })
     }
-}
-
-@Composable
-private fun Card(content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .havenCard()
-            .padding(18.dp),
-        content = content,
-    )
-}
-
-@Composable
-private fun KeyVal(key: String, value: String) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(key, color = HavenTheme.textSecondary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-        Text(value, color = Color.White, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+    storyIndex?.let { start ->
+        val group = remember(myStories) {
+            StoryGroup(myStories.first().authorShort, isMe = true, items = myStories)
+        }
+        FullScreenOverlay(onDismiss = { storyIndex = null }) {
+            StoryViewer(groups = listOf(group), startGroup = 0,
+                onClose = { storyIndex = null }, startItem = start)
+        }
     }
-}
-
-@Composable
-private fun CheckRow(title: String, ok: Boolean) {
-    Row(
-        Modifier.fillMaxWidth().padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            if (ok) Icons.Filled.CheckCircle else Icons.Filled.Cancel,
-            contentDescription = null,
-            tint = if (ok) Color(0xFF34D399) else Color(0xFFF87171),
-            modifier = Modifier.size(22.dp),
-        )
-        Spacer(Modifier.size(10.dp))
-        Text(title, color = Color.White, fontSize = 14.sp)
-    }
-}
-
-private fun shareInvite(context: android.content.Context, uri: String) {
-    val send = Intent(Intent.ACTION_SEND).apply {
-        type = "text/plain"
-        putExtra(Intent.EXTRA_TEXT, "Add me on Haven: $uri")
-    }
-    context.startActivity(Intent.createChooser(send, "Invite to Haven"))
 }

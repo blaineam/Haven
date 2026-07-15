@@ -53,25 +53,25 @@ object LocalMedia {
      * the feed renders them as players (images stay bare for backward compatibility).
      */
     fun store(circleId: String, bytes: ByteArray, isVideo: Boolean = false): String {
-        val hash = sha256Hex(bytes)
-        sealToFile(circleId, bytes, File(dir, hash))   // large blobs seal file→file (off-heap) to avoid OOM
         // Mint the SAME ref scheme as iOS (apple/HavenApp/Media.swift): the kind is encoded in the
         // prefix so a recipient on either platform knows how to render it. iOS hard-rejects any ref
         // without an img_/vid_/aud_ prefix, so bare hashes were being dropped cross-platform.
-        return if (isVideo) "vid_$hash" else "img_$hash"
+        val ref = (if (isVideo) "vid_" else "img_") + sha256Hex(bytes)
+        sealToFile(circleId, bytes, mediaFile(ref))   // large blobs seal file→file (off-heap) to avoid OOM
+        return ref
     }
 
     /** Store a recorded voice message; returns an `aud_` ref (sealed at rest like other media). */
     fun storeAudio(circleId: String, bytes: ByteArray): String {
-        val hash = sha256Hex(bytes)
-        sealToFile(circleId, bytes, File(dir, hash))   // large blobs seal file→file (off-heap) to avoid OOM
-        return "aud_$hash"
+        val ref = "aud_" + sha256Hex(bytes)
+        sealToFile(circleId, bytes, mediaFile(ref))   // large blobs seal file→file (off-heap) to avoid OOM
+        return ref
     }
 
     /** Decrypt an audio ref to a cache file MediaPlayer can read; null if missing. */
     fun audioFile(circleId: String, ref: String): File? {
         val bytes = load(circleId, ref) ?: return null
-        val out = File(dir.parentFile, "aud_${bareId(ref)}.m4a")
+        val out = File(dir.parentFile, "${storageKey(ref)}.m4a")
         if (!out.exists()) runCatching { out.writeBytes(bytes) }
         return if (out.exists()) out else null
     }
@@ -94,7 +94,7 @@ object LocalMedia {
 
     /** The at-rest sealed file size for [ref] (≈ plaintext size; AEAD overhead is a few bytes), or -1. */
     fun sealedSize(ref: String): Long {
-        val f = File(dir, bareId(ref))
+        val f = mediaFile(ref)
         return if (f.exists()) f.length() else -1L
     }
 
@@ -103,16 +103,52 @@ object LocalMedia {
         val s = sealedSize(ref)
         return s in 0..maxInMemoryBytes()
     }
-    // Strip the kind prefix (ours or iOS's) to the on-disk storage key. Legacy v:/i: kept for
-    // already-stored local media.
+    // Strip the kind prefix (ours or iOS's) to the ref's unique part — the content hash. NOT a
+    // storage key on its own: it is kind-BLIND, so img_X and vid_X reduce to the same string
+    // (see [storageKey]). Legacy v:/i: kept for already-stored local media.
     private fun bareId(ref: String): String =
         ref.removePrefix("v:").removePrefix("i:")
             .removePrefix("img_").removePrefix("vid_").removePrefix("aud_")
 
+    /**
+     * The on-disk key for [ref] — the content hash QUALIFIED BY KIND, so a photo and a video can
+     * never share a file. The single-letter legacy schemes normalize onto their modern key (`v:X`
+     * and `vid_X` name the same media). Kindless legacy refs — bare content hashes, the scheme we
+     * minted before iOS parity — have no kind to qualify with and keep the bare key they were
+     * written under.
+     */
+    private fun storageKey(ref: String): String = when {
+        ref.startsWith("img_") || ref.startsWith("i:") -> "img_${bareId(ref)}"
+        ref.startsWith("vid_") || ref.startsWith("v:") -> "vid_${bareId(ref)}"
+        ref.startsWith("aud_") -> "aud_${bareId(ref)}"
+        else -> bareId(ref)
+    }
+
+    /**
+     * The sealed at-rest file for [ref], adopting a legacy bare-key file on first touch.
+     *
+     * The store predates ref prefixes: files were named by the bare content hash — the ref *was* the
+     * filename — so when the img_/vid_/aud_ scheme landed, [bareId] stripped the kind back off purely
+     * to keep resolving those existing files. That threw away the one bit telling a photo from a
+     * video: `img_X` and `vid_X` shared one file and whichever was written last served ITS bytes for
+     * BOTH refs (the demo's ridge photo, rendered as a black video frame). Keys are kind-qualified
+     * now, and media already cached under the old scheme is RENAMED into place rather than orphaned.
+     * A legacy key is ambiguous by construction, so on the pathological pair the first ref to ask
+     * claims it and the other reads as missing — and re-fetches — instead of being handed the wrong
+     * bytes, which is the corruption this fixes.
+     */
+    private fun mediaFile(ref: String): File {
+        val f = File(dir, storageKey(ref))
+        if (f.exists()) return f
+        val legacy = File(dir, bareId(ref))
+        if (legacy != f && legacy.exists()) runCatching { legacy.renameTo(f) }
+        return f
+    }
+
     /** Load + decrypt a stored media ref, or null if we don't have it (or it's too big to hold in
      *  RAM on this device — see [fitsInMemory]; oversized media is skipped, never OOM-crashed). */
     fun load(circleId: String, ref: String): ByteArray? {
-        val f = File(dir, bareId(ref))
+        val f = mediaFile(ref)
         if (!f.exists()) return null
         if (f.length() > maxInMemoryBytes()) return null   // too big to decrypt in RAM here → skip
         val stored = f.readBytes()
@@ -125,9 +161,9 @@ object LocalMedia {
      *  allocations aren't bound by the managed-heap cap, only by physical RAM. The player then streams
      *  from the file, so the whole video is never held in the app's heap at once. */
     fun videoFile(circleId: String, ref: String): File? {
-        val out = File(dir.parentFile, "vid_${bareId(ref)}.mp4")
+        val out = File(dir.parentFile, "${storageKey(ref)}.mp4")
         if (out.exists()) return out
-        val sealed = File(dir, bareId(ref))
+        val sealed = mediaFile(ref)
         if (!sealed.exists()) return null
         val ok = runCatching {
             HavenNet.engine.openCircleMediaFile(circleId, sealed.absolutePath, out.absolutePath)
@@ -157,7 +193,7 @@ object LocalMedia {
      *  trigger a full decrypt just to draw a feed thumbnail (a 600 MB video would be needless heavy
      *  work per feed item); an un-played video shows the play-glyph tile until it's opened. */
     fun videoPoster(circleId: String, ref: String): Bitmap? {
-        val file = File(dir.parentFile, "vid_${bareId(ref)}.mp4")
+        val file = File(dir.parentFile, "${storageKey(ref)}.mp4")
         if (!file.exists()) return null
         val mmr = android.media.MediaMetadataRetriever()
         return runCatching {
@@ -189,7 +225,7 @@ object LocalMedia {
     fun pixelSize(circleId: String, ref: String): Pair<Int, Int>? {
         sizeCache[ref]?.let { return if (it == UNKNOWN_SIZE) null else it }
         val size = if (isVideo(ref)) {
-            val file = File(dir.parentFile, "vid_${bareId(ref)}.mp4")
+            val file = File(dir.parentFile, "${storageKey(ref)}.mp4")
             if (!file.exists()) null else {
                 val mmr = android.media.MediaMetadataRetriever()
                 runCatching { mmr.setDataSource(file.absolutePath); mmrSize(mmr) }
@@ -209,7 +245,7 @@ object LocalMedia {
         return size
     }
 
-    fun has(ref: String): Boolean = File(dir, bareId(ref)).exists()
+    fun has(ref: String): Boolean = mediaFile(ref).exists()
 
     /**
      * True if [ref] is a synthetic, non-fetchable attachment (e.g. a `geo:<lat>,<lon>,<label>`
@@ -226,7 +262,7 @@ object LocalMedia {
     /** Load decrypted bytes trying each circle's key (for serving a media request). Null if the
      *  media is too big to hold in RAM here (skipped rather than OOM — a relay/other device serves it). */
     fun loadAnyCircle(ref: String): ByteArray? {
-        val f = File(dir, bareId(ref))
+        val f = mediaFile(ref)
         if (!f.exists()) return null
         if (f.length() > maxInMemoryBytes()) return null
         val stored = f.readBytes()
@@ -238,7 +274,7 @@ object LocalMedia {
 
     /** Store received plaintext bytes under an exact ref (sealed at rest to the circle). */
     fun storeUnderRef(circleId: String, ref: String, bytes: ByteArray) {
-        sealToFile(circleId, bytes, File(dir, bareId(ref)))   // large blobs seal file→file (off-heap) to avoid OOM
+        sealToFile(circleId, bytes, mediaFile(ref))   // large blobs seal file→file (off-heap) to avoid OOM
     }
 
     /** The at-rest sealed blob for a ref — uploaded to the relay verbatim (same form iOS stores).
@@ -246,14 +282,14 @@ object LocalMedia {
      *  media it can't even load (the source device + relay already hold it) instead of OOM-crashing
      *  during background backfill. */
     fun rawSealed(ref: String): ByteArray? {
-        val f = File(dir, bareId(ref))
+        val f = mediaFile(ref)
         if (!f.exists() || f.length() > maxInMemoryBytes()) return null
         return f.readBytes()
     }
 
     /** Write a sealed blob fetched from the relay straight to disk (load() opens it on read). */
     fun writeRawSealed(ref: String, blob: ByteArray) {
-        runCatching { File(dir, bareId(ref)).writeBytes(blob) }
+        runCatching { mediaFile(ref).writeBytes(blob) }
     }
 
     // ---- Chunked reassembly (large-media fix) ---------------------------------------------------
@@ -264,7 +300,7 @@ object LocalMedia {
 
     /** A fresh empty temp file to reassemble an incoming chunked (sealed) transfer for [ref]. */
     fun newSealedPart(ref: String): File {
-        val f = File(dir, "incoming_${bareId(ref)}_${System.nanoTime()}.part")
+        val f = File(dir, "incoming_${storageKey(ref)}_${System.nanoTime()}.part")
         runCatching { f.delete() }
         runCatching { f.createNewFile() }
         return f
@@ -277,7 +313,7 @@ object LocalMedia {
     /** Move a fully-reassembled sealed temp file into place under [ref] (load() opens it on read). */
     fun adoptSealedPart(ref: String, part: File): Boolean =
         runCatching {
-            val dst = File(dir, bareId(ref))
+            val dst = mediaFile(ref)   // adopts any legacy-key file first, so it isn't left orphaned
             runCatching { dst.delete() }
             part.renameTo(dst) || (part.copyTo(dst, overwrite = true).let { part.delete(); true })
         }.getOrDefault(false)

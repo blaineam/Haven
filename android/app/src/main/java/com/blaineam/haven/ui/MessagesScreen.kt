@@ -28,8 +28,8 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Group
-import androidx.compose.material.icons.filled.GroupAdd
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.MoreVert
@@ -92,10 +92,7 @@ fun MessagesScreen() {
 
     val thread = openThread
     if (thread == null) {
-        ThreadList(
-            onOpen = { c -> openThread = HavenNet.startDm(c) to c },
-            onOpenGroup = { cid, title -> openThread = cid to Contact("", title, "") },
-        )
+        ThreadList(onOpen = { cid, partner -> openThread = cid to partner })
     } else {
         DmThread(circleId = thread.first, partner = thread.second, onBack = { openThread = null })
     }
@@ -106,30 +103,53 @@ private data class Conversation(
     val circleId: String,
     val title: String,
     val contact: Contact?,   // non-null for a 1:1 (drives the avatar + opening the thread)
+    val preview: String,     // newest message, one line (iOS rowLabel parity); "" = nothing said yet
     val lastActivity: ULong,
     val unread: Int,         // inbound messages newer than the thread's read watermark
 )
 
+/** The partner Contact behind a 1:1 dm circle — the real contact when we still know them, else a
+ *  stand-in from the id encoded in the circle itself (a removed friend's thread still opens). */
+private fun dmPartner(circleId: String): Contact? {
+    val hex = HavenNet.dmMemberHexes(circleId).firstOrNull { !it.equals(HavenNet.nodeIdHex, true) }
+        ?: return null
+    return HavenNet.contacts.firstOrNull { it.idHex.equals(hex, true) }
+        ?: Contact(hex, HavenNet.dmPartnerName(circleId), "")
+}
+
+/** The newest message as one line — what iOS's rowLabel shows (unsent / secret never leak content). */
+private fun previewOf(circleId: String): String {
+    val last = HavenNet.messages(circleId).maxByOrNull { it.createdAt } ?: return ""
+    return when {
+        last.unsent -> "Message unsent"
+        com.blaineam.haven.core.SecretMessages.isSecret(last.body) -> "🔒 Secret message"
+        else -> last.body
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ThreadList(onOpen: (Contact) -> Unit, onOpenGroup: (String, String) -> Unit) {
+private fun ThreadList(onOpen: (String, Contact) -> Unit) {
     val contacts = HavenNet.contacts
     val version by HavenNet.feedVersion
     val readTick by com.blaineam.haven.core.DmRead.version
+    val circlesVersion by HavenNet.circlesVersion
     val pins = com.blaineam.haven.core.DmPins.pinned
-    var showGroupPicker by remember { mutableStateOf(false) }
+    var showPicker by remember { mutableStateOf(false) }
 
-    // Unified conversation list: every 1:1 (one per contact) + every existing group DM, each with its
-    // last-activity time. Sorted newest-first; pinned (up to 6) float to the top in pin order.
-    val conversations = remember(version, readTick, contacts, pins.toList()) {
-        val oneToOnes = contacts.map { c ->
-            val cid = HavenNet.dmCircleId(c.idHex)
-            Conversation(cid, c.name, c, HavenNet.lastActivity(cid), HavenNet.unreadMessages(cid))
-        }
-        val groups = HavenNet.groupDmThreads().map { (cid, title) ->
-            Conversation(cid, title, null, HavenNet.lastActivity(cid), HavenNet.unreadMessages(cid))
-        }
-        val all = oneToOnes + groups
+    // Real CONVERSATIONS, not the address book: every dm: circle that actually exists (iOS
+    // `store.dmCircles`). Listing a row per contact turned Messages into a second contact list and
+    // buried the two threads you actually have. Sorted newest-first; pinned (max 6) float to the top.
+    val conversations = remember(version, readTick, circlesVersion, contacts, pins.toList()) {
+        val all = runCatching { HavenNet.engine.circles() }.getOrDefault(emptyList())
+            .filter { it.id.startsWith("dm:") }
+            .map { c ->
+                val partner = if (HavenNet.isGroupDm(c.id)) null else dmPartner(c.id)
+                Conversation(
+                    c.id, HavenNet.dmPartnerName(c.id), partner, previewOf(c.id),
+                    HavenNet.lastActivity(c.id), HavenNet.unreadMessages(c.id),
+                )
+            }
         val byId = all.associateBy { it.circleId }
         val pinned = pins.mapNotNull { byId[it] }   // pin order, still-present only
         val rest = all.filter { !pins.contains(it.circleId) }.sortedByDescending { it.lastActivity }
@@ -138,13 +158,14 @@ private fun ThreadList(onOpen: (Contact) -> Unit, onOpenGroup: (String, String) 
     val pinnedConvos = conversations.first
     val restConvos = conversations.second
 
-    if (showGroupPicker) {
-        GroupMessagePicker(
-            onDismiss = { showGroupPicker = false },
+    if (showPicker) {
+        NewMessagePicker(
+            onDismiss = { showPicker = false },
             onStart = { picks ->
-                showGroupPicker = false
+                showPicker = false
+                // One pick = a 1:1, 2+ = a group (startGroupDM funnels a single pick back to startDm).
                 val cid = HavenNet.startGroupDM(picks)
-                onOpenGroup(cid, picks.joinToString(", ") { it.name })
+                onOpen(cid, if (picks.size == 1) picks[0] else Contact("", picks.joinToString(", ") { it.name }, ""))
             },
         )
     }
@@ -156,26 +177,30 @@ private fun ThreadList(onOpen: (Contact) -> Unit, onOpenGroup: (String, String) 
             ) {
                 BrandText("Messages", fontSize = 26)
                 Spacer(Modifier.weight(1f))
-                if (contacts.size >= 2) {
-                    Box(Modifier.clip(CircleShape).clickable { showGroupPicker = true }.padding(6.dp)) {
-                        Icon(Icons.Filled.GroupAdd, "New group message", tint = HavenTheme.pink)
+                if (contacts.isNotEmpty()) {
+                    Box(Modifier.clip(CircleShape).clickable { showPicker = true }.padding(6.dp)) {
+                        Icon(Icons.Filled.Edit, "New message", tint = HavenTheme.pink)
                     }
                 }
             }
-            if (contacts.isEmpty()) {
+            if (contacts.isEmpty() || (pinnedConvos.isEmpty() && restConvos.isEmpty())) {
                 Column(
                     Modifier.fillMaxSize().padding(32.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center,
                 ) {
-                    Text("No one to message yet", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                    Text(if (contacts.isEmpty()) "No one to message yet" else "No messages yet",
+                        color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(8.dp))
-                    Text("Add a friend from the Circle tab, then DM them here.",
-                        color = HavenTheme.textSecondary, fontSize = 14.sp, textAlign = TextAlign.Center)
+                    Text(
+                        if (contacts.isEmpty()) "Add a friend from the Circle tab, then DM them here."
+                        else "Tap the pencil to start one.",
+                        color = HavenTheme.textSecondary, fontSize = 14.sp, textAlign = TextAlign.Center,
+                    )
                 }
             } else {
                 val open: (Conversation) -> Unit = { conv ->
-                    if (conv.contact != null) onOpen(conv.contact) else onOpenGroup(conv.circleId, conv.title)
+                    onOpen(conv.circleId, conv.contact ?: Contact("", conv.title, ""))
                 }
                 LazyColumn(
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
@@ -215,9 +240,15 @@ private fun ConversationRow(conv: Conversation, pinned: Boolean, onOpen: () -> U
                 }
             }
             Spacer(Modifier.size(12.dp))
-            Text(conv.title, color = Color.White, fontSize = 16.sp,
-                fontWeight = if (conv.unread > 0) FontWeight.Bold else FontWeight.Medium,
-                maxLines = 1, modifier = Modifier.weight(1f))
+            Column(Modifier.weight(1f)) {
+                Text(conv.title, color = Color.White, fontSize = 16.sp,
+                    fontWeight = if (conv.unread > 0) FontWeight.Bold else FontWeight.Medium, maxLines = 1)
+                if (conv.preview.isNotBlank()) {
+                    Text(conv.preview, fontSize = 13.sp, maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        color = if (conv.unread > 0) Color.White else HavenTheme.textSecondary)
+                }
+            }
             if (conv.unread > 0) {
                 UnreadBadge(conv.unread)
                 Spacer(Modifier.size(8.dp))
@@ -275,15 +306,16 @@ fun UnreadBadge(count: Int) {
     }
 }
 
-/** Multi-select contacts to start a GROUP DM (2+ people). */
+/** Pick who to message: one contact for a 1:1, two or more for a group DM. This is the ONLY way into
+ *  a new thread now that the list shows conversations rather than the whole address book. */
 @Composable
-private fun GroupMessagePicker(onDismiss: () -> Unit, onStart: (List<Contact>) -> Unit) {
+private fun NewMessagePicker(onDismiss: () -> Unit, onStart: (List<Contact>) -> Unit) {
     val contacts = HavenNet.contacts
     val picked = remember { mutableStateListOf<String>() }
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = HavenTheme.card,
-        title = { Text("New group message", color = Color.White) },
+        title = { Text("New message", color = Color.White) },
         text = {
             LazyColumn(Modifier.heightIn(max = 360.dp)) {
                 items(contacts, key = { it.idHex }) { c ->
@@ -306,9 +338,9 @@ private fun GroupMessagePicker(onDismiss: () -> Unit, onStart: (List<Contact>) -
             }
         },
         confirmButton = {
-            val ready = picked.size >= 2
+            val ready = picked.isNotEmpty()
             Text(
-                if (ready) "Start (${picked.size})" else "Pick 2+",
+                if (ready) "Start (${picked.size})" else "Pick someone",
                 color = if (ready) HavenTheme.pink else HavenTheme.textSecondary,
                 modifier = Modifier.clickable(enabled = ready) {
                     onStart(contacts.filter { picked.contains(it.idHex) })

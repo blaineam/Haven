@@ -21,6 +21,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AddReaction
+import androidx.compose.material.icons.filled.ArrowCircleUp
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.PhotoCamera
@@ -611,6 +613,12 @@ fun FullScreenOverlay(onDismiss: () -> Unit, content: @Composable () -> Unit) {
         onDismissRequest = onDismiss,
         properties = androidx.compose.ui.window.DialogProperties(
             usePlatformDefaultWidth = false, dismissOnClickOutside = false,
+            // decorFitsSystemWindows=false or this Dialog reports EVERY window inset as 0 —
+            // measured live: navBottom=0 imeBottom=0 statusTop=0. That makes navigationBarsPadding()
+            // and imePadding() SILENT NO-OPS for anything inside, which is why the story viewer's
+            // reply row sat under the gesture pill and could never lift above the keyboard. Content
+            // here already asks for the insets it wants; this is what lets those requests be heard.
+            decorFitsSystemWindows = false,
         ),
     ) {
         Box(Modifier.fillMaxSize().background(HavenTheme.background)) { content() }
@@ -1368,6 +1376,9 @@ fun VideoTile(
 
 private val QUICK_EMOJI = listOf("❤️", "😂", "🔥", "👍", "🎉", "😮")
 
+/** The one-tap reactions offered on every card, next to the chips (iOS EmojiStore.frequent(3)). */
+private val QUICK_REACT = listOf("❤️", "😂", "🎉")
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PostCard(
@@ -1378,7 +1389,6 @@ fun PostCard(
     videoActive: Boolean = false,
 ) {
     val context = LocalContext.current
-    var showComment by remember(item.id) { mutableStateOf(false) }
     var postMenu by remember(item.id) { mutableStateOf(false) }
     var showReport by remember(item.id) { mutableStateOf(false) }
     var commentDraft by remember(item.id) { mutableStateOf("") }
@@ -1445,6 +1455,18 @@ fun PostCard(
                             onClick = { postMenu = false; copyPostLink(context, url) },
                         )
                     }
+                    // Own-post actions live here, not in the card body — the body is for reacting and
+                    // replying now (iOS keeps Edit/Unsend in this same ellipsis menu).
+                    if (item.isMe) {
+                        DropdownMenuItem(
+                            text = { Text("Edit", color = Color.White) },
+                            onClick = { postMenu = false; showEdit = true },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Delete", color = Color(0xFFF87171)) },
+                            onClick = { postMenu = false; HavenNet.unsendPost(circleId, item.id) },
+                        )
+                    }
                     val hidden = com.blaineam.haven.core.HiddenStore.isHidden(item.id)
                     DropdownMenuItem(
                         text = { Text(if (hidden) "Unhide post" else "Hide post", color = Color.White) },
@@ -1504,42 +1526,38 @@ fun PostCard(
             MusicChip(m)
         }
 
-        // Existing reactions.
-        if (item.reactions.isNotEmpty()) {
-            Spacer(Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                item.reactions.forEach { r ->
-                    val mine = r.mine
-                    Box(
-                        Modifier.clip(RoundedCornerShape(20.dp))
-                            .background(if (mine) HavenTheme.pink.copy(alpha = 0.25f) else HavenTheme.background)
-                            .combinedClickable(
-                                onClick = {
-                                    if (mine) HavenNet.unreact(circleId, item.id, r.emoji)
-                                    else HavenNet.react(circleId, item.id, r.emoji)
-                                },
-                                onLongClick = { whoReacted = r },
-                            )
-                            .padding(horizontal = 10.dp, vertical = 5.dp),
-                    ) { Text("${r.emoji} ${r.count}", fontSize = 13.sp, color = Color.White) }
-                }
-            }
-        }
-
-        // Action bar: react + comment.
+        // Reactions row (iOS `reactionsRow`): existing chips — tap toggles YOURS, long-press shows who
+        // — then the one-tap quick reacts and a picker for anything else. The old "React" / "Comment"
+        // text links made every reaction cost two taps and hid the reply behind a third.
         Spacer(Modifier.height(10.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("React", color = HavenTheme.pink, fontSize = 13.sp, fontWeight = FontWeight.Medium,
-                modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { showPicker = !showPicker }.padding(6.dp))
-            Spacer(Modifier.size(8.dp))
-            Text("Comment", color = HavenTheme.pink, fontSize = 13.sp, fontWeight = FontWeight.Medium,
-                modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { showComment = !showComment }.padding(6.dp))
-            if (item.isMe) {
-                Spacer(Modifier.size(8.dp))
-                Text("Edit", color = HavenTheme.textSecondary, fontSize = 13.sp,
-                    modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { showEdit = !showEdit }.padding(6.dp))
-                Text("Delete", color = Color(0xFFF87171), fontSize = 13.sp,
-                    modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { HavenNet.unsendPost(circleId, item.id) }.padding(6.dp))
+            item.reactions.forEach { r ->
+                val mine = r.mine
+                Box(
+                    Modifier.padding(end = 6.dp).clip(RoundedCornerShape(20.dp))
+                        .background(if (mine) HavenTheme.pink.copy(alpha = 0.25f) else HavenTheme.background)
+                        .combinedClickable(
+                            onClick = {
+                                if (mine) HavenNet.unreact(circleId, item.id, r.emoji)
+                                else HavenNet.react(circleId, item.id, r.emoji)
+                            },
+                            onLongClick = { whoReacted = r },
+                        )
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                ) {
+                    Text("${r.emoji} ${r.count}", fontSize = 13.sp,
+                        color = if (mine) HavenTheme.pink else Color.White)
+                }
+            }
+            Spacer(Modifier.weight(1f))
+            QUICK_REACT.forEach { e ->
+                Box(Modifier.clip(CircleShape).clickable { HavenNet.react(circleId, item.id, e) }.padding(5.dp)) {
+                    Text(e, fontSize = 19.sp)
+                }
+            }
+            Box(Modifier.clip(CircleShape).clickable { showPicker = !showPicker }.padding(5.dp)) {
+                Icon(Icons.Filled.AddReaction, "More reactions", tint = HavenTheme.textSecondary,
+                    modifier = Modifier.size(20.dp))
             }
         }
         if (showEdit) {
@@ -1624,21 +1642,28 @@ fun PostCard(
                 }
             }
         }
-        if (showComment) {
-            Spacer(Modifier.height(6.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
-                    value = commentDraft, onValueChange = { commentDraft = it },
-                    placeholder = { Text("Add a comment…", fontSize = 13.sp) },
-                    modifier = Modifier.weight(1f), shape = RoundedCornerShape(18.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink),
-                )
-                Text("Send", color = HavenTheme.pink, fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable {
-                        HavenNet.comment(circleId, item.id, commentDraft.trim())
-                        commentDraft = ""; showComment = false
-                    }.padding(10.dp))
+        // The reply composer is ALWAYS on the card (iOS `commentField`) — replying was previously
+        // invisible behind a "Comment" link, so nobody found it.
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = commentDraft, onValueChange = { commentDraft = it },
+                placeholder = { Text("Add a reply…", fontSize = 13.sp) },
+                modifier = Modifier.weight(1f), shape = RoundedCornerShape(18.dp), maxLines = 5,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink),
+            )
+            Spacer(Modifier.size(6.dp))
+            val canSend = commentDraft.isNotBlank()
+            Box(
+                Modifier.size(34.dp).clip(CircleShape).clickable(enabled = canSend) {
+                    HavenNet.comment(circleId, item.id, commentDraft.trim()); commentDraft = ""
+                },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Filled.ArrowCircleUp, "Send reply",
+                    tint = if (canSend) HavenTheme.pink else HavenTheme.textSecondary,
+                    modifier = Modifier.size(28.dp))
             }
         }
     }

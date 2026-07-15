@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -1003,12 +1004,15 @@ fun MediaViewer(circleId: String, refs: List<String>, startIndex: Int, onClose: 
                 )
             }
         }
-        Box(Modifier.align(Alignment.TopStart).padding(16.dp).size(42.dp).clip(CircleShape)
+        // statusBarsPadding: this viewer draws under the status bar, whose window swallows taps in
+        // that strip — leaving Close visibly present but dead at its centre. Same bug the QR
+        // scanner had.
+        Box(Modifier.align(Alignment.TopStart).statusBarsPadding().padding(16.dp).size(42.dp).clip(CircleShape)
             .background(Color.Black.copy(alpha = 0.4f)).clickable { onClose() }, contentAlignment = Alignment.Center) {
             Icon(Icons.Filled.Close, "Close", tint = Color.White)
         }
         // Save this item to Photos.
-        Box(Modifier.align(Alignment.TopEnd).padding(16.dp).size(42.dp).clip(CircleShape)
+        Box(Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(16.dp).size(42.dp).clip(CircleShape)
             .background(Color.Black.copy(alpha = 0.4f)).clickable {
                 val ref = refs[pager.currentPage]
                 scope.launch {

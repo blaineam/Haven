@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -231,10 +232,14 @@ fun StoryCameraScreen(
             modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 200.dp)
                 .clip(CircleShape).background(Color.Black.copy(alpha = 0.4f)).padding(horizontal = 16.dp, vertical = 6.dp))
 
-        Box(Modifier.align(Alignment.TopStart).padding(16.dp).size(42.dp).clip(CircleShape)
+        // statusBarsPadding, like the filter hint's navigationBarsPadding above: we draw under the
+        // system bars, and the status-bar window eats taps in its strip — so without this, Close's
+        // visible centre is dead and only its bottom edge answers. The bottom inset was already
+        // handled here; the top just got missed.
+        Box(Modifier.align(Alignment.TopStart).statusBarsPadding().padding(16.dp).size(42.dp).clip(CircleShape)
             .background(Color.Black.copy(alpha = 0.35f)).pointerInput(Unit) { detectTap(onClose) },
             contentAlignment = Alignment.Center) { Icon(Icons.Filled.Close, "Close", tint = Color.White) }
-        Box(Modifier.align(Alignment.TopEnd).padding(16.dp).size(42.dp).clip(CircleShape)
+        Box(Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(16.dp).size(42.dp).clip(CircleShape)
             .background(Color.Black.copy(alpha = 0.35f)).pointerInput(Unit) { detectTap { lensFront = !lensFront } },
             contentAlignment = Alignment.Center) { Icon(Icons.Filled.Cameraswitch, "Flip", tint = Color.White) }
 

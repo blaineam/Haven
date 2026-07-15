@@ -10,12 +10,14 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -62,6 +64,11 @@ fun QrScannerScreen(onResult: (String) -> Unit, onCancel: () -> Unit) {
         }
     }
     var done = remember0 { booleanArrayOf(false) }
+
+    // Without this, system back skips the scanner entirely and finishes the Activity — measured:
+    // pressing back here dropped straight to the launcher. Connect is shown by AnimatedVisibility,
+    // not a Dialog or a nav destination, so nothing else was ever going to catch it.
+    BackHandler { onCancel() }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         AndroidView(
@@ -120,7 +127,12 @@ fun QrScannerScreen(onResult: (String) -> Unit, onCancel: () -> Unit) {
             }
         }
 
-        Column(Modifier.fillMaxWidth().align(Alignment.TopStart).padding(16.dp)) {
+        // statusBarsPadding is load-bearing, not cosmetic: enableEdgeToEdge() means we draw UNDER
+        // the status bar, and the system's status-bar window eats touches in that strip. Measured on
+        // a Pixel 8 — the button sat at y=32..158px with a ~110px status bar, so tapping the arrow's
+        // visible centre did nothing while only a sliver at its bottom edge worked. StoryEditor's
+        // top chrome already does this; this screen just missed it.
+        Column(Modifier.fillMaxWidth().align(Alignment.TopStart).statusBarsPadding().padding(16.dp)) {
             Box(Modifier.size(40.dp).clip(RoundedCornerShape(20.dp)).clickable { onCancel() },
                 contentAlignment = Alignment.Center) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White)

@@ -1492,7 +1492,7 @@ struct CallOverlay: View {
                             .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.white.opacity(0.6)))
                             .overlay(activeSpeakerBorder(cornerRadius: 12, active: call.activeSpeaker == ""))
                             .animation(.easeInOut(duration: 0.2), value: call.activeSpeaker)
-                            .padding(.top, 60).padding(.trailing, 16)
+                            .padding(.top, 8).padding(.trailing, 16)
                     }
                     Spacer()
                 }
@@ -1511,12 +1511,19 @@ struct CallOverlay: View {
                         Spacer()
                     }
                 }
-                .padding(.top, 54)
+                .padding(.top, 8)
+                .padding(.horizontal, 20)
                 Spacer()
-                controls.padding(.bottom, 50)
+                controls.padding(.bottom, 16)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity).ignoresSafeArea()
+        // No ignoresSafeArea here: this scene's chrome (minimize, the name, the controls) has to sit
+        // INSIDE the safe area, and an ignoresSafeArea on the whole ZStack zeroes it for every
+        // descendant — which left minimize at x=0/y=54, hard against the display's rounded corner,
+        // and the name under the Dynamic Island. Each full-bleed layer (background, soloTile,
+        // screenStage) already ignores the safe area itself, so those visuals stay edge-to-edge;
+        // `grid` deliberately does not, so its tiles stay clear of the rounded corners.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .transition(.move(edge: .bottom))
         #if targetEnvironment(macCatalyst) || os(macOS)
         .sheet(isPresented: Binding(get: { call.showScreenPicker },
@@ -1564,13 +1571,17 @@ struct CallOverlay: View {
     /// square once there's more than one row (so they fill width and scroll), and fill the height
     /// for a single row. One peer fills the screen.
     private var grid: some View {
+        // Tiles sit INSIDE the safe area (+ a corner margin) so their rounded corners, name badges
+        // and active-speaker borders never bleed into the device's rounded screen corners. Unlike
+        // the other layers in `active`, this one must NOT ignore the safe area: the reader below is
+        // laid out within it, so `geo.size` is already inset and only the margin is left to apply.
+        // Do not reach for `geo.safeAreaInsets` here — an `.ignoresSafeArea()` attached under the
+        // reader consumes the insets before it resolves, so the proxy reports .zero and padding by
+        // it silently does nothing (which is how the tiles ended up under the status bar clock).
         GeometryReader { geo in
-            // Inset tiles inside the safe area (+ a corner margin) so their rounded corners, name
-            // badges and active-speaker borders never bleed into the device's rounded screen corners.
-            let safe = geo.safeAreaInsets
             let margin: CGFloat = 12
-            let w = max(geo.size.width - safe.leading - safe.trailing - margin * 2, 80)
-            let h = max(geo.size.height - safe.top - safe.bottom, 80)
+            let w = max(geo.size.width - margin * 2, 80)
+            let h = max(geo.size.height, 80)
             let tiles = call.participants
             let count = max(tiles.count, 1)
             let aspect = Double(w / max(h, 1))
@@ -1593,10 +1604,8 @@ struct CallOverlay: View {
             }
             .scrollDisabled(rows <= 1)
             .frame(width: w, height: h)
-            .padding(.top, safe.top).padding(.bottom, safe.bottom)
-            .padding(.leading, safe.leading + margin).padding(.trailing, safe.trailing + margin)
+            .padding(.horizontal, margin)
         }
-        .ignoresSafeArea()
     }
 
     /// Full-bleed 1:1 view: the peer's camera aspect-fills the screen — no tile margin, name badge or

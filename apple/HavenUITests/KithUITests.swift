@@ -45,4 +45,24 @@ final class HavenUITests: XCTestCase {
         let posted = app.staticTexts["a sealed post from the UI test"]
         XCTAssertTrue(posted.waitForExistence(timeout: 5), "new post should appear in the feed")
     }
+
+    /// The in-call scene's minimize ("back") control must sit INSIDE the safe area, clear of the
+    /// status bar and the display's rounded corner. It regressed to x=0/y=54 when the scene's
+    /// ZStack ignored the safe area, which zeroed it for every descendant.
+    func testCallMinimizeIsInsideSafeArea() {
+        let app = app(tab: "circle")
+        app.launchEnvironment["HAVEN_DEMO"] = "1"
+        app.launchEnvironment["HAVEN_SCENE"] = "call"
+        app.launch()
+
+        let minimize = app.buttons["chevron.down"].firstMatch
+        XCTAssertTrue(minimize.waitForExistence(timeout: 20), "the call scene should offer a way back")
+
+        let frame = minimize.frame
+        XCTAssertGreaterThanOrEqual(frame.minX, 16, "minimize must clear the display's rounded corner")
+        XCTAssertGreaterThanOrEqual(frame.minY, 62, "minimize must sit below the status bar / Dynamic Island")
+
+        minimize.tap()
+        XCTAssertTrue(minimize.waitForNonExistence(timeout: 5), "minimize should take you back to the app")
+    }
 }

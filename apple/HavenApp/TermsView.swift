@@ -19,7 +19,21 @@ final class TermsStore: ObservableObject {
 
     @Published private(set) var accepted: Bool
 
-    private init() { accepted = d.integer(forKey: key) >= Self.currentVersion }
+    private init() {
+        #if DEBUG
+        // The screenshot/demo launch marks the profile onboarded (Profile.swift:46) but never
+        // agreed, which is EXACTLY the state TermsGateView exists to catch (onboarded, not
+        // agreed) — so it swallowed the app and every captured "scene" came out as the
+        // ground-rules wall: 7 byte-identical App Store screenshots that the capture script
+        // happily reported as a success. Honour the same DEBUG-only flag Profile does.
+        // Release builds can't reach this — real users always see the gate.
+        if ProcessInfo.processInfo.environment["HAVEN_SKIP_ONBOARDING"] == "1" {
+            accepted = true
+            return
+        }
+        #endif
+        accepted = d.integer(forKey: key) >= Self.currentVersion
+    }
 
     func accept() {
         d.set(Self.currentVersion, forKey: key)

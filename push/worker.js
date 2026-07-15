@@ -23,7 +23,7 @@ export default {
         // A node id can have MULTIPLE devices (multi-device / linked devices) — keep a list of
         // tokens, not one, so a push reaches every device on that identity.
         const { nodeId, token, sandbox, platform, ts, sig } = await request.json();
-        if (!nodeId || !token) return json({ error: "nodeId + token required" }, 400);
+        if (!nodeId || !hexToken(token)) return json({ error: "nodeId + token required" }, 400);
         // The registration must be signed by the identity (audit F5) — stops anyone registering
         // their token under someone else's node id (token hijack / eviction of the real device).
         if (!(await verifyReg(nodeId, token, ts, sig))) return json({ error: "unauthorized" }, 401);
@@ -42,7 +42,7 @@ export default {
         // A member who shares an S3 bucket as their circle's mailbox registers here, so the cron
         // can nudge them (silently) to re-mint fresh pre-signed URLs before the old ones expire.
         const { nodeId, token, sandbox, ts, sig } = await request.json();
-        if (!nodeId || !token) return json({ error: "nodeId + token required" }, 400);
+        if (!nodeId || !hexToken(token)) return json({ error: "nodeId + token required" }, 400);
         if (!(await verifyReg(nodeId, token, ts, sig))) return json({ error: "unauthorized" }, 401);
         await env.TOKENS.put(`owner:${nodeId}`, JSON.stringify({ token, sandbox: !!sandbox }));
         return json({ ok: true });
@@ -55,7 +55,7 @@ export default {
         // for every device except whichever registered last (each launch of any linked device
         // clobbered the one slot), which reads as "calls never ring in the background".
         const { nodeId, token, sandbox, ts, sig } = await request.json();
-        if (!nodeId || !token) return json({ error: "nodeId + token required" }, 400);
+        if (!nodeId || !hexToken(token)) return json({ error: "nodeId + token required" }, 400);
         if (!(await verifyReg(nodeId, token, ts, sig))) return json({ error: "unauthorized" }, 401);
         const rec = (await env.TOKENS.get(`voip:${nodeId}`, "json")) || {};
         const tokens = (rec.tokens || (rec.token ? [{ token: rec.token, sandbox: rec.sandbox }] : []))
@@ -145,20 +145,34 @@ export default {
 
       if (url.pathname === "/flag") {
         // Moderation ledger (App Review 1.2 "notify the developer"). Haven is E2E — the developer
-        // sees NO content, ever. A report/block appends a content-free, pseudonymous entry:
-        // identity vs identity, action, offense category. Node ids are opaque public keys, so the
-        // ledger shows abuse PATTERNS (many reporters × one identity) without any PII. Entries are
-        // permanent — the action lives on in the ledger. List them with the `ledger:` KV prefix.
-        const { actor, subject, action, reason } = await request.json();
-        if (action !== "report" && action !== "block") return json({ error: "bad action" }, 400);
+        // sees NO content, ever. An explicit REPORT appends one row: subject, action, category.
+        //
+        // Three deliberate limits, all from audit F1:
+        //   * `action` is report-ONLY. A block is a private, local act; it must not be expressible
+        //     here at all, so an old client that still pings on block is refused by the server.
+        //   * The row carries NO actor — not even hashed. Node ids are enumerable (this same KV is
+        //     full of them), so any deterministic function of the actor that the worker can compute
+        //     is one the operator can invert. Not storing it is the only honest way to not hold the
+        //     "A reported B" graph edge the mandate forbids.
+        //   * Rows expire (90d). A forgery-resistant record is still not a permanent one.
+        const { actor, subject, action, reason, ts, sig } = await request.json();
+        if (action !== "report") return json({ error: "bad action" }, 400);
         if (!/^[0-9a-f]{8,64}$/.test(actor || "") || !/^[0-9a-f]{8,64}$/.test(subject || ""))
           return json({ error: "actor + subject node hex required" }, 400);
+        const category = String(reason || "").slice(0, 64);   // category only — free text stays in the circle
+        // The reporter must prove the identity key (audit F1): TERMS.md attaches real consequences to
+        // these rows, so an unauthenticated POST must not be able to plant one against anyone. Same
+        // Ed25519-over-a-domain-string check the /register routes use; the signed material binds
+        // subject + action + category (not just the actor), so a captured flag cannot be re-aimed.
+        // The 5-min window in verifyReg plus the ts-derived key below make a replay a no-op write.
+        if (!(await verifyReg(actor, flagMaterial(subject, action, category), ts, sig)))
+          return json({ error: "unauthorized" }, 401);
         if (await rateLimited(env, request, "flag")) return json({ ok: true }, 200);
-        const key = `ledger:${new Date().toISOString()}:${crypto.randomUUID().slice(0, 8)}`;
-        await env.TOKENS.put(key, JSON.stringify({
-          actor, subject, action,
-          reason: String(reason || "").slice(0, 64),   // category only — free text stays in the circle
-        }));
+        // Key is derived from the SIGNED ts + the signature, never a fresh uuid: re-POSTing a captured
+        // flag inside the freshness window rewrites the identical row instead of inflating the count.
+        const key = `ledger:${new Date(Number(ts) * 1000).toISOString()}:${await sigTag(sig)}`;
+        await env.TOKENS.put(key, JSON.stringify({ subject, action, reason: category }),
+                             { expirationTtl: 90 * 24 * 3600 });
         return json({ ok: true });
       }
 
@@ -266,9 +280,32 @@ function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
 }
 
+/// The material a /flag signature covers, slotted into verifyReg's `token` position. The core FFI
+/// exposes exactly one purpose-specific signer (`sign_push_registration`) and deliberately no raw
+/// signing oracle (audit H3), so /flag reuses it rather than growing a second one — and the two
+/// message spaces are kept provably disjoint by `hexToken` below: a real APNs/PushKit token is always
+/// hex, and this string never is. Subject is hex and action is a fixed word, so only `reason` is free
+/// and it sits at the tail — the mapping from fields to string is injective, no delimiter ambiguity.
+/// (Cleaner long-term: a `sign_moderation_flag` with its own `haven-push-flag-v1` tag in core.)
+function flagMaterial(subject, action, reason) {
+  return `flag-v1:${subject}:${action}:${reason}`;
+}
+
+/// Device tokens are hex, always (both platforms format them `%02x`). Enforcing that is what keeps a
+/// /flag signature from being replayable as a registration — see flagMaterial.
+const hexToken = (t) => /^[0-9a-f]{8,256}$/.test(t || "");
+
+/// Short, non-invertible tag for a ledger key. The signature is never stored, so its hash reveals
+/// nothing about the reporter — it only makes a replayed flag idempotent.
+async function sigTag(sigB64) {
+  const d = await crypto.subtle.digest("SHA-256", base64ToBytes(sigB64));
+  return [...new Uint8Array(d).slice(0, 8)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 /// Verify a signed registration (audit F5): the node id IS the identity's Ed25519 public key, so the
 /// worker checks the Ed25519 signature over `haven-push-register-v1:<nodeId>:<token>:<ts>` and a 5-min
 /// freshness window. A forger who doesn't hold the identity key can't register under that node id.
+/// Also used by /flag with `token` = flagMaterial(...).
 async function verifyReg(nodeId, token, ts, sigB64) {
   try {
     if (!ts || !sigB64) return false;

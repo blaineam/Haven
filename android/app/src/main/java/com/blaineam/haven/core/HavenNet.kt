@@ -848,9 +848,11 @@ object HavenNet : InboundListener {
 
     fun dismiss(req: PendingRequest) { pending.removeAll { it.idHex == req.idHex } }
 
-    /** Block a node: purge from every circle, drop from contacts, ignore future frames. */
+    /** Block a node: purge from every circle, drop from contacts, ignore future frames.
+     *
+     *  Entirely local — a block never leaves the device (audit F1). Deciding you don't want to see
+     *  someone is nobody's business but yours; only an explicit report notifies the developer. */
     fun block(idHex: String) {
-        ModerationLedger.record("block", idHex, "")
         runCatching { social.blockMember(idHex) }
         contacts.removeAll { it.idHex == idHex }
         pending.removeAll { it.idHex == idHex }
@@ -1184,7 +1186,7 @@ object HavenNet : InboundListener {
         HiddenStore.hide(target)
         val author = runCatching { social.reports(circleId) }.getOrDefault(emptyList())
             .firstOrNull { it.target == target }?.author
-        ModerationLedger.record("report", author ?: "", reason)
+        ModerationLedger.report(core.account, author ?: "", reason)
         return author
     }
 

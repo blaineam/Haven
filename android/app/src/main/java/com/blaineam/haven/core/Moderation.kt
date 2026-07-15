@@ -1,10 +1,12 @@
 package com.blaineam.haven.core
 
+import android.util.Base64
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import uniffi.haven_ffi.Account
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -16,21 +18,31 @@ import java.net.URL
 
 /**
  * Fire-and-forget, content-free entries to the developer ledger on the push Worker. Node ids are
- * opaque public keys — the ledger records WHO acted against WHOM and WHY (category), never what
- * was said or shown. It makes abuse patterns (many reporters × one identity) visible without a
- * single byte of content.
+ * opaque public keys — the ledger records only that an identity WAS REPORTED and for which
+ * category, never what was said or shown.
+ *
+ * Only an explicit report comes here (audit F1). **Blocking never touches the network**: it is a
+ * private, local decision to stop seeing someone, and it stays on the device.
  */
 object ModerationLedger {
     const val RELAY = "https://haven-push.blaineams3.workers.dev"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    fun record(action: String, subject: String, reason: String) {
+    /** Signed with the identity key (audit F1): the Terms attach real consequences to a ledger row,
+     *  so an unsigned POST must not be able to plant one. The signature binds subject + action +
+     *  category, so a captured flag can't be re-aimed at someone else. */
+    fun report(account: Account, subject: String, reason: String) {
         if (subject.isEmpty()) return
+        val category = reason.take(64)
+        val ts = System.currentTimeMillis() / 1000
+        val sig = account.signPushRegistration("flag-v1:$subject:report:$category", ts.toULong())
         val body = JSONObject()
-            .put("actor", HavenNet.engine.myNodeHex())
+            .put("actor", account.nodeIdHex())
             .put("subject", subject)
-            .put("action", action)
-            .put("reason", reason)
+            .put("action", "report")
+            .put("reason", category)
+            .put("ts", ts)
+            .put("sig", Base64.encodeToString(sig, Base64.NO_WRAP))
             .toString()
         scope.launch {
             runCatching {   // fire and forget — never blocks moderation

@@ -533,13 +533,15 @@ final class FeedStore: ObservableObject {
 
     /// Block a node id: remember it, purge them from every circle (engine), drop them
     /// from contacts. Future posts/messages/calls/handshakes from them are dropped.
+    ///
+    /// Entirely local — a block never leaves the device (audit F1). Deciding you don't want to see
+    /// someone is nobody's business but yours; only an explicit report notifies the developer.
     func blockConnection(_ idHex: String) {
         ConnectionsStore.shared.block(idHex)
         social?.blockMember(nodeHex: idHex)
         if let c = ContactsStore.shared.contacts.first(where: { $0.idHex == idHex }) {
             ContactsStore.shared.remove(c)
         }
-        ModerationLedger.record(action: "block", subject: idHex, reason: "")
         persist(); refreshCircles(); refresh()
     }
 
@@ -913,8 +915,8 @@ final class FeedStore: ObservableObject {
     }
 
     /// File a report against a post/message: hide it locally right away (the reporter never sees it
-    /// again), broadcast the sealed report to the whole circle, and append a content-free
-    /// identity-vs-identity entry to the developer ledger. Returns the reported author's FULL node
+    /// again), broadcast the sealed report to the whole circle, and append a content-free, signed
+    /// entry (subject + category, no reporter) to the developer ledger. Returns the reported author's FULL node
     /// hex (resolved by the core from the event log) so the caller can offer an immediate block.
     @discardableResult
     func report(circleId: String, target: String, reason: String, comment: String) -> String? {
@@ -923,7 +925,7 @@ final class FeedStore: ObservableObject {
         HiddenStore.shared.hide(target)
         reportsCache.removeValue(forKey: circleId)
         let author = reports(circleId: circleId)[target]?.first?.author
-        ModerationLedger.record(action: "report", subject: author ?? "", reason: reason)
+        ModerationLedger.report(subject: author ?? "", reason: reason)
         refresh()
         return author
     }

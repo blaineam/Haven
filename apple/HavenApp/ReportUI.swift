@@ -7,21 +7,32 @@ import SwiftUI
 // content-free ledger entry: identity vs identity, action, offense category. No PII, no content.
 
 /// Fire-and-forget, content-free entries to the developer ledger on the push Worker. Node ids are
-/// opaque public keys — the ledger records WHO acted against WHOM and WHY (category), never what
-/// was said or shown. This is the 1.2 "notify the developer" hook, weighted honestly: it makes
-/// abuse patterns (many reporters × one identity) visible without a single byte of content.
+/// opaque public keys — the ledger records only that an identity WAS REPORTED and for which
+/// category, never what was said or shown. This is the 1.2 "notify the developer" hook.
+///
+/// Only an explicit report comes here (audit F1). **Blocking never touches the network**: it is a
+/// private, local decision to stop seeing someone, and it stays on the device.
 enum ModerationLedger {
     @MainActor
-    static func record(action: String, subject: String, reason: String) {
-        guard let url = URL(string: PushManager.relay + "/flag") else { return }
+    static func report(subject: String, reason: String) {
+        guard !subject.isEmpty, let url = URL(string: PushManager.relay + "/flag") else { return }
+        // Signed with the identity key (audit F1): the Terms attach real consequences to a ledger row,
+        // so an unsigned POST must not be able to plant one. The signature binds subject + action +
+        // category, so a captured flag can't be re-aimed at someone else. Unsigned = we don't send.
+        guard let seed = AccountStore.storedSeed(), let acct = try? Account.fromSeed(seed: seed) else { return }
+        let category = String(reason.prefix(64))
+        let ts = UInt64(Date().timeIntervalSince1970)
+        let sig = acct.signPushRegistration(token: "flag-v1:\(subject):report:\(category)", tsSecs: ts)
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body: [String: String] = [
-            "actor": FeedStore.shared.myAccountHex,
+        let body: [String: Any] = [
+            "actor": acct.nodeIdHex(),
             "subject": subject,
-            "action": action,
-            "reason": reason,
+            "action": "report",
+            "reason": category,
+            "ts": ts,
+            "sig": sig.base64EncodedString(),
         ]
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         URLSession.shared.dataTask(with: req).resume()   // fire and forget — never blocks moderation

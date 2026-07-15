@@ -37,12 +37,20 @@ with the people who actually see the content — the members of each circle:
 
 ## 3. The moderation ledger
 
-When you report or block someone, a **content-free** record is added to a permanent moderation
-ledger operated by the developer: your identity key, their identity key, the action, and the
-offense category. Never the content, and never any personal information — identity keys are
-pseudonymous public keys. Identities that accumulate abuse reports may be refused the services
-the developer does operate (such as push notification relaying), and ledger entries may be
-shared with law enforcement where legally required.
+**Blocking is private.** Blocking someone happens entirely on your device and is never reported to
+the developer or to anyone else.
+
+When you **report** someone, a **content-free** record is added to a moderation ledger operated by
+the developer: the reported identity key, the action, and the offense category. Never the content,
+never any personal information, and **never your identity** — the report is signed by your key so
+that nobody can file one in your name, but the signature is checked and discarded, not stored. The
+developer therefore cannot tell who reported whom. Records are deleted after 90 days.
+
+Identities that accumulate abuse reports may be refused the services the developer does operate
+(such as push notification relaying). Because identity keys are free to create, this is a limited
+deterrent, not an identification system. Ledger records may be disclosed where legally required,
+but they contain only a pseudonymous key, an action, a category, and a time — the developer cannot
+link an identity key to a person, produce any content, or say who filed a report.
 
 ## 4. Your content and responsibility
 

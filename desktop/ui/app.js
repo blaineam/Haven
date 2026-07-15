@@ -218,6 +218,9 @@ const state = {
   activeCircle: "default",
   activeDm: null,
   attachments: [], // {ref, url, isVideo}
+  // Media refs the CIRCLE flagged sensitive (see sensitiveGuard). Refreshed with each feed/thread
+  // render, like reportsByTarget — a Set so the per-item check during render is free.
+  sensitive: new Set(),
 };
 
 // ---- navigation ------------------------------------------------------------------------
@@ -619,6 +622,9 @@ async function renderFeed() {
     // content. postCard still renders the tombstone for a post reached directly (comments open).
     .filter((i) => !i.story && !i.unsent)
     .filter((i) => Hidden.showHidden || !Hidden.has(i.id));   // personal per-post hide (reversible)
+  // Media any member flagged sensitive — must land before the cards build, since each tile decides
+  // its own cover as it's created.
+  await loadSensitive(state.activeCircle);
   // Reports filed by ANY member — the circle's shared moderation signal, grouped per post.
   const reportsByTarget = {};
   for (const r of await invoke("reports", { circleId: state.activeCircle }).catch(() => []))
@@ -884,6 +890,55 @@ function geoChip(geo) {
   }, el("span", { class: "note" }, "📍"), el("strong", {}, text));
 }
 
+// ---- Sensitive content ------------------------------------------------------------------
+// Apple runs the on-device analyzer (SensitiveContentAnalysis) and federates a SensitiveFlag to the
+// circle so members whose platform has NO classifier can still blur — that's this. We author no
+// flags (there's no SCA equivalent on Windows/Linux) but we HONOR every one we receive, otherwise a
+// poster marks something sensitive on their iPhone and it lands full-frame on their friend's laptop.
+// Behaviour + copy track apple/HavenApp/SensitiveContent.swift: frosted cover, "Sensitive Content" /
+// "Tap to view", click reveals with a short fade and stays revealed for that render.
+//
+// The federated set is authoritative for EVERY ref in it, including your own posts — iOS's `scan`
+// flag gates only whether the local analyzer runs, never whether a received flag blurs.
+async function loadSensitive(circleId) {
+  const refs = await invoke("sensitive_refs", { circleId }).catch(() => []);
+  state.sensitive = new Set(refs);
+}
+
+/** The frosted cover for one flagged item. Clicking it reveals the media underneath. */
+function sensitiveCover(onReveal) {
+  const cover = el("div", { class: "sensitive-cover", title: "Sensitive Content" },
+    el("div", { class: "sensitive-label" },
+      icon("eye.slash"),
+      el("div", { class: "t" }, "Sensitive Content"),
+      el("div", { class: "s" }, "Tap to view")));
+  cover.addEventListener("click", (e) => {
+    // Don't let the reveal double as a play/▶ or the feed's double-tap-to-❤️.
+    e.stopPropagation();
+    e.preventDefault();
+    cover.classList.add("revealed");
+    onReveal();
+    setTimeout(() => cover.remove(), 200);   // after the fade
+  });
+  return cover;
+}
+
+/** Blur `node` and cover `container` (which must be position:relative) if `ref` is flagged. */
+function guardSensitiveIn(container, node, ref) {
+  if (!state.sensitive.has(ref)) return;
+  node.classList.add("sensitive-blur");
+  container.append(sensitiveCover(() => node.classList.remove("sensitive-blur")));
+}
+
+/** Wrap a bare media node so it can carry its own cover — for the masonry grid and chat bubbles,
+ *  where tiles aren't already inside a positioned page of their own. Returns what to append. */
+function guardSensitive(node, ref) {
+  if (!state.sensitive.has(ref)) return node;
+  const wrap = el("div", { class: "sensitive-wrap" }, node);
+  guardSensitiveIn(wrap, node, ref);
+  return wrap;
+}
+
 function mediaNode(ref, imgStyle) {
   // Videos start muted unless the global "play video sound" toggle is on (iOS parity); native controls
   // still let the user override per-video. data-video lets the toggle re-apply across all of them.
@@ -991,7 +1046,11 @@ function applyBackdrop(p) {
 function buildMediaPages(refs, container, onAspects) {
   const pages = refs.map((ref) => {
     const node = mediaNode(ref);
-    return { ref, node, page: el("div", { class: "media-page" }, node), aspect: 0, poster: null, backdrop: null };
+    const page = el("div", { class: "media-page" }, node);
+    // .media-page is already position:relative + overflow:hidden — the cover goes straight in, over
+    // both the fitted media and its backdrop (which is a blurred copy of the same flagged frame).
+    guardSensitiveIn(page, node, ref);
+    return { ref, node, page, aspect: 0, poster: null, backdrop: null };
   });
   const sync = () => pages.forEach(applyBackdrop);
   for (const p of pages) {
@@ -1235,7 +1294,7 @@ function postCard(it, circleId, reports = []) {
   const media = el("div", { class: "post-media" + (carousel ? " carousel" : mediaCount > 1 ? " masonry" : mediaCount === 1 ? " single" : ""), style: "position:relative" });
   if (carousel) mediaCarousel(visualRefs, media);
   else if (mediaCount === 1) mediaSingle(visualRefs[0], media);
-  else for (const ref of visualRefs) media.append(mediaNode(ref));
+  else for (const ref of visualRefs) media.append(guardSensitive(mediaNode(ref), ref));
   const audio = el("div", {});
   for (const ref of audioRefs) audio.append(mediaNode(ref));
   // Double-tap a photo to ❤️ it (Instagram-style), like the iOS gesture.
@@ -1791,6 +1850,7 @@ async function newMessageSheet() {
 
 async function renderThread(root, dm) {
   const msgs = await invoke("messages", { circleId: dm.id });
+  await loadSensitive(dm.id);   // flags are per-circle, and a DM is a circle
   // A group DM has more than one OTHER participant (member_count > 2) → each incoming message needs a
   // sender name so the group knows who said what (a 1:1 DM doesn't). The relay-reachability flag drives the
   // delivery checkmark (filled = store-and-forward reachable).
@@ -1804,7 +1864,10 @@ async function renderThread(root, dm) {
   const chat = el("div", { class: "chat" });
   for (const m of msgs) {
     // A `geo:` ref renders as a map chip, not media (otherwise a broken tile in the bubble).
-    const mediaEls = (m.media || []).map((r) => { const g = parseGeo(r); return g ? geoChip(g) : mediaNode(r, "max-width:240px;border-radius:12px;display:block"); });
+    const mediaEls = (m.media || []).map((r) => {
+      const g = parseGeo(r);
+      return g ? geoChip(g) : guardSensitive(mediaNode(r, "max-width:240px;border-radius:12px;display:block"), r);
+    });
 
     // An unsent message is a TOMBSTONE, not a hidden row — macOS renders "Message unsent" in
     // italic on the secondary surface, so the thread still reads as a conversation.

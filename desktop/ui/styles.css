@@ -445,6 +445,30 @@ input:focus, textarea:focus, select:focus {
   transform: scale(1.1) translateZ(0); will-change: transform; contain: paint;
   border-radius: 0; pointer-events: none;
 }
+/* ---- Sensitive content (see app.js ▸ sensitiveGuard) ---- */
+/* Honors a SensitiveFlag federated by a member whose platform HAS an analyzer (Apple's SCA). The
+   look is iOS's `.ultraThinMaterial` cover: frosted, centred label, click to reveal.
+   The media itself is blurred rather than relying on the cover's backdrop-filter alone — WebKitGTK
+   (the Linux webview) can fall back to a plain translucent panel, and a scrim you can read THROUGH
+   is a broken promise, not a cosmetic bug. filter+scale hides the blur's soft edge at the bounds. */
+.sensitive-blur { filter: blur(22px); transform: scale(1.08); pointer-events: none; }
+.sensitive-wrap { position: relative; overflow: hidden; border-radius: var(--r-md); display: block; break-inside: avoid; }
+.sensitive-wrap img, .sensitive-wrap video { display: block; }
+.post-media.masonry .sensitive-wrap { margin-bottom: 7px; }
+.sensitive-cover {
+  position: absolute; inset: 0; z-index: 4;   /* above the fitted media (1) and the dots (3) */
+  display: flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  cursor: pointer; text-align: center; border-radius: inherit;
+  transition: opacity .2s ease;
+}
+.sensitive-cover.revealed { opacity: 0; pointer-events: none; }
+.sensitive-label { color: var(--muted); padding: 8px; display: flex; flex-direction: column; align-items: center; gap: 5px; }
+.sensitive-label svg { width: 20px; height: 20px; }
+.sensitive-label .t { font-size: 12px; font-weight: 600; }
+.sensitive-label .s { font-size: 11px; }
+
 .carousel-dots {
   position: absolute; left: 0; right: 0; bottom: 9px; z-index: 3;
   display: flex; justify-content: center; gap: 6px; pointer-events: none;

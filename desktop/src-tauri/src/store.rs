@@ -113,7 +113,8 @@ pub struct RelayEntry {
     /// Learned from the sealed frame-19 announce; empty = iroh-only relay.
     #[serde(default)]
     pub http_urls: Vec<String>,
-    /// Bearer token the relay's HTTP interface requires (travels ONLY inside sealed announces).
+    /// Shared relay secret folded into each request signature (travels ONLY inside sealed
+    /// announces, and is never put on the wire — see `Engine::http_auth`).
     #[serde(default)]
     pub http_token: String,
     /// When this relay was last (re-)ADOPTED (unix ms). Rides the announce so a member who FORGOT it
@@ -196,7 +197,8 @@ pub struct Prefs {
     /// `RelayMailboxStore.entries` (UserDefaults key `haven.relay.entries`).
     #[serde(default)]
     pub relay_entries: std::collections::HashMap<String, RelayEntry>,
-    /// Bearer token for OUR hosted relay's plain-HTTP interface (generated once at first host).
+    /// Shared relay secret for OUR hosted relay's plain-HTTP interface (generated once at first
+    /// host). A pre-filter mixed into request signatures — membership is what authorizes.
     #[serde(default)]
     pub relay_http_token: String,
     /// Optional public URL for OUR hosted relay's HTTP interface (port-forward / reverse proxy /

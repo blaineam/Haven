@@ -338,6 +338,7 @@ pub fn run() {
             commands::add_to_circle,
             commands::remove_from_circle,
             commands::feed,
+            commands::sensitive_refs,
             commands::post,
             commands::post_story,
             commands::comment,

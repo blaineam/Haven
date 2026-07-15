@@ -267,6 +267,14 @@ pub fn feed(engine: Eng, circle_id: String) -> Vec<FeedItemDto> {
     engine.feed(&cid).into_iter().map(|it| feed_item_dto(&engine, it)).collect()
 }
 
+/// Media refs flagged sensitive by any member of this circle — the frontend blurs these until the
+/// viewer reveals them. We only ever read the federated set; desktop authors no flags.
+#[tauri::command]
+pub fn sensitive_refs(engine: Eng, circle_id: String) -> Vec<String> {
+    let cid = if circle_id.is_empty() { DEFAULT_CIRCLE.to_string() } else { circle_id };
+    engine.sensitive_refs(&cid)
+}
+
 #[tauri::command]
 pub fn post(engine: Eng, circle_id: String, body: String, media: Vec<String>, music: Option<TrackInput>, mute_video: Option<bool>) {
     let cid = if circle_id.is_empty() { DEFAULT_CIRCLE.to_string() } else { circle_id };

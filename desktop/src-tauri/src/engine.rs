@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
+use base64::Engine as _; // for `.encode` on the base64 engine (this module's `Engine` is unrelated)
 use haven_ffi::{
     parse_link, Account, FeedItemFfi, HavenNode, HavenSocial, InboundListener, RelayClient,
     RelayServerHandle, TrackRefFfi,
@@ -138,7 +139,14 @@ pub struct Engine {
     seen_relay: StdMutex<std::collections::HashSet<String>>,
 }
 
-const MEDIA_CHUNK_SIZE: usize = 512 * 1024;
+/// Peer-to-peer iroh frame chunk — 32 KB, matching iOS/Android (`HavenNet.kt:2173`). Theirs is the
+/// deliberate number: larger frames overflowed the reliable-send buffer on a BLE-only nearby link
+/// and were silently dropped. Desktop has no BLE, so 512 KB was never wrong here — but it was
+/// unintentional, and one number means one tested reassembly path instead of a desktop-only size
+/// mobile receivers never see from each other. The cost is the per-chunk hybrid-KEM seal (~1.1 KB of
+/// ML-KEM ct + ephemeral pubkey): ~3.5% overhead at 32 KB vs ~0.2% at 512 KB. Mobile already pays it
+/// on far weaker hardware, and a few % on a LAN/QUIC transfer is worth cross-platform uniformity.
+const MEDIA_CHUNK_SIZE: usize = 32 * 1024;
 /// Relay/S3 media chunk size — 8 MB, well under blobstore's MAX_BLOB (256 MB) and memory-safe.
 /// (Distinct from MEDIA_CHUNK_SIZE above, which is the peer-to-peer iroh frame chunk.)
 const MEDIA_CHUNK_BYTES: usize = 8 * 1024 * 1024;
@@ -157,11 +165,51 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The payload of a `data:` URL, or the string unchanged if it isn't one. The frontend stores
+/// avatars as `data:image/jpeg;base64,…` (that's what `img src` wants), but the profile card on the
+/// wire is bare base64 — iOS feeds it straight to `Data(base64Encoded:)`, which rejects the prefix.
+fn raw_base64(s: &str) -> String {
+    match s.split_once(";base64,") {
+        Some((head, payload)) if head.starts_with("data:") => payload.to_string(),
+        _ => s.to_string(),
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// The exact `/flag` body desktop POSTs for a report — pure, so a test can sign one and put it on
+/// the wire without a live engine. `None` = we can't sign, so we don't send (an unsigned flag is
+/// just a 401).
+///
+/// Signed with the identity key (audit F1): TERMS.md attaches real consequences to a ledger row, so
+/// an unsigned POST must not be able to plant one. The signed material binds subject + action +
+/// category, so a captured flag can't be re-aimed at someone else. It reuses the one
+/// purpose-specific signer core exposes rather than growing a second (no raw signing oracle, audit
+/// H3), and `flag-v1:…` is deliberately non-hex — that's what keeps it disjoint from the
+/// `/register` token space, which the worker's `hexToken` enforces. Parity with ReportUI.swift and
+/// Moderation.kt.
+fn flag_body(seed: &[u8; 32], subject: &str, reason: &str, ts: u64) -> Option<serde_json::Value> {
+    if subject.is_empty() {
+        return None;
+    }
+    let acct = Account::from_seed(seed.to_vec()).ok()?;
+    let category: String = reason.chars().take(64).collect(); // category only, as the worker slices it
+    let sig = acct.sign_push_registration(format!("flag-v1:{subject}:report:{category}"), ts);
+    Some(serde_json::json!({
+        // The worker verifies against `actor` (a node id IS the Ed25519 public key it checks) but
+        // stores no actor — the "A reported B" edge never lands in KV. Sent, never recorded.
+        "actor": acct.node_id_hex(),
+        "subject": subject,
+        "action": "report",   // report-only server-side: a block is unrepresentable here
+        "reason": category,
+        "ts": ts,
+        "sig": base64::engine::general_purpose::STANDARD.encode(sig),
+    }))
 }
 
 impl Engine {
@@ -926,6 +974,13 @@ impl Engine {
         self.social.feed(circle_id.to_string(), now_ms(), retention)
     }
 
+    /// Media refs any circle member flagged sensitive. Desktop has no on-device classifier (Apple's
+    /// SCA has no equivalent here), so we author no flags — but we HONOR the federated ones, which is
+    /// the whole point of `SensitiveFlag` riding the event log. See `apple/HavenApp/SensitiveContent.swift`.
+    pub fn sensitive_refs(&self, circle_id: &str) -> Vec<String> {
+        self.social.sensitive_refs(circle_id.to_string())
+    }
+
     pub fn post(self: &Arc<Self>, circle_id: String, body: String, media: Vec<String>, music: Option<TrackRefFfi>, mute_video: bool) {
         if body.trim().is_empty() && media.is_empty() && music.is_none() {
             return;
@@ -1011,7 +1066,7 @@ impl Engine {
                     .into_iter()
                     .find(|r| r.target == target)
                     .map(|r| r.author);
-                self.moderation_flag("report", author.clone().unwrap_or_default(), reason);
+                self.moderation_report(author.clone().unwrap_or_default(), reason);
                 author
             }
             Err(e) => {
@@ -1027,18 +1082,16 @@ impl Engine {
     }
 
     /// Fire-and-forget, content-free entry to the developer moderation ledger on the push Worker
-    /// (App Review 1.2 parity with Apple/Android): actor × subject × action × offense category —
-    /// opaque node hexes only, never content. Free-text comments stay sealed to the circle.
-    fn moderation_flag(&self, action: &str, subject: String, reason: String) {
-        if subject.is_empty() {
+    /// (App Review 1.2 parity with Apple/Android): subject × action × offense category — opaque
+    /// node hexes only, never content. Free-text comments stay sealed to the circle.
+    ///
+    /// Only an explicit REPORT comes here (audit F1). **Blocking never touches the network**: it is
+    /// a private, local decision to stop seeing someone, and it stays on the device. `action` is
+    /// report-only server-side, so a block is unrepresentable here by construction.
+    fn moderation_report(&self, subject: String, reason: String) {
+        let Some(body) = flag_body(&self.seed, &subject, &reason, now_ms() / 1000) else {
             return;
-        }
-        let body = serde_json::json!({
-            "actor": self.social.my_node_hex(),
-            "subject": subject,
-            "action": action,
-            "reason": reason,
-        });
+        };
         let http = self.http.clone();
         tauri::async_runtime::spawn(async move {
             // Manual JSON body — this crate's reqwest is built without the `json` feature
@@ -1283,8 +1336,9 @@ impl Engine {
         self.prefs.lock().unwrap().blocked.clone()
     }
 
+    /// Blocking is local and private (audit F1) — it sends NOTHING to the network. No ledger flag,
+    /// no developer notification: stopping seeing someone is nobody's business but the user's.
     pub fn block(self: &Arc<Self>, id_hex: String) {
-        self.moderation_flag("block", id_hex.clone(), String::new());
         self.social.block_member(id_hex.clone());
         {
             let mut p = self.prefs.lock().unwrap();
@@ -1394,8 +1448,12 @@ impl Engine {
             .map(|c| c.name)
             .unwrap_or_else(|| "My Circle".to_string());
         let bundle = self.social.my_bundle();
-        // Avatar is left out of the Hello (keeps it small, matches Android); it travels in-app.
-        let signed = self.social.my_signed_profile(name, profile.bio, profile.link, String::new(), profile.emoji);
+        // The avatar rides the signed card, same as iOS (`Profile.swift:90`) and Android
+        // (`HavenNet.kt:1105`). The UI already caps it at 192px / JPEG q0.7 (`avatarDataUrl`), so
+        // it's the same handful of KB those two send — but we store it as a `data:` URL and the
+        // wire is RAW base64 (iOS decodes with `Data(base64Encoded:)`), hence the strip.
+        let signed =
+            self.social.my_signed_profile(name, profile.bio, profile.link, raw_base64(&profile.avatar), profile.emoji);
         Some(wire::hello_payload(circle_id, &circle_name, &bundle, &signed))
     }
 
@@ -2905,10 +2963,34 @@ impl Engine {
     fn http_key_url(base: &str, key: &str) -> String {
         format!("{}/k/{}", base.trim_end_matches('/'), key)
     }
+    /// Sign ONE request to a relay's plain-HTTP media interface.
+    ///
+    /// The relay no longer accepts a shared bearer token: it verifies a signature over this
+    /// device's transport key to learn WHO is asking, then runs the same circle-membership check
+    /// the iroh path runs (core httprelay.rs). The frame-19 token is folded into the signed
+    /// transcript rather than sent, so it never crosses the wire.
+    ///
+    /// The seed MUST be the same one `HavenNode::start` binds the transport to (the roster's
+    /// per-device seed), or the relay sees a node id that is in no roster and answers 403.
+    ///
+    /// NEVER cache the returned header: it carries a timestamp, a one-shot nonce and a digest of
+    /// THIS body, so reusing one is a replay and the relay refuses it.
+    fn http_auth(&self, token: &str, method: &str, key: &str, body: &[u8]) -> Option<String> {
+        let seed: [u8; 32] = self.roster.lock().unwrap().device_seed.clone().try_into().ok()?;
+        let secret = p2pcore::identity::Identity::from_seed(&seed).node_secret_bytes();
+        Some(haven_net::httprelay::auth_header(&secret, token, method, key, body))
+    }
     /// GET one key. `Ok(Some)` = bytes, `Ok(None)` = reachable but 404 (a real MISS — the iroh path
     /// serves the same store, so skip dialing it), `Err(())` = unreachable.
     async fn http_get(&self, base: &str, token: &str, key: &str) -> Result<Option<Vec<u8>>, ()> {
-        let resp = self.http.get(Self::http_key_url(base, key)).bearer_auth(token).send().await.map_err(|_| ())?;
+        let auth = self.http_auth(token, "GET", key, b"").ok_or(())?;
+        let resp = self
+            .http
+            .get(Self::http_key_url(base, key))
+            .header("authorization", auth)
+            .send()
+            .await
+            .map_err(|_| ())?;
         match resp.status().as_u16() {
             200..=299 => Ok(Some(resp.bytes().await.map_err(|_| ())?.to_vec())),
             404 => Ok(None),
@@ -2916,9 +2998,11 @@ impl Engine {
         }
     }
     async fn http_put(&self, base: &str, token: &str, key: &str, body: Vec<u8>) -> bool {
+        // Digest over the EXACT bytes sent — `.body(body)` puts this buffer on the wire verbatim.
+        let Some(auth) = self.http_auth(token, "PUT", key, &body) else { return false };
         self.http
             .put(Self::http_key_url(base, key))
-            .bearer_auth(token)
+            .header("authorization", auth)
             .header("content-type", "application/octet-stream")
             .body(body)
             .send()
@@ -3763,9 +3847,90 @@ impl InboundListener for NodeListener {
 }
 
 #[cfg(test)]
+mod flag_tests {
+    use crate::engine::flag_body;
+
+    /// The moderation ledger row is signed (audit F1). Proven against a REAL worker rather than a
+    /// mock, because the thing that broke was a contract mismatch a mock would have reproduced
+    /// wrongly: desktop kept POSTing the old unsigned body and the worker's 401 went unnoticed
+    /// behind fire-and-forget.
+    ///
+    /// Needs the worker running locally, so it's `#[ignore]` by default:
+    ///     cd push && npx wrangler dev --port 8799 --local
+    ///     cargo test --lib flag -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "needs `wrangler dev --port 8799` in push/"]
+    async fn signed_report_is_accepted_and_unsigned_is_not() {
+        let url = "http://127.0.0.1:8799/flag";
+        let http = reqwest::Client::new();
+        let seed = [7u8; 32];
+        let subject = "a".repeat(64);
+        let post = |body: String| {
+            http.post(url).header("content-type", "application/json").body(body).send()
+        };
+
+        // BEFORE (the bug): the old unsigned body desktop shipped through beta.33.
+        let old = serde_json::json!({
+            "actor": "b".repeat(64), "subject": subject, "action": "report", "reason": "Spam or scam",
+        });
+        assert_eq!(post(old.to_string()).await.unwrap().status(), 401, "unsigned flag must be refused");
+
+        // AFTER (the fix): the exact bytes moderation_report puts on the wire.
+        let ts = crate::engine::now_ms() / 1000;
+        let body = flag_body(&seed, &subject, "Spam or scam", ts).expect("signable");
+        assert_eq!(post(body.to_string()).await.unwrap().status(), 200, "signed flag lands");
+
+        // A flag can't be re-aimed: same signature, different victim.
+        let mut stolen = body.clone();
+        stolen["subject"] = serde_json::json!("c".repeat(64));
+        assert_eq!(post(stolen.to_string()).await.unwrap().status(), 401, "signature binds the subject");
+
+        // Block is unrepresentable server-side — belt to the braces of desktop never sending one.
+        let mut blocked = body.clone();
+        blocked["action"] = serde_json::json!("block");
+        assert_eq!(post(blocked.to_string()).await.unwrap().status(), 400, "a block has no ledger row");
+    }
+
+    /// No subject / no signable identity → we send nothing at all, rather than a flag the worker
+    /// would refuse anyway.
+    #[test]
+    fn unsignable_or_subjectless_reports_are_not_sent() {
+        assert!(flag_body(&[7u8; 32], "", "Spam or scam", 1).is_none(), "no subject, no row");
+        assert!(flag_body(&[7u8; 32], &"a".repeat(64), "x", 1).is_some());
+    }
+}
+
+#[cfg(test)]
 mod round_trip_tests {
     use crate::wire;
     use haven_ffi::HavenSocial;
+
+    /// The frontend hands us `data:` URLs; peers expect bare base64. Getting this backwards ships
+    /// an avatar that every Apple client silently drops (`Data(base64Encoded:)` returns nil).
+    #[test]
+    fn avatar_rides_the_card_as_bare_base64() {
+        assert_eq!(crate::engine::raw_base64("data:image/jpeg;base64,AQID"), "AQID");
+        assert_eq!(crate::engine::raw_base64("AQID"), "AQID", "already-bare base64 is untouched");
+        assert_eq!(crate::engine::raw_base64(""), "", "no avatar stays empty");
+
+        // ...and it survives the sign/verify round trip the Hello actually performs.
+        let alice = HavenSocial::new([11u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([22u8; 32].to_vec()).unwrap();
+        let signed = alice.my_signed_profile(
+            "Alice".into(),
+            String::new(),
+            String::new(),
+            crate::engine::raw_base64("data:image/jpeg;base64,AQID"),
+            String::new(),
+        );
+        let hello = wire::hello_payload("default", "My Circle", &alice.my_bundle(), &signed);
+        let parsed = wire::parse_hello(&wire::frame(wire::HELLO, &hello)[1..]).expect("hello parses");
+        assert_eq!(
+            bob.verify_profile(parsed.bundle, parsed.signed_profile).as_deref(),
+            Some("Alice"),
+            "the card still verifies with an avatar aboard"
+        );
+    }
 
     /// Two parties handshake and exchange a post + a sealed media chunk through the exact
     /// `wire` framing the engine moves over iroh — a stand-in for a real cross-device test

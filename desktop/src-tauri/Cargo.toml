@@ -34,6 +34,9 @@ haven_ffi = { path = "../../core/p2pcore-ffi" }
 p2pcore = { path = "../../core/p2pcore" }
 # Shared BYO-storage mailbox (SigV4 S3 client) — additive core crate.
 haven-s3 = { path = "../../core/haven-s3" }
+# The relay's own crate — for `httprelay::auth_header`, so the desktop client signs its plain-HTTP
+# media requests with byte-identical code to the one the relay verifies with.
+haven-net = { path = "../../core/haven-net" }
 
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"

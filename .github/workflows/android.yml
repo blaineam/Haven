@@ -24,7 +24,30 @@ permissions:
   contents: write
 
 jobs:
+  # Does this push actually touch Android? A main push that only edits apple/, web/ or docs/ has no
+  # business rebuilding the Rust core for four ABIs.
+  #
+  # This is a JOB-level gate rather than an `on.push.paths:` filter on purpose: `paths` would also
+  # be evaluated for TAG pushes, and a tag can point at a commit whose diff touches nothing here —
+  # which would silently skip the release build and the Play upload. Tags always build.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      android: ${{ steps.filter.outputs.android }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            android:
+              - 'android/**'
+              - 'core/**'
+              - '.github/workflows/android.yml'
+
   build:
+    needs: changes
+    if: github.ref_type == 'tag' || needs.changes.outputs.android == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

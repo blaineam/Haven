@@ -5,6 +5,13 @@ on:
   # Runs on pushes targeting the default branch
   push:
     branches: ["main"]
+    # Only redeploy Pages when the site actually changed. This one is safe to filter at the trigger
+    # (no tags involved) — every commit to apple/, android/ or desktop/ was rebuilding and
+    # redeploying an identical site.
+    paths:
+      - "web/**"
+      - "docs/**"
+      - ".github/workflows/static.yml"
 
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:

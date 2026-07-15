@@ -1,12 +1,18 @@
 # Haven — security model & threat model
 
-Haven is a peer-to-peer, end-to-end-encrypted, post-quantum social network. **Nothing is sent to the
-developer; nothing is logged.** Content travels only between the people in a user's circles — directly
-over Bluetooth/Wi-Fi/iroh P2P, or store-and-forwarded through a relay/S3 mailbox that one of the
-circle's own members runs. Every relay and server is **blind**: it holds only ciphertext.
+Haven is a peer-to-peer, end-to-end-encrypted, post-quantum social network. **No content is ever sent
+to the developer, and no content is logged.** Content travels only between the people in a user's
+circles — directly over Bluetooth/Wi-Fi/iroh P2P, or store-and-forwarded through a relay/S3 mailbox
+that one of the circle's own members runs. Every relay and server is **blind**: it holds only
+ciphertext.
+
+"No content" is the exact scope, and the qualifier is load-bearing: reporting or blocking someone
+sends a **content-free** ledger entry to the developer (see *Moderation & reporting* below), and the
+push Worker necessarily handles routing metadata. Those are the only things that reach the developer,
+and neither includes a byte of what anyone said or shared.
 
 This document records what Haven protects, how, and the limits — including the two features that are
-**privacy deterrents, not cryptographic guarantees**. It reflects the post-audit state (2026-06).
+**privacy deterrents, not cryptographic guarantees**. It reflects the post-audit state (2026-07).
 
 ## Cryptography
 
@@ -15,10 +21,18 @@ This document records what Haven protects, how, and the limits — including the
   security, so Haven is never weaker than classical and resists "harvest-now-decrypt-later". The KEM
   derivation binds the full transcript (ephemeral key, ciphertext, recipient keys).
 - **Group keying (sender keys + epochs)** — see `GROUP-KEYING.md`. Each member seals their posts under
-  a rotating epoch key distributed to the current members via the hybrid KEM. Removing/blocking a
-  member rotates the epoch so the removed node **cannot decrypt content posted afterward** —
-  cryptographic revocation, not advisory. Old epoch keys are pruned, giving **bounded forward
-  secrecy**: a later key compromise can't decrypt older wire/relay ciphertext.
+  an epoch key distributed to the current members via the hybrid KEM. Removing/blocking a member, or a
+  device-roster change, rotates the epoch so the removed node **cannot decrypt content posted
+  afterward** — cryptographic revocation, not advisory (`core/p2pcore-ffi/src/lib.rs:1128`, `:1521`,
+  `:2516`). Only the last 4 epoch keys are retained (`prune_epoch_keys`, `lib.rs:1041-1063`).
+- **Forward secrecy — read this carefully.** Pruning bounds it *only once the epoch has actually
+  moved*, and today the epoch moves **only on removal/block/device-roster change**. The periodic
+  rotation the design calls for is implemented in core (`rotate_circle`, `lib.rs:1518`) but **is not
+  yet called by any client** — so in a stable circle with no membership churn, the epoch never
+  advances and one seed compromise still decrypts that circle's history. Haven does **not** have
+  per-message forward secrecy or post-compromise security; that needs MLS, which is **not built**
+  (the current layer is multi-recipient PKE — `core/p2pcore/src/social.rs:14-16`). Wiring the
+  periodic cadence is tracked in `ROADMAP.md` → Outstanding.
 - **Authentication**: every event is signed and the signer is bound to the event author and circle
   epoch; push notifications are signed (the receiver verifies the sender); push registration is signed
   (the worker verifies the device belongs to the identity). Signatures are domain-separated; there is
@@ -35,20 +49,57 @@ This document records what Haven protects, how, and the limits — including the
   relays, for replication). A node that merely learns the relay's id can no longer fetch or enumerate a
   circle's blobs. Self-sync slots are likewise access-controlled to their owning account. (Standalone
   self-host relays stay permissive until configured; the apps configure membership automatically.)
-- **Can** see **limited metadata**: connection timing, IP↔node-id mappings (via the iroh/n0 public
-  discovery the app uses for NAT traversal), and — for a member-run relay, which knows its own circle's
-  config anyway — the random circle UUIDs in key paths. Content, contacts, and keys remain sealed. A
-  user with a stricter threat model can run their own relay/discovery. *(Core groundwork also exists for
-  opaque/HMAC'd per-member key prefixes, for the case of a non-member-operated relay.)*
+- **Can** see **limited metadata**: connection timing, blob sizes, and **`IP ↔ node id` for every peer
+  it serves** — both via the iroh/n0 public discovery used for NAT traversal *and* directly, because the
+  relay reads the connecting peer's verified node id off the QUIC handshake
+  (`core/haven-net/src/blobstore.rs:537`) and needs it to enforce the membership check above. Your node
+  id is your public key. It also sees — for a member-run relay, which knows its own circle's config
+  anyway — the random circle UUIDs in key paths. Content, contacts, and keys remain sealed. A user with
+  a stricter threat model can run their own relay/discovery, or put Haven behind a VPN. *(Core
+  groundwork also exists for opaque/HMAC'd per-member key prefixes, for the case of a
+  non-member-operated relay — `groupkey.rs:108`, not yet called by any client.)*
 
 ## Identity & control
 
 - The user can **roll their identity** at any time (a true reset that abandons the old social graph),
   **remove** any member from a circle, or **block** them. Block/remove are now cryptographically
   enforced going forward (epoch rotation), not just local filtering.
-- There is **no content moderation or reporting** by design, and it is not possible: content is E2EE
-  between community members, the developer has no access to it and logs nothing, so there is nothing
-  to moderate or report to. Users curate their own circles (who they approve, remove, and block).
+- Users curate their own circles (who they approve, remove, and block).
+
+## Moderation & reporting
+
+**Server-side content moderation is impossible; reporting exists and ships.** Those are two different
+claims, and only the first is about cryptography:
+
+- **No *content* moderation is possible, by construction.** Content is E2EE between circle members;
+  the developer holds no key and stores no copy, so there is no content for anyone outside the circle
+  to review, filter, or take down. Nothing in this section changes that.
+- **Reporting is shipped on all three platforms**, and it is *member*-scoped. A report is sealed to
+  the **whole circle** as an ordinary event (`EventKind::Report` —
+  `core/p2pcore/src/social.rs:70`, authored at `core/p2pcore-ffi/src/lib.rs:1862`), because circles
+  have no owner: every member judges it and acts with the power they already hold — hide, remove, or
+  block. The reporter's free-text comment goes **only** to the circle.
+- **A content-free entry is also sent to the developer.** Reporting
+  (`apple/HavenApp/FeedView.swift:926`) and — today, automatically and silently — blocking
+  (`apple/HavenApp/FeedView.swift:542`; Android: `android/.../core/Moderation.kt:37`) `POST /flag` to
+  the push Worker, which appends a permanent KV row of `{actor, subject, action, reason}`
+  (`push/worker.js:146-163`): two pseudonymous identity keys, the action, and an offense category.
+  **Never content, never PII.** See `MODERATION.md` for the design and `TERMS.md` §3 for the
+  consequences attached to it (possible refusal of developer-operated services, disclosure where
+  legally required).
+
+**Honest limits of the ledger**, so no one over-reads it:
+
+- It is a record the developer holds *about identities*, which is the one place Haven's
+  "the developer holds nothing" instinct does not hold. It is content-free, but it is not nothing.
+- `/flag` is **unauthenticated** — `actor` is self-asserted and not signature-checked
+  (`push/worker.js:154` validates only hex shape). Entries are therefore forgeable and should not be
+  treated as evidence about any identity.
+- Blocking is a private, defensive act, yet it currently notifies the developer without asking.
+
+Signing `/flag`, dropping the automatic block report, and bounding entry lifetime are tracked as
+audit finding **F1** (`SECURITY-AUDIT-2026-07.md`). This section describes what ships **today**, not
+what should.
 
 ## Deterrents, not guarantees (do not over-rely)
 

@@ -1,253 +1,248 @@
 # Roadmap
 
-Milestones are ordered so each one proves the hardest unproven thing next, and every
-step is verifiable.
+**Last verified against the code: 2026-07-15.** Every "shipped" claim below was checked against
+an implementation, not against another doc. Where a claim couldn't be verified either way it is
+marked **UNVERIFIED** rather than asserted.
 
-## ✅ M1a — Cryptographic spine (DONE)
+## Where things actually stand
 
-Real, unit-tested hybrid post-quantum identity, key establishment, and the reach-me
-link system, all verifiable on the host with no devices or network.
+| Surface | State |
+|---|---|
+| **iOS + iPadOS** | **1.0.4 live on the App Store.** 1.0.5 (build 189) in review — feed blur backdrop + carousel, web post links, relay nudge, call fixes |
+| **macOS** | **1.0.4 live on the App Store** (native `HavenMac`, not Catalyst). 1.0.5 in review |
+| **Apple Watch** | Shipped, embedded in the iOS app (`com.blaineam.kith.watchkitapp`) |
+| **Android** | Signed AAB on the Play **internal** track. Closed testing not yet public |
+| **Windows** | Real `.msi` / NSIS `.exe` on GitHub Releases (`v0.1.0-beta.40`). ⚠️ **install path untested on real hardware.** Not in the Microsoft Store |
+| **Linux** | `.deb` / `.rpm` / AppImage / sideloadable `haven.flatpak` on GitHub Releases (x86_64). **Not on the AUR. Not on Flathub** |
+| **`haven-relay` daemon** | Static musl binaries for x86_64 / aarch64 / armv7 / armv6 (Pi), plus macOS + Windows |
+| **Web** | Invite-landing / promo page only — the client was abandoned (M6) |
+| **tvOS** | Does not exist and is not planned |
 
-- On-device identity: Ed25519 + X25519 + ML-KEM-768 (`identity.rs`)
-- Hybrid-PQ KEM (X25519 + ML-KEM-768 → HKDF) + AES-256-GCM (`crypto.rs`)
-- Reach-me links (`haven://` + `https://`), parse/verify/MITM-check (`link.rs`)
-- Transport `Path` ladder + selector seam (`transport.rs`)
-- 5 integration tests green (`tests/spine.rs`)
+Version skew check: Apple `1.0.5`/`189` (`apple/project.yml:115-116`); desktop + Android ship
+from tag `v0.1.0-beta.40`; core crates are all `0.0.1` and unversioned. That's intentional, not drift.
 
-## ✅ M1b — Networking spine (first transfer working)
+---
 
-A real photo moves peer-to-peer as hybrid-PQ ciphertext over QUIC, verified
-byte-identical. Runnable: `cargo run -p haven-demo` (see `core/demo/`).
+## Is v1 feature-complete?
 
-- **iroh 1.0** integrated: two endpoints, dial-by-address, real QUIC streams,
-  relays disabled (runs fully offline/local)
-- `p2pcore` crypto carried over the wire end-to-end (X25519+ML-KEM-768 → AES-256-GCM);
-  the QUIC stream only ever holds ciphertext, verified by BLAKE3 match on both ends
-- On-wire framing for `Encapsulation` (eph ‖ pq_ct ‖ sealed)
-- Bonus: iroh 1.0 ships `X25519MLKEM768` PQ-transport examples → confirms D4's
-  PQ transport is available to switch on later
+**Functionally, essentially yes.** Everything in the product thesis — circles, feed, DMs, stories,
+media, music, mesh calls, screen share, nearby, relay, notifications, multi-device, scheduled
+messages — is built and shipping on the Apple platforms, which is where v1 actually launches.
 
-### Reusable networking node ✅
-- **`haven-net`** crate: a `Node` (iroh) that listens + dials and exchanges opaque
-  payloads. Test: two nodes exchange a real `p2pcore::social::SealedEnvelope` over
-  QUIC and the recipient opens the post with their own keys.
+**But there are real gaps, and two are security-relevant.** None of them block an Apple v1; they
+block *claiming parity*, and they block some of what the docs promise. In priority order:
 
-### Remaining for M1b polish
-- **Async FFI** so the iOS app drives a `Node` (connect, send, receive callbacks)
-- **Discovery** (iroh n0 / DHT) so an invite link's node id resolves to a live
-  address over the internet (currently direct/LAN address)
-- Integrate **iroh-blobs** for content-addressed, **resumable**, multi-source
-  transfer (large/100 GB files)
-- Wrap behind the `Transport` trait + path-selector; relay fallback
-- True two-device run (currently two nodes on one host)
+### Outstanding — security-relevant
 
-## ✅ M1c — Hybrid PQ signatures (DONE)
+1. **Revocation is not adversary-proof.** A linked device holds a **copy of the account master
+   seed** (that's what `haven-seed:` move-to-device transfers), and the engine runs under that
+   copied seed rather than a per-device key. Revoking marks a device revoked; it does **not**
+   invalidate the seed it already holds. Since device lists merge higher-version-wins
+   (`core/p2pcore/src/device.rs`), an attacker with the seed can sign a fresh higher-version list
+   and **re-add itself**. The finalizing "seed-drop" is explicitly still to build
+   (`apple/HavenApp/DeviceRoster.swift:11-12`, `:52-54`). Revocation works against a *lost* device,
+   not a *compromised* one. → This is D16 Phase 2's real remaining work. See `MULTI-DEVICE.md`.
+2. **Periodic epoch rotation is not wired.** `rotate_circle` exists in core
+   (`core/p2pcore-ffi/src/lib.rs:1518`) and is called by **no client** — only a unit test
+   (`:2921`). Rotation therefore only ever happens on removal/block/device-roster change. In a
+   circle with no membership churn the epoch **never advances**, `prune_epoch_keys` never fires,
+   and one seed compromise decrypts that circle's whole history. Bounded forward secrecy is real
+   only for circles with churn. → Wire a timer on each platform. See `GROUP-KEYING.md`.
+3. **Video EXIF/GPS gaps.** Photos are stripped on iOS + Android. Video is not: iOS's **default**
+   auto-optimize path never sets `export.metadata` (`apple/HavenApp/Media.swift:552-588`) while the
+   *non-default* "share original" path does (`:364`); Android ships raw video bytes with no strip
+   (`core/LocalMedia.kt:330-337`). The iOS side is a one-liner. See `MEDIA-AND-MUSIC.md`.
+   *(The iOS default-path leak is inferred from the `AVAssetExportSession` contract — **UNVERIFIED**
+   on device; confirm by inspecting an exported file's metadata.)*
 
-**ML-DSA-65** (FIPS 204) added alongside Ed25519 in `identity.rs`. Signatures are
-now `ed25519(64) ‖ ml-dsa(rest)`; both halves must verify. Tests prove each half is
-enforced (corrupting either fails). "Hybrid PQ everywhere" is complete — KEM *and*
-signatures. 6 core tests green.
+### Outstanding — parity / correctness
 
-## ✅ M2 — Groups, posts, comments, reactions (DONE)
+4. **Desktop avatar never reaches peers.** You can set one; it stays local.
+   `desktop/src-tauri/src/engine.rs:1398` passes `String::new()` into the signed profile card
+   instead of `profile.avatar`. The comment there claims this "matches Android" — it does not
+   (`android/.../HavenNet.kt:1105` passes `profile.avatarB64`). One-line fix.
+5. **Sensitive-content blur is Apple-only.** The analyzer ships on Apple
+   (`apple/HavenApp/SensitiveContent.swift`) and federates a `SensitiveFlag` to the circle so peers
+   can blur without running it — but **Android and desktop ignore the flag entirely** and render
+   flagged media unblurred. Neither needs a classifier; both need to honor the flag. There is also
+   **no per-circle toggle** anywhere (it follows the system setting).
+6. **Windows install path untested.** CI builds the installers; nobody has installed one on real
+   Windows (the available VM can't build them). Treat Windows as beta until someone does.
+   **UNVERIFIED** by construction.
+7. **In-band chunk size is inconsistent**: 32 KB on iOS/Android, 512 KB on desktop
+   (`desktop/src-tauri/src/engine.rs:141`). Interoperable, but unintentional.
+8. **macOS native-view backfill**: camera / in-call video / dual-camera are honest
+   `isSupported == false` placeholders on macOS (`apple/HavenApp/DualCamera.swift:262-278`).
+   Gated, not broken — but a real gap on a shipping platform.
+9. **"Start relay at login" is a no-op on native macOS** — `RelayHost.swift:255-267` is gated
+   inside `#if targetEnvironment(macCatalyst)`, and Catalyst was dropped.
+10. **Music: local-file attach missing on Android.** The portable-reference design has two halves
+    (local file → full; streaming → deep-link). Only deep-link exists.
+11. **No Wear OS companion** (iOS has one).
+12. **No active-speaker highlight** in Android calls (`ui/CallUI.kt:322-323`). Cosmetic.
 
-- ✅ **Social engine** (`p2pcore::social`): circles, posts, stories, messages, comments,
-  reactions, edit, unsend, DMs, media + music refs — events sealed E2E to all members
-  (fresh content key + per-member hybrid-KEM wrap), hybrid-signed; `build_feed` timeline
-  reducer with author-authorized edit/unsend.
-- ✅ **Multi-circle feed in the app**, networked between real devices: compose, react,
-  comment, edit, unsend flow peer-to-peer (verified device-to-device).
-- ✅ **Edit & unsend** as signed ordered events: edit → "Edited" badge, unsend →
-  "Message unsent" (see DECISIONS D11).
-- ✅ Contact approval + blocking (client-side enforcement); per-circle privacy
-  (Spotlight + Face ID lock).
-- ✅ **Messages UX**: recency-sorted conversations + iMessage-style **pinning** (up to 6,
-  drag-to-rearrange on iOS/macOS); pins **self-sync across your devices**. A DM-delete
-  **watermark** (a local "cleared before" mark — true network deletion is impossible in
-  P2P) so restarting a conversation doesn't restore old messages. **Group DMs** show each
-  message's sender name + timestamp + delivery checkmark.
-- ⏭️ Harden to **`mls-rs`** with a hybrid-PQ ciphersuite (forward secrecy / efficient
-  membership) — the current layer is multi-recipient PKE, not yet MLS.
-- ⏭️ **Scheduled "send later"** (D17, `SCHEDULED-MESSAGES.md`): queue plaintext, seal+send
-  at T from an awake device (always-on device = primary firer); send-time + optional
-  display-time modes; editable/cancelable until fired *(designed; relies on M2b)*.
+### Deliberately not doing (do not "fix" these)
 
-## 🟡 M2b — Multi-device & multi-identity
+- **China**: permanent no.
+- **FRA**: off deliberately.
+- **Web client**: abandoned 2026-06-22 (M6) — a browser can't be an iroh peer.
+- **Tor / onion mode**: evaluated and declined (`TOR.md`) — Tor is TCP-only, so it can't carry
+  iroh's QUIC/UDP data plane or WebRTC calls. VPN or a self-hosted relay/discovery node is the
+  supported way to hide your IP.
+- **Mac Catalyst**: dropped 2026-06-23 for the native `HavenMac` target.
+- **FCM on Android**: rejected on purpose — foreground `ConnectionService` + `WorkManager` instead,
+  so there's no Google dependency.
+- **Quota / blind-token / subscription work**: deleted per D15.
 
-- ✅ **Multi-identity switcher**: keep a roster of every identity you've used and jump
-  between them; **per-identity profiles** (name/photo/emoji/bio/link) namespaced by
-  node-id (`AccountStore.roster()`, `Profile.swift`).
-- ✅ **Move-to-device**: transfer code + QR (`haven-seed:…`) to adopt an identity on a
-  new device; **iCloud-Keychain backup/restore** of identity history (active seed stays
-  device-only; history is synced + recoverable).
-- ✅ **Multi-token push**: the relay holds multiple device tokens per identity, so every
-  linked device gets pushes; authored events self-sync via a silent push to your own
-  devices.
-- 🟡 **Per-device keys + signed device credentials (D16)** — building in phases:
-  - ✅ **Phase 1: trust layer** in core (`p2pcore::device`): per-device keypair,
-    account-signed `DeviceCredential`, versioned signed `DeviceList` (add/revoke,
-    higher-version-wins, rollback-defended), verified against the pinned account key —
-    MLS-independent, unit-tested.
-  - ✅ **Phase 3: convergence engine** in core (`p2pcore::selfsync`): an `AccountState`
-    CRDT (LWW roster/contacts/profile/settings/blocked/**pinned conversations** + grow-only
-    read cursors) with a commutative/associative/idempotent merge, self-encrypted via a
-    seed-derived key only the user's devices can derive — **wired end to end on iOS/iPadOS,
-    macOS, Android, and desktop**. Plus **own-device event convergence**: each device takes a
-    per-device transport id, and divergent per-device epoch keys converge on the
-    numerically-larger key, so posts/DMs authored or received on one device sync to the others.
-  - ✅ **Phase 2: FFI export** done (`p2pcore-ffi::multidevice`): `issue/verify_device_credential`,
-    `sign/verify_device_list`, `device_list_is_authorized`, an `AccountStateHandle` object +
-    `seal/open_account_state` — device + self-sync types callable from Swift/Kotlin/desktop.
-    Remaining: enrollment QR/verify flow + UI.
-  - ⏭️ Phase 4 live device-to-device delivery + personal forwarder · Phase 5 MLS leaf/commit
-    hardening (per-message forward + post-compromise secrecy; gated on MLS).
-  - See `MULTI-DEVICE.md` → *Implementation phases*.
-- ⏭️ **Always-on device as personal store-and-forward** (ordered backlog cache; Phase 4).
-- See `MULTI-DEVICE.md`
+---
 
-## ✅ M3 — Apple app (DONE, on TestFlight)
+## Shipped
 
-iOS / iPadOS + native-macOS SwiftUI app on the real Rust core via a UniFFI XCFramework.
-On TestFlight and used device-to-device over the internet. (Mac Catalyst was dropped
-2026-06-23; macOS now ships from the native `HavenMac` target — see `MACOS-NATIVE-PORT.md`.)
+### ✅ Cryptographic spine (M1a / M1c)
+Hybrid-PQ identity and key establishment: X25519 + ML-KEM-768 → HKDF → AES-256-GCM; signatures
+Ed25519 + ML-DSA-65 (both halves must verify). Reach-me links (`haven://` + `https://`) with
+parse/verify/MITM-check. `identity.rs`, `crypto.rs`, `link.rs`.
 
-- ✅ `rustup` + iOS targets, **UniFFI** crate `haven_ffi`, `HavenFFI.xcframework`
-  (device + sim + native-macOS `aarch64-apple-darwin` slices), `build-rust-xcframework.sh`
-- ✅ On-device identity, `haven://` QR + reach-me link, Keychain-persisted master seed,
-  on-device hybrid-PQ self-test (covered by `HavenUITests`)
-- ✅ Networked feed/DMs/media over iroh on real devices; circles; stories; calls
-- ⏭️ Secure Enclave-backed key storage (currently Keychain)
+### ✅ Networking spine (M1b)
+iroh 1.0: real QUIC, dial-by-address, discovery. `haven-net` `Node` exchanges sealed envelopes.
+Async FFI drives it from every client.
 
-## ✅ M4 — Nearby (Bluetooth + local-WiFi) transport (DONE)
+### ✅ Social engine (M2)
+`p2pcore::social`: circles, posts, stories, messages, comments, reactions, edit, unsend, DMs,
+media + music refs — sealed E2E to all members (fresh content key + per-member hybrid-KEM wrap),
+hybrid-signed, with a `build_feed` reducer enforcing author-authorized edit/unsend. Contact
+approval + blocking; per-circle privacy (Spotlight + Face ID lock). Messages UX: recency sort,
+pinning (≤6, self-syncing), DM-delete watermark, group-DM sender rows.
 
-- ✅ Nearby offline transport via **MultipeerConnectivity** (Bluetooth + local Wi-Fi):
-  posts, DMs, and handshakes flow over a nearby mesh when peers are off-internet.
-- ✅ **Mesh relay** (frame type 9): an internet-connected nearby phone forwards a sealed
-  frame it can't read toward its destination (cleartext routing header, E2E payload,
-  ttl-bounded, msg-id dedup).
+> **Not MLS.** This is multi-recipient PKE (`core/p2pcore/src/social.rs:14-16`). There is no
+> `mls-rs` dependency and no MLS code in the tree — it appears only in comments about future work.
+> Consequence: **no per-message forward secrecy, no post-compromise security.** Group keying is
+> sender-keys + epochs (`GROUP-KEYING.md`); removal/block rotation gives **cryptographic
+> revocation**, which is real and tested. MLS hardening remains a future phase, gated on a
+> PQ-capable ciphersuite (D3).
 
-## 🟡 M5 — Offline delivery & large files (zero operator cost — D15)
+### ✅ Group keying (epochs)
+Epoch keys distributed via the hybrid KEM; removal/block/device-roster change rotates
+(`p2pcore-ffi/src/lib.rs:1128`, `:1521`, `:2516`, `:2540`); last 4 epochs retained
+(`prune_epoch_keys`). Adding a member does **not** rotate — and doesn't need to: a joiner gets the
+current epoch, so earlier epochs stay unreadable without rotating anything. *(Periodic rotation:
+see Outstanding #2.)*
 
-- ✅ **Store-and-forward mailbox**: circle-sealed blobs to an S3-compatible bucket; a
-  **pre-signed-URL** model (`PresignStore`) so members never hold bucket credentials;
-  per-circle mailbox config (frame 14). "Volunteer as tribute" — a member re-serves
-  circle-sealed media P2P.
-- ✅ **Chunked media transfer** (512 KB sealed chunks) — large videos send with flat
-  memory; auto-optimize (1080p video / ≤2560px photos) vs. lossless toggle.
-- ⏭️ Fallback chain polish: group-gossip cache; **Haven relay mailbox** (in-app relay
-  or `haven-relay` daemon) or the user's **own S3-compatible bucket** for offline
-  delivery, see `RELAY-AND-DEPLOY.md`.
-- ⏭️ Opt-in onion/proxy mode for full IP hiding.
-- *(No quota/blind-token/subscription work — deleted per D15.)*
+### ✅ Multi-device (M2b, D16 Phases 1–3)
+Multi-identity switcher + per-identity profiles; move-to-device via `haven-seed:` code/QR;
+iCloud-Keychain backup/restore of identity history; multi-token push. **Phase 1** device-credential
+trust layer (`p2pcore::device`). **Phase 3** `AccountState` CRDT convergence engine
+(`p2pcore::selfsync`) — wired end to end on iOS/iPadOS, macOS, Android, and desktop — plus
+own-device event convergence (per-device transport ids + epoch-key convergence). **Phase 2** FFI
+export done; enrollment QR/verify flow + UI ship. *(Phase 2's remaining seed-drop: Outstanding #1.
+Phase 4 personal forwarder + Phase 5 MLS hardening: not started.)*
 
-## 🟡 M5b — `haven-relay` easy circle relay (optional / community)
+### ✅ Apple apps (M3)
+iOS/iPadOS + native macOS SwiftUI on the Rust core via a UniFFI XCFramework. **Live on the App
+Store at 1.0.4.** Secure Enclave key storage is **done** — every on-device seed copy is
+ECIES-wrapped to a non-extractable P-256 Enclave key (`apple/Shared/SecureEnclaveBox.swift`, wired
+at `AccountStore.swift:201`), so a raw Keychain dump yields nothing.
 
-- For volunteers (or the operator later) who want guaranteed relay reliability —
-  **never required**, no mandatory monthly cost
-- ✅ **Single static Rust binary** (`core/haven-relay`) composing `haven-net` +
-  `p2pcore` — reinvents no crypto/transport. `haven-relay run --link <code>` links to a
-  circle and serves **both** roles while online:
-  - ✅ **Connection relay**: forwards mesh-relay frames (cleartext routing header —
-    dest node ids + ttl + random msg-id; opaque sealed payload) toward circle members it
-    can reach; RAM-only bounded de-dup; **non-key-holder** (can't open the payload).
-    Proven by `relay_forward.rs` (Alice→relay→Bob, indirect peers; relay can't decrypt).
-  - ✅ **Media store-and-forward**: runs `rclone serve s3` on loopback + S3-over-iroh
-    tunnel (`haven/s3/1`, HAVEN-NET-RELAY.md Design A) — no public host/port/domain.
-    Proven by `s3_tunnel.rs` (consumer ↔ iroh ↔ store byte round-trip).
-  - ✅ **Relay link** = public routing data only (`circle tag` + member node ids) — no
-    content/KEM key, so linking can't make it a content reader or bypass target.
-  - ✅ Hardened no-log defaults: RAM-only de-dup, rclone `--log-level ERROR` on loopback,
-    persisted seed (`0600`) so the relay's node id is stable.
-- ✅ App-side hooks: an **in-app RelayHost** (`RelayHost.swift`, FFI) runs the relay
-  in-process; per-circle relay node id is stored + broadcast (frames 19/20); the
-  **Mac runs it as an invisible background relay** (accessory activation policy — close
-  the window, no dock icon, keeps relaying). Standalone `haven-relay` packaging ships
-  for **macOS launchd** and **Linux systemd** (`relay/`).
-- ⏭️ OpenTofu modules: AWS / GCP / Azure / Hetzner / Fly / DO / Cloudflare-R2 / Oracle /
-  bare VPS; `haven-relay deploy --provider … --role connection|storage|both`
-- ⏭️ Self-register to discovery; true two-machine field run
+### ✅ Apple Watch
+Standalone watchOS target embedded in the iOS app, a **thin WCSession client** — links neither
+HavenFFI nor WebRTC (`apple/project.yml:319-345`). Recent DM threads / circle posts, quick replies,
+tap-to-react, mirrored notifications, offline queueing via `transferUserInfo`. Scoped per D13.
 
-## ❌ M6 — Web client — ABANDONED (native-only focus)
+### ✅ Nearby transport (M4)
+MultipeerConnectivity (Bluetooth + local Wi-Fi) on Apple; Nearby Connections on Android. Posts,
+DMs, and handshakes flow off-internet. **Mesh relay** (frame 9): an internet-connected nearby phone
+forwards a sealed frame it can't read, ttl-bounded with msg-id dedup. *(No desktop equivalent —
+deferred.)*
 
-A browser can't be a peer on Haven's network: no raw UDP / NAT hole-punching, so it can
-never join the iroh mesh directly. The only way a web client could work is as a thin
-client of a **publicly-hosted relay** (WSS/WebRTC bridge → iroh) — which means every circle
-would need a public relay just for web to function. Not worth the complexity or the
-half-broken UX. **Decision (2026-06-22): drop the web client.** The web page (`web/`) is now
-just a clean **invite-landing / app-promo** (parses `haven://` invites → opens the native
-app); the WASM client and `web/engine/` were removed.
+### ✅ Offline delivery & large files (M5)
+Store-and-forward mailbox: circle-sealed blobs to an S3-compatible bucket, pre-signed-URL model
+(`PresignStore`) so members never hold bucket credentials; per-circle mailbox config (frame 14).
+Chunked media (see `MEDIA-AND-MUSIC.md` for the real sizes) with flat memory; auto-optimize vs.
+lossless toggle. Shared SigV4 client in `core/haven-s3` — one implementation for all platforms.
 
-- **Android** is still planned, but as a **native** UniFFI → Kotlin/JNI client (see M8), not
-  WASM — so it's a real iroh peer like iOS/macOS.
+### ✅ `haven-relay` (M5b)
+Single static Rust binary composing `haven-net` + `p2pcore`. Connection relay (forwards mesh-relay
+frames, non-key-holder, RAM-only bounded de-dup — proven by `relay_forward.rs`) **and** media
+store-and-forward (`rclone serve s3` on loopback + S3-over-iroh tunnel — proven by `s3_tunnel.rs`).
+Relay links carry public routing data only. An in-app `RelayHost` runs it in-process; the Mac runs
+it as an invisible background relay. Packaged for macOS launchd + Linux systemd.
 
-## 🟡 M7 — Media, music, calls, safety (security-audited — D18, `MEDIA-AND-MUSIC.md`)
+> **Membership authorization** (post-audit): a circle's mailbox is served only to that circle's
+> members, checked against the connecting peer's verified node id
+> (`core/haven-net/src/blobstore.rs:537`, `:687-709`, `:742-748`). This closed a real enumeration
+> hole — and it means a relay **does** see `IP ↔ node id` for peers it serves. That's an
+> unavoidable consequence of authorizing at all, documented honestly in `THREAT-MODEL.md`. The
+> relay holds no key and sees no content.
 
-- ✅ **In-app camera** (photos+video): seal E2E before send, sandbox-only; **camera
-  filters** (9 Apple-style variants + Kodak Gold).
-- ✅ **Apple Music on posts**: attach a song (reference only — `TrackRef`), artist+title
-  pill + playing animation; video muted while music plays; unmute → clean audio
-  crossfade (`AudioCoordinator`). Real MusicKit catalog + library picker.
-- ✅ **Calls**: WebRTC **1:1 and full-mesh group** calls (audio+video, E2EE DTLS-SRTP),
-  signaling over the sealed iroh channel; **VoIP PushKit** ring-from-killed; **CallKit**
-  on iOS, in-app on native macOS; echo cancellation; **screen share** (macOS
-  ScreenCaptureKit, iOS ReplayKit broadcast extension → App Group `group.com.blaineam.kith`).
-- ✅ **MusicKit entitlement** on the App ID — granted; live Apple Music attach + playback
-  shipped (see `MEDIA-AND-MUSIC.md`).
-- ⏭️ **EXIF/GPS stripping** at the seal-and-send boundary.
-- ⏭️ On-device `SensitiveContentAnalysis` guards; per-circle toggles.
+### ✅ Media, music, calls (M7)
+In-app camera (photos+video) with 9 filters + Kodak Gold; Apple Music attach (MusicKit entitlement
+granted; real catalog + library picker) with muted-video / audio-crossfade coordination. **Calls:
+WebRTC 1:1 and full-mesh group (audio+video, E2EE DTLS-SRTP), signaling over the sealed iroh
+channel — on all four surfaces** (iOS, macOS, Android, desktop). VoIP PushKit ring-from-killed,
+CallKit on iOS, Telecom/ConnectionService on Android. **Screen share on all four** (macOS
+ScreenCaptureKit, iOS ReplayKit, Android MediaProjection, desktop `getDisplayMedia`).
 
-## ⏭️ M10 — CI & launch tooling
+### ✅ Scheduled messages (D17)
+**Built and shipping on all three clients** — this was long marked "designed only", and that was
+wrong. `desktop/src-tauri/src/scheduled.rs` (5 unit tests) + a headless always-on firer
+(`lib.rs:422-455`); `apple/HavenApp/ScheduledStore.swift` (30s timer, encrypted at rest, picker
+UI); `android/.../core/ScheduledStore.kt`. *(Only the relay timed-release variant — "Option B" in
+`SCHEDULED-MESSAGES.md` — is genuinely unbuilt.)*
 
-- ✅ Marketing page live: https://wemiller.com/apps/haven/ (registered in projects.json)
-- ⏭️ **Monkr ASC screenshot pipeline** (`.local-screenshots.conf` + `rocket shots Haven`)
-  — device-framed App Store screenshots
-- ⏭️ **Xcode Cloud CI** (eventually; local rocket CI is fine for the early phase)
+### ✅ Notifications
+Blind APNs relay: a self-hosted Cloudflare Worker (`push/worker.js`) holds `nodeId → token` in KV
+and forwards **sealed** payloads it never reads; the Notification Service Extension
+(`apple/HavenNotificationService/`) decrypts on-device and falls back to a generic banner. Push
+notifications and registrations are both signed. Android uses a foreground `ConnectionService` for
+real-time delivery plus a 15-minute `WorkManager` poll — **no FCM, no Google**.
 
-## 🟡 M8 — More clients (all reuse `p2pcore`)
+### ✅ Windows / Linux desktop (M8)
+Tauri 2; the Rust backend links the core directly — a real iroh peer, not a web client. Feed,
+circles, DMs, stories, camera, media, WebRTC mesh calls + screen share, tray, notifications, BYO
+storage, plus a headless relay in the same binary (`--headless`). Installers ship from
+`release.yml`. **MSIX packaging + Store submission are already automated** and gated on secrets —
+no code-signing certificate is needed, because the Store re-signs (`STORE-AUTOPUBLISH.md`).
+*(Gaps: Outstanding #4, #6, #7.)*
 
-- 🟡 **Android native** via UniFFI → Kotlin/JNI — **in progress** (`android/`, Jetpack
-  Compose + Material 3, minSdk 29). Identity, circles, feed, DMs, reactions/comments,
-  stories, QR handshake, cross-device media chunks + mailbox, WebRTC calls
-  (Telecom/ConnectionService), notifications (WorkManager), and nearby are ported, along
-  with the DM parity + own-device sync (delete-watermark, group-DM sender rows,
-  pinned+sorted messages, device roster, sync-light). Remaining: on-device polish + full
-  cross-platform field testing. (No WASM — the web client was abandoned.)
-- ✅ **macOS native** — ships from the **native AppKit/SwiftUI `HavenMac` target**; Mac
-  Catalyst was **dropped 2026-06-23**. See `MACOS-NATIVE-PORT.md`. (Backfill in flight:
-  native camera / in-call video / Apple Music / screen share views.)
-- 🟡 **Windows / Linux desktop** — **in progress** (`desktop/`, Tauri 2; the Rust backend
-  links the core directly — a real iroh peer, not a web client). GUI at near-parity (feed,
-  circles, DMs, stories, camera, media, WebRTC group calls + **screen share**, tray,
-  notifications, BYO storage) plus a headless relay in the same binary. Linux ships across
-  Ubuntu/Debian/Raspbian (`.deb`/AppImage/`.rpm`), Arch (AUR), and SteamOS/Steam Deck
-  (Flatpak); the `haven-relay` daemon cross-builds for x86_64/aarch64/armv7/armv6 (Pi). See
-  [`WINDOWS-PORT.md`](WINDOWS-PORT.md) + [`LINUX.md`](LINUX.md). Remaining: MSIX/Store
-  packaging, on-device sensitive-content classifier, live multi-machine media/call tests.
-- 🟡 **Apple Watch** companion — **in progress** (`apple/HavenWatch`). A standalone
-  single-target SwiftUI watchOS app (`com.blaineam.kith.watchkitapp`, embedded in the iOS
-  app) that is a **thin WCSession client** — the iPhone keeps the iroh node + identity; the
-  Watch links NEITHER HavenFFI NOR WebRTC. Shows recent DM threads / circle posts + reactions,
-  opens a thread, sends quick replies (dictation / Scribble / canned) and tap-to-react, and
-  mirrors the phone's local notifications. Scoped per DECISIONS D13: messages/reactions/
-  notifications/quick replies — *not* bulk video/large files. Bridge: `WatchSessionManager`
-  (phone) ↔ `WatchConnectivityClient` (watch) over FFI-free `WatchShared` Codable models.
+### ✅ Android (M8)
+Native UniFFI → Kotlin/JNI (Jetpack Compose + Material 3, minSdk 29). Identity in an
+Android-Keystore-backed `EncryptedSharedPreferences` (`core/HavenCore.kt:85-97`), circles, feed,
+DMs, reactions/comments, stories, QR handshake, cross-device media chunks + mailbox, WebRTC mesh
+calls + screen share, notifications, nearby, scheduled messages, avatar publish, in-app browser,
+music search, DM parity + own-device sync. See `ANDROID-PARITY.md`. *(Gaps: Outstanding #3, #5,
+#10, #11, #12.)*
 
-## 🟡 M9 — Launch surface
+### ✅ Launch surface (M9 / M10)
+Marketing page live at https://wemiller.com/apps/haven/. TestFlight pipeline via rocket
+(`.local-ci.conf` → `rocket build Haven`). Export compliance answered —
+`ITSAppUsesNonExemptEncryption = NO`, no ASC declaration needed (`EXPORT-COMPLIANCE.md`). App Store
+screenshots shipped (`docs/appstore-screenshots/`). CHANGELOG + docs + README kept current on every
+push.
 
-- ✅ **TestFlight pipeline** via rocket: `.local-ci.conf` (iOS, scheme Haven, team,
-  XCFramework prebuild) → `rocket build Haven` archives + cloud-signs + uploads.
-  Haven is **live on TestFlight** in ASC app "Haven Community" (com.blaineam.kith);
-  see `PROGRESS.md` for the current build number.
-- ⏭️ Answer export compliance in TestFlight; add testers
-- **Marketing page** at `blaineam.github.io` repo under `/apps/haven/` — only once
-  close to App Store submission
-- **Screenshot automation**: wire Haven into the shared capture → **Monkr-frame** →
-  ASC pipeline in `_shared/` (depends on Monkr `/headless`), via the **rocket** flow,
-  matching the existing app-portfolio screenshot style
-- CHANGELOG + docs/pages-site + README kept current on every push
+---
 
-## Toolchain prerequisites (this machine)
+## Not started
 
-Installed: Rust (rustup) + Apple targets (iOS device/sim, native macOS `aarch64-apple-darwin`),
-`uniffi-bindgen`, cargo, Xcode, XcodeGen, swift.
-Still needed (when their milestone arrives):
-- Android NDK + `cargo-ndk` + JDK 17 pin — for M8 (the native Android client)
+- **MLS hardening** (`mls-rs` + a hybrid-PQ ciphersuite) — per-message forward secrecy and
+  post-compromise secrecy. Gated on a PQ ciphersuite (D3). This is the single largest outstanding
+  *cryptographic* item, and every doc above is now honest about not having it.
+- **D16 Phase 4**: live device-to-device delivery + always-on personal store-and-forward (ordered
+  backlog cache).
+- **OpenTofu modules** for one-command relay deploy (AWS / GCP / Azure / Hetzner / Fly / DO / R2 /
+  Oracle / bare VPS). Confirmed absent — no `.tf` anywhere in the repo.
+- **Relay self-registration to discovery**; true two-machine field run.
+- **AUR + Flathub publication.** PKGBUILDs exist in-repo (`packaging/aur/`); nothing in CI
+  publishes them, and there is no Flathub submission step. See `LINUX.md`.
+- **Microsoft Store listing** — blocked only on creating the 4 Azure AD secrets.
+- **Group-gossip cache** for the fallback chain.
+- **Xcode Cloud CI** (local rocket CI is fine).
+
+## Toolchain (this machine)
+
+Rust (rustup) + Apple targets (iOS device/sim, `aarch64-apple-darwin`), `uniffi-bindgen`, cargo,
+Xcode, XcodeGen, swift, Android NDK + `cargo-ndk` + JDK 17 pin.
+
+> **Android build gotcha:** the Rust `.so` + UniFFI bindings are gitignored and are **not** rebuilt
+> by `assembleDebug`. Run `android/build-rust.sh` after **any** `core/` change, or a locally-built
+> APK ships a stale core. CI rebuilds the core itself.
+</content>

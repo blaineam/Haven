@@ -135,18 +135,28 @@ Android, and desktop all inherit it.
    phrase** the user confirms (out-of-band check so a relay can't inject a rogue
    device).
 3. The authorizing device issues a **signed device credential** for the newcomer.
-4. It adds the new device as a **leaf** to all the user's active MLS groups (Add +
-   Commit), so it starts receiving immediately.
-5. Contacts' clients see a new leaf whose credential chains to the **pinned account
+4. It publishes an updated, account-signed **device list** including the newcomer, and
+   rotates the circle epoch so the new device gets a KeyCommit it can open
+   (`core/p2pcore-ffi/src/lib.rs:1960`).
+5. Contacts' clients see a device whose credential chains to the **pinned account
    key** → trusted automatically, optionally with a transparent *"Blaine linked a new
    device (MacBook)"* notice (iMessage-style).
 
-## Receiving on all devices (how it maps to MLS)
+## Receiving on all devices (how it actually works today)
 
-Each device is its own **leaf** in every group the user belongs to. MLS encrypts to
-all leaves efficiently, so a message is decryptable by **all** of the user's devices.
-Adding/removing a device is an MLS Add/Remove commit. This is precisely what MLS was
-designed for (chosen in D3), so multi-device is native, not bolted on.
+> **This is not MLS.** MLS is **not implemented** — there is no `mls-rs` dependency and no
+> MLS code in the tree; it appears only in comments describing future work
+> (`core/p2pcore/src/social.rs:14-16`, `device.rs:13-17`). The description below is the
+> mechanism that actually ships. The MLS design this doc originally described is a *plan*
+> (Phase 5), and D3's rationale for eventually preferring a PQ variant still stands — see
+> `GROUP-KEYING.md`.
+
+Each circle has an **epoch key**. When sealing, the recipient set is expanded from circle
+members to each member's **authorized devices** (`recipients_with_devices` in
+`core/p2pcore-ffi/src/lib.rs`), and the epoch key is wrapped to every device bundle with the
+hybrid KEM. So a message is decryptable by **all** of the user's authorized devices. This is
+multi-recipient public-key encryption — it works, it's tested, and it gives cryptographic
+revocation, but it does **not** give per-message forward secrecy or post-compromise security.
 
 ## The always-on device as a personal forwarder
 
@@ -160,18 +170,31 @@ infrastructure the user already owns:
 - It forwards **ciphertext**; it doesn't need to decrypt to relay (though, being your
   device, it legitimately could read its own copy).
 
-**Honest MLS constraint:** MLS requires each device to process group changes
-(commits) **in order** to stay in sync. So the forwarder must keep the **ordered
-backlog** of handshake + application messages — not just the latest — or a
-long-offline device can't catch up. This is the standard MLS "delivery service" role,
-which our store-and-forward layer (D15) already plays.
+**Ordering constraint (applies today, and more strictly under MLS later):** a device must
+see each KeyCommit to hold the epoch keys it needs, so the forwarder keeps an **ordered
+backlog** — not just the latest — or a long-offline device can't catch up. Only the last 4
+epochs are retained (`prune_epoch_keys`), so a device offline across more than 4 rotations
+loses the ability to open content sealed in the epochs it missed. If MLS lands (Phase 5),
+in-order commit processing becomes a hard requirement rather than a practical one.
 
 ## Revocation & recovery
 
-- **Lost/stolen device:** the account key signs an updated device list excluding it;
-  an MLS Remove commit re-keys the groups (post-compromise security — the removed
-  device can't read anything after removal). You stay *you*; only that device goes
-  dark. Contacts honor the signed update.
+- **Lost/stolen device:** the account key signs an updated device list excluding it, and
+  the circle **epoch rotates** so the removed device is not a recipient of any future
+  KeyCommit — it can't read content posted after removal (`core/p2pcore-ffi/src/lib.rs:2516`).
+  You stay *you*; only that device goes dark. Contacts honor the signed update.
+  > ⚠️ **Known limitation — revocation is not yet adversary-proof.** Today a linked device
+  > holds a **copy of the account master seed** (that's what `haven-seed:` move-to-device
+  > transfers), and the engine still runs under that copied seed rather than under a
+  > per-device key. Revoking a device marks it revoked; it does **not** invalidate the seed
+  > that device already has. Because device lists merge higher-version-wins
+  > (`core/p2pcore/src/device.rs`), a *cooperative* device honors revocation, but an
+  > attacker in possession of the seed can sign a fresh, higher-version device list and
+  > re-add itself. The "seed-drop that finalizes revocation" is explicitly still to build
+  > (`apple/HavenApp/DeviceRoster.swift:11-12`, `:52-54`). **Treat revocation as effective
+  > against a lost device, not against a compromised one.** If a device is stolen and you
+  > believe the seed is extractable, roll your identity. Closing this is the top item in
+  > `ROADMAP.md` → Outstanding.
 - **Lost one device, others remain:** revoke as above, link a replacement.
 - **Lost all devices:** restore the **account key from escrow** (passphrase + iCloud
   Keychain), then re-authorize fresh devices. This is the one place the account key

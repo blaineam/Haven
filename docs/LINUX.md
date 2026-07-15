@@ -23,8 +23,8 @@ Haven runs on Linux in **two capacities**, sharing the same Rust core (`p2pcore`
 | **Ubuntu** | ✅ x86_64 | ✅ | GUI: `.deb` / AppImage · Relay: `haven-relay` `.deb` or `install.sh` |
 | **Debian** | ✅ x86_64 | ✅ | same as Ubuntu |
 | **Raspberry Pi OS / Raspbian** | ⚠️ best-effort (arm64) | ✅ **primary role** | Relay: `install.sh` (arm64 / armv7 / armv6) or `.deb` |
-| **Arch** | ✅ x86_64 / aarch64 | ✅ | AUR `haven-desktop` / `haven-relay` |
-| **SteamOS / Steam Deck** | ✅ x86_64 | ✅ | GUI: **Flatpak** (Discover) · Relay: binary + systemd user service |
+| **Arch** | ✅ x86_64 | ✅ | GUI: build from the in-repo PKGBUILD (**not on the AUR yet**) · Relay: binary + systemd |
+| **SteamOS / Steam Deck** | ✅ x86_64 | ✅ | GUI: **Flatpak** — sideload `haven.flatpak` from the release (**not on Flathub**) · Relay: binary + systemd user service |
 
 The GUI needs **WebKitGTK** + a glibc userland, so it targets desktop distros. The relay is a
 **musl static binary** with no dependencies — it runs anywhere, including 32-bit Pis.
@@ -45,15 +45,24 @@ The `.deb` declares its runtime deps (`libwebkit2gtk-4.1-0`, `libgtk-3-0`,
 and screen share. CI also produces an **AppImage** (no install — `chmod +x` and run) and an
 `.rpm`.
 
-### Arch (AUR)
+### Arch
+
+> **Not published to the AUR yet.** `haven-desktop` does not exist on `aur.archlinux.org` —
+> `git clone https://aur.archlinux.org/haven-desktop.git` will fail. The PKGBUILD is
+> maintained **in this repo** and nothing in CI publishes it (`.github/workflows/` has no
+> AUR step). Build it from the in-repo recipe:
 
 ```bash
-git clone https://aur.archlinux.org/haven-desktop.git
-cd haven-desktop && makepkg -si
+git clone https://github.com/blaineam/haven.git
+cd haven/packaging/aur/haven-desktop && makepkg -si
 ```
 
 The web UI is static and **embedded into the binary at compile time**, so the build needs no
-Node/npm — just Rust + system WebKitGTK. (PKGBUILD source: `packaging/aur/haven-desktop/`.)
+Node/npm — just Rust + system WebKitGTK.
+
+Prefer not to compile? Use the `.deb`, `.rpm`, or AppImage from the release — the AppImage runs
+on Arch as-is. Note CI builds the desktop GUI on `ubuntu-latest` only, so the **prebuilt Linux
+GUI artifacts are x86_64 only**; aarch64 Arch/Linux means building from source.
 
 ### SteamOS / Steam Deck (Flatpak)
 
@@ -135,17 +144,21 @@ The `.deb` ships a locked-down systemd **system** service that runs as a dedicat
 `haven-relay` user with `ProtectSystem=strict`, `PrivateDevices`, `NoNewPrivileges`, etc.
 (`relay/debian/haven-relay.service`).
 
-### As an AUR package (Arch / SteamOS desktop)
+### From the PKGBUILD (Arch / SteamOS desktop)
+
+> **Not on the AUR yet** — `aur.archlinux.org/haven-relay.git` does not exist. Build from the
+> in-repo recipe (or just use the static musl binary + `install.sh` above, which needs no
+> compiler):
 
 ```bash
-git clone https://aur.archlinux.org/haven-relay.git
-cd haven-relay && makepkg -si
+git clone https://github.com/blaineam/haven.git
+cd haven/packaging/aur/haven-relay && makepkg -si
 sudo systemctl enable --now haven-relay
 ```
 
 ### systemd service variants
 
-- **System** (boot, no login) — shipped in the `.deb`/AUR pkg; source at
+- **System** (boot, no login) — shipped in the `.deb` / Arch pkg; source at
   `relay/debian/haven-relay.service`.
 - **Per-user** (no root, needs `loginctl enable-linger`) — `relay/haven-relay.service`:
   ```bash

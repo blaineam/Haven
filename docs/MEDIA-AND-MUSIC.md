@@ -18,8 +18,10 @@ is shown in the composer, then is **sealed E2E before it ever leaves the device*
   added to a post as a content-addressed blob, and are **encrypted with the hybrid-PQ
   content key (AES-256-GCM) before any transmission**. No frame, thumbnail, or file
   ever touches a server in the clear. (Same `p2pcore::social` seal path as text.)
-- **Metadata hygiene:** strip GPS/EXIF location and identifying maker tags by default
-  on capture/import; the user can opt to keep them. No silent location leak.
+- **Metadata hygiene (design intent — *partially* met today):** strip GPS/EXIF location and
+  identifying maker tags by default on capture/import. **Holds for photos on iOS + Android;
+  video has real gaps** — see the per-platform table under "Metadata hygiene" below before
+  relying on this. Stated as the goal, not as a shipped guarantee.
 - **No analytics, no third parties:** the camera pipeline calls no SDK, logs nothing,
   and uploads nothing. Temp files are deleted after the post is sealed.
 - **Maker holds nothing:** there is no server in this path, so there is nothing for
@@ -80,13 +82,43 @@ encryption boundary; it's just more sealed bytes.
 - ✅ **Real Apple Music**: the **MusicKit capability + `com.apple.developer.musickit`
   entitlement** are **granted on the App ID**; live catalog + library picker, attach, and
   playback are shipped.
-- ✅ **Cross-device media send**: media is chunked (512 KB sealed chunks), content-addressed
-  (BLAKE3), sealed E2E, and moves peer-to-peer over iroh / nearby with the relay or the
-  user's own S3 bucket as the offline backstop. A **media-request throttle** stops missing
-  media from being re-requested forever, so requests settle.
+- ✅ **Cross-device media send**: media is content-addressed (BLAKE3), sealed E2E, and moves
+  peer-to-peer over iroh / nearby with the relay or the user's own S3 bucket as the offline
+  backstop. A **media-request throttle** stops missing media from being re-requested forever,
+  so requests settle. Two distinct chunking mechanisms are in play:
+  - **In-band chunk frames** (type 5, direct P2P / nearby): **32 KB** on iOS
+    (`apple/HavenApp/FeedView.swift:103`) and Android (`core/HavenNet.kt:2171`) — reduced from
+    512 KB after a MultipeerConnectivity buffer overflow — but still **512 KB on desktop**
+    (`desktop/src-tauri/src/engine.rs:141`). This doc previously claimed a flat "512 KB"; that
+    is only true of desktop. The mismatch is interoperable (the receiver doesn't care) but the
+    inconsistency is unintentional.
+  - **Manifest chunking for large blobs** (relay/S3): blobs over **8 MB** split into 8 MB parts
+    under an `HVCHUNK1` manifest (`engine.rs:144`, `:2994`), keeping each object under the
+    256 MB `MAX_BLOB` cap. Byte-identical across iOS/Android/desktop
+    (`SharedStore.swift:167`, `HavenNet.kt:2195`).
+
+**Metadata hygiene — the honest, per-platform truth (2026-07-15):**
+
+This was previously listed as a flat "⏭️ not done". That's wrong in both directions: photos are
+handled, and one *video* path is a real leak.
+
+| Path | EXIF/GPS stripped? | Evidence |
+|---|---|---|
+| iOS photo | ✅ yes — re-encode via `jpegData` drops EXIF | `apple/HavenApp/Media.swift:310-325` |
+| Android photo | ✅ yes — re-encode from decoded bitmap | `core/LocalMedia.kt:344-393` |
+| iOS video, auto-optimize **OFF** | ✅ yes — `export.metadata = []` | `Media.swift:364` |
+| iOS video, auto-optimize **ON** (the **default**) | ⚠️ **likely NO** | `optimizeVideo` (`Media.swift:552-588`) never sets `export.metadata`; `AVAssetExportSession` copies source metadata when it's unset. **Needs an on-device confirmation** (inspect an exported file's metadata) — flagged from the API contract, not an observed leak |
+| Android video | ❌ **no** — raw bytes, no transcode | `core/LocalMedia.kt:330-337` |
+| Desktop | n/a — no strip code exists at all | no EXIF handling anywhere in `desktop/` |
+
+So the deterrent-sounding "strip GPS/EXIF by default" principle at the top of this doc holds for
+**photos only**. Fixing the iOS default path is a one-liner (`export.metadata = []` in
+`optimizeVideo`); Android video needs a transcode or a metadata rewrite.
 
 **Follow-ups (security-relevant):**
-- ⏭️ **EXIF/GPS stripping at the seal-and-send boundary.** Strip location + identifying
-  maker tags *before* sealing so nothing leaks with a shared photo/video. Tracked here so it
-  isn't missed.
-- ⏭️ On-device `SensitiveContentAnalysis` guards (per-circle toggles).
+- ⏭️ **Close the video EXIF/GPS gaps** above (iOS default path; Android video).
+- ⏭️ **Per-circle** `SensitiveContentAnalysis` toggles. *(The analyzer itself is **shipped** on
+  Apple — `apple/HavenApp/SensitiveContent.swift` — and flags federate to peers as a
+  `SensitiveFlag` event. But it follows the **system** Sensitive Content setting, there is no
+  per-circle toggle, and **Android/desktop ignore the federated flag entirely** — they render
+  flagged media unblurred.)*

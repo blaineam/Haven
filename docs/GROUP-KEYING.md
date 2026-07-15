@@ -74,8 +74,17 @@ sealing it to the **new** member set:
 True per-message FS (Double Ratchet) is incompatible with multi-recipient, offline, eventually-consistent
 delivery. Instead:
 
-- Epoch keys rotate on **removal/block**, on a device-roster change, **and** on a periodic schedule
-  (time/-volume based). Adding a member does NOT rotate — and doesn't need to: a joiner is handed the
+- Epoch keys rotate on **removal/block** and on a **device-roster change** — both real and wired
+  (`core/p2pcore-ffi/src/lib.rs:1128`, `:1521`, `:2516`, `:2540`).
+  > ⚠️ **The periodic schedule is designed but NOT wired.** `rotate_circle` exists in core
+  > (`lib.rs:1518`) and is exercised only by a unit test (`lib.rs:2921`) — **no client calls it**.
+  > Consequence: in a circle with no removals, blocks, or device changes, **the epoch never
+  > advances**, `prune_epoch_keys` never fires, and one seed compromise decrypts that circle's whole
+  > history — exactly the property this design was meant to remove. Bounded FS is real *only* for
+  > circles that experience membership churn. Don't state the periodic clause as shipped until a
+  > client drives it on a timer.
+
+  Adding a member does NOT rotate — and doesn't need to: a joiner is handed the
   *current* epoch, so earlier epochs stay unreadable to them without rotating anything. Rotation exists
   to revoke, not to admit. (Said precisely because "rotates on every membership change" once leaked into
   the relay walkthrough's UI copy as "add or remove someone and the key rotates", which is not true and
@@ -83,8 +92,9 @@ delivery. Instead:
 - Clients **delete** epoch keys older than the circle's retention window. A seed/device compromise then
   reveals only the *current* epoch plus retained-history epochs — not all history forever.
 
-This is "bounded forward secrecy": strictly stronger than today (which has none), and the strongest the
-delivery model admits without breaking offline use.
+This is "bounded forward secrecy": the strongest the delivery model admits without breaking offline
+use — **once rotation actually happens**. Until the periodic cadence is wired (see the warning above),
+a churn-free circle gets no forward secrecy at all, only cryptographic revocation.
 
 ## Properties
 
@@ -122,12 +132,13 @@ delivery model admits without breaking offline use.
    relay mailbox), so iOS/macOS/Android/desktop inherit this through the shared core with **zero**
    networking changes. (Validation: rebuild bindings + smoke-test each platform.)
 5. ✅ **Relay:** unaffected (still ciphertext-only); KeyCommits ride the same transports as events.
-6. ✅ **FS scheduling (bounded).** `prune_epoch_keys` keeps only the last 4 epoch keys (mine + per
-   peer) and deletes the rest on every rotation/commit, so a later compromise can't decrypt older
-   wire/relay ciphertext. `rotate_circle(circle_id)` forces a fresh epoch for periodic rotation (call
-   on a schedule). *Remaining (minor): wire the periodic `rotate_circle` cadence into each platform's
-   timer; a "share history → re-seal prior epochs to a new member" path; retire the legacy per-recipient
-   path once all clients are migrated.*
+6. 🟡 **FS scheduling (bounded) — half-shipped.** `prune_epoch_keys` keeps only the last 4 epoch keys
+   (mine + per peer) and deletes the rest on every rotation/commit, so a later compromise can't decrypt
+   older wire/relay ciphertext. `rotate_circle(circle_id)` forces a fresh epoch — but **nothing calls
+   it**, so pruning only ever runs on churn-driven rotations. *Remaining (NOT minor — this is the
+   feature): wire the periodic `rotate_circle` cadence into each platform's timer. Also remaining: a
+   "share history → re-seal prior epochs to a new member" path; retire the legacy per-recipient path
+   once all clients are migrated.*
 
 ## Test obligations (per increment)
 

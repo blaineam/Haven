@@ -68,15 +68,28 @@ integration is developed and verified locally, then cross-built for Windows.
 
 ### Microsoft Store (MSIX)
 
-Tauri emits MSI/NSIS, not MSIX directly. For the Store ($10 one-time, zero recurring):
+> **This is automated — don't do it by hand, and do NOT buy a code-signing certificate for it.**
+> An earlier version of this section told you to wrap the MSIX with `makeappx` and sign it with a
+> paid publisher cert. That is wrong and would cost money for nothing.
+> **See [`STORE-AUTOPUBLISH.md`](STORE-AUTOPUBLISH.md) for the real flow.**
 
-1. Build the MSI/exe in CI.
-2. Wrap it into an `.msix` with the **MSIX Packaging Tool** or `makeappx.exe` + a
-   `AppxManifest.xml` (identity `com.blaineam.haven`, the `icons/Square*Logo.png` set is
-   already generated for this).
-3. Sign with the Partner Center publisher cert (`signtool`), then submit via Partner Center.
+What actually happens today, in [`.github/workflows/release.yml`](../.github/workflows/release.yml):
 
-NSIS/MSI direct download is the no-Store fallback; both should be EV/OV code-signed.
+1. Tauri builds the MSI/NSIS `.exe` (`release.yml:200-207`).
+2. CI packages the `.msix` itself with `makeappx` from `desktop/msix/AppxManifest.xml.in`
+   (`release.yml:212-241`) — **unsigned**. There is no `signtool` call anywhere in CI, by design:
+   **the Microsoft Store re-signs the package on ingestion**, so no publisher cert is needed.
+3. CI submits it with `msstore publish` via the MSStore CLI (`release.yml:243-250`).
+
+Both the packaging and publish steps are **gated on Store secrets being present** and are
+`continue-on-error`, so with no secrets configured they simply skip and the normal
+`.msi`/`.exe` release still ships. The 8 required secrets are listed in `STORE-AUTOPUBLISH.md`.
+
+**Current state: not in the Microsoft Store.** The 4 Azure AD credentials
+(`STORE_TENANT_ID`, `STORE_CLIENT_ID`, `STORE_CLIENT_SECRET`, `STORE_SELLER_ID`) have not been
+created, so the publish step is inert. Direct download of the `.msi`/NSIS `.exe` from GitHub
+Releases is the shipping path today; those are **not** code-signed, so Windows SmartScreen will
+warn on first run.
 
 ## Parity table (iOS → Windows/Tauri)
 
@@ -96,8 +109,9 @@ NSIS/MSI direct download is the no-Store fallback; both should be EV/OV code-sig
 | Local notifications + tray | `tauri-plugin-notification` (native toast) + system tray (show / host relay / quit) | **Done** |
 | Apple Music | portable track refs + deep-link (no inline catalog playback) | **Redesign** — same as Android |
 | Audio/video/group calls (WebRTC) | `callwire.rs` frames 10–18/21 in Rust; WebView2 `RTCPeerConnection` full mesh in `app.js`; signaling over the sealed iroh channel | **Done** (live device-test pending) |
-| Screen share | WebRTC `getDisplayMedia` (reuses the mesh) | **TODO** |
-| Sensitive content blur | per-circle `flag_sensitive` (already in core); no on-device classifier | **Partial** |
+| Screen share | WebRTC `getDisplayMedia` (reuses the mesh) | **Done** — `desktop/ui/app.js:2709-2733` (Wayland/SteamOS via the xdg-desktop-portal) |
+| Sensitive content blur | core exposes `flag_sensitive`/`sensitive_refs`; **desktop calls neither** | **Not built** — no classifier *and* no blur. A photo an iPhone flags sensitive renders **unblurred** on desktop |
+| Profile avatar | settable in the UI, stored in local prefs — **never published to peers** | **Broken/local-only** — `desktop/src-tauri/src/engine.rs:1398` passes `String::new()` instead of `profile.avatar` into the signed profile card, so contacts never see your desktop-set photo. (The code comment there claims this "matches Android"; it does not — `android/.../HavenNet.kt:1105` passes `profile.avatarB64`.) |
 | S3 BYO-bucket | `core/haven-s3` — one shared SigV4 client (AWS/R2/B2/MinIO), wired into the engine's mailbox | **Done** (SigV4 unit-tested vs AWS vector; live bucket test pending) |
 | Nearby offline mesh | no desktop equivalent of MultipeerConnectivity; later via local mDNS/BLE | **Deferred** |
 | Push (APNs/FCM) | n/a — desktop stays running; headless relay covers offline | **n/a** |
@@ -113,10 +127,17 @@ NSIS/MSI direct download is the no-Store fallback; both should be EV/OV code-sig
 
 ## Remaining milestones (recommended order)
 
-1. **Live cross-device interop test**: Windows ↔ iPhone ↔ Android — text post, DM, media bytes, and a call over iroh.
-2. **Screen share** (`getDisplayMedia`) reusing the call mesh.
-3. **MSIX packaging + code signing + Microsoft Store** submission (CI emits MSI/exe today).
-4. **On-device sensitive-content classifier** (the per-circle flag already propagates).
+1. **Publish the avatar** — one-line fix at `desktop/src-tauri/src/engine.rs:1398` (pass
+   `profile.avatar`, not `String::new()`), and delete the incorrect "matches Android" comment.
+2. **Render the sensitive-content blur** from federated `sensitive_refs` (no classifier needed —
+   Apple peers already federate the flag; desktop just ignores it today).
+3. **Verify the Windows install path on real hardware.** ⚠️ **Untested** — the `.msi`/`.exe` are
+   built by CI and have never been run through an install on a real Windows machine (the available
+   VM can't build installers). Treat Windows as beta until someone installs it.
+4. **Live cross-device interop test**: Windows ↔ iPhone ↔ Android — text post, DM, media bytes, and a call over iroh.
+5. **Microsoft Store submission** — packaging + publish are already automated in `release.yml`; this
+   is blocked only on creating the 4 Azure AD secrets (see `STORE-AUTOPUBLISH.md`). No cert needed.
+6. **Video transcode** on attach (images already downscale in JS).
 
 ## Notes / gotchas
 

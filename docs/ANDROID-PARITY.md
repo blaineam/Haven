@@ -20,8 +20,25 @@ script). Verified on a physical **Nokia 6.1 (Android 15)**.
   (`DmPins`), device roster, and self-sync (sync-light).
 - 🧪 **Tests:** byte-exact wire-format unit tests + an on-device instrumented suite (handshake,
   post/DM exchange, persistence, sealed-media round-trip, story flag).
-- 🚧 **Remaining:** in-app browser for links; the music redesign (portable reference model);
-  broader cross-platform field testing and on-device polish.
+- ✅ **Since shipped** (this list previously said these were remaining — they landed 2026-06-23):
+  **in-app browser** for links (Chrome Custom Tabs + system fallback, `ui/LinkText.kt:22-26`) and
+  the **music redesign** (`MusicSearch.kt`, iTunes Search API — no account/SDK — wired into the
+  composer and feed). Key storage is also real: the 32-byte seed lives in
+  `EncryptedSharedPreferences` under an Android-Keystore `MasterKey` (`core/HavenCore.kt:85-97`),
+  not plain prefs.
+- 🚧 **Actually remaining** (verified against code 2026-07-15):
+  - **Sensitive-content blur is not wired.** The FFI exposes `flagSensitive`/`sensitiveRefs`, but
+    no Android code calls either — so media an Apple peer flags via SCA renders **unblurred** on
+    Android. Android needs no classifier for this; it only needs to honor the federated flag.
+  - **No EXIF/GPS strip on video.** Photos are safe (`LocalMedia.kt:344-393` re-encodes from a
+    decoded bitmap, dropping all EXIF incl. GPS), but `readVideoBytes` (`LocalMedia.kt:330-337`)
+    reads the picked video's raw bytes with no transcode — **original GPS metadata ships**.
+  - **Music: local-file attach missing.** The doc's design has two halves (local file → full;
+    streaming → deep-link). Only the deep-link half exists; there's no local-audio-file attach.
+  - **No Wear OS companion** (iOS has `HavenWatch`; nothing equivalent under `android/`).
+  - **No active-speaker highlight** in calls — needs audio-level plumbing on `CallManager`
+    (`ui/CallUI.kt:322-323`). Cosmetic.
+  - Broader cross-platform field testing and on-device polish.
 
 > **Build gotcha (do not skip):** the Android Rust `.so` + UniFFI bindings are gitignored and are
 > **not** rebuilt by `assembleDebug`. Run `android/build-rust.sh` after **any** `core/` change or
@@ -73,7 +90,7 @@ re-architecture. The parity table is really "which platform API replaces which A
 | CloudKit favorites/resume sync | ⚠️ **No equivalent.** Use the existing **mailbox** (circle-sealed per-user prefs blob) instead of a platform cloud — actually *more* aligned with the no-server ethos | **Redesign → arguably better** |
 | Liquid Glass / SwiftUI styling | **Jetpack Compose** + Material 3; rebuild the visual language (brand gradient, masonry, story ring) | **Full** (reimplement UI, not logic) |
 | Widgets (ES-style) | **Glance** (Compose for App Widgets) — if we want them | **Full** |
-| Push (the OneSignal/APNs discussion) | Same conclusion as iOS: real push needs a server → parked. Local-notif + WorkManager covers it serverlessly. **FCM would be the Android equivalent of the APNs-relay path** if ever pursued | n/a (parked) |
+| Push | **Superseded.** iOS shipped a blind APNs relay (self-hosted Cloudflare Worker, `push/worker.js`; sealed payload, NSE decrypts on-device — see `NOTIFICATIONS.md`). Android deliberately did **not** follow with FCM: it uses an opt-in foreground `ConnectionService` that keeps the iroh node alive for real-time local notifications (`core/ConnectionService.kt:17-20` — *"no FCM, no Google, no push server"*), plus a 15-min `WorkManager` `SyncWorker` poll as the fallback | **Done, different by design** — no Google dependency |
 
 ## Recommended build order (when we start)
 
@@ -88,9 +105,14 @@ re-architecture. The parity table is really "which platform API replaces which A
 
 ## Parity summary
 
-- **Full parity, no redesign:** crypto, circles, feed, DMs, stories, transport, mailbox, camera, media, calls, secret messages, notifications, nearby, key storage. (~90% of the app.)
-- **Needs a redesign (and it's healthier for it):** Apple Music → portable music refs; CloudKit → mailbox-based prefs sync.
-- **Parked (same as iOS):** real push (FCM/APNs relay), pending the no-server decision.
+- **Full parity, no redesign:** crypto, circles, feed, DMs, stories, transport, mailbox, camera,
+  media, calls (incl. mesh group + screen share), secret messages, notifications, nearby, key
+  storage, scheduled messages, avatar publish, in-app browser. (~90% of the app.)
+- **Redesigned (and healthier for it):** Apple Music → portable music refs (deep-link half done,
+  local-file half missing); CloudKit → mailbox-based prefs sync; push → foreground service +
+  WorkManager instead of FCM.
+- **Real gaps:** sensitive-content blur not wired; no EXIF/GPS strip on video; no Wear OS app.
+  See "Actually remaining" above.
 
 The single most valuable cross-platform investment is **moving the mailbox/S3 transport
 into the Rust core** (step 3): it gives iOS and Android the *same* networking from one

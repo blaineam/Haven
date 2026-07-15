@@ -110,7 +110,23 @@ if [ "$CACHE_HIT" -eq 0 ]; then
   echo "--- building HavenFFI.xcframework (Rust) ---"
   if ! command -v rustup >/dev/null 2>&1; then
     echo "installing rustup..."
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+    # Retry: the runner's egress is flaky and a single reset kills the whole build under
+    # `set -e` — build 24 died on exactly this, 5s in, with
+    #   curl: (35) Recv failure: Connection reset by peer
+    # Nothing was wrong with the toolchain or the script; the connection just dropped.
+    # --retry alone doesn't cover it (curl won't retry a mid-transfer reset without
+    # --retry-all-errors), and the download is piped straight to sh, so a truncated body
+    # would otherwise be handed to the shell as a "script".
+    rustup_ok=0
+    for attempt in 1 2 3; do
+      if curl --proto '=https' --tlsv1.2 -sSf --retry 3 --retry-all-errors --retry-delay 5 \
+           --connect-timeout 20 --max-time 180 https://sh.rustup.rs -o /tmp/rustup-init.sh; then
+        sh /tmp/rustup-init.sh -y --default-toolchain stable && { rustup_ok=1; break; }
+      fi
+      echo "rustup install attempt $attempt failed; retrying in 10s..."
+      sleep 10
+    done
+    [ "$rustup_ok" -eq 1 ] || { echo "rustup install FAILED after 3 attempts ❌"; exit 1; }
   fi
   export PATH="$HOME/.cargo/bin:$PATH"
   # build-rust-xcframework.sh adds the Apple targets itself and drives cargo via $CARGO, so it

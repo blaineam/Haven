@@ -16,7 +16,64 @@ permissions:
   contents: write
 
 jobs:
+  # Derive + validate the version the same way release.yml's `meta` job does, so a relay-only
+  # hotfix lands on the same version line as everything else. Without this the .deb comes out
+  # as haven-relay_0.0.1 (the hardcoded Cargo.toml value) — older than every main release under
+  # dpkg ordering, so `apt upgrade` would never move anyone onto the hotfix. See docs/RELEASING.md.
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        # Via env, not `${{ }}` interpolation — a tag name is attacker-controllable text and
+        # must never be pasted into a shell.
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+
+          asc="$(python3 - <<'PY'
+          import re, pathlib, sys
+          t = pathlib.Path("apple/project.yml").read_text()
+          vs = set(re.findall(r'(?m)^\s*MARKETING_VERSION:\s*"([^"]+)"', t))
+          if not vs:
+              sys.exit("no MARKETING_VERSION found in apple/project.yml")
+          if len(vs) > 1:
+              sys.exit(f"apple/project.yml disagrees with itself: MARKETING_VERSION = {sorted(vs)}")
+          print(vs.pop())
+          PY
+          )"
+
+          if [ "$REF_TYPE" = "tag" ]; then
+            version="${REF_NAME#relay-v}"
+          else
+            # workflow_dispatch dry-run off a branch: build what the next relay WOULD be,
+            # instead of stamping the branch name ("main") in as a version.
+            version="$asc"
+          fi
+
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$REF_NAME' is not a plain relay-vX.Y.Z. Haven releases track the App" \
+                 "Store marketing version — no -beta/-rc/-alpha suffixes. See docs/RELEASING.md."
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "haven-relay **$version**" >> "$GITHUB_STEP_SUMMARY"
+
+          # Not fatal: shipping a relay ahead of the App Store number is the whole point of this
+          # path. But the versions are protocol-coupled, so drift is worth saying out loud.
+          if [ "$version" != "$asc" ]; then
+            echo "::warning::relay-v$version does not match apple/project.yml MARKETING_VERSION" \
+                 "($asc). One product, one version — fold this into a v$version release when you" \
+                 "next ship the apps. See docs/RELEASING.md."
+          fi
+
   build:
+    needs: meta
     strategy:
       fail-fast: false
       matrix:
@@ -38,6 +95,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
+      - name: Stamp version
+        run: |
+          python3 - <<'PY'
+          import re, pathlib
+          v = "${{ needs.meta.outputs.version }}"
+          p = pathlib.Path("core/haven-relay/Cargo.toml")
+          t = p.read_text()
+          t = re.sub(r'(?m)^version = ".*"', f'version = "{v}"', t, count=1)
+          p.write_text(t)
+          PY
 
       # zig gives painless musl + Arm cross-compilation from a single x86_64 runner.
       - name: Install zig
@@ -75,6 +142,7 @@ jobs:
           if-no-files-found: error
 
   macos:
+    needs: meta
     strategy:
       matrix:
         target: [aarch64-apple-darwin, x86_64-apple-darwin]
@@ -87,6 +155,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
+      - name: Stamp version
+        run: |
+          python3 - <<'PY'
+          import re, pathlib
+          v = "${{ needs.meta.outputs.version }}"
+          p = pathlib.Path("core/haven-relay/Cargo.toml")
+          t = p.read_text()
+          t = re.sub(r'(?m)^version = ".*"', f'version = "{v}"', t, count=1)
+          p.write_text(t)
+          PY
       - name: Build haven-relay (${{ matrix.target }})
         working-directory: core
         run: cargo build --release -p haven-relay --target ${{ matrix.target }}
@@ -102,6 +180,7 @@ jobs:
           if-no-files-found: error
 
   windows:
+    needs: meta
     strategy:
       fail-fast: false
       matrix:
@@ -115,6 +194,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
+      - name: Stamp version
+        shell: bash
+        run: |
+          python -c "import re,pathlib; p=pathlib.Path('core/haven-relay/Cargo.toml'); t=p.read_text(); p.write_text(re.sub(r'(?m)^version = \".*\"','version = \"${{ needs.meta.outputs.version }}\"',t,count=1))"
       - name: Build haven-relay (${{ matrix.target }})
         working-directory: core
         run: cargo build --release -p haven-relay --target ${{ matrix.target }}

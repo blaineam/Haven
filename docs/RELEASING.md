@@ -36,7 +36,7 @@ same code. That's fixed by the gate in `release.yml`, not by convention.
 | git tag → GitHub Release | **product** | you: `git tag v<X.Y.Z>` |
 | Android `versionName` | **product** | `android.yml`, from the tag (`${GITHUB_REF_NAME#v}`) |
 | Desktop `.msi`/`.exe`/`.deb`/`.rpm`/AppImage/MSIX | **product** | `release.yml` stamps `desktop/src-tauri/tauri.conf.json` |
-| `haven-relay` binary + `.deb` | **product** | `release.yml` stamps `core/haven-relay/Cargo.toml` |
+| `haven-relay` binary + `.deb` | **product** | `release.yml` (and `relay-release.yml`) stamps `core/haven-relay/Cargo.toml` |
 | AUR `haven-desktop` / `haven-relay` `pkgver` | **product** | `release.yml`'s `aur` job stamps it from the tag |
 | Flatpak / metainfo `<release version=…>` | **product** | hand-updated (see [Flathub](#flathub)) |
 
@@ -99,10 +99,15 @@ across the switch — verified, not assumed.
 **Dry run:** `workflow_dispatch` on `release.yml` builds everything without publishing. Off a
 branch with no input it builds whatever `MARKETING_VERSION` currently says.
 
-**Relay-only hotfix:** tag `relay-v*` → `relay-release.yml` ships just the relay binaries.
-⚠️ **Known gap:** that workflow does *not* stamp a version, so its `.deb`s come out as
-`haven-relay_0.0.1-1_*.deb` — older than anything `release.yml` publishes, so apt will not
-upgrade to them. Prefer a normal `v*` release until that's fixed.
+**Relay-only hotfix:** tag `relay-v<X.Y.Z>` → `relay-release.yml` ships just the relay binaries
+and `.deb`s. It stamps `core/haven-relay/Cargo.toml` from the tag exactly as `release.yml` does,
+so `relay-v1.0.6` yields `haven-relay_1.0.6-1_amd64.deb` and `apt upgrade` moves users onto it.
+The tag must be plain semver — same gate, same reason as below.
+
+Unlike `release.yml` this path does **not** fail on drift from `MARKETING_VERSION`; shipping a
+relay ahead of the App Store number is the entire point of it. It warns instead. Because the
+relay is protocol-coupled to the clients, fold the hotfix number into the next `v*` release
+rather than letting a relay-only line accumulate.
 
 ### The version gate
 

@@ -1,0 +1,988 @@
+# Security audit — 2026-07 (pre-v1)
+
+Scope: the whole product as of `f0ad60d`, audited against the standing mandate:
+
+> **Audit every feature; the maker must NOT hold keys or be a bypass target.**
+
+Method: read the code, not the comments. Every finding cites `file:line` against the tree at
+`f0ad60d`. Claims were taken from `docs/SECURITY.md`, `docs/GROUP-KEYING.md`, `docs/MODERATION.md`,
+`docs/LINK-SYSTEM.md`, `docs/NOTIFICATIONS.md`, `docs/HAVEN-NET-RELAY.md`, `docs/RELAY-AND-DEPLOY.md`,
+`docs/THREAT-MODEL.md`, `docs/TERMS.md`, `web/`, and `appstore-metadata.md`, and then attacked.
+
+**A false claim is a finding.** Several here are documentation findings: the code is safe and the doc
+promises more (or less) than the code delivers. Those are ranked alongside the code bugs because the
+docs are public and load-bearing.
+
+---
+
+## Headline
+
+**The mandate is intact on content, and broken on metadata — in one specific, shipped place.**
+
+Nothing anywhere in this codebase lets Blaine, a relay operator, or the website read a post, a
+message, or a media item. I attacked that from five directions and could not move it. The hybrid PQ
+construction is real, the epoch revocation is real, the Worker and the website are structurally
+blind. On the thing the project cares most about, the answer is: **no glaring holes.**
+
+But `POST /flag` (`push/worker.js:146-163`) writes a **permanent, unauthenticated, forgeable
+identity-vs-identity graph** into the developer's KV — and fires automatically on every *block*, an
+act users reasonably believe is private and local. `docs/TERMS.md:43-45` then attaches real
+consequences to those rows (service refusal, disclosure to law enforcement). That is the maker
+holding something he promised not to hold, populated by a channel anyone can forge into.
+
+That is **F1**, and it is the one finding I would gate v1 on for mandate reasons. The other ship
+blockers (**F2**, **F3**) are ordinary security bugs of the "default transport has no authorization"
+kind — serious, but not mandate violations.
+
+---
+
+## Severity summary
+
+| # | Finding | Severity | Blocks v1? |
+|---|---|---|---|
+| F1 | Moderation ledger: unauthenticated, forgeable, permanent identity graph held by the developer | **Critical** | **Yes** |
+| F2 | HTTP relay (`:8674`, the default media transport) has zero circle-membership authorization | **Critical** | **Yes** |
+| F3 | Unauthenticated `/call` + NSE ignores verified sender → lock-screen spoofing & ring-spam | **High** | **Yes** |
+| F4 | `haven/devroster/**` + `haven/media/**` readable/enumerable by strangers, no token | **High** | **Yes** |
+| F5 | Media refs are random UUIDs, not content addresses; no blob↔ref binding | **High** | **Yes** |
+| F6 | Media is plaintext at rest; on macOS with no protection at all | **High** | Yes (or fix docs) |
+| F7 | `SECURITY.md` flatly contradicts shipped reporting/ledger + `MODERATION.md` | **High** (docs) | **Yes** |
+| F8 | `RELAY-AND-DEPLOY.md` promises "ephemeral rendezvous tokens" that do not exist | **High** (docs) | **Yes** |
+| F9 | Relay bearer token crosses the wire in cleartext; no TLS; token never rotates | **High** | Yes |
+| F10 | Connection relay is an open forwarder with 32× amplification | **High** | Yes |
+| F11 | `DeviceKeyStore` has the locked-read-overwrite bug the master seed was hardened against | **Medium** | No |
+| F12 | Transient SE failure silently downgrades a seed copy to plaintext | **Medium** | No |
+| F13 | Transient read failure destroys the identity-recovery archive | **Medium** | No |
+| F14 | No quota / rate limit / content-address verification → disk exhaustion, mesh-amplified | **Medium** | Community-relay story only |
+| F15 | HVCHUNK1 manifest is unauthenticated; unbounded chunk count → remote disk-fill | **Medium** | No |
+| F16 | Routing header leaks the co-recipient set (= the circle graph) | **Medium** | No (docs must be honest) |
+| F17 | `quick-xml` 0.36.2 in `haven-s3`: two 7.5-high advisories, attacker-reachable | **Medium** | No |
+| F18 | DM authorization degrades to "member of any circle on this relay" | **Low-Med** | No |
+| F19 | `HAVEN_SCENE` is not DEBUG-gated; auto-opens the seed-backup sheet in release | **Low-Med** | No |
+| F20 | Worker observes sender-IP × recipient-identity in real time | **Low** | No (docs) |
+| F21 | `api.github.com` fetch fires on every page load, including post-link opens | **Low** | No |
+| F22 | Demo seeding drives the real store on Apple/Android (desktop isolates correctly) | **Low** | No |
+
+---
+
+## F1 — CRITICAL: the moderation ledger is a developer-held, permanent, forgeable identity graph
+
+**The claim.** `docs/SECURITY.md:3-4`: "**Nothing is sent to the developer; nothing is logged.**"
+And `docs/SECURITY.md:49-51`: "There is **no content moderation or reporting** by design, **and it is
+not possible**: content is E2EE between community members, the developer has no access to it and logs
+nothing, so there is nothing to moderate or report to."
+
+**What the code does.** `push/worker.js:146-163` implements `POST /flag`, writing a **permanent** KV
+row `ledger:<ISO-ts>:<uuid>` = `{actor, subject, action, reason}`. There is no `expirationTtl`.
+`docs/MODERATION.md:47` states the intent plainly: "Entries are permanent by design."
+
+It fires on every **block**, silently, on all three platforms:
+
+- `apple/HavenApp/FeedView.swift:542` — `ModerationLedger.record(action: "block", …)`
+- `apple/HavenApp/FeedView.swift:926` — on report
+- `android/.../HavenNet.kt:853`, `:1187` — same, on report *and* block
+- `apple/HavenApp/ReportUI.swift:21` — sends `FeedStore.shared.myAccountHex`, the user's real account id
+
+**`/flag` performs no signature check.** I verified this directly: `verifyReg` is called at
+`worker.js:29` (`/register`), `:46` (`/register-owner`), and `:59` (`/register-voip`) — and nowhere
+else. `/flag`'s only validation is a hex regex (`worker.js:154`) and an IP-keyed best-effort rate
+limit (`:156`).
+
+`docs/TERMS.md:43-45` then attaches consequences: *"Identities that accumulate abuse reports may be
+refused the services the developer does operate (such as push notification relaying), and ledger
+entries may be shared with law enforcement where legally required."*
+
+**Impact.** Three distinct problems, compounding:
+
+1. **Mandate violation.** Blaine holds a permanent, timestamped, append-only graph of "identity A
+   acted against identity B", plus each actor's IP at the Cloudflare edge. That is a social graph.
+   The mandate says he must not become this.
+2. **It is forgeable, which makes it both dangerous and worthless.** Because `actor` is
+   unauthenticated, anyone can write unlimited entries attributing reports to arbitrary identities
+   against a victim. The ledger's *only* stated value is "many distinct reporters × one identity is
+   signal" (`MODERATION.md:44`) — precisely what forgery manufactures. An unauthenticated endpoint
+   should not be able to trigger service denial or plant law-enforcement records.
+3. **Block is a private, defensive act.** Users are never told at block time that it phones home.
+   The disclosure exists only in `TERMS.md`/`MODERATION.md`, while `SECURITY.md` — the doc users and
+   auditors actually read — asserts the opposite.
+
+**Recommended fix** (do not apply from this doc; these are precise instructions):
+
+1. **Sign `/flag`.** Domain-tagged Ed25519 over `actor|subject|action|ts`, verified with
+   `verifyReg`-shaped logic (`worker.js:272-286` is the template, including its 5-minute window).
+   Non-negotiable given the Terms' consequences.
+2. **Stop auto-recording `block`.** Remove the ledger call at `FeedView.swift:542` and
+   `HavenNet.kt:853`. Report only, and only with an explicit "also notify the developer" checkbox.
+3. **Drop `actor`, or store `HMAC(actor, rotating_key)`.** `subject + action` is sufficient for
+   pattern detection and removes the graph edge entirely.
+4. **Add `expirationTtl`** (90d). "Permanent by design" is indefensible for a forgeable record.
+5. **Reconcile `SECURITY.md:3-4` and `:49-51` with reality** — see F7.
+
+---
+
+## F2 — CRITICAL: the HTTP relay path has zero circle-membership authorization
+
+**The claim.** `docs/SECURITY.md:35-37`: "the relay enforces **circle-membership authorization** — a
+circle's mailbox (read, write, and list) is served only to that circle's members… A node that merely
+learns the relay's id can no longer fetch or enumerate a circle's blobs."
+
+**What the code does.** `httprelay::serve(root, bind, token)` (`core/haven-net/src/httprelay.rs:82`)
+never receives `RelayAuth`. `handle_conn` (`:102`) checks exactly two things: a bearer token
+(`:121-122`) and `checked()` (`:235-241`), which only enforces the `haven/` prefix + `safe_path`.
+**`mailbox_forbidden` is never called from this file.** The iroh path calls it correctly at
+`core/haven-net/src/blobstore.rs:754`; the HTTP path does not.
+
+This path is **on by default everywhere**: `DEFAULT_HTTP_BIND = "0.0.0.0:8674"`
+(`core/haven-relay/src/config.rs:230`), enabled unless `--no-http` (`config.rs:164-168`), started at
+`runner.rs:91-92`, `apple/HavenApp/RelayHost.swift:94`, `android/.../HavenNet.kt:1806`,
+`desktop/.../engine.rs:1767`, and published by `relay/docker/docker-compose.yml:38`. And there is
+**one token per relay** (`config.rs:234-249`; `RelayHost.swift:107-115`) — per-device, not
+per-circle — handed to every circle the relay serves.
+
+**Evidence.** Probed against a real `httprelay::serve` in the scratchpad, caller a member of no
+circle holding only the relay token:
+
+```
+GET /l/haven                          → 200  haven/devroster/deadbeef
+                                             haven/mailbox/fam/aaaa
+                                             haven/mailbox/secretclub/bbbb
+GET /k/haven/mailbox/secretclub/bbbb  → 200  SEALED-secretclub-post
+PUT /k/haven/mailbox/secretclub/injected → 200 OK
+GET /l/haven/devroster                → 200  haven/devroster/deadbeef
+```
+
+**Impact.** Any token holder — by design, every member of *any* circle on the relay — can enumerate
+every circle on that relay, read every blob, and write into any circle's mailbox. The entire point
+of the community/mesh relay model (`RELAY-AND-DEPLOY.md:42,47-76`) is that strangers' circles
+co-tenant one relay. Content stays sealed, so this is not a plaintext break — but the enumeration
+claim and the per-circle boundary are **false on the default transport**. The unit test at
+`httprelay.rs:396-405` exercises `haven/mailbox/fam/` writes with no membership concept present.
+
+**Recommended fix.** A shared bearer token structurally cannot express membership, because HTTP here
+has no verified peer identity. In preference order:
+
+1. Authenticate with the member's node key: `Authorization: Haven <nodehex>.<sig over
+   method|path|ts|nonce>`, giving HTTP the identity iroh already has, then call `mailbox_forbidden`
+   with it.
+2. Interim: per-circle tokens (`token_c = HMAC(relay_secret, circle_id)`, shipped per-circle in the
+   frame-19 announce), bind the circle from the key prefix, and hard-refuse broad `haven` /
+   `haven/mailbox` prefixes over HTTP.
+
+Note `appstore-metadata.md:72` describes this as "an authenticated local HTTP interface (port 8674)".
+That is true only in the weakest sense (a shared bearer token) and should not be read as membership
+authorization.
+
+---
+
+## F3 — HIGH: unauthenticated `/call` + NSE ignores the verified sender
+
+**The claim.** `docs/SECURITY.md:23`: "push notifications are signed (**the receiver verifies the
+sender**)."
+
+**What the code does.** The signature *is* verified, and verified well —
+`core/p2pcore-ffi/src/lib.rs:331-353`, binding recipient + domain tag at `:317-323`. But the core's
+own doc comment warns at `core/p2pcore-ffi/src/lib.rs:309-310`:
+
+> "The receiver should still confirm it's a known contact before trusting the display name — **the
+> signature proves authenticity, not authorization**."
+
+Nothing does. `apple/HavenNotificationService/NotificationService.swift:37-38` ignores
+`opened.sender_hex` and renders `opened.data` directly. There is no known-contact check. `/notify`
+requires no signature (`worker.js:171-177`), and node ids are public by design (they are in every
+reach-me link and QR). So:
+
+> Any stranger mints a throwaway identity → seals+signs `{t:"Mom", b:"I'm stranded, send money"}` to
+> the victim → `POST /notify` → the victim's lock screen renders it as **Mom**.
+
+The signature check the docs tout is satisfied: the forger validly signs *as themselves*, and nobody
+checks who that is.
+
+**The VoIP variant is worse.** `apple/HavenApp/PushManager.swift:154-166` calls
+`CallManager.shared.reportIncomingFromPush(name:peerHex:)` **outside** the `if let` that decrypts and
+verifies. Decryption failure → `name = "Someone"` (`:155`) → **the phone rings anyway**
+(`CallManager.swift:359-367` → `:382`). `/call` requires no signature (`worker.js:74-76`). And `h`
+(caller hex) inside the payload is never checked against the signer (`PushManager.swift:161`), so
+even a verified payload can claim to be someone else — CallKit renders the spoofed name full-screen.
+The only brake is `rateLimited` (`worker.js:305-311`): 60/min keyed on source IP, on eventually
+consistent KV; its own comment concedes it is "best-effort, not a hard gate".
+
+**Impact.** Anyone with a victim's public node id can put attacker-chosen text under an
+attacker-chosen contact name on their lock screen, and can ring their phone full-screen from a
+killed/locked state, repeatedly. Phishing, harassment, battery drain — against exactly the trust
+relationship Haven sells.
+
+**Recommended fix.** Note iOS 13+ *requires* `reportNewIncomingCall` for every VoIP push or the
+process is killed and the app loses VoIP privileges, so the ring cannot simply be dropped.
+
+1. **Worker-side (the real fix):** authenticate `/call` and `/notify` — require the sender's
+   signature and verify it. Keep the uniform `ok:true` response (`worker.js:143`) so the existence
+   oracle stays closed.
+2. **Device-side:** mirror known-contact hexes into the shared Keychain group (the pattern already
+   exists — `SharedLockedCircles`, used at `NotificationService.swift:53`). After
+   `openSignedNotificationWithSeed`, require `opened.senderHex ∈ contacts`, else fall through to the
+   generic banner at `:40`. For calls: report, then immediately `provider.reportCall(with:endedAt:
+   reason:.failed)` when the payload doesn't open, or `opened.senderHex != obj["h"]`, or the sender
+   isn't a known contact.
+
+---
+
+## F4 — HIGH: device rosters and media are readable/enumerable by strangers, with no token
+
+**The claim.** Same as F2 — "cannot be enumerated by strangers".
+
+**What the code does.** `mailbox_forbidden` (`core/haven-net/src/blobstore.rs:698-709`) ends in
+`None => false` — **permissive for every key not under `haven/mailbox/`**. Device rosters live at
+`haven/devroster/<account>` (`blobstore.rs:619`), so GET and LIST of that namespace are allowed for
+any peer. The crate's own test asserts the same permissive branch for media (`blobstore.rs:1322`).
+
+The roster blob is **signed, not sealed**: `verify_devroster` (`blobstore.rs:632-665`) parses a
+plaintext `HavenId` bundle and `DeviceList` straight out of the body.
+
+**Impact.** A stranger who learns a relay's node id dials it, `LIST haven/devroster/` → every account
+id the relay serves, then `GET` each → that account's full public identity bundle, complete device
+list, and revoked set. A precise account roster and multi-device map of the relay's entire
+population, from an unauthenticated dial with no token. The same branch lets a stranger enumerate and
+download every media blob (sealed, but counts, sizes, and the full ciphertext corpus for offline
+work).
+
+**Recommended fix.** Flip to default-deny once configured: `None => true` with an explicit allowlist.
+Gate devroster *reads* to authorized members (writes stay permissive — the signature is the trust,
+and that part is sound). Refuse `LIST haven/devroster` for non-relays.
+
+---
+
+## F5 — HIGH: media refs are random UUIDs, not content addresses; nothing binds a blob to its ref
+
+**The claim.** Asserted repeatedly in-code: "Content-addressed keys never change"
+(`apple/HavenApp/SharedStore.swift:216`); "`key(ref)` is content-addressed — independent of the
+sealed bytes" (`:280-282`); "keys are content-addressed, so a co-member can neither read nor forge
+another member's DM — only relay it" (`core/haven-net/src/blobstore.rs:702-706`).
+
+**What the code does.** The ref is a random UUID:
+
+- `apple/HavenApp/Media.swift:319` — `let ref = "img_\(UUID().uuidString)"`
+- `apple/HavenApp/Media.swift:339` — `let ref = "vid_\(UUID().uuidString)"`
+
+And `seal_bytes` binds **no** context — not the ref, not the circle id, not the post id
+(`core/p2pcore/src/social.rs:208-230`: `group` is used only to enumerate recipients; the signed
+transcript covers sender/ciphertext/recipients and nothing else). `seal_circle_media`
+(`core/p2pcore-ffi/src/lib.rs:2197-2208`) passes no AAD. On the open side there is no ref check
+either: `open_circle_media` (`lib.rs:2242-2258`) accepts any circle member as sender, and
+`open_circle_media_file` (`lib.rs:2276-2296`) loops **every known circle** until one opens.
+`SharedStore.swift:616-621` does the same. The reassembled blob is never hashed against `ref`.
+
+Compounding: the relay does not gate media keys at all (F4), and `local_put`
+(`blobstore.rs:322-331`) overwrites unconditionally.
+
+**Impact.** A relay operator — always a circle member — or any node that learns a ref can take member
+X's sealed media from ref A and PUT it at ref B. Every client opens it (X is a member, signature
+verifies, GCM verifies) and renders X's photo A under whatever signed post referenced ref B. This is
+**silent, cryptographically undetected content substitution across posts, authors, and circles**, and
+it defeats the point of signing posts: the post envelope is unforgeable, but its media payload is
+freely swappable. The same primitive gives permanent media DoS (overwrite with garbage → GCM fails
+forever; senders won't re-upload because `MediaBackupLedger.has(node, ref)` marks it confirmed —
+`SharedStore.swift:229-233`).
+
+**Recommended fix.** Both halves are needed:
+
+1. Make the ref an actual content address: `ref = "img_" + hex(blake3(plaintext))`, and after every
+   open verify `blake3(plaintext) == ref` before adopting/rendering (`SharedStore.swift:616-621`,
+   `Media.swift:650`). This alone kills substitution and makes puts genuinely idempotent.
+2. Bind context into the AEAD: give `seal_bytes` an `aad: &[u8]`, pass `circle_id || ref`, include it
+   in `env.transcript()` so the signature covers it, and have `open_bytes` require the caller's
+   expected AAD. Then delete the "try every circle" loop in `open_circle_media_file` — it is the
+   mechanism that makes cross-circle replay work.
+
+Both are wire-format changes: version the envelope and accept legacy unbound blobs read-only during
+migration.
+
+---
+
+## F6 — HIGH: media is plaintext at rest; on macOS with no protection at all
+
+**The claim.** `docs/SECURITY.md:26-27`: "the decrypted social state, **media**, and scheduled queue
+use file-protection so they're unreadable on a locked/forensic device."
+
+**What the code does.** Media is written as raw plaintext and stays that way for the life of the
+install. `apple/HavenApp/Media.swift:320-323` — `img.jpegData(...)` → `try? data.write(to: url)` into
+`haven-media/<ref>.jpg`; video likewise (`:337-352`). Sealing happens only on the way *out* to a
+relay (`core/p2pcore-ffi/src/lib.rs:2220` reads plaintext from `in_path`), and inbound media is
+written back to plaintext (`lib.rs:2299-2306`, `Media.swift:650-653`).
+
+Protection is iOS Data Protection at the **weakest** usable class —
+`.completeUntilFirstUserAuthentication` (`Media.swift:277-283`). The `#else` branch (`:284-285`)
+applies **no protection on macOS**: `createDirectory` with no attributes. Media sits in plaintext in
+`~/Library/Application Support/haven-media/`, readable by any process running as the user.
+
+Additional plaintext residue: `MediaPicker.swift:99,153`, `StoryCamera.swift:234,422`,
+`DualCamera.swift:129`, `CameraView.swift:343,762`, `Audio.swift:22`, `FeedView.swift:3053,3079` all
+stage plaintext in `temporaryDirectory`. `Media.swift:120-137` (`export()`) writes a trimmed
+plaintext MP4 to tmp and **never deletes it** (no `defer`; contrast `SharedStore.swift:316-317`,
+which correctly does).
+
+**Impact.** The at-rest claim does not hold on macOS at all, and holds only against a
+powered-off/pre-first-unlock iOS device. Forensic extraction of an AFU iPhone, any macOS
+local-process compromise, or an unencrypted backup yields every photo, video, and voice note in the
+clear. This is the largest gap between `docs/SECURITY.md` and the code.
+
+**Recommended fix.** On macOS, seal `haven-media` at rest under a key derived from the master seed
+(which *is* SE-wrapped), decrypting to tmpfs/`.part` only for AVPlayer and deleting on teardown. On
+iOS, raise `haven-media` to `.completeUnlessOpen` (playback holds the handle open, so this works) and
+route the `temporaryDirectory` staging above through `MediaStore.makeTempFile()` (`Media.swift:
+643-647`), which already lands in the protected dir. Add the missing
+`defer { try? FileManager.default.removeItem(at: dst) }` to `Media.swift:120`. **If you ship without
+this, correct `docs/SECURITY.md:26-27`** — it currently claims a property the code does not have.
+
+---
+
+## F7 — HIGH (docs): SECURITY.md contradicts the shipped product and MODERATION.md
+
+`docs/SECURITY.md:49-51` states: "There is **no content moderation or reporting** by design, and it
+is not possible… there is nothing to moderate or report to."
+
+`docs/MODERATION.md` — same repo — documents a shipped report sheet, a shipped circle-wide
+`EventKind::Report`, and a shipped developer ledger, on all three platforms (`MODERATION.md:51-60`).
+`SECURITY.md:3-4`'s "nothing is sent to the developer; nothing is logged" is contradicted by every
+`/flag` call site listed in F1.
+
+These cannot both be true. `SECURITY.md` is the document a security researcher reads first, and it is
+wrong in the direction that inflates the guarantee. Note `appstore-metadata.md:61` is *more* accurate
+than `SECURITY.md` — it carefully says there is no copy of *content* to moderate, which is true.
+
+**Recommended fix.** Rewrite `SECURITY.md:49-51` to match `appstore-metadata.md:61`: no *content*
+moderation is possible, because the developer has no content; reporting exists and is circle-scoped;
+a content-free ledger entry is sent to the developer on report (and, until F1 is fixed, on block),
+and link to `MODERATION.md` and `TERMS.md:38-45`. Fix `:3-4` to scope "nothing is logged" to content.
+
+---
+
+## F8 — HIGH (docs): RELAY-AND-DEPLOY.md promises a rendezvous-token design that does not exist
+
+`docs/RELAY-AND-DEPLOY.md:160-164` states: *"The relay/broker sees opaque sealed frames addressed by
+**ephemeral rendezvous tokens**, not Haven public keys. A node that somehow logged an IP still could
+not tie it to a Haven identity."*
+
+**This is false.** There are no rendezvous tokens in the code. `dest` ids are long-term Ed25519
+identity keys (`core/haven-net/src/relay.rs:57`; `core/haven-relay/src/link.rs:13-17`), and the QUIC
+session authenticates the peer under that same key (`blobstore.rs:537`, `lib.rs:672`). The relay
+holds an exact, permanent identity↔IP map. `SECURITY.md:38-42` is honest about this ("Can see limited
+metadata: connection timing, IP↔node-id mappings"); the two docs contradict each other, and the
+optimistic one is wrong.
+
+**Recommended fix.** Either implement the blinded routing tags the doc claims (`HMAC(epoch_key,
+node_id)`, rotated per epoch — the "opaque/HMAC'd per-member key prefixes" groundwork
+`SECURITY.md:42` mentions, and which `groupkey::mailbox_prefix` already provides for storage keys),
+or delete the paragraph. Docs must agree.
+
+---
+
+## F9 — HIGH: the relay bearer token crosses the wire in cleartext; no TLS exists
+
+`httprelay` is raw TCP (`core/haven-net/src/httprelay.rs:47,84`) — there is no TLS in the crate. The
+module doc says "TLS is delegated to a fronting proxy/tunnel" (`:8-9`), but clients announce bare
+`http://<lan-ip>:8674` URLs by default (`RelayHost.swift:120-124`; `HavenNet.kt:1830-1845`); the
+HTTPS public URL is opt-in.
+
+So `Authorization: Bearer <token>` (`httprelay.rs:122`) crosses the wire in cleartext on **every**
+request. An on-path attacker — explicitly *not* the relay operator, so outside the trusted party —
+captures it from the first request and inherits everything in F2. The token is static, persisted, and
+never rotated (`config.rs:234-249`), so this is permanent. The attacker also sees every key
+(`haven/mailbox/<circleUUID>/<hash>` → circle UUIDs, blob sizes, traffic volume) and can tamper with
+or inject blobs (no wire integrity).
+
+**Recommended fix.** Refuse to bind a non-loopback address without TLS. Replace the bearer token with
+a signed/timestamped/nonce'd request MAC so the credential is not replayable from a capture. Rotate
+on membership change. Stop announcing plain-HTTP LAN URLs as the default transport.
+
+---
+
+## F10 — HIGH: the connection relay is an open, unauthenticated forwarder with 32× amplification
+
+`RelayNode::handle_inbound` (`core/haven-net/src/lib.rs:549-603`) performs **no membership check
+whatsoever**. It parses any frame from any peer and forwards to up to `MAX_DEST = 32` destinations
+(`relay.rs:47,93`). `cfg.link.members` is loaded but never consulted — `runner.rs:38` is a no-op
+warmup hook.
+
+`MAX_PAYLOAD` is 256 MB (`lib.rs:28`), so one frame → 32 outbound sends = **8 GB out for 256 MB in**.
+Any stranger holding a relay's node id gets a free anonymous packet-injection and amplification
+service aimed at arbitrary node ids. `SeenSet` is RAM-only and count-capped at 8192 (`relay.rs:153`);
+an attacker pushing >8192 distinct msg_ids evicts the dedup window — the crate's own test proves an
+evicted id is re-admitted (`relay.rs:189`) — defeating even honest loop-breaking.
+
+**Recommended fix.** Require `dest ⊆ link.members` (and/or sender ∈ members) before forwarding; cap
+relayed frame size far below 256 MB; per-peer rate limit; make `SeenSet` time-windowed rather than
+count-capped.
+
+---
+
+## F11 — MEDIUM: `DeviceKeyStore` has the locked-read-overwrite bug the master seed was hardened against
+
+**The claim.** The project's own rule (`reference_keychain_locked_overwrite`): "nil read ≠ absent (may
+be LOCKED); only `errSecItemNotFound` justifies generate+save."
+
+**What the code does.** `AccountStore` implements this **perfectly** (see VERIFIED). `DeviceKeyStore`
+— the other 32-byte Account seed on the device — does not:
+
+```swift
+// apple/HavenApp/DeviceRoster.swift:40-44
+private static func loadSeed() -> Data? {
+    var q = query(); q[kSecReturnData as String] = true; …
+    return SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess ? item as? Data : nil
+}
+```
+
+The OSStatus is discarded — `errSecInteractionNotAllowed` collapses to `nil`, identical to
+`errSecItemNotFound`. The caller then generates and saves over it:
+
+```swift
+// apple/HavenApp/DeviceRoster.swift:19-23
+static func deviceAccount() -> Account {
+    if let seed = loadSeed(), let acct = try? Account.fromSeed(seed: seed) { return acct }
+    let fresh = Account.generate()
+    saveSeed(fresh.secretSeed())      // ← SecItemDelete + SecItemAdd (:46-52)
+    return fresh
+}
+```
+
+The item is `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` (`:49`), so a read before first unlock
+returns `errSecInteractionNotAllowed` → nil → **the device key is destroyed and replaced**. An
+`Account.fromSeed` throw also silently triggers regeneration — the exact case `AccountStore.swift:
+35-38` explicitly refuses.
+
+**Impact.** The device key is what the account signs to authorize this device, and it is the
+per-device transport seed. Rotating it out from under the account-signed credential — which survives
+in `UserDefaults` (`DeviceRoster.swift:59-62`) and now attests to a key that no longer exists —
+desynchronizes the device from the signed roster. That is precisely the failure signature of two bugs
+already in this project's history (`reference_haven_own_device_roster_reject`,
+`reference_haven_roster_revocation_flipflop`). Ranked Medium only because reachability is narrow
+(needs `deviceAccount()` pre-first-unlock; `FeedView.swift:148/637/663` are view-driven, so a
+background launch after reboot is the realistic trigger).
+
+**Recommended fix.** Mirror `AccountStore.loadSeedStatus` exactly: return the OSStatus and generate
+**only** on `errSecItemNotFound`. On any other status, return nil/throw and let the caller retry
+after unlock. Treat a `fromSeed` failure as "present but unreadable", never as absent.
+
+---
+
+## F12 — MEDIUM: a transient SE failure silently downgrades a seed copy to plaintext
+
+**The claim.** `docs/THREAT-MODEL.md:13`: "**Every** on-device copy of the master seed is
+Secure-Enclave-wrapped… The one unsealed copy is the *opt-in* iCloud-synced archive."
+
+**What the code does.** Three write paths fall back to plaintext on *any* seal failure, not only on
+no-Enclave hardware:
+
+- `apple/Shared/SharedSeed.swift:52` — `add[kSecValueData] = box.seal(seed) ?? seed`. On `nil`, the
+  raw 32-byte seed is written to the **shared** access group.
+- `apple/HavenApp/AccountStore.swift:232-240` — `saveSeed`: `if wrapAndStore(data) { return }`, else
+  plaintext keychain item.
+- `apple/HavenApp/AccountStore.swift:420-431` — `storeHistory`: the `else` catches both "opted into
+  iCloud" *and* "seal failed", so a seal failure writes a **device-local plaintext archive of up to
+  12 past seeds**.
+
+`seal` returns nil whenever `publicKey(creatingIfNeeded:)` returns nil
+(`SecureEnclaveBox.swift:99-104`), which includes the **locked** case: `privateKey()` returns `(nil,
+errSecInteractionNotAllowed)` and `guard creatingIfNeeded, status == errSecItemNotFound` fails
+(`:63-65`). So this is not only the Simulator path the comments describe — it is any transient
+Enclave unavailability.
+
+**Impact.** Silent, permanent downgrade. Once the plaintext item lands it is never re-wrapped
+(`SharedSeed` and `storeHistory` have no repair path; only `AccountStore.swift:32` re-wraps on
+launch). A keychain dump then yields the live seed and every archived identity — exactly what the SE
+wrapping exists to prevent, while the threat model asserts it cannot happen.
+
+**Recommended fix.** Distinguish "no Enclave" from "Enclave unavailable right now". Add tri-state
+availability probing; at each call site, if the Enclave *exists* but sealing failed, **write nothing
+and retry later**. Only the genuine no-Enclave case (`errSecUnimplemented`/Simulator) may take the
+plaintext path. In `storeHistory`, split the `else` into explicit `synced` and `seal-failed` branches,
+the latter aborting.
+
+---
+
+## F13 — MEDIUM: a transient read failure destroys the identity-recovery archive
+
+`previousIdentities()` collapses every failure to `[]` — a locked keychain read
+(`AccountStore.swift:445`), a failed SE unwrap (`:452-454`, `if case .ok(...)` with no else), and a
+JSON decode failure all return the empty array indistinguishably from "no archive".
+
+`archive()` then treats `[]` as ground truth and rewrites the store from it
+(`AccountStore.swift:398-405` → `storeHistory`, which unconditionally `SecItemDelete`s both keychains
+first at `:413-416`). `setICloudSync` is worse: it calls `storeHistory(previousIdentities())`
+directly (`:110`) — one failed read while toggling the switch wipes the archive.
+
+**Impact.** Same nil-read-is-not-absence class as F11, applied to the recovery archive. Silent,
+permanent loss of up to 12 recoverable identities — the exact data whose purpose is surviving an
+identity mistake.
+
+**Recommended fix.** Give `previousIdentities()` a status-carrying sibling (`.found([String])` /
+`.notFound` / `.lockedOrError`), exactly like `loadSeedStatus`. `archive()` and `setICloudSync` must
+**abort without writing** on anything but `.found`/`.notFound`. Keep the lossy variant only for
+read-only UI (`roster()`, `:495`).
+
+---
+
+## F14 — MEDIUM: no quota, no rate limit, no content-address verification
+
+PUT never verifies `key == hash(body)` on either path (`blobstore.rs:761-810`;
+`httprelay.rs:147-160`). Any authorized peer — per F2, any token holder for *any* circle — can write
+unlimited distinct 256 MB keys. `gc_sweep` sweeps only `MAILBOX_PREFIX` (`blobstore.rs:399-402`);
+`haven/media/**` is **never** swept (asserted at `:1289`), so junk under `haven/media/` is permanent.
+Mesh sync then replicates the flood to every sibling relay (`pull_missing_from_peer:564-597`).
+
+`RELAY-AND-DEPLOY.md:117-125` lists precisely these as open review items ("cap peer fan-out,
+rate-limit `list`/`get`, bound store size per circle"). None are implemented. For a v1 that invites
+strangers to run community relays, this is a blocker for that story specifically.
+
+**Recommended fix.** Verify content-addressed keys against `blake3(body)` on PUT (poisoning becomes
+impossible rather than merely "inert" — and this composes with F5's fix); per-circle byte quota;
+per-peer rate limit; a TTL for media.
+
+---
+
+## F15 — MEDIUM: the HVCHUNK1 manifest is unauthenticated with an unbounded chunk count
+
+Chunks are **not** independently sealed — the whole media is sealed into one envelope, then the
+*sealed bytes* are sliced (`SharedStore.swift:445-456`). This is good for integrity: reorder, swap,
+drop, and truncation all break the single AES-GCM tag and fail closed (`:616-621`). **The truncation
+attack does not work.**
+
+The manifest itself, however, is unauthenticated plaintext JSON at the permission-free key
+`haven/media/<ref>` (`makeManifest`, `SharedStore.swift:170-176`). `parseManifest` reads only
+`chunks` and ignores the `total`/`sizes` it wrote (`:178-185`), and the download loop trusts that
+count with no ceiling (`:591-601`). Identical on Android (`HavenNet.kt:2203-2211`) and desktop
+(`engine.rs:2791-2799`).
+
+**Impact.** Anyone who can PUT a media key (per F4, that is unauthenticated) can serve a manifest
+declaring `chunks: 100000000`. The victim loops fetching and appending until the disk fills. Cheap
+remote disk-exhaustion DoS on every platform.
+
+**Recommended fix.** In all three `parseManifest`s, reject `chunks > MAX_CHUNKS` and `total >
+MAX_MEDIA`; enforce `sizes.count == chunks` and `sizes.sum() == total`; assert each fetched part
+matches `sizes[i]`. Best fix: seal `{sizes,total}` to the circle and store *that* as the manifest, so
+a relay cannot author one.
+
+---
+
+## F16 — MEDIUM: the routing header leaks the co-recipient set
+
+**Every plaintext field a relay operator sees** (`core/haven-net/src/relay.rs:25-32`): `magic`
+`HVR1` (4B) · `ttl` u8 · `n_dest` u8 · `msg_id` [16B] · `dest` — *n*×32B Ed25519 node ids · payload
+byte length. Plus, at the transport layer, the QUIC-authenticated sender node id and its IP. On the
+storage path: the key `haven/mailbox/<circleUUID>/<hash>` and the blob length.
+
+`relay.rs:19-21` claims the relay learns "never who is in which circle". **False.** `dest` is the
+co-recipient list for one message — up to 32 node ids explicitly grouped. Observed over time it *is*
+the circle membership graph. A storage relay gets it more directly: per-circle key prefixes plus
+which node id PUTs/GETs each.
+
+**Recommended fix.** `groupkey::mailbox_prefix` (`core/p2pcore/src/groupkey.rs:108-115`) already
+implements exactly the right primitive for storage keys — a keyed BLAKE3 MAC over `kind:circle_id`
+under a per-member `circle_secret`, so the relay never sees the circle id. It is built, tested
+(`groupkey.rs:364-373`), and distributed in every KeyCommit (`:42-47`) — **but the storage paths do
+not appear to use it.** Finish that wiring, apply the same idea to `dest`, and correct `relay.rs:
+19-21` in the meantime.
+
+---
+
+## F17 — MEDIUM: `quick-xml` 0.36.2 in `haven-s3` — two high advisories, attacker-reachable
+
+`cargo audit` (run 2026-07-15, 554 crates, advisory-db fresh) reports 5 vulnerabilities + 3 warnings:
+
+| Crate | Version | ID | Severity | Solution |
+|---|---|---|---|---|
+| `quick-xml` | 0.36.2 | RUSTSEC-2026-0195 (unbounded ns-decl alloc → memory-exhaustion DoS) | 7.5 high | ≥0.41.0 |
+| `quick-xml` | 0.36.2 | RUSTSEC-2026-0194 (quadratic runtime on duplicate attr names) | 7.5 high | ≥0.41.0 |
+| `quick-xml` | 0.39.4 | RUSTSEC-2026-0195, -0194 | 7.5 high | ≥0.41.0 |
+| `crossbeam-epoch` | 0.9.18 | RUSTSEC-2026-0204 (invalid ptr deref in `fmt::Pointer`) | — | ≥0.9.20 |
+| `paste` | 1.0.15 | RUSTSEC-2024-0436 | unmaintained | — |
+| `anyhow` | 1.0.102 | RUSTSEC-2026-0190 (`Error::downcast_mut()` unsoundness) | unsound | — |
+| `spin` | 0.10.0 | — | yanked | — |
+
+**The one that matters** is `quick-xml@0.36.2`, a **direct dependency of `haven-s3`**
+(`cargo tree -i` confirms: `quick-xml v0.36.2 └── haven-s3 └── haven_ffi`). It parses XML responses
+from a **user-configured, arbitrary S3 endpoint** — i.e. attacker-controllable input in the BYO-storage
+threat model (`docs/BYO-STORAGE.md`), reachable from the app process on every platform. A hostile or
+compromised S3 endpoint returns crafted XML → quadratic CPU or unbounded allocation in the client.
+The `0.39.4` copy is transitive under `iroh → netwatch → netdev → plist` and parses local system
+plists, so it is not attacker-reachable.
+
+**Recommended fix.** Bump `haven-s3`'s `quick-xml` to ≥0.41.0 (direct dep, yours to move); this is the
+only one I would treat as security-relevant before v1. Bump `crossbeam-epoch` to ≥0.9.20 and
+un-yank/replace `spin` opportunistically. `paste` (unmaintained) and `anyhow` (downcast unsoundness,
+not reached by this code) are acceptable to carry with a `cargo-deny` ignore + a note.
+
+---
+
+## F18 — LOW-MEDIUM: DM authorization degrades to "member of any circle on this relay"
+
+`blobstore.rs:706`: `Some(circle) if circle.starts_with("dm:") => !a.members.values().any(|m|
+m.contains(peer))`. Any member of **any** circle on the relay can read, write, and prefix-enumerate
+**every** DM mailbox on it. The comment acknowledges this and argues content stays sealed — true —
+but DM keys are `dm:<a>-<b>`, i.e. both participants' account ids in the clear, so this hands a
+complete who-DMs-whom oracle to any co-tenant. With F2 that becomes any token holder; with F4 the
+account hexes resolve to identities.
+
+**Recommended fix.** Derive DM mailbox keys as an HMAC over the participant pair under a key only the
+participants hold (the `mailbox_prefix` primitive again), so the key neither names participants nor
+can be probed.
+
+---
+
+## F19 — LOW-MEDIUM: `HAVEN_SCENE` is not DEBUG-gated and auto-opens the seed-backup sheet in release
+
+**The claim.** `apple/HavenApp/DemoSeed.swift:21-23`: "Everything here is gated on HAVEN_DEMO so it is
+impossible to trigger in a real build." `DemoEnv.isDemo` backs this up correctly (`:40-49`, a real
+`#if DEBUG` / `#else return false`).
+
+**The sibling property has no gate:**
+
+```swift
+// apple/HavenApp/DemoSeed.swift:51-52
+static var scene: DemoScene? { env["HAVEN_SCENE"].flatMap(DemoScene.init) }
+```
+
+`DemoScene` includes `.identity` (`:32`), and the consumer is live in release —
+`apple/HavenApp/ContentView.swift:73-78` presents `IdentityBackupView` (`:70-71`), the sheet that
+renders the master-seed transfer code / QR, 0.4s after appear.
+
+**Impact.** On macOS, `HAVEN_SCENE=identity /Applications/Haven.app/Contents/MacOS/Haven` on a
+shipped, signed build auto-presents the master-seed QR with no interaction — a one-command seed-exfil
+path for anyone with brief local access to an unlocked Mac, skipping the deliberate multi-tap UX
+guarding that sheet. Low-Medium because it does not grant much an attacker with local exec lacks —
+but it directly falsifies the file's own "impossible to trigger in a real build."
+
+**Recommended fix.**
+
+```swift
+static var scene: DemoScene? {
+    #if DEBUG
+    return env["HAVEN_SCENE"].flatMap(DemoScene.init)
+    #else
+    return nil
+    #endif
+}
+```
+
+Better: make `scene` return nil unless `isDemo` is also true, so the two cannot drift apart again.
+
+---
+
+## F20 — LOW: the Worker observes sender-IP × recipient-identity in real time
+
+`/notify`'s body carries the **recipient** nodeId while the request carries the **sender's** IP
+(`cf-connecting-ip`, `worker.js:306`) — so the Worker *observes* the social graph in real time even
+though it does not persist it. KV holds `nodeId → tokens` (`:37`), `voip:` (`:65`), `owner:` (`:47`);
+rate-limit rows are IP-keyed with 60s TTL (`:309`) and **not** joined to nodeId. `wrangler.toml` has
+no `[observability]` block, so Workers Logs are off by default.
+
+Honest answer to "does it retain identity → token → IP?": **token yes, IP no** — but only by a
+one-line-change margin, and account-level Logpush is invisible from this repo.
+`docs/NOTIFICATIONS.md` is honest here; `SECURITY.md:3-4`'s "nothing is logged" is a **policy** claim
+about a server Blaine controls, not a cryptographic guarantee.
+
+**Recommended fix.** Set `[observability] enabled = false` explicitly in `wrangler.toml`. State in
+`SECURITY.md` that no Logpush is configured and that this is operator policy, not cryptography.
+
+---
+
+## F21 — LOW: `api.github.com` fetch fires on every page load, including post-link opens
+
+**The claim.** `docs/SECURITY.md:69-70`: "No analytics, telemetry, crash reporters, or ad SDKs —
+**verified by audit**." True for the app, and *almost* true for the site.
+
+`web/index.html:659` does an unconditional top-level `fetch("https://api.github.com/repos/…/releases/
+latest")` on **every** page load — including when opened via `#p/<circle>.<post>`.
+
+**Impact.** GitHub/Microsoft receives reader IP + timestamp + `Referer: https://wemiller.com/` for
+every Haven link opened in a browser. It does **not** learn which post (fragments are stripped from
+`Referer` per spec, regardless of policy). Still an undisclosed third-party readership-timing signal,
+and avoidable.
+
+**Recommended fix.** Bake release asset URLs at deploy time (the `notify-portfolio` workflow already
+exists), gate the fetch behind a click on the download section, or at minimum skip it entirely when
+`location.hash` is non-empty. Also add `<meta name="referrer" content="no-referrer">` and a CSP
+(`connect-src 'self' api.github.com`) — defense-in-depth that makes a malicious-JS exfil conspicuous.
+
+---
+
+## F22 — LOW: demo seeding drives the real store on Apple/Android
+
+Desktop does this correctly and deliberately — its own seed **and** its own data dir
+(`desktop/src-tauri/src/demo.rs:52-62`, `lib.rs:188-195`), with the rationale written out at
+`demo.rs:20-22`. Apple and Android do not: `DemoSeeder.seed(feed:)` uses `feed.demoEngine`
+(`DemoSeed.swift:86`) — the real engine — and mutates `ProfileStore.shared` (`:89-93`); Android uses
+`HavenNet.engine` (`DemoSeed.kt:82`), `ProfileStore.get(context)` + `me.save()` (`:86-92`), and
+`LocalMedia.storeUnderRef` — all real stores. Persistence is partly defended (`Profile.swift:13-19`
+skips `defaults.set` when `isDemo`; `FeedView.swift:211` guards `demoPersist`) — but Android's
+`HavenNet.demoPersist()` has no such guard and writes seeded state to disk.
+
+Release builds are safe (the `#if DEBUG` / `BuildConfig.DEBUG` gates hold). Exposure is a developer
+running a debug build on a device holding real data. **Recommended fix.** Port desktop's rule to both:
+own seed, own data dir/prefs namespace. Minimum on Android: guard `demoPersist()` on
+`BuildConfig.DEBUG && DemoEnv.isDemo`.
+
+**Related (INFO).** `android/app/build.gradle.kts:47-48` sets `isMinifyEnabled = false` for release,
+so `DemoSeeder`/`DemoEnv` ship in the release APK as unreachable code (`BuildConfig.DEBUG` is a
+`static final false`). Same on Apple. Only desktop achieves true absence
+(`#[cfg(debug_assertions)] mod demo;` + a `compile_error!` tripwire at `demo.rs:22`). Not exploitable
+— reaching the seeder requires already having code execution — but a weaker guarantee than desktop's,
+and F19 shows what happens when a gate is assumed rather than enforced. Moving `DemoSeed.kt` to
+`src/debug/java/` would give physical absence.
+
+---
+
+## Claims VERIFIED TRUE
+
+These are as valuable as the holes. Each was attacked, not merely read.
+
+### Cryptography
+
+- **The hybrid is a real hybrid.** `combine` (`core/p2pcore/src/crypto.rs:106-119`) builds
+  `ikm = dh ‖ pq` and runs it through one HKDF-SHA256 extract+expand. Breaking one half leaves the
+  other's 32 bytes of entropy in the IKM — you cannot learn the output without both. Both halves are
+  fixed-length (32 ‖ 32), so the concatenation is unambiguous and not vulnerable to a
+  canonicalization split. This is the correct construction; it matches PQXDH/PQ3 as the comment
+  claims.
+- **The KEM transcript really is bound.** `kem_transcript` (`crypto.rs:123-130`) folds ephemeral
+  X25519 pub ‖ ML-KEM ciphertext ‖ recipient X25519 pub ‖ recipient ML-KEM pub into the HKDF `info`
+  (`:112-114`), giving implicit key confirmation and blocking unknown-key-share / ciphertext
+  substitution. The `haven-hybrid-kem-v2` salt (`:111`) is a clean break from the unbound v1.
+  `SECURITY.md:16`'s "The KEM derivation binds the full transcript" is accurate.
+- **The deterministic-nonce seal is sound, and the danger is correctly fenced.** `seal_reproducible`
+  (`crypto.rs:157-170`) derives the nonce as a PRF of the key — catastrophic if a key ever repeated
+  across distinct plaintexts. It cannot: the event key derives from a salt that is itself a keyed
+  BLAKE3 PRF over the plaintext (`groupkey.rs:186-194`), so any plaintext change → different salt →
+  different key → different nonce. `groupkey.rs:285-304` tests exactly this. The tradeoff (an
+  observer can tell whether two same-epoch envelopes seal identical plaintext) is real, correctly
+  documented at `GROUP-KEYING.md:48-51`, and is the property the mailbox dedup depends on.
+- **The epoch key is never used directly as an AES key** — only as HKDF keying material
+  (`derive_event_key`, `groupkey.rs:120-129`), so one epoch key safely seals unbounded events.
+- **Removal fencing is cryptographic, and I could not find a decrypt window.** `seal_key_commit`
+  (`groupkey.rs:68-85`) seals to exactly the new member set; a removed node is absent, never receives
+  the key, and cannot derive any `event_key` for that epoch or later. Proven end-to-end by
+  `key_commit_revokes_removed_member` (`groupkey.rs:307-343`), which asserts both that Carol cannot
+  open the epoch-1 commit and that she cannot open an epoch-1 post with her stale e0.
+- **`GROUP-KEYING.md` is now accurate about rotation.** The doc's corrected text (`:78-82` — rotates
+  on removal/block, on device-roster change, and periodically; **not** on add) matches the code.
+  Worth noting the doc explicitly explains *why* add needn't rotate, which is the right reasoning.
+- **The `allow_forwarded` author/sender bypass is correctly gated.** `open_event_in_epoch`
+  (`groupkey.rs:211-230`) skips the author/sender bind only when the caller passes
+  `allow_forwarded` — and the single production call site passes `sender_hex == me_hex`
+  (`core/p2pcore-ffi/src/lib.rs:1273`), i.e. only for my own account's self-forwards. Only my own
+  account can produce a `sender=me` envelope, so a member cannot use this to re-attribute someone
+  else's event. I checked every call site; there is no other.
+- **Tamper/forgery rejected** — `groupkey.rs:346-361`.
+- **No crypto backdoors in core.** No `env::var`/`getenv` outside `#[cfg(test)]` in `p2pcore`,
+  `p2pcore-ffi`, `haven-net`; no `#[cfg(test)]` leakage into release paths; no hardcoded keys, no
+  skip-verify flags, no crypto-weakening env overrides.
+
+### Relay
+
+- **The relay cannot read content.** Bodies are read and written verbatim on both paths
+  (`blobstore.rs:778-788,820-827`; `httprelay.rs:133-156`). No decryption path exists in the relay; it
+  holds no content key. The only body inspection anywhere is the signature-verified devroster branch
+  (`blobstore.rs:798-802`). **The core claim holds.**
+- **Path traversal is properly closed.** `safe_path` (`blobstore.rs:237-263`) rejects
+  empty/oversize/NUL/absolute and `.`/`..` per component, then re-asserts `starts_with(root)`. HTTP
+  percent-decodes *before* validating (`route` → `decode` → `checked`, `httprelay.rs:214-241`), so
+  `%2e%2e` is caught (tests at `:346,:355`). Attacked; could not break it.
+- **`self/` self-sync slots are correctly owner-gated.** On iroh, the account in the key is compared
+  to the QUIC-verified `conn.remote_id()` before any other gate (`blobstore.rs:742-749`); on HTTP they
+  are refused outright (test at `httprelay.rs:407`).
+- **Device-roster injection is impossible.** `verify_devroster` (`blobstore.rs:632-665`) binds the
+  carried bundle to the key and requires a valid hybrid account signature, excluding revoked devices.
+  A stranger cannot inject device ids for another account. (Its *confidentiality* is F4; its
+  *integrity* is sound.) **Nobody can add a device to your account.**
+- **A member cannot TOUCH-expire another member's envelopes, and cannot delete anything.**
+  `local_touch` (`blobstore.rs:367-377`) only calls `touch_now` (`:191-196`), which moves mtime
+  forward. There is no delete verb. Deletion is exclusively the relay's local TTL policy
+  (`gc_sweep:387-403`). A member can only keep entries alive — exactly as `RELAY-AND-DEPLOY.md:113-115`
+  claims.
+- **TOUCH prefix confinement is correct** — both paths force a trailing `/` before `starts_with`
+  (`blobstore.rs:856`; `httprelay.rs:184`), so `fam` cannot match `famX`.
+- **Mesh sync will not resurrect GC'd entries** (`blobstore.rs:172-188,200-206`, tested `:1205-1235`).
+- **A malicious relay cannot forge or read.** Payloads are signed `SealedEnvelope`s; the relay has no
+  key. It **can** silently drop, delay, and reorder (`lib.rs:601` is best-effort, no acks) —
+  unavoidable for store-and-forward, mitigated by multi-relay fan-out.
+
+### Push / notifications
+
+- **The Worker is blind on content.** Unsealed envelope = `{nodeId (recipient), ciphertext (opaque
+  b64), event (opaque b64), silent}` + APNs headers. **No sender-supplied title/body ever.** The
+  fallback alert is a hardcoded constant — `{title:"Haven", body:"New activity"}` (`worker.js:191`)
+  and `"Incoming call"` (`:120`) — so the NSE-fails-to-decrypt case leaks nothing, and the NSE never
+  guesses (`NotificationService.swift:40`).
+- **Push registration is signed and verified — impersonation is closed.** `PushManager.swift:123-128`
+  signs; `worker.js:272-286` verifies Ed25519 over `haven-push-register-v1:<nodeId>:<token>:<ts>` with
+  a 5-minute window. `nodeId` **is** the pubkey, so it is self-authenticating. **You cannot register a
+  device token under someone else's identity.** Half of `SECURITY.md:23-24` is fully sound (the
+  registration half; the notification half is F3).
+- **Notification signing binds the recipient** (`core/p2pcore-ffi/src/lib.rs:317-323`: domain tag ‖
+  recipient hex ‖ plaintext) — cross-user replay prevented.
+- **No existence oracle** — `/notify` and `/call` return uniform `ok:true` for unknown nodes
+  (`worker.js:143,177`).
+
+### Link system — the strongest part of the codebase
+
+- **The fragment never reaches the server.** `web/index.html:515` reads `location.hash`, parses it
+  locally (`:514-533`), and navigates via `window.location.href = "haven://…"` (`:545`) — a custom
+  scheme, no round-trip. **Nothing** puts the hash into a fetch, query param, path, beacon, `Image`,
+  `replaceState`/`pushState`, or redirect. `hashchange` re-renders locally (`:579`). Verified by
+  reading every hash consumer.
+- **Zero third-party subresources.** Every origin in `web/` is `github.com` / `apps.apple.com` /
+  `play.google.com` as user-clicked links, plus the one `api.github.com` fetch (F21). No fonts, no
+  CDN, no scripts, no analytics.
+- **The post link carries no key.** `DeepLink.swift:33-37` emits `#p/<circleId>.<postId>` — two
+  opaque ids, percent-encoded with `.`/`/` excluded. Identical on Android (`DeepLink.kt:44`) and
+  desktop (`desktop/ui/app.js:365`). A pointer, not a capability — as documented.
+- **The relay link carries no key material** (`core/haven-relay/src/link.rs:1-30` — circle tag +
+  already-public node ids).
+
+### Seed at rest
+
+- **The `.seError` / locked-read discipline on the master seed is correct, and notably well done.**
+  `SeedStatus` distinguishes four states (`AccountStore.swift:255`); `.missingKey`, `.failed`, and a
+  wrong-size decrypt all map to `.seError` (`:262-272`); `.lockedOrError` and `.seError` both take the
+  throwaway-identity path with an explicit "Do NOT save" (`:46-54`). **`.notFound` is the only branch
+  that generates+saves** (`:39-45`). I traced every `Account.generate()` in the file (`:37,41,53,72,
+  581`) — each is either non-persisting or a deliberate user-initiated reset. A seed present but
+  underivable refuses to overwrite (`:35-38`). `loadWrappedBlob` applies the same discipline one layer
+  down (`:332-364`). `SecureEnclaveBox.publicKey` refuses to mint a second Enclave key on a locked
+  read (`:63-65`) — the subtle case that would orphan existing ciphertext. **The bug class that has
+  bitten this project before is correctly defended here.** (F11/F13 are the *other* stores, which did
+  not inherit the discipline.)
+- **The three named master-seed copies are SE-wrapped** — active (`AccountStore.swift:369-377`), NSE
+  shared mirror (`SharedSeed.swift:52`), device-local archive (`AccountStore.swift:420-424`) — modulo
+  F12's fallback.
+- **The iCloud archive is opt-in and is the only *intentionally* unsealed copy.**
+  `iCloudSyncEnabled` defaults to `false` (`AccountStore.swift:87`); the synchronizable branch
+  requires `synced == true` (`:425-430`). The rationale at `:392-397` is accurate — an Enclave key
+  cannot sync, so cross-device recovery needs the bytes.
+- **The seed is never synchronizable.** Every `saveSeed`/`wrapAndStore` sets
+  `kSecAttrSynchronizable: false` (`:239,374`). (Note: the `synced:` parameter on `saveSeed` (`:232`)
+  is **dead** — accepted and never read. Correct behavior via a misleading signature; worth deleting.)
+- **No plaintext master seed in UserDefaults, files, or logs** anywhere in `apple/HavenApp`.
+- **Desktop seed lives in the OS keyring** and `load_seed` correctly distinguishes `NoEntry` from a
+  transient error (`desktop/src-tauri/src/store.rs:559-574`); callers propagate rather than mint
+  (`lib.rs:42-50,62-70`). **Free of the F11/F13 bug class.**
+- **Android seed lives in `EncryptedSharedPreferences` under a Keystore `AES256_GCM` master key**
+  (`HavenCore.kt:84-95`); `loadOrCreate` generates only on a genuine null (`:62-71`).
+
+### Media
+
+- **Chunked media is tamper-evident.** Reorder, swap, drop, and truncation all break the single
+  AES-GCM tag and fail closed (`SharedStore.swift:616-621`). **The truncation attack does not work.**
+  (F15 is a separate, lesser manifest issue.)
+- **The AEAD ratio-threshold trap is absent** — there is no naive ratio check to misfire. Swept
+  `apple/HavenApp`, `android/app/src`, `desktop/src-tauri/src`, `core/p2pcore*` for
+  ratio/plausibility/size-sanity heuristics; found none. The only size logic is `sealedSize >
+  mediaChunkBytes` (`SharedStore.swift:325`), an exact byte comparison against a fixed 8 MB constant —
+  correct, and immune to the fixed-AEAD-overhead problem. **Media validity is decided by GCM
+  authentication, not by size — the right call.**
+
+### Demo
+
+- **`DemoEnv.isDemo` is a true compile-time gate** (`DemoSeed.swift:40-49`).
+- **`core/demo/src/main.rs` is dev-only** — a standalone `haven-demo` binary that mints throwaway
+  identities and disables relays; ships nowhere.
+- **Desktop demo gating is exemplary** and should be the model: `#[cfg(debug_assertions)] mod demo;`
+  (`lib.rs:7-9`), a `compile_error!` tripwire (`demo.rs:22`), `#[cfg(debug_assertions)]` at every call
+  site, a release `no_net()` hard-returning `false` (`lib.rs:181-184`), isolated seed + data dir, and
+  demo implies no-net so the synthetic cast can never reach the wire (`demo.rs:47-50`).
+
+---
+
+## The mandate question, answered directly
+
+> Is there any path by which Blaine (or a relay operator, or the website host) can read content,
+> impersonate a user, or become a chokepoint?
+
+**Read content: no.** Not through the relay (it holds no key; `blobstore.rs` never decrypts), not
+through the Worker (payloads are sealed; `worker.js` forwards opaque b64), not through the website
+(the fragment carries two opaque ids, no key material — verified at `DeepLink.swift:33-37`). Even a
+*malicious* website serving hostile JS gets `p/<circleId>.<postId>` + reader IP — a readership map,
+not a post. Decryption requires the circle epoch key, which exists only on member devices.
+
+**Impersonate a user: no, cryptographically** — but **yes, perceptually**, via F3. Nobody can forge a
+signature, register a token under another identity (`worker.js:272-286` verified), or inject a device
+into someone's roster (`blobstore.rs:632-665` verified). But because the NSE never checks *who* validly
+signed, a stranger can put "Mom" on a victim's lock screen. That is an authorization gap, not an
+authenticity break — and it is fixable in a few lines on both sides.
+
+**Become a chokepoint: yes, once — and it is shipped.** The moderation ledger (F1). Not a
+hypothetical malicious-operator scenario: it is live code writing a permanent, forgeable
+identity-vs-identity graph into Blaine's KV on every block, with service-denial and
+law-enforcement-disclosure consequences written into the Terms. It holds no content and no keys, so
+the *content* mandate survives — but "the maker must not be a bypass target" does not survive an
+unauthenticated endpoint that can get someone's push service cut off and plant a record about them.
+
+The website-operator and Worker-operator trust class is the *correct* bar: metadata at worst, never
+content. F1 is the one place the project fell below its own bar.
+
+---
+
+## What I did NOT cover, and why
+
+- **No runtime verification of most findings.** This was primarily a static audit. The one exception
+  is F2, proven with a live probe against `httprelay::serve` (transcript in the finding). **F5's
+  substitution attack and F19's `HAVEN_SCENE=identity` are code-path arguments and should be
+  confirmed empirically before being treated as settled** — F19 is a 30-second test on a release
+  macOS build.
+- **WebRTC / calls (DTLS-SRTP) beyond the push doorbell.** Media-path encryption, SDP handling, and
+  the frame-9 relay-forwarded signaling were not audited. **Flagged:** the relay-forward path noted
+  that non-idempotent frame types (call signaling) would be **replayable by a malicious relay**, since
+  `msg_id` dedup is an honest-relay loop-breaker only (see below). Worth a dedicated look.
+- **`msg_id` is not replay protection and should not be described as such.** It is sender-chosen
+  random (`relay.rs:63-68`) and a relay builds its own outbound frames (`lib.rs:593-598`) — it can
+  re-emit the same payload under fresh msg_ids indefinitely. What actually neutralizes replay is
+  application-layer idempotence: event ids are `BLAKE3(author‖created_at‖kind)` and the reducer dedups
+  by id (`core/p2pcore/src/social.rs:82,371-373`), and mailbox keys are content hashes so a re-PUT is
+  a no-op. Fine for events; **unexamined for call signaling.**
+- **iOS Data Protection classes on the engine state file and the scheduled queue.** I verified only
+  the `haven-media` directory (`Media.swift:277-285`). Given F6 found the media half of
+  `SECURITY.md:26-27` false on macOS, the other two stores in that sentence deserve the same check.
+- **Watch (`apple/HavenWatch`) and `core/haven-wasm`** — not examined for seed storage. `haven-wasm`
+  in particular deserves attention: the transfer-code flow (`AccountStore.swift:123-131`) advertises
+  moving the seed to a web client, and a browser has no Enclave equivalent.
+- **`apple/Haven N.xcodeproj`** (32 numbered duplicates) — treated as project-file noise. Worth
+  confirming none is a live target with different `SWIFT_ACTIVE_COMPILATION_CONDITIONS`, since every
+  Apple demo gate rests on `#if DEBUG` resolving correctly for the shipped target.
+- **The iroh/n0 dependency itself**, `SelfSync` reducer semantics, scheduled messages, Apple Music
+  integration, and the S3 tunnel (`s3tunnel.rs`) beyond the `quick-xml` reachability question.
+- **No formal cryptanalysis.** I verified construction and composition (the hybrid is a real hybrid,
+  the transcript binds, nonces cannot repeat), not the primitives themselves — those are standard
+  library implementations of published algorithms, which is exactly what you want.
+- **Supply chain beyond `cargo audit`.** No review of npm (`web/`, Worker), Gradle, or SwiftPM
+  dependency trees; no lockfile provenance or typosquat check.
+
+---
+
+## Recommended ship gate
+
+**Fix before v1:**
+
+1. **F1** — sign `/flag`; stop auto-logging blocks. *(Mandate. Also the cheapest fix here.)*
+2. **F2 + F9** — the default media transport is an unauthenticated-by-circle, cleartext,
+   statically-tokened HTTP service on `0.0.0.0:8674` that undoes the authorization done properly on
+   the iroh path.
+3. **F3** — one known-contact check in the NSE + signature on `/call`.
+4. **F4 + F10** — each independently falsifies "cannot be enumerated by strangers" with no token.
+5. **F5** — silent media substitution is the most surprising break in the report; a member-operated
+   relay is inside every gate you have.
+6. **F7 + F8** — the docs must stop claiming things the code does not do. This is the cheapest
+   category and the most damaging if a researcher finds it first.
+7. **F6** — fix, or amend `SECURITY.md:26-27` to tell the truth about macOS.
+
+**Acceptable to ship with, tracked:** F11–F22.
+
+**Honest confidence.** *High* on the crypto core, the link system, and the seed discipline — small,
+well-factored, thoroughly tested code that I read completely and attacked. *High* on F1, F2, F7, F8
+(F2 is empirically proven; the rest are direct doc-vs-code contradictions). *Medium-high* on F3, F4,
+F5 — traced carefully but not executed. *Medium* on the Apple/Android platform layers, which are
+large and where I sampled rather than swept. *Low* on the areas listed as not covered — particularly
+WebRTC call signaling and `haven-wasm`, which are real gaps in this audit rather than clean bills of
+health.
+
+**The one-line summary:** the cryptography is genuinely good and the mandate holds on content; the
+gap is everywhere the code left the crypto — the default HTTP transport, the unauthenticated
+endpoints, and a ledger that quietly made the maker into the thing he promised not to be.

@@ -6,10 +6,18 @@ import UIKit
 
 /// This device's OWN keypair — distinct from the account master seed, never synced, never leaves the
 /// device. Multi-device (D16): a linked device acts under this key plus an account-signed credential,
-/// so the account can authorize it and **revoke it individually** without touching the master seed.
+/// so the account can authorize it and revoke it individually.
 ///
-/// This is the foundation; the enrollment flow (the primary issues a credential for this key on link,
-/// the engine runs under it instead of the copied seed) + the Authorized-Devices UI build on top.
+/// ⚠️ **This key is additive today, not the device's operative identity.** The engine still runs under
+/// the copied master seed (`HavenSocial(seed:)`), because linking transfers the seed itself
+/// (`AccountStore.transferCode` → `haven-seed:` / `haven-link:`) and enrollment only hands a
+/// credential to a device that already has it. So a linked device is cryptographically the account,
+/// and revoking it does not take that away — see `DeviceRosterManager.revoke`.
+///
+/// The finishing move is D16 Phase 2's **seed-drop**: a device links by getting a credential for THIS
+/// key and never receives the seed, and the engine runs under the device key with peers verifying the
+/// device→account credential chain. Until that lands, revocation is honest only against a device that
+/// is lost, not one that is compromised. Don't let this file's existence imply otherwise.
 enum DeviceKeyStore {
     private static let service = "com.blaineam.kith"
     private static let accountKey = "haven.device-key-seed"
@@ -166,7 +174,16 @@ final class DeviceRosterManager: ObservableObject {
     }
 
     /// Revoke a device: drop it from the active set, bump the version, re-sign. It stops being a
-    /// recipient of any circle's future key commits → it can decrypt nothing posted afterward.
+    /// recipient of any circle's future key commits under its DEVICE key.
+    ///
+    /// ⚠️ This is **not** cryptographic revocation against an attacker, and must not be described as
+    /// such. Linking copies the master seed, so every linked device also holds the account key — and
+    /// circle key commits always seal to the account key as well (`recipients_with_devices`). Someone
+    /// who extracted the seed therefore keeps decrypting after this call, and can re-sign a
+    /// higher-version roster that re-adds them (the roster's authority IS the account key, so no rule
+    /// here can bind them). What this DOES defeat: a device you no longer control whose keychain is
+    /// intact — a lost or stolen phone, the ordinary case. For a device you believe was compromised,
+    /// the only real remedy today is a new identity. See [`revocationCaveat`].
     @discardableResult
     func revoke(_ nodeHex: String, social: HavenSocial?, accountSeed: Data) -> Bool {
         guard nodeHex != primaryHex else { return false }   // never revoke the master key
@@ -260,6 +277,15 @@ struct AuthorizedDevicesView: View {
     private var thisDeviceAuthorized: Bool { DeviceCredentialStore.isAuthorized }
     private var hasSeed: Bool { AccountStore.storedSeed() != nil }
 
+    /// The truth about what revoking buys you, stated where the user decides. Linking copies the master
+    /// key, so revoking removes a device's access only if nobody pulled that key off it; against a
+    /// genuinely compromised device the remedy is a new identity, and a user staring at a "revoked"
+    /// checkmark should not think otherwise. Kept in one place so the dialog and the footer can't drift.
+    static let revocationCaveat =
+        "Revoking works if the device is simply out of your hands — lost or stolen. It can’t help if "
+        + "someone has extracted your master key from it: linked devices hold a copy of that key, and "
+        + "revoking doesn’t take it back. If you think that happened, start a new identity in Advanced."
+
     /// This device's role, shown at the top so a linked Mac clearly reads as "linked", not "primary".
     private var role: (icon: String, title: String, subtitle: String) {
         if roster.isEnabled {
@@ -267,7 +293,7 @@ struct AuthorizedDevicesView: View {
                     "It holds your master key and authorizes or revokes your other devices.")
         } else if thisDeviceAuthorized {
             return ("checkmark.seal.fill", "This is a linked device",
-                    "It acts on behalf of your primary device, which can revoke it at any time.")
+                    "It holds a copy of your master key and syncs with your primary device, which can revoke it.")
         } else {
             return ("laptopcomputer", "This device isn’t linked yet",
                     "Make it your primary, or link it to the device that already is.")
@@ -319,7 +345,7 @@ struct AuthorizedDevicesView: View {
                         }
                     }
                 } header: { Text("Authorized devices") }
-                footer: { Text("Each linked device has its own key, authorized by your master key. Revoke a device to cut it off from everything posted afterward.")
+                footer: { Text("Each linked device holds a copy of your master key and has its own key on top, authorized by it. Revoking stops a device receiving what you post afterward. " + Self.revocationCaveat)
                     .fixedSize(horizontal: false, vertical: true) }
 
                 // Only a device that ISN'T already the primary offers these. The primary (roster on) shows
@@ -351,7 +377,7 @@ struct AuthorizedDevicesView: View {
                         .havenToolbarPill()
                     } footer: { Text(thisDeviceAuthorized
                         ? "This device is authorized. Pull your profile + posts from your primary device again (keep it nearby or online)."
-                        : "Asks your primary device (keep it nearby or online) to authorize this device with its own revocable key and send your profile + posts.")
+                        : "Asks your primary device (keep it nearby or online) to authorize this device with its own key and send your profile + posts.")
                         .fixedSize(horizontal: false, vertical: true) }
                 }
             }
@@ -367,7 +393,8 @@ struct AuthorizedDevicesView: View {
             }
             Button("Cancel", role: .cancel) { revokeTarget = nil }
         } message: {
-            Text("This device will no longer receive anything posted to your circles afterward. To use it again you'd re-link it.")
+            Text("This device will no longer receive anything posted to your circles afterward. To use it again you'd re-link it.\n\n"
+                 + Self.revocationCaveat)
         }
         .confirmationDialog("Stop being the primary device?", isPresented: $confirmStepDown, titleVisibility: .visible) {
             Button("Step down", role: .destructive) { store.stepDownAsPrimary() }

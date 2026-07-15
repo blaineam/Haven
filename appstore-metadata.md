@@ -33,12 +33,12 @@ A private, end‑to‑end encrypted home for your closest people. No ads, no tra
 
 ## whats_new
 What's new:
-• Your own devices now stay in sync — posts and messages you make on one device show up on the rest
-• Group DMs show who sent each message, when, and whether it was delivered
-• Pin up to 6 conversations to the top of Messages and reorder them your way
-• Group voice & video calls with screen sharing — still peer‑to‑peer, no call server
-• Scheduled messages and screenshot‑protected secret messages
-• Smoother, faster feed scrolling
+• Photos and videos now fill the width of the feed, with a soft blurred version of the same shot behind them — no more tall photos squeezed into a sliver
+• A post with several photos is now a swipeable carousel instead of a grid of thumbnails
+• Share a post as a link that opens straight to it in Haven — on iPhone, iPad, Mac, or Android. The link is built so the website never learns which post it points to
+• If your circle doesn't have a relay yet, Haven now offers to help you set one up, and explains plainly what a relay can and can't see
+• Calls are opaque now — your feed no longer shows faintly through an active call
+• The in‑call minimize button sits clear of the Dynamic Island and the screen's rounded corners
 
 Native on iPhone, iPad, and Mac — with Android and Windows/Linux desktop apps too.
 

@@ -16,7 +16,23 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"          # android/
 ADB="${ADB:-$(command -v adb || echo "$HOME/Library/Android/sdk/platform-tools/adb")}"
-DEV="${1:-$("$ADB" devices | awk 'NR>1 && $2=="device"{print $1; exit}')}"
+# Pick a device, but NEVER silently: with the phone + tablet AVDs both booted this used to take
+# whichever adb listed first and say nothing. That shot the tablet — which had a different build
+# and sat on onboarding — and the Play screenshots came out of the wrong device entirely.
+# Pass a serial ($1) to choose; otherwise a single attached device is fine and several is an error.
+if [ -n "${1:-}" ]; then
+  DEV="$1"
+else
+  _devs=$("$ADB" devices | awk 'NR>1 && $2=="device"{print $1}')
+  _n=$(printf '%s\n' "$_devs" | grep -c . || true)
+  if [ "$_n" -gt 1 ]; then
+    echo "several devices attached — name one (they are not interchangeable):" >&2
+    printf '  %s\n' $_devs >&2
+    echo "usage: $0 <serial>" >&2
+    exit 1
+  fi
+  DEV="$_devs"
+fi
 PKG="com.blaineam.haven"
 MONKR="${MONKR:-$HOME/Documents/scripts/monkr/bin/monkr.mjs}"
 RAW="$ROOT/app/build/play-screenshots/raw"

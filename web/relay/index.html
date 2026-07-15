@@ -404,8 +404,9 @@ cargo build --release -p haven-relay --target x86_64-pc-windows-gnu</code></pre>
         <b>On your IP address, honestly:</b> a relay <em>does</em> briefly handle your IP — that's
         physically how bytes reach you. Haven's hardened defaults mean it's <b>never logged, never
         persisted, and never linked to your identity</b> (peers authenticate to each other, never to the
-        relay). For full IP hiding today, run Haven behind your own VPN; a built-in onion/Tor mode is on
-        the roadmap, not yet shipped. The relay link itself carries
+        relay). To hide your IP from a relay entirely, run Haven behind your own VPN or host your own
+        relay; a built-in onion/Tor mode was evaluated and declined, because Tor can't carry the
+        traffic Haven's calls and direct connections depend on. The relay link itself carries
         <b>no content key, no roster secret</b> — so adding a relay can never turn it into a content reader.
         Read the full <a class="inline" href="../docs/#threat">threat model</a>.
       </div>

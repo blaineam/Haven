@@ -89,10 +89,10 @@
         <div class="hero-renders reveal" aria-hidden="false">
           <img class="render r-back" src="assets/renders/phone-story.png?v=4"
                alt="Haven story view on iPhone — a full-screen photo story shared inside a private circle"
-               loading="eager" width="660" height="1434" />
+               loading="eager" width="637" height="1320" />
           <img class="render r-front" src="assets/renders/phone-feed.png?v=4"
                alt="Haven feed on iPhone — posts from a small private circle of family and friends"
-               loading="eager" width="660" height="1434" />
+               loading="eager" width="637" height="1320" />
         </div>
       </div>
     </div>
@@ -121,7 +121,7 @@
         <div class="spread-art render-wrap float">
           <img class="render tilt" src="assets/renders/phone-feed.png?v=4"
                alt="Haven home feed on iPhone — a calm chronological feed of posts from one private circle"
-               loading="lazy" width="660" height="1434" />
+               loading="lazy" width="637" height="1320" />
         </div>
         <div class="spread-copy">
           <div class="spread-num">01 — The feed</div>
@@ -161,7 +161,7 @@
         <div class="spread-art render-wrap float">
           <img class="render tilt-r" src="assets/renders/phone-story.png?v=4"
                alt="Haven story view on iPhone — a full-screen photo story with a film-style look"
-               loading="lazy" width="660" height="1434" />
+               loading="lazy" width="637" height="1320" />
         </div>
         <div class="spread-copy">
           <div class="spread-num">02 — Posts &amp; stories</div>
@@ -192,7 +192,7 @@
           <div class="render-wrap">
             <img class="render" src="assets/renders/tablet-thread.png?v=4"
                  alt="Haven conversation thread on iPad — a private message thread with reactions"
-                 loading="lazy" width="900" height="1200" />
+                 loading="lazy" width="554" height="722" />
           </div>
           <div class="spread-copy">
             <div class="spread-num">03 — Messages &amp; calls</div>
@@ -227,19 +227,19 @@
         <figure class="g-item" style="margin:0">
           <img class="render" src="assets/renders/phone-call.png?v=4"
                alt="Haven group video call on iPhone — three participants in an encrypted call"
-               loading="lazy" width="660" height="1434" />
+               loading="lazy" width="637" height="1320" />
           <figcaption class="g-cap">Group calls &amp; screen share</figcaption>
         </figure>
         <figure class="g-item lift" style="margin:0">
           <img class="render" src="assets/renders/phone-messages.png?v=4"
                alt="Haven messages on iPhone — a list of private direct-message conversations"
-               loading="lazy" width="660" height="1434" />
+               loading="lazy" width="637" height="1320" />
           <figcaption class="g-cap">Direct &amp; group messages</figcaption>
         </figure>
         <figure class="g-item" style="margin:0">
           <img class="render" src="assets/renders/phone-you.png?v=4"
                alt="Haven profile and settings on iPhone — your identity and circle controls"
-               loading="lazy" width="660" height="1434" />
+               loading="lazy" width="637" height="1320" />
           <figcaption class="g-cap">Your space, your controls</figcaption>
         </figure>
       </div>
@@ -311,15 +311,17 @@
               <p>A relay handling your IP for a moment is just how the internet works — every app you
                 own does the same thing. The difference is that Haven's relay never logs it and can't
                 tie it to who you are, because it doesn't know who you are.</p>
-              <p>For full IP hiding today, run Haven behind your own VPN; a built-in onion/Tor mode is
-                on the roadmap, <b>not shipped</b>.</p>
+              <p>If you want to hide your IP from a relay entirely, run Haven behind your own VPN, or
+                host your own relay. We looked hard at a built-in onion/Tor mode and decided against
+                it: Tor can't carry the kind of traffic Haven's calls and direct connections need, so
+                it would quietly break them.</p>
             </div>
           </details>
         </div>
       </div>
 
       <div class="callout reveal" style="margin-top:18px">
-        <b>The promise:</b> never logged, never linked to you, optionally fully hidden. For the full picture,
+        <b>The promise:</b> never logged, never linked to you. For the full picture,
         read the <a class="inline" href="docs/">threat model and architecture docs</a>.
       </div>
     </div>
@@ -438,25 +440,25 @@ haven-relay run --link "haven-relay://circle#…"</code></pre>
         <figure class="lu lu-lap" role="listitem">
           <img class="render" src="assets/renders/windows-feed.png?v=1"
                alt="Haven running on a Windows laptop — the circle feed in the desktop app"
-               loading="lazy" width="2056" height="1326" />
+               loading="lazy" width="1028" height="663" />
           <figcaption>Windows</figcaption>
         </figure>
         <figure class="lu lu-hero" role="listitem">
           <img class="render" src="assets/renders/phone-feed.png?v=4"
                alt="Haven running on iPhone — the circle feed"
-               loading="lazy" width="1274" height="2639" />
+               loading="lazy" width="637" height="1320" />
           <figcaption>iPhone &amp; iPad</figcaption>
         </figure>
         <figure class="lu lu-phone" role="listitem">
           <img class="render" src="assets/renders/android-feed.png?v=1"
                alt="Haven running on an Android phone — the circle feed"
-               loading="lazy" width="879" height="1854" />
+               loading="lazy" width="440" height="927" />
           <figcaption>Android</figcaption>
         </figure>
         <figure class="lu lu-lap" role="listitem">
           <img class="render" src="assets/renders/linux-feed.png?v=1"
                alt="Haven running on a Linux laptop — the circle feed in the desktop app"
-               loading="lazy" width="2056" height="1326" />
+               loading="lazy" width="1028" height="663" />
           <figcaption>Linux</figcaption>
         </figure>
       </div>

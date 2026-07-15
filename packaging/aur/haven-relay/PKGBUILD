@@ -3,30 +3,37 @@
 # Builds the tiny single binary from source (no GUI / no webkit), installs a hardened
 # systemd *system* service plus a sysusers entry for the `haven-relay` service account.
 #
-#   git clone https://aur.archlinux.org/haven-relay.git && cd haven-relay && makepkg -si
+# pkgver tracks the Haven product version (= the App Store marketing version). The relay is
+# protocol-coupled to the app — a relay and the clients that talk to it must be the same
+# release — so it deliberately shares the product version. See docs/RELEASING.md.
 #
 pkgname=haven-relay
-pkgver=0.0.1
+pkgver=1.0.5
 pkgrel=1
 pkgdesc="Always-on Haven circle relay + sealed-media mailbox (ciphertext only, no server)"
 arch=('x86_64' 'aarch64' 'armv7h')
 url="https://github.com/blaineam/haven"
 license=('LicenseRef-PolyForm-Noncommercial-1.0.0')
 depends=('gcc-libs')
-makedepends=('rust' 'cargo' 'git')
-backup=()
+makedepends=('rust' 'git')
 install="${pkgname}.install"
 options=('!lto')
-# Alpha: build from the repo. Pin to a tag/commit once releases are cut.
-source=("git+https://github.com/blaineam/haven.git")
+# Pinned to the release tag — never a moving HEAD (see the haven-desktop PKGBUILD for why
+# a git source with SKIP is the right integrity anchor here).
+source=("haven::git+https://github.com/blaineam/haven.git#tag=v$pkgver")
 sha256sums=('SKIP')
+
+prepare() {
+  cd "$srcdir/haven/core"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
 
 build() {
   cd "$srcdir/haven/core"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR="$srcdir/target"
-  cargo build --release --frozen --package haven-relay 2>/dev/null \
-    || cargo build --release --package haven-relay
+  cargo build --release --frozen --package haven-relay
 }
 
 package() {
@@ -35,6 +42,9 @@ package() {
     "$pkgdir/usr/lib/systemd/system/haven-relay.service"
   install -Dm644 "$srcdir/haven/relay/README.md" \
     "$pkgdir/usr/share/doc/haven-relay/README.md"
+
+  # Non-standard (non-SPDX-common) license → Arch requires a copy under /usr/share/licenses.
+  install -Dm644 "$srcdir/haven/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 
   # Declarative service account + state dir (systemd-sysusers / -tmpfiles).
   install -dm755 "$pkgdir/usr/lib/sysusers.d" "$pkgdir/usr/lib/tmpfiles.d"

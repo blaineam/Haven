@@ -27,15 +27,68 @@ permissions:
   contents: write
 
 jobs:
+  # ── The version gate ───────────────────────────────────────────────────────────────────
+  # Haven ships ONE product version across every store and every download. `apple/project.yml`
+  # MARKETING_VERSION is the source of truth (App Store Connect is the slowest, least
+  # forgiving publisher, so it sets the number); the tag must agree with it. This job fails
+  # the release rather than let the two drift — that drift is exactly how we ended up shipping
+  # the same commit as "0.1.0-beta.40" on GitHub and "1.0.4" on the App Store.
+  # See docs/RELEASING.md.
   meta:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
+      - uses: actions/checkout@v4
       - id: v
+        # Via env, not `${{ }}` interpolation — a tag name is attacker-controllable text and
+        # must never be pasted into a shell.
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
-          ref="${{ github.event.inputs.version || github.ref_name }}"
-          echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+
+          asc="$(python3 - <<'PY'
+          import re, pathlib, sys
+          t = pathlib.Path("apple/project.yml").read_text()
+          vs = set(re.findall(r'(?m)^\s*MARKETING_VERSION:\s*"([^"]+)"', t))
+          if not vs:
+              sys.exit("no MARKETING_VERSION found in apple/project.yml")
+          if len(vs) > 1:
+              sys.exit(f"apple/project.yml disagrees with itself: MARKETING_VERSION = {sorted(vs)}")
+          print(vs.pop())
+          PY
+          )"
+
+          raw="${INPUT_VERSION:-}"
+          if [ -z "$raw" ]; then
+            if [ "$REF_TYPE" = "tag" ]; then
+              raw="$REF_NAME"
+            else
+              # workflow_dispatch dry-run off a branch: build what the next release WOULD be,
+              # instead of stamping the branch name ("main") in as a version.
+              raw="v$asc"
+            fi
+          fi
+          version="${raw#v}"
+
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$raw' is not a plain semver x.y.z. Haven releases track the App Store" \
+                 "marketing version — no -beta/-rc/-alpha suffixes. See docs/RELEASING.md."
+            exit 1
+          fi
+
+          if [ "$version" != "$asc" ]; then
+            echo "::error::Version drift: tag says '$version' but apple/project.yml" \
+                 "MARKETING_VERSION says '$asc'. One product, one version — bump" \
+                 "MARKETING_VERSION and re-tag. See docs/RELEASING.md."
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Haven **$version** — matches apple/project.yml MARKETING_VERSION." >> "$GITHUB_STEP_SUMMARY"
 
   # ── Relay: static binary for every installer arch + macOS, plus .deb packages ───────────
   relay:
@@ -346,3 +399,99 @@ jobs:
           files: dist/*
           body_path: NOTES.md
           fail_on_unmatched_files: true
+
+  # ── AUR: push the PKGBUILDs to aur.archlinux.org (tags · only when AUR_SSH_PRIVATE_KEY is
+  #    set). Inert otherwise — exactly like the Play/Microsoft Store steps — so a release
+  #    without the secret stays green and simply skips Arch.
+  #
+  #    The recipes build from the *tag* we just published, so this must run after `publish`
+  #    (a failed release must not leave the AUR pointing at a release that isn't there).
+  #    Setup is a one-time thing the maintainer does by hand — see docs/RELEASING.md.
+  aur:
+    needs: [meta, publish]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg: [haven-desktop, haven-relay]
+    steps:
+      # Gate first, so a release without the secret costs a few seconds rather than a full
+      # Arch pull + system upgrade. (Job-level `if:` can't read `secrets`, hence the step gate.)
+      - name: Check AUR credentials
+        id: gate
+        env:
+          KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No AUR_SSH_PRIVATE_KEY secret — skipping the AUR push for ${{ matrix.pkg }}. See docs/RELEASING.md."
+          fi
+
+      - name: Container deps
+        if: steps.gate.outputs.publish == 'true'
+        run: pacman -Syu --noconfirm --needed git openssh sudo namcap
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.publish == 'true'
+
+      - name: Stamp pkgver from the tag + regenerate .SRCINFO
+        if: steps.gate.outputs.publish == 'true'
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          PKG: ${{ matrix.pkg }}
+        run: |
+          set -euo pipefail
+          cd "packaging/aur/$PKG"
+          sed -i -E "s/^pkgver=.*/pkgver=$VERSION/; s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+          # .SRCINFO is mandatory on the AUR and must agree with the PKGBUILD, so generate it
+          # rather than hand-maintain it. makepkg refuses to run as root.
+          useradd -m builder
+          chown -R builder:builder .
+          sudo -u builder makepkg --printsrcinfo > .SRCINFO
+          namcap PKGBUILD || true
+          cat .SRCINFO
+
+      - name: Push to the AUR
+        if: steps.gate.outputs.publish == 'true'
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          PKG: ${{ matrix.pkg }}
+        run: |
+          set -euo pipefail
+          install -dm700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          # TOFU on the AUR host key (what every AUR-publish action does). The blast radius is
+          # bounded: this key can only write these two AUR packages, and it is not the identity
+          # anchor for anything else.
+          ssh-keyscan -t ed25519,rsa aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          cat > ~/.ssh/config <<'EOF'
+          Host aur.archlinux.org
+            User aur
+            IdentityFile ~/.ssh/aur
+            IdentitiesOnly yes
+          EOF
+
+          git config --global user.name "Haven release"
+          git config --global user.email "blaine@wemiller.com"
+          git config --global --add safe.directory '*'
+
+          # Cloning a package that does not exist yet yields an EMPTY repo — the first push is
+          # what creates it. So this one step both creates and updates the AUR package.
+          git clone "ssh://aur@aur.archlinux.org/$PKG.git" "/tmp/aur-$PKG"
+          cd "/tmp/aur-$PKG"
+          # Drop tracked files first so deletions propagate, then lay the recipe back down.
+          find . -mindepth 1 -maxdepth 1 -not -name .git -exec rm -rf {} +
+          cp -r "$GITHUB_WORKSPACE/packaging/aur/$PKG/." .
+          git add -A
+          if git diff --cached --quiet; then
+            echo "::notice::$PKG is already at $VERSION on the AUR — nothing to push."
+            exit 0
+          fi
+          git commit -m "$PKG $VERSION"
+          git push origin HEAD:master

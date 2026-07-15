@@ -3,10 +3,11 @@
 # `--headless`). The web UI is static and embedded into the binary at compile time, so the
 # build needs no Node/npm — just Rust + the system WebKitGTK.
 #
-#   git clone https://aur.archlinux.org/haven-desktop.git && cd haven-desktop && makepkg -si
+# pkgver tracks the Haven product version (= the App Store marketing version). It is stamped
+# from the `v*` release tag by .github/workflows/release.yml; see docs/RELEASING.md.
 #
 pkgname=haven-desktop
-pkgver=0.1.0
+pkgver=1.0.5
 pkgrel=1
 pkgdesc="Haven — private, post-quantum, peer-to-peer social network (desktop client + relay)"
 arch=('x86_64' 'aarch64')
@@ -15,19 +16,28 @@ license=('LicenseRef-PolyForm-Noncommercial-1.0.0')
 depends=('webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator' 'pipewire')
 optdepends=('xdg-desktop-portal: camera + screen-share portals'
             'xdg-desktop-portal-gtk: portal backend')
-makedepends=('rust' 'cargo' 'git')
-provides=('haven-desktop')
+makedepends=('rust' 'git')
 conflicts=('haven-desktop-bin')
 options=('!lto')
-source=("git+https://github.com/blaineam/haven.git")
+# Pinned to the release tag — never a moving HEAD. A non-VCS package (no `-git` suffix) must
+# build one specific, reproducible revision. `SKIP` is correct for a git source: the tag name
+# is the integrity anchor, and unlike GitHub's auto-generated tarballs it is byte-stable.
+source=("haven::git+https://github.com/blaineam/haven.git#tag=v$pkgver")
 sha256sums=('SKIP')
+
+prepare() {
+  cd "$srcdir/haven/desktop/src-tauri"
+  export RUSTUP_TOOLCHAIN=stable
+  # Pre-fetch crates so build() can run --frozen (offline, lockfile-exact).
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
 
 build() {
   cd "$srcdir/haven/desktop/src-tauri"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR="$srcdir/target"
   # Static frontend (ui/) is baked in by tauri-build; no bundler step.
-  cargo build --release --frozen 2>/dev/null || cargo build --release
+  cargo build --release --frozen
 }
 
 package() {
@@ -38,8 +48,15 @@ package() {
   install -Dm644 "$srcdir/haven/desktop/flatpak/com.blaineam.haven.metainfo.xml" \
     "$pkgdir/usr/share/metainfo/com.blaineam.haven.metainfo.xml"
 
-  for px in 32 128; do
-    install -Dm644 "$srcdir/haven/desktop/src-tauri/icons/${px}x${px}.png" \
-      "$pkgdir/usr/share/icons/hicolor/${px}x${px}/apps/com.blaineam.haven.png"
-  done
+  # 32/128 ship at their own names; Tauri's "128x128@2x" IS the 256x256 icon, which is the
+  # size the desktop-entry spec and every icon theme actually reach for.
+  install -Dm644 "$srcdir/haven/desktop/src-tauri/icons/32x32.png" \
+    "$pkgdir/usr/share/icons/hicolor/32x32/apps/com.blaineam.haven.png"
+  install -Dm644 "$srcdir/haven/desktop/src-tauri/icons/128x128.png" \
+    "$pkgdir/usr/share/icons/hicolor/128x128/apps/com.blaineam.haven.png"
+  install -Dm644 "$srcdir/haven/desktop/src-tauri/icons/128x128@2x.png" \
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/com.blaineam.haven.png"
+
+  # Non-standard (non-SPDX-common) license → Arch requires a copy under /usr/share/licenses.
+  install -Dm644 "$srcdir/haven/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

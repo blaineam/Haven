@@ -23,7 +23,7 @@ Haven runs on Linux in **two capacities**, sharing the same Rust core (`p2pcore`
 | **Ubuntu** | ✅ x86_64 | ✅ | GUI: `.deb` / AppImage · Relay: `haven-relay` `.deb` or `install.sh` |
 | **Debian** | ✅ x86_64 | ✅ | same as Ubuntu |
 | **Raspberry Pi OS / Raspbian** | ⚠️ best-effort (arm64) | ✅ **primary role** | Relay: `install.sh` (arm64 / armv7 / armv6) or `.deb` |
-| **Arch** | ✅ x86_64 | ✅ | GUI: build from the in-repo PKGBUILD (**not on the AUR yet**) · Relay: binary + systemd |
+| **Arch** | ✅ x86_64 | ✅ | GUI: build from the in-repo PKGBUILD (**not on the AUR yet** — [why](#arch)) · Relay: binary + systemd |
 | **SteamOS / Steam Deck** | ✅ x86_64 | ✅ | GUI: **Flatpak** — sideload `haven.flatpak` from the release (**not on Flathub**) · Relay: binary + systemd user service |
 
 The GUI needs **WebKitGTK** + a glibc userland, so it targets desktop distros. The relay is a
@@ -36,7 +36,7 @@ The GUI needs **WebKitGTK** + a glibc userland, so it targets desktop distros. T
 ### Ubuntu / Debian / Raspberry Pi OS (`.deb`)
 
 ```bash
-sudo apt install ./Haven_0.1.0_amd64.deb      # or arm64 on a 64-bit Pi
+sudo apt install ./Haven_1.0.5_amd64.deb      # or arm64 on a 64-bit Pi
 haven-desktop                                  # launch (also in your app menu)
 ```
 
@@ -48,9 +48,11 @@ and screen share. CI also produces an **AppImage** (no install — `chmod +x` an
 ### Arch
 
 > **Not published to the AUR yet.** `haven-desktop` does not exist on `aur.archlinux.org` —
-> `git clone https://aur.archlinux.org/haven-desktop.git` will fail. The PKGBUILD is
-> maintained **in this repo** and nothing in CI publishes it (`.github/workflows/` has no
-> AUR step). Build it from the in-repo recipe:
+> `git clone https://aur.archlinux.org/haven-desktop.git` will fail today. The PKGBUILD is
+> maintained **in this repo**. CI *can* publish it (`release.yml` has an `aur` job that pushes
+> on every `v*` tag), but that job is gated on an `AUR_SSH_PRIVATE_KEY` secret which is not set
+> yet — publishing requires a personal AUR account, so it can't be automated away. Until then,
+> build from the in-repo recipe:
 
 ```bash
 git clone https://github.com/blaineam/haven.git
@@ -146,9 +148,10 @@ The `.deb` ships a locked-down systemd **system** service that runs as a dedicat
 
 ### From the PKGBUILD (Arch / SteamOS desktop)
 
-> **Not on the AUR yet** — `aur.archlinux.org/haven-relay.git` does not exist. Build from the
-> in-repo recipe (or just use the static musl binary + `install.sh` above, which needs no
-> compiler):
+> **Not on the AUR yet** — `aur.archlinux.org/haven-relay.git` does not exist. Same story as
+> [the GUI](#arch): CI is wired to publish it on a tag, but the `AUR_SSH_PRIVATE_KEY` secret
+> isn't set. Build from the in-repo recipe (or just use the static musl binary + `install.sh`
+> above, which needs no compiler):
 
 ```bash
 git clone https://github.com/blaineam/haven.git
@@ -211,8 +214,12 @@ The GUI is at parity with iOS/macOS; here is how each Apple-specific capability 
 **Cut a release by pushing a tag** — everything is built and published automatically:
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0
+git tag v1.0.5 && git push origin v1.0.5
 ```
+
+The tag **must** be a plain `vX.Y.Z` matching `MARKETING_VERSION` in `apple/project.yml` —
+Haven ships one version across every store. `release.yml` fails the build if it doesn't.
+See [`RELEASING.md`](RELEASING.md) for the scheme and the full checklist.
 
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) then builds and attaches
 to one GitHub Release:
@@ -222,7 +229,11 @@ to one GitHub Release:
 - **Desktop** installers: Windows `.msi`/NSIS, Linux `.deb`/`.rpm`/AppImage.
 - **SteamOS** `haven.flatpak` **plus a version-pinned `com.blaineam.haven.yml`** (the real
   `.deb` `sha256` is computed and injected at release time, so building the Flatpak from the
-  release manifest needs no manual pin).
+  release manifest needs no manual pin). This is a **sideload** bundle — Haven is not on
+  Flathub, and that manifest is not Flathub-submittable as-is (it unpacks a prebuilt `.deb`;
+  Flathub requires building from source). See [`RELEASING.md`](RELEASING.md#flathub).
+- **Arch**: the `aur` job pushes `packaging/aur/*` to `aur.archlinux.org` — **only if** the
+  `AUR_SSH_PRIVATE_KEY` secret is set. It skips cleanly otherwise.
 
 The tag drives the version (stamped into `tauri.conf.json` + the relay crate before build).
 

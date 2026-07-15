@@ -78,7 +78,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(40.dp).clip(CircleShape).clickable { if (section != null) section = null else onBack() },
                     contentAlignment = Alignment.Center) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White)
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = HavenTheme.textPrimary)
                 }
                 Spacer(Modifier.size(6.dp))
                 BrandText(sectionTitle, fontSize = 24)
@@ -98,7 +98,7 @@ fun SettingsScreen(onBack: () -> Unit) {
 
             if (section == "privacy") {
             Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
-                Text("Auto-delete posts", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                Text("Auto-delete posts", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                 Spacer(Modifier.height(4.dp))
                 Text("Old posts disappear on their own — locally and for everyone you share with.",
                     color = HavenTheme.textSecondary, fontSize = 12.sp)
@@ -116,14 +116,14 @@ fun SettingsScreen(onBack: () -> Unit) {
                                 .androidxFill())
                         }
                         Spacer(Modifier.size(12.dp))
-                        Text(label, color = Color.White, fontSize = 15.sp)
+                        Text(label, color = HavenTheme.textPrimary, fontSize = 15.sp)
                     }
                 }
             }
 
             Spacer(Modifier.height(16.dp))
             Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
-                Text("Photos", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                Text("Photos", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                 Spacer(Modifier.height(4.dp))
                 Text("Keep a copy in your gallery (Pictures/Haven).", color = HavenTheme.textSecondary, fontSize = 12.sp)
                 Spacer(Modifier.height(8.dp))
@@ -143,14 +143,14 @@ fun SettingsScreen(onBack: () -> Unit) {
 
             Spacer(Modifier.height(16.dp))
             Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
-                Text("Stay connected", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                Text("Stay connected", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                 Spacer(Modifier.height(4.dp))
                 Text("Keep Haven connected in the background for instant posts, messages and calls — no server, no Google. Uses a little battery and shows an ongoing notification.",
                     color = HavenTheme.textSecondary, fontSize = 12.sp)
                 Spacer(Modifier.height(8.dp))
                 var stayOn by remember { mutableStateOf(com.blaineam.haven.core.ConnectionService.isEnabled(context)) }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Real-time connection", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                    Text("Real-time connection", color = HavenTheme.textPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
                     androidx.compose.material3.Switch(
                         checked = stayOn,
                         onCheckedChange = { on -> com.blaineam.haven.core.ConnectionService.setEnabled(context, on); stayOn = on },
@@ -162,7 +162,7 @@ fun SettingsScreen(onBack: () -> Unit) {
 
             Spacer(Modifier.height(16.dp))
             Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
-                Text("Nearby (offline)", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                Text("Nearby (offline)", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                 Spacer(Modifier.height(4.dp))
                 Text("Share with people right next to you over Bluetooth/Wi-Fi — no internet needed.",
                     color = HavenTheme.textSecondary, fontSize = 12.sp)
@@ -173,7 +173,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                     if (grants.values.all { it }) { HavenNet.enableNearby(); nearbyOn = true }
                 }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Nearby sharing", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                    Text("Nearby sharing", color = HavenTheme.textPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
                     androidx.compose.material3.Switch(
                         checked = nearbyOn,
                         onCheckedChange = { on ->
@@ -195,7 +195,7 @@ fun SettingsScreen(onBack: () -> Unit) {
 
             if (section == "blocked") {
             Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
-                Text("Blocked people", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                Text("Blocked people", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                 Spacer(Modifier.height(6.dp))
                 if (HavenNet.blocked.isEmpty()) {
                     Text("No one blocked.", color = HavenTheme.textSecondary, fontSize = 13.sp)
@@ -203,7 +203,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                     HavenNet.blocked.forEach { idHex ->
                         Row(Modifier.fillMaxWidth().padding(vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically) {
-                            Text(idHex.take(16) + "…", color = Color.White, fontSize = 13.sp)
+                            Text(idHex.take(16) + "…", color = HavenTheme.textPrimary, fontSize = 13.sp)
                             Spacer(Modifier.size(8.dp))
                             Text("Unblock", color = HavenTheme.pink, fontSize = 13.sp,
                                 modifier = Modifier.clickable { HavenNet.unblock(idHex) })
@@ -217,17 +217,17 @@ fun SettingsScreen(onBack: () -> Unit) {
             if (section == "diagnostics") {
             // Under the hood (identity hex + safety words + crypto).
             Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
-                Text("Under the hood", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                Text("Under the hood", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                 Spacer(Modifier.height(8.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Your id", color = HavenTheme.textSecondary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                    Text(core.nodeIdHex.take(24) + "…", color = Color.White, fontSize = 13.sp,
+                    Text(core.nodeIdHex.take(24) + "…", color = HavenTheme.textPrimary, fontSize = 13.sp,
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
                 }
                 Spacer(Modifier.height(6.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Safety words", color = HavenTheme.textSecondary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                    Text(com.blaineam.haven.core.SafetyWords.phrase(core.verificationHex), color = Color.White, fontSize = 13.sp,
+                    Text(com.blaineam.haven.core.SafetyWords.phrase(core.verificationHex), color = HavenTheme.textPrimary, fontSize = 13.sp,
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
                 }
                 Spacer(Modifier.height(10.dp))
@@ -255,7 +255,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             if (section == "identity") {
             // Move to another device / restore here.
             Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
-                Text("Your identity", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                Text("Your identity", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                 Spacer(Modifier.height(4.dp))
                 Text("Move your account to a new phone, or restore it here. Your keys never touch a server.",
                     color = HavenTheme.textSecondary, fontSize = 12.sp)
@@ -315,7 +315,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         AlertDialog(
             onDismissRequest = { confirmReset = false },
             containerColor = HavenTheme.card,
-            title = { Text("Start over?", color = Color.White) },
+            title = { Text("Start over?", color = HavenTheme.textPrimary) },
             text = {
                 Text("This permanently erases your identity, your whole circle, and every post on this device. The people you've connected with will no longer recognize you. This can't be undone.",
                     color = HavenTheme.textSecondary)
@@ -336,7 +336,7 @@ private fun SettingsCategory(title: String, subtitle: String, onClick: () -> Uni
     Row(Modifier.fillMaxWidth().havenCard().clickable { onClick() }.padding(16.dp),
         verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text(title, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+            Text(title, color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
             Spacer(Modifier.height(2.dp))
             Text(subtitle, color = HavenTheme.textSecondary, fontSize = 12.sp)
         }
@@ -356,7 +356,7 @@ private fun SettingsCheck(title: String, ok: Boolean) {
         Text(if (ok) "✓" else "✗", color = if (ok) Color(0xFF34D399) else Color(0xFFF87171),
             fontSize = 16.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.size(10.dp))
-        Text(title, color = Color.White, fontSize = 14.sp)
+        Text(title, color = HavenTheme.textPrimary, fontSize = 14.sp)
     }
 }
 
@@ -378,7 +378,7 @@ private fun StorageSyncCard(context: android.content.Context) {
     val dirty = candidate != saved
 
     Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
-        Text("Sync across your devices", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+        Text("Sync across your devices", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
         Spacer(Modifier.height(4.dp))
         Text(
             if (saved.isConfigured)
@@ -441,14 +441,14 @@ private fun RelaysHubCard(context: android.content.Context) {
 
     // This-device relay (the zero-setup path that makes this phone a relay).
     Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
-        Text("This device", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+        Text("This device", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
         Spacer(Modifier.height(4.dp))
         Text("Turn this phone into a relay — sealed (unreadable) posts and media live here and re-serve to your circles when someone's been offline. Serves while Haven is open (or in the background if Real-time connection is on).",
             color = HavenTheme.textSecondary, fontSize = 12.sp)
         Spacer(Modifier.height(10.dp))
         val hosting by HavenNet.hosting
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("Be a relay on this phone", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Text("Be a relay on this phone", color = HavenTheme.textPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
             androidx.compose.material3.Switch(
                 checked = hosting,
                 onCheckedChange = { on -> if (on) HavenNet.startHosting() else HavenNet.stopHosting() },
@@ -463,7 +463,7 @@ private fun RelaysHubCard(context: android.content.Context) {
     // Configured relays (active + inactive).
     Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
         Text(if (entries.isEmpty()) "Configured relays" else "Configured relays (${entries.size})",
-            color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+            color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
         Spacer(Modifier.height(4.dp))
         Text("The default relay (★) is inherited by every circle that hasn't picked its own. Removing a relay DEACTIVATES it — its name and circle settings survive so you can turn it back on later. An inactive relay unseen for a week is cleaned up automatically.",
             color = HavenTheme.textSecondary, fontSize = 12.sp)
@@ -509,7 +509,7 @@ private fun RelaysHubCard(context: android.content.Context) {
     if (renaming != null) {
         AlertDialog(
             onDismissRequest = { renaming = null }, containerColor = HavenTheme.card,
-            title = { Text("Rename relay", color = Color.White) },
+            title = { Text("Rename relay", color = HavenTheme.textPrimary) },
             text = {
                 androidx.compose.material3.OutlinedTextField(
                     value = renameText, onValueChange = { renameText = it }, singleLine = true,
@@ -556,7 +556,7 @@ private fun RelayRow(
             Spacer(Modifier.size(10.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(entry.name, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                    Text(entry.name, color = HavenTheme.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
                     if (isDefault) { Spacer(Modifier.size(6.dp)); Text("★", color = HavenTheme.pink, fontSize = 13.sp) }
                 }
                 Text(status, color = HavenTheme.textSecondary, fontSize = 11.sp)
@@ -565,7 +565,7 @@ private fun RelayRow(
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
             }
             Box {
-                Text("⋯", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold,
+                Text("⋯", color = HavenTheme.textPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold,
                     modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { menu = true }.padding(horizontal = 10.dp, vertical = 4.dp))
                 androidx.compose.material3.DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     androidx.compose.material3.DropdownMenuItem(
@@ -682,10 +682,10 @@ private fun AddRelayForm(context: android.content.Context, onDone: () -> Unit) {
 
 @Composable
 private fun RelayTypeSeg(text: String, selected: Boolean, onClick: () -> Unit) {
-    Text(text, color = if (selected) Color.White else HavenTheme.textSecondary,
+    Text(text, color = if (selected) HavenTheme.textPrimary else HavenTheme.textSecondary,
         fontSize = 13.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
         modifier = Modifier.clip(RoundedCornerShape(8.dp))
-            .background(if (selected) HavenTheme.pink.copy(alpha = 0.28f) else Color.White.copy(alpha = 0.06f))
+            .background(if (selected) HavenTheme.pink.copy(alpha = 0.28f) else HavenTheme.cardBorder)
             .clickable { onClick() }.padding(horizontal = 14.dp, vertical = 8.dp))
 }
 
@@ -706,7 +706,7 @@ private fun StorageField(label: String, value: String, secret: Boolean = false, 
 @Composable
 private fun SettingSwitch(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+        Text(label, color = HavenTheme.textPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
         androidx.compose.material3.Switch(checked = checked, onCheckedChange = onChange,
             colors = androidx.compose.material3.SwitchDefaults.colors(
                 checkedThumbColor = Color.White, checkedTrackColor = HavenTheme.pink))
@@ -724,7 +724,7 @@ private fun AuthorizedDevicesCard() {
     LaunchedEffect(Unit) { DeviceCredentialStore.refresh() }
 
     Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
-        Text("Authorized devices", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+        Text("Authorized devices", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
         Spacer(Modifier.height(4.dp))
         val role = when {
             enabled -> "This is your primary device" to "It holds your master key and authorizes or revokes your other devices."
@@ -746,7 +746,7 @@ private fun AuthorizedDevicesCard() {
                     )
                     Spacer(Modifier.size(10.dp))
                     Column(Modifier.weight(1f)) {
-                        Text(d.name, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                        Text(d.name, color = HavenTheme.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
                         Text(
                             if (d.isPrimary) "Master key" else if (d.isThisDevice) "This device" else "Linked device",
                             color = HavenTheme.textSecondary, fontSize = 11.sp,
@@ -786,7 +786,7 @@ private fun AuthorizedDevicesCard() {
     revokeTarget?.let { t ->
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { revokeTarget = null }, containerColor = HavenTheme.card,
-            title = { Text("Revoke “${t.name}”?", color = Color.White) },
+            title = { Text("Revoke “${t.name}”?", color = HavenTheme.textPrimary) },
             text = { Text("This device will no longer receive anything posted to your circles afterward.", color = HavenTheme.textSecondary) },
             confirmButton = {
                 Text("Revoke device", color = Color(0xFFF87171),

@@ -23,6 +23,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddReaction
 import androidx.compose.material.icons.filled.ArrowCircleUp
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.PhotoCamera
@@ -213,7 +215,7 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                     horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                     Text("🔒", fontSize = 48.sp)
                     Spacer(Modifier.height(12.dp))
-                    Text("This circle is locked", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                    Text("This circle is locked", color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(6.dp))
                     Text("Stories, posts and messages stay hidden until you unlock.",
                         color = HavenTheme.textSecondary, fontSize = 13.sp, textAlign = TextAlign.Center)
@@ -257,7 +259,7 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                     if (posts.isEmpty()) item {
                         Column(Modifier.fillMaxWidth().height(260.dp).padding(24.dp),
                             horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                            Text("Nothing here yet", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                            Text("Nothing here yet", color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                             Spacer(Modifier.height(8.dp))
                             Text(
                                 if (HavenNet.contacts.isEmpty())
@@ -291,10 +293,11 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                                 LocalMedia.isVideo(ref) ->
                                     Box(Modifier.size(64.dp).clip(RoundedCornerShape(12.dp)).background(HavenTheme.card),
                                         contentAlignment = Alignment.Center) {
-                                        Icon(Icons.Filled.Videocam, "Video", tint = Color.White, modifier = Modifier.size(26.dp))
+                                        Icon(Icons.Filled.Videocam, "Video", tint = HavenTheme.textPrimary, modifier = Modifier.size(26.dp))
                                     }
                                 else -> MediaImage(active, ref, Modifier.size(64.dp).clip(RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop)
                             }
+                            // White-on-black-scrim over the media thumb — not a theme surface.
                             Text("✕", color = Color.White, fontSize = 13.sp,
                                 modifier = Modifier.align(Alignment.TopEnd).padding(3.dp).clip(CircleShape)
                                     .background(Color.Black.copy(alpha = 0.6f)).clickable { pendingMedia.remove(ref) }
@@ -308,7 +311,7 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                 Row(Modifier.padding(start = 16.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Filled.MusicNote, null, tint = HavenTheme.pink, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.size(6.dp))
-                    Text("${m.title} · ${m.artist}", color = Color.White, fontSize = 12.sp, maxLines = 1)
+                    Text("${m.title} · ${m.artist}", color = HavenTheme.textPrimary, fontSize = 12.sp, maxLines = 1)
                     Spacer(Modifier.size(8.dp))
                     Text("✕", color = HavenTheme.textSecondary, fontSize = 14.sp,
                         modifier = Modifier.clickable { pendingMusic = null })
@@ -361,6 +364,7 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                 )
                 Spacer(Modifier.size(8.dp))
                 val canPost = draft.isNotBlank() || pendingMedia.isNotEmpty() || pendingMusic != null
+                // The glyph is white-on-brand-gradient — never themed.
                 Box(Modifier.size(48.dp).clip(CircleShape).background(HavenTheme.brandHorizontal)
                     .clickable(enabled = canPost) {
                         HavenNet.post(active, draft.trim(), pendingMedia.toList(), pendingMusic, retentionSecs = disappearSecs)
@@ -409,7 +413,7 @@ fun CircleScreen(onAddFriend: () -> Unit) {
         }
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { showSchedule = false }, containerColor = HavenTheme.card,
-            title = { Text("Send later", color = Color.White) },
+            title = { Text("Send later", color = HavenTheme.textPrimary) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("Posts from this phone when the time comes (it catches up next time you open Haven).",
@@ -428,7 +432,7 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                         Text(label, color = HavenTheme.pink, fontSize = 15.sp,
                             modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { doSchedule(ms) }.padding(vertical = 10.dp))
                     }
-                    Text("Pick a date & time…", color = Color.White, fontSize = 15.sp,
+                    Text("Pick a date & time…", color = HavenTheme.textPrimary, fontSize = 15.sp,
                         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable {
                             val c = java.util.Calendar.getInstance()
                             android.app.DatePickerDialog(context, { _, y, mo, d ->
@@ -458,7 +462,7 @@ private fun CircleManageSheet(circleId: String, onDismiss: () -> Unit) {
     val csVersion by cs.version
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss, containerColor = HavenTheme.card,
-        title = { Text("Circle settings", color = Color.White) },
+        title = { Text("Circle settings", color = HavenTheme.textPrimary) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 if (!isDefault) {
@@ -490,7 +494,7 @@ private fun CircleManageSheet(circleId: String, onDismiss: () -> Unit) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         HavenAvatar(m.idHex, m.name, size = 30.dp)
                         Spacer(Modifier.size(8.dp))
-                        Text(m.name, color = Color.White, modifier = Modifier.weight(1f), maxLines = 1)
+                        Text(m.name, color = HavenTheme.textPrimary, modifier = Modifier.weight(1f), maxLines = 1)
                         Text("Remove", color = HavenTheme.pink, fontSize = 13.sp,
                             modifier = Modifier.clickable { HavenNet.removeFromCircle(circleId, m.idHex) }.padding(horizontal = 6.dp, vertical = 4.dp))
                         Text("Block", color = Color(0xFFEF4444), fontSize = 13.sp,
@@ -517,7 +521,7 @@ private fun CircleManageSheet(circleId: String, onDismiss: () -> Unit) {
 @Composable
 private fun OverrideRow(label: String, current: Boolean?, onSet: (Boolean?) -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f), maxLines = 1)
+        Text(label, color = HavenTheme.textPrimary, fontSize = 13.sp, modifier = Modifier.weight(1f), maxLines = 1)
         OverrideSeg("Auto", current == null) { onSet(null) }
         OverrideSeg("On", current == true) { onSet(true) }
         OverrideSeg("Off", current == false) { onSet(false) }
@@ -528,7 +532,7 @@ private fun OverrideRow(label: String, current: Boolean?, onSet: (Boolean?) -> U
 private fun OverrideSeg(text: String, selected: Boolean, onClick: () -> Unit) {
     Text(
         text,
-        color = if (selected) Color.White else HavenTheme.textSecondary,
+        color = if (selected) HavenTheme.textPrimary else HavenTheme.textSecondary,
         fontSize = 12.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
         modifier = Modifier.clip(RoundedCornerShape(6.dp))
             .background(if (selected) HavenTheme.pink.copy(alpha = 0.28f) else Color.Transparent)
@@ -559,7 +563,7 @@ private fun CircleRelaySection(circleId: String) {
         val isDefault = default == e.hex
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(e.name, color = Color.White, fontSize = 13.sp, maxLines = 1)
+                Text(e.name, color = HavenTheme.textPrimary, fontSize = 13.sp, maxLines = 1)
                 if (isDefault) Text("Default — inherited by every circle", color = HavenTheme.textSecondary, fontSize = 10.sp)
             }
             androidx.compose.material3.Switch(
@@ -584,7 +588,7 @@ private fun RetentionOverrideRow(currentDays: Int?, onSet: (Int?) -> Unit) {
         30 -> "After 30 days"; 365 -> "After 1 year"; else -> "After $currentDays days"
     }
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text("Auto-delete old posts", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f), maxLines = 1)
+        Text("Auto-delete old posts", color = HavenTheme.textPrimary, fontSize = 13.sp, modifier = Modifier.weight(1f), maxLines = 1)
         Box {
             Text(label, color = HavenTheme.pink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable { open = true }.padding(horizontal = 8.dp, vertical = 4.dp))
@@ -633,7 +637,7 @@ private fun PendingCard(req: PendingRequest) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
-            Text("${req.name} wants to connect", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text("${req.name} wants to connect", color = HavenTheme.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             Text("Safety: ${com.blaineam.haven.core.SafetyWords.phrase(req.verifyHex)}",
                 color = HavenTheme.textSecondary, fontSize = 11.sp)
         }
@@ -704,6 +708,7 @@ private fun MediaThumb(circleId: String, ref: String, modifier: Modifier, onOpen
         MediaImage(circleId, ref, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
         if (LocalMedia.isVideo(ref)) {
             Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.18f)), contentAlignment = Alignment.Center) {
+                // White-on-scrim over media — not a theme surface.
                 Icon(Icons.Filled.PlayCircle, "Play", tint = Color.White, modifier = Modifier.size(40.dp))
             }
         }
@@ -737,7 +742,7 @@ fun LocationChip(ref: String) {
         }
         Spacer(Modifier.size(10.dp))
         Column(Modifier.weight(1f)) {
-            Text(pin.label, color = Color.White, fontSize = 14.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium, maxLines = 1)
+            Text(pin.label, color = HavenTheme.textPrimary, fontSize = 14.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium, maxLines = 1)
             Text("Tap to open in Maps", color = HavenTheme.textSecondary, fontSize = 11.sp)
         }
     }
@@ -870,6 +875,7 @@ private fun MediaPage(circleId: String, ref: String, containerAspect: Float?, pl
                 // A scrim only behind the glyph — a full-page one would grey out the backdrop we just drew.
                 Box(Modifier.align(Alignment.Center).size(52.dp).clip(CircleShape)
                     .background(Color.Black.copy(alpha = 0.35f)), contentAlignment = Alignment.Center) {
+                    // White-on-scrim over media — not a theme surface.
                     Icon(Icons.Filled.PlayCircle, "Play", tint = Color.White, modifier = Modifier.size(40.dp))
                 }
             }
@@ -904,6 +910,7 @@ private fun MediaCarousel(circleId: String, refs: List<String>, videoActive: Boo
                 repeat(refs.size) { i ->
                     Box(
                         Modifier.size(6.dp).clip(CircleShape)
+                            // Page dots sit on the media itself — always white.
                             .background(Color.White.copy(alpha = if (i == pager.currentPage) 0.95f else 0.4f)),
                     )
                 }
@@ -1012,6 +1019,7 @@ fun MediaViewer(circleId: String, refs: List<String>, startIndex: Int, onClose: 
             }, contentAlignment = Alignment.Center) {
             Icon(Icons.Filled.Download, "Save to Photos", tint = Color.White)
         }
+        // The viewer's surface is Color.Black in both modes — all its chrome stays white.
         if (refs.size > 1) Text("${pager.currentPage + 1} / ${refs.size}", color = Color.White, fontSize = 13.sp,
             modifier = Modifier.align(Alignment.TopCenter).padding(top = 24.dp))
         if (saved) {
@@ -1042,25 +1050,25 @@ private fun CircleSwitcher(activeId: String, circlesVersion: Int) {
         ) {
             circles.forEach { c ->
                 androidx.compose.material3.DropdownMenuItem(
-                    text = { Text("${c.name}  ·  ${c.memberCount}", color = Color.White) },
+                    text = { Text("${c.name}  ·  ${c.memberCount}", color = HavenTheme.textPrimary) },
                     onClick = { HavenNet.setActiveCircle(c.id); menu = false },
                 )
             }
             androidx.compose.material3.HorizontalDivider(color = HavenTheme.cardBorder)
             androidx.compose.material3.DropdownMenuItem(
-                text = { Text("⚙️  Circle settings", color = Color.White) },
+                text = { Text("⚙️  Circle settings", color = HavenTheme.textPrimary) },
                 onClick = { menu = false; showManage = true },
             )
             val locked = com.blaineam.haven.core.CircleLock.isLocked(activeId)
             androidx.compose.material3.DropdownMenuItem(
-                text = { Text(if (locked) "🔓 Unlock this circle" else "🔒 Lock this circle", color = Color.White) },
+                text = { Text(if (locked) "🔓 Unlock this circle" else "🔒 Lock this circle", color = HavenTheme.textPrimary) },
                 onClick = { com.blaineam.haven.core.CircleLock.setLocked(activeId, !locked); menu = false },
             )
             val anyHidden = com.blaineam.haven.core.HiddenStore.hidden.size
             val showingHidden by com.blaineam.haven.core.HiddenStore.showHidden
             if (anyHidden > 0) {
                 androidx.compose.material3.DropdownMenuItem(
-                    text = { Text(if (showingHidden) "🙈  Hide hidden posts" else "👁  Show hidden posts ($anyHidden)", color = Color.White) },
+                    text = { Text(if (showingHidden) "🙈  Hide hidden posts" else "👁  Show hidden posts ($anyHidden)", color = HavenTheme.textPrimary) },
                     onClick = { com.blaineam.haven.core.HiddenStore.toggleShowHidden(); menu = false },
                 )
             }
@@ -1075,7 +1083,7 @@ private fun CircleSwitcher(activeId: String, circlesVersion: Int) {
         var nm by remember { mutableStateOf("") }
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { showCreate = false }, containerColor = HavenTheme.card,
-            title = { Text("New circle", color = Color.White) },
+            title = { Text("New circle", color = HavenTheme.textPrimary) },
             text = {
                 OutlinedTextField(value = nm, onValueChange = { nm = it }, singleLine = true,
                     placeholder = { Text("Circle name") },
@@ -1191,7 +1199,7 @@ private fun SyncDetailContent() {
     Column(
         Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp, top = 4.dp),
     ) {
-        Text("Sync activity", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Text("Sync activity", color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.size(6.dp))
         // The live headline: are we actively moving media right now, or idle/synced?
         Text(
@@ -1214,7 +1222,7 @@ private fun SyncDetailContent() {
             if (online || relay) Icons.Filled.Wifi else Icons.Filled.WifiOff,
             when { relay -> "Relay / mailbox: active"; online -> "Internet (iroh): connected"; else -> "Internet: connecting…" },
             tint = if (online || relay) HavenTheme.pink else HavenTheme.textSecondary,
-            valueColor = if (online || relay) Color.White else HavenTheme.textSecondary,
+            valueColor = if (online || relay) HavenTheme.textPrimary else HavenTheme.textSecondary,
         )
         Spacer(Modifier.size(10.dp))
         val (nearbyIcon, nearbyText) = when (nearbyState) {
@@ -1226,7 +1234,7 @@ private fun SyncDetailContent() {
         SyncDetailRow(
             nearbyIcon, nearbyText,
             tint = if (nearbyState == HavenNet.NearbyState.CONNECTED) HavenTheme.pink else HavenTheme.textSecondary,
-            valueColor = if (nearbyState == HavenNet.NearbyState.CONNECTED) Color.White else HavenTheme.textSecondary,
+            valueColor = if (nearbyState == HavenNet.NearbyState.CONNECTED) HavenTheme.textPrimary else HavenTheme.textSecondary,
         )
         Spacer(Modifier.size(14.dp))
         Text(
@@ -1242,7 +1250,7 @@ private fun SyncDetailRow(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     text: String,
     tint: Color = HavenTheme.textSecondary,
-    valueColor: Color = Color.White,
+    valueColor: Color = HavenTheme.textPrimary,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
@@ -1397,6 +1405,21 @@ fun PostCard(
     var whoReacted by remember(item.id) { mutableStateOf<uniffi.haven_ffi.ReactionFfi?>(null) }
     var viewerStart by remember(item.id) { mutableStateOf<Int?>(null) }
     var commentPicker by remember(item.id) { mutableStateOf<String?>(null) }   // comment id being reacted to
+    // Staged reply attachments (iOS `commentMedia`) — photos/videos via the picker, voice via the recorder.
+    val commentMedia = remember(item.id) { androidx.compose.runtime.mutableStateListOf<String>() }
+    var commentAttachMenu by remember(item.id) { mutableStateOf(false) }
+    var showCommentRecorder by remember(item.id) { mutableStateOf(false) }
+    var commentViewer by remember(item.id) { mutableStateOf<Pair<String, String>?>(null) }   // (circle, ref) being viewed
+    // Same store-under-the-circle's-key flow as the post composer's picker.
+    val commentPickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(4)) { uris ->
+        uris.forEach { uri ->
+            val ref = if (com.blaineam.haven.core.isVideoUri(context, uri))
+                com.blaineam.haven.core.readVideoBytes(context, uri)?.let { LocalMedia.store(circleId, it, isVideo = true) }
+            else loadAndDownscale(context, uri)?.let { LocalMedia.store(circleId, it) }
+            if (ref != null) commentMedia.add(ref)
+        }
+    }
     viewerStart?.let { start ->
         FullScreenOverlay(onDismiss = { viewerStart = null }) {
             MediaViewer(circleId, item.media.filter { !com.blaineam.haven.core.LocationShare.isLocation(it) }, start) { viewerStart = null }
@@ -1406,12 +1429,12 @@ fun PostCard(
     whoReacted?.let { r ->
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { whoReacted = null }, containerColor = HavenTheme.card,
-            title = { Text("${r.emoji}  ${r.count}", color = Color.White) },
+            title = { Text("${r.emoji}  ${r.count}", color = HavenTheme.textPrimary) },
             text = {
                 Column {
                     r.authors.forEach { a ->
                         Text(if (a.startsWith(HavenNet.nodeIdHex.take(8))) "You" else HavenNet.displayName(a.take(8)),
-                            color = Color.White, fontSize = 14.sp, modifier = Modifier.padding(vertical = 2.dp))
+                            color = HavenTheme.textPrimary, fontSize = 14.sp, modifier = Modifier.padding(vertical = 2.dp))
                     }
                 }
             },
@@ -1426,12 +1449,12 @@ fun PostCard(
             Spacer(Modifier.size(10.dp))
             Text(
                 if (item.isMe) "You" else HavenNet.displayName(item.authorShort),
-                color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                color = HavenTheme.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
             )
             Spacer(Modifier.weight(1f))
             Text(
                 relativeTime(item.createdAt) + if (item.edited) " · edited" else "",
-                color = Color.White.copy(alpha = 0.5f), fontSize = 12.sp,
+                color = HavenTheme.textSecondary, fontSize = 12.sp,
             )
             Box {
                 Icon(androidx.compose.material.icons.Icons.Filled.MoreVert, "More",
@@ -1447,11 +1470,11 @@ fun PostCard(
                                    else com.blaineam.haven.core.DeepLink.postUrl(circleId, item.id)
                     shareUrl?.let { url ->
                         DropdownMenuItem(
-                            text = { Text("Share post", color = Color.White) },
+                            text = { Text("Share post", color = HavenTheme.textPrimary) },
                             onClick = { postMenu = false; sharePost(context, url) },
                         )
                         DropdownMenuItem(
-                            text = { Text("Copy link", color = Color.White) },
+                            text = { Text("Copy link", color = HavenTheme.textPrimary) },
                             onClick = { postMenu = false; copyPostLink(context, url) },
                         )
                     }
@@ -1459,7 +1482,7 @@ fun PostCard(
                     // replying now (iOS keeps Edit/Unsend in this same ellipsis menu).
                     if (item.isMe) {
                         DropdownMenuItem(
-                            text = { Text("Edit", color = Color.White) },
+                            text = { Text("Edit", color = HavenTheme.textPrimary) },
                             onClick = { postMenu = false; showEdit = true },
                         )
                         DropdownMenuItem(
@@ -1469,7 +1492,7 @@ fun PostCard(
                     }
                     val hidden = com.blaineam.haven.core.HiddenStore.isHidden(item.id)
                     DropdownMenuItem(
-                        text = { Text(if (hidden) "Unhide post" else "Hide post", color = Color.White) },
+                        text = { Text(if (hidden) "Unhide post" else "Hide post", color = HavenTheme.textPrimary) },
                         onClick = {
                             if (hidden) com.blaineam.haven.core.HiddenStore.unhide(item.id)
                             else com.blaineam.haven.core.HiddenStore.hide(item.id)
@@ -1504,7 +1527,7 @@ fun PostCard(
         }
         if (item.body.isNotBlank()) {
             Spacer(Modifier.height(10.dp))
-            LinkedText(item.body, color = Color.White, fontSize = 15.sp)
+            LinkedText(item.body, color = HavenTheme.textPrimary, fontSize = 15.sp)
             LinkPreviewCard(item.body, Modifier.padding(top = 10.dp))
         }
 
@@ -1546,7 +1569,7 @@ fun PostCard(
                         .padding(horizontal = 10.dp, vertical = 5.dp),
                 ) {
                     Text("${r.emoji} ${r.count}", fontSize = 13.sp,
-                        color = if (mine) HavenTheme.pink else Color.White)
+                        color = if (mine) HavenTheme.pink else HavenTheme.textPrimary)
                 }
             }
             Spacer(Modifier.weight(1f))
@@ -1615,7 +1638,17 @@ fun PostCard(
                         onLongClick = { commentPicker = if (commentPicker == c.id) null else c.id })) {
                         Text(if (c.isMe) "You: " else "${HavenNet.displayName(c.authorShort)}: ",
                             color = HavenTheme.pink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                        Text(c.body, color = Color.White, fontSize = 13.sp)
+                        Text(c.body, color = HavenTheme.textPrimary, fontSize = 13.sp)
+                    }
+                    // A reply's own attachments (iOS `commentMediaRow`): voice notes play inline, a
+                    // photo/video opens the full-screen viewer.
+                    if (!c.unsent && c.media.isNotEmpty()) {
+                        Row(Modifier.padding(start = 4.dp, top = 3.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            c.media.forEach { ref ->
+                                if (LocalMedia.isAudio(ref)) AudioPlayerPill(circleId, ref)
+                                else MediaThumb(circleId, ref, Modifier.size(56.dp)) { commentViewer = circleId to ref }
+                            }
+                        }
                     }
                     if (c.reactions.isNotEmpty()) {
                         Row(Modifier.padding(start = 4.dp, top = 2.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1625,7 +1658,7 @@ fun PostCard(
                                     .clickable {
                                         if (r.mine) HavenNet.unreact(circleId, c.id, r.emoji) else HavenNet.react(circleId, c.id, r.emoji)
                                     }.padding(horizontal = 8.dp, vertical = 3.dp)) {
-                                    Text("${r.emoji} ${r.count}", fontSize = 12.sp, color = Color.White)
+                                    Text("${r.emoji} ${r.count}", fontSize = 12.sp, color = HavenTheme.textPrimary)
                                 }
                             }
                         }
@@ -1645,7 +1678,61 @@ fun PostCard(
         // The reply composer is ALWAYS on the card (iOS `commentField`) — replying was previously
         // invisible behind a "Comment" link, so nobody found it.
         Spacer(Modifier.height(8.dp))
+        // Staged reply attachments, each removable (iOS `commentAttachChip`).
+        if (commentMedia.isNotEmpty()) {
+            androidx.compose.foundation.lazy.LazyRow(
+                Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                items(commentMedia.size) { i ->
+                    val ref = commentMedia[i]
+                    Box {
+                        when {
+                            LocalMedia.isAudio(ref) ->
+                                Box(Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)).background(HavenTheme.card),
+                                    contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Filled.Mic, "Audio reply", tint = HavenTheme.pink, modifier = Modifier.size(20.dp))
+                                }
+                            LocalMedia.isVideo(ref) ->
+                                Box(Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)).background(HavenTheme.card),
+                                    contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Filled.Videocam, "Video", tint = HavenTheme.textPrimary, modifier = Modifier.size(20.dp))
+                                }
+                            else -> MediaImage(circleId, ref, Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)),
+                                contentScale = ContentScale.Crop)
+                        }
+                        // White-on-black-scrim over the thumb — not a theme surface.
+                        Text("✕", color = Color.White, fontSize = 11.sp,
+                            modifier = Modifier.align(Alignment.TopEnd).padding(2.dp).clip(CircleShape)
+                                .background(Color.Black.copy(alpha = 0.6f)).clickable { commentMedia.remove(ref) }
+                                .padding(horizontal = 5.dp, vertical = 1.dp))
+                    }
+                }
+            }
+        }
         Row(verticalAlignment = Alignment.CenterVertically) {
+            // Attach affordance (iOS parity: paperclip → photo/video | audio). Same picker + recorder
+            // the post composer and DM thread already use, so a reply's media rides the identical
+            // store → seal → relay-backup path.
+            Box {
+                Icon(Icons.Filled.AttachFile, "Attach to reply", tint = HavenTheme.textSecondary,
+                    modifier = Modifier.size(22.dp).clip(CircleShape).clickable { commentAttachMenu = true })
+                DropdownMenu(expanded = commentAttachMenu, onDismissRequest = { commentAttachMenu = false },
+                    modifier = Modifier.background(HavenTheme.card)) {
+                    DropdownMenuItem(
+                        text = { Text("Photo or video", color = HavenTheme.textPrimary) },
+                        onClick = {
+                            commentAttachMenu = false
+                            commentPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Audio reply", color = HavenTheme.textPrimary) },
+                        onClick = { commentAttachMenu = false; showCommentRecorder = true },
+                    )
+                }
+            }
+            Spacer(Modifier.size(4.dp))
             OutlinedTextField(
                 value = commentDraft, onValueChange = { commentDraft = it },
                 placeholder = { Text("Add a reply…", fontSize = 13.sp) },
@@ -1654,10 +1741,12 @@ fun PostCard(
                     focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink),
             )
             Spacer(Modifier.size(6.dp))
-            val canSend = commentDraft.isNotBlank()
+            // A media-only reply is valid, so an attachment alone arms Send.
+            val canSend = commentDraft.isNotBlank() || commentMedia.isNotEmpty()
             Box(
                 Modifier.size(34.dp).clip(CircleShape).clickable(enabled = canSend) {
-                    HavenNet.comment(circleId, item.id, commentDraft.trim()); commentDraft = ""
+                    HavenNet.comment(circleId, item.id, commentDraft.trim(), commentMedia.toList())
+                    commentDraft = ""; commentMedia.clear()
                 },
                 contentAlignment = Alignment.Center,
             ) {
@@ -1665,6 +1754,18 @@ fun PostCard(
                     tint = if (canSend) HavenTheme.pink else HavenTheme.textSecondary,
                     modifier = Modifier.size(28.dp))
             }
+        }
+    }
+    if (showCommentRecorder) {
+        VoiceRecorderDialog(
+            circleId = circleId,
+            onDone = { ref -> commentMedia.add(ref); showCommentRecorder = false },
+            onDismiss = { showCommentRecorder = false },
+        )
+    }
+    commentViewer?.let { (cid, ref) ->
+        FullScreenOverlay(onDismiss = { commentViewer = null }) {
+            MediaViewer(cid, listOf(ref), 0) { commentViewer = null }
         }
     }
 }

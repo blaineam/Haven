@@ -20,9 +20,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.min
 
-/** The Haven mark: a little constellation of connected people (matches the app icon). */
+/** The Haven mark: a little constellation of connected people (matches the app icon). Defaults to the
+ *  theme's primary ink; callers drawing it on a fixed dark surface (the call screen) pass white. */
 @Composable
-fun ConstellationMark(modifier: Modifier = Modifier, color: Color = Color.White) {
+fun ConstellationMark(modifier: Modifier = Modifier, color: Color = HavenTheme.textPrimary) {
     val nodes = listOf(
         Offset(50f, 53f), Offset(50f, 24f), Offset(23f, 46f),
         Offset(77f, 46f), Offset(34f, 75f), Offset(66f, 75f),
@@ -58,6 +59,7 @@ fun BrandButton(
     ) {
         Text(
             text,
+            // White-on-brand-gradient — never themed.
             color = Color.White.copy(alpha = if (enabled) 1f else 0.6f),
             fontWeight = FontWeight.SemiBold,
             fontSize = 16.sp,

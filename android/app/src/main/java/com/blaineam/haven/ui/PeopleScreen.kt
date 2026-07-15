@@ -62,7 +62,7 @@ fun PeopleScreen(onAddFriend: () -> Unit, onClose: () -> Unit) {
             Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 16.dp, top = 14.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(40.dp).clip(CircleShape).clickable { onClose() }, contentAlignment = Alignment.Center) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White)
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = HavenTheme.textPrimary)
                 }
                 Spacer(Modifier.size(4.dp))
                 BrandText("Your circle", fontSize = 24)
@@ -74,7 +74,7 @@ fun PeopleScreen(onAddFriend: () -> Unit, onClose: () -> Unit) {
             if (contacts.isEmpty()) {
                 Column(Modifier.fillMaxSize().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center) {
-                    Text("No one in your circle yet", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                    Text("No one in your circle yet", color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(8.dp))
                     Text("Tap Invite to add someone by QR or link.",
                         color = HavenTheme.textSecondary, fontSize = 14.sp, textAlign = TextAlign.Center)
@@ -87,7 +87,7 @@ fun PeopleScreen(onAddFriend: () -> Unit, onClose: () -> Unit) {
                             HavenAvatar(c.idHex, c.name, 44.dp)
                             Spacer(Modifier.size(12.dp))
                             Column(Modifier.weight(1f)) {
-                                Text(c.name, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                                Text(c.name, color = HavenTheme.textPrimary, fontSize = 16.sp, fontWeight = FontWeight.Medium)
                                 Text(SafetyWords.phrase(c.verifyHex), color = HavenTheme.textSecondary, fontSize = 11.sp, maxLines = 1)
                             }
                             Box(Modifier.size(40.dp).clip(CircleShape).clickable { dm = HavenNet.startDm(c) to c },
@@ -109,7 +109,7 @@ fun PeopleScreen(onAddFriend: () -> Unit, onClose: () -> Unit) {
         AlertDialog(
             onDismissRequest = { confirmBlock = null },
             containerColor = HavenTheme.card,
-            title = { Text("Block ${c.name}?", color = Color.White) },
+            title = { Text("Block ${c.name}?", color = HavenTheme.textPrimary) },
             text = { Text("They'll be removed from your circle and can't reach you. This can't be undone here.",
                 color = HavenTheme.textSecondary) },
             confirmButton = { TextButton(onClick = { HavenNet.block(c.idHex); confirmBlock = null }) {
@@ -122,7 +122,7 @@ fun PeopleScreen(onAddFriend: () -> Unit, onClose: () -> Unit) {
         AlertDialog(
             onDismissRequest = { confirmRemove = null },
             containerColor = HavenTheme.card,
-            title = { Text("Remove ${c.name}?", color = Color.White) },
+            title = { Text("Remove ${c.name}?", color = HavenTheme.textPrimary) },
             text = { Text("They'll be removed from this circle but not blocked — you can add them again later.",
                 color = HavenTheme.textSecondary) },
             confirmButton = { TextButton(onClick = { HavenNet.removeFromCircle(c.idHex); confirmRemove = null }) {

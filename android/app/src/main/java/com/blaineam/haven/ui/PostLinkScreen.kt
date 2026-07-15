@@ -59,7 +59,7 @@ fun PostLinkScreen(circleId: String, postId: String, onDone: () -> Unit) {
                 Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 12.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Post", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                Text("Post", color = HavenTheme.textPrimary, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.weight(1f))
                 Text(
                     "Done", color = HavenTheme.pink, fontWeight = FontWeight.SemiBold,
@@ -84,7 +84,7 @@ fun PostLinkScreen(circleId: String, postId: String, onDone: () -> Unit) {
                 ) {
                     Text("🔍", fontSize = 48.sp)
                     Spacer(Modifier.height(12.dp))
-                    Text("Post not found", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Post not found", color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(6.dp))
                     Text(
                         "It may have been unsent, or you're not in this circle. If it's new, it may not have reached this device yet.",

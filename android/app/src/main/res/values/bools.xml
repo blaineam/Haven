@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Light mode paints a pale window, so the status-bar glyphs must go dark to stay readable. -->
+    <bool name="haven_light_status_bar">true</bool>
+</resources>

@@ -67,7 +67,7 @@ fun EditProfileScreen(onDone: () -> Unit) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(40.dp).clip(CircleShape).clickable { onDone() },
                     contentAlignment = Alignment.Center) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White)
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = HavenTheme.textPrimary)
                 }
                 Spacer(Modifier.size(6.dp))
                 BrandText("Edit profile", fontSize = 24)

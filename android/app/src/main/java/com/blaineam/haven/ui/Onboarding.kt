@@ -90,7 +90,7 @@ fun OnboardingScreen(onDone: (name: String, emoji: String) -> Unit) {
 
             Text(
                 "Pick a face",
-                color = Color.White,
+                color = HavenTheme.textPrimary,
                 fontSize = 14.sp,
                 modifier = Modifier.fillMaxWidth(),
                 textAlign = TextAlign.Start,

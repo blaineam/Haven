@@ -49,8 +49,10 @@ private fun setSecureFlag(context: Context, on: Boolean) {
  * marks the window FLAG_SECURE (excluded from screenshots/recents) while revealed — the coarse
  * Android counterpart of iOS's per-window screenshot exclusion.
  */
+// `contentColor` is the ENCLOSING bubble's foreground, not this chip's own choice: a secret rides
+// inside a DM bubble that is either a pink fill (white content) or a theme card (themed content).
 @Composable
-fun SecretBubble(body: String) {
+fun SecretBubble(body: String, contentColor: Color = HavenTheme.textPrimary) {
     val context = LocalContext.current
     var revealed by remember(body) { mutableStateOf(false) }
     LaunchedEffect(revealed) {
@@ -59,16 +61,16 @@ fun SecretBubble(body: String) {
     }
     DisposableEffect(Unit) { onDispose { setSecureFlag(context, false) } }
     Row(
-        Modifier.clip(RoundedCornerShape(10.dp)).background(Color.White.copy(alpha = 0.10f))
+        Modifier.clip(RoundedCornerShape(10.dp)).background(contentColor.copy(alpha = 0.10f))
             .clickable { if (!revealed) revealed = true }
             .padding(horizontal = 8.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(Icons.Filled.Lock, null, tint = Color.White, modifier = Modifier.size(15.dp))
+        Icon(Icons.Filled.Lock, null, tint = contentColor, modifier = Modifier.size(15.dp))
         Spacer(Modifier.size(6.dp))
         Text(
             if (revealed) SecretMessages.text(body) else "Tap to view secret",
-            color = Color.White, fontSize = 15.sp,
+            color = contentColor, fontSize = 15.sp,
         )
     }
 }

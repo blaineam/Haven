@@ -67,7 +67,7 @@ fun ReportSheet(item: FeedItemFfi, circleId: String, authorName: String, onDismi
         containerColor = HavenTheme.card,
     ) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
-            Text("Report post", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Text("Report post", color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(4.dp))
             Text("What's wrong with it?", color = HavenTheme.textSecondary, fontSize = 13.sp)
             Spacer(Modifier.height(10.dp))
@@ -79,7 +79,7 @@ fun ReportSheet(item: FeedItemFfi, circleId: String, authorName: String, onDismi
                         .padding(horizontal = 14.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(r, color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                    Text(r, color = HavenTheme.textPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
                     if (reason == r) Icon(Icons.Filled.CheckCircle, null, tint = HavenTheme.pink, modifier = Modifier.size(18.dp))
                 }
             }
@@ -92,7 +92,7 @@ fun ReportSheet(item: FeedItemFfi, circleId: String, authorName: String, onDismi
             )
             Spacer(Modifier.height(6.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Also block $authorName", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                Text("Also block $authorName", color = HavenTheme.textPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
                 Switch(
                     checked = alsoBlock, onCheckedChange = { alsoBlock = it },
                     colors = SwitchDefaults.colors(checkedTrackColor = HavenTheme.pink),
@@ -128,7 +128,7 @@ fun ReportedBanner(item: FeedItemFfi, circleId: String, authorName: String, repo
     if (confirmRemove) {
         AlertDialog(
             onDismissRequest = { confirmRemove = false }, containerColor = HavenTheme.card,
-            title = { Text("Remove $authorName from this circle?", color = Color.White, fontSize = 16.sp) },
+            title = { Text("Remove $authorName from this circle?", color = HavenTheme.textPrimary, fontSize = 16.sp) },
             text = {
                 Text("Their posts leave your view of the circle and they can't rejoin through you. Your own devices stay in sync.",
                     color = HavenTheme.textSecondary, fontSize = 13.sp)
@@ -152,7 +152,7 @@ fun ReportedBanner(item: FeedItemFfi, circleId: String, authorName: String, repo
         Icon(Icons.Filled.Flag, null, tint = Color(0xFFF59E0B), modifier = Modifier.size(16.dp))
         Spacer(Modifier.width(8.dp))
         Column(Modifier.weight(1f)) {
-            Text("Reported by $reporterNames", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            Text("Reported by $reporterNames", color = HavenTheme.textPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             Text(reasons, color = HavenTheme.textSecondary, fontSize = 11.sp)
         }
         Box {
@@ -161,7 +161,7 @@ fun ReportedBanner(item: FeedItemFfi, circleId: String, authorName: String, repo
             DropdownMenu(expanded = actMenu, onDismissRequest = { actMenu = false },
                 modifier = Modifier.background(HavenTheme.card)) {
                 DropdownMenuItem(
-                    text = { Text("Hide for me", color = Color.White) },
+                    text = { Text("Hide for me", color = HavenTheme.textPrimary) },
                     onClick = { actMenu = false; HiddenStore.hide(item.id) },
                 )
                 DropdownMenuItem(

@@ -33,14 +33,12 @@ private const val TAG = "DemoSeed"
  *   haven_skip_onboarding (bool) implied true whenever haven_demo is on (no onboarding flow)
  *   haven_no_net (bool)          never bring the live P2P node online (offline, fast, deterministic)
  *   haven_tab (string)           which tab is selected at launch: circle | messages | you
- *   haven_scene (string)         a scene to auto-present: feed | you | messages | thread | story
  */
 object DemoEnv {
     @Volatile var isDemo = false; private set
     @Volatile var skipOnboarding = false; private set
     @Volatile var noNet = false; private set
     @Volatile var tab: String? = null; private set
-    @Volatile var scene: String? = null; private set
 
     /** Read launch flags from the Activity intent. No-op (everything off) in a release build. */
     fun configure(intent: Intent?) {
@@ -51,8 +49,7 @@ object DemoEnv {
         skipOnboarding = intent.getBooleanExtra("haven_skip_onboarding", true)
         noNet = intent.getBooleanExtra("haven_no_net", false)
         tab = intent.getStringExtra("haven_tab")
-        scene = intent.getStringExtra("haven_scene")
-        Log.i(TAG, "demo on (tab=$tab scene=$scene noNet=$noNet)")
+        Log.i(TAG, "demo on (tab=$tab noNet=$noNet)")
     }
 }
 

@@ -74,7 +74,7 @@ fun MessagesScreen() {
                 horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                 Text("🔒", fontSize = 48.sp)
                 Spacer(Modifier.height(12.dp))
-                Text("Messages are locked", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Text("Messages are locked", color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(6.dp))
                 Text("Unlock your circle to see your private chats.", color = HavenTheme.textSecondary,
                     fontSize = 13.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
@@ -190,7 +190,7 @@ private fun ThreadList(onOpen: (String, Contact) -> Unit) {
                     verticalArrangement = Arrangement.Center,
                 ) {
                     Text(if (contacts.isEmpty()) "No one to message yet" else "No messages yet",
-                        color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                        color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(8.dp))
                     Text(
                         if (contacts.isEmpty()) "Add a friend from the Circle tab, then DM them here."
@@ -241,12 +241,12 @@ private fun ConversationRow(conv: Conversation, pinned: Boolean, onOpen: () -> U
             }
             Spacer(Modifier.size(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(conv.title, color = Color.White, fontSize = 16.sp,
+                Text(conv.title, color = HavenTheme.textPrimary, fontSize = 16.sp,
                     fontWeight = if (conv.unread > 0) FontWeight.Bold else FontWeight.Medium, maxLines = 1)
                 if (conv.preview.isNotBlank()) {
                     Text(conv.preview, fontSize = 13.sp, maxLines = 1,
                         overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                        color = if (conv.unread > 0) Color.White else HavenTheme.textSecondary)
+                        color = if (conv.unread > 0) HavenTheme.textPrimary else HavenTheme.textSecondary)
                 }
             }
             if (conv.unread > 0) {
@@ -275,7 +275,7 @@ private fun ConversationRow(conv: Conversation, pinned: Boolean, onOpen: () -> U
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
             containerColor = HavenTheme.card,
-            title = { Text("Delete conversation?", color = Color.White) },
+            title = { Text("Delete conversation?", color = HavenTheme.textPrimary) },
             text = { Text("This hides the messages on this device. Re-starting the chat won't restore them.",
                 color = HavenTheme.textSecondary) },
             confirmButton = {
@@ -301,6 +301,7 @@ fun UnreadBadge(count: Int) {
             .padding(horizontal = if (count > 9) 6.dp else 0.dp),
         contentAlignment = Alignment.Center,
     ) {
+        // White-on-pink-fill, not a theme surface — stays white in both modes.
         Text(if (count > 99) "99+" else "$count", color = Color.White,
             fontSize = 11.sp, fontWeight = FontWeight.Bold)
     }
@@ -315,7 +316,7 @@ private fun NewMessagePicker(onDismiss: () -> Unit, onStart: (List<Contact>) -> 
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = HavenTheme.card,
-        title = { Text("New message", color = Color.White) },
+        title = { Text("New message", color = HavenTheme.textPrimary) },
         text = {
             LazyColumn(Modifier.heightIn(max = 360.dp)) {
                 items(contacts, key = { it.idHex }) { c ->
@@ -328,7 +329,7 @@ private fun NewMessagePicker(onDismiss: () -> Unit, onStart: (List<Contact>) -> 
                     ) {
                         HavenAvatar(idOrShort = c.idHex, name = c.name, size = 34.dp)
                         Spacer(Modifier.size(10.dp))
-                        Text(c.name, color = Color.White, fontSize = 15.sp, modifier = Modifier.weight(1f))
+                        Text(c.name, color = HavenTheme.textPrimary, fontSize = 15.sp, modifier = Modifier.weight(1f))
                         Icon(
                             if (on) Icons.Filled.CheckCircle else Icons.Filled.RadioButtonUnchecked,
                             null, tint = if (on) HavenTheme.pink else HavenTheme.textSecondary,
@@ -399,12 +400,12 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
             ) {
                 Box(Modifier.size(40.dp).clip(CircleShape).clickable { onBack() },
                     contentAlignment = Alignment.Center) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White)
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = HavenTheme.textPrimary)
                 }
                 Spacer(Modifier.size(4.dp))
                 HavenAvatar(idOrShort = partner.idHex, name = partner.name, size = 32.dp)
                 Spacer(Modifier.size(8.dp))
-                Text(partner.name, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Text(partner.name, color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                 androidx.compose.foundation.layout.Spacer(Modifier.weight(1f))
                 val startCall = rememberCallStarter()
                 Box(Modifier.size(40.dp).clip(CircleShape).clickable {
@@ -434,14 +435,14 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
                 Box(Modifier.padding(start = 16.dp, bottom = 4.dp)) {
                     if (com.blaineam.haven.core.LocalMedia.isVideo(ref))
                         Box(Modifier.size(56.dp).clip(RoundedCornerShape(10.dp)).background(HavenTheme.card),
-                            contentAlignment = Alignment.Center) { Icon(Icons.Filled.Videocam, null, tint = Color.White) }
+                            contentAlignment = Alignment.Center) { Icon(Icons.Filled.Videocam, null, tint = HavenTheme.textPrimary) }
                     else MediaImage(circleId, ref, Modifier.size(56.dp).clip(RoundedCornerShape(10.dp)))
                 }
             }
             pendingMusic?.let { m ->
                 Row(Modifier.padding(start = 16.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     MusicChip(m)
-                    Icon(Icons.Filled.Close, "Remove song", tint = Color.White,
+                    Icon(Icons.Filled.Close, "Remove song", tint = HavenTheme.textPrimary,
                         modifier = Modifier.padding(start = 6.dp).size(18.dp).clickable { pendingMusic = null })
                 }
             }
@@ -449,7 +450,7 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
                 Row(Modifier.padding(start = 16.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("Editing message", color = HavenTheme.pink, fontSize = 12.sp)
                     Spacer(Modifier.size(10.dp))
-                    Text("Cancel", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp,
+                    Text("Cancel", color = HavenTheme.textSecondary, fontSize = 12.sp,
                         modifier = Modifier.clickable { editingId = null; draft = ""; secretMode = false })
                 }
             }
@@ -473,7 +474,7 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
                     Box(Modifier.size(40.dp).clip(CircleShape).clickable { showOptions = true },
                         contentAlignment = Alignment.Center) {
                         Icon(Icons.Filled.MoreVert, "More options",
-                            tint = if (secretMode || disappearSecs != null) HavenTheme.pink else Color.White.copy(alpha = 0.5f))
+                            tint = if (secretMode || disappearSecs != null) HavenTheme.pink else HavenTheme.textSecondary)
                     }
                     DropdownMenu(expanded = showOptions, onDismissRequest = { showOptions = false }) {
                         DropdownMenuItem(
@@ -514,6 +515,7 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
                             draft = ""; pendingPhoto = null; pendingMusic = null; secretMode = false; editingId = null
                         },
                     contentAlignment = Alignment.Center,
+                    // White-on-brand-gradient — never themed.
                 ) { Icon(Icons.AutoMirrored.Filled.Send, "Send", tint = Color.White) }
             }
         }
@@ -549,6 +551,8 @@ private fun Bubble(
                 modifier = Modifier.padding(start = 4.dp, bottom = 2.dp),
             )
         }
+        // MY bubble is a pink FILL (white content, both modes); theirs is a theme card (themed content).
+        val bubbleContent = if (mine) Color.White else HavenTheme.textPrimary
         Column(
             Modifier.widthIn(max = 280.dp).clip(RoundedCornerShape(18.dp))
                 .background(if (mine) HavenTheme.pink else HavenTheme.card)
@@ -557,7 +561,7 @@ private fun Bubble(
         ) {
             m.media.forEach { ref ->
                 when {
-                    com.blaineam.haven.core.LocalMedia.isAudio(ref) -> AudioPlayerPill(circleId, ref)
+                    com.blaineam.haven.core.LocalMedia.isAudio(ref) -> AudioPlayerPill(circleId, ref, contentColor = bubbleContent)
                     com.blaineam.haven.core.LocalMedia.isVideo(ref) ->
                         VideoTile(circleId, ref, Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)))
                     else -> MediaImage(circleId, ref, Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)))
@@ -565,8 +569,8 @@ private fun Bubble(
                 if (text.isNotBlank() || m.music != null) Spacer(Modifier.size(6.dp))
             }
             if (text.isNotBlank()) {
-                if (com.blaineam.haven.core.SecretMessages.isSecret(text)) SecretBubble(text)
-                else LinkedText(text, color = Color.White, fontSize = 15.sp)
+                if (com.blaineam.haven.core.SecretMessages.isSecret(text)) SecretBubble(text, bubbleContent)
+                else LinkedText(text, color = bubbleContent, fontSize = 15.sp)
             }
             // A shared song renders as the same chip as in the feed.
             m.music?.let { mus ->
@@ -585,7 +589,7 @@ private fun Bubble(
                                 else HavenNet.react(circleId, m.id, r.emoji)
                             }
                             .padding(horizontal = 8.dp, vertical = 3.dp),
-                    ) { Text("${r.emoji} ${r.count}", fontSize = 12.sp, color = Color.White) }
+                    ) { Text("${r.emoji} ${r.count}", fontSize = 12.sp, color = HavenTheme.textPrimary) }
                 }
             }
         }

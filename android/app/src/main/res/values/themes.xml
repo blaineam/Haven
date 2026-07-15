@@ -3,9 +3,11 @@
     <!-- A bare Material3 base theme. The real visual language lives in Compose (HavenTheme).
          We disable the action bar since the whole UI is Compose. -->
     <style name="Theme.Haven" parent="android:Theme.Material.NoActionBar">
-        <item name="android:windowBackground">@android:color/black</item>
+        <!-- Both of these resolve per-mode out of values/ vs values-night/. ONE style definition so a
+             future item can't silently drift between the two modes. -->
+        <item name="android:windowBackground">@color/haven_window_background</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
-        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightStatusBar">@bool/haven_light_status_bar</item>
     </style>
 </resources>

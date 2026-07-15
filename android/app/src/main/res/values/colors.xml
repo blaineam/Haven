@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The pre-Compose launch background. Must track HavenTheme.background (Theme.kt) or the window
+         flashes the wrong mode's backdrop before the first Compose frame lands. -->
+    <color name="haven_window_background">#F6F4FA</color>
+</resources>

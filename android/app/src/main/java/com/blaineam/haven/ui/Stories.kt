@@ -109,7 +109,7 @@ fun StoriesTray(groups: List<StoryGroup>, onAddStory: () -> Unit, onOpen: (Int) 
                         } else {
                             androidx.compose.material3.Text(
                                 if (g.isMe) "You" else g.authorShort.take(2),
-                                color = Color.White, fontSize = 13.sp,
+                                color = HavenTheme.textPrimary, fontSize = 13.sp,
                             )
                         }
                     }
@@ -117,7 +117,7 @@ fun StoriesTray(groups: List<StoryGroup>, onAddStory: () -> Unit, onOpen: (Int) 
                 Spacer(Modifier.height(4.dp))
                 androidx.compose.material3.Text(
                     if (g.isMe) "You" else com.blaineam.haven.core.HavenNet.displayName(g.authorShort),
-                    color = Color.White, fontSize = 11.sp, maxLines = 1,
+                    color = HavenTheme.textPrimary, fontSize = 11.sp, maxLines = 1,
                 )
             }
         }
@@ -129,6 +129,7 @@ fun StoriesTray(groups: List<StoryGroup>, onAddStory: () -> Unit, onOpen: (Int) 
 @Composable
 private fun StoryActionChip(label: String, onClick: () -> Unit) {
     androidx.compose.material3.Text(
+        // Story chrome sits on the story media — always white.
         label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
         modifier = Modifier.clip(androidx.compose.foundation.shape.RoundedCornerShape(50))
             .background(Color.White.copy(alpha = 0.22f))
@@ -280,7 +281,7 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
             androidx.compose.material3.AlertDialog(
                 onDismissRequest = { confirmDelete = false },
                 containerColor = HavenTheme.card,
-                title = { androidx.compose.material3.Text("Delete this story?", color = Color.White) },
+                title = { androidx.compose.material3.Text("Delete this story?", color = HavenTheme.textPrimary) },
                 text = { androidx.compose.material3.Text("It will be removed from your story and for everyone you shared it with.", color = HavenTheme.textSecondary) },
                 confirmButton = {
                     androidx.compose.material3.TextButton(onClick = {

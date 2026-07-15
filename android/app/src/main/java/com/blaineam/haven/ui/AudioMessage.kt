@@ -42,9 +42,16 @@ import com.blaineam.haven.core.AudioRecorder
 import com.blaineam.haven.core.LocalMedia
 import kotlinx.coroutines.delay
 
-/** A play/pause pill for a received voice message (decrypts the aud_ ref + plays via MediaPlayer). */
+/** A play/pause pill for a received voice message (decrypts the aud_ ref + plays via MediaPlayer).
+ *  `contentColor` is the ENCLOSING surface's foreground — the pill rides inside a DM bubble that is
+ *  either a pink fill (white content) or a theme card (themed content). */
 @Composable
-fun AudioPlayerPill(circleId: String, ref: String, modifier: Modifier = Modifier) {
+fun AudioPlayerPill(
+    circleId: String,
+    ref: String,
+    modifier: Modifier = Modifier,
+    contentColor: Color = HavenTheme.textPrimary,
+) {
     var playing by remember(ref) { mutableStateOf(false) }
     val player = remember(ref) { MediaPlayer() }
     val context = LocalContext.current
@@ -65,7 +72,7 @@ fun AudioPlayerPill(circleId: String, ref: String, modifier: Modifier = Modifier
         onDispose { runCatching { player.release() }; runCatching { audioManager.abandonAudioFocusRequest(focusRequest) } }
     }
     androidx.compose.foundation.layout.Row(
-        modifier.clip(RoundedCornerShape(20.dp)).background(Color.White.copy(alpha = 0.18f))
+        modifier.clip(RoundedCornerShape(20.dp)).background(contentColor.copy(alpha = 0.18f))
             .clickable {
                 if (playing) { runCatching { player.pause() }; playing = false }
                 else {
@@ -90,9 +97,9 @@ fun AudioPlayerPill(circleId: String, ref: String, modifier: Modifier = Modifier
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, "Play", tint = Color.White, modifier = Modifier.size(20.dp))
+        Icon(if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, "Play", tint = contentColor, modifier = Modifier.size(20.dp))
         Spacer(Modifier.size(8.dp))
-        Text("Voice message", color = Color.White, fontSize = 13.sp)
+        Text("Voice message", color = contentColor, fontSize = 13.sp)
     }
 }
 

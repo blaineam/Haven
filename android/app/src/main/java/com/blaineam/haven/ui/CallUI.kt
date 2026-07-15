@@ -100,6 +100,15 @@ fun rememberCallStarter(): (List<String>, String) -> Unit {
     }
 }
 
+/**
+ * The in-call palette. Fixed, NOT the [HavenTheme] tokens: the call surface is deliberately black in
+ * BOTH modes, so it needs dark-mode colours even when the app is light. `HavenTheme.card` here was a
+ * live light-mode bug — it resolves to pure white, which collided with the white "on" chip state and
+ * made [RoundButton]'s `bg == card` tint test true for every chip, painting white glyphs on white.
+ */
+private val CallChip = Color(0xFF16161D)
+private val CallSecondary = Color(0xFF9A9AA8)
+
 /** The call overlay: incoming ring, or the in-call mesh grid. Mounted at the app root. */
 @Composable
 fun CallOverlay() {
@@ -126,13 +135,13 @@ private fun MinimizedCall() {
                 .clickable { CallManager.minimized.value = false }.padding(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(Modifier.size(50.dp, 66.dp).clip(RoundedCornerShape(10.dp)).background(HavenTheme.card)) {
+            Box(Modifier.size(50.dp, 66.dp).clip(RoundedCornerShape(10.dp)).background(CallChip)) {
                 CallVideoTile(firstRemote, Modifier.fillMaxSize())
             }
             Spacer(Modifier.size(10.dp))
             Column {
                 Text(name.ifBlank { "Haven call" }, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                Text("Tap to return", color = HavenTheme.textSecondary, fontSize = 11.sp)
+                Text("Tap to return", color = CallSecondary, fontSize = 11.sp)
             }
             Spacer(Modifier.size(12.dp))
             Box(Modifier.size(40.dp).clip(CircleShape).background(Color(0xFFEF4444)).clickable { CallManager.hangup() },
@@ -148,11 +157,11 @@ private fun IncomingCall() {
     val name by CallManager.peerName
     Box(Modifier.fillMaxSize().background(Color(0xF2000000)), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            ConstellationMark(Modifier.size(72.dp))
+            ConstellationMark(Modifier.size(72.dp), color = Color.White)   // fixed-black ring surface
             Spacer(Modifier.height(20.dp))
             Text(name.ifBlank { "Incoming call" }, color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(4.dp))
-            Text("Haven call", color = HavenTheme.textSecondary, fontSize = 14.sp)
+            Text("Haven call", color = CallSecondary, fontSize = 14.sp)
             Spacer(Modifier.height(48.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(48.dp)) {
                 RoundButton(Icons.Filled.CallEnd, Color(0xFFEF4444), "Decline") { CallManager.decline() }
@@ -223,7 +232,7 @@ private fun InCall() {
         // Local self-preview.
         Box(
             Modifier.align(Alignment.TopEnd).padding(12.dp).size(96.dp, 132.dp)
-                .clip(RoundedCornerShape(12.dp)).background(HavenTheme.card),
+                .clip(RoundedCornerShape(12.dp)).background(CallChip),
         ) { CallVideoTile(CallManager.localVideo, Modifier.fillMaxSize(), mirror = true) }
 
         // Title + minimize (return to the app while the call continues).
@@ -246,20 +255,20 @@ private fun InCall() {
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 RoundButton(if (micOn) Icons.Filled.Mic else Icons.Filled.MicOff,
-                    if (micOn) HavenTheme.card else Color.White, "Mic") { CallManager.toggleMic() }
+                    if (micOn) CallChip else Color.White, "Mic") { CallManager.toggleMic() }
                 RoundButton(if (speakerOn) Icons.Filled.VolumeUp else Icons.Filled.PhoneInTalk,
-                    if (speakerOn) Color.White else HavenTheme.card, if (speakerOn) "Speaker on" else "Speaker off") {
+                    if (speakerOn) Color.White else CallChip, if (speakerOn) "Speaker on" else "Speaker off") {
                     CallManager.toggleSpeaker()
                 }
                 RoundButton(if (cameraOn) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
-                    if (cameraOn) HavenTheme.card else Color.White, "Camera") { CallManager.toggleCamera() }
+                    if (cameraOn) CallChip else Color.White, "Camera") { CallManager.toggleCamera() }
                 if (cameraOn) {
-                    RoundButton(Icons.Filled.Cameraswitch, HavenTheme.card, "Flip") { CallManager.switchCamera() }
+                    RoundButton(Icons.Filled.Cameraswitch, CallChip, "Flip") { CallManager.switchCamera() }
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 RoundButton(if (sharing) Icons.Filled.StopScreenShare else Icons.Filled.ScreenShare,
-                    if (sharing) Color.White else HavenTheme.card, "Share screen") {
+                    if (sharing) Color.White else CallChip, "Share screen") {
                     if (sharing) CallManager.stopScreenShare()
                     else {
                         val mpm = context.getSystemService(android.content.Context.MEDIA_PROJECTION_SERVICE)
@@ -267,7 +276,7 @@ private fun InCall() {
                         projectionLauncher.launch(mpm.createScreenCaptureIntent())
                     }
                 }
-                RoundButton(Icons.Filled.PersonAdd, HavenTheme.card, "Add people",
+                RoundButton(Icons.Filled.PersonAdd, CallChip, "Add people",
                     enabled = CallManager.addableContacts().isNotEmpty()) { showAddPeople = true }
                 RoundButton(Icons.Filled.CallEnd, Color(0xFFEF4444), "End") { CallManager.hangup() }
             }
@@ -282,7 +291,7 @@ private fun AddToCallPicker(onDismiss: () -> Unit) {
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = HavenTheme.card,
-        title = { Text("Add to call", color = Color.White) },
+        title = { Text("Add to call", color = HavenTheme.textPrimary) },
         text = {
             LazyColumn(Modifier.heightIn(max = 320.dp)) {
                 lazyItems(candidates, key = { it.idHex }) { c: Contact ->
@@ -294,7 +303,7 @@ private fun AddToCallPicker(onDismiss: () -> Unit) {
                     ) {
                         HavenAvatar(idOrShort = c.idHex, name = c.name, size = 34.dp)
                         Spacer(Modifier.size(10.dp))
-                        Text(c.name, color = Color.White, fontSize = 15.sp, modifier = Modifier.weight(1f))
+                        Text(c.name, color = HavenTheme.textPrimary, fontSize = 15.sp, modifier = Modifier.weight(1f))
                         Icon(Icons.Filled.PersonAdd, null, tint = HavenTheme.pink)
                     }
                 }
@@ -350,6 +359,6 @@ private fun RoundButton(icon: ImageVector, bg: Color, desc: String, enabled: Boo
         contentAlignment = Alignment.Center,
     ) {
         Icon(icon, desc, modifier = Modifier.size(26.dp),
-            tint = (if (bg == HavenTheme.card) Color.White else Color.Black).copy(alpha = if (enabled) 1f else 0.5f))
+            tint = (if (bg == CallChip) Color.White else Color.Black).copy(alpha = if (enabled) 1f else 0.5f))
     }
 }

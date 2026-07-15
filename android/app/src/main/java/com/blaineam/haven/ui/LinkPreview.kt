@@ -59,7 +59,7 @@ fun LinkPreviewCard(text: String, modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxWidth().height(160.dp))
         }
         Column(Modifier.padding(12.dp)) {
-            Text(p.title.ifBlank { p.domain }, color = androidx.compose.ui.graphics.Color.White,
+            Text(p.title.ifBlank { p.domain }, color = HavenTheme.textPrimary,
                 fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 2)
             if (p.desc.isNotBlank()) {
                 Text(p.desc, color = HavenTheme.textSecondary, fontSize = 12.sp, maxLines = 2)

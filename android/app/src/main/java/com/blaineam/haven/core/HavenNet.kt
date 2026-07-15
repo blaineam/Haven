@@ -1149,10 +1149,12 @@ object HavenNet : InboundListener {
         afterAuthor(circleId, env)
     }
 
-    fun comment(circleId: String, postId: String, body: String) {
-        if (body.isBlank()) return
-        val env = runCatching { social.comment(circleId, postId, body, emptyList(), nowMs()) }.getOrNull() ?: return
+    fun comment(circleId: String, postId: String, body: String, media: List<String> = emptyList()) {
+        // A media-only reply (a photo or a voice note with no text) is valid — iOS allows it too.
+        if (body.isBlank() && media.isEmpty()) return
+        val env = runCatching { social.comment(circleId, postId, body, media, nowMs()) }.getOrNull() ?: return
         afterAuthor(circleId, env)
+        media.forEach { enqueueBackup(circleId, it) }   // same relay push a post's media gets
     }
 
     /** Edit your own post's text; broadcasts the edit event. */

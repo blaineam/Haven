@@ -70,6 +70,7 @@ fun RelayNudgeBanner(circleId: String) {
     val show = remember(circleId, nudgeV, relaysV, hosting, circlesV) { RelayNudge.shouldShow(circleId) }
     if (!show) return
 
+    // Everything in this banner is white-on-brand-gradient — never themed.
     Row(
         Modifier.fillMaxWidth()
             .background(HavenTheme.brandHorizontal, RoundedCornerShape(16.dp))
@@ -113,7 +114,7 @@ private fun RelayWalkthrough(onDone: () -> Unit) {
         Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 28.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("Set up a relay", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text("Set up a relay", color = HavenTheme.textPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
 
         Point(Icons.Filled.Inbox, "Nobody has to be online at once",
             "Your posts and media are uploaded sealed. Anyone in the circle picks them up whenever they next open Haven — even if you've long since closed the app.")
@@ -165,7 +166,7 @@ private fun Point(icon: ImageVector, title: String, body: String) {
         Icon(icon, contentDescription = null, tint = HavenTheme.pink, modifier = Modifier.size(20.dp))
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text(title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(title, color = HavenTheme.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(3.dp))
             Text(body, color = HavenTheme.textSecondary, fontSize = 12.sp)
         }

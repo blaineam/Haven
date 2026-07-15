@@ -149,7 +149,7 @@ fun MusicSearchSheet(onPick: (TrackRefFfi) -> Unit, onDismiss: () -> Unit) {
                         }
                         Spacer(Modifier.size(12.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(t.title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                            Text(t.title, color = HavenTheme.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
                             Text(t.artist, color = HavenTheme.textSecondary, fontSize = 12.sp, maxLines = 1)
                         }
                         val isPlaying = MusicPlayer.playingUrl == t.previewUrl
@@ -193,7 +193,7 @@ private fun ListenOnMenu(music: TrackRefFfi) {
 @Composable
 private fun ProviderItem(label: String, onClick: () -> Unit) {
     androidx.compose.material3.DropdownMenuItem(
-        text = { Text(label, color = Color.White) },
+        text = { Text(label, color = HavenTheme.textPrimary) },
         onClick = onClick,
     )
 }
@@ -221,7 +221,7 @@ fun MusicChip(music: TrackRefFfi, modifier: Modifier = Modifier) {
         }
         Spacer(Modifier.size(10.dp))
         Column(Modifier.weight(1f)) {
-            Text(music.title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+            Text(music.title, color = HavenTheme.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
             if (music.artist.isNotBlank())
                 Text(music.artist, color = HavenTheme.textSecondary, fontSize = 12.sp, maxLines = 1)
             ListenOnMenu(music)

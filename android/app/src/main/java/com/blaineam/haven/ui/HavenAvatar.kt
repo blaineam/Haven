@@ -53,6 +53,7 @@ fun HavenAvatar(idOrShort: String, name: String, size: Dp, isMe: Boolean = false
         when {
             img != null -> Image(img, "Avatar", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             emoji.isNotBlank() -> Text(emoji, fontSize = (size.value * 0.5f).sp)
+            // White-on-brand-gradient — never themed.
             else -> Text(name.take(1).uppercase().ifBlank { "•" }, color = Color.White,
                 fontWeight = FontWeight.Bold, fontSize = (size.value * 0.4f).sp)
         }

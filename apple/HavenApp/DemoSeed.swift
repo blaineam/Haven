@@ -97,6 +97,11 @@ enum DemoSeeder {
         let mainHex = main.myNodeHex()
         main.createCircle(id: "default", name: "Your circle")
 
+        // The nudge is a PROBLEM state — "this circle has no relay yet". A seeded circle would
+        // trip it (4 members, no relay), so every App Store screenshot would open on a banner
+        // advertising something missing. A relay is the normal setup, so the demo starts past it.
+        RelayNudgeStore.shared.dismiss("default")
+
         // ── The cast ──────────────────────────────────────────────────────────────
         var people = [
             Persona(name: "Maya Quinn",  emoji: "🌸", bio: "ceramics & cold brew",     avatar: "avatar-maya", seedByte: 0xA1),

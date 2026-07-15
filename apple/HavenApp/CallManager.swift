@@ -1432,7 +1432,9 @@ struct CallOverlay: View {
 
     private var incoming: some View {
         ZStack {
-            HavenTheme.brand.opacity(0.96).ignoresSafeArea()
+            // Opaque, not 0.96: this overlays the live feed, and 4% was enough to read post text,
+            // names and the tab bar straight through the call.
+            HavenTheme.brand.ignoresSafeArea()
             VStack(spacing: 16) {
                 Spacer()
                 Image(systemName: call.participants.count > 1 ? "person.3.fill" : "phone.fill.arrow.down.left")
@@ -1461,7 +1463,9 @@ struct CallOverlay: View {
 
     private var active: some View {
         ZStack {
-            HavenTheme.brand.opacity(0.96).ignoresSafeArea()
+            // Opaque, not 0.96 — see `incoming`. The gaps around the tiles are the only place this
+            // shows, and they were showing the feed.
+            HavenTheme.brand.ignoresSafeArea()
             // A peer sharing their screen takes over the layout: their screen fills the view and the
             // participant tiles shrink to a filmstrip along the bottom.
             if let shareHex = call.remoteScreenTracks.keys.sorted().first,

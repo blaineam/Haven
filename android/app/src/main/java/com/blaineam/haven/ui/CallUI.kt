@@ -155,7 +155,9 @@ private fun MinimizedCall() {
 @Composable
 private fun IncomingCall() {
     val name by CallManager.peerName
-    Box(Modifier.fillMaxSize().background(Color(0xF2000000)), contentAlignment = Alignment.Center) {
+    // Opaque: this overlays the live feed, and the 5% that used to show through leaked post
+    // content behind the ring screen (iOS had the same bug, far worse over its light gradient).
+    Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             ConstellationMark(Modifier.size(72.dp), color = Color.White)   // fixed-black ring surface
             Spacer(Modifier.height(20.dp))

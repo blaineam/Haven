@@ -93,6 +93,11 @@ object DemoSeeder {
         val mainHex = HavenNet.nodeIdHex
         runCatching { main.createCircle(DEFAULT_CIRCLE, "Your circle") }
 
+        // The nudge is a PROBLEM state — "this circle has no relay yet". A seeded circle would
+        // trip it (4 members, no relay), so every Play screenshot would open on a banner
+        // advertising something missing. A relay is the normal setup, so the demo starts past it.
+        RelayNudge.dismiss(DEFAULT_CIRCLE)
+
         // ── The cast ──────────────────────────────────────────────────────────────────────
         val people = listOf(
             Persona("Maya Quinn", "🌸", "ceramics & cold brew", 0xA1, "avatar-maya"),

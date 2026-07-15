@@ -1,0 +1,11 @@
+# State holds the account id in plaintext — never commit it.
+*.tfstate
+*.tfstate.*
+.terraform/
+crash.log
+tofu.plan
+*.tfplan
+
+# Real values live here; terraform.tfvars.example is the committed template.
+terraform.tfvars
+*.auto.tfvars

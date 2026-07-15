@@ -1,0 +1,6 @@
+# Copy to terraform.tfvars (gitignored) and fill in, or export TF_VAR_cloudflare_account_id.
+# The API token is NOT set here — export it so it can't be committed by accident:
+#   export CLOUDFLARE_API_TOKEN=...   # needs Account ▸ Workers KV Storage ▸ Edit
+# Cloudflare dashboard ▸ Workers & Pages ▸ right sidebar shows the account id.
+
+cloudflare_account_id = ""

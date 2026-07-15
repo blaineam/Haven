@@ -32,8 +32,13 @@ final class RelayHost: ObservableObject {
     private init() { enabled = d.bool(forKey: enabledKey) }
 
     /// Whether this kind of device makes a good always-on relay (informs the UI copy).
+    ///
+    /// `os(macOS)` for the same reason as `setStartAtLogin`: Catalyst was dropped for the native
+    /// HavenMac target, so a Catalyst-only gate answers FALSE on the shipping Mac app — which fed
+    /// Storage.swift the iPhone/iPad footer telling a Mac user "a Mac or the desktop app is best
+    /// for always-on".
     var isDesktopClass: Bool {
-        #if targetEnvironment(macCatalyst)
+        #if os(macOS) || targetEnvironment(macCatalyst)
         return true
         #else
         return false

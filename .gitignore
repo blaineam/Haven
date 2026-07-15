@@ -39,3 +39,7 @@ android/.kotlin/
 android/app/build/play-screenshots/
 android/fastlane/metadata/android/*/images/
 desktop/screenshots/
+
+# Local miniflare/wrangler state from `wrangler dev` — never a build input, and it has held
+# real KV rows (an F1 ledger entry). Untracked + unignored made it a `git add -A` landmine.
+push/.wrangler/

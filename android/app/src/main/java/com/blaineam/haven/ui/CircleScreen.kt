@@ -706,11 +706,16 @@ private fun MediaBitmapContent(bmp: ImageBitmap?, done: Boolean, modifier: Modif
 @Composable
 private fun MediaThumb(circleId: String, ref: String, modifier: Modifier, onOpen: () -> Unit) {
     Box(modifier.clip(RoundedCornerShape(12.dp)).clickable { onOpen() }) {
-        MediaImage(circleId, ref, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-        if (LocalMedia.isVideo(ref)) {
-            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.18f)), contentAlignment = Alignment.Center) {
-                // White-on-scrim over media — not a theme surface.
-                Icon(Icons.Filled.PlayCircle, "Play", tint = Color.White, modifier = Modifier.size(40.dp))
+        // Honors a flag federated by a member whose platform has an analyzer (iOS parity).
+        SensitiveGuard(circleId, ref, cornerRadius = 12) { _ ->
+            Box(Modifier.fillMaxSize()) {
+                MediaImage(circleId, ref, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                if (LocalMedia.isVideo(ref)) {
+                    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.18f)), contentAlignment = Alignment.Center) {
+                        // White-on-scrim over media — not a theme surface.
+                        Icon(Icons.Filled.PlayCircle, "Play", tint = Color.White, modifier = Modifier.size(40.dp))
+                    }
+                }
             }
         }
     }
@@ -847,7 +852,6 @@ private fun MediaPage(circleId: String, ref: String, containerAspect: Float?, pl
             if (size > FEED_AUTOPLAY_MAX_BYTES) null else LocalMedia.videoFile(circleId, ref)
         }
     }
-    val plays = playing && isVideo && vid != null
     // ONE decode for the page AND its backdrop — they draw the same pixels, so the backdrop can never
     // silently drop out from under media that IS showing. Re-asked once `vid` lands: that decrypt is
     // precisely what turns a video's poster from null into a real frame.
@@ -863,24 +867,31 @@ private fun MediaPage(circleId: String, ref: String, containerAspect: Float?, pl
     }
     // clip() keeps the fill copy from bleeding onto the neighbouring page.
     Box(Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)).clickable { onOpen() }) {
-        // Drawn under everything and never clickable → it can't intercept a tap or the pager's drag.
-        if (letterboxes && bmp != null) MediaBackdrop(bmp, Modifier.matchParentSize())
-        if (plays) {
-            // VideoTile fits the clip inside the bounds it's GIVEN (its own matrix transform), so
-            // handing it the page verbatim letterboxes the video onto the backdrop exactly like a
-            // photo — the page keeps its own pageHeight/pageAspect sizing either way.
-            VideoTile(circleId, ref, Modifier.matchParentSize(), resolved = vid)
-        } else {
-            MediaBitmapContent(bmp, done, Modifier.fillMaxSize(), ContentScale.Fit)
-            if (isVideo) {
-                // A scrim only behind the glyph — a full-page one would grey out the backdrop we just drew.
-                Box(Modifier.align(Alignment.Center).size(52.dp).clip(CircleShape)
-                    .background(Color.Black.copy(alpha = 0.35f)), contentAlignment = Alignment.Center) {
-                    // White-on-scrim over media — not a theme surface.
-                    Icon(Icons.Filled.PlayCircle, "Play", tint = Color.White, modifier = Modifier.size(40.dp))
+      // Honors a flag federated by a member whose platform has an analyzer (iOS parity). A covered
+      // video must NOT autoplay: a blur hides the picture but not the sound.
+      SensitiveGuard(circleId, ref, cornerRadius = 16) { covered ->
+        val plays = playing && isVideo && vid != null && !covered
+        Box(Modifier.fillMaxSize()) {
+            // Drawn under everything and never clickable → it can't intercept a tap or the pager's drag.
+            if (letterboxes && bmp != null) MediaBackdrop(bmp, Modifier.matchParentSize())
+            if (plays) {
+                // VideoTile fits the clip inside the bounds it's GIVEN (its own matrix transform), so
+                // handing it the page verbatim letterboxes the video onto the backdrop exactly like a
+                // photo — the page keeps its own pageHeight/pageAspect sizing either way.
+                VideoTile(circleId, ref, Modifier.matchParentSize(), resolved = vid)
+            } else {
+                MediaBitmapContent(bmp, done, Modifier.fillMaxSize(), ContentScale.Fit)
+                if (isVideo) {
+                    // A scrim only behind the glyph — a full-page one would grey out the backdrop we just drew.
+                    Box(Modifier.align(Alignment.Center).size(52.dp).clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.35f)), contentAlignment = Alignment.Center) {
+                        // White-on-scrim over media — not a theme surface.
+                        Icon(Icons.Filled.PlayCircle, "Play", tint = Color.White, modifier = Modifier.size(40.dp))
+                    }
                 }
             }
         }
+      }
     }
 }
 

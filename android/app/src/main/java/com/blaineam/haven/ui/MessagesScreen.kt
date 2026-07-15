@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -562,9 +563,17 @@ private fun Bubble(
             m.media.forEach { ref ->
                 when {
                     com.blaineam.haven.core.LocalMedia.isAudio(ref) -> AudioPlayerPill(circleId, ref, contentColor = bubbleContent)
+                    // Honors a flag federated by a member whose platform has an analyzer (iOS
+                    // Messages.swift:457,468 wraps the same two cases at radius 14).
                     com.blaineam.haven.core.LocalMedia.isVideo(ref) ->
-                        VideoTile(circleId, ref, Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)))
-                    else -> MediaImage(circleId, ref, Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)))
+                        SensitiveGuard(circleId, ref, cornerRadius = 14) { covered ->
+                            // A blur hides the picture, not the sound — don't play a covered clip.
+                            if (covered) Box(Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp)).background(HavenTheme.card))
+                            else VideoTile(circleId, ref, Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)))
+                        }
+                    else -> SensitiveGuard(circleId, ref, cornerRadius = 14) { _ ->
+                        MediaImage(circleId, ref, Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)))
+                    }
                 }
                 if (text.isNotBlank() || m.music != null) Spacer(Modifier.size(6.dp))
             }

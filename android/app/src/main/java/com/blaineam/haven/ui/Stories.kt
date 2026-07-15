@@ -177,13 +177,19 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
     ) {
         val mediaId = item.media.firstOrNull()
         if (mediaId != null) {
-            // A video story must play in a video view, not the image decoder (was rendering nothing).
-            if (com.blaineam.haven.core.LocalMedia.isVideo(mediaId)) {
-                VideoTile(DEFAULT_CIRCLE, mediaId, Modifier.fillMaxSize())
-            } else {
-                // MediaImage defaults to FillWidth, which letterboxed the story into black bands.
-                // A story is full-bleed on iOS (scaledToFill), so crop to the frame instead.
-                MediaImage(DEFAULT_CIRCLE, mediaId, Modifier.fillMaxSize(), ContentScale.Crop)
+            // Honors a flag federated by a member whose platform has an analyzer. cornerRadius 0 —
+            // a story is full-bleed, exactly as iOS passes it (Stories.swift:123).
+            SensitiveGuard(DEFAULT_CIRCLE, mediaId, cornerRadius = 0) { covered ->
+                // A video story must play in a video view, not the image decoder (was rendering nothing).
+                if (com.blaineam.haven.core.LocalMedia.isVideo(mediaId)) {
+                    // A blur hides the picture, not the sound — don't play a covered story.
+                    if (covered) Box(Modifier.fillMaxSize().background(HavenTheme.card))
+                    else VideoTile(DEFAULT_CIRCLE, mediaId, Modifier.fillMaxSize())
+                } else {
+                    // MediaImage defaults to FillWidth, which letterboxed the story into black bands.
+                    // A story is full-bleed on iOS (scaledToFill), so crop to the frame instead.
+                    MediaImage(DEFAULT_CIRCLE, mediaId, Modifier.fillMaxSize(), ContentScale.Crop)
+                }
             }
         }
         // Decode the iOS-authored caption (was shown raw → gibberish): position + colour it, with

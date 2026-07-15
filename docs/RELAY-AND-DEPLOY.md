@@ -158,20 +158,29 @@ claim it. What we *do* guarantee, enforced by the deploy tool's default config:
 
 - **Zero logging / zero persistence.** RAM-only operation, no access logs, no disk
   spill, provider-side request logging disabled where the provider allows it.
-- **No identity ↔ IP linkage.** Peers authenticate **to each other** end-to-end,
-  never to the relay. The relay/broker sees opaque sealed frames addressed by
-  **ephemeral rendezvous tokens**, not Haven public keys. A node that somehow logged
-  an IP still could not tie it to a Haven identity.
+- **No linkage to a real-world identity — but the relay does see your node id.** Peers
+  authenticate **to each other** end-to-end for *content*, and the relay never holds a
+  content key. It does, however, authenticate the connecting peer by its iroh node id,
+  which **is** that peer's Haven public key (`core/haven-net/src/blobstore.rs:537`): that
+  check is what enforces circle-membership authorization (`blobstore.rs:687-709`) and
+  self-sync slot ownership (`blobstore.rs:742-748`), and it's the reason a stranger who
+  learns the relay id can't enumerate a circle's mailbox. So `IP ↔ node id` is available
+  to the relay in memory while it moves your bytes; nothing persists it. What it cannot do
+  is tie that key to a real-world you — there is no account, name, email or phone in the
+  system to tie it to. Run your own relay, or a circle member's, if that link matters.
 - **No operator-funded quota.** Storage is a Haven relay mailbox (the user's own or a
   volunteer's) or the user's own S3-compatible bucket, so there is no metered allotment
   to enforce (the earlier blind-signed quota-token model was deleted per D15).
-- **Opt-in onion/proxy mode for true hiding (planned — not yet shipped; iroh is QUIC/UDP, which Tor's SOCKS can't carry, so this needs a TCP transport).** The only way a node genuinely cannot
-  see your IP is to not connect to it directly. Haven ships an **optional** mode that
-  routes relay + storage access through Tor or a user-chosen proxy. Off by default
-  (latency cost); on for users who want full IP hiding.
+- **Hiding your IP is your choice of path.** The only way a node genuinely cannot see your
+  IP is to not connect to it directly. Run Haven behind your own VPN, or stand up a
+  relay/discovery node you host yourself — both work today and keep direct P2P and calls
+  intact. An opt-in onion/proxy (Tor) mode was evaluated and **declined**: Tor is TCP-only
+  and can't carry iroh's QUIC/UDP data plane or WebRTC calls, and the only constructible
+  variant is relay-only with no direct P2P and no calling (see `TOR.md`).
 
-Summary of the honest promise: **never logged, never linked to you, optionally fully
-hidden.**
+Summary of the honest promise: **never logged, never sold, never readable.** Not "never
+seen" — a relay necessarily learns `IP ↔ node id` for as long as it is moving your bytes,
+and nothing persists it.
 
 ## The deployment tool (`haven-relay`)
 
@@ -194,9 +203,10 @@ privacy-hardened defaults they can't accidentally turn off.
   **self-registers to discovery** so clients can find and rank it.
 - **Storage-only needs no compute** — a Tofu module that provisions just a bucket +
   scoped creds + auto-expiry + the broker. The cheapest possible relay.
-- **Defaults are the product.** No-logging, RAM-only, and identity-blind rendezvous are
-  *on by default and hard to disable*, so a casual operator can't accidentally run a
-  surveilling relay.
+- **Defaults are the product.** No-logging and RAM-only operation are *on by default and
+  hard to disable*, so a casual operator can't accidentally run a surveilling relay. (What
+  they are *not* is blind to node ids — the membership check needs them; see the IP-privacy
+  section above.)
 
 ## Status
 

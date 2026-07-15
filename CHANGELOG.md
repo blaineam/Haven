@@ -26,6 +26,24 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   time (measured via `dumpsys media.player`), muted by default, capped at 128 MB per clip.
 
 ### Fixed
+- **Docs promised an onion/Tor mode we won't build.** The threat model's IP promise ended in
+  "optionally fully hidden", carried by a "planned, not yet shipped" opt-in onion mode — repeated
+  across five docs, both marketing pages, and the relay README. The research spike (`docs/TOR.md`)
+  concluded **don't recommend**: Tor is TCP-only, so iroh's QUIC/UDP data plane and WebRTC calls can
+  never traverse it, and the one constructible variant deletes direct P2P and calling. It's now
+  recharacterized as evaluated-and-declined, with VPN or a self-hosted relay/discovery node as the
+  supported way to hide your IP from a node. Same honest-IP-guarantees discipline as D14 — an honest
+  downgrade beats a stale promise.
+- **"Never linked to you" was not true, and is gone** (closes audit **F8**). A configured relay
+  authenticates each peer by its iroh node id — which *is* that peer's Haven public key
+  (`blobstore.rs:537`) — because that check is what enforces circle membership (`:687-709`) and
+  self-sync slot ownership (`:742-748`), and what stops a stranger who learns the relay id from
+  enumerating a mailbox. So the relay holds `IP ↔ node id` in memory while it moves your bytes.
+  `RELAY-AND-DEPLOY.md`'s "ephemeral rendezvous tokens, not Haven public keys" described a design
+  that was never built, and contradicted `SECURITY.md`, which was already honest about it. The
+  promise across the docs, both web pages and the relay README is now **never logged, never sold,
+  never readable** — explicitly *not* "never seen" — and what a relay can't do is tie that key to a
+  real-world you, since there's no account, name, email or phone in the system to tie it to.
 - **Relay walkthrough claimed adding a member rotates the circle key. It doesn't** — rotation happens
   on removal/block, device-roster changes, and the periodic `rotate_circle`. The old wording implied a
   new member was cryptographically fenced off from earlier posts; they aren't. Traced to

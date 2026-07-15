@@ -228,13 +228,21 @@ privacy-hardened defaults that are hard to disable.
 *transiently handles* your IP because that's how bytes reach you; "no node ever sees
 your IP" is false and we won't claim it. We **do** guarantee, by default config:
 - **zero logging / zero persistence** (RAM-only, provider logs disabled),
-- **no identity↔IP linkage** (peers auth to each other E2E; relay sees ephemeral
-  rendezvous tokens, not public keys),
+- **no linkage to a real-world you** — but *not* "the relay can't see who's connecting":
+  a relay authenticates the peer by its iroh node id, which **is** your Haven public key
+  (`core/haven-net/src/blobstore.rs:537`), because that's what enforces circle-membership
+  authorization and keeps a stranger from enumerating a mailbox. So `IP ↔ node id` is
+  available to it in memory while it moves your bytes. It has no account, name, email or
+  phone to attach that key to, and it holds no content key,
 - **quota without identity** (blind-signed Privacy-Pass-style tokens),
-- **opt-in onion/proxy mode (planned, not yet shipped)** for true IP *hiding* (the only way a node can't see
-  your IP), off by default for latency.
+- **your own path if you want IP *hiding*** — run behind your own VPN, or use a
+  relay/discovery node you host yourself. An opt-in onion/proxy (Tor) mode was evaluated
+  and **declined**: Tor is TCP-only and cannot carry iroh's QUIC/UDP data plane or WebRTC
+  calls, and the only constructible variant deletes direct P2P and calling (see `TOR.md`).
 
-Promise: **never logged, never linked to you, optionally fully hidden.**
+Promise: **never logged, never sold, never readable.** Not "never seen" — a relay
+necessarily learns `IP ↔ node id` for as long as it is moving your bytes, and nothing
+persists it.
 
 **Why:** Removes you as a central operator, lets the network be genuinely federated,
 and makes the strongest IP claim that is actually true rather than a comforting lie.

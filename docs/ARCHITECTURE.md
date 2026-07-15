@@ -111,8 +111,12 @@ service. Full detail in [`RELAY-AND-DEPLOY.md`](RELAY-AND-DEPLOY.md).
   chain). This is the BYO / quota'd-bucket model — the user's own storage, or any
   community member's, never required to be yours.
 
-Both run with **hardened, no-log, identity-blind defaults**; IPs are never logged or
-linked to identities. Today's IP privacy is **relay-mediated** (peers never see each
-other's IP) plus run-behind-your-own-VPN; a Tor/onion transport is *not* shipped (iroh is
-UDP/QUIC and Tor's SOCKS can't carry UDP). A **`haven-relay`** deployment tool stands
+Both run with **hardened, no-log defaults**; IPs are never logged or persisted, and there
+is no account, name or email in the system to tie one to — though a relay does authenticate
+peers by node id (= their public key) to enforce membership, so `IP ↔ node id` is visible to
+it in memory while it moves bytes (see `THREAT-MODEL.md`). IP privacy is **relay-mediated**
+(peers never see each other's IP)
+plus run-behind-your-own-VPN or a relay/discovery node you host yourself; a Tor/onion
+transport was evaluated and declined (iroh is UDP/QUIC and Tor's SOCKS can't carry UDP —
+see `TOR.md`). A **`haven-relay`** deployment tool stands
 either role up on most clouds in one command.

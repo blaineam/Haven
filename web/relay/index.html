@@ -403,8 +403,11 @@ cargo build --release -p haven-relay --target x86_64-pc-windows-gnu</code></pre>
       <div class="callout reveal" style="margin-top:18px">
         <b>On your IP address, honestly:</b> a relay <em>does</em> briefly handle your IP — that's
         physically how bytes reach you. Haven's hardened defaults mean it's <b>never logged, never
-        persisted, and never linked to your identity</b> (peers authenticate to each other, never to the
-        relay). To hide your IP from a relay entirely, run Haven behind your own VPN or host your own
+        persisted, and never tied to a real-world you</b> — there's no account, name or email in the
+        system to tie it to. Being precise: a relay authenticates each peer by its node id (which is
+        that peer's public key), because that check is what stops a stranger who learns the relay id
+        from enumerating a circle's mailbox — so it does hold <b>IP ↔ node id</b> in memory while it
+        moves your bytes, and persists neither. To hide your IP from a relay entirely, run Haven behind your own VPN or host your own
         relay; a built-in onion/Tor mode was evaluated and declined, because Tor can't carry the
         traffic Haven's calls and direct connections depend on. The relay link itself carries
         <b>no content key, no roster secret</b> — so adding a relay can never turn it into a content reader.

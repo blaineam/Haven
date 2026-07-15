@@ -250,7 +250,8 @@ saved circle link, and the (sealed) blob store; the de-dup set is RAM-only and b
 the blob store logs nothing; `rclone` (only when you opt into `--s3`/`--rclone-remote`)
 runs at `--log-level ERROR` bound to loopback only. As with any relay, it transiently
 handles your IP (that is physically how bytes reach you) — see `docs/RELAY-AND-DEPLOY.md`
-for the honest IP-privacy promise and the opt-in onion/proxy mode.
+for the honest IP-privacy promise, and for why VPN or a self-hosted relay — not an onion
+mode — is the supported way to hide your IP from a node.
 
 ### Free / cheap always-on hosting
 

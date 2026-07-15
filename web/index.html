@@ -301,7 +301,7 @@
           <h3 style="font-size:20px;margin-bottom:8px">The honest limits</h3>
           <ul class="points" style="margin-top:6px">
             <li><span class="dot"></span><span>A <b>relay</b> (an optional helper) can see that <em>some</em> encrypted bytes passed through, but never what they say.</span></li>
-            <li><span class="dot"></span><span>To deliver bytes to you, a relay <b>briefly handles your IP address</b> — never logged, never tied to who you are.</span></li>
+            <li><span class="dot"></span><span>To deliver bytes to you, a relay <b>briefly handles your IP address</b> — never logged, never stored, and never tied to a name, because there isn't one.</span></li>
             <li><span class="dot"></span><span>Friends <b>never see each other's IP</b> when a relay is in the path — only the relay does, briefly.</span></li>
             <li><span class="dot"></span><span>If someone steals your unlocked, malware-infected device, they have your device. No app on earth fixes that.</span></li>
           </ul>
@@ -309,8 +309,13 @@
             <summary><span class="tag-tech">What that means for your IP</span><span class="chev">›</span></summary>
             <div class="tbody">
               <p>A relay handling your IP for a moment is just how the internet works — every app you
-                own does the same thing. The difference is that Haven's relay never logs it and can't
-                tie it to who you are, because it doesn't know who you are.</p>
+                own does the same thing. The difference is that Haven's relay never logs it, never
+                stores it, and has nothing to tie it to: no account, no name, no email, no phone.</p>
+              <p>Being precise: while a relay is moving your bytes it does see your app's key — a long
+                random identifier — alongside your IP. It has to check that key, or a stranger could
+                help themselves to your circle's mailbox. It can't read anything with it, and it can't
+                turn it into your name. So the promise is <b>never logged, never sold, never readable</b>
+                — not "never seen".</p>
               <p>If you want to hide your IP from a relay entirely, run Haven behind your own VPN, or
                 host your own relay. We looked hard at a built-in onion/Tor mode and decided against
                 it: Tor can't carry the kind of traffic Haven's calls and direct connections need, so
@@ -321,7 +326,7 @@
       </div>
 
       <div class="callout reveal" style="margin-top:18px">
-        <b>The promise:</b> never logged, never linked to you. For the full picture,
+        <b>The promise:</b> never logged, never sold, never readable. For the full picture,
         read the <a class="inline" href="docs/">threat model and architecture docs</a>.
       </div>
     </div>

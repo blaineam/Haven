@@ -165,10 +165,11 @@ Be precise about who we'd be hiding from.
   anonymity within a group** by design — posts are signed by identity keys, deliberately,
   so members can attribute and remove abuse. Tor does not change that and shouldn't.
 - **From a relay operator (a stranger's Pi)?** This is the **real** exposure, and it's the
-  strongest argument for Tor. But: `THREAT-MODEL.md` already answers it with *never logged,
-  never persisted (RAM-only), never linked to identity* — the relay sees opaque
-  circle-sealed blobs, not your public key — and `SECURITY.md` documents circle-membership
-  authorization so a stranger can't even enumerate. Tor would upgrade "not linked by
+  strongest argument for Tor. But: `THREAT-MODEL.md` answers it with *never logged, never
+  persisted (RAM-only), never tied to a real-world identity* — the relay sees circle-sealed
+  blobs it holds no key for. It *does* see your public key: the node id it authenticates is
+  the same key, which is exactly what `SECURITY.md`'s circle-membership authorization needs
+  to stop a stranger enumerating (audit F8). Tor would upgrade "not linked by
   policy" to "not knowable by construction." That is a genuine improvement, for one hop,
   at the cost of the entire §3 list.
 - **From n0?** `SECURITY.md:38` already discloses IP↔node-id mappings via n0 discovery,
@@ -181,7 +182,8 @@ Be precise about who we'd be hiding from.
 
 Content is already E2E hybrid-PQ (X25519 + ML-KEM-768). Seeds are Secure-Enclave-wrapped.
 There is no account, no telemetry, no plaintext anywhere off-device. **The remaining
-exposure is one hop of transient, unlogged, unlinked IP handling.** Tor is a very large
+exposure is one hop of transient, unlogged `IP ↔ node id` handling — a key with no name
+behind it.** Tor is a very large
 lever aimed at a small, already-mitigated problem — and it would pay for that small win by
 deleting P2P, calls, and media throughput.
 

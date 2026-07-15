@@ -54,10 +54,12 @@ Updated continuously. (Times in your local day.)
 - **Desktop logo now matches iOS/Android**: regenerated the whole Tauri icon set (.png/.ico/
   .icns + Store logos) from the real `apple/.../icon_1024.png`, so the constellation glyph is
   pixel-identical across iPhone, Android, Windows, and Linux.
-- **Tor honesty**: removed the "there's an opt-in onion/Tor mode" claim from the site + softened
-  the design docs to "(planned, not shipped)". Haven is iroh/QUIC (UDP); Tor's SOCKS can't carry
-  UDP, so real onion routing needs a TCP transport — it is **not** built. Today's IP privacy is
-  relay-mediated (peers never see each other's IP) + run-behind-your-own-VPN.
+- **Tor honesty**: removed the "there's an opt-in onion/Tor mode" claim from the site + docs.
+  Haven is iroh/QUIC (UDP); Tor's SOCKS can't carry UDP, so real onion routing needs a TCP
+  transport — it is **not** built. The research spike (`docs/TOR.md`) has since concluded
+  **don't recommend**, and the docs now say evaluated-and-declined rather than "planned".
+  IP privacy is relay-mediated (peers never see each other's IP) + run-behind-your-own-VPN
+  or a self-hosted relay/discovery node.
 - **Relays survive reboot, everywhere**: Windows gets a one-line `install.ps1` that downloads
   `haven-relay.exe` (x86-64 + Arm64) **and registers a logon Scheduled Task** so it relaunches
   on reboot; macOS (launchd) + Linux (systemd) already did. The desktop app added an **"Always-on

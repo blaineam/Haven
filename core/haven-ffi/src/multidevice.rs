@@ -8,9 +8,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use haven_p2p::device::{DeviceCredential, DeviceList};
+use haven_p2p::device::{open_self_sync_key, seal_self_sync_key, DeviceCredential, DeviceList};
 use haven_p2p::identity::{HavenId, Identity};
 use haven_p2p::selfsync::{AccountState, Stamp};
+use haven_p2p::social::SealedEnvelope;
 
 use crate::{hex, HavenError};
 
@@ -304,4 +305,58 @@ pub fn open_account_state(account_seed: Vec<u8>, sealed: Vec<u8>) -> Result<Arc<
     let st = AccountState::open(&acct.self_sync_key(), &sealed)
         .map_err(|e| HavenError::Invalid { msg: format!("open account state failed: {e}") })?;
     Ok(Arc::new(AccountStateHandle { inner: Mutex::new(st) }))
+}
+
+// ── Seed-drop S4 / F11: self-sync WITHOUT the seed ─────────────────────────────────────────
+//
+// `seal_account_state` / `open_account_state` derive the self-sync key from the account seed. A
+// SEEDLESS device (seed-drop S4) never holds the seed — the primary GRANTS it the 32-byte key
+// (`seal_self_sync_key_grant` → `open_self_sync_key_grant`), and the device then seals/opens its
+// own self-sync slots with that bare key. These are the FFI wrappers over `selfsync::AccountState`'s
+// bare-key `seal`/`open` and `device::{seal,open}_self_sync_key`.
+
+/// Seal an account state for the mailbox with a BARE 32-byte self-sync key (not derived from a seed).
+/// Used by a seedless device with the GRANTED key; identical output to `seal_account_state` for the same
+/// key, so a seeded and a seedless device converge on the same slots.
+#[uniffi::export]
+pub fn seal_account_state_with_key(self_sync_key: Vec<u8>, state: Arc<AccountStateHandle>) -> Result<Vec<u8>, HavenError> {
+    let key = id32(&self_sync_key, "self-sync key")?;
+    let st = state.inner.lock().unwrap();
+    Ok(st.seal(&key))
+}
+
+/// Open a `seal_account_state`/`seal_account_state_with_key` blob with a BARE 32-byte self-sync key.
+#[uniffi::export]
+pub fn open_account_state_with_key(self_sync_key: Vec<u8>, sealed: Vec<u8>) -> Result<Arc<AccountStateHandle>, HavenError> {
+    let key = id32(&self_sync_key, "self-sync key")?;
+    let st = AccountState::open(&key, &sealed)
+        .map_err(|e| HavenError::Invalid { msg: format!("open account state failed: {e}") })?;
+    Ok(Arc::new(AccountStateHandle { inner: Mutex::new(st) }))
+}
+
+/// PRIMARY side (holds the seed): seal the account's self-sync key to a seedless device's public bundle,
+/// signed by the account so the device can verify provenance. Returns the sealed grant envelope bytes to
+/// ride the enroll grant / a directed transfer. Wrapper over `device::seal_self_sync_key`.
+#[uniffi::export]
+pub fn seal_self_sync_key_grant(account_seed: Vec<u8>, device_bundle: Vec<u8>) -> Result<Vec<u8>, HavenError> {
+    let acct = Identity::from_seed(&seed32(account_seed)?);
+    let dev = bundle(&device_bundle)?;
+    let env = seal_self_sync_key(&acct, &dev, &acct.self_sync_key())
+        .map_err(|e| HavenError::Invalid { msg: format!("seal self-sync grant failed: {e}") })?;
+    Ok(env.to_bytes())
+}
+
+/// SEEDLESS-DEVICE side: open a grant sealed by `seal_self_sync_key_grant`, verifying the account's
+/// signature against its pinned public bundle, and return the 32-byte self-sync key to store + use with
+/// `seal_account_state_with_key` / `open_account_state_with_key`. A grant sealed to another device (or a
+/// tampered / forged one) fails here. Wrapper over `device::open_self_sync_key`.
+#[uniffi::export]
+pub fn open_self_sync_key_grant(device_seed: Vec<u8>, account_bundle: Vec<u8>, envelope: Vec<u8>) -> Result<Vec<u8>, HavenError> {
+    let dev = Identity::from_seed(&seed32(device_seed)?);
+    let acct = bundle(&account_bundle)?;
+    let env = SealedEnvelope::from_bytes(&envelope)
+        .map_err(|e| HavenError::Invalid { msg: format!("bad grant envelope: {e}") })?;
+    let key = open_self_sync_key(&dev, &acct, &env)
+        .map_err(|e| HavenError::Invalid { msg: format!("open self-sync grant failed: {e}") })?;
+    Ok(key.to_vec())
 }

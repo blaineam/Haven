@@ -1225,7 +1225,14 @@ async function handleFiles(files, after) {
   for (const f of files) {
     const isVideo = f.type.startsWith("video");
     try {
-      const b64 = isVideo ? await fileToBase64(f) : await imageToJpegBase64(f);
+      // Images: canvas re-encode (2048px/0.82) — that already drops all EXIF/GPS. Videos: the picker's
+      // RAW bytes used to be sent verbatim, which carried the capture GPS (in the MP4 `©xyz`/`loci`
+      // userdata) to the whole circle — the desktop half of the leak iOS/Android already close. We
+      // re-encode the video through a canvas + MediaRecorder (the same pipeline the in-app camera uses),
+      // which produces an entirely new container: no source metadata survives, and it's downscaled to
+      // 1080p at the same time. If that re-encode isn't possible in this webview we WARN and skip rather
+      // than silently ship a located original (see optimizeVideoStrippingMetadata).
+      const b64 = isVideo ? await optimizeVideoStrippingMetadata(f) : await imageToJpegBase64(f);
       const ref = await invoke("add_media", { circleId: state.activeCircle, dataBase64: b64, isVideo });
       const url = await invoke("media_data_url", { circleId: state.activeCircle, reference: ref });
       state.attachments.push({ ref, url, isVideo });
@@ -1234,12 +1241,85 @@ async function handleFiles(files, after) {
   }
 }
 
-function fileToBase64(file) {
+// Re-encode a picked video to a metadata-free ≤1080p clip and return its base64. This is the desktop
+// counterpart of iOS `MediaStore.optimizeVideo` / Android `transcodeVideo`: it plays the source into a
+// canvas and captures that (plus the source audio track) with MediaRecorder, so the bytes we send are a
+// BRAND-NEW container — the original's GPS/device/capture metadata cannot ride along. Downscales to a
+// 1920px long edge in the same pass.
+//
+// SECURITY: on any failure we REJECT the attachment (throw) instead of falling back to the raw file —
+// the raw file is exactly the located original we must never post silently. The webviews desktop ships
+// on (WebView2 on Windows, WebKitGTK on Linux) support MediaRecorder — it's the same API the camera
+// dialog already relies on — but if it's unavailable the user is told, not leaked.
+function optimizeVideoStrippingMetadata(file, maxDim = 1920) {
   return new Promise((res, rej) => {
-    const r = new FileReader();
-    r.onload = () => res(r.result.split(",")[1]);
-    r.onerror = rej;
-    r.readAsDataURL(file);
+    if (typeof MediaRecorder === "undefined") {
+      toast("This video can't be stripped of location data on this system, so it wasn't attached.");
+      rej(new Error("MediaRecorder unavailable — refusing to post a video with possible location metadata"));
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    video.muted = true;            // let it autoplay through without audible playback
+    video.playsInline = true;
+    video.preload = "auto";
+    let raf, rec, settled = false;
+    const fail = (e) => {
+      if (settled) return; settled = true;
+      if (raf) cancelAnimationFrame(raf);
+      try { if (rec && rec.state !== "inactive") rec.stop(); } catch {}
+      URL.revokeObjectURL(url);
+      toast("Couldn't process this video's metadata, so it wasn't attached.");
+      rej(e instanceof Error ? e : new Error(String(e)));
+    };
+    video.onerror = () => fail(new Error("video decode failed"));
+    video.onloadedmetadata = () => {
+      const vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
+      const scale = Math.min(1, maxDim / Math.max(vw, vh));
+      const w = Math.max(2, Math.round(vw * scale) & ~1);
+      const h = Math.max(2, Math.round(vh * scale) & ~1);
+      const c = document.createElement("canvas");
+      c.width = w; c.height = h;
+      const ctx = c.getContext("2d");
+      let capStream;
+      try {
+        capStream = c.captureStream(30);
+        // Carry the audio: capture the element's own stream and graft its audio tracks onto the canvas
+        // stream. The re-mux drops the audio's metadata too (fresh container).
+        const elStream = (video.captureStream && video.captureStream()) ||
+          (video.mozCaptureStream && video.mozCaptureStream());
+        if (elStream) elStream.getAudioTracks().forEach((t) => capStream.addTrack(t));
+      } catch (e) { return fail(e); }
+      const chunks = [];
+      try { rec = new MediaRecorder(capStream); } catch (e) { return fail(e); }
+      const stopDraw = () => { if (raf) cancelAnimationFrame(raf); raf = null; };
+      rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+      rec.onstop = async () => {
+        if (settled) return; settled = true;
+        stopDraw();
+        try {
+          const blob = new Blob(chunks, { type: rec.mimeType || "video/webm" });
+          const b64 = await blobToBase64(blob);
+          URL.revokeObjectURL(url);
+          res(b64);
+        } catch (e) { URL.revokeObjectURL(url); rej(e); }
+      };
+      // Drive the canvas draw off requestVideoFrameCallback (fires per PRESENTED video frame) when
+      // available — that's robust even if requestAnimationFrame is throttled (e.g. the window drops to
+      // the background mid-encode), which would otherwise frame-starve the re-encode. Fall back to rAF.
+      const drawFrame = () => ctx.drawImage(video, 0, 0, w, h);
+      if (typeof video.requestVideoFrameCallback === "function") {
+        const step = () => { if (settled) return; drawFrame(); video.requestVideoFrameCallback(step); };
+        video.requestVideoFrameCallback(step);
+      } else {
+        const loop = () => { drawFrame(); raf = requestAnimationFrame(loop); };
+        video.onplay = () => loop();
+      }
+      video.onended = () => { if (rec && rec.state !== "inactive") rec.stop(); };
+      try { rec.start(); } catch (e) { return fail(e); }
+      video.play().catch(fail);
+    };
+    video.src = url;
   });
 }
 

@@ -3,11 +3,14 @@ package com.blaineam.haven.core
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaCodec
+import android.media.MediaFormat
 import android.net.Uri
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.security.MessageDigest
 import kotlin.math.max
+import kotlin.math.min
 
 /**
  * On-device media store: photos are content-addressed (sha-256 of the plaintext, so the id is
@@ -501,26 +504,44 @@ object LocalMedia {
 }
 
 /**
- * Read a picked video, capped to avoid huge attachments (default 60 MB), with its identifying
- * container metadata REMOVED — GPS above all.
+ * Read a picked video for posting. TWO privacy/size concerns are handled here, in order:
  *
- * This used to hand the picker's raw bytes straight to [LocalMedia.store], so a clip recorded with
- * location on carried its capture coordinates to everyone in the circle. Photos were stripped
- * ([loadAndDownscale] re-encodes from a decoded bitmap); video was the hole. iOS strips via
- * `AVAssetExportSession.metadataItemFilter`; this is the Android half.
+ *  1. **Compression (optimize on — the default).** When the active circle's optimize setting is on,
+ *     the clip is TRANSCODED to ≤1080p H.264 + copied audio via [transcodeVideo] (Android has no
+ *     one-liner — it's a MediaCodec decode→encoder-input-surface pipeline). This matches iOS's
+ *     `optimizeVideo` (AVAssetExportPreset1920x1080, H.264, faststart): a full-HD re-encode, so a
+ *     4K/200 MB original lands well under the cap and every recipient can decode it. Because the
+ *     transcode writes a brand-new container via [MediaMuxer], it ALSO drops all identifying
+ *     metadata (GPS included) — the same guarantee the strip-remux below gives.
  *
- * The strip is a [MediaExtractor] → [MediaMuxer] passthrough remux: samples are copied verbatim, so
- * there is NO re-encode (same codec, same quality, no CPU burn on a big clip), but the muxer writes a
- * fresh container and only the boxes we ask for. Location rides in the container's `loci`/`udta`
- * userdata, which a new muxer emits only via `setLocation` — never called here, so it's simply gone.
- * The rotation hint IS carried across ([MediaMuxer.setOrientationHint]); it's display geometry, not
- * an identifier, and dropping it would turn every portrait clip sideways.
+ *  2. **Metadata strip (always — parity with iOS).** If optimize is off, or the transcode fails for
+ *     any reason (unsupported codec, encoder init, a stall), we fall back to the passthrough
+ *     [stripVideoMetadata] remux: samples are copied verbatim (NO re-encode, same quality) into a
+ *     fresh container that carries only the boxes we ask for. Location rides in the container's
+ *     `loci`/`udta` userdata, which a new muxer emits only via `setLocation` — never called — so
+ *     it's simply gone. The rotation hint IS carried across; it's display geometry, not an identifier.
  *
- * Falls back to the raw bytes only if the remux fails outright (an unmuxable source) — the same
- * "post something rather than nothing" tradeoff iOS makes, and the one path that can still carry
- * metadata.
+ * The 60 MB cap is applied AFTER whichever path ran (a transcoded clip is checked at its final size,
+ * not its original). Falls back to the raw bytes only if BOTH the transcode and the remux fail
+ * outright — the same "post something rather than nothing" tradeoff iOS makes, and the one path that
+ * can still carry metadata (reachable only when AVFoundation's Android analogue can't process the
+ * asset at all).
+ *
+ * Historical note: this used to hand the picker's raw bytes straight to [LocalMedia.store], so a clip
+ * recorded with location on carried its capture coordinates to everyone in the circle.
  */
 fun readVideoBytes(context: Context, uri: Uri, maxBytes: Int = 60 * 1024 * 1024): ByteArray? {
+    // Optimize per the active circle's override (falls back to the app-wide default), same as photos
+    // ([loadAndDownscale]) — media is picked while composing for that circle.
+    val optimize = runCatching { CircleSettings.optimize(HavenNet.activeCircle.value) }.getOrDefault(true)
+    if (optimize) {
+        // Transcode reads the source directly (MediaExtractor), NOT the capped raw read below — so a
+        // large 4K original that would blow the cap is shrunk first, then checked against it. On any
+        // failure it returns null and we fall through to the always-on metadata strip.
+        transcodeVideo(context, uri, maxBytes)?.let { return it }
+    }
+    // Optimize off, or transcode failed: passthrough strip-remux (metadata gone, no re-encode). The raw
+    // read here is capped, so an un-optimizable clip over the cap is rejected rather than sent huge.
     val raw = runCatching {
         context.contentResolver.openInputStream(uri)?.use { input ->
             val bytes = input.readBytes()
@@ -528,6 +549,196 @@ fun readVideoBytes(context: Context, uri: Uri, maxBytes: Int = 60 * 1024 * 1024)
         }
     }.getOrNull() ?: return null
     return stripVideoMetadata(context, uri, maxBytes) ?: raw
+}
+
+/**
+ * Transcode a picked video to a network-friendly ≤1080p H.264 MP4 (+ audio copied through), the
+ * Android counterpart of iOS `MediaStore.optimizeVideo`. Returns the encoded bytes, or null on ANY
+ * failure/stall so the caller falls back to the lossless metadata-strip remux.
+ *
+ * Pipeline: source → [MediaExtractor] → hardware [MediaCodec] decoder → the ENCODER'S INPUT SURFACE →
+ * [MediaCodec] AVC encoder → [MediaMuxer]. Feeding the decoder straight into the encoder's input
+ * surface means the BufferQueue backing that surface is sized to the encoder's configured (downscaled)
+ * dimensions, so the frames are scaled to 1080p WITHOUT an OpenGL pass — the surface consumer does the
+ * resize. The audio track is copied through verbatim (no re-encode). Rotation is preserved as a muxer
+ * orientation hint (display geometry, not identity), never baked, so there's no GL and portrait clips
+ * still play upright. The fresh muxer container carries no `loci`/`udta` userdata → GPS is gone.
+ *
+ * Off-heap by construction: frames live in the codecs' native buffers and the surface, never on the
+ * managed heap, so this doesn't reintroduce the large-media OOM the sealed store works so hard to
+ * avoid. A wall-clock stall guard turns a wedged codec into a fallback rather than a hang.
+ */
+private fun transcodeVideo(context: Context, uri: Uri, maxBytes: Int): ByteArray? {
+    val out = File.createTempFile("xcode", ".mp4", context.cacheDir)
+    var extractor: android.media.MediaExtractor? = null
+    var audioEx: android.media.MediaExtractor? = null
+    var decoder: android.media.MediaCodec? = null
+    var encoder: android.media.MediaCodec? = null
+    var muxer: android.media.MediaMuxer? = null
+    var inputSurface: android.view.Surface? = null
+    return try {
+        extractor = android.media.MediaExtractor().apply { setDataSource(context, uri, null) }
+        var videoTrack = -1
+        var srcFormat: android.media.MediaFormat? = null
+        for (i in 0 until extractor.trackCount) {
+            val f = extractor.getTrackFormat(i)
+            if (f.getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true) { videoTrack = i; srcFormat = f; break }
+        }
+        if (videoTrack < 0 || srcFormat == null) return null
+        val srcMime = srcFormat.getString(MediaFormat.KEY_MIME) ?: return null
+        val srcW = srcFormat.getInteger(MediaFormat.KEY_WIDTH)
+        val srcH = srcFormat.getInteger(MediaFormat.KEY_HEIGHT)
+        if (srcW <= 0 || srcH <= 0) return null
+
+        // Audio track (copied through). Its own extractor so track selection can't fight the video's.
+        var audioTrack = -1
+        var audioFormat: android.media.MediaFormat? = null
+        for (i in 0 until extractor.trackCount) {
+            val f = extractor.getTrackFormat(i)
+            if (f.getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true) { audioTrack = i; audioFormat = f; break }
+        }
+
+        // Fit within 1920x1080 (long×short edge), preserving aspect, never upscaling; even dims (H.264).
+        fun even(v: Int) = (v and 1.inv()).coerceAtLeast(2)
+        val srcLong = max(srcW, srcH).toDouble()
+        val srcShort = min(srcW, srcH).toDouble()
+        val scale = minOf(1.0, 1920.0 / srcLong, 1080.0 / srcShort)
+        val dstW = even((srcW * scale).toInt())
+        val dstH = even((srcH * scale).toInt())
+
+        // Target bitrate ≈ 4 bits/pixel, clamped to a 2–8 Mbps sane 1080p band. If the source declares a
+        // lower bitrate, never inflate past it.
+        val srcBitrate = if (srcFormat.containsKey(MediaFormat.KEY_BIT_RATE)) srcFormat.getInteger(MediaFormat.KEY_BIT_RATE) else Int.MAX_VALUE
+        val bitrate = ((dstW.toLong() * dstH * 4).coerceIn(2_000_000L, 8_000_000L)).toInt().coerceAtMost(srcBitrate)
+        val fps = if (srcFormat.containsKey(MediaFormat.KEY_FRAME_RATE)) srcFormat.getInteger(MediaFormat.KEY_FRAME_RATE).coerceIn(1, 60) else 30
+
+        val outFormat = MediaFormat.createVideoFormat("video/avc", dstW, dstH).apply {
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+            setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
+            setInteger(MediaFormat.KEY_FRAME_RATE, fps)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+        }
+        encoder = MediaCodec.createEncoderByType("video/avc")
+        encoder.configure(outFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        inputSurface = encoder.createInputSurface()
+        encoder.start()
+
+        decoder = MediaCodec.createDecoderByType(srcMime)
+        decoder.configure(srcFormat, inputSurface, null, 0)
+        decoder.start()
+        extractor.selectTrack(videoTrack)
+
+        muxer = android.media.MediaMuxer(out.absolutePath, android.media.MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        val rotation = if (srcFormat.containsKey(MediaFormat.KEY_ROTATION)) srcFormat.getInteger(MediaFormat.KEY_ROTATION) else runCatching {
+            android.media.MediaMetadataRetriever().use { r ->
+                r.setDataSource(context, uri)
+                r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull()
+            }
+        }.getOrNull() ?: 0
+        if (rotation != 0) muxer.setOrientationHint(rotation)
+
+        val TIMEOUT = 10_000L
+        val STALL_MS = 20_000L
+        val info = MediaCodec.BufferInfo()
+        var inputDone = false
+        var decodeDone = false
+        var encodeDone = false
+        var muxerStarted = false
+        var videoOut = -1
+        var audioOut = -1
+        var lastProgress = System.currentTimeMillis()
+
+        while (!encodeDone) {
+            if (System.currentTimeMillis() - lastProgress > STALL_MS)
+                throw IllegalStateException("transcode stalled")
+
+            // Feed the decoder.
+            if (!inputDone) {
+                val inIdx = decoder.dequeueInputBuffer(TIMEOUT)
+                if (inIdx >= 0) {
+                    val buf = decoder.getInputBuffer(inIdx)!!
+                    val sz = extractor.readSampleData(buf, 0)
+                    if (sz < 0) {
+                        decoder.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                        inputDone = true
+                    } else {
+                        decoder.queueInputBuffer(inIdx, 0, sz, extractor.sampleTime, 0)
+                        extractor.advance()
+                    }
+                }
+            }
+
+            // Drain the decoder → render into the encoder's input surface.
+            if (!decodeDone) {
+                val outIdx = decoder.dequeueOutputBuffer(info, TIMEOUT)
+                if (outIdx >= 0) {
+                    decoder.releaseOutputBuffer(outIdx, info.size > 0)   // render=true pushes to the surface
+                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+                        decodeDone = true
+                        encoder.signalEndOfInputStream()
+                    }
+                    lastProgress = System.currentTimeMillis()
+                }
+            }
+
+            // Drain the encoder → muxer.
+            val encIdx = encoder.dequeueOutputBuffer(info, TIMEOUT)
+            if (encIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                if (muxerStarted) throw IllegalStateException("format changed twice")
+                videoOut = muxer.addTrack(encoder.outputFormat)
+                if (audioFormat != null) audioOut = muxer.addTrack(audioFormat)
+                muxer.start()
+                muxerStarted = true
+            } else if (encIdx >= 0) {
+                val encBuf = encoder.getOutputBuffer(encIdx)!!
+                if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) info.size = 0   // csd already in the track format
+                if (info.size > 0 && muxerStarted) {
+                    encBuf.position(info.offset)
+                    encBuf.limit(info.offset + info.size)
+                    muxer.writeSampleData(videoOut, encBuf, info)
+                    lastProgress = System.currentTimeMillis()
+                }
+                encoder.releaseOutputBuffer(encIdx, false)
+                if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) encodeDone = true
+            }
+        }
+
+        // Copy the audio track through verbatim (no re-encode). Written after the video samples — a
+        // valid MP4 doesn't require cross-track interleave, and this keeps the loop above single-purpose.
+        if (audioOut >= 0 && audioTrack >= 0) {
+            audioEx = android.media.MediaExtractor().apply { setDataSource(context, uri, null) }
+            audioEx.selectTrack(audioTrack)
+            val cap = if (audioFormat!!.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE))
+                audioFormat.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE).coerceAtLeast(64 * 1024) else 256 * 1024
+            val abuf = java.nio.ByteBuffer.allocate(cap)
+            val ainfo = MediaCodec.BufferInfo()
+            while (true) {
+                val sz = audioEx.readSampleData(abuf, 0)
+                if (sz < 0) break
+                ainfo.offset = 0
+                ainfo.size = sz
+                ainfo.presentationTimeUs = audioEx.sampleTime
+                ainfo.flags = audioEx.sampleFlags
+                muxer.writeSampleData(audioOut, abuf, ainfo)
+                audioEx.advance()
+            }
+        }
+
+        muxer.stop()
+        val bytes = out.readBytes()
+        if (bytes.size > maxBytes) null else bytes
+    } catch (t: Throwable) {
+        android.util.Log.w("LocalMedia", "video transcode failed (falling back to strip): ${t.message}")
+        null
+    } finally {
+        runCatching { decoder?.stop() }; runCatching { decoder?.release() }
+        runCatching { encoder?.stop() }; runCatching { encoder?.release() }
+        runCatching { muxer?.release() }
+        runCatching { inputSurface?.release() }
+        runCatching { extractor?.release() }
+        runCatching { audioEx?.release() }
+        runCatching { out.delete() }
+    }
 }
 
 /** The remux behind [readVideoBytes]. Null if the source can't be remuxed (caller falls back). */

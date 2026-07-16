@@ -14,7 +14,7 @@
   <Identity Name="@IDENTITY_NAME@"
             Publisher="@PUBLISHER@"
             Version="@VERSION@"
-            ProcessorArchitecture="x64" />
+            ProcessorArchitecture="@ARCH@" />
 
   <Properties>
     <!-- MUST byte-match a name reserved in Partner Center ▸ Manage app names. Plain "Haven" is taken

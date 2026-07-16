@@ -248,6 +248,10 @@ jobs:
             name: windows
           - os: ubuntu-latest
             name: linux
+          # Native ARM64 Linux GUI build (free arm64-hosted runner on public repos). Produces the
+          # arm64 .deb/.rpm/.AppImage so Windows-on-ARM parity isn't the only arch story.
+          - os: ubuntu-24.04-arm
+            name: linux-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -256,7 +260,7 @@ jobs:
         with:
           workspaces: desktop/src-tauri
       - name: Linux build deps
-        if: matrix.os == 'ubuntu-latest'
+        if: startsWith(matrix.os, 'ubuntu')
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -300,25 +304,57 @@ jobs:
         run: |
           $ver  = "${{ needs.meta.outputs.version }}".Split('-')[0]
           $ver4 = "$ver.0"
-          $stage = "$env:RUNNER_TEMP\msix"
-          New-Item -ItemType Directory -Force -Path "$stage\Assets" | Out-Null
-          $rel = "desktop\src-tauri\target\release"
-          $exe = if (Test-Path "$rel\Haven.exe") { "$rel\Haven.exe" } else { "$rel\haven-desktop.exe" }
-          Copy-Item $exe "$stage\Haven.exe"
-          foreach ($a in 'StoreLogo','Square150x150Logo','Square44x44Logo','Square71x71Logo','Square310x310Logo') {
-            Copy-Item "desktop\src-tauri\icons\$a.png" "$stage\Assets\$a.png"
-          }
-          $m = Get-Content "desktop\msix\AppxManifest.xml.in" -Raw
-          $m = $m.Replace('@IDENTITY_NAME@',    $env:STORE_IDENTITY_NAME).
-                  Replace('@PUBLISHER@',        $env:STORE_PUBLISHER).
-                  Replace('@PUBLISHER_DISPLAY@',$env:STORE_PUBLISHER_DISPLAY).
-                  Replace('@VERSION@',          $ver4)
-          Set-Content "$stage\AppxManifest.xml" $m -Encoding UTF8
           $makeappx = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\makeappx.exe" -ErrorAction SilentlyContinue |
                        Sort-Object FullName -Descending | Select-Object -First 1).FullName
           if (-not $makeappx) { throw "makeappx.exe not found in the Windows SDK" }
-          $msix = "out\Haven-$ver.msix"
-          & $makeappx pack /d "$stage" /p "$msix" /o
+
+          # Stage + pack one arch-specific MSIX from an already-built Haven.exe.
+          function Pack([string]$arch, [string]$relDir) {
+            $exe = if (Test-Path "$relDir\Haven.exe") { "$relDir\Haven.exe" } else { "$relDir\haven-desktop.exe" }
+            if (-not (Test-Path $exe)) { throw "no exe for $arch in $relDir" }
+            $stage = "$env:RUNNER_TEMP\msix-$arch"
+            New-Item -ItemType Directory -Force -Path "$stage\Assets" | Out-Null
+            Copy-Item $exe "$stage\Haven.exe" -Force
+            foreach ($a in 'StoreLogo','Square150x150Logo','Square44x44Logo','Square71x71Logo','Square310x310Logo') {
+              Copy-Item "desktop\src-tauri\icons\$a.png" "$stage\Assets\$a.png" -Force
+            }
+            $m = (Get-Content "desktop\msix\AppxManifest.xml.in" -Raw).
+                   Replace('@IDENTITY_NAME@',    $env:STORE_IDENTITY_NAME).
+                   Replace('@PUBLISHER@',        $env:STORE_PUBLISHER).
+                   Replace('@PUBLISHER_DISPLAY@',$env:STORE_PUBLISHER_DISPLAY).
+                   Replace('@VERSION@',          $ver4).
+                   Replace('@ARCH@',             $arch)
+            Set-Content "$stage\AppxManifest.xml" $m -Encoding UTF8
+            New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\pkgs" | Out-Null
+            & $makeappx pack /d "$stage" /p "$env:RUNNER_TEMP\pkgs\Haven-$arch.msix" /o
+            if ($LASTEXITCODE -ne 0) { throw "makeappx pack failed for $arch" }
+          }
+
+          # x64 is built by the Build step above. Also cross-build a NATIVE arm64 binary so the Store
+          # gets a real ARM64 package — Windows-on-ARM dropped AArch32 and only emulates x64 (slowly).
+          # Kept best-effort: if the arm64 cross-build can't complete on the runner, we ship x64-only
+          # rather than regress. Only the exe is cross-built (the frontend dist from the x64 tauri
+          # build is already embedded via tauri-build) — no arm64 NSIS/MSI bundler needed.
+          $haveArm = $false
+          try {
+            rustup target add aarch64-pc-windows-msvc
+            cargo build --release --manifest-path desktop\src-tauri\Cargo.toml --target aarch64-pc-windows-msvc
+            if ($LASTEXITCODE -eq 0) { $haveArm = $true } else { Write-Host "arm64 cargo build exit $LASTEXITCODE" }
+          } catch { Write-Host "arm64 cross-build failed: $_" }
+
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Pack "x64" "desktop\src-tauri\target\release"
+          if ($haveArm) {
+            Pack "arm64" "desktop\src-tauri\target\aarch64-pc-windows-msvc\release"
+            # One .msixbundle carrying both arches — the Store hands each device its native package.
+            $msix = "out\Haven-$ver.msixbundle"
+            & $makeappx bundle /d "$env:RUNNER_TEMP\pkgs" /p "$msix" /bv $ver4 /o
+            if ($LASTEXITCODE -ne 0) { throw "makeappx bundle failed" }
+          } else {
+            Write-Host "::warning::ARM64 cross-build unavailable — shipping x64-only MSIX (no arm64 flavor this build)."
+            $msix = "out\Haven-$ver.msix"
+            Copy-Item "$env:RUNNER_TEMP\pkgs\Haven-x64.msix" "$msix" -Force
+          }
           "msix=$msix" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Submit MSIX to the Microsoft Store

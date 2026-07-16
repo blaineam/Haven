@@ -13,8 +13,8 @@ use haven_net::blobstore::BlobClient;
 use std::path::PathBuf;
 use p2pcore::crypto::{decapsulate, encapsulate_to, open, seal, Encapsulation};
 use p2pcore::device::{
-    recipients_with_devices, recipients_with_devices_gated, ContactDevices, DeviceCredential,
-    DeviceList, SeedDropCapability,
+    circle_fully_seed_drop_capable, recipients_with_devices, recipients_with_devices_gated,
+    ContactDevices, DeviceCredential, DeviceList, SeedDropCapability,
 };
 use p2pcore::identity::{Identity, HavenId};
 use p2pcore::link::HavenLink;
@@ -2268,10 +2268,15 @@ impl HavenSocial {
             &st.seed_drop_capable,
             st.retire_account_key,
         );
-        // Seed-drop S3: author the commit + events under this DEVICE's key when one is adopted (`signer_of`),
-        // so content is device-attributable and a seedless device (which never held the account seed) can
-        // still sign. Falls back to the ACCOUNT key pre-adoption. Contacts resolve a device signer → its
-        // account via the verified roster (S1), so authorship still binds to the account.
+        // Seed-drop S3: author the commit + events under this DEVICE's key (`signer_of`) — BUT only once the
+        // whole circle is affirmatively seed-drop-capable. This is the backwards-compat gate: a device-signed
+        // envelope's sender is the device, which a pre-S1 peer can't chain to the account, so it would be
+        // unreadable there (SEED-DROP-DESIGN §8/§4.2). Until every member advertises the S1 verifier (and we
+        // hold their rosters), keep signing as the ACCOUNT — a fully-capable circle has no such peer. The S5
+        // retirement gate above is a further, separately-flipped step on top of this. Seedless devices (no
+        // account seed) can only reach this once their circle is capable, which is exactly the S4 precondition.
+        let author_under_device = st.device.is_some()
+            && circle_fully_seed_drop_capable(&accounts, &st.device_lists, &st.seed_drop_capable);
         let mut out: Vec<Vec<u8>> = Vec::new();
         // Share my OWN device roster so peers seal their content to all my devices (and never a revoked
         // one). Idempotent: a same-version roster is ignored on the receiver, so this can't rotation-storm.
@@ -2290,7 +2295,7 @@ impl HavenSocial {
             h.update(&secret);
             // The signer is part of the context: adopting a device key changes who signs the commit, so a
             // cached account-signed commit must not be reused after `use_device_identity`.
-            h.update(&signer_of(&st).public().node_id_bytes());
+            h.update(&signer_of(&st, author_under_device).public().node_id_bytes());
             let mut ids: Vec<[u8; 32]> = members.iter().map(|m| m.node_id_bytes()).collect();
             ids.sort_unstable();
             for id in &ids {
@@ -2301,7 +2306,7 @@ impl HavenSocial {
         match &st.circles[idx].cached_commit {
             Some((ctx, bytes)) if *ctx == commit_ctx => out.push(bytes.clone()),
             _ => {
-                if let Ok(commit) = seal_key_commit(signer_of(&st), &members, circle_id, epoch, &key, &secret) {
+                if let Ok(commit) = seal_key_commit(signer_of(&st, author_under_device), &members, circle_id, epoch, &key, &secret) {
                     let bytes = tagged(TAG_KEY_COMMIT, &commit.to_bytes());
                     st.circles[idx].cached_commit = Some((commit_ctx, bytes.clone()));
                     out.push(bytes);
@@ -2324,7 +2329,7 @@ impl HavenSocial {
             }
         }
         for e in &events {
-            if let Ok(env) = seal_event_in_epoch(signer_of(&st), circle_id, epoch, &key, e) {
+            if let Ok(env) = seal_event_in_epoch(signer_of(&st, author_under_device), circle_id, epoch, &key, e) {
                 out.push(tagged(TAG_EPOCH_EVENT, &env.to_bytes()));
             }
         }
@@ -2911,12 +2916,18 @@ fn restore_roster(st: &mut NetState, account_bundle: &[u8], list_bytes: &[u8], c
     st.device_lists.insert(acct_id, ContactDevices { list, credentials });
 }
 
-/// The identity that signs outgoing commits + events (seed-drop S3): this DEVICE's key once adopted, else
-/// the ACCOUNT key (pre-multidevice / not-yet-upgraded). A device signer is resolved back to its account by
-/// recipients via the verified roster, so authorship binds to the account either way. Borrowed as a
-/// temporary at each seal site — never held across a mutable circle write.
-fn signer_of(st: &NetState) -> &Identity {
-    st.device.as_ref().unwrap_or(&st.me)
+/// The identity that signs outgoing commits + events (seed-drop S3). When `under_device` (an adopted device
+/// key AND a fully seed-drop-capable circle — computed by the caller), sign under the DEVICE key; a device
+/// signer is resolved back to its account by recipients via the verified roster, so authorship still binds
+/// to the account. Otherwise sign under the ACCOUNT key (pre-adoption, or a circle with any peer that can't
+/// yet verify a device→account chain). Borrowed as a temporary at each seal site — never held across a
+/// mutable circle write.
+fn signer_of(st: &NetState, under_device: bool) -> &Identity {
+    if under_device {
+        st.device.as_ref().unwrap_or(&st.me)
+    } else {
+        &st.me
+    }
 }
 
 /// If `sender_hex` is an AUTHORIZED device of a member of circle `idx` (or of me), return that device's
@@ -3730,13 +3741,19 @@ mod net_tests {
 
         let bob_acct_hex = hex(&Identity::from_seed(&[2u8; 32]).public().node_id_bytes());
 
-        // Bob adopts his DEVICE key + self-registers a v1 roster {account, device}; Alice learns it (and his
-        // capability marker) as it rides the sync bundle.
+        // BOTH adopt device keys + exchange rosters and capability markers, so Bob's circle computes as fully
+        // seed-drop-capable — the precondition for device-key authoring (a partly-legacy circle stays on
+        // account signing so no peer is stranded). Capability rides the roster wire, so it's delivered by a
+        // sync, not by direct ingest.
+        assert!(alice.use_device_identity([98u8; 32].to_vec()));
         assert!(bob.use_device_identity([99u8; 32].to_vec()));
         let bob_dev_hex = bob.my_device_node_hex();
         assert_ne!(bob_dev_hex, bob_acct_hex, "device transport id differs from the account id");
-        let (list, creds) = install_two_device_roster(&bob, [2u8; 32], [99u8; 32]);
-        assert!(alice.ingest_device_roster(bob.my_bundle(), list, creds));
+        let (al_list, al_creds) = install_two_device_roster(&alice, [1u8; 32], [98u8; 32]);
+        let (bo_list, bo_creds) = install_two_device_roster(&bob, [2u8; 32], [99u8; 32]);
+        assert!(alice.ingest_device_roster(bob.my_bundle(), bo_list, bo_creds));
+        assert!(bob.ingest_device_roster(alice.my_bundle(), al_list, al_creds));
+        sync(&alice, &bob, &cid); // Alice's capability marker → Bob (his circle is now fully capable)
 
         // Bob posts. His OUTGOING bundle is signed under the DEVICE key: both the epoch event and the key
         // commit carry sender = Bob's device id, never his account id. (Pre-S3 these were account-signed.)
@@ -3841,19 +3858,26 @@ mod net_tests {
         assert!(mac.set_my_device_roster(list.clone(), creds.clone()));
         assert!(phone.set_my_device_roster(list, creds));
 
-        // Mac posts under its device key; the phone converges the device-committed epoch key into its own
-        // slot and opens the sibling's post (author = Bob's account, is_me = true).
+        // Each posts under its OWN device key. Storing a roster rotates the epoch (verify_and_store_roster),
+        // so both minted independent epoch keys and must converge on the numerically-larger one; convergence
+        // takes a few bidirectional rounds (each device re-seals its events under the agreed key on its next
+        // bundle) — exactly the own-device sync production runs continuously. Trap-B is what makes this
+        // converge AT ALL: a sibling's device-signed commit must land in the own-device key slot, not a peer
+        // slot the read path never consults — if it didn't, no number of rounds would ever open the content.
         mac.post(cid.clone(), "from the mac".into(), vec![], None, None, false, false, 1_000).unwrap();
-        sync(&mac, &phone, &cid);
-        let pf = phone.feed(cid.clone(), 2_000, None);
+        phone.post(cid.clone(), "from the phone".into(), vec![], None, None, false, false, 3_000).unwrap();
+        for _ in 0..4 {
+            sync(&mac, &phone, &cid);
+            sync(&phone, &mac, &cid);
+        }
+
+        let pf = phone.feed(cid.clone(), 5_000, None);
+        let mf = mac.feed(cid.clone(), 5_000, None);
         let seen = pf.iter().find(|m| m.body == "from the mac").expect("phone opens the mac's device-signed post");
         assert!(seen.is_me, "own-account content reads as mine on the sibling device");
-
-        // And the reverse: the phone posts under the converged key; the mac opens it.
-        phone.post(cid.clone(), "from the phone".into(), vec![], None, None, false, false, 3_000).unwrap();
-        sync(&phone, &mac, &cid);
-        assert!(mac.feed(cid.clone(), 4_000, None).iter().any(|m| m.body == "from the phone"),
-                "the mac opens the phone's device-signed post — siblings stay converged");
+        assert!(pf.iter().any(|m| m.body == "from the phone"), "phone sees its own post");
+        assert!(mf.iter().any(|m| m.body == "from the mac"), "mac opens the phone→converged content");
+        assert!(mf.iter().any(|m| m.body == "from the phone"), "mac sees its own post — siblings converge");
     }
 
     /// A pre-seed-drop (legacy) peer is unaffected by the new capability marker: the profile/roster still

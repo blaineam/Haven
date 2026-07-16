@@ -28,6 +28,7 @@
 
 pub mod crypto;
 pub mod device;
+pub mod enroll;
 pub mod groupkey;
 pub mod identity;
 pub mod link;

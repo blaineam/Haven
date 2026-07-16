@@ -38,13 +38,14 @@ This document records what Haven protects, how, and the limits — including the
   **not yet built** (`core/p2pcore/src/device.rs:371-373`); until it lands, the only remedy against a
   genuinely compromised device is starting a new identity.
 - **Forward secrecy — read this carefully.** Pruning bounds it *only once the epoch has actually
-  moved*, and today the epoch moves **only on removal/block/device-roster change**. The periodic
-  rotation the design calls for is implemented in core (`rotate_circle`, `lib.rs:1518`) but **is not
-  yet called by any client** — so in a stable circle with no membership churn, the epoch never
-  advances and one seed compromise still decrypts that circle's history. Haven does **not** have
-  per-message forward secrecy or post-compromise security; that needs MLS, which is **not built**
-  (the current layer is multi-recipient PKE — `core/p2pcore/src/social.rs:14-16`). Wiring the
-  periodic cadence is tracked in `ROADMAP.md` → Outstanding.
+  moved*. The epoch moves on removal/block/device-roster change **and, as of the 2026-07 hardening,
+  on a periodic 7-day cadence** driven by the full sync bundle (`ROTATE_INTERVAL_SECS`, `lib.rs:1061`;
+  `maybe_rotate`, `lib.rs:1131-1149`) — so even a quiet circle with no membership churn advances its
+  epoch, and with the last four epochs retained a seed compromise exposes on the order of the last
+  month of captured ciphertext rather than a circle's whole history. (The manual `rotate_circle` FFI
+  at `lib.rs:1518` remains test-only; the periodic path above is what actually runs.) Haven still
+  does **not** have per-message forward secrecy or post-compromise security; that needs MLS, which is
+  **not built** (the current layer is multi-recipient PKE — `core/p2pcore/src/social.rs:14-16`).
 - **Authentication**: every event is signed and the signer is bound to the event author and circle
   epoch; push notifications are signed (the receiver verifies the sender); push registration is signed
   (the worker verifies the device belongs to the identity). Signatures are domain-separated; there is

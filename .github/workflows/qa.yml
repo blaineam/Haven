@@ -1,0 +1,158 @@
+name: qa
+
+# 🦉 Soren — the release-candidate QA gate.
+#
+# Runs Haven's test suites across every platform via Soren (the QA counterpart to
+# Rocket). Rocket ships; Soren makes sure it's worth shipping.
+#
+# ── WHEN THIS RUNS ───────────────────────────────────────────────────────────────
+#   • push of a release-candidate tag  →  vX.Y.Z-rc.N   (e.g. v1.0.7-rc.1)
+#   • manual workflow_dispatch
+#
+# An rc tag is a PRE-RELEASE candidate: this QA pipeline runs, the release/android
+# workflows BUILD + verify but publish NOTHING to a production store, and — once the
+# board is green — you cut the clean `vX.Y.Z` tag for the official release. The exact
+# tag → action matrix is documented in docs/QA.md.
+#
+# ── HOW SOREN IS OBTAINED (it lives in a SEPARATE repo) ──────────────────────────
+# Soren lives in the shared tools repo (github.com/blaineam/rocket, the `_shared`
+# working copy locally), NOT in Haven. Haven's CI only checks out Haven, so each job
+# ALSO checks out the tools repo *alongside* Haven under $GITHUB_WORKSPACE:
+#     $GITHUB_WORKSPACE/Haven      ← this repo
+#     $GITHUB_WORKSPACE/_shared    ← the tools repo (contains soren/)
+# Then `node ../_shared/soren/soren.mjs` from inside Haven/ resolves exactly like the
+# local Apps/Haven ↔ Apps/_shared sibling layout. Soren is zero-dependency pure Node,
+# so there is nothing to install after checkout. If the tools repo is private, provide
+# a PAT as the SHARED_REPO_TOKEN secret; a public repo needs no token (github.token
+# for a *different* repo has no access, hence the fallback). See _shared/soren/docs/ci.md.
+
+on:
+  push:
+    tags: ["v*-rc.*"]
+  workflow_dispatch:
+    inputs:
+      suites:
+        description: "Optional space-separated suite names (blank = all for the leg)"
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  # Point every checkout of the tools repo at the same place. A public repo ignores
+  # the token; a private one needs a PAT in SHARED_REPO_TOKEN.
+  SHARED_REPO: blaineam/rocket
+
+jobs:
+  # ── Apple: iOS + macOS simulator/host tests on a macOS runner ─────────────────────
+  apple:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: Haven }
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SHARED_REPO }}
+          path: _shared
+          token: ${{ secrets.SHARED_REPO_TOKEN || github.token }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Generate the Xcode project (XcodeGen)
+        working-directory: Haven/apple
+        run: |
+          brew install xcodegen >/dev/null 2>&1 || true
+          xcodegen generate || echo "::warning::xcodegen generate failed — the ios/macos suites will report skipped"
+      - name: Soren — apple suites
+        working-directory: Haven
+        run: node ../_shared/soren/soren.mjs ci Haven ${{ github.event.inputs.suites || 'ios macos' }} --junit soren-apple.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: soren-junit-apple, path: Haven/soren-apple.xml, if-no-files-found: warn }
+
+  # ── Core: the Rust workspace (haven-p2p + haven_ffi incl. the migration harness) ──
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: Haven }
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SHARED_REPO }}
+          path: _shared
+          token: ${{ secrets.SHARED_REPO_TOKEN || github.token }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: Haven/core }
+      - name: Soren — core suite (incl. migration harness)
+        working-directory: Haven
+        run: node ../_shared/soren/soren.mjs ci Haven ${{ github.event.inputs.suites || 'core' }} --junit soren-core.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: soren-junit-core, path: Haven/soren-core.xml, if-no-files-found: warn }
+
+  # ── Desktop: the Tauri Rust side + the web-UI syntax gate ─────────────────────────
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: Haven }
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SHARED_REPO }}
+          path: _shared
+          token: ${{ secrets.SHARED_REPO_TOKEN || github.token }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: Haven/desktop/src-tauri }
+      - name: Linux (Tauri) build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf file
+      - name: Soren — desktop suites
+        working-directory: Haven
+        run: node ../_shared/soren/soren.mjs ci Haven ${{ github.event.inputs.suites || 'desktop desktop-ui' }} --junit soren-desktop.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: soren-junit-desktop, path: Haven/soren-desktop.xml, if-no-files-found: warn }
+
+  # ── Android: JVM unit tests (connected/instrumented tests need an emulator and are
+  #    gracefully skipped by Soren when none is running). Needs the Rust core .so + the
+  #    UniFFI Kotlin bindings that android/build-rust.sh produces. ─────────────────────
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: Haven }
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SHARED_REPO }}
+          path: _shared
+          token: ${{ secrets.SHARED_REPO_TOKEN || github.token }}
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "17" }
+      - uses: android-actions/setup-android@v3
+      - name: Install NDK + platform + build-tools
+        run: |
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "ndk;27.1.12297006"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.1.12297006" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: Haven/core }
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+      - name: Build Rust core (.so per ABI) + UniFFI Kotlin bindings
+        working-directory: Haven
+        env:
+          ABIS: "arm64-v8a armeabi-v7a x86_64 x86"
+        run: ./android/build-rust.sh
+      - name: Soren — android suite (unit; connected auto-skips with no emulator)
+        working-directory: Haven
+        # setup-java exports JAVA_HOME; Soren's config javaHome points at a local macOS
+        # path that doesn't exist here, so the runner keeps the CI JAVA_HOME. It runs
+        # testDebugUnitTest and skips connectedDebugAndroidTest (no emulator on the runner).
+        run: node ../_shared/soren/soren.mjs ci Haven ${{ github.event.inputs.suites || 'android' }} --junit soren-android.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: soren-junit-android, path: Haven/soren-android.xml, if-no-files-found: warn }

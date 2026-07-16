@@ -59,6 +59,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      is_rc: ${{ steps.v.outputs.is_rc }}
     steps:
       - uses: actions/checkout@v4
       - id: v
@@ -95,21 +96,42 @@ jobs:
           fi
           version="${raw#v}"
 
-          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::'$raw' is not a plain semver x.y.z. Haven releases track the App Store" \
-                 "marketing version — no -beta/-rc/-alpha suffixes. See docs/RELEASING.md."
+          # A release-candidate tag is `vX.Y.Z-rc.N`: it BUILDS + QAs (see qa.yml)
+          # but publishes NOTHING to a production store (guards below + in android.yml).
+          # `-rc.N` is the ONLY allowed pre-release suffix; -beta/-alpha stay rejected.
+          # The core X.Y.Z still has to match MARKETING_VERSION so an rc can't drift.
+          core="${version%%-rc.*}"
+          is_rc=false
+          [ "$core" != "$version" ] && is_rc=true
+
+          if [ "$is_rc" = true ] && ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$'; then
+            echo "::error::'$raw' — the only allowed pre-release suffix is -rc.N (release candidate)." \
+                 "No -beta/-alpha. See docs/QA.md + docs/RELEASING.md."
             exit 1
           fi
 
-          if [ "$version" != "$asc" ]; then
-            echo "::error::Version drift: tag says '$version' but apple/project.yml" \
+          if ! printf '%s' "$core" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$raw' is not a plain semver x.y.z (optionally -rc.N). Haven releases track" \
+                 "the App Store marketing version. See docs/RELEASING.md."
+            exit 1
+          fi
+
+          if [ "$core" != "$asc" ]; then
+            echo "::error::Version drift: tag says '$core' but apple/project.yml" \
                  "MARKETING_VERSION says '$asc'. One product, one version — bump" \
                  "MARKETING_VERSION and re-tag. See docs/RELEASING.md."
             exit 1
           fi
 
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Haven **$version** — matches apple/project.yml MARKETING_VERSION." >> "$GITHUB_STEP_SUMMARY"
+          # Downstream stamping always uses the clean X.Y.Z (an rc stamps the same
+          # version it's a candidate for).
+          echo "version=$core" >> "$GITHUB_OUTPUT"
+          echo "is_rc=$is_rc" >> "$GITHUB_OUTPUT"
+          if [ "$is_rc" = true ]; then
+            echo "Haven **$core** — release CANDIDATE ($raw): builds + QAs, no production publish." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Haven **$core** — matches apple/project.yml MARKETING_VERSION." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   # ── Relay: static binary for every installer arch + macOS, plus .deb packages ───────────
   relay:
@@ -363,7 +385,9 @@ jobs:
       - name: Submit MSIX to the Microsoft Store
         # Tag-only: a manual dispatch build is for a hand-upload to Partner Center, so it must NOT
         # auto-open a Store submission (Partner Center allows only one open submission at a time).
-        if: steps.msix.outputs.msix != '' && env.STORE_TENANT_ID != '' && startsWith(github.ref, 'refs/tags/v')
+        # rc GUARD: a `-rc.N` tag builds + packages the MSIX (CI verify above) but must NEVER submit
+        # to the production Microsoft Store — that only happens on a clean vX.Y.Z tag. See docs/QA.md.
+        if: steps.msix.outputs.msix != '' && env.STORE_TENANT_ID != '' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-rc')
         # Non-fatal — same reasoning as "Package MSIX" above. The `publish` job that cuts the GitHub
         # Release depends on this `desktop` matrix leg, so a Store-side hiccup (cert queue, an unset
         # age rating, or the current paid-product GitHub-Actions limitation — see below) must NOT
@@ -478,7 +502,10 @@ jobs:
     # Tags cut/refresh their release. A manual workflow_dispatch ALSO updates the existing release
     # for the current version (v<MARKETING_VERSION>) in place — so rebuilding to add an arch (arm64)
     # or fix an asset actually refreshes the download, instead of stranding artifacts in a CI run.
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    # rc GUARD: a `-rc.N` tag runs every BUILD job above (relay/desktop/flatpak — CI verify) but does
+    # NOT cut a public GitHub Release. The clean vX.Y.Z tag publishes the official download. The `aur`
+    # job needs `publish`, so it is skipped for rc automatically. See docs/QA.md.
+    if: (startsWith(github.ref, 'refs/tags/') && !contains(github.ref, '-rc')) || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

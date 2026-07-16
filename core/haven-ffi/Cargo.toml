@@ -24,6 +24,13 @@ uniffi = { version = "0.31.2", features = ["cli", "tokio"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
+# Dev-only: the Tier-1 migration/regression harness in tests/ is a separate crate, so it
+# must re-declare the deps it uses directly (base64/hex for fixture files, serde_json for the
+# fixture generator). These do NOT affect the shipped lib/staticlib/cdylib.
+[dev-dependencies]
+data-encoding = "2.11.0"
+serde_json = "1.0.150"
+
 # Android-only: wire the JavaVM + Context into ndk-context so iroh's rustls platform
 # verifier can reach the system trust store (otherwise the node panics with
 # "android context was not initialized"). No effect on Apple/wasm builds.

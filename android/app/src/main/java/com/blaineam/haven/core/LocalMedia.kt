@@ -134,7 +134,11 @@ object LocalMedia {
     // Strip the kind prefix (ours or iOS's) to the ref's unique part — the content hash. NOT a
     // storage key on its own: it is kind-BLIND, so img_X and vid_X reduce to the same string
     // (see [storageKey]). Legacy v:/i: kept for already-stored local media.
-    private fun bareId(ref: String): String =
+    //
+    // Public so the evicted-media store can match a recorded eviction across ref/bare-hash forms
+    // (an event ref `img_<hash>` and an on-disk bare-hash stem name the same media) — mirrors iOS
+    // `MediaStore.bareId` used by `EvictedMediaStore`.
+    fun bareId(ref: String): String =
         ref.removePrefix("v:").removePrefix("i:")
             .removePrefix("img_").removePrefix("vid_").removePrefix("aud_")
 
@@ -365,6 +369,102 @@ object LocalMedia {
             runCatching { dst.delete() }
             part.renameTo(dst) || (part.copyTo(dst, overwrite = true).let { part.delete(); true })
         }.getOrDefault(false)
+
+    // ---- Size-sorted inventory + local-limit sweep (storage management UX) ----------------------
+    // The client sibling of the relay's retention: the "Manage media" screen lists every cached blob
+    // largest-first, and the age/size caps evict oldest-first. Mirrors iOS `MediaStore.storedBlobs` +
+    // `performLimitSweep` byte-for-byte (apple/HavenApp/Media.swift).
+
+    /** One stored media blob: its on-disk storage key (a kind-prefixed ref or a bare content hash),
+     *  sealed byte size, and last-modified time in ms. */
+    data class StoredBlob(val key: String, val bytes: Long, val mtimeMs: Long)
+
+    /** True when [name] is in-flight scratch that must never be counted as a stored blob or swept as an
+     *  orphan candidate — a chunked-reassembly temp (`incoming_*.part`), a seal-to-file temp
+     *  (`*.plain.tmp`), or a hidden dotfile. */
+    private fun isScratchName(name: String): Boolean =
+        name.startsWith("incoming_") || name.endsWith(".plain.tmp") || name.startsWith(".")
+
+    /** Every stored SEALED blob (the `media/` dir) with its size + mtime, for the size-sorted cleanup
+     *  screen and the local-limit sweep. Skips in-flight scratch + hidden files. Blocking — call off
+     *  the main thread. Files in `dir` are named by their storage key with NO extension, so the file
+     *  name IS the key. */
+    fun storedBlobs(): List<StoredBlob> {
+        val out = ArrayList<StoredBlob>()
+        dir.listFiles()?.forEach { f ->
+            if (!f.isFile || isScratchName(f.name)) return@forEach
+            out.add(StoredBlob(f.name, f.length(), f.lastModified()))
+        }
+        return out
+    }
+
+    /** A small thumbnail bitmap for a stored blob (any circle) — a downsampled image, or a video's
+     *  poster frame if the clip has already been decrypted to cache. Null for un-played videos / audio
+     *  / undecodable blobs (the cleanup screen falls back to a glyph). Blocking — off the main thread. */
+    fun thumbnail(ref: String, reqDim: Int = 160): Bitmap? {
+        if (isAudio(ref)) return null
+        if (isVideo(ref)) return videoPoster("", ref)   // videoPoster ignores the circle (reads plain cache)
+        val bytes = loadAnyCircle(ref) ?: return null
+        return runCatching {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            var sample = 1
+            while (max(bounds.outWidth, bounds.outHeight) / sample > reqDim) sample *= 2
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size,
+                BitmapFactory.Options().apply { inSampleSize = sample })
+        }.getOrNull()
+    }
+
+    /**
+     * The client sibling of the relay's retention: evict this device's cached blobs by AGE then SIZE
+     * (oldest first) until under the caps. Unlike the orphan sweep, a blob a live event still
+     * references IS eligible here — it just becomes a re-downloadable placeholder (the caller records
+     * such keys in the evicted set so they aren't auto-refetched). [pinnedKeys] (device pins, unioned
+     * from [normalizedKeys]) and composer-staged / in-flight media (fresh mtime, [graceMs] window) are
+     * never touched. [inUse] is passed only to decide which evicted keys to record. Returns freed
+     * bytes/files + the referenced keys to mark evicted (on-disk key → last-known size). Mirrors iOS
+     * `MediaStore.performLimitSweep`. Blocking — call off the main thread.
+     */
+    fun performLimitSweep(
+        maxDays: Int, maxGB: Int, pinnedKeys: Set<String>, inUse: Set<String>,
+        graceMs: Long = 48L * 3600 * 1000,
+    ): Triple<Long, Int, Map<String, Long>> {
+        if (maxDays <= 0 && maxGB <= 0) return Triple(0L, 0, emptyMap())
+        data class Cand(val file: File, val key: String, val bytes: Long, val mtime: Long)
+        val freshCutoff = System.currentTimeMillis() - graceMs
+        val cands = ArrayList<Cand>()
+        var pinnedBytes = 0L
+        dir.listFiles()?.forEach { f ->
+            if (!f.isFile || isScratchName(f.name)) return@forEach
+            val bytes = f.length()
+            if (f.name in pinnedKeys) { pinnedBytes += bytes; return@forEach }   // device-pinned: never evict
+            if (f.lastModified() > freshCutoff) return@forEach                   // too fresh to judge
+            cands.add(Cand(f, f.name, bytes, f.lastModified()))
+        }
+        var freed = 0L
+        var files = 0
+        val evict = HashMap<String, Long>()
+        val deleted = HashSet<File>()
+        fun remove(c: Cand) {
+            if (!deleted.add(c.file)) return
+            runCatching { c.file.delete() }
+            freed += c.bytes; files++
+            if (c.key in inUse) evict[c.key] = c.bytes
+            sizeCache.remove(c.key)
+        }
+        if (maxDays > 0) {
+            val ageCutoff = System.currentTimeMillis() - maxDays.toLong() * 86_400_000L
+            for (c in cands) if (c.mtime < ageCutoff) remove(c)
+        }
+        if (maxGB > 0) {
+            val cap = maxGB.toLong() * 1_000_000_000L
+            val survivors = cands.filter { it.file !in deleted }.sortedBy { it.mtime }   // oldest first
+            var total = pinnedBytes + survivors.sumOf { it.bytes }
+            var i = 0
+            while (total > cap && i < survivors.size) { remove(survivors[i]); total -= survivors[i].bytes; i++ }
+        }
+        return Triple(freed, files, evict)
+    }
 
     // ---- Deletion & GC ---------------------------------------------------------------------------
     // Blobs never deleted themselves: `purgeExpired` drops the EVENTS but the sealed bytes (and,

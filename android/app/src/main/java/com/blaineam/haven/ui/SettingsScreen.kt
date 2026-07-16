@@ -13,6 +13,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -21,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -29,20 +33,32 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Smartphone
+import com.blaineam.haven.core.MediaLimits
+import com.blaineam.haven.core.PinnedMediaStore
 import com.blaineam.haven.core.DeviceCredentialStore
 import com.blaineam.haven.core.DeviceRosterManager
 import com.blaineam.haven.core.HavenNet
@@ -68,15 +84,23 @@ fun SettingsScreen(onBack: () -> Unit) {
         "privacy" -> "Privacy & content"; "connection" -> "Connection & relay"
         "relays" -> "Relays"
         "blocked" -> "Blocked people"; "diagnostics" -> "Security & diagnostics"
-        "identity" -> "Identity & devices"; else -> "Settings"
+        "identity" -> "Identity & devices"; "managemedia" -> "Manage media"; else -> "Settings"
     }
 
     val options = listOf(0 to "Keep forever", 7 to "After 1 week", 30 to "After 1 month", 90 to "After 3 months", 365 to "After 1 year")
 
     HavenBackground {
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp)) {
+        // "Manage media" owns its own LazyColumn scroll, so it must NOT sit inside this verticalScroll
+        // (nesting a lazy list in a scrollable column throws on the infinite-height constraint).
+        val manageMedia = section == "managemedia"
+        Column(Modifier.fillMaxSize()
+            .then(if (manageMedia) Modifier else Modifier.verticalScroll(rememberScrollState()))
+            .padding(20.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(40.dp).clip(CircleShape).clickable { if (section != null) section = null else onBack() },
+                Box(Modifier.size(40.dp).clip(CircleShape).clickable {
+                    // "Manage media" is nested under Connection — back returns there, not to the top.
+                    section = when (section) { "managemedia" -> "connection"; null -> { onBack(); null }; else -> null }
+                },
                     contentAlignment = Alignment.Center) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = HavenTheme.textPrimary)
                 }
@@ -138,11 +162,16 @@ fun SettingsScreen(onBack: () -> Unit) {
                 RelaysHubCard(context)
             }
 
+            // ── Manage media (Settings ▸ Connection ▸ Storage ▸ Manage media) — size-sorted cleanup ──
+            if (manageMedia) {
+                Box(Modifier.weight(1f).fillMaxWidth()) { MediaCleanupScreen() }
+            }
+
             if (section == "connection") {
             StorageSyncCard(context)
 
             Spacer(Modifier.height(16.dp))
-            MediaCleanupCard()
+            MediaCleanupCard(onManageMedia = { section = "managemedia" })
 
             Spacer(Modifier.height(16.dp))
             Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
@@ -363,13 +392,17 @@ private fun SettingsCheck(title: String, ok: Boolean) {
     }
 }
 
-/** Storage housekeeping: run the media orphan sweep on demand and show what it freed.
- *  Parity with iOS Settings ▸ Storage ▸ "Clean up unused media". */
+/** Storage housekeeping: the size-sorted "Manage media" screen, device-pin count, the local age/size
+ *  caps, and the on-demand orphan sweep. Parity with iOS Settings ▸ Storage. */
 @Composable
-private fun MediaCleanupCard() {
+private fun MediaCleanupCard(onManageMedia: () -> Unit) {
     val context = LocalContext.current
     var cleaning by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<String?>(null) }
+    // Observe pins + limit selections so the card reflects live state.
+    val pinnedCount = com.blaineam.haven.core.PinnedMediaStore.refs.size
+    val maxDays = com.blaineam.haven.core.MediaLimits.maxDaysState.intValue
+    val maxGB = com.blaineam.haven.core.MediaLimits.maxGBState.intValue
     LaunchedEffect(cleaning) {
         if (!cleaning) return@LaunchedEffect
         val r = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -382,8 +415,41 @@ private fun MediaCleanupCard() {
     Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
         Text("Storage", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
         Spacer(Modifier.height(4.dp))
-        Text("Remove media on this device that no post, message or scheduled send references anymore.",
+        Text("Photos and videos from your circles, cached on this device. Manage media lists everything by size so you can free the biggest items or keep favorites forever.",
             color = HavenTheme.textSecondary, fontSize = 12.sp)
+
+        // Manage media (size-sorted cleanup screen) + kept count.
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { onManageMedia() }
+            .padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Manage media", color = HavenTheme.pink, fontWeight = FontWeight.Medium, fontSize = 14.sp,
+                modifier = Modifier.weight(1f))
+            if (pinnedCount > 0) {
+                Text("$pinnedCount kept", color = HavenTheme.textSecondary, fontSize = 12.sp)
+                Spacer(Modifier.size(6.dp))
+            }
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = HavenTheme.textSecondary)
+        }
+
+        // Local age/size caps (default OFF). Least space wins — see LocalMedia.performLimitSweep.
+        Spacer(Modifier.height(6.dp))
+        StorageLimitPicker(
+            label = "Delete local media older than",
+            options = listOf(0 to "Never", 30 to "30 days", 90 to "90 days", 180 to "6 months", 365 to "1 year"),
+            selected = maxDays,
+            onSelect = { com.blaineam.haven.core.MediaLimits.setMaxDays(it) },
+        )
+        Spacer(Modifier.height(6.dp))
+        StorageLimitPicker(
+            label = "Keep local media under",
+            options = listOf(0 to "No limit", 1 to "1 GB", 2 to "2 GB", 5 to "5 GB", 10 to "10 GB", 25 to "25 GB"),
+            selected = maxGB,
+            onSelect = { com.blaineam.haven.core.MediaLimits.setMaxGB(it) },
+        )
+        Text("Automatically removes old / excess cached media (oldest first) — the posts stay and re-download on demand. Kept items are never removed.",
+            color = HavenTheme.textSecondary, fontSize = 11.sp)
+
+        // On-demand orphan sweep.
         Spacer(Modifier.height(10.dp))
         Text(
             if (cleaning) "Cleaning up…" else "Clean up unused media",
@@ -397,6 +463,29 @@ private fun MediaCleanupCard() {
         result?.let {
             Spacer(Modifier.height(4.dp))
             Text(it, color = HavenTheme.textSecondary, fontSize = 12.sp)
+        }
+    }
+}
+
+/** A labeled row that opens a dropdown of preset caps — the Android counterpart of iOS's Storage
+ *  Pickers ("Delete local media older than" / "Keep local media under"). */
+@Composable
+private fun StorageLimitPicker(label: String, options: List<Pair<Int, String>>, selected: Int, onSelect: (Int) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val current = options.firstOrNull { it.first == selected }?.second ?: options.first().second
+    Box {
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { open = true }
+            .padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(label, color = HavenTheme.textPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Text(current, color = HavenTheme.pink, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+        }
+        androidx.compose.material3.DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            options.forEach { (value, text) ->
+                androidx.compose.material3.DropdownMenuItem(
+                    text = { Text(text, color = if (value == selected) HavenTheme.pink else HavenTheme.textPrimary) },
+                    onClick = { onSelect(value); open = false },
+                )
+            }
         }
     }
 }

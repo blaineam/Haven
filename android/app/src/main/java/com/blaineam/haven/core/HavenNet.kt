@@ -239,6 +239,9 @@ object HavenNet : InboundListener {
         SelfSyncCoordinator.init(appContext)
         DmPins.init(appContext)
         DmRead.init(appContext)
+        PinnedMediaStore.init(appContext)   // device-pin retention exemption (storage management)
+        EvictedMediaStore.init(appContext)  // deliberately-removed refs (no auto-refetch)
+        MediaLimits.init(appContext)        // local age/size caps
         restoreState()
         // Self-register AFTER importing persisted state (parity with iOS): registering first wrote a
         // fresh v1 roster that restoreState's higher-version-wins restore then clobbered — so a stale
@@ -344,6 +347,7 @@ object HavenNet : InboundListener {
                     runCatching { pushOwnMediaNearby() }
                     runCatching { purgeStaleRelays() }
                     runCatching { maybeWeeklyMediaSweep() }   // orphaned media blobs (at most once a week)
+                    runCatching { enforceLocalLimits() }      // age/size caps (throttled ~10 min)
                 }
                 // Poll bucket (base 30s): pull the circle relay/mailbox so posts arrive even when peers
                 // aren't both online (pollMailbox also drives mesh + multi-device self-sync internally).
@@ -2370,6 +2374,10 @@ object HavenNet : InboundListener {
             }
         }
         ScheduledStore.items.forEach { it.media.forEach(::add) }
+        // Device-pinned blobs are cleanup-exempt regardless of referencedness — union their on-disk
+        // keys so the orphan sweep + purge GC never delete a "kept" blob. MUST stay in lockstep with
+        // the limit-sweep skip-set in enforceLocalLimits (both take PinnedMediaStore.inUseKeys()).
+        keys.addAll(PinnedMediaStore.inUseKeys())
         return keys
     }
 
@@ -2398,6 +2406,156 @@ object HavenNet : InboundListener {
         }
     }
 
+    // ---- Storage management: size-sorted inventory, device pins, local caps, on-demand refetch ----
+    // Mirrors iOS FeedStore.mediaInventory / deleteSelectedMedia / enforceLocalLimits / downloadEvicted.
+
+    /** One row of the "Manage media" screen: a stored blob, its size, and the post/DM/comment it
+     *  belongs to (best-effort). [orphan] = no live event references it (free to delete). [pinned] =
+     *  kept on this device, shown ineligible for cleanup. [circleId] backs the thumbnail decrypt. */
+    data class MediaInventoryRow(
+        val key: String,          // on-disk storage key — the delete/pin/thumbnail arg (a real ref or bare hash)
+        val bytes: Long,
+        val mtimeMs: Long,
+        val isVideo: Boolean,
+        val isAudio: Boolean,
+        val circleId: String?,
+        val circleName: String,
+        val snippet: String?,
+        val orphan: Boolean,
+        val pinned: Boolean,
+    )
+
+    /** Every stored media blob, joined to the post/DM/comment that references it (best-effort), sorted
+     *  by size DESCENDING for the "Manage media" screen. A blob no live event names is an ORPHAN
+     *  ("Unused", or "Scheduled to send" if a queued post holds it). DM circle ids ("dm:") label
+     *  "Direct message". Deleting a row here frees only local bytes — the event stays. Blocking. */
+    fun mediaInventory(): List<MediaInventoryRow> {
+        if (!ready) return emptyList()
+        val circleNames = HashMap<String, String>()
+        val scheduledKeys = HashSet<String>()
+        ScheduledStore.items.forEach { it.media.forEach { r -> scheduledKeys.addAll(LocalMedia.normalizedKeys(r)) } }
+        // key (on-disk storage key) -> owning event (first/newest wins).
+        val owner = HashMap<String, Triple<String, String, Long>>()  // key -> (circleId, snippet, ts)
+        for (c in runCatching { social.circles() }.getOrDefault(emptyList())) {
+            circleNames[c.id] = c.name
+            val feed = runCatching { social.feed(c.id, nowMs(), null) }.getOrDefault(emptyList())
+            for (item in feed) {
+                fun attribute(refs: List<String>, body: String, ts: ULong) {
+                    val snip = body.take(80)
+                    for (r in refs) for (k in LocalMedia.normalizedKeys(r)) if (!owner.containsKey(k)) {
+                        owner[k] = Triple(c.id, snip, ts.toLong())
+                    }
+                }
+                attribute(item.media, item.body, item.createdAt)
+                item.comments.forEach { cm -> attribute(cm.media, cm.body, cm.createdAt) }
+            }
+        }
+        return LocalMedia.storedBlobs().map { blob ->
+            val isVideo = LocalMedia.isVideo(blob.key)
+            val isAudio = LocalMedia.isAudio(blob.key)
+            val pinned = PinnedMediaStore.isPinned(blob.key)
+            val o = owner[blob.key]
+            if (o != null) {
+                val isDM = o.first.startsWith("dm:")
+                MediaInventoryRow(
+                    key = blob.key, bytes = blob.bytes, mtimeMs = blob.mtimeMs, isVideo = isVideo, isAudio = isAudio,
+                    circleId = o.first,
+                    circleName = if (isDM) "Direct message" else (circleNames[o.first] ?: "A circle"),
+                    snippet = o.second.ifEmpty { null }, orphan = false, pinned = pinned,
+                )
+            } else {
+                val scheduled = LocalMedia.normalizedKeys(blob.key).any { it in scheduledKeys }
+                MediaInventoryRow(
+                    key = blob.key, bytes = blob.bytes, mtimeMs = blob.mtimeMs, isVideo = isVideo, isAudio = isAudio,
+                    circleId = null,
+                    circleName = if (scheduled) "Scheduled to send" else "Unused",
+                    snippet = null, orphan = !scheduled, pinned = pinned,
+                )
+            }
+        }.sortedByDescending { it.bytes }
+    }
+
+    /** Delete the LOCAL blobs for these rows (the event/metadata stays). A key a live event still
+     *  references is recorded in the evicted set with its size, so it renders as a "Download X MB"
+     *  placeholder instead of being auto-refetched (that would undo the cleanup). Pinned rows are
+     *  skipped. Returns freed bytes. Blocking — call off the main thread. */
+    fun deleteSelectedMedia(rows: List<MediaInventoryRow>): Long {
+        if (!ready) return 0L
+        val inUse = mediaInUseKeys()
+        var freed = 0L
+        for (row in rows) {
+            if (row.pinned) continue
+            val referenced = LocalMedia.normalizedKeys(row.key).any { it in inUse }
+            freed += LocalMedia.delete(row.key)
+            if (referenced) EvictedMediaStore.mark(row.key, row.bytes)
+        }
+        return freed
+    }
+
+    // ---- Local limits (#4) — age/size caps ------------------------------------------------------
+    @Volatile private var lastLimitSweepAt = 0L
+    @Volatile private var limitSweepInFlight = false
+
+    /** Enforce the device-local age/size caps (Settings ▸ Storage). Deletes local blobs (metadata stays
+     *  → placeholder) oldest-first, skipping pinned + in-flight media. [force] bypasses the throttle
+     *  (used when the setting changes). No-op when both caps are off. */
+    fun enforceLocalLimits(force: Boolean = false) {
+        if (!ready || limitSweepInFlight) return
+        val maxDays = MediaLimits.maxDays
+        val maxGB = MediaLimits.maxGB
+        if (maxDays <= 0 && maxGB <= 0) return
+        val nowMs = System.currentTimeMillis()
+        if (!force && nowMs - lastLimitSweepAt < 600_000L) return   // at most every 10 min otherwise
+        lastLimitSweepAt = nowMs
+        limitSweepInFlight = true
+        scope.launch {
+            val r = runCatching {
+                val pinnedKeys = PinnedMediaStore.inUseKeys()   // MUST mirror mediaInUseKeys' pin union
+                val inUse = mediaInUseKeys()
+                LocalMedia.performLimitSweep(maxDays, maxGB, pinnedKeys, inUse)
+            }.getOrNull()
+            limitSweepInFlight = false
+            if (r != null && r.second > 0) {
+                for ((key, bytes) in r.third) EvictedMediaStore.mark(key, bytes)
+                Log.i("MediaGC", "limit sweep: freed ${r.first}B across ${r.second} files")
+            }
+        }
+    }
+
+    // ---- On-demand download of an evicted blob (#3) ---------------------------------------------
+
+    /** Refs a Download tap is actively fetching, and refs the relay no longer has — drive the
+     *  placeholder's spinner / "no longer available" states. Compose-observable. */
+    val downloadingMedia = mutableStateListOf<String>()
+    val unavailableMedia = mutableStateListOf<String>()
+
+    /** User tapped "Download" on a placeholder for a blob we deliberately evicted: clear the eviction
+     *  (so the normal missing-media path may fetch it), request it now (relay restore + a direct peer
+     *  ask), and surface a spinner. If it hasn't arrived in ~45s, mark it unavailable. */
+    fun downloadEvicted(ref: String) {
+        EvictedMediaStore.clear(ref)
+        unavailableMedia.remove(ref)
+        if (LocalMedia.has(ref)) return
+        if (!downloadingMedia.contains(ref)) downloadingMedia.add(ref)
+        // Find the circle that references this ref (for the relay restore key + a scoped direct ask).
+        val circleId = runCatching {
+            social.circles().firstOrNull { c ->
+                social.feed(c.id, nowMs(), null).any { item ->
+                    item.media.contains(ref) || item.comments.any { it.media.contains(ref) }
+                }
+            }?.id
+        }.getOrNull()
+        if (circleId != null) enqueueRestore(circleId, ref)   // relay-first (mailbox → HTTP → S3 → iroh)
+        // Direct peer ask (tiny frame, no blob in RAM) — same per-ref request requestMissingMedia makes.
+        val payload = nodeIdHex.toByteArray(Charsets.UTF_8) + ref.toByteArray(Charsets.UTF_8)
+        for (idHex in contacts.map { it.idHex }) sendFrame(Wire.MEDIA_REQ, payload, idHex)
+        scope.launch {
+            kotlinx.coroutines.delay(45_000)
+            downloadingMedia.remove(ref)
+            if (!LocalMedia.has(ref)) { if (!unavailableMedia.contains(ref)) unavailableMedia.add(ref) }
+        }
+    }
+
     /** Fetch missing feed media: try the circle relay (haven/media/<ref>) first, then ask contacts. */
     fun requestMissingMedia() {
         if (!ready) return
@@ -2408,8 +2566,12 @@ object HavenNet : InboundListener {
             for (item in feed) {
                 // Skip synthetic refs (geo: location pins): they carry no fetchable bytes, so counting
                 // them keeps the pending metric pinned above 0 forever and fires a doomed fetch each sweep.
-                item.media.forEach { if (!LocalMedia.isSynthetic(it) && !LocalMedia.has(it)) missing.putIfAbsent(it, c.id) }
-                item.comments.forEach { cm -> cm.media.forEach { if (!LocalMedia.isSynthetic(it) && !LocalMedia.has(it)) missing.putIfAbsent(it, c.id) } }
+                // Skip refs the user DELIBERATELY evicted ("Manage media" / local-limit sweep): auto-
+                // refetching would silently undo the freed space. They re-download only on an explicit
+                // "Download" tap (downloadEvicted clears the eviction first), and are excluded from the
+                // pending metric too (never added to `missing`). Media never evicted still fetches.
+                item.media.forEach { if (!LocalMedia.isSynthetic(it) && !LocalMedia.has(it) && !EvictedMediaStore.contains(it)) missing.putIfAbsent(it, c.id) }
+                item.comments.forEach { cm -> cm.media.forEach { if (!LocalMedia.isSynthetic(it) && !LocalMedia.has(it) && !EvictedMediaStore.contains(it)) missing.putIfAbsent(it, c.id) } }
             }
         }
         SyncMetrics.setPending(missing.size)   // media refs still missing locally (iOS nbMediaPending)

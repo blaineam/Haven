@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
@@ -663,7 +664,7 @@ private fun PendingCard(req: PendingRequest) {
 fun MediaImage(circleId: String, id: String, modifier: Modifier = Modifier,
                contentScale: ContentScale = ContentScale.FillWidth) {
     val (bmp, done) = rememberMediaBitmap(circleId, id)
-    MediaBitmapContent(bmp, done, modifier, contentScale)
+    MediaBitmapContent(circleId, id, bmp, done, modifier, contentScale)
 }
 
 /** Decrypt + decode a media ref's bitmap off the main thread, ONCE per (ref, circle) — `load()` is a
@@ -674,10 +675,16 @@ fun MediaImage(circleId: String, id: String, modifier: Modifier = Modifier,
 private fun rememberMediaBitmap(circleId: String, ref: String, reloadKey: Any? = null): Pair<ImageBitmap?, Boolean> {
     var bmp by remember(ref, circleId) { mutableStateOf<ImageBitmap?>(null) }
     var done by remember(ref, circleId) { mutableStateOf(false) }
+    // Re-attempt whenever the feed bumps WHILE we still have nothing to show — this is how a tile
+    // whose bytes were missing (still syncing, or a just-tapped "Download") flips to the real image
+    // once the blob lands, without navigating away. It's cheap: with a bitmap already in hand the
+    // guard below skips the decrypt entirely, so an established image never re-decodes on a bump.
+    val fv = com.blaineam.haven.core.HavenNet.feedVersion.value
     // `reloadKey` re-asks WITHOUT clearing what's already drawn: a video's poster only becomes
     // readable once the clip has been decrypted to cache, and blinking the page out to go fetch it
     // would be worse than showing it a beat late.
-    LaunchedEffect(ref, circleId, reloadKey) {
+    LaunchedEffect(ref, circleId, reloadKey, if (bmp == null) fv else 0) {
+        if (bmp != null) return@LaunchedEffect   // already have pixels — a feed bump is a no-op here
         val b = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             val raw = if (LocalMedia.isVideo(ref)) LocalMedia.videoPoster(circleId, ref)
                       else LocalMedia.imageBitmap(circleId, ref)
@@ -689,18 +696,82 @@ private fun rememberMediaBitmap(circleId: String, ref: String, reloadKey: Any? =
     return bmp to done
 }
 
-/** The three states of a media bitmap: the image, a plain tile, or a spinner. */
+/** The states of a media bitmap: the image, a graceful missing-media placeholder (bytes absent), a
+ *  plain tile (bytes present but undrawable — e.g. an un-played video's missing poster), or a spinner. */
 @Composable
-private fun MediaBitmapContent(bmp: ImageBitmap?, done: Boolean, modifier: Modifier,
-                               contentScale: ContentScale) {
+private fun MediaBitmapContent(circleId: String, ref: String, bmp: ImageBitmap?, done: Boolean,
+                               modifier: Modifier, contentScale: ContentScale) {
+    // Observe the evicted-store version so this recomposes when a "Download" tap clears an eviction.
+    com.blaineam.haven.core.EvictedMediaStore.version.value
+    val hasBytes = remember(ref, com.blaineam.haven.core.HavenNet.feedVersion.value) { LocalMedia.has(ref) }
     when {
         bmp != null -> Image(bmp, contentDescription = "Photo", modifier = modifier, contentScale = contentScale)
-        // Finished loading with no bitmap (video with no poster, or media too big to decode here) →
-        // a plain tile, NOT a perpetual spinner. MediaThumb overlays the play glyph for videos.
+        // Finished loading with no bitmap AND the bytes aren't on disk → the graceful placeholder
+        // (a "Download N" affordance for a deliberately-evicted blob, a spinner while it's fetching,
+        // or "No longer available"), NOT a perpetual blank spinner.
+        done && !hasBytes -> MissingMediaPlaceholder(circleId, ref, LocalMedia.isVideo(ref), modifier)
+        // Finished with bytes present but no bitmap (video with no poster yet, or too big to decode
+        // here) → a plain tile. MediaThumb/MediaPage overlay the play glyph for videos.
         done -> Box(modifier.background(HavenTheme.card))
         else -> Box(modifier.background(HavenTheme.card), contentAlignment = Alignment.Center) {
             androidx.compose.material3.CircularProgressIndicator(
                 color = HavenTheme.pink, strokeWidth = 2.dp, modifier = Modifier.size(22.dp))
+        }
+    }
+}
+
+/** A graceful placeholder for a referenced blob whose bytes aren't on disk. Four states, mirroring
+ *  iOS `MissingMediaPlaceholder`:
+ *   • deliberately evicted ("Manage media" / limit sweep) → a "Download N" affordance (re-fetches on tap);
+ *   • actively downloading (post-tap) → a spinner;
+ *   • relay/peers no longer have it → "No longer available" + Retry;
+ *   • simply still syncing (never evicted) → the plain "still loading" spinner. */
+@Composable
+private fun MissingMediaPlaceholder(circleId: String, ref: String, isVideo: Boolean, modifier: Modifier) {
+    val context = LocalContext.current
+    // Observe live download state + the evicted-store version so the tile reacts to taps/timeouts.
+    com.blaineam.haven.core.EvictedMediaStore.version.value
+    val downloading = com.blaineam.haven.core.HavenNet.downloadingMedia.contains(ref)
+    val unavailable = com.blaineam.haven.core.HavenNet.unavailableMedia.contains(ref)
+    val evictedBytes = com.blaineam.haven.core.EvictedMediaStore.size(ref)
+    Box(modifier.background(HavenTheme.card), contentAlignment = Alignment.Center) {
+        when {
+            downloading -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                androidx.compose.material3.CircularProgressIndicator(
+                    color = HavenTheme.pink, strokeWidth = 2.dp, modifier = Modifier.size(22.dp))
+                Spacer(Modifier.height(8.dp))
+                Text("Downloading…", color = HavenTheme.textSecondary, fontSize = 12.sp)
+            }
+            unavailable -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(Icons.Filled.WifiOff, null, tint = HavenTheme.textSecondary, modifier = Modifier.size(28.dp))
+                Spacer(Modifier.height(6.dp))
+                Text("No longer available", color = HavenTheme.textSecondary, fontSize = 12.sp)
+                Spacer(Modifier.height(6.dp))
+                Text("Retry", color = HavenTheme.pink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                        .clickable { com.blaineam.haven.core.HavenNet.downloadEvicted(ref) }
+                        .padding(horizontal = 10.dp, vertical = 4.dp))
+            }
+            evictedBytes != null -> Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.clip(RoundedCornerShape(12.dp))
+                    .clickable { com.blaineam.haven.core.HavenNet.downloadEvicted(ref) }
+                    .padding(12.dp),
+            ) {
+                Icon(Icons.Filled.Download, null, tint = HavenTheme.pink, modifier = Modifier.size(34.dp))
+                Spacer(Modifier.height(6.dp))
+                Text("Download ${android.text.format.Formatter.formatShortFileSize(context, evictedBytes)}",
+                    color = HavenTheme.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(2.dp))
+                Text("Removed to save space", color = HavenTheme.textSecondary, fontSize = 11.sp)
+            }
+            else -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                androidx.compose.material3.CircularProgressIndicator(
+                    color = HavenTheme.pink, strokeWidth = 2.dp, modifier = Modifier.size(22.dp))
+                Spacer(Modifier.height(8.dp))
+                Text(if (isVideo) "Video still loading…" else "Media still loading…",
+                    color = HavenTheme.textSecondary, fontSize = 12.sp)
+            }
         }
     }
 }
@@ -713,7 +784,8 @@ private fun MediaThumb(circleId: String, ref: String, modifier: Modifier, onOpen
         SensitiveGuard(circleId, ref, cornerRadius = 12) { _ ->
             Box(Modifier.fillMaxSize()) {
                 MediaImage(circleId, ref, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                if (LocalMedia.isVideo(ref)) {
+                // Glyph only when the bytes are here — else the missing-media placeholder owns the tile.
+                if (LocalMedia.isVideo(ref) && LocalMedia.has(ref)) {
                     Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.18f)), contentAlignment = Alignment.Center) {
                         // White-on-scrim over media — not a theme surface.
                         Icon(Icons.Filled.PlayCircle, "Play", tint = Color.White, modifier = Modifier.size(40.dp))
@@ -883,8 +955,10 @@ private fun MediaPage(circleId: String, ref: String, containerAspect: Float?, pl
                 // photo — the page keeps its own pageHeight/pageAspect sizing either way.
                 VideoTile(circleId, ref, Modifier.matchParentSize(), resolved = vid)
             } else {
-                MediaBitmapContent(bmp, done, Modifier.fillMaxSize(), ContentScale.Fit)
-                if (isVideo) {
+                MediaBitmapContent(circleId, ref, bmp, done, Modifier.fillMaxSize(), ContentScale.Fit)
+                // Suppress the play glyph while the bytes are absent — the missing-media placeholder
+                // (Download / loading / unavailable) owns the tile then; a glyph on top would misread.
+                if (isVideo && LocalMedia.has(ref)) {
                     // A scrim only behind the glyph — a full-page one would grey out the backdrop we just drew.
                     Box(Modifier.align(Alignment.Center).size(52.dp).clip(CircleShape)
                         .background(Color.Black.copy(alpha = 0.35f)), contentAlignment = Alignment.Center) {
@@ -1025,17 +1099,31 @@ fun MediaViewer(circleId: String, refs: List<String>, startIndex: Int, onClose: 
             .background(Color.Black.copy(alpha = 0.4f)).clickable { onClose() }, contentAlignment = Alignment.Center) {
             Icon(Icons.Filled.Close, "Close", tint = Color.White)
         }
-        // Save this item to Photos.
-        Box(Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(16.dp).size(42.dp).clip(CircleShape)
-            .background(Color.Black.copy(alpha = 0.4f)).clickable {
-                val ref = refs[pager.currentPage]
-                scope.launch {
-                    saved = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                        LocalMedia.loadAnyCircle(ref)?.let { com.blaineam.haven.core.MediaSaver.save(context, it, LocalMedia.isVideo(ref)) } ?: false
+        // Top-right actions: keep-on-device (pin) + save to Photos.
+        Row(Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            // "Keep on this device" — exempts this blob from every cleanup path (device pin, #2). Reads
+            // PinnedMediaStore.refs (observable) so the glyph reflects the current state.
+            val curRef = refs.getOrNull(pager.currentPage)
+            val pinned = curRef != null && com.blaineam.haven.core.PinnedMediaStore.refs.contains(curRef)
+            Box(Modifier.size(42.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.4f))
+                .clickable { curRef?.let { com.blaineam.haven.core.PinnedMediaStore.togglePin(listOf(it)) } },
+                contentAlignment = Alignment.Center) {
+                Icon(Icons.Filled.PushPin, if (pinned) "Kept on this device" else "Keep on this device",
+                    tint = if (pinned) HavenTheme.pink else Color.White)
+            }
+            // Save this item to Photos.
+            Box(Modifier.size(42.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.4f))
+                .clickable {
+                    val ref = refs[pager.currentPage]
+                    scope.launch {
+                        saved = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            LocalMedia.loadAnyCircle(ref)?.let { com.blaineam.haven.core.MediaSaver.save(context, it, LocalMedia.isVideo(ref)) } ?: false
+                        }
                     }
-                }
-            }, contentAlignment = Alignment.Center) {
-            Icon(Icons.Filled.Download, "Save to Photos", tint = Color.White)
+                }, contentAlignment = Alignment.Center) {
+                Icon(Icons.Filled.Download, "Save to Photos", tint = Color.White)
+            }
         }
         // The viewer's surface is Color.Black in both modes — all its chrome stays white.
         if (refs.size > 1) Text("${pager.currentPage + 1} / ${refs.size}", color = Color.White, fontSize = 13.sp,

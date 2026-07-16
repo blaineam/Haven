@@ -75,8 +75,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::blobstore::{
-    blob_forbidden, local_get, local_list, local_put, local_touch, safe_path, RelayAuth, VERB_GET,
-    VERB_HAS, VERB_LIST, VERB_PUT, VERB_TOUCH,
+    blob_forbidden, local_get, local_list, local_put, local_touch, safe_path, verify_devroster_put,
+    RelayAuth, DEVROSTER_PREFIX, VERB_GET, VERB_HAS, VERB_LIST, VERB_PUT, VERB_TOUCH,
 };
 
 /// Hard cap on a single blob — matches the iroh blob path (256 MiB).
@@ -323,10 +323,32 @@ async fn handle_conn(
                 let hit = local_touch(root, &[key]).is_empty();
                 head_respond(&mut w, if hit { 200 } else { 404 }, keep_alive).await?;
             }
-            Route::Put(_) => match local_put(root, &key, &body) {
-                Ok(()) => respond(&mut w, 200, "OK", keep_alive, b"OK").await?,
-                Err(_) => respond(&mut w, 500, "write failed", keep_alive, b"").await?,
-            },
+            Route::Put(_) => {
+                // A devroster PUT is deliberately un-gated by `blob_forbidden` (any signed peer may
+                // publish, so a device the relay has never heard of can enroll) — which is ONLY safe
+                // if the ACCOUNT SIGNATURE in the body is verified. The iroh path verifies; this path
+                // did NOT, so a self-minted key could rename garbage over any account's roster over
+                // plain HTTP (audit R6). Verify (with rollback defense) before storing, and expand
+                // membership from the verified device ids just like the iroh path does.
+                if let Some(acct) = key.strip_prefix(DEVROSTER_PREFIX) {
+                    match verify_devroster_put(root, acct, &body) {
+                        Some((account, devices)) => match local_put(root, &key, &body) {
+                            Ok(()) => {
+                                auth.lock().unwrap().authorize_devices(&account, &devices);
+                                respond(&mut w, 200, "OK", keep_alive, b"OK").await?;
+                            }
+                            Err(_) => respond(&mut w, 500, "write failed", keep_alive, b"").await?,
+                        },
+                        // Unsigned/forged/wrong-account/stale roster → refuse, same as the read gate.
+                        None => respond(&mut w, 403, "forbidden", keep_alive, b"").await?,
+                    }
+                } else {
+                    match local_put(root, &key, &body) {
+                        Ok(()) => respond(&mut w, 200, "OK", keep_alive, b"OK").await?,
+                        Err(_) => respond(&mut w, 500, "write failed", keep_alive, b"").await?,
+                    }
+                }
+            }
             Route::List(_) => {
                 let mut keys = local_list(root, &key);
                 keys.sort();

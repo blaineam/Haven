@@ -631,8 +631,9 @@ fn is_broad_prefix(key: &str) -> bool {
 
 /// The `haven/media/…`-style key prefix under which a device publishes its account-signed device
 /// roster so a headless relay can authorize its device ids. Permissive to WRITE (not a mailbox key);
-/// the trust comes from the signature check in [`verify_devroster`], never from the write gate.
-const DEVROSTER_PREFIX: &str = "haven/devroster/";
+/// the trust comes from the signature check in [`verify_devroster`], never from the write gate — so
+/// EVERY transport must verify the body before storing it (see [`verify_devroster_put`]).
+pub(crate) const DEVROSTER_PREFIX: &str = "haven/devroster/";
 /// Tag byte on the self-sync roster wire (mirror of p2pcore-ffi `TAG_DEVICE_ROSTER`).
 const TAG_DEVICE_ROSTER: u8 = 0x04;
 
@@ -646,6 +647,13 @@ const TAG_DEVICE_ROSTER: u8 = 0x04;
 /// bundle→account via the key + verifying the signature means a stranger can neither impersonate the
 /// account nor inject device ids for it. Revoked device ids are excluded.
 fn verify_devroster(expect_account: &str, body: &[u8]) -> Option<(String, Vec<String>)> {
+    let (account, devices, _version) = verify_devroster_full(expect_account, body)?;
+    Some((account, devices))
+}
+
+/// Like [`verify_devroster`] but also returns the DeviceList `version`, so a write gate can enforce
+/// rollback defense (higher-version-wins; a replayed OLD roster must never overwrite a newer one).
+fn verify_devroster_full(expect_account: &str, body: &[u8]) -> Option<(String, Vec<String>, u64)> {
     use p2pcore::device::DeviceList;
     use p2pcore::identity::HavenId;
     let body = match body.split_first() {
@@ -677,7 +685,43 @@ fn verify_devroster(expect_account: &str, body: &[u8]) -> Option<(String, Vec<St
         .filter(|d| !dl.revoked.contains(d))
         .map(|d| hex(d))
         .collect();
-    Some((expect_account.to_string(), devices))
+    Some((expect_account.to_string(), devices, dl.version))
+}
+
+/// Gate a device-roster PUT to `haven/devroster/<expect_account>` BEFORE the bytes are stored.
+/// Returns the verified `(account, device_hexes)` to expand membership with when the write MAY
+/// proceed, or `None` to REFUSE it entirely.
+///
+/// This is the write-side twin of the read gate, and it fails CLOSED exactly the same way: an
+/// unsigned, malformed, or wrong-account body → `None`. The write is deliberately un-gated by
+/// [`blob_forbidden`] (a device the relay has never heard of must be able to publish its first
+/// roster), so this signature check is the ONLY thing standing between a stranger and a victim's
+/// roster on disk. Without it a self-minted key could rename garbage over any account's roster
+/// (audit R6).
+///
+/// Rollback defense (the roster flip-flop bug — see `DeviceList::adopt_if_newer`): a validly-signed
+/// body whose `version` is strictly OLDER than the roster already on disk is refused, so a replayed
+/// stale roster can only lose. A same-version re-publish is accepted (only the account key could
+/// produce a different signed list at one version, so the bytes are effectively identical) — that
+/// keeps a device's routine re-publish to a freshly-dialed relay working.
+pub(crate) fn verify_devroster_put(
+    root: &Path,
+    expect_account: &str,
+    body: &[u8],
+) -> Option<(String, Vec<String>)> {
+    let (account, devices, version) = verify_devroster_full(expect_account, body)?;
+    // Never let an older signed version clobber a newer stored one. Both are account-signed and
+    // versions only grow, so "newer wins" can't be forged and a replay can only be rejected.
+    if let Ok(path) = safe_path(root, &format!("{DEVROSTER_PREFIX}{expect_account}")) {
+        if let Ok(existing) = std::fs::read(&path) {
+            if let Some((_, _, cur)) = verify_devroster_full(expect_account, &existing) {
+                if version < cur {
+                    return None;
+                }
+            }
+        }
+    }
+    Some((account, devices))
 }
 
 /// Re-apply every stored `haven/devroster/<account>` blob to `auth` — so a relay that authorizes
@@ -819,6 +863,25 @@ pub(crate) async fn handle_request(
             // rename so a concurrent GET never sees a half-written blob.
             let mut body = vec![0u8; blen as usize];
             recv.read_exact(&mut body).await.ah()?;
+
+            // A devroster PUT is un-gated by `blob_forbidden` (any signed peer may publish, so a
+            // never-seen device can enroll), so the ACCOUNT SIGNATURE — not the write gate — is the
+            // trust. Verify it BEFORE renaming over the target, or a stranger clobbers a victim's
+            // roster on disk (audit R6). Refuse an unsigned/forged/stale roster; carry the verified
+            // devices forward to expand membership after the write.
+            let roster = if let Some(acct) = key.strip_prefix(DEVROSTER_PREFIX) {
+                match verify_devroster_put(&root, acct, &body) {
+                    Some(v) => Some(v),
+                    None => {
+                        let _ = send.write_all(b"ERR forbidden").await;
+                        let _ = send.finish();
+                        return Ok(());
+                    }
+                }
+            } else {
+                None
+            };
+
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
@@ -831,16 +894,13 @@ pub(crate) async fn handle_request(
             match write_res {
                 Ok(()) => {
                     let _ = send.write_all(b"OK").await;
-                    // Device-roster authorization: when the app writes its account-signed device roster
-                    // to `haven/devroster/<account>`, verify it and expand this account's circle
-                    // membership to include its device ids — so a HEADLESS relay (which only knows
-                    // account ids from the link) stops ERR-forbidding the account's devices' mailbox
-                    // ops. The blob is now persisted, so it also mesh-replicates to sibling relays and
-                    // survives restart (see `rehydrate_device_rosters`).
-                    if let Some(acct) = key.strip_prefix(DEVROSTER_PREFIX) {
-                        if let Some((account, devices)) = verify_devroster(acct, &body) {
-                            auth.lock().unwrap().authorize_devices(&account, &devices);
-                        }
+                    // Device-roster authorization: expand this account's circle membership to include
+                    // its (now-verified) device ids — so a HEADLESS relay (which only knows account
+                    // ids from the operator's link) stops ERR-forbidding the account's devices' mailbox
+                    // ops. The blob is persisted, so it also mesh-replicates to siblings and survives
+                    // restart (see `rehydrate_device_rosters`).
+                    if let Some((account, devices)) = roster {
+                        auth.lock().unwrap().authorize_devices(&account, &devices);
                     }
                 }
                 Err(_) => {

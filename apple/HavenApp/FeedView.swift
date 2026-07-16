@@ -557,6 +557,7 @@ final class FeedStore: ObservableObject {
 
     /// Messages of a circle (for a DM thread) without disturbing the main feed.
     func messages(in circleId: String) -> [FeedItemFfi] {
+        maybePurgeExpiredMedia(circleId, retention: CircleSettingsStore.shared.retentionSecs(circleId))
         let all = social?.feed(circleId: circleId, nowMs: now(), viewerRetentionSecs: CircleSettingsStore.shared.retentionSecs(circleId)) ?? []
         guard let cutoff = dmClearedBefore[circleId] else { return all }
         return all.filter { $0.createdAt >= cutoff }   // hide messages exchanged before this DM was cleared
@@ -600,6 +601,98 @@ final class FeedStore: ObservableObject {
     /// Node ids in a circle for whom we hold keys (handshake complete).
     func handshaked(in circleId: String) -> [String] {
         social?.contactNodeIds(circleId: circleId) ?? []
+    }
+
+    // MARK: - Media GC (purge-linked deletion + orphan sweep)
+    //
+    // `feed()` only HIDES expired posts; `purgeExpired` really drops the events and returns their
+    // media refs so the blobs can finally leave disk too. Deletion is gated on an in-use check —
+    // the same photo may ride another live post (any circle, DMs included), a comment, or a
+    // scheduled send, and those must keep their bytes.
+
+    /// Circles already purged this app session (purging is idempotent; once per session is plenty).
+    private var purgedCircles = Set<String>()
+
+    /// Really delete expired content for a circle and GC the blobs the purge orphaned. Called from
+    /// the feed/messages refresh paths with the SAME retention they pass to `feed` — throttled to
+    /// once per circle per app session so a hot refresh loop never re-runs engine purges.
+    func maybePurgeExpiredMedia(_ circleId: String, retention: UInt64?) {
+        guard let social, !DemoEnv.isDemo, !purgedCircles.contains(circleId) else { return }
+        purgedCircles.insert(circleId)
+        let nowMs = now()
+        let scheduledRefs = ScheduledStore.shared.items.flatMap(\.media)
+        Task.detached(priority: .utility) { [weak self] in
+            let purged = social.purgeExpired(circleId: circleId, viewerRetentionSecs: retention, nowMs: nowMs)
+            guard !purged.isEmpty else { return }
+            // Anything a LIVE event anywhere still names keeps its bytes (content addressing means
+            // one blob can back many posts). Built AFTER the purge so this circle's dropped events
+            // no longer count as users.
+            var inUse = Self.mediaInUseStems(social: social)
+            for r in scheduledRefs { inUse.formUnion(MediaStore.storedStems(for: r)) }
+            await MainActor.run {
+                guard let self else { return }
+                // Persist FIRST: once the blobs are gone, the purged events must not resurrect from
+                // a stale state file and re-request their (now deleted) media forever.
+                self.persist()
+                var freed: Int64 = 0
+                for ref in purged where !MediaStore.isSynthetic(ref) {
+                    if MediaStore.storedStems(for: ref).isDisjoint(with: inUse) {
+                        freed += MediaStore.shared.delete(ref)
+                    }
+                }
+                if freed > 0 { HavenLog.sync("media GC purge \(circleId): freed \(freed)B") }
+            }
+        }
+    }
+
+    /// The stem (on-disk basename) of every media ref a live event still references — every circle's
+    /// feed (retention nil: expired-but-unpurged events still hold their bytes until purged) plus
+    /// every comment. `nonisolated` because `feed()` re-opens every envelope (real CPU) and the
+    /// sweep runs it for ALL circles — never on the main actor.
+    nonisolated static func mediaInUseStems(social: HavenSocial) -> Set<String> {
+        var stems = Set<String>()
+        let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
+        for c in social.circles() {
+            for item in social.feed(circleId: c.id, nowMs: nowMs, viewerRetentionSecs: nil) {
+                for r in item.media { stems.formUnion(MediaStore.storedStems(for: r)) }
+                for cm in item.comments {
+                    for r in cm.media { stems.formUnion(MediaStore.storedStems(for: r)) }
+                }
+            }
+        }
+        return stems
+    }
+
+    /// Walk haven-media and delete every blob no event anywhere references (Settings' "Clean up
+    /// unused media" and the weekly sweep). Returns what was freed.
+    func cleanupUnusedMedia() async -> (bytes: Int64, files: Int) {
+        guard let social, !DemoEnv.isDemo else { return (0, 0) }
+        let scheduledRefs = ScheduledStore.shared.items.flatMap(\.media)
+        let result = await Task.detached(priority: .utility) { () -> (Int64, Int) in
+            var inUse = Self.mediaInUseStems(social: social)
+            for r in scheduledRefs { inUse.formUnion(MediaStore.storedStems(for: r)) }
+            return MediaStore.performOrphanSweep(inUse: inUse)
+        }.value
+        if result.1 > 0 {
+            MediaStore.shared.clearMemoryCache()   // deleted files may still be decoded in the caches
+            HavenLog.sync("media GC sweep: freed \(result.0)B across \(result.1) files")
+        }
+        return result
+    }
+
+    private var weeklySweepInFlight = false
+    /// Run the orphan sweep at most once a week (persisted stamp), piggybacked on the sync timer.
+    private func maybeWeeklyMediaSweep() {
+        guard !DemoEnv.isDemo, !weeklySweepInFlight else { return }
+        let key = "haven.mediagc.lastSweep"
+        let last = UserDefaults.standard.double(forKey: key)
+        guard Date().timeIntervalSince1970 - last > 7 * 24 * 3600 else { return }
+        weeklySweepInFlight = true
+        Task { @MainActor in
+            _ = await self.cleanupUnusedMedia()
+            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: key)
+            self.weeklySweepInFlight = false
+        }
     }
 
     // MARK: - Persistence (so posts + contacts survive restarts and updates)
@@ -755,6 +848,7 @@ final class FeedStore: ObservableObject {
                 self.requestMissingMedia()
                 RelayHost.shared.meshSyncTick()   // if we host a relay, pull from sibling relays
                 RelayMailboxStore.shared.purgeStale()   // GC relays inactive + unseen > 7 days
+                self.maybeWeeklyMediaSweep()      // orphaned media blobs (at most once a week)
             }
         }
     }
@@ -771,6 +865,7 @@ final class FeedStore: ObservableObject {
         let gen = refreshGeneration
         let circleId = activeCircleId
         let retention = CircleSettingsStore.shared.retentionSecs(circleId)
+        maybePurgeExpiredMedia(circleId, retention: retention)   // feed refresh = the purge hook (throttled)
         let blocked = ConnectionsStore.shared.blocked
         let removed = ConnectionsStore.shared.removedHexes(inCircle: circleId)   // explicit severances
         let showHidden = HiddenStore.shared.showHidden

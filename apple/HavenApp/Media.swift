@@ -296,7 +296,9 @@ final class MediaStore: ObservableObject {
                                       longitude: lonRef == "W" ? -lon : lon)
     }
 
-    private var dir: URL {
+    /// The on-disk media directory. `nonisolated` so the orphan sweep (which walks the whole dir with
+    /// FileManager only) can run off the main actor without hopping through the shared instance.
+    nonisolated static var storageDir: URL {
         let d = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("haven-media", isDirectory: true)
         // Protect media at rest to match the in-transit E2EE: files created here inherit
@@ -313,6 +315,7 @@ final class MediaStore: ObservableObject {
         #endif
         return d
     }
+    private var dir: URL { Self.storageDir }
     private func fileURL(_ ref: String) -> URL? {
         guard let kind = MediaKind(ref: ref) else { return nil }
         return dir.appendingPathComponent("\(ref).\(kind.ext)")
@@ -440,6 +443,83 @@ final class MediaStore: ObservableObject {
             }
         }
         return (total, count)
+    }
+
+    // MARK: - Deletion & GC
+    //
+    // Blobs never deleted themselves: `purge_expired` drops the EVENTS, but the bytes under
+    // haven-media lived forever (and unsent/expired posts left orphans). Deletion is ref-driven —
+    // the engine hands back the purged events' media refs, the caller subtracts anything still
+    // referenced by a live event in ANY circle, and what's left is removed here.
+
+    /// Every on-disk basename STEM a ref could be stored under. Files here are `<ref>.<ext>` for
+    /// kind-prefixed refs; the legacy single-letter schemes normalize onto the modern prefix and the
+    /// bare hash is included defensively (other platforms store under it, and refs may arrive either
+    /// way). Used both to DELETE a ref's file(s) and to build the sweep's keep-set — one definition,
+    /// so the two can't drift.
+    nonisolated static func storedStems(for ref: String) -> Set<String> {
+        let id = bareId(ref)
+        var out: Set<String> = [ref, id]
+        if ref.hasPrefix("v:") { out.insert("vid_\(id)") }
+        if ref.hasPrefix("i:") { out.insert("img_\(id)") }
+        if ref.hasPrefix("a:") { out.insert("aud_\(id)") }
+        return out
+    }
+
+    /// Remove a ref's blob from disk (every stem × every media ext, so a legacy-schemed duplicate
+    /// goes too) and evict its decoded copies from memory. Only call with refs no live event
+    /// references — the caller owns the in-use check. Returns the bytes freed.
+    @discardableResult
+    func delete(_ ref: String) -> Int64 {
+        guard !Self.isSynthetic(ref) else { return 0 }
+        let fm = FileManager.default
+        var freed: Int64 = 0
+        for stem in Self.storedStems(for: ref) {
+            for ext in ["jpg", "mp4", "m4a"] {
+                let url = dir.appendingPathComponent("\(stem).\(ext)")
+                guard fm.fileExists(atPath: url.path) else { continue }
+                if let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize {
+                    freed += Int64(size)
+                }
+                try? fm.removeItem(at: url)
+            }
+        }
+        cacheRemove(ref)
+        sizeCache.removeValue(forKey: ref)
+        // NSCache can't evict by key prefix and the thumb keys are "<ref>@<bucket>" — drop them all;
+        // thumbnails re-derive from disk, and deletion is rare (expiry/sweep), not a hot path.
+        thumbCache.removeAllObjects()
+        return freed
+    }
+
+    /// Delete every file whose stem no live event references (the caller passes the in-use stem set
+    /// built from every circle's feed + comments + scheduled posts). A GRACE window skips anything
+    /// modified recently: media staged in a composer but not yet posted, an in-flight `incoming_*.part`
+    /// reassembly, and a `mint_*` scratch mid-produce all have fresh mtimes and no referencing event
+    /// yet — age, not referencedness, is what makes those safe to judge. Static + nonisolated so the
+    /// walk runs off the main actor; the caller clears the in-memory caches afterwards.
+    nonisolated static func performOrphanSweep(inUse: Set<String>, graceSeconds: TimeInterval = 48 * 3600) -> (bytes: Int64, files: Int) {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(
+            at: storageDir,
+            includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]) else { return (0, 0) }
+        let cutoff = Date().addingTimeInterval(-graceSeconds)
+        var bytes: Int64 = 0
+        var files = 0
+        for url in items {
+            let vals = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey])
+            if vals?.isDirectory == true { continue }
+            if let m = vals?.contentModificationDate, m > cutoff { continue }   // too fresh to judge
+            let stem = url.deletingPathExtension().lastPathComponent
+            if inUse.contains(stem) { continue }
+            // Past the grace window with no referencing event anywhere: an orphan. This also retires
+            // stale mint_/incoming_ scratch a crash left behind (their stems are never in a feed).
+            bytes += Int64(vals?.fileSize ?? 0)
+            files += 1
+            try? fm.removeItem(at: url)
+        }
+        return (bytes, files)
     }
 
     @discardableResult

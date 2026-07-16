@@ -2549,10 +2549,35 @@ async function scheduledSheet() {
 }
 
 async function advancedSheet() {
+  const fmtBytes = (n) => {
+    if (!n) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let i = 0, v = n;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+  };
   const security = el("div", { class: "card col" },
     el("h3", {}, "Security"),
     el("div", { class: "muted small" }, "Run the on-device hybrid post-quantum self-test (Ed25519 + ML-DSA, X25519 + ML-KEM-768)."),
     el("button", { class: "btn", onclick: async () => { const r = await invoke("self_test"); modal(el("div", {}, el("h2", {}, r.all_ok ? "✅ All checks passed" : "⚠️ Some checks failed"), el("div", { class: "col small" }, line("Identity", r.identity_ok), line("Hybrid KEM", r.hybrid_kem_ok), line("Signatures", r.signature_ok), line("Reach-me link", r.link_ok)), el("p", { class: "muted small" }, r.summary))); } }, "Run self-test"),
+  );
+
+  const storage = el("div", { class: "card col" },
+    el("h3", {}, "Storage"),
+    el("div", { class: "muted small" }, "Remove media on this device that no post, message or scheduled send references anymore."),
+    (() => {
+      const status = el("div", { class: "muted small" }, "");
+      const btn = el("button", { class: "btn", onclick: async () => {
+        btn.disabled = true; btn.textContent = "Cleaning up…";
+        try {
+          const r = await invoke("media_cleanup");
+          status.textContent = !r || !r.files ? "Nothing to clean up."
+            : `Freed ${fmtBytes(r.bytes)} across ${r.files} file${r.files === 1 ? "" : "s"}.`;
+        } catch (e) { status.textContent = "Cleanup failed: " + e; }
+        btn.disabled = false; btn.textContent = "Clean up unused media";
+      } }, "Clean up unused media");
+      return el("div", { class: "col", style: "gap:6px" }, btn, status);
+    })(),
   );
 
   const danger = el("div", { class: "card col" },
@@ -2566,7 +2591,7 @@ async function advancedSheet() {
     el("div", { class: "muted small mono" }, "node id: " + state.node),
   );
 
-  sheet("Advanced", el("div", { class: "col", style: "gap:16px" }, about, security, danger));
+  sheet("Advanced", el("div", { class: "col", style: "gap:16px" }, about, security, storage, danger));
 }
 
 async function identitiesSheet() {

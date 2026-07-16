@@ -25,8 +25,17 @@ import kotlin.math.max
 object LocalMedia {
     private lateinit var dir: File
 
+    /** Decrypted playback caches (videoFile/audioFile output). These used to be written LOOSE in
+     *  filesDir — OUTSIDE the media dir — so [clear] never removed them and PLAINTEXT media survived
+     *  "start over" (a privacy bug). New caches land in this dedicated subdir, which clear() and the
+     *  orphan sweep both cover; reads still check the old loose location first (compat), and clear()
+     *  removes the loose stragglers too. */
+    private lateinit var plainDir: File
+
     fun init(context: Context) {
-        dir = File(context.applicationContext.filesDir, "media").apply { mkdirs() }
+        val files = context.applicationContext.filesDir
+        dir = File(files, "media").apply { mkdirs() }
+        plainDir = File(files, "media-plain").apply { mkdirs() }
     }
 
     /** Above this plaintext size, seal file→file (off-heap) instead of holding the sealed envelope in RAM. */
@@ -75,10 +84,19 @@ object LocalMedia {
         return ref
     }
 
+    /** The decrypted playback-cache file for [ref]: the legacy loose filesDir location if a cache
+     *  already exists there (read-compat), else the media-plain/ subdir that clear() + the orphan
+     *  sweep own. */
+    private fun plainCacheFile(ref: String, ext: String): File {
+        val key = storageKey(ref)
+        val legacy = File(dir.parentFile, "$key.$ext")
+        return if (legacy.exists()) legacy else File(plainDir, "$key.$ext")
+    }
+
     /** Decrypt an audio ref to a cache file MediaPlayer can read; null if missing. */
     fun audioFile(circleId: String, ref: String): File? {
         val bytes = load(circleId, ref) ?: return null
-        val out = File(dir.parentFile, "${storageKey(ref)}.m4a")
+        val out = plainCacheFile(ref, "m4a")
         if (!out.exists()) runCatching { out.writeBytes(bytes) }
         return if (out.exists()) out else null
     }
@@ -175,7 +193,7 @@ object LocalMedia {
      *  allocations aren't bound by the managed-heap cap, only by physical RAM. The player then streams
      *  from the file, so the whole video is never held in the app's heap at once. */
     fun videoFile(circleId: String, ref: String): File? {
-        val out = File(dir.parentFile, "${storageKey(ref)}.mp4")
+        val out = plainCacheFile(ref, "mp4")
         if (out.exists()) return out
         val sealed = mediaFile(ref)
         if (!sealed.exists()) return null
@@ -216,7 +234,7 @@ object LocalMedia {
      *  trigger a full decrypt just to draw a feed thumbnail (a 600 MB video would be needless heavy
      *  work per feed item); an un-played video shows the play-glyph tile until it's opened. */
     fun videoPoster(circleId: String, ref: String): Bitmap? {
-        val file = File(dir.parentFile, "${storageKey(ref)}.mp4")
+        val file = plainCacheFile(ref, "mp4")
         if (!file.exists()) return null
         val mmr = android.media.MediaMetadataRetriever()
         return runCatching {
@@ -248,7 +266,7 @@ object LocalMedia {
     fun pixelSize(circleId: String, ref: String): Pair<Int, Int>? {
         sizeCache[ref]?.let { return if (it == UNKNOWN_SIZE) null else it }
         val size = if (isVideo(ref)) {
-            val file = File(dir.parentFile, "${storageKey(ref)}.mp4")
+            val file = plainCacheFile(ref, "mp4")
             if (!file.exists()) null else {
                 val mmr = android.media.MediaMetadataRetriever()
                 runCatching { mmr.setDataSource(file.absolutePath); mmrSize(mmr) }
@@ -345,9 +363,88 @@ object LocalMedia {
             part.renameTo(dst) || (part.copyTo(dst, overwrite = true).let { part.delete(); true })
         }.getOrDefault(false)
 
-    /** Delete every stored media file (part of "start over"). */
+    // ---- Deletion & GC ---------------------------------------------------------------------------
+    // Blobs never deleted themselves: `purgeExpired` drops the EVENTS but the sealed bytes (and,
+    // worse, the DECRYPTED playback caches) lived forever. Deletion is ref-driven — the engine hands
+    // back purged refs, HavenNet subtracts anything a live event anywhere still names, and the rest
+    // is removed here. The orphan sweep covers what purging can't reach (unsent/abandoned staging,
+    // legacy bare-hash files, caches for media that's long gone).
+
+    /** Every on-disk name [ref] resolves to — the kind-qualified storage key plus the legacy bare
+     *  key. One definition shared by [delete] and the sweep's keep-set so the two can't drift. */
+    fun normalizedKeys(ref: String): Set<String> = setOf(storageKey(ref), bareId(ref))
+
+    /** True when [stem] is shaped like one of our storage keys — a kind-prefixed ref or a bare
+     *  64-hex content hash. Gates which loose filesDir files the cache cleanup may touch (filesDir
+     *  also holds app state that must never be swept). */
+    private fun isMediaKeyStem(stem: String): Boolean =
+        stem.startsWith("img_") || stem.startsWith("vid_") || stem.startsWith("aud_") ||
+            (stem.length == 64 && stem.all { it in '0'..'9' || it in 'a'..'f' })
+
+    /** Remove [ref]'s sealed blob (modern + legacy key) AND its decrypted playback caches (both the
+     *  media-plain/ subdir and the legacy loose filesDir location). Only call with refs no live
+     *  event references — the caller owns the in-use check. Returns bytes freed. */
+    fun delete(ref: String): Long {
+        if (isSynthetic(ref)) return 0L
+        var freed = 0L
+        fun rm(f: File) {
+            if (f.isFile) { freed += f.length(); runCatching { f.delete() } }
+        }
+        for (key in normalizedKeys(ref)) rm(File(dir, key))
+        for (ext in listOf("mp4", "m4a")) {
+            rm(File(dir.parentFile, "${storageKey(ref)}.$ext"))
+            rm(File(plainDir, "${storageKey(ref)}.$ext"))
+        }
+        sizeCache.remove(ref)
+        return freed
+    }
+
+    /** Delete every stored file whose key is not in [keepKeys] (built by the caller from every
+     *  circle's feed + comments + scheduled sends via [normalizedKeys]). A GRACE window skips
+     *  anything modified recently — media staged in a composer but not yet posted and in-flight
+     *  `incoming_*.part` reassemblies have fresh mtimes and no referencing event YET; age, not
+     *  referencedness, is what makes them safe to judge. Covers the sealed store, the media-plain/
+     *  cache dir, and legacy loose caches in filesDir. Returns (bytesFreed, filesRemoved). */
+    fun sweepOrphans(keepKeys: Set<String>, graceMs: Long = 48L * 3600 * 1000): Pair<Long, Int> {
+        val cutoff = System.currentTimeMillis() - graceMs
+        var bytes = 0L
+        var files = 0
+        fun rm(f: File) { bytes += f.length(); files++; runCatching { f.delete() } }
+        // Sealed blobs (also retires stale incoming_*.part / *.plain.tmp scratch — never in the keep-set).
+        dir.listFiles()?.forEach { f ->
+            if (f.isFile && f.lastModified() <= cutoff && f.name !in keepKeys) rm(f)
+        }
+        // Decrypted playback caches: ours entirely — keep iff the sealed key is kept.
+        plainDir.listFiles()?.forEach { f ->
+            val stem = f.name.substringBeforeLast('.')
+            if (f.isFile && f.lastModified() <= cutoff && stem !in keepKeys) rm(f)
+        }
+        // Legacy loose caches in filesDir (pre-media-plain builds): only touch files SHAPED like our
+        // caches — filesDir holds unrelated app state.
+        dir.parentFile?.listFiles()?.forEach { f ->
+            val n = f.name
+            if (!f.isFile || !(n.endsWith(".mp4") || n.endsWith(".m4a"))) return@forEach
+            val stem = n.dropLast(4)
+            if (isMediaKeyStem(stem) && f.lastModified() <= cutoff && stem !in keepKeys) rm(f)
+        }
+        return bytes to files
+    }
+
+    /** Delete every stored media file (part of "start over") — the sealed store, the decrypted
+     *  playback caches, AND the legacy loose caches that used to survive this (plaintext outliving
+     *  a factory reset was a privacy bug). */
     fun clear() {
         runCatching { dir.listFiles()?.forEach { it.delete() } }
+        runCatching { plainDir.listFiles()?.forEach { it.delete() } }
+        runCatching {
+            dir.parentFile?.listFiles()?.forEach { f ->
+                val n = f.name
+                if (f.isFile && (n.endsWith(".mp4") || n.endsWith(".m4a")) && isMediaKeyStem(n.dropLast(4))) {
+                    f.delete()
+                }
+            }
+        }
+        sizeCache.clear()
     }
 
     private fun sha256Hex(bytes: ByteArray): String =

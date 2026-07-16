@@ -408,6 +408,7 @@ pub fn run() {
             commands::s3_status,
             commands::s3_configure,
             commands::s3_clear,
+            commands::media_cleanup,
             commands::set_foreground,
             commands::reset,
         ])

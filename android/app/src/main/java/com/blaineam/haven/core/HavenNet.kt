@@ -343,6 +343,7 @@ object HavenNet : InboundListener {
                     runCatching { requestMissingMedia() }
                     runCatching { pushOwnMediaNearby() }
                     runCatching { purgeStaleRelays() }
+                    runCatching { maybeWeeklyMediaSweep() }   // orphaned media blobs (at most once a week)
                 }
                 // Poll bucket (base 30s): pull the circle relay/mailbox so posts arrive even when peers
                 // aren't both online (pollMailbox also drives mesh + multi-device self-sync internally).
@@ -665,6 +666,7 @@ object HavenNet : InboundListener {
     /** The messages of a circle (a DM thread), oldest→newest for chat display. Hides anything older
      *  than this DM's "cleared before" watermark so re-starting a (deterministic-id) DM shows fresh. */
     fun messages(circleId: String): List<uniffi.haven_ffi.FeedItemFfi> {
+        maybePurgeExpiredMedia(circleId)   // really drop expired events + GC their blobs (throttled)
         // Honor this DM's viewer auto-delete window, same as the posts feed (CircleScreen) and iOS
         // (`messages(in:)`). A DM is a Post under a `dm:` circle, so both the sender's disappearing timer
         // and the viewer's retention setting apply; passing `null` here silently exempted DM threads.
@@ -2318,6 +2320,82 @@ object HavenNet : InboundListener {
             val it = mediaQueueKeys.iterator(); it.next(); it.remove()
         }
         true
+    }
+
+    // ---- Media GC (purge-linked deletion + orphan sweep) -------------------------------------
+    // `feed()` only HIDES expired posts; `purgeExpired` really drops the events and returns their
+    // media refs so the blobs (sealed store + decrypted playback caches) finally leave disk too.
+    // Deletion is gated on an in-use check — the same photo may ride another live post (any circle,
+    // DMs included), a comment, or a scheduled send, and those keep their bytes.
+
+    /** Circles already purged this app session (purging is idempotent; once per session is plenty). */
+    private val purgedMediaCircles = mutableSetOf<String>()
+
+    /** Really delete expired content for a circle and GC the blobs the purge orphaned. Call from the
+     *  feed/messages display paths — throttled to once per circle per app session so recompositions
+     *  never re-run engine purges. */
+    fun maybePurgeExpiredMedia(circleId: String) {
+        if (!ready) return
+        synchronized(purgedMediaCircles) { if (!purgedMediaCircles.add(circleId)) return }
+        scope.launch {
+            val purged = runCatching {
+                social.purgeExpired(circleId, CircleSettings.retentionSecs(circleId), nowMs())
+            }.getOrDefault(emptyList())
+            if (purged.isEmpty()) return@launch
+            // Persist FIRST: once the blobs are gone, the purged events must not resurrect from a
+            // stale state file and re-request their (now deleted) media forever.
+            persist()
+            // Built AFTER the purge, so this circle's dropped events no longer count as users.
+            val inUse = mediaInUseKeys()
+            var freed = 0L
+            for (ref in purged) {
+                if (LocalMedia.isSynthetic(ref)) continue
+                if (LocalMedia.normalizedKeys(ref).none { it in inUse }) freed += LocalMedia.delete(ref)
+            }
+            if (freed > 0) Log.i("MediaGC", "purge $circleId: freed ${freed}B")
+        }
+    }
+
+    /** Every on-disk key a live event still references: every circle's feed (retention null —
+     *  expired-but-unpurged events keep their bytes until purged) + every comment + scheduled sends.
+     *  Blocking (feed() re-opens every envelope) — call off the main thread. */
+    private fun mediaInUseKeys(): Set<String> {
+        val keys = HashSet<String>()
+        fun add(r: String) { if (!LocalMedia.isSynthetic(r)) keys.addAll(LocalMedia.normalizedKeys(r)) }
+        for (c in runCatching { social.circles() }.getOrDefault(emptyList())) {
+            val feed = runCatching { social.feed(c.id, nowMs(), null) }.getOrDefault(emptyList())
+            for (item in feed) {
+                item.media.forEach(::add)
+                item.comments.forEach { cm -> cm.media.forEach(::add) }
+            }
+        }
+        ScheduledStore.items.forEach { it.media.forEach(::add) }
+        return keys
+    }
+
+    /** Delete every stored blob no event anywhere references (Settings' "Clean up unused media" and
+     *  the weekly sweep). Blocking — call off the main thread. Returns (bytesFreed, filesRemoved). */
+    fun cleanupUnusedMedia(): Pair<Long, Int> {
+        if (!ready) return 0L to 0
+        val result = LocalMedia.sweepOrphans(mediaInUseKeys())
+        if (result.second > 0) Log.i("MediaGC", "sweep: freed ${result.first}B across ${result.second} files")
+        return result
+    }
+
+    private val gcPrefs get() = appContext.getSharedPreferences("haven.mediagc", Context.MODE_PRIVATE)
+    @Volatile private var weeklySweepInFlight = false
+
+    /** Run the orphan sweep at most once a week (persisted stamp), piggybacked on the sync loop. */
+    private fun maybeWeeklyMediaSweep() {
+        if (!ready || weeklySweepInFlight) return
+        val last = gcPrefs.getLong("lastSweep", 0L)
+        if (System.currentTimeMillis() - last < 7L * 24 * 3600 * 1000) return
+        weeklySweepInFlight = true
+        scope.launch {
+            runCatching { cleanupUnusedMedia() }
+            gcPrefs.edit().putLong("lastSweep", System.currentTimeMillis()).apply()
+            weeklySweepInFlight = false
+        }
     }
 
     /** Fetch missing feed media: try the circle relay (haven/media/<ref>) first, then ask contacts. */

@@ -120,6 +120,8 @@ struct SettingsView: View {
     var onReset: () -> Void
     @ObservedObject private var settings = SettingsStore.shared
     @State private var storageText = "…"
+    @State private var cleaningMedia = false
+    @State private var cleanupResult: String?
 
     /// Walk the media dir off the main actor and format the total (e.g. "1.2 GB · 340 files").
     private func measureStorage() async {
@@ -183,9 +185,32 @@ struct SettingsView: View {
                         Spacer()
                         Text(storageText).foregroundStyle(.secondary).monospacedDigit()
                     }
+                    Button {
+                        guard !cleaningMedia else { return }
+                        cleaningMedia = true
+                        cleanupResult = nil
+                        Task {
+                            let r = await FeedStore.shared.cleanupUnusedMedia()
+                            cleanupResult = r.files == 0
+                                ? "Nothing to clean up"
+                                : "Freed \(ByteCountFormatter.string(fromByteCount: r.bytes, countStyle: .file)) · \(r.files) file\(r.files == 1 ? "" : "s")"
+                            await measureStorage()
+                            cleaningMedia = false
+                        }
+                    } label: {
+                        HStack {
+                            Label(cleaningMedia ? "Cleaning up…" : "Clean up unused media", systemImage: "trash")
+                            Spacer()
+                            if cleaningMedia { ProgressView() }
+                            else if let cleanupResult {
+                                Text(cleanupResult).foregroundStyle(.secondary).font(.caption).monospacedDigit()
+                            }
+                        }
+                    }
+                    .disabled(cleaningMedia)
                 } header: { Text("Storage") }
                 footer: {
-                    Text("Photos and videos from your circles, cached on this device. Freeing space here just re-downloads them from your relay when you next view them.")
+                    Text("Photos and videos from your circles, cached on this device. Freeing space here just re-downloads them from your relay when you next view them. Cleaning up removes only media no post, message or scheduled send references anymore.")
                 }
                 .task { await measureStorage() }
                 Section {

@@ -285,6 +285,89 @@ impl LocalMedia {
             }
         }
     }
+
+    // ---- Deletion & GC ------------------------------------------------------------------
+    // Blobs never deleted themselves: `purge_expired` drops the EVENTS but the sealed bytes lived
+    // forever. Deletion is ref-driven — the engine hands back purged refs, the engine subtracts
+    // anything a live event anywhere still names, and the rest is removed here. The orphan sweep
+    // covers what purging can't reach (unsent/abandoned staging, stale `incoming_*.part` scratch).
+
+    /// The on-disk file name a ref is stored under. Storage has always keyed on the LOCAL `bare_id`
+    /// (desktop mints strip `v:`/`a:`/`i:`; inbound `img_`/`vid_`/`aud_` refs keep their prefix), so
+    /// this is the one mapping both [`Self::delete`] and the sweep's keep-set must share.
+    pub fn storage_name(reference: &str) -> String {
+        bare_id(reference).to_string()
+    }
+
+    /// Remove a ref's blob from disk. Only call with refs no live event references — the caller
+    /// owns the in-use check. Returns the bytes freed.
+    pub fn delete(&self, reference: &str) -> u64 {
+        if Self::is_synthetic(reference) {
+            return 0;
+        }
+        let p = self.dir.join(bare_id(reference));
+        let len = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+        if fs::remove_file(&p).is_ok() {
+            len
+        } else {
+            0
+        }
+    }
+
+    /// Delete every stored file whose name is not in `keep` (built by the caller from every
+    /// circle's feed + comments + scheduled sends via [`Self::storage_name`]). A GRACE window skips
+    /// anything modified recently: media staged in a composer but not yet posted and an in-flight
+    /// `incoming_*.part` reassembly have fresh mtimes and no referencing event YET — age, not
+    /// referencedness, is what makes those safe to judge. Dot-files (the GC stamp) are never touched.
+    /// Returns (bytes_freed, files_removed).
+    pub fn sweep_orphans(&self, keep: &std::collections::HashSet<String>, grace_secs: u64) -> (u64, usize) {
+        let cutoff = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(grace_secs));
+        let mut bytes = 0u64;
+        let mut files = 0usize;
+        if let Ok(entries) = fs::read_dir(&self.dir) {
+            for e in entries.flatten() {
+                let path = e.path();
+                let Ok(md) = e.metadata() else { continue };
+                if !md.is_file() {
+                    continue;
+                }
+                let fresh = match (md.modified().ok(), cutoff) {
+                    (Some(m), Some(c)) => m > c,
+                    _ => true, // unreadable mtime = treat as fresh (never judge it)
+                };
+                if fresh {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+                if name.starts_with('.') || keep.contains(name) {
+                    continue;
+                }
+                bytes += md.len();
+                files += 1;
+                let _ = fs::remove_file(&path);
+            }
+        }
+        (bytes, files)
+    }
+
+    /// True when the persisted GC stamp is older than `min_interval_secs` (or absent) — gates the
+    /// startup-throttled weekly sweep.
+    pub fn gc_due(&self, min_interval_secs: u64) -> bool {
+        let stamp = self.dir.join(".gc-stamp");
+        match fs::metadata(&stamp).and_then(|m| m.modified()) {
+            Ok(m) => std::time::SystemTime::now()
+                .duration_since(m)
+                .map(|d| d.as_secs() >= min_interval_secs)
+                .unwrap_or(false),
+            Err(_) => true,
+        }
+    }
+
+    /// Record "a sweep just ran" (see [`Self::gc_due`]).
+    pub fn touch_gc_stamp(&self) {
+        let _ = fs::write(self.dir.join(".gc-stamp"), b"");
+    }
 }
 
 #[cfg(test)]

@@ -130,6 +130,9 @@ fun CircleScreen(onAddFriend: () -> Unit) {
     val circleSettingsVersion by com.blaineam.haven.core.CircleSettings.version
     val showHidden by com.blaineam.haven.core.HiddenStore.showHidden
     val hiddenCount = com.blaineam.haven.core.HiddenStore.hidden.size
+    // Viewing a circle's feed is the purge hook: really drop expired events + GC their media blobs
+    // (throttled inside — once per circle per app session).
+    LaunchedEffect(active) { HavenNet.maybePurgeExpiredMedia(active) }
     val items: List<FeedItemFfi> = remember(version, active, profile.retentionDays, circleSettingsVersion, circlesVersion, HavenNet.blocked.size, showHidden, hiddenCount) {
         // Per-circle auto-delete override (falls back to the app-wide retention default).
         val raw = runCatching { HavenNet.engine.feed(active, nowMs(), com.blaineam.haven.core.CircleSettings.retentionSecs(active)) }.getOrDefault(emptyList())

@@ -142,6 +142,9 @@ fun SettingsScreen(onBack: () -> Unit) {
             StorageSyncCard(context)
 
             Spacer(Modifier.height(16.dp))
+            MediaCleanupCard()
+
+            Spacer(Modifier.height(16.dp))
             Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
                 Text("Stay connected", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                 Spacer(Modifier.height(4.dp))
@@ -357,6 +360,44 @@ private fun SettingsCheck(title: String, ok: Boolean) {
             fontSize = 16.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.size(10.dp))
         Text(title, color = HavenTheme.textPrimary, fontSize = 14.sp)
+    }
+}
+
+/** Storage housekeeping: run the media orphan sweep on demand and show what it freed.
+ *  Parity with iOS Settings ▸ Storage ▸ "Clean up unused media". */
+@Composable
+private fun MediaCleanupCard() {
+    val context = LocalContext.current
+    var cleaning by remember { mutableStateOf(false) }
+    var result by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(cleaning) {
+        if (!cleaning) return@LaunchedEffect
+        val r = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { HavenNet.cleanupUnusedMedia() }.getOrDefault(0L to 0)
+        }
+        result = if (r.second == 0) "Nothing to clean up"
+        else "Freed ${android.text.format.Formatter.formatFileSize(context, r.first)} · ${r.second} file${if (r.second == 1) "" else "s"}"
+        cleaning = false
+    }
+    Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
+        Text("Storage", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+        Spacer(Modifier.height(4.dp))
+        Text("Remove media on this device that no post, message or scheduled send references anymore.",
+            color = HavenTheme.textSecondary, fontSize = 12.sp)
+        Spacer(Modifier.height(10.dp))
+        Text(
+            if (cleaning) "Cleaning up…" else "Clean up unused media",
+            color = if (cleaning) HavenTheme.textSecondary else HavenTheme.pink,
+            fontWeight = FontWeight.Medium, fontSize = 14.sp,
+            modifier = Modifier
+                .clip(RoundedCornerShape(10.dp))
+                .clickable(enabled = !cleaning) { result = null; cleaning = true }
+                .padding(vertical = 8.dp),
+        )
+        result?.let {
+            Spacer(Modifier.height(4.dp))
+            Text(it, color = HavenTheme.textSecondary, fontSize = 12.sp)
+        }
     }
 }
 

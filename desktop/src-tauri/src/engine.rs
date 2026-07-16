@@ -137,6 +137,9 @@ pub struct Engine {
     http_url_bad: StdMutex<HashMap<String, u64>>,
     /// Frame-9 mesh-relay msgIds already seen (dedup / loop protection, parity with iOS seenRelay).
     seen_relay: StdMutex<std::collections::HashSet<String>>,
+    /// Circles whose expired events were already really-purged this app session (purging is
+    /// idempotent; once per session is plenty — see `maybe_purge_expired_media`).
+    media_purged: StdMutex<std::collections::HashSet<String>>,
 }
 
 /// Peer-to-peer iroh frame chunk — 32 KB, matching iOS/Android (`HavenNet.kt:2173`). Theirs is the
@@ -268,6 +271,7 @@ impl Engine {
                 .unwrap_or_default(),
             http_url_bad: StdMutex::new(HashMap::new()),
             seen_relay: StdMutex::new(std::collections::HashSet::new()),
+            media_purged: StdMutex::new(std::collections::HashSet::new()),
         }))
     }
 
@@ -521,6 +525,7 @@ impl Engine {
         }
         self.fire_due_scheduled(); // flush anything overdue from while the app was closed
         self.purge_stale_relays().await; // erase relays inactive AND unseen > 7 days (config else survives)
+        self.maybe_weekly_media_sweep(); // orphaned media blobs (at most once a week; runs off-thread)
         self.bump_activity(); // seed activity NOW so launch starts at tight cadence (idle=huge would else max-back-off)
         self.start_mailbox_loop();
     }
@@ -972,6 +977,107 @@ impl Engine {
     pub fn feed(&self, circle_id: &str) -> Vec<FeedItemFfi> {
         let retention = self.prefs.lock().unwrap().retention_secs;
         self.social.feed(circle_id.to_string(), now_ms(), retention)
+    }
+
+    // ---- media GC (purge-linked deletion + orphan sweep) ---------------------------------
+    // `feed()` only HIDES expired posts; `purge_expired` really drops the events and returns their
+    // media refs so the blobs finally leave disk too. Deletion is gated on an in-use check — the
+    // same photo may ride another live post (any circle, DMs included), a comment, or a scheduled
+    // send, and those keep their bytes.
+
+    /// Really delete expired content for a circle and GC the blobs the purge orphaned. Called from
+    /// the feed/messages commands — throttled to once per circle per app session so a refreshing
+    /// frontend never re-runs engine purges. Runs off the command thread.
+    pub fn maybe_purge_expired_media(self: &Arc<Self>, circle_id: &str) {
+        if !self.media_purged.lock().unwrap().insert(circle_id.to_string()) {
+            return;
+        }
+        let me = self.clone();
+        let cid = circle_id.to_string();
+        tauri::async_runtime::spawn_blocking(move || {
+            // Same retention the display paths pass to `feed`: the global pref for circles, none
+            // for DM threads (`messages` renders without a viewer window).
+            let retention = if cid.starts_with("dm:") {
+                None
+            } else {
+                me.prefs.lock().unwrap().retention_secs
+            };
+            let purged = me.social.purge_expired(cid.clone(), retention, now_ms());
+            if purged.is_empty() {
+                return;
+            }
+            // Persist FIRST: once the blobs are gone, the purged events must not resurrect from a
+            // stale state file and re-request their (now deleted) media forever.
+            me.persist();
+            // Built AFTER the purge, so this circle's dropped events no longer count as users.
+            let in_use = me.media_in_use_names();
+            let mut freed = 0u64;
+            for r in &purged {
+                if LocalMedia::is_synthetic(r) {
+                    continue;
+                }
+                if !in_use.contains(&LocalMedia::storage_name(r)) {
+                    freed += me.media.delete(r);
+                }
+            }
+            if freed > 0 {
+                log::info!("media GC purge {cid}: freed {freed}B");
+            }
+        });
+    }
+
+    /// The on-disk name of every media ref a live event still references — every circle's feed
+    /// (retention None: expired-but-unpurged events keep their bytes until purged), every comment,
+    /// and every scheduled send. Blocking (`feed` re-opens every envelope) — never call on the UI
+    /// path directly.
+    fn media_in_use_names(&self) -> std::collections::HashSet<String> {
+        let mut names = std::collections::HashSet::new();
+        fn add(names: &mut std::collections::HashSet<String>, r: &str) {
+            if !LocalMedia::is_synthetic(r) {
+                names.insert(LocalMedia::storage_name(r));
+            }
+        }
+        for c in self.social.circles() {
+            for item in self.social.feed(c.id, now_ms(), None) {
+                for r in &item.media {
+                    add(&mut names, r);
+                }
+                for cm in &item.comments {
+                    for r in &cm.media {
+                        add(&mut names, r);
+                    }
+                }
+            }
+        }
+        for s in &self.scheduled.lock().unwrap().items {
+            for r in &s.media {
+                add(&mut names, r);
+            }
+        }
+        names
+    }
+
+    /// Delete every stored blob no event anywhere references (Settings' "Clean up unused media"
+    /// and the weekly sweep). Blocking. Returns (bytes_freed, files_removed).
+    pub fn cleanup_unused_media(&self) -> (u64, usize) {
+        let keep = self.media_in_use_names();
+        let res = self.media.sweep_orphans(&keep, 48 * 3600);
+        if res.1 > 0 {
+            log::info!("media GC sweep: freed {}B across {} files", res.0, res.1);
+        }
+        res
+    }
+
+    /// Run the orphan sweep at most once a week (persisted stamp), kicked from startup.
+    fn maybe_weekly_media_sweep(self: &Arc<Self>) {
+        if !self.media.gc_due(7 * 24 * 3600) {
+            return;
+        }
+        let me = self.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let _ = me.cleanup_unused_media();
+            me.media.touch_gc_stamp();
+        });
     }
 
     /// Media refs any circle member flagged sensitive. Desktop has no on-device classifier (Apple's

@@ -264,6 +264,7 @@ pub fn remove_from_circle(engine: Eng, circle_id: String, contact_id_hex: String
 #[tauri::command]
 pub fn feed(engine: Eng, circle_id: String) -> Vec<FeedItemDto> {
     let cid = if circle_id.is_empty() { DEFAULT_CIRCLE.to_string() } else { circle_id };
+    engine.maybe_purge_expired_media(&cid); // feed refresh = the purge hook (throttled, off-thread)
     engine.feed(&cid).into_iter().map(|it| feed_item_dto(&engine, it)).collect()
 }
 
@@ -452,7 +453,22 @@ pub fn step_down_as_primary(engine: Eng) {
 
 #[tauri::command]
 pub fn messages(engine: Eng, circle_id: String) -> Vec<FeedItemDto> {
+    engine.maybe_purge_expired_media(&circle_id); // really drop expired DMs + GC their blobs (throttled)
     engine.messages(&circle_id).into_iter().map(|it| feed_item_dto(&engine, it)).collect()
+}
+
+/// Delete every locally-stored media blob no post, message, comment or scheduled send references
+/// anymore (Settings ▸ Advanced ▸ Storage). Returns what was freed so the UI can show it.
+#[derive(Serialize)]
+pub struct MediaCleanupDto {
+    pub bytes: u64,
+    pub files: usize,
+}
+
+#[tauri::command]
+pub fn media_cleanup(engine: Eng) -> MediaCleanupDto {
+    let (bytes, files) = engine.cleanup_unused_media();
+    MediaCleanupDto { bytes, files }
 }
 
 #[tauri::command]

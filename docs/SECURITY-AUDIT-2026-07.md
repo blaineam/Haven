@@ -986,3 +986,403 @@ health.
 **The one-line summary:** the cryptography is genuinely good and the mandate holds on content; the
 gap is everywhere the code left the crypto — the default HTTP transport, the unauthenticated
 endpoints, and a ledger that quietly made the maker into the thing he promised not to be.
+
+---
+---
+
+# Verification round 2 — 2026-07-15
+
+A second auditor, who wrote none of the round-1 fixes, was asked to (a) **independently verify** every
+claimed fix rather than trust the commits, and (b) audit what round 1 explicitly skipped — WebRTC call
+signaling, `haven-wasm`, and the large new attack surface (signed HTTP auth, content-addressed media,
+live device-to-device delivery, the signed `/flag`) that landed in ~20 commits under deadline.
+
+Method held to round 1's bar: **prove things.** Two executable attacks and one live-Worker forgery
+suite are the load-bearing evidence; the rest is code traced end-to-end. Where a fix could not be
+made to fail, it is marked RESOLVED **with the evidence that would have caught it if it were broken**.
+
+## Round-1 verdicts (this round's re-verification)
+
+| # | Round-1 severity | Verdict now | How it was verified |
+|---|---|---|---|
+| F1 | Critical | **RESOLVED** (documented residual) | Live `wrangler dev` + a 7-case forgery suite; KV dumped |
+| F2 | Critical | **RESOLVED** | The round-1 probe, now green: non-member 401/403, member 200 |
+| F3 | High | *out of round-2 scope for the push path;* call path = **new R1** | NSE known-contact check present; call signaling separately broken |
+| F4 | High | **RESOLVED for reads**, **reopened for devroster writes → R6** | Executable probe: non-member destroyed a roster over HTTP |
+| F5 | High | **RESOLVED** (real residuals) | `media_substitution` test green; legacy path traced on 3 platforms |
+| F7 | High (docs) | **PARTIAL** | Reporting section honest; new/remaining false claims → R2,R4,R5 |
+| F8 | High (docs) | **RESOLVED** | "rendezvous tokens" gone; signed-auth doc text matches code |
+| F9 | High | **PARTIAL — as intended** | No TLS on non-loopback binds; confirmed still the honest state |
+| F10 | High | **RESOLVED** | Same signed-auth + `blob_forbidden` default-deny gate |
+| F11 | Medium | **RESOLVED** | `loadSeedStatus` 3-way enum; only `.notFound` writes |
+| F17 | Medium | **RESOLVED** | `haven-s3` on `quick-xml 0.41.0`; residual is transitive `plist` |
+| — | Video GPS (non-audit) | **RESOLVED** | exiftool proof on all 6 export paths + JPEG + Android remux |
+| — | Epoch rotation (non-audit) | **RESOLVED** (additive) | `rotate_if_stale` 7d, sync-bundle driven, backward-clock guarded |
+| — | Revocation (non-audit) | **code honest; docs/UI NOT → R2,R3** | `recipients_with_devices` always seals to the account key |
+
+## New round-2 findings
+
+| # | Finding | Severity | Blocks v1? |
+|---|---|---|---|
+| R1 | WebRTC call signaling is unauthenticated **and** unsealed → spoofed call control + SDP/DTLS-SRTP MITM | **High** | **Yes** |
+| R2 | `SECURITY.md` still calls device-roster-change revocation "cryptographic, not advisory" — false | **High** (docs) | **Yes** |
+| R3 | Android + desktop still tell a user a revoked device "will no longer receive anything posted afterward" | **Med-High** (UI) | **Yes** |
+| R4 | `TERMS.md` says the developer "cannot tell who reported whom"; the actor **is** transmitted | **Medium** (docs) | Yes (legal doc) |
+| R5 | `appstore-metadata.md` says reporting "is not technically possible"; the `/flag` ledger ships | **Medium** (docs) | Yes (review copy) |
+| R6 | Non-member can destroy/fabricate any account's device roster over plain HTTP (proven) | **Med** | Recommended |
+| R7 | `haven-wasm` is dead code but exports `seed_hex()` and advises `localStorage` — delete the crate | **Info** | No |
+
+---
+
+## F1 — RESOLVED, with a residual the docs now own
+
+**Verified by executing it.** Ran the current `push/worker.js` under `wrangler dev --local` and pointed
+a 7-case forgery suite (self-generated Ed25519 keys, real Ed25519 signatures) at `POST /flag`:
+
+```
+200  A1 legit signed report                          [expect 200]  ✓
+401  B1 unsigned flag                                [expect 401]  ✓
+401  B2 garbage sig                                  [expect 401]  ✓
+401  B3 re-aim captured sig at new subject           [expect 401]  ✓   (subject bound)
+401  B4 re-aim captured sig, new category            [expect 401]  ✓   (category bound)
+401  B5 claim actor=alice, sig by mallory            [expect 401]  ✓   (actor bound)
+400  B6 signed action=block                          [expect 400]  ✓   (block unrepresentable)
+401  B7 signed, 1h-stale ts                          [expect 401]  ✓   (5-min window)
+400  C1 replay flag sig as /register                 [expect 400]  ✓   (hexToken keeps the spaces disjoint)
+```
+
+Then dumped the KV the Worker actually wrote: rows are `{subject, action, reason}` — **no `actor`,
+not even hashed** (confirmed by reading a row back); every row carries `expirationTtl` 90d; and five
+identical replays collapsed to **one** row (the key is `ts + sigTag(sig)`, so a captured flag is a
+no-op re-write). Each of the four round-1 fix items — signed, subject+action+category bound,
+replay-idempotent, no actor, 90d TTL, `block` rejected — **holds under attack.** Blocks never leave
+the device: `apple/HavenApp/ReportUI.swift` and `android/.../Moderation.kt` send only on `report`, and
+`blockConnection` (`FeedView.swift:539`) is local-only.
+
+**Residual (now an accepted, documented property, not a hole).** The sybil floor is exactly what the
+Terms already disclose. My suite planted **25/25** rows against one victim from 25 throwaway keys, and
+**10/10** from a single identity by walking `ts` inside the 5-minute window. But `docs/TERMS.md:64-68`
+and `docs/MODERATION.md:64-68` now state this plainly ("a determined attacker can still sign N reports
+from N throwaway keys… a row means *a holder of a valid Haven identity reported this identity*, **not**
+N distinct people"), and **nothing in the Worker reads the ledger to auto-enforce** (grep: the only
+`ledger:` references are the write and its key). Signing raised the floor from "anyone with curl" to
+"each row costs a real key", which is all the Terms lean on. Acceptable.
+
+**Nit (not a finding):** a non-numeric `ts` makes `verify_header`'s window `NaN > 300 → false`, so it
+reaches `new Date(NaN).toISOString()` and throws → **HTTP 500**, not an accepted flag. Harmless (no row
+lands), but the input should be rejected as `400` before the date math.
+
+---
+
+## F2 / F4 / F9 / F10 — RESOLVED (F9 partial, as intended), verified by the round-1 probe going green
+
+The round-1 probe (`core/haven-net/tests/http_relay_probe.rs`) is now a committed regression test, and
+it **passes** against the fixed relay. Its three passes are the exact F2/F4 attack, re-run:
+
+```
+[1] non-member, only the shared token:      GET /l/haven … PUT … → 401  (all four)
+[2] non-member, correctly signed + token:   GET /l/haven … PUT … → 403  (all four)   ← the authz case
+[3] secretclub's OWN member:                GET/PUT/list/get     → 200            ← still works
+```
+
+Pass [2] is the one that matters: a caller with a **valid identity and a valid signature** who is a
+member of no circle is refused `403` on enumerate, read, and write. I read the mechanism and it is
+sound: `verify_header` (`httprelay.rs:147`) binds `REQUEST_DOMAIN‖token‖method‖key‖ts‖nonce‖
+blake3(body)`, recomputes the body digest server-side and **enforces** it (`:308`, `400` on mismatch),
+burns the nonce (`:181`, replay → `None`), and bounds the timestamp in **both** directions (`:166`).
+`blob_forbidden` (`blobstore.rs`) now ends in `true` — **default-deny** for any unrecognized key under
+`haven/` — the inversion round 1 asked for. The signed header reaches all three clients through the
+`http_auth_header` FFI (`p2pcore-ffi/src/lib.rs:410`; `SharedStore.swift:510`, `HavenNet.kt:2422`,
+`engine.rs`), signing with the **device** key.
+
+**F9 remains PARTIAL, and that is the honest state.** `httprelay` is still raw TCP (module doc:
+"TLS is delegated to a fronting proxy/tunnel"), and clients still announce bare `http://<lan-ip>:8674`
+by default. The signed-request MAC means a captured `Authorization` header **cannot be replayed** (the
+nonce is burned and the ts window is 5 min), which closes the worst of round-1 F9 — but an on-path
+attacker still reads every key and blob in cleartext on a non-loopback bind. Round 1 flagged F9 as
+"partial (no TLS)"; it is still partial for the same reason. Not newly broken; not newly fixed.
+
+---
+
+## F4 reopened for devroster **writes** → R6 (proven): a non-member can destroy any device roster over HTTP
+
+Round-1 F4 was about **reads**, and reads are now denied (pass [2] above). But `blob_forbidden`
+un-gates **`VERB_PUT` on `haven/devroster/**` before the membership check** (`blobstore.rs`), on the
+stated grounds that the blob is self-authenticating via `verify_devroster`. That is true on the **iroh**
+path (`blobstore.rs:696,841` call `verify_devroster`) and **false on the HTTP path** — `httprelay.rs`
+never calls `verify_devroster`; its PUT branch calls `local_put` directly (`:326`), which renames over
+the target unconditionally.
+
+**Proven with an executable probe** (temporary, not committed):
+
+```
+=== ROUND-2 PROBE: non-member devroster PUT over plain HTTP ===
+attacker: a self-generated Ed25519 key, member of no circle, holding the token
+  [control] PUT /k/haven/mailbox/secretclub/injected -> 403   (mailbox write correctly refused)
+  [ATTACK ] PUT /k/haven/devroster/deadbeef           -> 200
+  roster on disk after: "POISONED-NOT-A-SIGNED-ROSTER"
+  [ATTACK ] PUT /k/haven/devroster/00000…000           -> 200   (fabricate a roster for an unknown account)
+  >>> PROBE SUCCEEDED: a non-member destroyed a stranger's device roster.
+  >>> The real account-signed roster is GONE (local_put renames over it).
+```
+
+**Impact — bounded, but real.** A signed non-member (any self-minted key; the `Authorization` gate is
+passed, the *membership* gate is skipped for this verb) overwrites a victim's real account-signed
+device roster on a given relay with garbage. Clients verify the account signature on **read**
+(`handleDeviceRosterAnnounce`), so the garbage is rejected there — but the *real* roster on that relay
+is gone, so the victim's device-id dialing/auth degrades for anyone fetching from that relay until it
+re-syncs from a sibling or the owner re-publishes. This is a device-roster **availability DoS**, not an
+integrity break (fabricated rosters fail signature verification downstream). Mitigated by multi-relay
+fan-out; worsened by mesh anti-entropy potentially propagating the clobber.
+
+**Recommended fix.** On the HTTP PUT path, when `key.starts_with("haven/devroster/")`, call
+`verify_devroster(account_from_key, &body)` and refuse (`400`) if it fails — exactly what the iroh path
+does at `blobstore.rs:696`. Do not rely on `blob_forbidden` un-gating a verb whose safety lives in a
+verifier the HTTP path never invokes.
+
+---
+
+## F5 — RESOLVED, with residuals the fix undersells
+
+`core/p2pcore/tests/media_substitution.rs` passes (6/6), and it is **not** vacuous: it runs real
+`seal_bytes`/`open_bytes` with a genuine roster member as the attacker, a one-line swap that forges
+nothing, and a negative control that proves the swap **lands** on the check-free path. Refs are
+`kind_hex(sha256(plaintext))` on all platforms (`mediaref.rs:121`, `Media.swift:357`, `LocalMedia.kt:66`;
+cross-platform digest pinned at `mediaref.rs:204`). Verification **fails closed** everywhere (Apple
+`store`/`adopt` refuse; Android/desktop `checked`/`load` return null/None).
+
+**The legacy path is NOT a downgrade vector** — for a reason worth stating precisely. The predicate is
+the dangerous shape ("looks like a content address? if not, skip verification", `mediaref.rs:136`,
+`Media.swift:393`, `LocalMedia.kt:390`), **but the attacker does not control the ref**: it lives inside
+`EventKind::Post`, which is inside the sealed ciphertext, and the signature covers the transcript
+binding that ciphertext (`social.rs:201`, verified `:234/:260`). Swapping a victim's `img_<sha256>` for
+an `img_<uuid>` requires the victim's signing key. Confirmed no unsigned ref source exists.
+
+**Residuals (accept knowingly):**
+- **Legacy `img_<uuid>` posts are permanently unprotected** — freely substitutable by a relay operator,
+  forever, with no expiry, re-mint migration, or user-visible "unverified" signal. The set shrinks only
+  by attrition.
+- **A malicious author can self-downgrade**: nothing forces minting, so an author can hand-craft an
+  `img_<uuid>` in their *own* signed post and then equivocate (serve different bytes to different
+  viewers, or mutate later) undetectably. Lower severity — they can post anything anyway — but the
+  equivocation property is a real loss, and clients cannot distinguish a new legacy-shaped ref from a
+  grandfathered one (no epoch/version field to gate on).
+- **Apple verifies at store/adopt only, not at at-rest read** (`item()`/`rawBytes()` read unverified),
+  unlike Android/desktop which verify on read too. Sound against a malicious *relay* (every inbound path
+  funnels through the two verified chokepoints), but does not catch at-rest file tampering.
+- **Android `videoFile` cache short-circuit** (`LocalMedia.kt:178-179`): returns a cached `.mp4`
+  *before* verification; a crash between the decrypt-write and the verify leaves an unverified plaintext
+  file that later calls return unchecked. Narrow (needs attacker timing + an OOM/crash window, which
+  this codebase has a history of), but real.
+
+---
+
+## F11 / F17 — RESOLVED
+
+**F11.** `DeviceKeyStore.loadSeed` is gone; `loadSeedStatus()` (`DeviceRoster.swift:89`) now returns a
+three-way `SeedStatus` and preserves the `OSStatus`: `errSecSuccess`→`.found`,
+`errSecItemNotFound`→`.notFound`, **everything else** (including `errSecInteractionNotAllowed`)→
+`.lockedOrError`. `deviceAccount()` generates+saves **only** on `.notFound` (`:44-49`); a present-but-
+underivable seed returns a throwaway and **never overwrites** (`:38-40`), and a locked read hands out a
+retried temporary identity. This is a faithful copy of the `AccountStore` discipline round 1 praised.
+The bug class is closed.
+
+**F17.** `cargo audit` (554 crates, fresh db) still lists two `quick-xml` 7.5-high advisories — but
+`cargo tree -i` shows the **attacker-reachable** copy, `haven-s3`'s direct dependency, is now
+`quick-xml v0.41.0` (advisory-free). The remaining flagged `0.39.4` is transitive under
+`iroh → netwatch → netdev → plist`, which parses **local** system plists, not the hostile-S3-endpoint
+XML — exactly round 1's reachability call. `crossbeam-epoch`/`paste`/`anyhow`/`spin` are unchanged and
+were already deemed carry-able. The one security-relevant bump is done.
+
+---
+
+## Video GPS strip (non-audit fix) — RESOLVED, empirically
+
+The highest-value re-verification, and it holds under a real `exiftool`. A source `.mov` carrying a
+QuickTime location atom was exported through **each** of the six `AVAssetExportSession` configurations
+the app actually uses:
+
+```
+SOURCE (loci injected):       GPSCoordinates: 37 deg 46' N, 122 deg 25' W
+OLD  (metadata = [] only):    LocationInformation: Lat=37.77489 Lon=-122.41940   ← THE BUG: leaks
+NEW  (metadataItemFilter=.forSharing()):  (no location tags)                     ← stripped
+```
+
+Box-level grep exposed the mechanism the round-1 note only suspected: `metadata = []` didn't merely
+fail to strip — AVFoundation **re-encoded** `©xyz` into a `loci` box while honoring the empty array.
+All six paths (`Media.swift` :124/:129, :509/:515, :549/:552, :579/:583, :663/:670, :719/:728) set
+`.forSharing()` and produced **no location tags**, including the passthrough remux most likely to skip a
+filter. JPEG EXIF GPS is stripped on re-encode (`addImage`/`Platform.swift:49`, proven with exiftool),
+and the Android instrumented test is genuine — it asserts the fixture *carried* GPS before testing the
+strip, then remuxes via MediaExtractor/MediaMuxer without `setLocation`.
+
+**Two documented leak paths remain, by design and disclosed in-code:** `importTrimmed`
+(`Media.swift:597`) raw-copies (safe today only via an unenforced caller invariant), and the
+"both exports failed" last-resort raw fallback (`Media.swift:495`, Android `readVideoBytes`) posts the
+original bytes rather than nothing. Worth a `stripVideoMetadata` on `importTrimmed` to make it
+self-defending.
+
+---
+
+## Epoch rotation & Revocation (non-audit) — rotation RESOLVED; revocation code honest, docs/UI NOT
+
+**Rotation.** `rotate_if_stale` (`p2pcore-ffi/src/lib.rs:1113`) advances the epoch once
+`ROTATE_INTERVAL_SECS` (7d) elapses, driven from `epoch_sync_bundle_inner` (`:2098`) so every sync
+attempts it, with a backward-clock guard (`:1118`) so skew can't force rotation. This is additive C2
+forward-secrecy hardening; sound.
+
+**Revocation.** Correctly **not** fixed, and the code is now brutally honest:
+`recipients_with_devices` (`core/p2pcore/src/device.rs:350`) **always** pushes the account key for
+every member ("ALWAYS seal to the account key", `:362`) before adding device bundles, and its own
+comment says "against a device whose seed was extracted, revoking is advisory… do not describe
+revocation as cryptographic." A seed-holder keeps decrypting regardless of the roster. **But the
+truth-telling landed on one surface out of several** — see R2 and R3.
+
+---
+
+## R1 — HIGH: WebRTC call signaling is unauthenticated **and** unsealed
+
+Round 1 flagged this as unexamined ("call signaling is non-idempotent and was never examined"). It is
+worse than non-idempotent: it is **unauthenticated and unencrypted**, and the code comment that says
+otherwise is false.
+
+**Unsealed.** `sendCallFrame` (`FeedView.swift`) sends `frame(type, payload)` via `sendIroh` **raw** —
+no `seal_*` call anywhere in the call send path — and *additionally* forwards the identical raw inner
+frame through the circle relays via `originateRelayInternet` (frame 9), which the relay host unwraps and
+re-sends. `WebRTCCall.swift:22` claims signaling "rides Haven's existing sealed P2P channel" — it does
+not; it rides the transport in cleartext. Every SDP offer/answer and ICE candidate (which contains
+candidate **IP addresses**) is visible to any relay on the frame-9 path.
+
+**Unauthenticated.** The FFI **does** deliver the QUIC-verified sender (`on_inbound(from_hex, payload)`,
+`p2pcore-ffi/src/lib.rs:862`; threaded into `handleInbound` as `senderDevice`, `FeedView.swift:651`),
+and `handleHello` **uses** it (compares at `:2380`). But the `switch type` dispatches **every** call
+frame (10/11/12/16/17/18/21/22) passing only `payload` to `CallManager` — the transport-verified id is
+**discarded**. The frame-9 relay path (`:2028`) calls `handleInbound(inner, viaNearby: true)` with **no**
+`senderDevice` at all. Authorization then rests entirely on the **self-declared** 64-hex prefix inside
+the payload: `handleOffer`/`handleIce` gate on `roster.contains(from)`, `handleInvite` on
+`knownContact(from)` — where `from` is attacker-chosen.
+
+**Attack.** Node ids are semi-public (reach-me links, QR, signed rosters). A malicious relay — or any
+node that can land a frame-9 or an iroh frame on the victim — sets `from` to a contact the victim knows
+and:
+1. **Spoofs the incoming-call UI** as a trusted contact (forged frame 10/16 → CallKit renders the
+   spoofed name full-screen; this is F3's perceptual-impersonation, reached here without even a Worker).
+2. **Forges call control** — a spoofed hangup (12) drops a live call; a spoofed invite rings the victim.
+3. **MITMs the media** — this is the serious one. Because the SDP offer is neither signed nor sealed, a
+   relay on the frame-9 path can rewrite the **DTLS-SRTP fingerprint** in the offer in flight. The
+   victim accepts the attacker's fingerprint (the only check, `roster.contains(from)`, still passes —
+   `from` is preserved), and the DTLS handshake terminates at the attacker → full call-media
+   interception. WebRTC's media encryption is only as good as the fingerprint's authenticity, and
+   nothing here authenticates it.
+
+**Recommended fix.** (a) Bind every call frame to the transport-verified identity: thread `senderDevice`
+into the call handlers and require `resolveAccount(senderDevice) == from` (mirroring `handleHello`), and
+**refuse frame-9-relayed call-control frames** unless the inner frame is itself origin-signed. (b) Seal
+signaling end-to-end like posts — the SDP/ICE payload should be a `SealedEnvelope` to the peer, so a
+relay can neither read candidate IPs nor rewrite the DTLS fingerprint. Until (b), the "sealed P2P
+channel" comment at `WebRTCCall.swift:22` must be corrected — it is the exact false-claim class as F7.
+
+---
+
+## R2 — HIGH (docs): SECURITY.md still calls device-roster revocation "cryptographic, not advisory"
+
+`docs/SECURITY.md:24-28`: "Removing/blocking a member, **or a device-roster change**, rotates the epoch
+so the removed node **cannot decrypt content posted afterward** — cryptographic revocation, not
+advisory." The `or a device-roster change` half is **false**, and it is the precise claim commit
+186e25b ("Stop promising revocation defeats a compromised device — it doesn't") set out to kill —
+still live in the security document a researcher reads first. Ground truth: `device.rs:362` always seals
+to the account key; every linked device holds the master seed (`DeviceRoster.swift:11-20`), so a revoked
+device keeps decrypting. SECURITY.md carries **no** revocation caveat anywhere. *Member* removal is
+genuinely cryptographic (the account key leaves the set); *device* revocation is not. The sentence
+conflates them. **Fix:** scope the claim to member removal; state device revocation is advisory until
+the D16 seed-drop, matching `device.rs:367-374`.
+
+## R3 — MED-HIGH (UI): Android + desktop still promise a revoked device is cut off
+
+186e25b fixed the Apple string only (`git show 186e25b --stat` = one file). Still shipping the promise:
+- `android/.../ui/SettingsScreen.kt:790` — *"This device will no longer receive anything posted to your
+  circles afterward."* (verbatim the string the fix commit names as false)
+- `desktop/ui/app.js:2526` — *"Revoke "…"? It will no longer receive anything posted afterward."*
+
+Both are false against every linked device today (all hold the seed). A user revoking a phone they
+believe was compromised reads a safety guarantee they do not have. **Fix:** port Apple's corrected copy
+(and its `revocationCaveat`) to both.
+
+## R4 — MEDIUM (docs): TERMS.md overstates "cannot tell who reported whom"
+
+`docs/TERMS.md:45-47`: "the report is signed by your key… but the signature is checked and discarded,
+not stored. The developer therefore **cannot** tell who reported whom." The **actor is transmitted** on
+the wire (`ReportUI.swift:30`, `Moderation.kt:41`, `engine.rs` all send `actor: nodeIdHex()`; the Worker
+destructures and `verifyReg`s it, `worker.js:158,168`). Only **persistence** is ruled out
+(`worker.js:174` stores no actor). So the honest verb is **"does not retain"**, an operator-policy
+boundary, not **"cannot"**, a cryptographic one — and `docs/SECURITY.md:99-104` already gets this exactly
+right ("the Worker observes the actor in memory… an operator-policy boundary, not cryptographic"). In a
+document that attaches service refusal and legal disclosure to these rows, the overstatement matters.
+**Fix:** change "cannot tell" to "does not retain, as a matter of code and policy", and cross-reference
+`SECURITY.md:99-104`.
+
+## R5 — MEDIUM (docs): appstore-metadata.md says reporting "is not technically possible"
+
+`appstore-metadata.md:61`: "there is no copy of user content to moderate or **to report to** —
+server-side filtering/**reporting is not technically possible**." Reporting to the developer **ships**
+(`worker.js:146-176`, a 90-day ledger row, called from all three clients); `docs/SECURITY.md:72` now
+says the opposite ("reporting exists and ships"). The 4178230 fix updated SECURITY.md and TERMS.md but
+never touched this App-Review-facing file. (The same sentence's "a removed member… cannot decrypt
+anything posted afterward" is **true** for member removal, so leave that clause.) **Fix:** state that
+content-free reporting to the developer exists and is signed, matching `SECURITY.md:72`.
+
+## R7 — INFO: haven-wasm is dead code with a seed-exfil footgun; delete it
+
+`core/haven-wasm` compiles (the `build_feed` arity break is fixed) but is **not built or shipped** —
+`docs/WEB-PARITY.md:1,28-29` records the web client as ABANDONED and the crate as "a vestige… candidate
+for removal"; no CI, no `wasm-pack`, no `.wasm` artifacts, no JS glue reference it. Its only tie to the
+build is the `core/Cargo.toml` workspace member line. RNG is correct (`getrandom` `js`/`wasm_js`), no
+secret is logged, no secret reaches a URL, and it holds **less** authority than native. But
+`lib.rs:61-65` exports `seed_hex()` across the wasm-bindgen boundary and its doc comment **recommends
+persisting the master seed to `localStorage`/IndexedDB** — a direct mandate violation (readable by any
+XSS on the origin and by extensions, with no Enclave/Keystore/keyring equivalent) if the crate is ever
+revived. Round 1's premise that the transfer-code flow "advertises moving the seed to a web client" is
+**incorrect** — `AccountStore.swift:115-117` says the opposite — so that specific worry is closed.
+**Fix:** drop `haven-wasm` from `core/Cargo.toml` and delete the crate, removing the footgun before
+someone finds it.
+
+---
+
+## Round-2 ship gate
+
+**Additional fix-before-v1 (on top of round-1's list):**
+
+1. **R1** — call signaling is the one genuinely new *code* vulnerability: unauthenticated and unsealed,
+   enabling caller-ID spoofing and DTLS-SRTP call-media MITM by a relay. Bind frames to the
+   transport-verified sender; seal signaling E2E. This is a mandate issue (a relay operator becomes a
+   MITM chokepoint on calls).
+2. **R2 + R3 + R4 + R5** — the revocation and reporting truth landed on some surfaces and not others.
+   Every one of these is a public, load-bearing claim that the code contradicts. Cheapest category to
+   fix, most damaging if a researcher finds it first (same reasoning as round-1 F7/F8).
+3. **R6** — close the HTTP devroster-PUT hole with `verify_devroster`; it reopens F4 for that namespace.
+
+**Acceptable to ship with, tracked:** F5's legacy/self-downgrade residuals, F9's no-TLS partial, the F1
+sybil floor (documented), R7 (delete the dead crate).
+
+**Does anything block a v1 announcement?** Yes — R1 (call MITM) and the R2–R5 false public claims. The
+crypto core, the relay authorization rebuild (F2/F4-reads/F10), the signed `/flag`, content-addressed
+media, F11, F17, and the video-GPS strip all **hold under attack** and would not, on their own, block a
+ship. The blockers are the new call-signaling surface and the honesty gap between what several docs/UI
+strings still promise and what the code does.
+
+**Honest confidence.** *High* on everything I executed — F1 (live forgery suite), F2/F4-reads (probe
+green), F4-writes/R6 (probe attack succeeded), video GPS (exiftool), F17 (`cargo tree`). *High* on R1,
+R2, R3, R4, R5: R1 is a code-path traced end-to-end (send is raw, `senderDevice` is provably discarded
+for call frames, frame-9 drops it) and the others are direct doc/UI-vs-code contradictions I read on
+both sides. *High* on F11 (read completely). *Medium-high* on F5 (test green, legacy path reasoned not
+executed as an attack — the ref-injection primitive genuinely does not exist, but that rests on the
+signature covering the ref, which I verified by reading not by forging). *Not covered this round:* the
+DTLS-SRTP media path itself beyond the fingerprint-authenticity argument, `SelfSync` reducer semantics,
+the S3 tunnel internals, and any non-Apple platform layer beyond the specific strings and call sites
+cited. `haven-wasm` is dead code (R7), so its latent issues are informational only.
+
+**One-line summary for round 2:** round 1's fixes hold where I could attack them — the signed `/flag`,
+the relay authorization, content addressing, and the video-GPS strip are real and survive an adversary;
+the remaining gaps are one new code surface that never got the same treatment (call signaling), a device
+roster write the HTTP path forgot to verify, and four public claims that still say the code does
+something it doesn't.

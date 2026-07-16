@@ -61,6 +61,9 @@ struct RelayCfg {
     /// Plain-HTTP interface to the same store — the default cross-NAT media transport
     /// (the iroh blob ALPN drops datagrams over pure-relay cross-NAT paths).
     http: Option<Arc<httprelay::HttpRelay>>,
+    /// Operator-chosen retention. Defaults to today's behavior (30d mailbox TTL, media
+    /// never deleted) — app-embedded relays never set it, so they change nothing.
+    retention: blobstore::Retention,
 }
 
 /// Per-peer dial backoff after failed connects. Without it the app's 20s sync loop re-dials every
@@ -199,13 +202,26 @@ impl Node {
 
     /// Start hosting the circle relay/mailbox in-process, rooted at `root`. Idempotent. The relay is
     /// served on this node's existing endpoint under the blob ALPN, so its node id == this node's id.
+    /// Default retention — 30d mailbox TTL, media never deleted — i.e. exactly the pre-retention
+    /// behavior; every app-embedded relay (FFI RelayHost) comes through here unchanged.
     pub fn enable_relay(&self, root: std::path::PathBuf) {
+        self.enable_relay_with_retention(root, blobstore::Retention::default());
+    }
+
+    /// [`Self::enable_relay`] with an OPERATOR-chosen [`blobstore::Retention`] (the headless
+    /// `haven-relay` binary's `--mailbox-ttl-days` / `--media-max-age-days` / `--media-max-bytes`).
+    pub fn enable_relay_with_retention(&self, root: std::path::PathBuf, retention: blobstore::Retention) {
         let mut g = lock(&self.relay);
         if g.is_none() {
-            *g = Some(RelayCfg { root: root.clone(), auth: Arc::new(Mutex::new(blobstore::RelayAuth::default())), http: None });
-            // Stamp the GC-enabled marker now so the 48h first-enable grace clock starts.
-            let _ = blobstore::gc_sweep(&root, blobstore::MAILBOX_TTL, blobstore::GC_GRACE);
-            // Hourly mailbox GC for the in-process store. A plain thread (not a tokio task):
+            *g = Some(RelayCfg {
+                root: root.clone(),
+                auth: Arc::new(Mutex::new(blobstore::RelayAuth::default())),
+                http: None,
+                retention,
+            });
+            // Stamp the GC-enabled marker(s) now so the 48h first-enable grace clock starts.
+            let _ = blobstore::gc_sweep_with(&root, &retention, blobstore::GC_GRACE);
+            // Hourly GC for the in-process store. A plain thread (not a tokio task):
             // `RelayServerHandle.attach` calls this from outside any async runtime on the app
             // platforms. Wakes every minute so it exits promptly once the relay is disabled.
             let holder = Arc::downgrade(&self.relay);
@@ -215,10 +231,27 @@ impl Node {
                     std::thread::sleep(std::time::Duration::from_secs(60));
                     slept += std::time::Duration::from_secs(60);
                     let Some(relay) = holder.upgrade() else { return };
-                    let Some(root) = lock(&relay).as_ref().map(|c| c.root.clone()) else { return };
+                    let Some((root, retention)) =
+                        lock(&relay).as_ref().map(|c| (c.root.clone(), c.retention))
+                    else {
+                        return;
+                    };
                     if slept >= blobstore::GC_INTERVAL {
                         slept = std::time::Duration::ZERO;
-                        let _ = blobstore::gc_sweep(&root, blobstore::MAILBOX_TTL, blobstore::GC_GRACE);
+                        let stats = blobstore::gc_sweep_with(&root, &retention, blobstore::GC_GRACE);
+                        // Operator visibility, but ONLY when a media limit is configured —
+                        // default (app-embedded) relays keep the existing no-output posture.
+                        if retention.media_limited() {
+                            println!(
+                                "▸ retention sweep: {} media aged out, {} evicted for size, {} freed \
+                                 ({} mailbox pruned) — media store now {}.",
+                                stats.media_deleted_age,
+                                stats.media_deleted_size,
+                                blobstore::fmt_bytes(stats.media_bytes_freed),
+                                stats.mailbox_deleted,
+                                blobstore::fmt_bytes(stats.media_bytes_total),
+                            );
+                        }
                     }
                 }
             });
@@ -309,16 +342,21 @@ impl Node {
     /// Mesh anti-entropy: pull every sealed blob a SIBLING relay holds that our in-process relay lacks,
     /// into our store (idempotent set-union). No-op if we don't host a relay. Returns blobs pulled.
     pub async fn relay_sync_from(&self, peer_node_hex: &str) -> usize {
-        let Some(root) = lock(&self.relay).as_ref().map(|c| c.root.clone()) else { return 0 };
+        let Some((root, retention)) =
+            lock(&self.relay).as_ref().map(|c| (c.root.clone(), c.retention))
+        else {
+            return 0;
+        };
         // Reuse THIS node's endpoint — a fresh `BlobClient::connect(self.secret, …)` endpoint shares
         // our node id, so it STEALS our DERP relay registration every mesh tick (home-relay flap) and
         // refuses all inbound handshakes while it lives. That single line made relay-path INBOUND to
         // any relay-hosting device effectively dead (dials timed out at 30s; direct dials took ~5ms).
         let Ok(client) = self.blob_client(peer_node_hex) else { return 0 };
-        // Age-preserving pull (shared with BlobServer::sync_pull_from): expired mailbox
-        // entries are never pulled back, and pulled files keep the peer's idle age — so a
-        // GC'd entry can't ping-pong between sibling relays forever.
-        let pulled = blobstore::pull_missing_from_peer(&root, &client).await;
+        // Age-preserving pull (shared with BlobServer::sync_pull_from): entries past OUR
+        // retention (mailbox TTL; media under the operator's own limits) are never pulled
+        // back, and pulled files keep the peer's idle age — so a GC'd entry can't ping-pong
+        // between sibling relays forever.
+        let pulled = blobstore::pull_missing_from_peer(&root, &client, &retention).await;
         let _ = client.close().await;
         pulled
     }

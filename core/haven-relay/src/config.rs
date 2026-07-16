@@ -64,6 +64,9 @@ pub struct Config {
     pub http_url: Option<String>,
     /// Bearer token the HTTP interface requires (generated once, persisted next to the seed).
     pub http_token: String,
+    /// Operator-chosen store retention (mailbox TTL override + optional media age/size
+    /// limits). Defaults to today's behavior: 30-day mailbox TTL, media never deleted.
+    pub retention: haven_net::blobstore::Retention,
 }
 
 /// On-disk JSON config (the `--config` form), all fields optional except `link`.
@@ -93,6 +96,15 @@ struct FileConfig {
     /// Public URL for the HTTP interface (reverse proxy / port-forward / tunnel).
     #[serde(default)]
     http_url: Option<String>,
+    /// Mailbox TTL override in days (default 30).
+    #[serde(default)]
+    mailbox_ttl_days: Option<u64>,
+    /// Delete media not touched for this many days (0/absent = keep forever, the default).
+    #[serde(default)]
+    media_max_age_days: Option<u64>,
+    /// Total-size cap on the media store, e.g. "50G" / "500M" (0/absent = unbounded).
+    #[serde(default)]
+    media_max_bytes: Option<String>,
 }
 
 fn default_s3_port() -> u16 {
@@ -168,9 +180,20 @@ impl Config {
         };
         let http_url = arg_value(args, "--http-url");
 
+        // Operator-chosen retention. Absent/0 media limits = today's behavior (never delete).
+        let retention = resolve_retention(
+            arg_value(args, "--mailbox-ttl-days")
+                .map(|v| v.parse::<u64>().map_err(|_| anyhow!("--mailbox-ttl-days must be a number")))
+                .transpose()?,
+            arg_value(args, "--media-max-age-days")
+                .map(|v| v.parse::<u64>().map_err(|_| anyhow!("--media-max-age-days must be a number")))
+                .transpose()?,
+            arg_value(args, "--media-max-bytes").as_deref(),
+        )?;
+
         let seed = load_or_create_seed(&data_dir)?;
         let http_token = load_or_create_http_token(&data_dir)?;
-        Ok(Self { link, data_dir, seed, backend, s3_port, rclone_bin, rclone_config, peers, http_bind, http_url, http_token })
+        Ok(Self { link, data_dir, seed, backend, s3_port, rclone_bin, rclone_config, peers, http_bind, http_url, http_token, retention })
     }
 
     fn from_file(path: &str) -> Result<Self> {
@@ -204,6 +227,11 @@ impl Config {
             None => Some(DEFAULT_HTTP_BIND.to_string()),
         };
         let http_token = load_or_create_http_token(&data_dir)?;
+        let retention = resolve_retention(
+            fc.mailbox_ttl_days,
+            fc.media_max_age_days,
+            fc.media_max_bytes.as_deref(),
+        )?;
         Ok(Self {
             link,
             data_dir,
@@ -222,8 +250,62 @@ impl Config {
             http_bind,
             http_url: fc.http_url,
             http_token,
+            retention,
         })
     }
+}
+
+/// Fold the operator's raw retention knobs into a [`haven_net::blobstore::Retention`].
+/// Absent (or 0) media limits mean "keep media forever" — exactly the pre-retention
+/// behavior — so a config written before these knobs existed resolves identically.
+fn resolve_retention(
+    mailbox_ttl_days: Option<u64>,
+    media_max_age_days: Option<u64>,
+    media_max_bytes: Option<&str>,
+) -> Result<haven_net::blobstore::Retention> {
+    let mut retention = haven_net::blobstore::Retention::default();
+    if let Some(days) = mailbox_ttl_days {
+        // The mailbox TTL is not optional (0 would delete every event instantly on the
+        // hourly sweep) — refuse rather than guess.
+        if days == 0 {
+            return Err(anyhow!("--mailbox-ttl-days must be at least 1 (default 30)"));
+        }
+        retention.mailbox_ttl = std::time::Duration::from_secs(days * 24 * 3600);
+    }
+    if let Some(days) = media_max_age_days {
+        if days > 0 {
+            retention.media_max_age = Some(std::time::Duration::from_secs(days * 24 * 3600));
+        }
+    }
+    if let Some(size) = media_max_bytes {
+        let bytes = parse_size(size)?;
+        if bytes > 0 {
+            retention.media_max_bytes = Some(bytes);
+        }
+    }
+    Ok(retention)
+}
+
+/// Parse a human size — plain bytes or a K/M/G/T suffix (optionally with a trailing B),
+/// decimal allowed: "50G", "500M", "1.5T", "1073741824". Powers of 1024.
+pub fn parse_size(s: &str) -> Result<u64> {
+    let up = s.trim().to_ascii_uppercase();
+    let up = up.strip_suffix('B').unwrap_or(&up);
+    let (num, mult) = match up.chars().last() {
+        Some('K') => (&up[..up.len() - 1], 1u64 << 10),
+        Some('M') => (&up[..up.len() - 1], 1u64 << 20),
+        Some('G') => (&up[..up.len() - 1], 1u64 << 30),
+        Some('T') => (&up[..up.len() - 1], 1u64 << 40),
+        _ => (up, 1u64),
+    };
+    let v: f64 = num
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("bad size '{s}' — use bytes or K/M/G/T, e.g. 50G or 500M"))?;
+    if !v.is_finite() || v < 0.0 {
+        return Err(anyhow!("bad size '{s}'"));
+    }
+    Ok((v * mult as f64) as u64)
 }
 
 /// Default bind for the HTTP blob interface.
@@ -363,6 +445,36 @@ fn decode_hex32(s: &str) -> Result<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_size_accepts_human_forms() {
+        assert_eq!(parse_size("0").unwrap(), 0);
+        assert_eq!(parse_size("1024").unwrap(), 1024);
+        assert_eq!(parse_size("500M").unwrap(), 500 * (1 << 20));
+        assert_eq!(parse_size("50G").unwrap(), 50 * (1u64 << 30));
+        assert_eq!(parse_size("50gb").unwrap(), 50 * (1u64 << 30));
+        assert_eq!(parse_size("1.5T").unwrap(), (1.5 * (1u64 << 40) as f64) as u64);
+        assert!(parse_size("watermelon").is_err());
+        assert!(parse_size("-5G").is_err());
+    }
+
+    #[test]
+    fn retention_defaults_to_todays_behavior() {
+        // No knobs → exactly the pre-retention policy (30d mailbox, media forever).
+        let r = resolve_retention(None, None, None).unwrap();
+        assert_eq!(r, haven_net::blobstore::Retention::default());
+        assert!(!r.media_limited());
+        // 0 is the documented "unbounded / no limit" spelling for the media knobs.
+        let r = resolve_retention(None, Some(0), Some("0")).unwrap();
+        assert!(!r.media_limited());
+        // Explicit limits land where the sweep reads them.
+        let r = resolve_retention(Some(60), Some(90), Some("50G")).unwrap();
+        assert_eq!(r.mailbox_ttl, std::time::Duration::from_secs(60 * 24 * 3600));
+        assert_eq!(r.media_max_age, Some(std::time::Duration::from_secs(90 * 24 * 3600)));
+        assert_eq!(r.media_max_bytes, Some(50 * (1u64 << 30)));
+        // A zero mailbox TTL would delete every event on the next sweep — refused.
+        assert!(resolve_retention(Some(0), None, None).is_err());
+    }
 
     #[test]
     fn seed_persists_across_loads() {

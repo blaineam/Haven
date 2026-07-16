@@ -33,8 +33,10 @@
 //! - [`gc_sweep`] runs hourly on every relay host and deletes `haven/mailbox/**` entries
 //!   whose mtime is older than [`MAILBOX_TTL`] (30 days). Live entries are touched daily by
 //!   each active author; legacy duplicates, stale-epoch copies, and retention-expired
-//!   events are never touched again, so they age out everywhere. Media (`haven/media/…`)
-//!   and self-sync slots are NEVER swept.
+//!   events are never touched again, so they age out everywhere. By DEFAULT media
+//!   (`haven/media/…`) and self-sync slots are NEVER swept; a relay OPERATOR may opt media
+//!   into an age limit and/or a total-size cap via [`Retention`] (see [`gc_sweep_with`]) —
+//!   age applies first, then oldest-first size eviction, so whichever rule frees more wins.
 //! - Mesh sync is **age-preserving** so a deletion isn't resurrected: `AGES` reports each
 //!   key's idle age, a puller skips mailbox entries already older than the TTL, and it
 //!   back-dates the pulled file's mtime by the peer's age — dead entries age monotonically
@@ -110,8 +112,11 @@ const MAX_KEY: usize = 512;
 /// Hard cap on a TOUCH request body (newline-joined keys — thousands of refs fit easily).
 const MAX_TOUCH_BODY: u64 = 256 * 1024;
 
-/// The namespace mailbox GC applies to. Media + self-sync slots are never swept.
+/// The namespace mailbox GC applies to. Self-sync slots are never swept; media is swept
+/// ONLY when the operator opts into a limit (see [`Retention`]).
 pub(crate) const MAILBOX_PREFIX: &str = "haven/mailbox/";
+/// The namespace operator-chosen media retention applies to.
+pub(crate) const MEDIA_PREFIX: &str = "haven/media/";
 /// A mailbox entry idle (no PUT / HAS hit / TOUCH) longer than this is garbage-collected.
 /// Clients refresh their live refs daily, so 30 days tolerates a month of total inactivity.
 pub const MAILBOX_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 3600);
@@ -120,6 +125,70 @@ pub const MAILBOX_TTL: std::time::Duration = std::time::Duration::from_secs(30 *
 pub const GC_GRACE: std::time::Duration = std::time::Duration::from_secs(48 * 3600);
 /// How often a relay host runs [`gc_sweep`].
 pub const GC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Operator-chosen retention policy for a relay store. **The default is exactly today's
+/// behavior** — mailbox entries age out after [`MAILBOX_TTL`], media is NEVER deleted — so
+/// an app-embedded relay that never touches this changes nothing. A relay operator may:
+///
+/// * override the mailbox TTL,
+/// * cap media by AGE (idle time, same TOUCH/HAS-refresh liveness clock the mailbox uses),
+/// * cap media by TOTAL SIZE (oldest-first eviction until under the cap),
+///
+/// or any combination. Age applies before size in a sweep, so when both are set whichever
+/// rule deletes more wins — the operator's "least amount of space" intent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Retention {
+    /// Idle TTL for `haven/mailbox/**` entries.
+    pub mailbox_ttl: std::time::Duration,
+    /// Idle TTL for `haven/media/**` blobs. `None` = never age out (today's behavior).
+    pub media_max_age: Option<std::time::Duration>,
+    /// Total-size cap on `haven/media/**`. `None` = unbounded (today's behavior).
+    pub media_max_bytes: Option<u64>,
+}
+
+impl Default for Retention {
+    fn default() -> Self {
+        Self { mailbox_ttl: MAILBOX_TTL, media_max_age: None, media_max_bytes: None }
+    }
+}
+
+impl Retention {
+    /// True when the operator opted into ANY media limit (the media sweep runs at all).
+    pub fn media_limited(&self) -> bool {
+        self.media_max_age.is_some() || self.media_max_bytes.is_some()
+    }
+}
+
+/// What one [`gc_sweep_with`] pass did — the operator-visibility numbers a relay host logs.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GcStats {
+    /// Mailbox entries (+ stale `.part` temps) deleted by the TTL sweep.
+    pub mailbox_deleted: usize,
+    /// Media blobs deleted because they exceeded `media_max_age`.
+    pub media_deleted_age: usize,
+    /// Media blobs evicted (oldest-first) to get under `media_max_bytes`.
+    pub media_deleted_size: usize,
+    /// Media bytes freed this pass (age + size deletions combined).
+    pub media_bytes_freed: u64,
+    /// Media store total AFTER the pass (only measured when a media limit is set).
+    pub media_bytes_total: u64,
+}
+
+/// Human-readable byte count for operator output ("1.5 GB", "512 MB", "980 B").
+pub fn fmt_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < UNITS.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{n} B")
+    } else {
+        format!("{:.1} {}", v, UNITS[i])
+    }
+}
 
 // --- request framing ----------------------------------------------------------------
 //
@@ -163,21 +232,53 @@ impl<T, E: std::fmt::Debug> IntoAnyhow<T> for std::result::Result<T, E> {
 
 /// Pure mesh-sync decision: of the `(key, idle-age-secs)` pairs a peer advertises, which
 /// should we pull? Those that (a) stay inside our namespace (no traversal / absolute /
-/// `..`), (b) we don't already hold, and (c) for mailbox entries, aren't already past the
-/// GC TTL — pulling one of those would RESURRECT an entry that is dying (or already
-/// deleted) everywhere else, which is exactly how dead entries used to circulate forever.
-/// Capped at `MAX_SYNC_PULL`. Factored out so the set-difference + safety + age logic is
-/// unit-testable without a live network. (A legacy peer that can't report ages advertises
-/// age 0, i.e. "fresh" — old pull-everything behavior during the transition.)
-pub(crate) fn keys_to_pull(root: &Path, peer_keys: &[(String, u64)]) -> Vec<(String, u64)> {
-    let ttl = MAILBOX_TTL.as_secs();
+/// `..`), (b) we don't already hold, and (c) aren't already past OUR OWN retention limits —
+/// pulling one of those would RESURRECT an entry we just deleted (or are about to delete),
+/// which is exactly how dead entries used to circulate forever. For mailbox entries the
+/// limit is the mailbox TTL; for media it's the operator's `media_max_age` (when set) plus
+/// the size-eviction horizon (see [`read_media_horizon`] — everything at or older than the
+/// newest blob the size cap evicted stays evicted, otherwise a size-capped relay would
+/// re-pull the oldest blobs every mesh tick just to evict them again next sweep). Each
+/// relay filters by its OWN policy only — siblings with laxer limits keep their copies;
+/// absence here is a local cutoff, never a tombstone. Capped at `MAX_SYNC_PULL`. Factored
+/// out so the set-difference + safety + age logic is unit-testable without a live network.
+/// (A legacy peer that can't report ages advertises age 0, i.e. "fresh" — old
+/// pull-everything behavior during the transition.)
+pub(crate) fn keys_to_pull(
+    root: &Path,
+    peer_keys: &[(String, u64)],
+    retention: &Retention,
+) -> Vec<(String, u64)> {
+    let mailbox_ttl = retention.mailbox_ttl.as_secs();
+    let media_ttl = retention.media_max_age.map(|d| d.as_secs());
+    let horizon = read_media_horizon(root);
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let mut out = Vec::new();
     for (key, age) in peer_keys {
         if out.len() >= MAX_SYNC_PULL {
             break;
         }
-        if *age >= ttl && key.starts_with(MAILBOX_PREFIX) {
+        if *age >= mailbox_ttl && key.starts_with(MAILBOX_PREFIX) {
             continue; // expired on the peer's clock → never resurrect
+        }
+        if key.starts_with(MEDIA_PREFIX) {
+            if media_ttl.is_some_and(|ttl| *age >= ttl) {
+                continue; // past OUR media age limit → we'd delete it next sweep anyway
+            }
+            // Older (by write time) than the newest blob the size cap already evicted →
+            // pulling it would just be evicted again next sweep (pull/evict churn loop).
+            // The slack absorbs age-granularity/clock skew between us and the peer: a peer's
+            // copy of the very blob we evicted computes a hair "newer" than our recorded
+            // horizon, which would defeat the guard without it.
+            const HORIZON_SLACK_SECS: u64 = 600;
+            if horizon > 0
+                && now_secs.saturating_sub(*age) <= horizon.saturating_add(HORIZON_SLACK_SECS)
+            {
+                continue;
+            }
         }
         match safe_path(root, key) {
             Ok(p) if !p.is_file() => out.push((key.clone(), *age)),
@@ -385,47 +486,182 @@ pub(crate) fn local_touch(root: &Path, keys: &[String]) -> Vec<String> {
 /// Garbage-collect the mailbox namespace: delete `haven/mailbox/**` entries idle longer
 /// than `ttl`, plus abandoned `.part` temp files (> 1h old), then prune empty directories.
 /// Returns how many entries were deleted. ONLY the mailbox is swept — media and self-sync
-/// slots are permanent until explicitly erased.
-///
-/// A `.haven-gc-enabled` marker in the store root (created on first call) delays the first
-/// deletion by `grace`: a pre-GC store has ancient mtimes on LIVE entries too, so members
-/// need one daily-refresh cycle to stamp them before anything may be deleted.
+/// slots are permanent until explicitly erased. (Compat wrapper: a host with operator media
+/// limits calls [`gc_sweep_with`] instead — this wrapper IS today's default behavior.)
 pub fn gc_sweep(root: &Path, ttl: std::time::Duration, grace: std::time::Duration) -> usize {
-    let marker = root.join(".haven-gc-enabled");
+    let retention = Retention { mailbox_ttl: ttl, ..Retention::default() };
+    gc_sweep_with(root, &retention, grace).mailbox_deleted
+}
+
+/// One retention pass: the mailbox TTL sweep (always), then — ONLY when the operator set a
+/// media limit — the media sweep: age first, then oldest-first size eviction, so with both
+/// set whichever deletes more wins ("least amount of space"). Runs from the existing hourly
+/// GC tick; nothing here is triggered mid-request.
+///
+/// Grace markers (both delayed by `grace` after first enable, created on first call):
+/// * `.haven-gc-enabled` — the original mailbox marker (already ancient on live relays).
+/// * `.haven-media-gc-enabled` — created the first time a MEDIA limit is active. Separate
+///   from the mailbox marker on purpose: an operator adding a media limit to a relay that
+///   has run for months must still get the 48h window for members' HAS/TOUCH traffic to
+///   stamp live media before anything may be deleted.
+pub fn gc_sweep_with(root: &Path, retention: &Retention, grace: std::time::Duration) -> GcStats {
+    let mut stats = GcStats::default();
+
+    // --- mailbox TTL sweep (unchanged semantics) -----------------------------------
+    if marker_past_grace(&root.join(".haven-gc-enabled"), grace) {
+        if let Ok(mailbox_root) = safe_path(root, MAILBOX_PREFIX) {
+            let mut freed = 0u64; // mailbox bytes aren't reported; media accounting only
+            sweep_dir(&mailbox_root, retention.mailbox_ttl.as_secs(), &mut stats.mailbox_deleted, &mut freed);
+        }
+    }
+
+    // --- operator-chosen media retention (opt-in; absent limits = never touch media) --
+    if !retention.media_limited() {
+        return stats;
+    }
+    let Ok(media_root) = safe_path(root, MEDIA_PREFIX) else { return stats };
+    if marker_past_grace(&root.join(".haven-media-gc-enabled"), grace) {
+        // Age first: same idle clock as the mailbox (PUT / HAS hit / TOUCH refresh mtime),
+        // so live media a member still references keeps getting its clock reset.
+        if let Some(max_age) = retention.media_max_age {
+            sweep_dir(&media_root, max_age.as_secs(), &mut stats.media_deleted_age, &mut stats.media_bytes_freed);
+        }
+        // Then size: evict oldest-first until under the cap. Applying age before size means
+        // the size pass sees the already-thinned store — the "least space wins" order.
+        if let Some(cap) = retention.media_max_bytes {
+            let (n, freed) = evict_media_to_cap(root, &media_root, cap);
+            stats.media_deleted_size = n;
+            stats.media_bytes_freed += freed;
+        }
+    }
+    stats.media_bytes_total = media_files(&media_root).iter().map(|(_, _, len)| len).sum();
+    stats
+}
+
+/// True when `marker` exists and is older than `grace`. Creates it (and returns false) on
+/// first sight — that creation is what starts the first-enable grace clock.
+fn marker_past_grace(marker: &Path, grace: std::time::Duration) -> bool {
     if !marker.is_file() {
         if let Some(parent) = marker.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        let _ = std::fs::write(&marker, b"");
-        return 0;
+        let _ = std::fs::write(marker, b"");
+        return false;
     }
-    if idle_age_secs(&marker) < grace.as_secs() {
-        return 0; // inside the first-enable grace window
-    }
-    let Ok(mailbox_root) = safe_path(root, MAILBOX_PREFIX) else { return 0 };
-    let mut deleted = 0usize;
-    sweep_dir(&mailbox_root, ttl.as_secs(), &mut deleted);
-    deleted
+    idle_age_secs(marker) >= grace.as_secs()
 }
 
 /// Recursive TTL sweep under `dir`; removes directories that end up empty (best-effort).
-fn sweep_dir(dir: &Path, ttl_secs: u64, deleted: &mut usize) {
+fn sweep_dir(dir: &Path, ttl_secs: u64, deleted: &mut usize, bytes_freed: &mut u64) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            sweep_dir(&path, ttl_secs, deleted);
+            sweep_dir(&path, ttl_secs, deleted, bytes_freed);
             let _ = std::fs::remove_dir(&path); // only succeeds if now empty
         } else if path.is_file() {
             let is_part = path.extension().map(|e| e == "part").unwrap_or(false);
             let age = idle_age_secs(&path);
             // Abandoned temp writes go after an hour; real entries after the TTL.
             if (is_part && age > 3600) || (!is_part && age > ttl_secs) {
+                let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 if std::fs::remove_file(&path).is_ok() {
                     *deleted += 1;
+                    *bytes_freed += len;
                 }
             }
         }
+    }
+}
+
+/// Every media blob under `media_root` as `(path, mtime-unix-secs, len)`. `.part` temps are
+/// excluded — an in-flight PUT's temp must never be yanked out from under the rename (the
+/// age sweep already reaps abandoned ones after an hour).
+fn media_files(media_root: &Path) -> Vec<(PathBuf, u64, u64)> {
+    fn walk(dir: &Path, out: &mut Vec<(PathBuf, u64, u64)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.is_file() && path.extension().map(|e| e != "part").unwrap_or(true) {
+                let Ok(meta) = std::fs::metadata(&path) else { continue };
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                out.push((path, mtime, meta.len()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(media_root, &mut out);
+    out
+}
+
+/// Size-cap eviction: while the media store exceeds `cap`, delete the OLDEST blob (by the
+/// same mtime clock the age sweep uses — TOUCH/HAS refreshes push a blob toward the back of
+/// the eviction line). Records the newest evicted mtime as the store's size-eviction
+/// horizon so mesh sync won't immediately re-pull what was just evicted (see
+/// [`keys_to_pull`]). Returns `(blobs deleted, bytes freed)`.
+fn evict_media_to_cap(root: &Path, media_root: &Path, cap: u64) -> (usize, u64) {
+    let mut files = media_files(media_root);
+    let mut total: u64 = files.iter().map(|(_, _, len)| len).sum();
+    if total <= cap {
+        return (0, 0);
+    }
+    files.sort_by_key(|(_, mtime, _)| *mtime); // oldest first
+    let mut deleted = 0usize;
+    let mut freed = 0u64;
+    let mut horizon = 0u64;
+    for (path, mtime, len) in files {
+        if total <= cap {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total = total.saturating_sub(len);
+            freed += len;
+            deleted += 1;
+            horizon = horizon.max(mtime);
+        }
+    }
+    if horizon > 0 {
+        write_media_horizon(root, horizon);
+    }
+    prune_empty_dirs(media_root);
+    (deleted, freed)
+}
+
+/// Remove now-empty directories under `dir` (best-effort, like the TTL sweep does).
+fn prune_empty_dirs(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            prune_empty_dirs(&path);
+            let _ = std::fs::remove_dir(&path); // only succeeds if now empty
+        }
+    }
+}
+
+/// The size-eviction horizon: unix-seconds mtime of the NEWEST media blob the size cap has
+/// ever evicted from this store. Mesh sync refuses to pull media written at or before it —
+/// a local cutoff under this operator's own cap, NOT a tombstone (siblings with more room
+/// keep and serve their copies). 0 = no size eviction has happened.
+fn read_media_horizon(root: &Path) -> u64 {
+    std::fs::read_to_string(root.join(".haven-media-horizon"))
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Persist the size-eviction horizon (monotonic max — a later sweep never lowers it).
+fn write_media_horizon(root: &Path, mtime_secs: u64) {
+    let cur = read_media_horizon(root);
+    if mtime_secs > cur {
+        let _ = std::fs::write(root.join(".haven-media-horizon"), mtime_secs.to_string());
     }
 }
 
@@ -510,7 +746,9 @@ impl BlobServer {
             self.endpoint.clone(),
             EndpointAddr::new(parse_node_id(peer_node_hex)?),
         )?;
-        let pulled = pull_missing_from_peer(&self.root, &client).await;
+        // A standalone BlobServer has no operator retention knobs — default policy (media
+        // unlimited), exactly today's behavior. The configurable host is Node::relay_sync_from.
+        let pulled = pull_missing_from_peer(&self.root, &client, &Retention::default()).await;
         let _ = client.close().await;
         Ok(pulled)
     }
@@ -567,10 +805,15 @@ impl BlobServer {
 /// One age-preserving anti-entropy pass: pull every blob the peer behind `client` holds
 /// (under the Haven namespace) that `root` lacks. Shared by [`BlobServer::sync_pull_from`]
 /// and the in-node relay attachment (`Node::relay_sync_from`) so the age semantics can't
-/// drift apart. Expired mailbox entries are never pulled, and a pulled file keeps the
-/// peer's idle age (see [`keys_to_pull`] / [`backdate`]) — that pair is what stops mesh
-/// sync from resurrecting GC'd entries forever.
-pub(crate) async fn pull_missing_from_peer(root: &Path, client: &BlobClient) -> usize {
+/// drift apart. Entries past OUR retention limits are never pulled (mailbox TTL always;
+/// media only under the operator's own limits), and a pulled file keeps the peer's idle
+/// age (see [`keys_to_pull`] / [`backdate`]) — that pair is what stops mesh sync from
+/// resurrecting GC'd entries forever.
+pub(crate) async fn pull_missing_from_peer(
+    root: &Path,
+    client: &BlobClient,
+    retention: &Retention,
+) -> usize {
     // Age-aware inventory when the peer speaks AGES; a pre-GC peer only speaks LIST, so
     // everything it advertises counts as fresh (the old pull-everything behavior).
     let peer_keys = match client.list_ages(SYNC_PREFIX).await {
@@ -584,7 +827,7 @@ pub(crate) async fn pull_missing_from_peer(root: &Path, client: &BlobClient) -> 
             .collect(),
     };
     let mut pulled = 0usize;
-    for (key, age) in keys_to_pull(root, &peer_keys) {
+    for (key, age) in keys_to_pull(root, &peer_keys, retention) {
         let Ok(local) = safe_path(root, &key) else { continue };
         // `get` caps the read at MAX_BLOB, so an oversized body can't blow up memory.
         let Ok(Some(blob)) = client.get(&key).await else { continue };
@@ -1321,10 +1564,10 @@ mod tests {
             // Mailbox entry already past the GC TTL on the peer → dying/deleted everywhere
             // else; pulling it would RESURRECT it. Never pull.
             ("haven/mailbox/fam/expired".to_string(), ttl + 5),
-            // Media has no TTL → an old age never blocks replication.
+            // Media has no TTL by DEFAULT → an old age never blocks replication.
             ("haven/media/ancient".to_string(), ttl + 5),
         ];
-        let want = keys_to_pull(&dir, &peer);
+        let want = keys_to_pull(&dir, &peer, &Retention::default());
         assert_eq!(
             want,
             vec![
@@ -1392,6 +1635,176 @@ mod tests {
         assert!(dir.join("self-slot").is_file(), "non-mailbox files are never swept");
         // The emptied dm circle directory is pruned; the still-populated one remains.
         assert!(!safe_path(&dir, "haven/mailbox/dm:a-b").unwrap().exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A fresh store with the given media entries at the given backdated ages; both grace
+    /// markers pre-aged past the window so sweeps act immediately (the grace behavior itself
+    /// is pinned by `gc_sweeps_only_stale_mailbox_entries_after_grace` +
+    /// `media_age_sweep_waits_for_its_own_grace`).
+    fn retention_store(tag: &str, entries: &[(&str, &[u8], u64)]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("haven-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (key, body, age) in entries {
+            local_put(&dir, key, body).unwrap();
+            backdate(&safe_path(&dir, key).unwrap(), *age);
+        }
+        for marker in [".haven-gc-enabled", ".haven-media-gc-enabled"] {
+            std::fs::write(dir.join(marker), b"").unwrap();
+            backdate(&dir.join(marker), GC_GRACE.as_secs() + 3600);
+        }
+        dir
+    }
+
+    #[test]
+    fn media_age_sweep_deletes_stale_spares_touched_and_fresh() {
+        let day = 24 * 3600;
+        let dir = retention_store(
+            "media-age",
+            &[
+                ("haven/media/old", b"xxxx", 10 * day),     // past the limit → deleted
+                ("haven/media/touched", b"xxxx", 10 * day), // past, but TOUCHed below → survives
+                ("haven/media/fresh", b"xxxx", 1 * day),    // under the limit → survives
+                ("haven/mailbox/fam/live", b"x", 0),        // mailbox untouched by media limits
+            ],
+        );
+        // The TOUCH discipline: a client refreshing a ref resets its liveness clock, exactly
+        // like the mailbox sweep honors.
+        assert!(local_touch(&dir, &["haven/media/touched".to_string()]).is_empty());
+        let ret = Retention {
+            media_max_age: Some(std::time::Duration::from_secs(7 * day)),
+            ..Retention::default()
+        };
+        let stats = gc_sweep_with(&dir, &ret, GC_GRACE);
+        assert_eq!(stats.media_deleted_age, 1);
+        assert_eq!(stats.media_deleted_size, 0);
+        assert_eq!(stats.media_bytes_freed, 4);
+        assert_eq!(stats.media_bytes_total, 8, "two 4-byte blobs remain");
+        assert!(!local_has(&dir, "haven/media/old"));
+        assert!(local_has(&dir, "haven/media/touched"), "TOUCH resets the eviction clock");
+        assert!(local_has(&dir, "haven/media/fresh"));
+        assert!(local_has(&dir, "haven/mailbox/fam/live"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn media_age_sweep_waits_for_its_own_grace() {
+        // A relay that has run for months (ancient mailbox marker) and JUST enabled a media
+        // limit must still give members 48h to stamp live media before anything is deleted.
+        let dir = retention_store("media-grace", &[("haven/media/old", b"x", 400 * 24 * 3600)]);
+        std::fs::remove_file(dir.join(".haven-media-gc-enabled")).unwrap();
+        let ret = Retention {
+            media_max_age: Some(std::time::Duration::from_secs(7 * 24 * 3600)),
+            ..Retention::default()
+        };
+        // First sighting plants the media marker; nothing may be deleted yet.
+        let stats = gc_sweep_with(&dir, &ret, GC_GRACE);
+        assert_eq!(stats.media_deleted_age, 0);
+        assert!(local_has(&dir, "haven/media/old"), "inside the media-enable grace window");
+        // Past the grace → the stale blob goes.
+        backdate(&dir.join(".haven-media-gc-enabled"), GC_GRACE.as_secs() + 3600);
+        assert_eq!(gc_sweep_with(&dir, &ret, GC_GRACE).media_deleted_age, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn media_size_sweep_evicts_oldest_until_under_cap() {
+        let day = 24 * 3600;
+        let dir = retention_store(
+            "media-size",
+            &[
+                ("haven/media/oldest", b"aaaa", 30 * day),
+                ("haven/media/middle", b"bbbb", 20 * day),
+                ("haven/media/newest", b"cccc", 10 * day),
+            ],
+        );
+        // Under the cap → nothing deleted.
+        let lax = Retention { media_max_bytes: Some(100), ..Retention::default() };
+        let stats = gc_sweep_with(&dir, &lax, GC_GRACE);
+        assert_eq!(stats.media_deleted_size, 0);
+        assert_eq!(stats.media_bytes_total, 12);
+        // Cap of 8 bytes with 12 stored → exactly the OLDEST blob is evicted.
+        let capped = Retention { media_max_bytes: Some(8), ..Retention::default() };
+        let stats = gc_sweep_with(&dir, &capped, GC_GRACE);
+        assert_eq!(stats.media_deleted_size, 1);
+        assert_eq!(stats.media_bytes_freed, 4);
+        assert_eq!(stats.media_bytes_total, 8);
+        assert!(!local_has(&dir, "haven/media/oldest"));
+        assert!(local_has(&dir, "haven/media/middle"));
+        assert!(local_has(&dir, "haven/media/newest"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn media_age_then_size_least_space_wins() {
+        let day = 24 * 3600;
+        let dir = retention_store(
+            "media-both",
+            &[
+                ("haven/media/ancient", b"aaaa", 30 * day), // over the age limit
+                ("haven/media/older", b"bbbb", 6 * day),    // under age; oldest survivor
+                ("haven/media/newer", b"cccc", 2 * day),
+                ("haven/media/newest", b"dddd", 1 * day),
+            ],
+        );
+        let ret = Retention {
+            media_max_age: Some(std::time::Duration::from_secs(7 * day)),
+            media_max_bytes: Some(8),
+            ..Retention::default()
+        };
+        let stats = gc_sweep_with(&dir, &ret, GC_GRACE);
+        // Age deletes `ancient` (1 blob), THEN size sees 12 bytes > 8 and evicts the oldest
+        // survivor (`older`). Net effect: the stricter combined rule — least space — wins.
+        assert_eq!(stats.media_deleted_age, 1);
+        assert_eq!(stats.media_deleted_size, 1);
+        assert_eq!(stats.media_bytes_freed, 8);
+        assert_eq!(stats.media_bytes_total, 8);
+        assert!(local_has(&dir, "haven/media/newer") && local_has(&dir, "haven/media/newest"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keys_to_pull_respects_own_media_retention() {
+        let day = 24 * 3600;
+        let dir = retention_store("media-pull", &[]);
+        let ret = Retention {
+            media_max_age: Some(std::time::Duration::from_secs(7 * day)),
+            media_max_bytes: Some(1024),
+            ..Retention::default()
+        };
+        let peer: Vec<(String, u64)> = vec![
+            ("haven/media/fresh".to_string(), 1 * day),      // under our limit → pull
+            ("haven/media/aged_out".to_string(), 10 * day),  // past OUR media age limit → never re-pull
+            ("haven/mailbox/fam/ok".to_string(), 1 * day),   // mailbox unaffected by media limits
+        ];
+        assert_eq!(
+            keys_to_pull(&dir, &peer, &ret),
+            vec![
+                ("haven/media/fresh".to_string(), 1 * day),
+                ("haven/mailbox/fam/ok".to_string(), 1 * day),
+            ],
+            "an aged-out media key is not re-pulled under the same relay's config"
+        );
+        // The DEFAULT config (no media limits) still pulls ancient media — today's behavior.
+        assert!(keys_to_pull(&dir, &peer, &Retention::default())
+            .contains(&("haven/media/aged_out".to_string(), 10 * day)));
+
+        // Size-eviction horizon: once the cap evicted blobs written up to time T, media at
+        // or older than T is never re-pulled (otherwise every mesh tick would re-pull the
+        // oldest blobs just for the next sweep to evict them again).
+        local_put(&dir, "haven/media/big", &[0u8; 2000]).unwrap();
+        backdate(&safe_path(&dir, "haven/media/big").unwrap(), 3 * day);
+        let stats = gc_sweep_with(&dir, &ret, GC_GRACE);
+        assert_eq!(stats.media_deleted_size, 1, "over the 1 KB cap → evicted");
+        let peer2: Vec<(String, u64)> = vec![
+            ("haven/media/big".to_string(), 3 * day),      // just evicted for size → don't re-pull
+            ("haven/media/brand_new".to_string(), 0),      // newer than the horizon → pull
+        ];
+        assert_eq!(
+            keys_to_pull(&dir, &peer2, &ret),
+            vec![("haven/media/brand_new".to_string(), 0)]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

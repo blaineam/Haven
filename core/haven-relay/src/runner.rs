@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::process::{Child, Command, Stdio};
 
 use anyhow::{anyhow, Result};
+use haven_net::blobstore::fmt_bytes;
 use haven_net::s3tunnel::S3Server;
 use haven_net::RelayNode;
 use haven_p2p::identity::Identity;
@@ -54,16 +55,37 @@ pub async fn run(cfg: Config) -> Result<()> {
             // the relay as "Unreachable — retrying" (the same-key second-endpoint bug, again).
             let store = cfg.data_dir.join("store");
             let node = relay.node();
-            node.enable_relay(store.clone());
+            node.enable_relay_with_retention(store.clone(), cfg.retention);
             println!(
                 "✓ media store live — local-disk blob mailbox at {} over Haven Net (haven/blob/1, shared endpoint).",
                 store.display()
             );
             println!("  storage node id (volunteer_node_id): {my_hex}");
             println!(
-                "  mailbox GC on — event entries not refreshed by any member for 30 days are pruned \
-                 (media is never pruned; first sweep waits 48h after enabling)."
+                "  mailbox GC on — event entries not refreshed by any member for {} days are pruned \
+                 (first sweep waits 48h after enabling).",
+                cfg.retention.mailbox_ttl.as_secs() / (24 * 3600)
             );
+            // Retention is the OPERATOR'S choice: without limits media is kept forever
+            // (today's behavior); with limits, the hourly sweep applies age first, then
+            // oldest-first size eviction — whichever rule frees more space wins.
+            match (cfg.retention.media_max_age, cfg.retention.media_max_bytes) {
+                (None, None) => println!("  media retention: unlimited — media is never pruned."),
+                (age, cap) => {
+                    let mut rules = Vec::new();
+                    if let Some(a) = age {
+                        rules.push(format!("older than {} days", a.as_secs() / (24 * 3600)));
+                    }
+                    if let Some(c) = cap {
+                        rules.push(format!("oldest-first over {}", fmt_bytes(c)));
+                    }
+                    println!(
+                        "  media retention: pruning media {} (hourly sweep; TOUCH/HAS keeps a blob live; \
+                         first media sweep waits 48h after enabling limits).",
+                        rules.join(", then ")
+                    );
+                }
+            }
 
             // Lock the mailbox to the circle's members (+ sibling relays) so only members can read or
             // enumerate it — a stranger who learns this relay's node id gets nothing (audit

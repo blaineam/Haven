@@ -84,6 +84,12 @@ fn print_help() {
          --http-url <url>          public URL members reach it at (port-forward/proxy/tunnel)\n  \
          --no-http                 disable the HTTP interface\n  \
          Requests need the bearer token printed at start (persisted in <data>/http_token).\n\n\
+         RETENTION (your choice; default = keep media forever, prune mailbox after 30 days):\n  \
+         --media-max-age-days N    prune media not touched for N days (0 = keep forever)\n  \
+         --media-max-bytes SIZE    cap the media store, oldest deleted first (50G, 500M; 0 = unbounded)\n  \
+         --mailbox-ttl-days N      override the 30-day mailbox event TTL\n  \
+         With both media limits set, whichever rule frees more space wins. Sweeps run hourly;\n  \
+         the first media sweep waits 48h after limits are first enabled.\n\n\
          COMMON FLAGS:  --data DIR  --s3-port PORT  --rclone PATH  --rclone-config FILE\n\n\
          The relay never holds any key that can read your circle's content. It forwards\n\
          sealed frames and serves sealed blobs it cannot open. No logs are written.\n"

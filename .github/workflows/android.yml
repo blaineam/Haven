@@ -210,11 +210,14 @@ jobs:
           find android/app/build/outputs/apk -name '*.apk' -exec cp {} out/ \;
           ls -la out
 
+      # The APK is now the PRIVATE download channel for the Android GUI (Play Store is the public
+      # one). Keep only recent builds — short retention so it never becomes a long artifact history.
       - uses: actions/upload-artifact@v4
         with:
           name: haven-android-apk
           path: out/*.apk
           if-no-files-found: error
+          retention-days: 7
 
       # CHANNEL POLICY (see file header): the APK only rides the GitHub Release as a stopgap
       # until the Google Play listing is public. Flip PUBLISH_ANDROID_TO_GH=false to take it off.

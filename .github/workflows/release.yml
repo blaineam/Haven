@@ -388,11 +388,15 @@ jobs:
           # this step may no-op until then — hence continue-on-error. Documented in STORE-AUTOPUBLISH.md.
           msstore publish "${{ steps.msix.outputs.msix }}" --appId $env:STORE_APP_ID --verbose
 
+      # desktop-windows is the PRIVATE download channel for the Windows GUI (Microsoft Store is the
+      # public one; PUBLISH_WINDOWS_TO_GH=false keeps it off the Release). Short retention so it
+      # stays recent-only rather than accumulating a long artifact history.
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.name }}
           path: out/*
           if-no-files-found: error
+          retention-days: 7
 
   flatpak:
     needs: [meta, desktop]

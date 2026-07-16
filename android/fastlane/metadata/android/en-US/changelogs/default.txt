@@ -1,7 +1,6 @@
-• Your own devices now stay in sync — posts and messages follow you across phone, tablet, and desktop
-• Group DMs show who sent each message, when, and whether it was delivered
-• Pin and reorder your favorite conversations at the top of Messages
-• Group voice & video calls with screen sharing — still peer-to-peer, no call server
-• Scheduled messages and screenshot-protected secret messages
-• Smoother, faster feed scrolling
-• Private, end-to-end encrypted circles — no ads, no tracking, no servers
+• Voice & video calls are now sealed and signed end-to-end, just like your posts and messages
+• Photos and videos verify against a fingerprint of the original, so a relay can never swap them
+• Relay and mailbox access is limited to your circle's members only
+• Groundwork for gracefully re-keying a lost or stolen device
+• Media fills the width of the feed; multi-photo posts swipe as a carousel
+• Private, end-to-end encrypted circles — no ads, no tracking

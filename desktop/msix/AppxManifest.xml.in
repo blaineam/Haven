@@ -17,7 +17,10 @@
             ProcessorArchitecture="x64" />
 
   <Properties>
-    <DisplayName>Haven</DisplayName>
+    <!-- MUST byte-match a name reserved in Partner Center ▸ Manage app names. Plain "Haven" is taken
+         by another Store developer, so we use "Haven 〇" — the same U+3007 ring variant as the iOS
+         App Store name (appstore-metadata.md ▸ name). Keep the ring character exactly (U+3007). -->
+    <DisplayName>Haven 〇</DisplayName>
     <PublisherDisplayName>@PUBLISHER_DISPLAY@</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
@@ -33,7 +36,7 @@
   <Applications>
     <Application Id="Haven" Executable="Haven.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="Haven"
+        DisplayName="Haven 〇"
         Description="A private home for your people — end-to-end encrypted, serverless social."
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png"

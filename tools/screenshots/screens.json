@@ -28,7 +28,7 @@
       "tab": "circle",
       "scene": "call",
       "source": "raw/android/call.png",
-      "headline": "Group video calls, no servers",
+      "headline": "Group video calls, peer-to-peer",
       "subtitle": "Peer-to-peer calls that never touch the cloud.",
       "background": "dark"
     },
@@ -49,7 +49,7 @@
       "scene": "keys",
       "source": "raw/android/keys.png",
       "headline": "Your keys never leave your device",
-      "subtitle": "No accounts, no servers, no one in the middle.",
+      "subtitle": "No accounts, no phone number, no one in the middle.",
       "background": "gradient"
     },
     {

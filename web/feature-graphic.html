@@ -1,0 +1,68 @@
+<!doctype html>
+<!-- Google Play feature graphic. Rendered to assets/play-feature-graphic.png at 1024x500.
+     Same brand system as og-poster.html, reflowed for the 1024x500 banner. Self-contained. -->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<style>
+  :root{
+    --violet:#7C3AED; --pink:#EC4899; --amber:#F59E0B;
+    --brand:linear-gradient(135deg,var(--violet),var(--pink),var(--amber));
+    --bg:#0b0b10; --text:#f5f5f7; --text2:rgba(245,245,247,.66);
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:1024px;height:500px;overflow:hidden}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",Roboto,system-ui,sans-serif;
+    background:var(--bg);
+    background-image:
+      radial-gradient(50% 60% at 92% -12%, rgba(236,72,153,.30), transparent 60%),
+      radial-gradient(48% 55% at -8% 8%, rgba(124,58,237,.32), transparent 60%),
+      radial-gradient(46% 50% at 62% 122%, rgba(245,158,11,.16), transparent 60%);
+    color:var(--text); position:relative;
+  }
+  .wrap{display:flex;height:100%;align-items:center}
+  .left{flex:0 0 560px;padding:0 0 0 60px}
+  .eyebrow{font-size:14px;font-weight:800;letter-spacing:.13em;text-transform:uppercase;
+    color:var(--pink);margin-bottom:18px}
+  .eyebrow .dot{color:rgba(245,245,247,.30);margin:0 7px}
+  .eyebrow .nb{white-space:nowrap}
+  .wordmark{font-size:98px;font-weight:850;letter-spacing:-.04em;line-height:.95;
+    background:var(--brand);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .tagline{font-size:33px;font-weight:800;letter-spacing:-.02em;line-height:1.08;margin-top:14px;color:var(--text)}
+  .tagline .g{background:var(--brand);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{margin-top:18px;font-size:16px;color:var(--text2);font-weight:600;max-width:34ch;line-height:1.45}
+  .pills{margin-top:22px;display:flex;gap:8px;flex-wrap:wrap}
+  .pill{font-size:12.5px;font-weight:600;color:var(--text2);
+    border:1px solid rgba(255,255,255,.14);border-radius:999px;padding:6px 12px;
+    background:rgba(255,255,255,.05)}
+  .right{flex:1;position:relative;height:100%}
+  .phone{position:absolute;right:-30px;top:50%;height:590px;
+    transform:translateY(-50%) rotate(6deg);
+    filter:drop-shadow(0 30px 55px rgba(0,0,0,.6))}
+  .phone.back{right:190px;height:520px;transform:translateY(-49%) rotate(-7deg);opacity:.92;
+    filter:drop-shadow(0 24px 44px rgba(0,0,0,.5))}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="left">
+      <div class="eyebrow"><span class="nb">End-to-end encrypted</span> <span class="dot">•</span> <span class="nb">No tracking</span> <span class="dot">•</span> <span class="nb">No ads</span></div>
+      <div class="wordmark">Haven</div>
+      <div class="tagline">A private home<br/>for <span class="g">your people.</span></div>
+      <div class="sub">Photos, stories, messages &amp; calls — peer-to-peer, post-quantum, nothing leaves your circle.</div>
+      <div class="pills">
+        <span class="pill">iPhone &amp; iPad</span>
+        <span class="pill">Mac</span>
+        <span class="pill">Android</span>
+        <span class="pill">Windows</span>
+        <span class="pill">Linux</span>
+      </div>
+    </div>
+    <div class="right">
+      <img class="phone back" src="assets/renders/android-messages.png" alt="" />
+      <img class="phone" src="assets/renders/phone-feed.png" alt="" />
+    </div>
+  </div>
+</body>
+</html>

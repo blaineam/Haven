@@ -32,6 +32,14 @@ use p2pcore::groupkey::{
 /// what gets sealed or who signs — it is the rail a later release flips on.
 const SEED_DROP_VERSION: u32 = 1;
 
+/// The MLS (TreeKEM) protocol version this build advertises (M0, docs/TREEKEM-DESIGN.md §7.1). Rides
+/// the signed profile beside `sd` so peers can NEGOTIATE the per-circle migration; nothing in this
+/// release *acts* on it to change what gets sealed or who signs — it is the rail a later release
+/// flips on. Advertised in the PROFILE only: the roster trailer is not appendable
+/// (`SeedDropCapability::from_bytes` consumes the rest as signature, so appending would break every
+/// existing peer's seed-drop verify mid-migration).
+const MLS_VERSION: u32 = 1;
+
 /// Wire tags prefixed to an envelope so `receive` can route it. Legacy (untagged) envelopes are raw
 /// JSON beginning with `{` (0x7b), so any tag byte we choose that isn't `{` is unambiguous.
 const TAG_EPOCH_EVENT: u8 = 0x02; // an EpochEnvelope (event sealed under a circle epoch key)
@@ -1218,6 +1226,14 @@ struct NetState {
     /// OFF this release, so nothing here changes what a circle seals to yet. Not persisted — it rebuilds
     /// as rosters/profiles re-sync.
     seed_drop_capable: std::collections::HashSet<[u8; 32]>,
+    /// Accounts we have AFFIRMATIVELY verified as MLS(TreeKEM)-capable — their signed profile carried
+    /// `ml >= 1` (TreeKEM M0, docs/TREEKEM-DESIGN.md §7.1) — keyed by account node id. **Monotonic —
+    /// insert only, never remove**: a missing entry means "unknown, treat as legacy," never
+    /// "downgraded" (absence is never information). Carried in the signed PROFILE only, never the
+    /// roster trailer (see `MLS_VERSION`). Consulted by nothing in production yet
+    /// (`circle_fully_mls_capable` ships OFF); populated so the fleet's capability picture is already
+    /// converged when a later release flips the gate. Not persisted — rebuilds as profiles re-sync.
+    mls_capable: std::collections::HashSet<[u8; 32]>,
     /// Viewer preference: keep MY OWN posts in the feed even when viewer auto-delete would age them
     /// out for others (my personal archive). Read by `feed`; set via `set_keep_own_posts`. Not
     /// persisted here — the app owns the toggle and re-applies it on launch.
@@ -1681,6 +1697,14 @@ impl HavenSocial {
                     s.insert(Identity::from_seed(&seed).public().node_id_bytes());
                     s
                 },
+                // Same self-seeding for the MLS marker (M0): this build advertises `ml`, so my own
+                // account must count as capable or a circle containing me could never compute as
+                // fully MLS-capable. Nothing consumes this in production yet.
+                mls_capable: {
+                    let mut s = std::collections::HashSet::new();
+                    s.insert(Identity::from_seed(&seed).public().node_id_bytes());
+                    s
+                },
                 keep_own_posts: false,
                 retire_account_key: false,
             }),
@@ -1836,10 +1860,12 @@ impl HavenSocial {
     /// name after the signature, not JSON) is still accepted by the verifiers below.
     pub fn my_signed_profile(&self, name: String, bio: String, link: String, avatar: String, emoji: String) -> Vec<u8> {
         let st = self.state.lock().unwrap();
-        // `sd` is the seed-drop capability version (S0), carried INSIDE the account-signed payload so it
-        // can't be forged or stripped by a relay. An older client ignores the unknown JSON key, so it is
-        // strictly additive; a missing `sd` always means "legacy," never "downgraded."
-        let payload = serde_json::json!({ "n": name, "b": bio, "l": link, "a": avatar, "e": emoji, "sd": SEED_DROP_VERSION }).to_string();
+        // `sd` is the seed-drop capability version (S0) and `ml` the MLS/TreeKEM capability version
+        // (M0), both carried INSIDE the account-signed payload so neither can be forged or stripped by
+        // a relay. An older client ignores the unknown JSON keys (proven in the field by `sd` shipping
+        // the same way), so both are strictly additive; a missing marker always means "legacy," never
+        // "downgraded."
+        let payload = serde_json::json!({ "n": name, "b": bio, "l": link, "a": avatar, "e": emoji, "sd": SEED_DROP_VERSION, "ml": MLS_VERSION }).to_string();
         // Domain-separate so a profile signature can never be confused with another signed object
         // (audit H3). The tag is part of the SIGNED bytes; the wire blob still carries only `payload`.
         let sig = st.me.sign(&profile_signing_bytes(payload.as_bytes()));
@@ -1899,6 +1925,8 @@ impl HavenSocial {
     /// profile is legacy / carries no marker / fails verification. A missing marker is 0 = "legacy," NEVER
     /// treated as a downgrade (absence is never information). On an affirmatively-verified marker (>= 1) we
     /// monotonically record the account as seed-drop-capable — real negotiation, learned never inferred.
+    /// The MLS/TreeKEM `ml` marker (M0) riding the same signed payload is learned here too, under the
+    /// same rules; it does not affect the returned `sd` version.
     pub fn profile_seed_drop_version(&self, bundle: Vec<u8>, blob: Vec<u8>) -> u32 {
         if blob.len() < 4 {
             return 0;
@@ -1918,8 +1946,21 @@ impl HavenSocial {
         {
             return 0;
         }
-        let version = serde_json::from_slice::<serde_json::Value>(payload)
-            .ok()
+        let card = serde_json::from_slice::<serde_json::Value>(payload).ok();
+        // The `ml` (MLS/TreeKEM, M0) marker rides the same verified payload and is learned the same
+        // way: monotonic insert on an affirmatively-verified marker only. Piggybacking on this call —
+        // the one place incoming signed profiles are already consumed — means the capability picture
+        // converges with zero new app wiring, while the return value (the `sd` version) is untouched
+        // for every existing caller.
+        let ml = card
+            .as_ref()
+            .and_then(|v| v.get("ml").and_then(|x| x.as_u64()))
+            .unwrap_or(0) as u32;
+        if ml >= 1 {
+            self.state.lock().unwrap().mls_capable.insert(id.node_id_bytes());
+        }
+        let version = card
+            .as_ref()
             .and_then(|v| v.get("sd").and_then(|x| x.as_u64()))
             .unwrap_or(0) as u32;
         if version >= 1 {
@@ -4022,6 +4063,71 @@ mod net_tests {
         let (_a, _list, _creds, trailer) = decode_roster(&wire[1..]).expect("new roster decodes");
         assert!(!trailer.is_empty(), "a seed-drop build's roster carries the signed capability trailer");
         assert!(bob.ingest_roster_wire(wire), "peer ingests the roster despite the trailer (additive)");
+    }
+
+    /// TreeKEM M0: the `ml` capability marker rides the SAME signed profile as `sd` and is just as
+    /// additive — a profile carrying BOTH markers verifies and the feed still flows, a forged profile
+    /// marks nothing, and a legacy (marker-less) card still parses with nothing learned (absence is
+    /// never a downgrade). Mirrors `legacy_peer_unaffected_by_seed_drop_marker`.
+    #[test]
+    fn legacy_peer_unaffected_by_mls_marker() {
+        let cid = DEFAULT_CIRCLE.to_string();
+        let alice = HavenSocial::new([81u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([82u8; 32].to_vec()).unwrap();
+        alice.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+        bob.add_contact_bundle(cid.clone(), alice.my_bundle()).unwrap();
+        let alice_id = HavenId::from_bytes(&alice.my_bundle()).unwrap().node_id_bytes();
+
+        // Self-seeding: this build advertises `ml`, so my own account counts as capable from birth
+        // (a circle containing me could otherwise never compute as fully MLS-capable).
+        assert!(alice.state.lock().unwrap().mls_capable.contains(&alice_id));
+        assert!(!bob.state.lock().unwrap().mls_capable.contains(&alice_id), "peers start unknown");
+
+        // The signed card carries BOTH markers inside the one account-signed payload (round-trip:
+        // what `my_signed_profile` embeds is what a verifier reads back).
+        let prof = alice.my_signed_profile("Alice".into(), "bio".into(), "".into(), "".into(), "".into());
+        let sig_len = u32::from_le_bytes(prof[..4].try_into().unwrap()) as usize;
+        let card: serde_json::Value = serde_json::from_slice(&prof[4 + sig_len..]).unwrap();
+        assert_eq!(card.get("ml").and_then(|x| x.as_u64()), Some(1), "`ml` rides the signed payload");
+        assert_eq!(card.get("sd").and_then(|x| x.as_u64()), Some(1), "`sd` still rides beside it");
+
+        // FORGED/tampered first: a flipped byte fails signature verification, so NOTHING is learned —
+        // the marker only counts when the profile signature verifies.
+        let mut forged = prof.clone();
+        let l = forged.len() - 1;
+        forged[l] ^= 0xff;
+        assert_eq!(bob.profile_seed_drop_version(alice.my_bundle(), forged), 0);
+        assert!(!bob.state.lock().unwrap().mls_capable.contains(&alice_id),
+                "a forged profile must not mark the account mls-capable");
+
+        // The genuine both-marker profile: existing callers see the same card and the same `sd`
+        // version as before (zero behavior change), and the account is now learned mls-capable.
+        assert_eq!(bob.verify_profile(alice.my_bundle(), prof.clone()).as_deref(), Some("Alice"),
+                   "a profile carrying `ml` still parses on the current parser");
+        assert_eq!(bob.profile_seed_drop_version(alice.my_bundle(), prof.clone()), 1,
+                   "the returned `sd` version is untouched by the new marker");
+        assert!(bob.state.lock().unwrap().mls_capable.contains(&alice_id));
+        assert!(bob.state.lock().unwrap().seed_drop_capable.contains(&alice_id));
+
+        // LEGACY-shaped card (an older build: no `sd`, no `ml`) — signed by the real account key. It
+        // still parses, and a fresh observer learns NO capability from it: absence is never information.
+        let legacy_payload = serde_json::json!({ "n": "OldAlice", "b": "", "l": "" }).to_string();
+        let legacy_sig = alice.state.lock().unwrap().me.sign(&profile_signing_bytes(legacy_payload.as_bytes()));
+        let mut legacy = (legacy_sig.len() as u32).to_le_bytes().to_vec();
+        legacy.extend_from_slice(&legacy_sig);
+        legacy.extend_from_slice(legacy_payload.as_bytes());
+        let carol = HavenSocial::new([83u8; 32].to_vec()).unwrap();
+        assert_eq!(carol.verify_profile(alice.my_bundle(), legacy.clone()).as_deref(), Some("OldAlice"),
+                   "a legacy-shaped profile still parses");
+        assert_eq!(carol.profile_seed_drop_version(alice.my_bundle(), legacy), 0);
+        assert!(!carol.state.lock().unwrap().mls_capable.contains(&alice_id),
+                "an absent marker is legacy, never a downgrade — and never an upgrade either");
+
+        // Zero behavior change end-to-end: after the both-marker profile was ingested, posts still flow.
+        alice.post(cid.clone(), "hello-ml".into(), vec![], None, None, false, false, 1_000).unwrap();
+        sync(&alice, &bob, &cid);
+        assert!(bob.feed(cid.clone(), 2_000, None).iter().any(|m| m.body == "hello-ml"),
+                "a peer that ingested a profile carrying both markers still receives everything");
     }
 
     /// Wall clock in unix millis. The purge tests must use REAL timestamps: the automatic

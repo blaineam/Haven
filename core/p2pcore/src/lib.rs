@@ -23,6 +23,8 @@
 //! * [`mediaref`] — media refs as content addresses, and the check that binds a
 //!   blob to the ref a signed post named. Without it, whoever stores the bytes
 //!   chooses what a post shows.
+//! * [`treekem`] — MLS-style TreeKEM wire formats (stage M0: types + serialization
+//!   only, nothing consumes them yet). See `docs/TREEKEM-DESIGN.md`.
 
 pub mod crypto;
 pub mod device;
@@ -33,6 +35,7 @@ pub mod mediaref;
 pub mod selfsync;
 pub mod social;
 pub mod transport;
+pub mod treekem;
 
 /// One error type for the whole core so the FFI surface stays small.
 #[derive(Debug, thiserror::Error)]

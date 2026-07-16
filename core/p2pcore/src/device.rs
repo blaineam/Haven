@@ -543,6 +543,26 @@ pub fn circle_fully_seed_drop_capable(
         })
 }
 
+/// Is EVERY member of a circle MLS(TreeKEM)-capable? (TreeKEM M0, `docs/TREEKEM-DESIGN.md` §7.2.)
+///
+/// The same **all-present positive** computation as [`circle_fully_seed_drop_capable`], composed
+/// with it: MLS capability is NESTED inside seed-drop capability (`ml` v1 requires seed-drop v1 —
+/// leaves *are* device keys, so a circle can only run TreeKEM if it could already retire the bare
+/// account key). A member therefore counts only when we have affirmatively verified its signed
+/// marker in BOTH capable sets AND hold its device roster; a single member missing from either set
+/// (or roster-less) keeps the whole circle NOT-fully-capable — absence is never information, so a
+/// missing marker means "legacy," never "downgraded." Wired but consumed by nothing in production
+/// this release (M0 ships the gate OFF).
+pub fn circle_fully_mls_capable(
+    members: &[HavenId],
+    devices_by_account: &std::collections::HashMap<[u8; 32], ContactDevices>,
+    seed_drop_capable: &std::collections::HashSet<[u8; 32]>,
+    mls_capable: &std::collections::HashSet<[u8; 32]>,
+) -> bool {
+    circle_fully_seed_drop_capable(members, devices_by_account, seed_drop_capable)
+        && members.iter().all(|m| mls_capable.contains(&m.node_id_bytes()))
+}
+
 /// [`recipients_with_devices`] with the seed-drop dual-seal **gate** wired. When `drop_account_key` is
 /// set AND the circle is fully seed-drop-capable, the bare per-member account key is omitted so content
 /// seals ONLY to authorized device bundles (a revoked device is then cut off cryptographically). With
@@ -856,6 +876,51 @@ mod tests {
         // never as "downgraded" (absence is never information).
         assert!(SeedDropCapability::from_bytes(&[]).is_none());
         assert!(SeedDropCapability::from_bytes(&cap.to_bytes()[..30]).is_none());
+    }
+
+    // ── TreeKEM M0 gate ──────────────────────────────────────────────────────────────────────
+
+    /// `circle_fully_mls_capable` is all-present-positive with NESTED capability: a member counts
+    /// only when it is in BOTH capable sets AND has a roster. Any single gap — an mls-less member,
+    /// a seed-drop-less member (nesting: mls-capable ⊂ seed-drop-capable), a roster-less member,
+    /// or an empty circle — keeps the whole circle off TreeKEM.
+    #[test]
+    fn mls_gate_requires_both_capability_sets_and_rosters() {
+        let alice = id(21);
+        let bob = id(22);
+        let members = [alice.public(), bob.public()];
+        let roster_for = |acct: &Identity, dev_seed: u8| {
+            let dev = id(dev_seed);
+            ContactDevices {
+                list: DeviceList::signed(acct, 1, 0, vec![dev.public().node_id_bytes()], vec![]),
+                credentials: vec![DeviceCredential::issue(acct, &dev.public(), "dev", 1)],
+            }
+        };
+        let mut rosters = std::collections::HashMap::new();
+        rosters.insert(alice.public().node_id_bytes(), roster_for(&alice, 23));
+        rosters.insert(bob.public().node_id_bytes(), roster_for(&bob, 24));
+        let both: std::collections::HashSet<[u8; 32]> =
+            [alice.public().node_id_bytes(), bob.public().node_id_bytes()].into();
+        let alice_only: std::collections::HashSet<[u8; 32]> = [alice.public().node_id_bytes()].into();
+
+        // Fully capable: every member in BOTH sets, every member with a roster → true.
+        assert!(circle_fully_mls_capable(&members, &rosters, &both, &both));
+
+        // An empty circle is never "fully capable" (vacuous truth must not flip a gate).
+        assert!(!circle_fully_mls_capable(&[], &rosters, &both, &both));
+
+        // One member missing the `ml` marker → false, even though seed-drop is all-present.
+        assert!(!circle_fully_mls_capable(&members, &rosters, &both, &alice_only));
+
+        // NESTING: an `ml` marker without seed-drop capability counts for nothing — a member in
+        // `mls_capable` but not `seed_drop_capable` keeps the circle off (leaves are device keys;
+        // TreeKEM presupposes the account-key retirement machinery).
+        assert!(!circle_fully_mls_capable(&members, &rosters, &alice_only, &both));
+
+        // A member whose roster we haven't learned → false, even with both markers verified.
+        let mut missing_roster = rosters.clone();
+        missing_roster.remove(&bob.public().node_id_bytes());
+        assert!(!circle_fully_mls_capable(&members, &missing_roster, &both, &both));
     }
 
     #[test]

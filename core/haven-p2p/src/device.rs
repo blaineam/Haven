@@ -596,6 +596,163 @@ pub fn recipients_with_devices_gated(
     out
 }
 
+// ── MLS M3: circle admin authority (docs/TREEKEM-DESIGN.md §4.3) ─────────────────────────────────
+//
+// Circles have no owner today; MLS Remove is the first operation that needs one. The LOCKED decision:
+// only a circle's CREATOR and CREATOR-delegated admins may remove a member. This is a minimal,
+// signed, tamper-proof authority model built on the SAME account-key signing + higher-version-wins +
+// absence-is-never-information discipline as `DeviceList` / `SeedDropCapability`. It holds NO one
+// else's keys — an admin only signs authority records and authors tree commits (the Kith mandate):
+// authority never becomes a key-escrow or a decryption bypass.
+//
+// Trust root: the creator is PINNED per circle (a bare 32-byte account id agreed out of band /
+// carried on the roster lane, exactly like a member id). Admins are delegated by GRANTS: a grant is
+// "grantor G says account X is admin of circle C at version V", account-signed by G. An account is an
+// admin iff it is the creator OR it is reachable from the creator by a chain of VERIFIED grants
+// (`admin_closure`) — so a grant whose grantor is not itself an admin injects nothing, even if its
+// signature is perfectly valid for some non-authoritative signer. Grants are versioned per
+// (circle, admin) and rollback-defended (`adopt_if_newer`), like the roster.
+
+/// Domain-separation tag for the bytes an account signs to issue a circle admin grant.
+const ADMIN_DOMAIN: &[u8] = b"haven-circle-admin-v1";
+
+/// A monotonic, account-signed **circle admin grant** (§4.3). "Grantor G delegates admin of circle
+/// C to account X at version V." Signed by the GRANTOR's account key so a relay can neither forge it
+/// nor strip it undetectably; a receiver only turns it into authority if the grantor is itself the
+/// creator or an already-established admin (`admin_closure`). Carries the pinned `creator` so a
+/// receiver can bind the grant to a specific authority root (a grant naming a different creator is
+/// for a different authority chain and is ignored).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdminGrant {
+    /// The circle this grant applies to (its id bytes).
+    pub circle_id: Vec<u8>,
+    /// The PINNED creator = the root of authority this grant chains under.
+    pub creator: [u8; 32],
+    /// The account being granted admin.
+    pub admin_account: [u8; 32],
+    /// Monotonic version per (circle, admin_account) — higher wins (rollback defense).
+    pub version: u64,
+    /// The account that signed this grant (must be the creator or a current admin to have effect).
+    pub grantor_account: [u8; 32],
+    /// Hybrid signature by the GRANTOR's account identity over [`Self::signing_bytes`].
+    pub sig: Vec<u8>,
+}
+
+impl AdminGrant {
+    fn signing_bytes(
+        circle_id: &[u8],
+        creator: &[u8; 32],
+        admin_account: &[u8; 32],
+        version: u64,
+        grantor_account: &[u8; 32],
+    ) -> Vec<u8> {
+        let mut v = Vec::with_capacity(ADMIN_DOMAIN.len() + 4 + circle_id.len() + 32 + 32 + 8 + 32);
+        v.extend_from_slice(ADMIN_DOMAIN);
+        v.extend_from_slice(&(circle_id.len() as u32).to_le_bytes());
+        v.extend_from_slice(circle_id);
+        v.extend_from_slice(creator);
+        v.extend_from_slice(admin_account);
+        v.extend_from_slice(&version.to_le_bytes());
+        v.extend_from_slice(grantor_account);
+        v
+    }
+
+    /// Issue a signed grant under the `grantor` account identity. The caller is responsible for the
+    /// grantor actually being an admin (the receiver re-checks that via `admin_closure`; a grant from
+    /// a non-admin simply contributes no authority).
+    pub fn issue(
+        grantor: &Identity,
+        circle_id: &[u8],
+        creator: [u8; 32],
+        admin_account: [u8; 32],
+        version: u64,
+    ) -> Self {
+        let grantor_account = grantor.public().node_id_bytes();
+        let sig = grantor.sign(&Self::signing_bytes(circle_id, &creator, &admin_account, version, &grantor_account));
+        Self { circle_id: circle_id.to_vec(), creator, admin_account, version, grantor_account, sig }
+    }
+
+    /// Verify the grant against the grantor's pinned account bundle (id match + hybrid signature). A
+    /// forged or tampered grant fails here and is dropped; a caller then treats it as no authority.
+    pub fn verify(&self, grantor_pub: &HavenId) -> Result<()> {
+        if grantor_pub.node_id_bytes() != self.grantor_account {
+            return Err(CoreError::Crypto("admin grant: grantor id mismatch"));
+        }
+        let msg = Self::signing_bytes(&self.circle_id, &self.creator, &self.admin_account, self.version, &self.grantor_account);
+        grantor_pub.verify(&msg, &self.sig)
+    }
+
+    /// Higher-version-wins replace for the same (circle, admin_account, creator) key. Returns `true`
+    /// if `other` is strictly newer and was adopted. Both must already be `verify()`-ed by the caller.
+    pub fn adopt_if_newer(&mut self, other: &AdminGrant) -> bool {
+        if other.circle_id == self.circle_id
+            && other.creator == self.creator
+            && other.admin_account == self.admin_account
+            && other.version > self.version
+        {
+            *self = other.clone();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Wire: `lp(circle_id) ‖ creator(32) ‖ admin_account(32) ‖ version(8) ‖ grantor(32) ‖ sig`.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(4 + self.circle_id.len() + 32 + 32 + 8 + 32 + self.sig.len());
+        v.extend_from_slice(&(self.circle_id.len() as u32).to_le_bytes());
+        v.extend_from_slice(&self.circle_id);
+        v.extend_from_slice(&self.creator);
+        v.extend_from_slice(&self.admin_account);
+        v.extend_from_slice(&self.version.to_le_bytes());
+        v.extend_from_slice(&self.grantor_account);
+        v.extend_from_slice(&self.sig);
+        v
+    }
+
+    /// Inverse of [`Self::to_bytes`].
+    pub fn from_bytes(b: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(b);
+        let circle_id = r.bytes_lp()?.to_vec();
+        let creator = r.array32()?;
+        let admin_account = r.array32()?;
+        let version = r.u64()?;
+        let grantor_account = r.array32()?;
+        let sig = r.rest().to_vec();
+        if sig.is_empty() {
+            return Err(CoreError::Encoding("admin grant: missing signature"));
+        }
+        Ok(Self { circle_id, creator, admin_account, version, grantor_account, sig })
+    }
+}
+
+/// Compute the transitive admin closure from the pinned `creator` and a set of ALREADY-VERIFIED
+/// `(grantor_account, admin_account)` delegation edges (§4.3). Pure, monotone fixpoint: seed with the
+/// creator, then repeatedly admit any account whose grantor is already an admin. An edge whose grantor
+/// never becomes an admin contributes NOTHING — so an isolated (even validly-signed) grant from a
+/// non-authority can never inject an admin. Convergence is monotone in the edge set: seeing more
+/// grants can only grow the admin set, never shrink it, so every replica that holds the same verified
+/// grants computes the same closure.
+pub fn admin_closure(
+    creator: [u8; 32],
+    edges: &[([u8; 32], [u8; 32])],
+) -> std::collections::HashSet<[u8; 32]> {
+    let mut admins = std::collections::HashSet::new();
+    admins.insert(creator);
+    loop {
+        let before = admins.len();
+        for (grantor, admin) in edges {
+            if admins.contains(grantor) {
+                admins.insert(*admin);
+            }
+        }
+        if admins.len() == before {
+            break; // fixpoint: nothing new is reachable
+        }
+    }
+    admins
+}
+
 /// Minimal length-prefixed byte reader for the wire formats above.
 struct Reader<'a> {
     b: &'a [u8],
@@ -1189,5 +1346,65 @@ mod tests {
         let commit = seal_key_commit(&account, &recips, "c1", 0, &e0, &secret).unwrap();
         // The legacy peer (account-key only, no devices) still opens the commit via its account-key recipient.
         assert_eq!(open_key_commit(&legacy_peer, &account.public(), &commit).unwrap().epoch_key, e0, "a straggler keeps the whole circle on dual-seal");
+    }
+
+    // ── MLS M3: circle admin authority (§4.3) ────────────────────────────────────────────────
+
+    #[test]
+    fn admin_grant_round_trips_verifies_and_rejects_forgery() {
+        let creator = id(1);
+        let alice = id(2);
+        let mallory = id(9);
+        let cid = b"circle-x";
+        let creator_id = creator.public().node_id_bytes();
+        let alice_id = alice.public().node_id_bytes();
+
+        // Creator delegates admin to Alice. Round-trips byte-stably and verifies against the creator.
+        let g = AdminGrant::issue(&creator, cid, creator_id, alice_id, 1);
+        assert_eq!(AdminGrant::from_bytes(&g.to_bytes()).unwrap(), g, "grant round-trips");
+        assert!(g.verify(&creator.public()).is_ok(), "a genuine grant verifies against its grantor");
+        // Verifying against the WRONG account fails (grantor id mismatch).
+        assert!(g.verify(&alice.public()).is_err(), "grant does not verify against a non-grantor");
+
+        // FORGERY: Mallory signs a grant but relabels the grantor as the creator — the signature no
+        // longer matches the creator's key, so verify() rejects it (a relay can't forge authority).
+        let mut forged = AdminGrant::issue(&mallory, cid, creator_id, mallory.public().node_id_bytes(), 5);
+        forged.grantor_account = creator_id;
+        assert!(forged.verify(&creator.public()).is_err(), "a forged grantor id must not verify");
+    }
+
+    #[test]
+    fn admin_grant_is_higher_version_wins() {
+        let creator = id(1);
+        let alice = id(2);
+        let cid = b"c";
+        let creator_id = creator.public().node_id_bytes();
+        let alice_id = alice.public().node_id_bytes();
+        let mut held = AdminGrant::issue(&creator, cid, creator_id, alice_id, 1);
+        let newer = AdminGrant::issue(&creator, cid, creator_id, alice_id, 3);
+        let stale = AdminGrant::issue(&creator, cid, creator_id, alice_id, 1);
+        assert!(held.adopt_if_newer(&newer), "a strictly-newer grant is adopted");
+        assert_eq!(held.version, 3);
+        assert!(!held.adopt_if_newer(&stale), "a stale (lower/equal version) grant loses");
+        assert_eq!(held.version, 3, "rollback is refused");
+    }
+
+    #[test]
+    fn admin_closure_only_follows_chains_rooted_at_the_creator() {
+        let creator = [1u8; 32];
+        let alice = [2u8; 32];
+        let bob = [3u8; 32];
+        let mallory = [9u8; 32];
+        let rando = [7u8; 32];
+
+        // creator → alice, alice → bob (a delegated admin can further delegate), plus an ISOLATED
+        // rando → mallory edge whose grantor is not (and never becomes) an admin.
+        let edges = vec![(creator, alice), (alice, bob), (rando, mallory)];
+        let admins = admin_closure(creator, &edges);
+        assert!(admins.contains(&creator), "the creator is always an admin");
+        assert!(admins.contains(&alice), "a creator-delegated admin is included");
+        assert!(admins.contains(&bob), "a transitively-delegated admin is included");
+        assert!(!admins.contains(&mallory), "a grant from a non-admin injects nothing");
+        assert!(!admins.contains(&rando), "the isolated grantor is not itself an admin");
     }
 }

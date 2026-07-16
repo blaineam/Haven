@@ -13,8 +13,9 @@ use haven_net::blobstore::BlobClient;
 use std::path::PathBuf;
 use haven_p2p::crypto::{decapsulate, encapsulate_to, open, seal, Encapsulation};
 use haven_p2p::device::{
-    circle_fully_mls_capable, circle_fully_seed_drop_capable, recipients_with_devices,
-    recipients_with_devices_gated, ContactDevices, DeviceCredential, DeviceList, SeedDropCapability,
+    admin_closure, circle_fully_mls_capable, circle_fully_seed_drop_capable, recipients_with_devices,
+    recipients_with_devices_gated, AdminGrant, ContactDevices, DeviceCredential, DeviceList,
+    SeedDropCapability,
 };
 use haven_p2p::treekem;
 use haven_p2p::identity::{Identity, HavenId};
@@ -55,6 +56,17 @@ const TAG_DEVICE_ROSTER: u8 = 0x04; // an account's signed device roster (Device
 const TAG_MLS_COMMIT: u8 = 0x05; // a treekem::Commit (a ratchet-tree commit; genesis carries the Adds)
 const TAG_MLS_WELCOME: u8 = 0x06; // a SealedEnvelope delivering a joiner's shadow secrets to its device
 const TAG_MLS_PROPOSAL: u8 = 0x07; // a treekem::Proposal (reserved; unbundled proposals — M4 roster path)
+// MLS M3 wire tags (docs/TREEKEM-DESIGN.md §7.2 join gate, §4.3 authority). Same additive contract:
+// any non-`{` tag a legacy peer fetches fails its raw-JSON parse and errors per-envelope harmlessly.
+const TAG_MLS_JOIN: u8 = 0x08; // a signed join ack: "device D holds genesis G's Welcome" (the §7.2 gate)
+const TAG_ADMIN_GRANT: u8 = 0x09; // an account-signed device::AdminGrant riding the circle control lane
+
+/// Content-epoch namespace for MLS-keyed circles (M3, §4.5). When the keying flip is live, the
+/// circle's content seals under `MLS_EPOCH_BASE + tree_epoch` instead of a legacy sender-keys epoch.
+/// The huge offset keeps tree epochs from ever colliding with the small legacy epoch numbers already
+/// in `my_epoch_keys` — so PARK (revert to legacy) never confuses a stale legacy key with a tree key,
+/// and the two epoch spaces coexist in the SAME maps with zero change to the content path's lookups.
+const MLS_EPOCH_BASE: u64 = 1 << 40;
 
 uniffi::setup_scaffolding!();
 
@@ -314,6 +326,18 @@ pub fn open_sealed_with_seed(seed: Vec<u8>, sealed: Vec<u8>) -> Option<Vec<u8>> 
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Parse a 64-char lowercase-hex account/node id into 32 bytes (the inverse of [`hex`] for ids).
+fn decode_hex32(s: &str) -> Result<[u8; 32], ()> {
+    if s.len() != 64 {
+        return Err(());
+    }
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|_| ())?;
+    }
+    Ok(out)
 }
 
 /// An opened, sender-authenticated push notification (audit H2).
@@ -1067,6 +1091,20 @@ struct Circle {
     /// copy per backfill run. Reusing the cached bytes while the context is unchanged keeps the
     /// mailbox key stable (events are handled separately: their sealing is fully deterministic).
     cached_commit: Option<([u8; 32], Vec<u8>)>,
+    /// MLS M3: the PINNED circle creator (root of Remove/Add authority, §4.3), as an account node id.
+    /// `None` on a circle whose creator we haven't learned. Set locally when we create a circle and
+    /// carried on the control lane; every member agrees on it (or the authority set is empty and no
+    /// tree Remove is accepted). Persisted (additive).
+    creator: Option<[u8; 32]>,
+    /// MLS M3: verified [`AdminGrant`] wire bytes riding the roster/control lane — the delegation edges
+    /// `admin_closure` walks from the creator. Higher-version-wins per (admin_account); a forged/stale
+    /// grant never reaches this vec (verified at ingest). Persisted (additive) and re-broadcast.
+    admin_grants: Vec<Vec<u8>>,
+    /// MLS M3: the live tree-derived content epoch (`MLS_EPOCH_BASE + tree_epoch`) when the keying flip
+    /// is active for this circle (§4.5), else `None` (shadow or parked). Set by `mls_refresh_keying`,
+    /// read by the author/re-seal paths so content seals under the tree key. NOT persisted — it is a
+    /// pure function of the tree chain + the master switch, recomputed every bundle/receive.
+    mls_live_epoch: Option<u64>,
 }
 
 /// How long an epoch may live before the periodic rotation retires it (audit C2). SEVEN DAYS —
@@ -1124,6 +1162,9 @@ impl Circle {
             peer_circle_secrets: HashMap::new(),
             rotated_at: 0,
             cached_commit: None,
+            creator: None,
+            admin_grants: vec![],
+            mls_live_epoch: None,
         }
     }
     /// Ensure I have a current epoch key for my own posts AND a stable circle secret (bootstrap on
@@ -1287,6 +1328,14 @@ struct NetState {
     /// non-capable circle (shadow doesn't run). Not persisted: it rebuilds from the commit + welcome
     /// re-emitted in every bundle, exactly like `mls_capable`/`seed_drop_capable` rebuild from sync.
     shadow_trees: std::collections::HashMap<String, ShadowTree>,
+    /// MLS M3 KEYING master switch (docs/TREEKEM-DESIGN.md §4.5/§7.2). Mirrors `retire_account_key`
+    /// EXACTLY: default **false**, NOT persisted, the app re-applies it on launch. When false the tree
+    /// runs in M2 shadow only and content is byte-identical to today (the no-regression proof). When
+    /// true, a circle that is fully-MLS-capable AND all-joined (§7.2) draws its content epoch key from
+    /// the tree (§4.5) and STOPS emitting the legacy KeyCommit; a circle that isn't all-joined stays
+    /// dual-stack, and one a legacy device (re)joins PARKS back to KeyCommit within one bundle (§7.3).
+    /// Ships DARK so this lands like seed-drop retirement; flipped ON per staged cohort after soak.
+    mls_keying: bool,
 }
 
 impl NetState {
@@ -1522,6 +1571,22 @@ struct ShadowTree {
     /// mailbox doesn't accumulate a copy per backfill (Welcomes wrap via a random KEM, so they
     /// MUST be cached — the same reasoning as `Circle::cached_commit`).
     emit_cache: Vec<Vec<u8>>,
+    /// MLS M3: device ids that have emitted a JOIN ack for a genesis they hold the Welcome to — the
+    /// §7.2 all-joined gate. A device joins by broadcasting `TAG_MLS_JOIN` once it holds its Welcome;
+    /// the creator auto-joins on build. `all-joined` = every device leaf in the CURRENT tree is here.
+    /// This is the second all-present-positive gate on top of `circle_fully_mls_capable`, so a member
+    /// who never fetched its Welcome can never strand the circle in the flipped state.
+    joined: std::collections::HashSet<[u8; 32]>,
+    /// MLS M3: the secret keying root this device uses when it is the committer (creator/admin) —
+    /// derived from its DEVICE seed (§ leaf-secret secrecy), so leaf secrets + the genesis init are
+    /// unknowable to a removed device even though the commit is public. Set at genesis build; unused
+    /// by a pure receiver. Empty until built.
+    my_secret_root: Option<[u8; 32]>,
+    /// MLS M3: the sorted device-id leaf set my_genesis was built over. When the authorized device
+    /// set GROWS (a straggler upgrades → §7.3 resume), this differs and the creator rebuilds genesis
+    /// so the newcomer is Welcomed and the circle can re-flip. (A Remove SHRINKS the tree via a
+    /// chained commit, not a rebuild, so the removed device stays cryptographically excluded.)
+    genesis_devices: Vec<[u8; 32]>,
 }
 
 impl ShadowTree {
@@ -1532,6 +1597,9 @@ impl ShadowTree {
             my_welcomes: std::collections::BTreeMap::new(),
             my_genesis: None,
             emit_cache: Vec::new(),
+            joined: std::collections::HashSet::new(),
+            my_secret_root: None,
+            genesis_devices: Vec::new(),
         }
     }
 }
@@ -1551,21 +1619,52 @@ fn shadow_genesis_parent(gid: &[u8]) -> [u8; 32] {
 fn shadow_genesis_cth(gid: &[u8]) -> [u8; 32] {
     shadow_domain_hash(b"haven-mls-shadow-genesis-cth-v1", gid)
 }
-fn shadow_genesis_init(gid: &[u8]) -> [u8; 32] {
-    shadow_domain_hash(b"haven-mls-shadow-genesis-init-v1", gid)
-}
-/// The (shadow) leaf secret a creator assigns to `device_id`. Deterministic + creator-scoped so
-/// the same creator reproduces its genesis across relaunches (no self-fork), while two creators
-/// pick different secrets (their genesis commits differ → a fork §5.1 resolves). SHADOW: these
-/// are never consumed for content, so their secrecy is not load-bearing; derived from the
-/// creator's own id anyway.
-fn shadow_leaf_secret(creator_id: &[u8; 32], gid: &[u8], device_id: &[u8; 32]) -> [u8; 32] {
+/// A committer's SECRET keying root, derived from its DEVICE secret seed (M3). Unlike the public
+/// per-group genesis constants above, this is the secrecy anchor the removal re-key rests on: the
+/// leaf secrets and genesis init the creator derives from it are UNKNOWABLE to a removed device,
+/// even though the genesis commit itself is public. It stays DETERMINISTIC (a pure function of the
+/// creator's device seed + group id), so the creator reproduces the same genesis across relaunches
+/// (no self-fork); two different creator devices produce different roots ⇒ a §5.1 fork that resolves.
+fn keying_secret_root(device_secret_seed: &[u8; 32], gid: &[u8]) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
-    h.update(b"haven-mls-shadow-leaf-v1");
-    h.update(creator_id);
+    h.update(b"haven-mls-keying-root-v1");
+    h.update(device_secret_seed);
     h.update(gid);
+    *h.finalize().as_bytes()
+}
+/// The SECRET leaf secret the committer assigns to `device_id` (derived from its secret root). Known
+/// only to the committer (who generated it) and the device it is Welcomed to — so a removed device
+/// cannot derive any OTHER remaining leaf's key and is excluded from the re-key path (§4.3).
+fn keying_leaf_secret(secret_root: &[u8; 32], device_id: &[u8; 32]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"haven-mls-keying-leaf-v1");
+    h.update(secret_root);
     h.update(device_id);
     *h.finalize().as_bytes()
+}
+/// The SECRET genesis init secret (`init_secret_0`) the committer feeds `build_commit` — secret, so
+/// the genesis `joiner_secret` is delivered ONLY via the Welcome and is NOT derivable from the public
+/// commit (contrast the shadow's public constant). This is what makes epoch 2's one-way link real.
+fn keying_base_init(secret_root: &[u8; 32]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"haven-mls-keying-init-v1");
+    h.update(secret_root);
+    *h.finalize().as_bytes()
+}
+/// A committer's fresh leaf secret + encapsulation entropy for the UpdatePath it builds at `epoch`
+/// (M3 removal re-key). Deterministic from its secret root + epoch so a REPLAY of its own commit
+/// reproduces identical bytes (the rebuild-each-bundle model has no separate stored build state).
+fn keying_update_material(secret_root: &[u8; 32], epoch: u64) -> ([u8; 32], [u8; 32]) {
+    let mut h = blake3::Hasher::new();
+    h.update(b"haven-mls-keying-upd-leaf-v1");
+    h.update(secret_root);
+    h.update(&epoch.to_le_bytes());
+    let leaf = *h.finalize().as_bytes();
+    let mut h = blake3::Hasher::new();
+    h.update(b"haven-mls-keying-upd-ent-v1");
+    h.update(secret_root);
+    h.update(&epoch.to_le_bytes());
+    (leaf, *h.finalize().as_bytes())
 }
 
 /// The account members whose devices populate the shadow tree (me + circle members).
@@ -1658,13 +1757,19 @@ fn resolve_shadow_sender(st: &NetState, idx: usize, sender_hex: &str) -> Option<
 /// telemetry only, never consumed for content. No-op if a genesis is already cached.
 fn build_shadow_genesis(st: &mut NetState, idx: usize) {
     let circle_id = st.circles[idx].id.clone();
-    if st.shadow_trees.get(&circle_id).and_then(|s| s.my_genesis).is_some() {
-        return; // already created — idempotent
-    }
     let gid = circle_id.as_bytes().to_vec();
     let devices = shadow_device_leaves(st, idx);
     if devices.len() < 2 {
         return; // a 1-leaf shadow group carries no signal; wait for the roster to fill in
+    }
+    let device_ids: Vec<[u8; 32]> = devices.iter().map(|(b, _)| b.node_id_bytes()).collect();
+    // Idempotent — but REBUILD if the authorized device set has GROWN (§7.3 resume: a straggler
+    // upgraded and must be Welcomed). A rebuild is a fresh genesis (a §5.1 fork the fleet reconverges
+    // on); a Remove never routes here (it is a chained commit that shrinks the tree, §4.3).
+    if let Some(s) = st.shadow_trees.get(&circle_id) {
+        if s.my_genesis.is_some() && s.genesis_devices == device_ids {
+            return;
+        }
     }
     // Own an Identity to sign with, so the immutable borrow of `st` ends before we mutate it.
     // Sign with THIS DEVICE's key (leaves are devices, §3.1): it scopes the genesis so two sibling
@@ -1678,12 +1783,14 @@ fn build_shadow_genesis(st: &mut NetState, idx: usize) {
     // Creator scope for leaf secrets + my own leaf: the signing device's id.
     let creator_id = signer.public().node_id_bytes();
     let my_device_id = Some(creator_id);
+    // SECRET keying root (from my device seed) — the anchor the removal re-key rests on (§4.3).
+    let secret_root = keying_secret_root(&signer.secret_seed(), &gid);
 
     // One Add per device, in the deterministic leaf order. leaf_index = position in the order.
     let mut adds: Vec<treekem::Proposal> = Vec::with_capacity(devices.len());
     let mut leaf_secrets: Vec<[u8; 32]> = Vec::with_capacity(devices.len());
     for (li, (bundle, cred)) in devices.iter().enumerate() {
-        let ls = shadow_leaf_secret(&creator_id, &gid, &bundle.node_id_bytes());
+        let ls = keying_leaf_secret(&secret_root, &bundle.node_id_bytes());
         leaf_secrets.push(ls);
         let kp = treekem::node_keypair_from_path_secret(&ls);
         let payload = treekem::leaf_binding_payload(&gid, &kp.kem_x, &kp.kem_pq);
@@ -1707,7 +1814,7 @@ fn build_shadow_genesis(st: &mut NetState, idx: usize) {
 
     let parent = shadow_genesis_parent(&gid);
     let base_cth = shadow_genesis_cth(&gid);
-    let base_init = shadow_genesis_init(&gid);
+    let base_init = keying_base_init(&secret_root);
     let build = match treekem::build_commit(
         &treekem::RatchetTree { slots: vec![] },
         &gid,
@@ -1755,6 +1862,10 @@ fn build_shadow_genesis(st: &mut NetState, idx: usize) {
     shadow.group_id = gid;
     shadow.commits.insert(commit_hash, commit_bytes);
     shadow.my_genesis = Some(commit_hash);
+    shadow.my_secret_root = Some(secret_root);
+    shadow.genesis_devices = device_ids;
+    // The creator auto-joins its own genesis (§7.2): it holds the Welcome by construction.
+    shadow.joined.insert(creator_id);
     if let Some(w) = my_welcome {
         shadow.my_welcomes.insert(commit_hash, w);
     }
@@ -1785,13 +1896,123 @@ fn receive_mls_commit(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool
     let Ok(commit) = treekem::Commit::from_bytes(body) else { return Ok(false) };
     let circle_id = st.circles[idx].id.clone();
     let gid = circle_id.as_bytes().to_vec();
-    if commit.group_id != gid || commit.epoch != 1 || commit.parent_commit_hash != shadow_genesis_parent(&gid) {
-        return Ok(false); // only genesis commits participate in the M2 shadow
+    if commit.group_id != gid {
+        return Ok(false);
+    }
+    let is_genesis = commit.epoch == 1 && commit.parent_commit_hash == shadow_genesis_parent(&gid);
+    if !is_genesis {
+        // A chained commit (M3 Remove, §4.3). It participates only if (a) it extends a commit we
+        // already hold (a known parent — otherwise it is an orphan we can't place) AND (b) it is
+        // AUTHORIZED: its committer must be the circle creator or a current admin, or the commit must
+        // remove only the committer's own account (self-removal). A Remove from a non-admin is
+        // REJECTED here by EVERY receiver — the authority guarantee — so it never enters the chain.
+        let parent_known = st
+            .shadow_trees
+            .get(&circle_id)
+            .map(|s| s.commits.contains_key(&commit.parent_commit_hash))
+            .unwrap_or(false);
+        if !parent_known || !mls_commit_authorized(st, idx, &commit) {
+            return Ok(false);
+        }
     }
     let h = treekem::commit_hash(body);
     let shadow = st.shadow_trees.entry(circle_id).or_insert_with(|| ShadowTree::new(gid));
     shadow.commits.entry(h).or_insert_with(|| body.to_vec());
     Ok(false)
+}
+
+/// Authorize a chained (non-genesis) commit (§4.3): resolve the committer device→account from its
+/// UpdatePath leaf credential (verified against the account's pinned bundle + roster), verify the
+/// commit's hybrid signature under that device bundle, then require the account to be a current admin
+/// (creator or creator-delegated) — UNLESS the commit removes only its own account's leaves (leave).
+/// Any failure (no path, forged credential, bad signature, non-admin) is `false` ⇒ the commit is
+/// dropped by this receiver, exactly as a corrupt envelope is.
+fn mls_commit_authorized(st: &NetState, idx: usize, commit: &treekem::Commit) -> bool {
+    let Some(up) = &commit.update_path else { return false }; // a Remove always re-keys (carries a path)
+    let Ok(cred) = DeviceCredential::from_bytes(&up.leaf_node.device_credential) else { return false };
+    // The committer's account must be a member (or me) with a known, verifying bundle + roster.
+    let acct = cred.account_id;
+    let Some(acct_bundle) = mls_account_bundle(st, idx, &acct) else { return false };
+    if cred.verify(&acct_bundle).is_err() {
+        return false; // the device→account credential must chain to the pinned account key
+    }
+    let device_bundle = cred.device.clone();
+    // The committing device must be currently authorized by that account's roster (not revoked).
+    let authorized_device = st
+        .device_lists
+        .get(&acct)
+        .map(|cd| cd.list.is_authorized(&device_bundle.node_id_bytes()))
+        .unwrap_or(false);
+    if !authorized_device {
+        return false;
+    }
+    // The commit's hybrid signature must verify under the committing device's bundle.
+    if device_bundle.verify(&treekem::commit_signing_bytes(commit), &commit.sig).is_err() {
+        return false;
+    }
+    // Self-removal (leave) is always allowed: every removed leaf belongs to the committer's account.
+    let removes: Vec<u32> = commit
+        .proposals
+        .iter()
+        .filter_map(|p| match &p.body {
+            treekem::ProposalBody::Remove { leaf_index } => Some(*leaf_index),
+            _ => None,
+        })
+        .collect();
+    // Otherwise the committer must be a current admin (creator or creator-delegated).
+    match circle_admin_set(st, idx) {
+        Some(admins) if admins.contains(&acct) => true,
+        _ => {
+            // Not an admin: only a self-removal is allowed. Resolve each removed leaf's account from
+            // the reconstructed genesis tree; all must equal the committer's account.
+            !removes.is_empty()
+                && removes.iter().all(|li| {
+                    committer_removes_own_leaf(st, idx, &commit.parent_commit_hash, *li, &acct)
+                })
+        }
+    }
+}
+
+/// Whether removed leaf `li` (as located in the tree at `parent_hash`) belongs to `acct` — used to
+/// permit self-removal by a non-admin. Reconstructs the tree by replaying the chain from genesis.
+fn committer_removes_own_leaf(
+    st: &NetState,
+    idx: usize,
+    parent_hash: &[u8; 32],
+    li: u32,
+    acct: &[u8; 32],
+) -> bool {
+    let circle_id = st.circles[idx].id.clone();
+    let Some(shadow) = st.shadow_trees.get(&circle_id) else { return false };
+    // A pure-receiver replay (no device seed) reconstructs the public tree up to the parent.
+    let Some(state) = mls_replay(shadow, None) else { return false };
+    // Walk is bounded to the current tip; if the parent is the current tip the tree matches.
+    if state.tip_hash != *parent_hash {
+        // Fall back to the genesis tree (the common case: first Remove chains off genesis).
+        let Some((gh, gbytes)) = keying_winning_genesis(shadow) else { return false };
+        if gh != *parent_hash {
+            return false;
+        }
+        let Ok(gc) = treekem::Commit::from_bytes(&gbytes) else { return false };
+        let mut leaves = Vec::new();
+        for p in &gc.proposals {
+            if let treekem::ProposalBody::Add { leaf_node } = &p.body {
+                leaves.push(leaf_node.clone());
+            }
+        }
+        let tree = treekem::RatchetTree::from_leaves(leaves);
+        return tree
+            .leaf(li)
+            .and_then(|l| DeviceCredential::from_bytes(&l.device_credential).ok())
+            .map(|c| c.account_id == *acct)
+            .unwrap_or(false);
+    }
+    state
+        .tree
+        .leaf(li)
+        .and_then(|l| DeviceCredential::from_bytes(&l.device_credential).ok())
+        .map(|c| c.account_id == *acct)
+        .unwrap_or(false)
 }
 
 /// Ingest a shadow Welcome (§4.2): open it with my device/account key and store the delivered
@@ -1817,6 +2038,505 @@ fn receive_mls_welcome(st: &mut NetState, idx: usize, body: &[u8]) -> Result<boo
     let shadow = st.shadow_trees.entry(circle_id).or_insert_with(|| ShadowTree::new(gid));
     shadow.my_welcomes.entry(commit_hash).or_insert(welcome);
     Ok(false)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// MLS M3 — the KEYING FLIP + removal RE-KEY + creator/admin authority
+// (docs/TREEKEM-DESIGN.md §4.3 Remove, §4.5 keying flip, §7.2 all-joined gate, §7.3 park/resume).
+//
+// Everything below is gated behind the `mls_keying` master switch (default OFF ⇒ these paths are
+// inert and content is byte-identical to M2). When ON, and a circle is fully-MLS-capable AND
+// all-joined, the tree's per-account `sender_key_n` fills `my/peer_epoch_keys` and the legacy
+// KeyCommit stops (§4.5); the content path (seal/open/dedup/feed) is UNCHANGED — only the key
+// source moves. A removed device is cut off by a chained Remove+UpdatePath commit whose
+// `commit_secret` it cannot derive (its leaf is excluded from the path encryption). If a legacy or
+// not-yet-joined device (re)joins, the gate recomputes false and the circle PARKS back to KeyCommit
+// within one bundle (§7.3) — both gate directions are recomputed from verified state, never edge-
+// triggered, so park/resume is idempotent and crash-safe.
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+
+/// Resolve an account node id to its verifying public bundle (me or a circle member).
+fn mls_account_bundle(st: &NetState, idx: usize, acct: &[u8; 32]) -> Option<HavenId> {
+    if *acct == st.me().node_id_bytes() {
+        return Some(st.me().clone());
+    }
+    st.circles[idx].members.iter().find(|m| m.node_id_bytes() == *acct).cloned()
+}
+
+/// The current admin set for a circle (§4.3): the pinned creator plus every account reachable by a
+/// chain of VERIFIED admin grants (`admin_closure`). `None` when no creator is pinned — then no tree
+/// Remove is authorized by anyone (a circle with no established authority root can't cut members).
+fn circle_admin_set(st: &NetState, idx: usize) -> Option<std::collections::HashSet<[u8; 32]>> {
+    let creator = st.circles[idx].creator?;
+    let gid = st.circles[idx].id.as_bytes().to_vec();
+    let mut edges: Vec<([u8; 32], [u8; 32])> = Vec::new();
+    for w in &st.circles[idx].admin_grants {
+        let Ok(g) = AdminGrant::from_bytes(w) else { continue };
+        // Bind the grant to THIS circle + THIS authority root; verify against the grantor's bundle.
+        if g.circle_id != gid || g.creator != creator {
+            continue;
+        }
+        let Some(grantor_pub) = mls_account_bundle(st, idx, &g.grantor_account) else { continue };
+        if g.verify(&grantor_pub).is_ok() {
+            edges.push((g.grantor_account, g.admin_account));
+        }
+    }
+    Some(admin_closure(creator, &edges))
+}
+
+/// Ingest an admin grant riding the control lane (§4.3): verify it against the grantor's pinned
+/// bundle, bind it to this circle, learn the pinned creator if we don't have one, and store the wire
+/// (higher-version-wins per admin_account). A forged/unverifiable/wrong-circle grant is dropped.
+/// SHADOW-lane: never touches content, returns `false`.
+fn receive_admin_grant(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool, HavenError> {
+    let Ok(g) = AdminGrant::from_bytes(body) else { return Ok(false) };
+    let gid = st.circles[idx].id.as_bytes().to_vec();
+    if g.circle_id != gid {
+        return Ok(false);
+    }
+    let Some(grantor_pub) = mls_account_bundle(st, idx, &g.grantor_account) else { return Ok(false) };
+    if g.verify(&grantor_pub).is_err() {
+        return Ok(false);
+    }
+    // Learn the pinned creator once (absence is never information; a differing later value is ignored).
+    if st.circles[idx].creator.is_none() {
+        st.circles[idx].creator = Some(g.creator);
+    } else if st.circles[idx].creator != Some(g.creator) {
+        return Ok(false); // a grant for a different authority root is not ours
+    }
+    // Higher-version-wins per (admin_account): replace a stale stored grant, else append a new one.
+    let grants = &mut st.circles[idx].admin_grants;
+    let mut replaced = false;
+    for w in grants.iter_mut() {
+        if let Ok(mut existing) = AdminGrant::from_bytes(w) {
+            if existing.circle_id == g.circle_id
+                && existing.creator == g.creator
+                && existing.admin_account == g.admin_account
+            {
+                if existing.adopt_if_newer(&g) {
+                    *w = existing.to_bytes();
+                }
+                replaced = true;
+                break;
+            }
+        }
+    }
+    if !replaced {
+        grants.push(g.to_bytes());
+    }
+    Ok(false)
+}
+
+/// The device ids present as leaves in `tree` (parsing each leaf's account-signed credential). Used
+/// by the all-joined gate and by sender-key derivation to enumerate the circle's live devices.
+fn tree_leaf_device_ids(tree: &treekem::RatchetTree) -> Vec<[u8; 32]> {
+    let mut out = Vec::new();
+    for slot in &tree.slots {
+        if let treekem::TreeSlot::Leaf(l) = slot {
+            if let Ok(c) = DeviceCredential::from_bytes(&l.device_credential) {
+                out.push(c.device.node_id_bytes());
+            }
+        }
+    }
+    out
+}
+
+/// The distinct ACCOUNT ids present as leaves in `tree` (a member's leaves resolve to its account —
+/// the account-keyed slot the content path already uses). Resolving §3.3's per-leaf sender key to a
+/// per-ACCOUNT key here is the deliberate simplification (§4.5 ambiguity) that keeps `my/peer_epoch_keys`
+/// keyed by `(account, epoch)` BYTE-IDENTICALLY: every member derives the same shared `sender_root`, so
+/// every member computes the identical account-scoped key, and the content path needs no map widening.
+fn tree_leaf_accounts(tree: &treekem::RatchetTree) -> Vec<[u8; 32]> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for slot in &tree.slots {
+        if let treekem::TreeSlot::Leaf(l) = slot {
+            if let Ok(c) = DeviceCredential::from_bytes(&l.device_credential) {
+                if seen.insert(c.account_id) {
+                    out.push(c.account_id);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The winning genesis commit for the KEYING layer. Among the epoch-1 commits (parent =
+/// genesis_parent), prefer the one with the MOST leaves, then the larger hash. The leaf-count
+/// preference makes §7.3 RESUME deterministic: when a straggler upgrades, the creator rebuilds a
+/// genesis that is a strict SUPERSET, and that larger genesis wins on every device — so the newcomer
+/// is never stranded behind a smaller stale genesis. (The M2 `mls_shadow_status` telemetry keeps its
+/// own pure `select_chain` view, unchanged, so nothing about the shadow soak signal moves.)
+fn keying_winning_genesis(shadow: &ShadowTree) -> Option<([u8; 32], Vec<u8>)> {
+    let gid = &shadow.group_id;
+    let parent = shadow_genesis_parent(gid);
+    let mut best: Option<(usize, [u8; 32], Vec<u8>)> = None; // (leaf count, hash, bytes)
+    for b in shadow.commits.values() {
+        let Ok(c) = treekem::Commit::from_bytes(b) else { continue };
+        if c.epoch != 1 || c.parent_commit_hash != parent || &c.group_id != gid {
+            continue;
+        }
+        let adds = c
+            .proposals
+            .iter()
+            .filter(|p| matches!(p.body, treekem::ProposalBody::Add { .. }))
+            .count();
+        let h = treekem::commit_hash(b);
+        let better = match &best {
+            None => true,
+            Some((bn, bh, _)) => adds > *bn || (adds == *bn && h > *bh),
+        };
+        if better {
+            best = Some((adds, h, b.clone()));
+        }
+    }
+    best.map(|(_, h, b)| (h, b))
+}
+
+/// This device's keying state after replaying the tree commit chain from its Welcome (§4.5, §5.1).
+struct KeyingState {
+    /// Tree epoch (1 = genesis; +1 per applied Remove commit).
+    epoch: u64,
+    tree: treekem::RatchetTree,
+    /// My private tree state at the current epoch, or `None` if I was removed / can't derive.
+    my_private: Option<treekem::TreePrivate>,
+    /// The current epoch's `sender_root` — `None` if I am the removed device (cut off from the epoch).
+    sender_root: Option<[u8; 32]>,
+    /// The current epoch's `init_secret` (feeds the next Remove's advance).
+    init_secret: Option<[u8; 32]>,
+    cth: [u8; 32],
+    tip_hash: [u8; 32],
+    removed_me: bool,
+}
+
+/// Rebuild MY OWN commit deterministically to recover its post-commit tree/schedule/private state
+/// (`apply_commit` refuses self-application, and the rebuild-each-bundle model stores no build). The
+/// fresh leaf secret + entropy come from `keying_update_material` (the exact material used when the
+/// commit was authored), so the tree + schedule + transcript reproduce EXACTLY; the signature is
+/// irrelevant to state (the transcript blanks it), so a dummy signer is used.
+fn keying_rebuild_own_commit(
+    prev: &KeyingState,
+    gid: &[u8],
+    target: &treekem::Commit,
+    my_leaf: u32,
+    my_secret_root: &[u8; 32],
+) -> Option<treekem::CommitBuild> {
+    let up = target.update_path.as_ref()?;
+    let cred = up.leaf_node.device_credential.clone();
+    let (new_leaf, entropy) = keying_update_material(my_secret_root, target.epoch);
+    let init = prev.init_secret?;
+    // Reproduce the EXACT commit CONTENT so the schedule matches the real broadcast commit (which
+    // receivers apply): the confirmed-transcript hash covers the proposals AND the UpdatePath's
+    // leaf-binding signature, so both must be byte-identical. We reuse the stored proposals as-is
+    // and feed back the stored leaf-binding signature (a hybrid sig need not be deterministic, so
+    // re-signing could diverge). Only the commit's OWN signature is outside the transcript ⇒ dummy.
+    let props: Vec<treekem::Proposal> = target.proposals.clone();
+    let stored_leaf_sig = up.leaf_node.leaf_binding_sig.clone();
+    treekem::build_commit(
+        &prev.tree,
+        gid,
+        target.epoch,
+        prev.tip_hash,
+        &prev.cth,
+        &init,
+        my_leaf,
+        props,
+        Some((&new_leaf, &cred, &entropy)),
+        move |_| stored_leaf_sig,
+        |_| Vec::new(),
+    )
+    .ok()
+}
+
+/// Replay the tree commit chain from my Welcome to the current epoch (§5.1). Pure function of
+/// {known commits, my Welcome, my device seed}: pick the winning genesis, reconstruct its tree,
+/// derive epoch 1 from the Welcome's `joiner_secret`, then walk each subsequent epoch's winning
+/// commit — applying it (or rebuilding it if I authored it) — until the chain ends. Returns `None`
+/// if I hold no Welcome for the winning genesis (I haven't joined).
+fn mls_replay(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>) -> Option<KeyingState> {
+    let gid = shadow.group_id.clone();
+    let (gh, gbytes) = keying_winning_genesis(shadow)?;
+    let welcome = shadow.my_welcomes.get(&gh)?;
+    let gc = treekem::Commit::from_bytes(&gbytes).ok()?;
+    // Reconstruct the genesis tree from its Add proposals (add-only ⇒ from_leaves).
+    let mut leaves = Vec::new();
+    for p in &gc.proposals {
+        if let treekem::ProposalBody::Add { leaf_node } = &p.body {
+            leaves.push(leaf_node.clone());
+        }
+    }
+    let tree = treekem::RatchetTree::from_leaves(leaves);
+    if treekem::tree_hash(&tree) != gc.tree_hash {
+        return None;
+    }
+    let cth1 = treekem::next_confirmed_transcript_hash(&shadow_genesis_cth(&gid), &gc);
+    let sched1 = treekem::welcome_epoch_schedule(&welcome.joiner_secret, &gid, 1, &gc.tree_hash, &cth1);
+    let mut cur = KeyingState {
+        epoch: 1,
+        tree,
+        my_private: Some(treekem::TreePrivate::new(welcome.leaf_index, welcome.leaf_secret)),
+        sender_root: Some(sched1.sender_root),
+        init_secret: Some(sched1.init_secret),
+        cth: cth1,
+        tip_hash: gh,
+        removed_me: false,
+    };
+    let my_secret_root = my_device_seed.map(|s| keying_secret_root(&s, &gid));
+    loop {
+        let next = cur.epoch + 1;
+        // Children of the current tip at the next epoch (a §5 fork at this level is resolved by hash).
+        let mut children: Vec<Vec<u8>> = shadow
+            .commits
+            .values()
+            .filter(|b| {
+                treekem::Commit::from_bytes(b)
+                    .map(|c| c.epoch == next && c.parent_commit_hash == cur.tip_hash)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        if children.is_empty() {
+            break;
+        }
+        children.sort_by(|a, b| treekem::commit_hash(a).cmp(&treekem::commit_hash(b)));
+        let cbytes = children.last().unwrap().clone();
+        let Ok(c) = treekem::Commit::from_bytes(&cbytes) else { break };
+        let tip = treekem::commit_hash(&cbytes);
+        let i_committed = cur.my_private.as_ref().map(|p| p.leaf_index) == Some(c.sender_leaf);
+        if i_committed {
+            let (Some(sroot), Some(mp)) = (my_secret_root, cur.my_private.as_ref()) else { break };
+            let my_leaf = mp.leaf_index;
+            let Some(build) = keying_rebuild_own_commit(&cur, &gid, &c, my_leaf, &sroot) else { break };
+            cur = KeyingState {
+                epoch: next,
+                tree: build.tree,
+                sender_root: Some(build.schedule.sender_root),
+                init_secret: Some(build.schedule.init_secret),
+                cth: build.confirmed_transcript_hash,
+                tip_hash: tip,
+                my_private: Some(build.my_private),
+                removed_me: false,
+            };
+        } else {
+            let Some(init) = cur.init_secret else { break };
+            let applied =
+                match treekem::apply_commit(&cur.tree, &gid, &cur.cth, &init, &c, cur.my_private.as_ref()) {
+                    Ok(a) => a,
+                    Err(_) => break, // a commit we can't apply cleanly: stop at the current epoch
+                };
+            if applied.removed_me {
+                // I am the removed device: I cannot derive this epoch. Freeze cut off from here.
+                cur = KeyingState {
+                    epoch: next,
+                    tree: applied.tree,
+                    sender_root: None,
+                    init_secret: None,
+                    cth: applied.confirmed_transcript_hash,
+                    tip_hash: tip,
+                    my_private: None,
+                    removed_me: true,
+                };
+                break;
+            }
+            let Some(sched) = applied.schedule else { break };
+            cur = KeyingState {
+                epoch: next,
+                tree: applied.tree,
+                sender_root: Some(sched.sender_root),
+                init_secret: Some(sched.init_secret),
+                cth: applied.confirmed_transcript_hash,
+                tip_hash: tip,
+                my_private: applied.my_private,
+                removed_me: false,
+            };
+        }
+    }
+    Some(cur)
+}
+
+/// The §7.2 all-joined gate: every device leaf in the CURRENT tree has broadcast a join ack. A
+/// device that never fetched its Welcome (and so never joined) keeps this false, so it can never
+/// strand the circle in the flipped state. Empty tree ⇒ false.
+fn keying_all_joined(shadow: &ShadowTree, tree: &treekem::RatchetTree) -> bool {
+    let leaves = tree_leaf_device_ids(tree);
+    !leaves.is_empty() && leaves.iter().all(|d| shadow.joined.contains(d))
+}
+
+/// The join-ack signing preimage: `domain ‖ genesis_hash ‖ device_id`.
+fn keying_join_payload(genesis_hash: &[u8; 32], device_id: &[u8; 32]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(20 + 64);
+    v.extend_from_slice(b"haven-mls-join-v1");
+    v.extend_from_slice(genesis_hash);
+    v.extend_from_slice(device_id);
+    v
+}
+
+/// Emit my join ack for the winning genesis (§7.2), and mark myself joined locally, once I hold its
+/// Welcome. `None` if there is no genesis, I hold no Welcome for it, or I have no device identity.
+fn keying_emit_join(st: &mut NetState, idx: usize) -> Option<Vec<u8>> {
+    if !st.mls_keying {
+        return None; // join acks only flow once keying is switched on — OFF stays byte-identical to M2
+    }
+    let circle_id = st.circles[idx].id.clone();
+    let seed = st.device.as_ref().map(|d| d.secret_seed())?;
+    let shadow = st.shadow_trees.get(&circle_id)?;
+    let (gh, _) = keying_winning_genesis(shadow)?;
+    if !shadow.my_welcomes.contains_key(&gh) {
+        return None; // I haven't joined (no Welcome) — nothing to attest
+    }
+    let signer = Identity::from_seed(&seed);
+    let did = signer.public().node_id_bytes();
+    let sig = signer.sign(&keying_join_payload(&gh, &did));
+    let mut body = Vec::with_capacity(64 + sig.len());
+    body.extend_from_slice(&gh);
+    body.extend_from_slice(&did);
+    body.extend_from_slice(&sig);
+    st.shadow_trees.get_mut(&circle_id)?.joined.insert(did);
+    Some(tagged(TAG_MLS_JOIN, &body))
+}
+
+/// Ingest a join ack (§7.2): verify the device's signature against its authorized bundle and record
+/// it joined. SHADOW-lane: never touches content, returns `false`. Malformed / unauthorized / bad
+/// signature are all ignored harmlessly (the legacy-peer contract).
+fn receive_mls_join(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool, HavenError> {
+    if !circle_is_mls_capable(st, idx) || body.len() < 64 {
+        return Ok(false);
+    }
+    let gh: [u8; 32] = body[0..32].try_into().unwrap();
+    let did: [u8; 32] = body[32..64].try_into().unwrap();
+    let sig = &body[64..];
+    let did_hex = hex(&did);
+    let Some(bundle) = resolve_shadow_sender(st, idx, &did_hex) else { return Ok(false) };
+    if bundle.verify(&keying_join_payload(&gh, &did), sig).is_err() {
+        return Ok(false);
+    }
+    let circle_id = st.circles[idx].id.clone();
+    let gid = circle_id.as_bytes().to_vec();
+    let shadow = st.shadow_trees.entry(circle_id).or_insert_with(|| ShadowTree::new(gid));
+    shadow.joined.insert(did);
+    Ok(false)
+}
+
+/// Author a creator/admin Remove commit that re-keys the tree so the removed device is cut off
+/// (§4.3): a chained Remove+UpdatePath at the next epoch. Returns `false` (no-op) if I'm not an
+/// active member, not authorized (creator/admin — or removing my own leaf, always allowed), or the
+/// circle isn't running the tree. The removed device cannot derive the new `commit_secret` (its leaf
+/// is excluded from the path encryption) so it cannot open any content sealed at the new epoch.
+fn mls_build_remove(st: &mut NetState, idx: usize, removed_leaves: &[u32]) -> bool {
+    if removed_leaves.is_empty() {
+        return false;
+    }
+    let circle_id = st.circles[idx].id.clone();
+    let gid = circle_id.as_bytes().to_vec();
+    let Some(seed) = st.device.as_ref().map(|d| d.secret_seed()) else { return false };
+    let signer = Identity::from_seed(&seed);
+    let my_secret_root = keying_secret_root(&seed, &gid);
+    let Some(shadow) = st.shadow_trees.get(&circle_id) else { return false };
+    let Some(cur) = mls_replay(shadow, Some(seed)) else { return false };
+    let Some(mp) = &cur.my_private else { return false }; // I must be an active member
+    let Some(init) = cur.init_secret else { return false };
+    let my_leaf = mp.leaf_index;
+    // Authority: I must be the creator/an admin, OR every removed leaf is my OWN account's (self-
+    // removal / leave, always allowed). Accounts come from the tree's leaf credentials, so this is
+    // checked against the same verified chain receivers use.
+    let my_account = st.me().node_id_bytes();
+    let removed_accounts: Vec<Option<[u8; 32]>> = removed_leaves
+        .iter()
+        .map(|li| {
+            cur.tree
+                .leaf(*li)
+                .and_then(|l| DeviceCredential::from_bytes(&l.device_credential).ok().map(|c| c.account_id))
+        })
+        .collect();
+    let authorized = match circle_admin_set(st, idx) {
+        Some(admins) if admins.contains(&my_account) => true,
+        _ => removed_accounts.iter().all(|a| *a == Some(my_account)),
+    };
+    if !authorized {
+        return false;
+    }
+    let next = cur.epoch + 1;
+    let (new_leaf, entropy) = keying_update_material(&my_secret_root, next);
+    let Some(cred) = cur.tree.leaf(my_leaf).map(|l| l.device_credential.clone()) else { return false };
+    let props: Vec<treekem::Proposal> = removed_leaves
+        .iter()
+        .map(|li| treekem::build_remove_proposal(&gid, next, my_leaf, *li, |m| signer.sign(m)))
+        .collect();
+    let build = match treekem::build_commit(
+        &cur.tree,
+        &gid,
+        next,
+        cur.tip_hash,
+        &cur.cth,
+        &init,
+        my_leaf,
+        props,
+        Some((&new_leaf, &cred, &entropy)),
+        |m| signer.sign(m),
+        |m| signer.sign(m),
+    ) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let cbytes = build.commit.to_bytes();
+    let ch = treekem::commit_hash(&cbytes);
+    let shadow = st.shadow_trees.get_mut(&circle_id).unwrap();
+    if shadow.commits.contains_key(&ch) {
+        return false; // already authored (idempotent)
+    }
+    shadow.commits.insert(ch, cbytes.clone());
+    shadow.emit_cache.push(tagged(TAG_MLS_COMMIT, &cbytes));
+    true
+}
+
+/// The keying flip (§4.5) / park-resume (§7.3), recomputed every bundle and receive. Returns the
+/// live content epoch when the circle is flipped (switch ON + fully-MLS-capable + all-joined + I can
+/// derive the current epoch), else `None` (shadow or parked). When live it fills `my/peer_epoch_keys`
+/// with the tree-derived, ACCOUNT-scoped sender keys under `MLS_EPOCH_BASE + tree_epoch`, so the
+/// unchanged content path seals/opens under the tree — and it sets `Circle::mls_live_epoch`, which
+/// the author + re-seal paths read. When NOT live it clears `mls_live_epoch`, so content reverts to
+/// the legacy sender-keys epoch within one bundle (park). Idempotent: pure function of verified state.
+fn mls_refresh_keying(st: &mut NetState, idx: usize) -> Option<u64> {
+    let clear = |st: &mut NetState, idx: usize| {
+        st.circles[idx].mls_live_epoch = None;
+    };
+    if !st.mls_keying || !circle_is_mls_capable(st, idx) {
+        clear(st, idx);
+        return None;
+    }
+    let circle_id = st.circles[idx].id.clone();
+    let gid = circle_id.as_bytes().to_vec();
+    let seed = st.device.as_ref().map(|d| d.secret_seed());
+    let Some(shadow) = st.shadow_trees.get(&circle_id) else {
+        clear(st, idx);
+        return None;
+    };
+    let Some(cur) = mls_replay(shadow, seed) else {
+        clear(st, idx);
+        return None;
+    };
+    if !keying_all_joined(shadow, &cur.tree) {
+        clear(st, idx);
+        return None;
+    }
+    let Some(sender_root) = cur.sender_root else {
+        clear(st, idx);
+        return None;
+    };
+    let content_epoch = MLS_EPOCH_BASE + cur.epoch;
+    let me_acct = st.me().node_id_bytes();
+    // Derive the account-scoped content key for every account still present in the tree. Every member
+    // holds the same `sender_root`, so every member computes the identical key for each account.
+    for acct in tree_leaf_accounts(&cur.tree) {
+        let key = treekem::sender_key(&sender_root, &acct, &gid, cur.epoch);
+        if acct == me_acct {
+            st.circles[idx].my_epoch_keys.insert(content_epoch, key);
+        } else {
+            st.circles[idx].peer_epoch_keys.insert((hex(&acct), content_epoch), key);
+        }
+    }
+    st.circles[idx].mls_live_epoch = Some(content_epoch);
+    Some(content_epoch)
 }
 
 /// Apply a received key commit: store the epoch key (if new) and unlock any buffered events.
@@ -2042,6 +2762,20 @@ pub struct MlsShadowStatusFfi {
     pub fork_count: u32,
 }
 
+/// TreeKEM M3 KEYING telemetry (`docs/TREEKEM-DESIGN.md` §4.5/§7.2/§7.3). Reports which keying regime
+/// a circle is in on THIS device and the tree epoch that keys its content:
+///   * `"off"`    — the master switch is off (M2 shadow only, if capable), or the circle isn't MLS.
+///   * `"shadow"` — switch on + capable, but not yet all-joined ⇒ dual-stack (KeyCommit still keys).
+///   * `"parked"` — was flippable but a non-capable / not-yet-joined device is present ⇒ reverted to
+///                  KeyCommit within one bundle (§7.3), tree state preserved for a later re-flip.
+///   * `"live"`   — flipped: content is keyed by the tree (§4.5), the legacy KeyCommit has stopped.
+/// `epoch` is the tree epoch (1 = genesis; +1 per applied Remove) when live, else 0.
+#[derive(uniffi::Record)]
+pub struct MlsKeyingStatusFfi {
+    pub state: String,
+    pub epoch: u64,
+}
+
 /// A verified profile "business card": the authoritative display name plus an optional
 /// one-line bio and a link the user chose to show. Bio/link are empty for legacy peers.
 #[derive(uniffi::Record)]
@@ -2095,6 +2829,13 @@ struct PersistCircle {
     /// AND roster arrival, so late keys/rosters still unlock it. Defaulted so old state files load.
     #[serde(default)]
     pending_epoch: Vec<Vec<u8>>,
+    /// MLS M3: the pinned circle creator (Remove/Add authority root, §4.3). Defaulted so old state
+    /// files load with no creator (⇒ no tree Remove is accepted until one is learned).
+    #[serde(default)]
+    creator: Option<[u8; 32]>,
+    /// MLS M3: verified admin-grant wire bytes (the delegation edges). Defaulted so old state loads.
+    #[serde(default)]
+    admin_grants: Vec<Vec<u8>>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PersistState {
@@ -2164,6 +2905,7 @@ impl HavenSocial {
                 keep_own_posts: false,
                 retire_account_key: false,
                 shadow_trees: std::collections::HashMap::new(),
+                mls_keying: false,
             }),
         }))
     }
@@ -2210,6 +2952,7 @@ impl HavenSocial {
                 keep_own_posts: false,
                 retire_account_key: false,
                 shadow_trees: std::collections::HashMap::new(),
+                mls_keying: false,
             }),
         }))
     }
@@ -2242,6 +2985,156 @@ impl HavenSocial {
     /// effect at the next key commit / epoch re-seal.
     pub fn set_seed_drop_retire(&self, on: bool) {
         self.state.lock().unwrap().retire_account_key = on;
+    }
+
+    /// Flip the MLS KEYING master switch (M3, docs/TREEKEM-DESIGN.md §4.5). Default OFF; NOT persisted;
+    /// the app re-applies it on launch — mirrors `set_seed_drop_retire` exactly. Ships DARK. When ON, a
+    /// circle that is fully-MLS-capable AND all-joined (§7.2) draws its content epoch key from the tree
+    /// and STOPS emitting the legacy KeyCommit; a not-yet-all-joined circle stays dual-stack, and one a
+    /// non-capable/not-yet-joined device (re)joins PARKS back to KeyCommit within one bundle (§7.3).
+    /// Changes nothing by itself — the flip/park is recomputed at the next bundle / receive.
+    pub fn set_mls_keying(&self, on: bool) {
+        self.state.lock().unwrap().mls_keying = on;
+    }
+
+    /// Pin the circle CREATOR — the root of Remove/Add authority (§4.3). If `account_hex` is my own
+    /// account and I hold the account key, this also issues a self-admin grant so the pin propagates to
+    /// (and is verifiable by) every member on the control lane. Returns false for an unknown circle.
+    pub fn set_circle_creator(&self, circle_id: String, account_hex: String) -> bool {
+        let mut st = self.state.lock().unwrap();
+        let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return false };
+        let Ok(creator) = decode_hex32(&account_hex) else { return false };
+        st.circles[idx].creator = Some(creator);
+        // Announce the creator to peers via a self-grant (creator→creator), signed by my account key,
+        // so a receiver learns + verifies the pin. Only possible when I AM the creator and hold the key.
+        let me = st.me().node_id_bytes();
+        if creator == me {
+            if let Some(acct) = st.me_secret.as_ref().map(|m| Identity::from_seed(&m.secret_seed())) {
+                let gid = circle_id.as_bytes().to_vec();
+                let g = AdminGrant::issue(&acct, &gid, creator, creator, 1);
+                let w = g.to_bytes();
+                if !st.circles[idx].admin_grants.iter().any(|e| *e == w) {
+                    st.circles[idx].admin_grants.push(w);
+                }
+            }
+        }
+        true
+    }
+
+    /// Delegate circle admin to `admin_hex` (§4.3). Requires that I am currently an admin (the creator
+    /// or a creator-delegated admin) AND hold my account key. The grant is account-signed, versioned
+    /// (higher-wins), stored, and re-broadcast on the control lane. Returns false if unauthorized.
+    pub fn grant_circle_admin(&self, circle_id: String, admin_hex: String) -> bool {
+        let mut st = self.state.lock().unwrap();
+        let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return false };
+        let Ok(admin) = decode_hex32(&admin_hex) else { return false };
+        let Some(creator) = st.circles[idx].creator else { return false };
+        let me = st.me().node_id_bytes();
+        // I must currently be an admin to delegate.
+        match circle_admin_set(&st, idx) {
+            Some(admins) if admins.contains(&me) => {}
+            _ => return false,
+        }
+        let Some(acct) = st.me_secret.as_ref().map(|m| Identity::from_seed(&m.secret_seed())) else { return false }; // grant must be account-signed
+        let gid = circle_id.as_bytes().to_vec();
+        // Next version for this (admin) key: one past the highest we hold.
+        let mut version = 1u64;
+        for w in &st.circles[idx].admin_grants {
+            if let Ok(g) = AdminGrant::from_bytes(w) {
+                if g.admin_account == admin && g.creator == creator {
+                    version = version.max(g.version + 1);
+                }
+            }
+        }
+        let g = AdminGrant::issue(&acct, &gid, creator, admin, version);
+        let w = g.to_bytes();
+        // Replace any older stored grant for this admin, else append.
+        let grants = &mut st.circles[idx].admin_grants;
+        if let Some(slot) = grants.iter_mut().find(|e| {
+            AdminGrant::from_bytes(e).map(|x| x.admin_account == admin && x.creator == creator).unwrap_or(false)
+        }) {
+            *slot = w;
+        } else {
+            grants.push(w);
+        }
+        true
+    }
+
+    /// The current admin accounts of a circle (hex) — the creator plus every creator-delegated admin
+    /// (`admin_closure`). Empty when no creator is pinned.
+    pub fn circle_admins(&self, circle_id: String) -> Vec<String> {
+        let st = self.state.lock().unwrap();
+        let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return vec![] };
+        match circle_admin_set(&st, idx) {
+            Some(admins) => {
+                let mut v: Vec<String> = admins.iter().map(|a| hex(a)).collect();
+                v.sort();
+                v
+            }
+            None => vec![],
+        }
+    }
+
+    /// Remove a MEMBER's devices from the MLS tree, re-keying so they are cryptographically cut off
+    /// (§4.3, the headline). Authorized only for the creator/an admin (checked inside `mls_build_remove`
+    /// against the same verified chain receivers use); a non-admin call is a no-op. Builds ONE chained
+    /// Remove+UpdatePath commit removing every leaf of `account_hex` at the next epoch; the removed
+    /// device cannot derive the new `commit_secret` and so cannot open content sealed afterward. Returns
+    /// whether a Remove commit was authored. (Membership-list / roster automation is M4.)
+    pub fn mls_remove_member(&self, circle_id: String, account_hex: String) -> bool {
+        let mut st = self.state.lock().unwrap();
+        let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return false };
+        let Ok(target) = decode_hex32(&account_hex) else { return false };
+        let seed = st.device.as_ref().map(|d| d.secret_seed());
+        let Some(shadow) = st.shadow_trees.get(&circle_id) else { return false };
+        let Some(cur) = mls_replay(shadow, seed) else { return false };
+        // Every current leaf of the target account (a member may run multiple devices).
+        let mut leaves: Vec<u32> = Vec::new();
+        for (i, slot) in cur.tree.slots.iter().enumerate() {
+            if let treekem::TreeSlot::Leaf(l) = slot {
+                if i % 2 == 0 {
+                    if let Ok(c) = DeviceCredential::from_bytes(&l.device_credential) {
+                        if c.account_id == target {
+                            leaves.push((i / 2) as u32);
+                        }
+                    }
+                }
+            }
+        }
+        if leaves.is_empty() {
+            return false;
+        }
+        mls_build_remove(&mut st, idx, &leaves)
+    }
+
+    /// M3 keying telemetry (§4.5/§7.2/§7.3): `{state, epoch}` — see [`MlsKeyingStatusFfi`].
+    pub fn mls_keying_status(&self, circle_id: String) -> MlsKeyingStatusFfi {
+        let mut st = self.state.lock().unwrap();
+        let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else {
+            return MlsKeyingStatusFfi { state: "off".into(), epoch: 0 };
+        };
+        if !st.mls_keying || !circle_is_mls_capable(&st, idx) {
+            return MlsKeyingStatusFfi { state: "off".into(), epoch: 0 };
+        }
+        // Recompute the flip. Some ⇒ live; None ⇒ shadow (not yet all-joined) or parked (a genesis
+        // exists but the gate went false). We distinguish by whether the tree has run at all here.
+        if let Some(content_epoch) = mls_refresh_keying(&mut st, idx) {
+            return MlsKeyingStatusFfi { state: "live".into(), epoch: content_epoch - MLS_EPOCH_BASE };
+        }
+        let has_tree = st
+            .shadow_trees
+            .get(&circle_id)
+            .map(|s| !s.commits.is_empty())
+            .unwrap_or(false);
+        let seed = st.device.as_ref().map(|d| d.secret_seed());
+        let all_joined = st.shadow_trees.get(&circle_id).and_then(|s| {
+            mls_replay(s, seed).map(|cur| keying_all_joined(s, &cur.tree))
+        }).unwrap_or(false);
+        // "parked": the tree could carry keying (genesis + all-joined) but the gate refused this bundle
+        // (e.g. a non-capable device present) — though if we reached here the circle IS capable, so a
+        // false gate with an all-joined tree means we couldn't derive (removed). Otherwise "shadow".
+        let state = if has_tree && all_joined { "parked" } else { "shadow" };
+        MlsKeyingStatusFfi { state: state.into(), epoch: 0 }
     }
 
     /// Adopt this DEVICE's transport/open identity (Option 1). The app passes its device-local seed
@@ -2895,20 +3788,46 @@ impl HavenSocial {
         // delete. Wall clock is how `rotate_if_stale` keys its window too; the core has no
         // injected clock on this path.
         purge_expired_from_circle(&mut st.circles[idx], None, None, now_secs().saturating_mul(1000));
+        // TreeKEM tree wires (genesis commit + Welcomes for the creator; cached Remove commits) go on
+        // the bundle regardless of the keying decision — a receiver needs them to build the tree AND
+        // (M3) to derive the content epoch. Built BEFORE the flip decision so the tree exists when we
+        // compute it. Plus my join ack (§7.2) and a re-broadcast of the verified admin grants (§4.3).
+        let shadow_wires = shadow_emit_bundle(&mut st, idx);
+        let join_wire = keying_emit_join(&mut st, idx);
+        let admin_wires: Vec<Vec<u8>> =
+            st.circles[idx].admin_grants.iter().map(|g| tagged(TAG_ADMIN_GRANT, g)).collect();
+        // THE KEYING FLIP / PARK DECISION (§4.5/§7.3), recomputed every bundle from verified state.
+        // `Some(content_epoch)` ⇒ the circle is flipped: content seals under the tree-derived key and
+        // the legacy KeyCommit STOPS. `None` ⇒ shadow or parked ⇒ legacy KeyCommit + sender-keys epoch.
+        let mls_live = mls_refresh_keying(&mut st, idx);
         // PERIODIC forward-secrecy rotation (audit C2) — the trigger for `rotate_if_stale`. This is the
         // only safe place for it: a full bundle (`sync_envelopes` on the P2P path, `export_my_envelopes`
         // on the relay backfill) emits the new key commit AND re-seals my entire history under it in the
         // same batch, so no peer is ever left with an event whose key it can't obtain. Both are reached
         // by every client on a schedule, so no platform timer is needed and no client can forget to
         // rotate. head-only/limited bundles must NOT rotate — they'd publish an epoch without the
-        // re-seal and strand relay-only readers until the next backfill.
-        if !head_only && mine_only && limit == 0 {
-            st.circles[idx].rotate_if_stale();
-        } else {
-            st.circles[idx].ensure_epoch();
-        }
-        let epoch = st.circles[idx].my_epoch;
-        let Some(key) = st.circles[idx].current_key() else { return vec![] };
+        // re-seal and strand relay-only readers until the next backfill. When the tree is LIVE, legacy
+        // rotation is gated OFF (the tree drives the epoch); content keys come from `mls_live` instead.
+        let (epoch, key) = match mls_live {
+            Some(content_epoch) => {
+                let key = st.circles[idx]
+                    .my_epoch_keys
+                    .get(&content_epoch)
+                    .copied()
+                    .expect("mls_refresh_keying populated my content key");
+                (content_epoch, key)
+            }
+            None => {
+                if !head_only && mine_only && limit == 0 {
+                    st.circles[idx].rotate_if_stale();
+                } else {
+                    st.circles[idx].ensure_epoch();
+                }
+                let e = st.circles[idx].my_epoch;
+                let Some(k) = st.circles[idx].current_key() else { return vec![] };
+                (e, k)
+            }
+        };
         let secret = st.circles[idx].my_circle_secret;
         let mut accounts = vec![st.me().clone()];
         accounts.extend(st.circles[idx].members.iter().cloned());
@@ -2960,18 +3879,36 @@ impl HavenSocial {
             }
             *h.finalize().as_bytes()
         };
-        match &st.circles[idx].cached_commit {
-            Some((ctx, bytes)) if *ctx == commit_ctx => out.push(bytes.clone()),
-            _ => {
-                if let Ok(commit) = seal_key_commit(signer_of(&st, author_under_device), &members, circle_id, epoch, &key, &secret) {
-                    let bytes = tagged(TAG_KEY_COMMIT, &commit.to_bytes());
-                    st.circles[idx].cached_commit = Some((commit_ctx, bytes.clone()));
-                    out.push(bytes);
+        // §4.5: when the tree is LIVE the KeyCommit STOPS — the commit IS the key distribution, and
+        // content keys come from the tree. When shadow/parked, emit the KeyCommit exactly as today.
+        if mls_live.is_none() {
+            match &st.circles[idx].cached_commit {
+                Some((ctx, bytes)) if *ctx == commit_ctx => out.push(bytes.clone()),
+                _ => {
+                    if let Ok(commit) = seal_key_commit(signer_of(&st, author_under_device), &members, circle_id, epoch, &key, &secret) {
+                        let bytes = tagged(TAG_KEY_COMMIT, &commit.to_bytes());
+                        st.circles[idx].cached_commit = Some((commit_ctx, bytes.clone()));
+                        out.push(bytes);
+                    }
                 }
             }
         }
+        // The tree wires + join ack + admin grants ride EVERY bundle (incl. head-only) so relay-only
+        // readers and late joiners converge on the tree and the §7.2 gate; strictly additive.
+        let append_tree = |out: &mut Vec<Vec<u8>>| {
+            for w in &shadow_wires {
+                out.push(w.clone());
+            }
+            if let Some(j) = &join_wire {
+                out.push(j.clone());
+            }
+            for w in &admin_wires {
+                out.push(w.clone());
+            }
+        };
         if head_only {
-            return out; // roster + current key commit only — no event re-seals
+            append_tree(&mut out);
+            return out; // roster + current key commit (or the tree) — no event re-seals
         }
         let mut events: Vec<Event> = st.circles[idx]
             .events
@@ -2990,14 +3927,9 @@ impl HavenSocial {
                 out.push(tagged(TAG_EPOCH_EVENT, &env.to_bytes()));
             }
         }
-        // TreeKEM M2 SHADOW: emit the ratchet-tree genesis commit + Welcomes ALONGSIDE (never
-        // replacing) the sender-keys commit above, gated on `circle_fully_mls_capable`. These
-        // ride the same mailbox; a receiver derives the tree's epoch secret in parallel and it is
-        // COMPARED (mls_shadow_status), never consumed — content keying is untouched (M3 is the
-        // flip). Empty for a non-capable circle, so this is strictly additive.
-        for env in shadow_emit_bundle(&mut st, idx) {
-            out.push(env);
-        }
+        // Tree wires + join ack + admin grants (built up front). In M2/parked they ride ALONGSIDE the
+        // KeyCommit (shadow); when LIVE they ARE the key distribution (§4.5). Additive either way.
+        append_tree(&mut out);
         out
     }
 
@@ -3084,10 +4016,31 @@ impl HavenSocial {
         match envelope[0] {
             TAG_KEY_COMMIT => receive_key_commit(&mut st, idx, &envelope[1..]),
             TAG_EPOCH_EVENT => receive_epoch_event(&mut st, idx, &envelope[1..]),
-            // TreeKEM M2 SHADOW tags: stored/derived in parallel, NEVER consumed for content, so
-            // each returns `false` (no content change). A non-capable circle ignores them harmlessly.
-            TAG_MLS_COMMIT => receive_mls_commit(&mut st, idx, &envelope[1..]),
-            TAG_MLS_WELCOME => receive_mls_welcome(&mut st, idx, &envelope[1..]),
+            // TreeKEM tree tags. In M2 shadow (keying switch OFF) these never touch content. In M3
+            // (switch ON, fully-joined) a commit/welcome/join can change which tree epoch keys the
+            // content, so after ingesting one we recompute the flip (`mls_refresh_keying`) and drain
+            // the pending buffer — a Remove that advances the epoch, or a Welcome/join that completes
+            // the all-joined gate, then unlocks content immediately. Still returns the handler's value
+            // (no direct content change from the wire itself); a non-capable circle ignores them.
+            TAG_MLS_COMMIT => {
+                let r = receive_mls_commit(&mut st, idx, &envelope[1..]);
+                mls_refresh_keying(&mut st, idx);
+                drain_pending(&mut st, idx);
+                r
+            }
+            TAG_MLS_WELCOME => {
+                let r = receive_mls_welcome(&mut st, idx, &envelope[1..]);
+                mls_refresh_keying(&mut st, idx);
+                drain_pending(&mut st, idx);
+                r
+            }
+            TAG_MLS_JOIN => {
+                let r = receive_mls_join(&mut st, idx, &envelope[1..]);
+                mls_refresh_keying(&mut st, idx);
+                drain_pending(&mut st, idx);
+                r
+            }
+            TAG_ADMIN_GRANT => receive_admin_grant(&mut st, idx, &envelope[1..]),
             // Unbundled proposals (§4.2 roster path) are reserved for M4; a stray one is inert.
             TAG_MLS_PROPOSAL => Ok(false),
             TAG_DEVICE_ROSTER => {
@@ -3456,6 +4409,8 @@ impl HavenSocial {
                 rotated_at: c.rotated_at,
                 cached_commit: c.cached_commit.clone(),
                 pending_epoch: c.pending_epoch.clone(),
+                creator: c.creator,
+                admin_grants: c.admin_grants.clone(),
             }).collect(),
             seedless_roster_wire: st.seedless_roster_wire.clone(),
             cached_profile: st.cached_profile.clone(),
@@ -3516,6 +4471,8 @@ impl HavenSocial {
                 rotated_at: 0,
                 cached_commit: None,
                 pending_epoch: vec![],
+                creator: None,
+                admin_grants: vec![],
             });
         }
     }
@@ -3578,6 +4535,17 @@ impl HavenSocial {
                 c.pending_epoch.push(raw);
             }
         }
+        // MLS M3 authority: adopt the pinned creator (learn-once; a differing later value is ignored —
+        // absence is never information, and the creator is a fixed fact of the circle) and union the
+        // verified admin grants (re-verification against member bundles happens where they are used).
+        if st.circles[idx].creator.is_none() {
+            st.circles[idx].creator = pc.creator;
+        }
+        for g in pc.admin_grants {
+            if !st.circles[idx].admin_grants.iter().any(|e| *e == g) {
+                st.circles[idx].admin_grants.push(g);
+            }
+        }
     }
 
     fn author(&self, circle_id: &str, created_at: u64, kind: EventKind) -> Result<Vec<u8>, HavenError> {
@@ -3607,9 +4575,26 @@ impl HavenSocial {
         // Seal under the circle's CURRENT epoch key (bootstrapping epoch 0 the first time). The key
         // commit that lets members open it rides `sync_envelopes`/`export_my_envelopes` (no separate
         // transport needed). Removed members lack the current epoch key → can't open this.
+        //
+        // M3: when the keying flip is LIVE (switch ON + fully-joined), seal under the TREE-derived
+        // content key instead — the rest of this path (seal/store/feed) is byte-identical, only the
+        // KEY SOURCE moves (§4.5). `mls_refresh_keying` (re)derives it and sets `mls_live_epoch`; when
+        // shadow/parked it returns `None` and we fall back to the legacy sender-keys epoch.
         st.circles[idx].ensure_epoch();
-        let epoch = st.circles[idx].my_epoch;
-        let key = st.circles[idx].current_key().expect("epoch key exists after ensure_epoch");
+        let (epoch, key) = match mls_refresh_keying(&mut st, idx) {
+            Some(content_epoch) => {
+                let key = st.circles[idx]
+                    .my_epoch_keys
+                    .get(&content_epoch)
+                    .copied()
+                    .expect("mls_refresh_keying populated my content key");
+                (content_epoch, key)
+            }
+            None => {
+                let epoch = st.circles[idx].my_epoch;
+                (epoch, st.circles[idx].current_key().expect("epoch key exists after ensure_epoch"))
+            }
+        };
         let env = seal_event_in_epoch(signer_of(&st, under_device), circle_id, epoch, &key, &event)
             .map_err(|e| HavenError::Invalid { msg: format!("seal failed: {e}") })?;
         st.circles[idx].seen.insert(event.id.clone());
@@ -5349,5 +6334,333 @@ mod net_tests {
         // A genuinely UNKNOWN tag still hits the legacy arm and errors harmlessly (no panic).
         assert!(bob.receive(cid.clone(), tagged(0x7F, &[1, 2, 3])).is_err(), "unknown tag → harmless per-envelope error");
         assert_eq!(bob.feed(cid.clone(), 2_000, None).len(), before, "the legacy peer's feed is unchanged");
+    }
+
+    // ── TreeKEM M3: keying flip + removal re-key + admin authority (§4.3/§4.5/§7.2/§7.3) ──────
+
+    /// The wire for a ONE-device roster (the running device is the only tree leaf) — every tree leaf
+    /// maps to a live, joining device, the topology the §7.2 all-joined gate needs. Does NOT install.
+    fn device_only_roster_wire(s: &HavenSocial, seed: [u8; 32]) -> (Vec<u8>, Vec<Vec<u8>>) {
+        let dev_bundle = s.my_device_bundle();
+        let dev_id = HavenId::from_bytes(&dev_bundle).unwrap().node_id_bytes().to_vec();
+        let dev_cred =
+            crate::multidevice::issue_device_credential(seed.to_vec(), dev_bundle, "device".into(), 1).unwrap();
+        let list = crate::multidevice::sign_device_list(seed.to_vec(), 1, 0, vec![dev_id], vec![]).unwrap();
+        (list, vec![dev_cred])
+    }
+
+    /// [`device_only_roster_wire`] + install it on `s`.
+    fn install_device_only_roster(s: &HavenSocial, seed: [u8; 32]) -> (Vec<u8>, Vec<Vec<u8>>) {
+        let (list, creds) = device_only_roster_wire(s, seed);
+        assert!(s.set_my_device_roster(list.clone(), creds.clone()));
+        (list, creds)
+    }
+
+    /// Build a fully-MLS-capable fleet (device-only rosters, cross-learned capability + rosters, a
+    /// pinned creator). Does NOT flip the keying switch — the caller decides. Returns the instances.
+    fn mls_capable_fleet(seeds: &[[u8; 32]], devs: &[[u8; 32]], creator_idx: usize) -> Vec<Arc<HavenSocial>> {
+        let cid = DEFAULT_CIRCLE.to_string();
+        let insts: Vec<Arc<HavenSocial>> =
+            seeds.iter().map(|s| HavenSocial::new(s.to_vec()).unwrap()).collect();
+        let n = insts.len();
+        for (i, d) in devs.iter().enumerate() {
+            assert!(insts[i].use_device_identity(d.to_vec()));
+        }
+        let bundles: Vec<Vec<u8>> = insts.iter().map(|s| s.my_bundle()).collect();
+        let mut rosters = Vec::new();
+        for i in 0..n {
+            for j in 0..n {
+                if i != j {
+                    insts[i].add_contact_bundle(cid.clone(), bundles[j].clone()).unwrap();
+                }
+            }
+            rosters.push(install_device_only_roster(&insts[i], seeds[i]));
+        }
+        let cards: Vec<Vec<u8>> = insts.iter().enumerate().map(|(i, s)| card(s, &format!("m{i}"))).collect();
+        for i in 0..n {
+            for j in 0..n {
+                if i != j {
+                    assert!(insts[i].ingest_device_roster(bundles[j].clone(), rosters[j].0.clone(), rosters[j].1.clone()));
+                    insts[i].profile_seed_drop_version(bundles[j].clone(), cards[j].clone());
+                }
+            }
+        }
+        // Pin the creator on every instance (agreed out of band); the creator also broadcasts a
+        // self-grant so the pin is verifiable on the lane.
+        let creator_hex = hex(&Identity::from_seed(&seeds[creator_idx]).public().node_id_bytes());
+        for s in &insts {
+            assert!(s.set_circle_creator(cid.clone(), creator_hex.clone()));
+        }
+        insts
+    }
+
+    /// Flip the keying switch on the whole fleet and sync all-to-all until it goes live everywhere.
+    fn flip_and_join(insts: &[Arc<HavenSocial>], cid: &str) {
+        for s in insts {
+            s.set_mls_keying(true);
+        }
+        for _ in 0..6 {
+            for i in 0..insts.len() {
+                for j in 0..insts.len() {
+                    if i != j {
+                        sync(&insts[i], &insts[j], cid);
+                    }
+                }
+            }
+        }
+    }
+
+    /// §9 M3 — the KEYING FLIP: switch OFF is byte-identical (KeyCommit keys content); switch ON, once
+    /// all-joined, flips to tree-derived keys, STOPS the KeyCommit, and content round-trips for all.
+    #[test]
+    fn mls_keying_flips_when_all_joined_and_content_round_trips() {
+        let cid = DEFAULT_CIRCLE.to_string();
+        let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32], [3u8; 32]], &[[11u8; 32], [12u8; 32], [13u8; 32]], 0);
+        let (a, b, c) = (&insts[0], &insts[1], &insts[2]);
+
+        // SWITCH OFF: shadow only. A KeyCommit is emitted and content flows (the legacy path).
+        for _ in 0..4 {
+            for i in 0..3 {
+                for j in 0..3 {
+                    if i != j {
+                        sync(&insts[i], &insts[j], &cid);
+                    }
+                }
+            }
+        }
+        assert_ne!(a.mls_keying_status(cid.clone()).state, "live", "off ⇒ not live");
+        assert!(a.sync_envelopes(cid.clone()).iter().any(|e| e.first() == Some(&TAG_KEY_COMMIT)), "off ⇒ KeyCommit still keys content");
+        a.post(cid.clone(), "legacy-keyed".into(), vec![], None, None, false, false, 900).unwrap();
+        for _ in 0..2 { sync(a, b, &cid); sync(a, c, &cid); }
+        assert!(b.feed(cid.clone(), 1_000, None).iter().any(|m| m.body == "legacy-keyed"), "off content flows");
+
+        // SWITCH ON + all-joined ⇒ LIVE everywhere, KeyCommit stops, tree keys content.
+        flip_and_join(&insts, &cid);
+        for s in &insts {
+            let ks = s.mls_keying_status(cid.clone());
+            assert_eq!(ks.state, "live", "every all-joined member flips live");
+            assert_eq!(ks.epoch, 1, "at the genesis epoch");
+        }
+        assert!(a.sync_envelopes(cid.clone()).iter().all(|e| e.first() != Some(&TAG_KEY_COMMIT)), "a live circle STOPS the KeyCommit (§4.5)");
+
+        a.post(cid.clone(), "tree-keyed".into(), vec![], None, None, false, false, 2_000).unwrap();
+        b.post(cid.clone(), "tree-keyed-from-b".into(), vec![], None, None, false, false, 2_100).unwrap();
+        for _ in 0..3 {
+            for i in 0..3 {
+                for j in 0..3 {
+                    if i != j {
+                        sync(&insts[i], &insts[j], &cid);
+                    }
+                }
+            }
+        }
+        for (name, s) in [("b", b), ("c", c)] {
+            assert!(s.feed(cid.clone(), 3_000, None).iter().any(|m| m.body == "tree-keyed"), "{name} reads A's tree-keyed post");
+        }
+        assert!(a.feed(cid.clone(), 3_000, None).iter().any(|m| m.body == "tree-keyed-from-b"), "A reads B's tree-keyed post");
+        assert!(c.feed(cid.clone(), 3_000, None).iter().any(|m| m.body == "tree-keyed-from-b"), "C reads B's tree-keyed post");
+    }
+
+    /// §9 M3 — THE HEADLINE (evolves `s5_revoked_seedless_device_cannot_reenter_or_decrypt`). In a
+    /// fully-joined, keying-LIVE circle a creator/admin removes a device: (a) the removed device
+    /// cannot derive the new epoch and cannot open any content posted after the Remove, while
+    /// remaining members can; (b) the removed device cannot re-enter (it is not an admin, so it cannot
+    /// author an authorized Add/Remove).
+    #[test]
+    fn s5_mls_removed_device_cannot_derive_or_reenter() {
+        let cid = DEFAULT_CIRCLE.to_string();
+        // A is the creator/admin; B stays; C is removed.
+        let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32], [3u8; 32]], &[[11u8; 32], [12u8; 32], [13u8; 32]], 0);
+        let (a, b, c) = (&insts[0], &insts[1], &insts[2]);
+        flip_and_join(&insts, &cid);
+        assert_eq!(a.mls_keying_status(cid.clone()).state, "live");
+
+        // CONTROL: pre-Remove content is readable by C.
+        a.post(cid.clone(), "before-removal".into(), vec![], None, None, false, false, 2_000).unwrap();
+        for _ in 0..3 { for i in 0..3 { for j in 0..3 { if i != j { sync(&insts[i], &insts[j], &cid); } } } }
+        assert!(c.feed(cid.clone(), 3_000, None).iter().any(|m| m.body == "before-removal"), "C reads pre-removal content");
+
+        // A (creator/admin) removes C — a re-key (§4.3): builds a chained Remove+UpdatePath commit.
+        let c_acct = hex(&Identity::from_seed(&[3u8; 32]).public().node_id_bytes());
+        assert!(a.mls_remove_member(cid.clone(), c_acct.clone()), "the creator's Remove is authored");
+        for _ in 0..4 { for i in 0..3 { for j in 0..3 { if i != j { sync(&insts[i], &insts[j], &cid); } } } }
+
+        // A and B advanced to the new epoch; C is cut off (cannot derive it).
+        assert_eq!(a.mls_keying_status(cid.clone()).epoch, 2, "A re-keyed to epoch 2");
+        assert_eq!(b.mls_keying_status(cid.clone()).epoch, 2, "B re-keyed to epoch 2");
+        assert_ne!(c.mls_keying_status(cid.clone()).state, "live", "the removed device cannot derive the new epoch");
+
+        // (a) Post-Remove content: readable by B, NOT by C.
+        a.post(cid.clone(), "after-removal".into(), vec![], None, None, false, false, 4_000).unwrap();
+        for _ in 0..4 { for i in 0..3 { for j in 0..3 { if i != j { sync(&insts[i], &insts[j], &cid); } } } }
+        assert!(b.feed(cid.clone(), 5_000, None).iter().any(|m| m.body == "after-removal"), "a remaining member reads post-Remove content");
+        assert!(!c.feed(cid.clone(), 5_000, None).iter().any(|m| m.body == "after-removal"), "the removed device CANNOT open content posted after the Remove");
+
+        // (b) C cannot re-enter: it is not an admin, so it cannot author an authorized Remove/Add.
+        assert!(!c.mls_remove_member(cid.clone(), c_acct), "a removed non-admin cannot author a tree Remove to force its way back");
+        assert!(!c.circle_admins(cid.clone()).contains(&hex(&Identity::from_seed(&[3u8; 32]).public().node_id_bytes())), "the removed device is not an admin");
+    }
+
+    /// §9 M3 — AUTHORITY: a Remove authored by a NON-admin is rejected by every receiver; a
+    /// creator/admin Remove is accepted; and a delegated admin (creator-granted) can then remove.
+    #[test]
+    fn mls_remove_authority_is_enforced_by_receivers() {
+        let cid = DEFAULT_CIRCLE.to_string();
+        // A creator; B a plain member; C a plain member; D the removal target.
+        let insts = mls_capable_fleet(
+            &[[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]],
+            &[[11u8; 32], [12u8; 32], [13u8; 32], [14u8; 32]],
+            0,
+        );
+        let (a, b, d) = (&insts[0], &insts[1], &insts[3]);
+        flip_and_join(&insts, &cid);
+        let d_acct = hex(&Identity::from_seed(&[4u8; 32]).public().node_id_bytes());
+        let b_acct = hex(&Identity::from_seed(&[2u8; 32]).public().node_id_bytes());
+
+        // NON-ADMIN: B tries to remove D. B is not the creator and holds no grant → its own client
+        // refuses to author the commit (the committer-side check), so no unauthorized commit exists.
+        assert!(!b.mls_remove_member(cid.clone(), d_acct.clone()), "a non-admin cannot author a Remove");
+
+        // Forge one anyway (bypassing the committer check) and feed it to A: A REJECTS it (receiver
+        // authority gate). A's epoch is unchanged and D still reads.
+        let forged = forge_remove_commit(b, &cid, &d_acct);
+        assert!(matches!(a.receive(cid.clone(), forged.clone()), Ok(false)), "a receiver returns no-content for an unauthorized Remove");
+        assert_eq!(a.mls_keying_status(cid.clone()).epoch, 1, "A did not apply the non-admin Remove");
+        a.post(cid.clone(), "still-here".into(), vec![], None, None, false, false, 2_000).unwrap();
+        for _ in 0..4 { for i in 0..4 { for j in 0..4 { if i != j { sync(&insts[i], &insts[j], &cid); } } } }
+        assert!(d.feed(cid.clone(), 3_000, None).iter().any(|m| m.body == "still-here"), "D is NOT cut off by a non-admin Remove");
+
+        // CREATOR grants B admin → B is now a current admin on every instance that ingests the grant.
+        assert!(a.grant_circle_admin(cid.clone(), b_acct.clone()), "the creator delegates admin to B");
+        for _ in 0..4 { for i in 0..4 { for j in 0..4 { if i != j { sync(&insts[i], &insts[j], &cid); } } } }
+        assert!(a.circle_admins(cid.clone()).contains(&b_acct), "B is an admin after the grant");
+        assert!(b.circle_admins(cid.clone()).contains(&b_acct), "B learns it is an admin");
+
+        // DELEGATED ADMIN: B now removes D — accepted by receivers, and D is cut off.
+        assert!(b.mls_remove_member(cid.clone(), d_acct.clone()), "a delegated admin authors a Remove");
+        for _ in 0..5 { for i in 0..4 { for j in 0..4 { if i != j { sync(&insts[i], &insts[j], &cid); } } } }
+        a.post(cid.clone(), "post-remove".into(), vec![], None, None, false, false, 6_000).unwrap();
+        for _ in 0..4 { for i in 0..4 { for j in 0..4 { if i != j { sync(&insts[i], &insts[j], &cid); } } } }
+        assert!(insts[2].feed(cid.clone(), 7_000, None).iter().any(|m| m.body == "post-remove"), "a remaining member reads content after the admin Remove");
+        assert!(!d.feed(cid.clone(), 7_000, None).iter().any(|m| m.body == "post-remove"), "D is cut off by the admin Remove");
+    }
+
+    /// Craft a Remove commit signed by a NON-admin (bypassing the committer-side authority check) to
+    /// exercise the RECEIVER-side gate. Mirrors `mls_build_remove` minus the authority check.
+    fn forge_remove_commit(inst: &HavenSocial, cid: &str, target_acct_hex: &str) -> Vec<u8> {
+        let mut st = inst.state.lock().unwrap();
+        let idx = st.circles.iter().position(|c| c.id == cid).unwrap();
+        let gid = cid.as_bytes().to_vec();
+        let seed = st.device.as_ref().map(|d| d.secret_seed()).unwrap();
+        let signer = Identity::from_seed(&seed);
+        let my_secret_root = keying_secret_root(&seed, &gid);
+        let shadow = st.shadow_trees.get(&cid.to_string()).unwrap();
+        let cur = mls_replay(shadow, Some(seed)).unwrap();
+        let mp = cur.my_private.as_ref().unwrap();
+        let my_leaf = mp.leaf_index;
+        let target = decode_hex32(target_acct_hex).unwrap();
+        let mut leaves = Vec::new();
+        for (i, slot) in cur.tree.slots.iter().enumerate() {
+            if let treekem::TreeSlot::Leaf(l) = slot {
+                if i % 2 == 0 {
+                    if let Ok(dc) = DeviceCredential::from_bytes(&l.device_credential) {
+                        if dc.account_id == target {
+                            leaves.push((i / 2) as u32);
+                        }
+                    }
+                }
+            }
+        }
+        let next = cur.epoch + 1;
+        let (new_leaf, entropy) = keying_update_material(&my_secret_root, next);
+        let cred = cur.tree.leaf(my_leaf).map(|l| l.device_credential.clone()).unwrap();
+        let props: Vec<treekem::Proposal> = leaves
+            .iter()
+            .map(|li| treekem::build_remove_proposal(&gid, next, my_leaf, *li, |m| signer.sign(m)))
+            .collect();
+        let build = treekem::build_commit(
+            &cur.tree, &gid, next, cur.tip_hash, &cur.cth, &cur.init_secret.unwrap(), my_leaf, props,
+            Some((&new_leaf, &cred, &entropy)), |m| signer.sign(m), |m| signer.sign(m),
+        )
+        .unwrap();
+        tagged(TAG_MLS_COMMIT, &build.commit.to_bytes())
+    }
+
+    /// §9 M3 — PARK/RESUME (§7.3): a legacy (non-capable) device joining a flipped circle reverts it
+    /// to the KeyCommit path within one bundle, and everyone (incl. the newcomer) still reads; when
+    /// the newcomer upgrades + joins, the circle re-flips.
+    #[test]
+    fn mls_legacy_join_parks_then_reflips() {
+        let cid = DEFAULT_CIRCLE.to_string();
+        let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
+        let (a, b) = (&insts[0], &insts[1]);
+        flip_and_join(&insts, &cid);
+        assert_eq!(a.mls_keying_status(cid.clone()).state, "live", "the pair flips live");
+
+        // A LEGACY newcomer joins: an account with no device key / no `ml` marker.
+        let legacy = HavenSocial::new([9u8; 32].to_vec()).unwrap();
+        a.add_contact_bundle(cid.clone(), legacy.my_bundle()).unwrap();
+        b.add_contact_bundle(cid.clone(), legacy.my_bundle()).unwrap();
+        legacy.add_contact_bundle(cid.clone(), a.my_bundle()).unwrap();
+        legacy.add_contact_bundle(cid.clone(), b.my_bundle()).unwrap();
+
+        // The circle is no longer fully-MLS-capable ⇒ it PARKS back to KeyCommit within one bundle.
+        assert_ne!(a.mls_keying_status(cid.clone()).state, "live", "a non-capable newcomer parks the flip (§7.3)");
+        assert!(a.sync_envelopes(cid.clone()).iter().any(|e| e.first() == Some(&TAG_KEY_COMMIT)), "KeyCommit resumes on park");
+
+        // Everyone — including the legacy newcomer — still reads content (legacy sender-keys path).
+        a.post(cid.clone(), "parked-post".into(), vec![], None, None, false, false, 3_000).unwrap();
+        for _ in 0..3 { sync(a, b, &cid); sync(a, &legacy, &cid); sync(b, &legacy, &cid); }
+        assert!(b.feed(cid.clone(), 4_000, None).iter().any(|m| m.body == "parked-post"), "a member reads parked content");
+        assert!(legacy.feed(cid.clone(), 4_000, None).iter().any(|m| m.body == "parked-post"), "the legacy newcomer reads parked content");
+
+        // The newcomer UPGRADES: adopts a device, installs its roster, advertises capability, and both
+        // directions cross-learn rosters + capability. Once it is capable AND joined, the circle
+        // RE-FLIPS (§7.3 resume — the parked tree grows to add it via a superseding genesis).
+        assert!(legacy.use_device_identity([19u8; 32].to_vec()));
+        install_device_only_roster(&legacy, [9u8; 32]); // the newcomer installs its (fresh) roster
+        let up = [a, b, &legacy];
+        let up_seeds = [[1u8; 32], [2u8; 32], [9u8; 32]];
+        // Roster WIRES for cross-ingest (a/b already have theirs installed — don't re-install).
+        let rosters: Vec<(Vec<u8>, Vec<Vec<u8>>)> =
+            up.iter().enumerate().map(|(i, s)| device_only_roster_wire(s, up_seeds[i])).collect();
+        let bundles: Vec<Vec<u8>> = up.iter().map(|s| s.my_bundle()).collect();
+        for i in 0..3 {
+            for j in 0..3 {
+                if i != j {
+                    // Idempotent: a same-version roster a/b already hold returns false harmlessly; the
+                    // NEW pairs (involving the newcomer) are the ones that matter.
+                    let _ = up[i].ingest_device_roster(bundles[j].clone(), rosters[j].0.clone(), rosters[j].1.clone());
+                    up[i].profile_seed_drop_version(
+                        bundles[j].clone(),
+                        up[j].my_signed_profile("m".into(), String::new(), String::new(), String::new(), String::new()),
+                    );
+                }
+            }
+        }
+        legacy.set_circle_creator(cid.clone(), hex(&Identity::from_seed(&[1u8; 32]).public().node_id_bytes()));
+        legacy.set_mls_keying(true);
+        for _ in 0..8 {
+            for i in 0..3 {
+                for j in 0..3 {
+                    if i != j {
+                        sync(up[i], up[j], &cid);
+                    }
+                }
+            }
+        }
+        // The circle re-flips: A is live again on the superseding (3-leaf) genesis.
+        assert_eq!(a.mls_keying_status(cid.clone()).state, "live", "re-flips once the straggler is capable + joined");
+        a.post(cid.clone(), "reflipped".into(), vec![], None, None, false, false, 6_000).unwrap();
+        for _ in 0..4 {
+            for i in 0..3 {
+                for j in 0..3 {
+                    if i != j {
+                        sync(up[i], up[j], &cid);
+                    }
+                }
+            }
+        }
+        assert!(legacy.feed(cid.clone(), 7_000, None).iter().any(|m| m.body == "reflipped"), "the re-added device reads tree-keyed content");
     }
 }

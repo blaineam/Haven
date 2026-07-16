@@ -39,81 +39,353 @@
 
 <main id="main">
 
-  <section class="hero" style="padding:64px 0 26px">
+  <section class="hero" style="padding:64px 0 22px">
     <div class="container">
-      <span class="eyebrow reveal">Under the hood</span>
-      <h1 class="reveal" style="font-size:clamp(34px,6vw,56px)">How Haven works,<br /><span class="h-grad">in human terms.</span></h1>
+      <span class="eyebrow reveal">How Haven works</span>
+      <h1 class="reveal" style="font-size:clamp(34px,6vw,56px)">The simple version first.<br /><span class="h-grad">The deep version one click down.</span></h1>
       <p class="lead reveal">
-        Haven is open about exactly how it's built. Below is a friendly overview of the big ideas, each
-        linking out to the full technical document in the repository. Read as deep as you like.
+        You don't need to know what "encryption" means to trust Haven — so we'll explain it like we're
+        talking to a friend. Each idea below starts plain and warm. If you're curious how it actually
+        works, open the <span class="tag-tech">The technical bit</span> under it and go as deep as you like.
       </p>
     </div>
   </section>
 
-  <!-- Big ideas -->
-  <section class="section" style="padding-top:34px">
+  <!-- One-breath summary -->
+  <section class="section tight" style="padding-top:22px">
     <div class="container">
+      <div class="card reveal" style="max-width:880px;margin:0 auto;padding:clamp(26px,4.5vw,40px) clamp(22px,4vw,38px)">
+        <p class="drop-cap" style="font-size:clamp(18px,2.7vw,23px);font-weight:640;line-height:1.5;margin:0;letter-spacing:-.012em">
+          Haven is a tiny, private social app for the handful of people you actually love. Everything you
+          post, say, and share is <span class="h-grad">locked on your own phone</span> before it leaves, and
+          only your people hold the key to open it. There's no company server in the middle holding your
+          life — <b>not even us</b>. That one fact is the whole story; the rest of this page is just the
+          "how."
+        </p>
+      </div>
+    </div>
+  </section>
 
-      <!-- Architecture -->
-      <div class="card reveal" id="architecture" style="margin-bottom:18px;padding:30px 26px">
-        <span class="eyebrow">The big picture</span>
-        <h2 style="font-size:clamp(22px,4vw,30px)">One shared core, every platform.</h2>
-        <p class="muted" style="margin-top:12px;max-width:78ch">
-          At Haven's heart is a single piece of trusted code — a Rust core that handles your identity,
-          the encryption, your circles, and the social engine (posts, stories, messages, reactions). Every
-          app, on every platform, runs the <em>same</em> core, so the security never depends on which
-          device you're holding. The user interface on top is native to each platform (SwiftUI on Apple,
-          Jetpack Compose on Android, a lightweight web view on Windows/Linux), but the trust layer is one
-          and the same everywhere.
+  <!-- Big ideas, each plain-first -->
+  <section class="section" style="padding-top:20px">
+    <div class="container" style="display:flex;flex-direction:column;gap:18px">
+
+      <!-- 1 · Only your people can see it -->
+      <div class="card reveal" id="encryption" style="padding:30px 26px">
+        <span class="eyebrow">Only your people can see it</span>
+        <h2 style="font-size:clamp(22px,4vw,30px)">Locked on your phone. Opened only by your circle.</h2>
+        <p class="muted" style="margin-top:12px;max-width:74ch">
+          Think of every photo or message as a note you seal in a box before it leaves your hands. Only the
+          people you invited own a key that fits. Anyone in between — your internet provider, a helper
+          server, us — just sees a sealed box they can't open. Haven is even built to stay locked against
+          <em>tomorrow's</em> computers, not just today's.
         </p>
-        <p class="muted" style="margin-top:12px;max-width:78ch">
-          When you share something, Haven automatically picks the best route to your friend:
-          <b>nearby</b> first (Bluetooth/Wi-Fi, even with no internet), then a <b>direct</b> peer-to-peer
-          connection, and only a <b>relay</b> if nothing else reaches them. Above that transport,
-          everything is just opaque encrypted bytes.
-        </p>
-        <div class="btn-row" style="justify-content:flex-start;margin-top:18px">
-          <a class="btn sm" href="https://github.com/blaineam/haven/blob/main/docs/ARCHITECTURE.md" rel="noopener">Read ARCHITECTURE.md ↗</a>
-        </div>
+        <details class="tech">
+          <summary><span class="tag-tech">The technical bit</span><span class="chev">›</span></summary>
+          <div class="tbody">
+            <p>Haven uses <b>hybrid post-quantum</b> cryptography everywhere. Keys are agreed with
+              <b>X25519 + ML-KEM-768</b> (FIPS&nbsp;203), everything is signed with
+              <b>Ed25519 + ML-DSA-65</b>, content is sealed with <b>AES-256-GCM</b>, and keys are derived
+              with <b>HKDF-SHA256</b>. "Hybrid" means an attacker has to break <em>both</em> the classical
+              and the quantum-resistant half — so Haven is never weaker than today's best, and it resists
+              "harvest-now, decrypt-later" capture.</p>
+            <p>Each circle has an <b>epoch key</b> distributed to its current members through that hybrid
+              key exchange; every post is sealed under a key derived from it. Removing or blocking a member
+              rotates the epoch and re-seals the new key to only the people who remain — so a removed member
+              <b>can't decrypt anything posted afterward</b>. That's a math guarantee, not a server rule.</p>
+            <p>Full detail: <a class="inline" href="https://github.com/blaineam/haven/blob/main/docs/GROUP-KEYING.md" rel="noopener">GROUP-KEYING.md ↗</a></p>
+          </div>
+        </details>
       </div>
 
-      <!-- Doc cards grid -->
+      <!-- 2 · Every platform -->
+      <div class="card reveal" id="architecture" style="padding:30px 26px">
+        <span class="eyebrow">Truly every platform</span>
+        <h2 style="font-size:clamp(22px,4vw,30px)">One app, on the device you already carry.</h2>
+        <p class="muted" style="margin-top:12px;max-width:74ch">
+          Your family doesn't all use the same phone — and they don't have to. Haven is on iPhone, iPad and
+          Mac, on Android, and on Windows and Linux, and it's the <em>same</em> Haven everywhere. Whichever
+          screen you pick up, your circle looks and feels the same, and it's exactly as private.
+        </p>
+
+        <!-- All-platform lineup. iPhone stays the hero (centre, largest); the rest answer
+             "does it run on mine?". Renders are transparent PNGs — .render adds the shadow. -->
+        <div class="lineup reveal" role="list" style="margin-top:26px">
+          <figure class="lu lu-lap" role="listitem">
+            <img class="render" src="../assets/renders/windows-feed.png?v=1"
+                 alt="Haven running on a Windows laptop — the circle feed in the desktop app"
+                 loading="lazy" width="1028" height="663" />
+            <figcaption>Windows</figcaption>
+          </figure>
+          <figure class="lu lu-hero" role="listitem">
+            <img class="render" src="../assets/renders/phone-feed.png?v=4"
+                 alt="Haven running on iPhone — the circle feed"
+                 loading="lazy" width="637" height="1320" />
+            <figcaption>iPhone &amp; iPad</figcaption>
+          </figure>
+          <figure class="lu lu-phone" role="listitem">
+            <img class="render" src="../assets/renders/android-feed.png?v=1"
+                 alt="Haven running on an Android phone — the circle feed"
+                 loading="lazy" width="440" height="927" />
+            <figcaption>Android</figcaption>
+          </figure>
+          <figure class="lu lu-lap" role="listitem">
+            <img class="render" src="../assets/renders/linux-feed.png?v=1"
+                 alt="Haven running on a Linux laptop — the circle feed in the desktop app"
+                 loading="lazy" width="1028" height="663" />
+            <figcaption>Linux</figcaption>
+          </figure>
+        </div>
+
+        <details class="tech" style="margin-top:24px">
+          <summary><span class="tag-tech">The technical bit</span><span class="chev">›</span></summary>
+          <div class="tbody">
+            <p>At Haven's heart is a single piece of trusted code — a <b>Rust core</b> (<code>p2pcore</code>)
+              that handles your identity, the encryption, your circles, and the social engine (posts,
+              stories, messages, reactions). Every app on every platform runs the <em>same</em> core, so
+              your security never depends on which device you're holding.</p>
+            <p>Only the look-and-feel on top is native to each platform: <b>SwiftUI</b> on Apple and
+              <b>Jetpack Compose</b> on Android reach the core through UniFFI; the <b>Windows/Linux</b> app
+              (Tauri) links the Rust core <em>directly</em>, so it's a real network peer too, not a thin
+              web page. Every client is a genuine peer on the network.</p>
+            <p>Full detail: <a class="inline" href="https://github.com/blaineam/haven/blob/main/docs/ARCHITECTURE.md" rel="noopener">ARCHITECTURE.md ↗</a>. See exactly what's shipped where under <a class="inline" href="#availability">availability</a> below.</p>
+          </div>
+        </details>
+      </div>
+
+      <!-- 3 · How it travels -->
+      <div class="card reveal" id="transport" style="padding:30px 26px">
+        <span class="eyebrow">How your stuff gets there</span>
+        <h2 style="font-size:clamp(22px,4vw,30px)">Haven quietly picks the best road every time.</h2>
+        <p class="muted" style="margin-top:12px;max-width:74ch">
+          When you share something, Haven tries to hand it over the closest, most direct way it can. Are
+          your people <b>right next to you</b>? It'll pass it phone-to-phone over Bluetooth or Wi-Fi — no
+          internet needed at all. Otherwise it connects your devices <b>directly</b>. Only if neither works
+          does it leave a sealed copy in a <b>relay mailbox</b> to wait for them. You never think about any
+          of this; it just happens.
+        </p>
+        <details class="tech">
+          <summary><span class="tag-tech">The technical bit</span><span class="chev">›</span></summary>
+          <div class="tbody">
+            <p>A path-selector walks a ladder: <b>nearby</b> (MultipeerConnectivity on Apple, Nearby
+              Connections on Android — Bluetooth + local Wi-Fi) → <b>direct</b> (iroh QUIC with NAT
+              hole-punching) → <b>relay</b> (only if nothing local reaches them). Above the transport,
+              everything is opaque encrypted bytes — the transport is interchangeable and completely blind
+              to content.</p>
+            <p>Finding a friend's current address uses signed records keyed by their public key, so a link
+              to someone is permanent with no central directory to maintain.</p>
+          </div>
+        </details>
+      </div>
+
+      <!-- 4 · The relay -->
+      <div class="card reveal" id="relay-idea" style="padding:30px 26px">
+        <span class="eyebrow">The relay, honestly</span>
+        <h2 style="font-size:clamp(22px,4vw,30px)">A mailbox that physically can't read your mail.</h2>
+        <p class="muted" style="margin-top:12px;max-width:74ch">
+          Sometimes a friend is offline when you post. A <b>relay</b> is just a helper that holds the sealed
+          envelope until they're back — a mailbox, not a reader. It only ever sees locked boxes, never
+          what's inside, and it now only serves people who are actually in your circle. Anyone can run one
+          (you, a friend, a $35 Raspberry&nbsp;Pi), and there's no company operating it.
+        </p>
+        <details class="tech">
+          <summary><span class="tag-tech">The technical bit — and the honest limit</span><span class="chev">›</span></summary>
+          <div class="tbody">
+            <p>A relay stores and forwards only ciphertext. It <b>cannot</b> read content, contacts, keys,
+              or notification text. As of the 2026-07 hardening it also enforces <b>per-circle membership
+              authorization</b>: reading, writing and listing a circle's mailbox is served only to that
+              circle's members, so a stranger who merely learns the relay's id can't fetch or enumerate a
+              thing.</p>
+            <p><b>The honest limit — your IP address.</b> To move your bytes, a relay briefly handles your
+              IP, and it authenticates each peer by its node id (which is your public key) to enforce that
+              membership check — so it does see <b>IP ↔ node id</b> in memory while it works. Haven's
+              hardened defaults mean this is <b>never logged and never persisted</b>, and there's no
+              account, name, or email in the system to tie it to. But it isn't invisible: a peer or a relay
+              operator can see your IP. If that matters to you, run Haven behind a VPN or host your own
+              relay. A built-in Tor/onion mode was evaluated and declined — Tor can't carry the UDP traffic
+              Haven's calls and direct connections need.</p>
+            <p>Full detail: <a class="inline" href="#threat">threat model</a> and <a class="inline" href="https://github.com/blaineam/haven/blob/main/docs/RELAY-AND-DEPLOY.md" rel="noopener">RELAY-AND-DEPLOY.md ↗</a></p>
+          </div>
+        </details>
+      </div>
+
+      <!-- 5 · Media -->
+      <div class="card reveal" id="media" style="padding:30px 26px">
+        <span class="eyebrow">Your photos keep their mouth shut</span>
+        <h2 style="font-size:clamp(22px,4vw,30px)">No hidden location tags. No swapped pictures.</h2>
+        <p class="muted" style="margin-top:12px;max-width:74ch">
+          Photos and videos quietly carry hidden data — where they were taken, on what device. Before
+          anything leaves your phone, Haven <b>strips that out</b>, so a shared beach photo doesn't hand
+          over your home address. And every file is fingerprinted, so a relay can't secretly swap one
+          picture for another without your app noticing.
+        </p>
+        <details class="tech">
+          <summary><span class="tag-tech">The technical bit</span><span class="chev">›</span></summary>
+          <div class="tbody">
+            <p>GPS/EXIF location and identifying maker tags are stripped by default on capture, for photos
+              <b>and</b> video (the video strip shipped 2026-07-15). Media is <b>content-addressed with
+              BLAKE3</b> and split into sealed chunks; because the address <em>is</em> the hash of the
+              content, a relay swapping a blob is detected on verify. The camera pipeline calls no
+              third-party SDK and logs nothing.</p>
+            <p>Full detail: <a class="inline" href="https://github.com/blaineam/haven/blob/main/docs/MEDIA-AND-MUSIC.md" rel="noopener">MEDIA-AND-MUSIC.md ↗</a></p>
+          </div>
+        </details>
+      </div>
+
+      <!-- 6 · Calls -->
+      <div class="card reveal" id="calls" style="padding:30px 26px">
+        <span class="eyebrow">Calls no one can tap</span>
+        <h2 style="font-size:clamp(22px,4vw,30px)">Voice, video and screen share — sealed the whole way.</h2>
+        <p class="muted" style="margin-top:12px;max-width:74ch">
+          When you call your circle, the audio and video are locked between you and them, even if a relay is
+          helping the two of you connect. A relay can move the call along, but it can't listen in and it
+          can't quietly slip itself into the middle.
+        </p>
+        <details class="tech">
+          <summary><span class="tag-tech">The technical bit</span><span class="chev">›</span></summary>
+          <div class="tbody">
+            <p>Calls use <b>WebRTC (DTLS-SRTP)</b> for real-time audio/video and screen share. The call
+              setup is sealed and signed end-to-end, so a forwarding relay can neither eavesdrop on a frame
+              nor MITM the handshake. When two peers can't connect directly, a stateless connection relay
+              forwards the encrypted stream without ever decrypting it.</p>
+          </div>
+        </details>
+      </div>
+
+      <!-- 7 · Multi-device -->
+      <div class="card reveal" id="devices" style="padding:30px 26px">
+        <span class="eyebrow">Many devices, one you</span>
+        <h2 style="font-size:clamp(22px,4vw,30px)">Your phone, iPad and Mac — all the same you.</h2>
+        <p class="muted" style="margin-top:12px;max-width:74ch">
+          Post from your phone and it's there on your iPad. Your circles, profile and conversations line up
+          across the devices you own, and your friends never notice which one you're on — you're just you.
+          You can move your identity to a new device with a quick transfer code or QR, never through a
+          server.
+        </p>
+        <details class="tech">
+          <summary><span class="tag-tech">The technical bit — including what revoking a device does and doesn't do</span><span class="chev">›</span></summary>
+          <div class="tbody">
+            <p>Each device is authorized by a credential your long-term identity key signs into a device
+              list, so adding or removing a device never changes who you are to your contacts. Your own
+              devices self-sync additively, so a freshly-restored or empty device can never wipe content
+              that exists elsewhere.</p>
+            <p><b>Be precise about revoking a device.</b> Today a linked device holds a <em>copy</em> of your
+              account seed, and revoking marks it revoked but doesn't invalidate the seed it already has. So
+              revocation is a <b>strong deterrent against a lost or stolen phone</b> (its keychain intact,
+              seed not extracted) — but it is <b>not yet a cryptographic guarantee against a fully
+              compromised one</b>. The re-key that makes revocation cryptographic ("seed-drop") is designed
+              and <b>planned for release 1.0.7 — not yet shipped</b>. Until then, the sure remedy against a
+              genuinely compromised device is rolling a new identity.</p>
+            <p>Full detail: <a class="inline" href="https://github.com/blaineam/haven/blob/main/docs/MULTI-DEVICE.md" rel="noopener">MULTI-DEVICE.md ↗</a></p>
+          </div>
+        </details>
+      </div>
+
+      <!-- Honest-limits callout -->
+      <div class="callout reveal">
+        <b>The honest limits, in one place:</b> a relay or a peer can see your <b>IP address</b> while it
+        moves your bytes (never logged, but use a VPN if that matters). Revoking a device defeats a
+        <b>lost or stolen</b> phone, not a fully <b>compromised</b> one, until the seed-drop re-key ships in
+        1.0.7. And Haven doesn't yet have per-message forward secrecy or post-compromise security — that
+        needs MLS, which isn't built yet. We'd rather tell you than let you assume. The full, unflinching
+        version is the <a class="inline" href="#threat">threat model ↗</a>.
+      </div>
+    </div>
+  </section>
+
+  <!-- Where you can get it -->
+  <section class="section tight" id="availability">
+    <div class="container">
+      <div class="card reveal" style="padding:30px 26px">
+        <span class="eyebrow">Where it runs today</span>
+        <h2 style="font-size:clamp(22px,4vw,28px)">On the shelf now, and honestly labelled.</h2>
+        <p class="muted" style="margin-top:12px;max-width:74ch">
+          We won't point you at a store page that 404s or a "tarball" for a paid app. Here's exactly where
+          each platform stands right now.
+        </p>
+        <ul class="points" style="margin-top:16px">
+          <li><span class="dot"></span><span><b>iPhone, iPad &amp; Mac</b> — live on the <b>App&nbsp;Store</b>, a one-time $9.99 purchase.</span></li>
+          <li><span class="dot"></span><span><b>Android</b> — a real, signed app, currently on Google&nbsp;Play <b>closed testing</b> (not public yet). Until the opt-in opens, install the signed APK straight from the latest release.</span></li>
+          <li><span class="dot"></span><span><b>Windows &amp; Linux</b> — real installers (<code>.exe</code>/<code>.msi</code>, <code>.deb</code>/<code>.rpm</code>/AppImage) on <b>GitHub&nbsp;Releases</b>. Not in the Microsoft&nbsp;Store, not on Flathub or the AUR yet.</span></li>
+          <li><span class="dot"></span><span><b>Headless relay</b> — a tiny <code>haven-relay</code> binary for a Pi or server, also from GitHub&nbsp;Releases.</span></li>
+        </ul>
+        <div class="btn-row" style="justify-content:flex-start;margin-top:18px">
+          <a class="btn sm" href="../#download">Get Haven for your device</a>
+          <a class="btn sm ghost" href="https://github.com/blaineam/haven/blob/main/docs/ROADMAP.md" rel="noopener">Read the roadmap ↗</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Glossary -->
+  <section class="section tight">
+    <div class="container">
+      <div class="card reveal" style="padding:30px 26px">
+        <span class="eyebrow">Plain-language glossary</span>
+        <h2 style="font-size:clamp(22px,4vw,28px)">A few words, demystified.</h2>
+        <ul class="points" style="margin-top:14px">
+          <li><span class="dot"></span><span><b>End-to-end encrypted</b> — locked on your device and only unlockable by the people you're sharing with. No one in the middle has a key.</span></li>
+          <li><span class="dot"></span><span><b>Peer-to-peer</b> — your devices talk directly to each other instead of through a company's servers.</span></li>
+          <li><span class="dot"></span><span><b>Post-quantum</b> — extra-future-proof encryption that even a future quantum computer can't crack, defending against "save it now, decrypt it later" attacks.</span></li>
+          <li><span class="dot"></span><span><b>Relay</b> — an optional always-on helper that holds your circle's <em>encrypted</em> messages for offline friends and forwards calls. It can never read your content.</span></li>
+          <li><span class="dot"></span><span><b>Circle</b> — one of your private groups. Everything in a circle is sealed to exactly the people in it.</span></li>
+          <li><span class="dot"></span><span><b>Seed / key</b> — the secret that proves you're you and unlocks your content. It lives only on your devices, wrapped by the hardware Secure Enclave.</span></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- Full docs library -->
+  <section class="section tight">
+    <div class="container">
+      <div class="center reveal" style="margin-bottom:22px">
+        <span class="eyebrow">Want to go all the way in?</span>
+        <h2 style="font-size:clamp(24px,4.2vw,34px)">The full technical library.</h2>
+        <p class="lead">Every claim on this site traces back to one of these. Read as deep as you like.</p>
+      </div>
+
       <div class="grid cols-2 reveal" style="gap:16px">
 
         <a class="card flat doclink" id="threat" href="https://github.com/blaineam/haven/blob/main/docs/THREAT-MODEL.md" rel="noopener">
           <h4>🛡️ Threat model <span class="arrow">↗</span></h4>
-          <p>Who Haven protects, against whom, and the honest non-goals. Includes the real story on IP
-            addresses, post-quantum encryption, abuse resistance, and lost-device protection.</p>
+          <p>Who Haven protects, against whom, and the honest non-goals — the real story on IP addresses,
+            post-quantum encryption, abuse resistance, and lost- vs. compromised-device protection.</p>
+        </a>
+
+        <a class="card flat doclink" href="https://github.com/blaineam/haven/blob/main/docs/SECURITY.md" rel="noopener">
+          <h4>🔐 Security model <span class="arrow">↗</span></h4>
+          <p>The complete cryptography write-up: the hybrid post-quantum algorithms, group keying, what a
+            relay can and can't do, and the deterrents that aren't guarantees.</p>
+        </a>
+
+        <a class="card flat doclink" href="https://github.com/blaineam/haven/blob/main/docs/GROUP-KEYING.md" rel="noopener">
+          <h4>🔑 Group keying <span class="arrow">↗</span></h4>
+          <p>How each circle's epoch key is distributed, why removing a member cryptographically cuts them
+            off, and where forward secrecy begins and ends.</p>
         </a>
 
         <a class="card flat doclink" href="https://github.com/blaineam/haven/blob/main/docs/RELAY-AND-DEPLOY.md" rel="noopener">
           <h4>🛰️ Relays &amp; deployment <span class="arrow">↗</span></h4>
           <p>The two relay roles (switchboard and mailbox), the zero-operator-cost storage model, the
-            IP-privacy guarantees, and the one-command deployment tool.</p>
-        </a>
-
-        <a class="card flat doclink" href="https://github.com/blaineam/haven/blob/main/docs/HAVEN-NET-RELAY.md" rel="noopener">
-          <h4>🔌 Relay over Haven Net <span class="arrow">↗</span></h4>
-          <p>How a volunteer's storage runs with no public host at all — the encrypted tunnel that lets a
-            relay live on a phone or laptop behind a normal home router.</p>
+            IP-privacy story, and the one-command deployment tool.</p>
         </a>
 
         <a class="card flat doclink" id="byo" href="https://github.com/blaineam/haven/blob/main/docs/BYO-STORAGE.md" rel="noopener">
           <h4>🗄️ Bring your own storage <span class="arrow">↗</span></h4>
-          <p>iCloud, S3, Google Drive, Dropbox or a NAS — with no secrets we host. How PKCE lets the app
-            sign you in without ever holding a client secret.</p>
+          <p>An S3-compatible bucket or a relay you run — with no secrets we host. How the app signs into
+            your storage without ever holding a provider credential.</p>
         </a>
 
         <a class="card flat doclink" href="https://github.com/blaineam/haven/blob/main/docs/MEDIA-AND-MUSIC.md" rel="noopener">
           <h4>🎞️ Media &amp; music <span class="arrow">↗</span></h4>
-          <p>The in-app camera, film filters, Apple Music on posts (references only, never audio), and the
-            music ↔ video crossfade — each with its security audit.</p>
+          <p>The in-app camera, film filters, Apple Music on posts (references only, never audio), the
+            EXIF/GPS strip, and the music ↔ video crossfade — each with its security audit.</p>
         </a>
 
         <a class="card flat doclink" href="https://github.com/blaineam/haven/blob/main/docs/MULTI-DEVICE.md" rel="noopener">
           <h4>🔗 Multi-device <span class="arrow">↗</span></h4>
-          <p>One identity, many authorized devices, each with its own key that never leaves it. Linking,
-            receiving everywhere, and instant revocation of a lost device.</p>
+          <p>One identity across the devices you own — linking, receiving everywhere, and the honest state
+            of device revocation (effective for a lost device; seed-drop finalizes it in 1.0.7).</p>
         </a>
 
         <a class="card flat doclink" href="https://github.com/blaineam/haven/blob/main/docs/NOTIFICATIONS.md" rel="noopener">
@@ -140,36 +412,28 @@
             redesigned (and healthier for it), and what's parked.</p>
         </a>
 
-        <a class="card flat doclink" id="roadmap" href="https://github.com/blaineam/haven/blob/main/docs/ROADMAP.md" rel="noopener">
-          <h4>🗺️ Roadmap <span class="arrow">↗</span></h4>
-          <p>What's done, what's in progress, and what's next — milestone by milestone, including the
-            features still being wired up.</p>
+        <a class="card flat doclink" href="https://github.com/blaineam/haven/blob/main/docs/WINDOWS-PORT.md" rel="noopener">
+          <h4>🪟 Windows <span class="arrow">↗</span></h4>
+          <p>The Tauri desktop app that links the Rust core directly, the same binary that runs headless as
+            a relay, and where the Windows build honestly still stands.</p>
         </a>
 
         <a class="card flat doclink" href="https://github.com/blaineam/haven/blob/main/docs/LINUX.md" rel="noopener">
           <h4>🐧 Linux <span class="arrow">↗</span></h4>
-          <p>First-class desktop app and relay daemon across Ubuntu, Debian, Raspbian, Arch and SteamOS —
-            packages, services, and a Pi relay path.</p>
+          <p>First-class desktop app and relay daemon across Ubuntu, Debian, Raspbian and SteamOS —
+            packages, services, and a Raspberry&nbsp;Pi relay path.</p>
+        </a>
+
+        <a class="card flat doclink" id="roadmap" href="https://github.com/blaineam/haven/blob/main/docs/ROADMAP.md" rel="noopener">
+          <h4>🗺️ Roadmap <span class="arrow">↗</span></h4>
+          <p>What's done, what's in progress, and what's next — checked against the code, with anything
+            unverified marked as such rather than asserted.</p>
         </a>
 
       </div>
 
-      <!-- Glossary -->
-      <div class="card reveal" style="margin-top:26px;padding:30px 26px">
-        <span class="eyebrow">Plain-language glossary</span>
-        <h2 style="font-size:clamp(22px,4vw,28px)">A few words, demystified.</h2>
-        <ul class="points" style="margin-top:14px">
-          <li><span class="dot"></span><span><b>End-to-end encrypted</b> — locked on your device and only unlockable by the people you're sharing with. No one in the middle has a key.</span></li>
-          <li><span class="dot"></span><span><b>Peer-to-peer</b> — your devices talk directly to each other instead of through a company's servers.</span></li>
-          <li><span class="dot"></span><span><b>Post-quantum</b> — extra-future-proof encryption that even a future quantum computer can't crack, defending against "save it now, decrypt it later" attacks.</span></li>
-          <li><span class="dot"></span><span><b>Relay</b> — an optional always-on helper that holds your circle's <em>encrypted</em> messages for offline friends and forwards calls. It can never read your content.</span></li>
-          <li><span class="dot"></span><span><b>Circle</b> — one of your private groups. Everything in a circle is sealed to exactly the people in it.</span></li>
-          <li><span class="dot"></span><span><b>Seed / key</b> — the secret that proves you're you and unlocks your content. It lives only on your devices, wrapped by the hardware Secure Enclave.</span></li>
-        </ul>
-      </div>
-
       <div class="callout reveal" style="margin-top:22px">
-        Want the whole library at once? Browse the full
+        Want the whole thing at once? Browse the full
         <a class="inline" href="https://github.com/blaineam/haven/tree/main/docs" rel="noopener">docs folder on GitHub ↗</a>,
         or read the source for the relay tooling in
         <a class="inline" href="https://github.com/blaineam/haven/tree/main/relay" rel="noopener">relay/ ↗</a>.
@@ -190,7 +454,7 @@
     <div class="foot-grid">
       <div>
         <a class="brand" href="../">Haven</a>
-        <p class="blurb">A private, peer-to-peer, end-to-end-encrypted social app for your close circle. No servers, no ads, no tracking.</p>
+        <p class="blurb">A private, peer-to-peer, end-to-end-encrypted social app for your close circle. No central server, no ads, no tracking.</p>
         <div class="platforms" style="justify-content:flex-start">
           <span class="pill">iOS</span><span class="pill">macOS</span><span class="pill">Android</span>
           <span class="pill">Windows</span><span class="pill">Linux</span>
@@ -217,7 +481,7 @@
         <a href="https://github.com/blaineam/haven/tree/main/relay" rel="noopener">Relay tooling ↗</a>
       </div>
     </div>
-    <p class="legal">Made with care for the people you love. Haven holds no keys and runs no servers — your circle is yours alone.</p>
+    <p class="legal">Made with care for the people you love. Haven holds no keys and keeps no copy of your content — your circle is yours alone.</p>
   </div>
 </footer>
 

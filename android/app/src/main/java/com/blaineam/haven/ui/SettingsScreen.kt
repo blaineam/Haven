@@ -292,8 +292,11 @@ fun SettingsScreen(onBack: () -> Unit) {
                 Text("Move your account to a new phone, or restore it here. Your keys never touch a server.",
                     color = HavenTheme.textSecondary, fontSize = 12.sp)
                 Spacer(Modifier.height(10.dp))
-                Text("Move to another device →", color = HavenTheme.pink, fontSize = 14.sp, fontWeight = FontWeight.Medium,
-                    modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { showTransfer = true }.padding(vertical = 8.dp))
+                // A seedless device holds no seed to move — hide the seed-export path there.
+                if (!core.seedless) {
+                    Text("Move to another device →", color = HavenTheme.pink, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                        modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { showTransfer = true }.padding(vertical = 8.dp))
+                }
                 Text("Restore identity here →", color = HavenTheme.pink, fontSize = 14.sp, fontWeight = FontWeight.Medium,
                     modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { showRestore = true }.padding(vertical = 8.dp))
             }
@@ -851,12 +854,16 @@ private fun AuthorizedDevicesCard() {
     var enabled by remember { mutableStateOf(DeviceRosterManager.isEnabled()) }
     val authorized by DeviceCredentialStore.authorized
     var revokeTarget by remember { mutableStateOf<RosterDevice?>(null) }
+    val seedless = remember { HavenNet.isSeedless }
+    val ticketUri by HavenNet.seedlessTicketUri            // "" while no ticket is offered
+    val enrollPrompt by HavenNet.seedlessPendingRequest    // a new device asking to link (null = none)
     LaunchedEffect(Unit) { DeviceCredentialStore.refresh() }
 
     Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
         Text("Authorized devices", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
         Spacer(Modifier.height(4.dp))
         val role = when {
+            seedless -> "This is a seedless linked device" to "It holds its own revocable device key and a granted sync key — never your master seed. Your primary device authorizes it and can cut it off cryptographically."
             enabled -> "This is your primary device" to "It holds your master key and authorizes or revokes your other devices."
             authorized -> "This is a linked device" to "It holds a copy of your master key and syncs with your primary device, which can revoke it."
             else -> "This device isn’t linked yet" to "Make it your primary, or link it to the device that already is."
@@ -893,7 +900,13 @@ private fun AuthorizedDevicesCard() {
         }
 
         Spacer(Modifier.height(12.dp))
-        if (!enabled) {
+        if (seedless) {
+            // A seedless device can never hold the seed → never become primary. It only re-syncs.
+            Text(
+                "Re-sync from my primary device", color = HavenTheme.pink, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { HavenNet.requestDeviceEnrollment() }.padding(vertical = 8.dp),
+            )
+        } else if (!enabled) {
             Text(
                 "Make this my primary device", color = HavenTheme.pink, fontSize = 14.sp, fontWeight = FontWeight.Medium,
                 modifier = Modifier.clip(RoundedCornerShape(8.dp))
@@ -905,12 +918,56 @@ private fun AuthorizedDevicesCard() {
                 modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { HavenNet.requestDeviceEnrollment() }.padding(vertical = 8.dp),
             )
         } else {
+            // Primary only (holds the seed): link a NEW device without ever sending it the seed. It gets
+            // its own revocable device key + a granted sync key (seed-drop S4).
+            Text(
+                "Link a new device (no seed) →", color = HavenTheme.pink, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                    .clickable { HavenNet.enrollMintTicket() }.padding(vertical = 8.dp),
+            )
             Text(
                 "This isn’t my primary device", color = Color(0xFFF87171), fontSize = 14.sp, fontWeight = FontWeight.Medium,
                 modifier = Modifier.clip(RoundedCornerShape(8.dp))
                     .clickable { HavenNet.stepDownAsPrimary(); enabled = DeviceRosterManager.isEnabled() }.padding(vertical = 8.dp),
             )
         }
+    }
+
+    // PRIMARY: the `haven-enroll:` QR for a new device to scan (single-use, short expiry — treat like an
+    // authorization credential). Sits over the card while a ticket is live.
+    if (ticketUri.isNotEmpty()) {
+        FullScreenOverlay(onDismiss = { HavenNet.cancelSeedlessTicket() }) {
+            val qr = rememberQr(ticketUri)
+            Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("Done", color = HavenTheme.textSecondary,
+                    modifier = Modifier.align(Alignment.End).clickable { HavenNet.cancelSeedlessTicket() }.padding(8.dp))
+                Spacer(Modifier.height(12.dp))
+                BrandText("Link a new device", fontSize = 22)
+                Spacer(Modifier.height(8.dp))
+                Text("On your NEW phone: open Haven → “Link without the seed” → scan this. The new device gets its own key — this code never carries your seed. It expires in a few minutes.",
+                    color = HavenTheme.textSecondary, fontSize = 13.sp, textAlign = TextAlign.Center)
+                Spacer(Modifier.height(20.dp))
+                qr?.let { Image(it, "Enroll QR",
+                    Modifier.size(260.dp).clip(RoundedCornerShape(12.dp)).background(Color(0xFF101018)).padding(8.dp)) }
+            }
+        }
+    }
+
+    // PRIMARY: a new device proved ticket possession — confirm before issuing its credential + grant.
+    enrollPrompt?.let { p ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { HavenNet.dismissSeedlessEnroll() }, containerColor = HavenTheme.card,
+            title = { Text("Link “${p.name}”?", color = HavenTheme.textPrimary) },
+            text = { Text("This device is asking to join your account with its own revocable key. Only continue if you started this on “${p.name}”. It will receive your circles and contacts, and you can revoke it any time.", color = HavenTheme.textSecondary) },
+            confirmButton = {
+                Text("Link device", color = HavenTheme.pink,
+                    modifier = Modifier.clickable { HavenNet.confirmSeedlessEnroll() }.padding(8.dp))
+            },
+            dismissButton = {
+                Text("Not now", color = HavenTheme.textSecondary,
+                    modifier = Modifier.clickable { HavenNet.dismissSeedlessEnroll() }.padding(8.dp))
+            },
+        )
     }
 
     revokeTarget?.let { t ->

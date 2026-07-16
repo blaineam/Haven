@@ -216,8 +216,15 @@ object CallManager {
         val plaintext = opened.data
         if (verified.length != 64 || plaintext.size < 64) return null
         val declared = runCatching { String(plaintext.copyOfRange(0, 64), Charsets.UTF_8) }.getOrNull()?.lowercase() ?: ""
-        if (declared != verified) return null            // proven sender must equal the self-declared from
-        if (HavenNet.blocked.contains(verified)) return null
+        // Seed-drop S4 (D9): a seedless sender signs call frames with its DEVICE key, so the proven
+        // signer is the device hex while the plaintext `from` names the ACCOUNT (what contacts key on).
+        // Accept iff the verified device resolves to the declared account; legacy account-signed frames
+        // keep verified == declared. Either way the sub-handlers still see the account hex as `from`.
+        if (declared != verified) {
+            val acct = runCatching { HavenNet.engine.accountForDevice(verified) }.getOrNull()?.lowercase()
+            if (acct == null || acct != declared) return null
+        }
+        if (HavenNet.blocked.contains(declared)) return null
         return plaintext
     }
 

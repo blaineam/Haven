@@ -225,15 +225,24 @@ object HavenNet : InboundListener {
         NativeBridge.ensureAndroidContext(appContext)
         core = HavenCore.get(appContext)
         profile = ProfileStore.get(appContext)
-        social = HavenSocial(core.seed)
+        DeviceKeyStore.init(appContext)   // needed by the seedless engine constructor below
+        // Engine boot mode (plan §5): a SEEDLESS device has no account master seed — it constructs the
+        // engine from the account PUBLIC bundle + its own device seed (the device identity is baked in),
+        // and NEVER registers a device or registers for push (the primary owns those). A seeded/legacy
+        // device keeps today's path: engine over the account seed, then adopt the device identity.
+        social = if (core.seedless) {
+            HavenSocial.newSeedless(core.bundle, DeviceKeyStore.deviceAccount().secretSeed())
+        } else {
+            HavenSocial(core.seed)
+        }
         LocalMedia.init(appContext)
         Presign.init(appContext)
         CircleLock.init(appContext)
         CircleRemovals.init(appContext)
-        DeviceKeyStore.init(appContext)
         // Engine runs on this device's UNIQUE identity (parity with iOS configure()); account id stays the
         // sealing/trust anchor + contact handle. Friends resolve it to our device node id via the roster.
-        social.useDeviceIdentity(DeviceKeyStore.deviceAccount().secretSeed())
+        // newSeedless already baked the device identity in, so only the seeded path adopts it here.
+        if (!core.seedless) social.useDeviceIdentity(DeviceKeyStore.deviceAccount().secretSeed())
         DeviceCredentialStore.init(appContext)
         DeviceRosterManager.init(appContext)
         SelfSyncCoordinator.init(appContext)
@@ -243,18 +252,40 @@ object HavenNet : InboundListener {
         EvictedMediaStore.init(appContext)  // deliberately-removed refs (no auto-refetch)
         MediaLimits.init(appContext)        // local age/size caps
         restoreState()
-        // Self-register AFTER importing persisted state (parity with iOS): registering first wrote a
-        // fresh v1 roster that restoreState's higher-version-wins restore then clobbered — so a stale
-        // revocation of our own device id in the persisted roster could never be cleared. Registering
-        // against the imported roster makes the re-authorization a version-bumped update that
-        // propagates (see DeviceList::merge).
-        social.registerDevice(DeviceKeyStore.deviceBundle(), DeviceKeyStore.deviceName,
-                              (System.currentTimeMillis() / 1000).toULong())
+        if (core.seedless) {
+            // A seedless device cannot mint a roster or an account-signed profile card. Install the
+            // primary's grant: the roster wire VERBATIM (incl. capability trailer — A3) so the engine
+            // authorizes this device + rebroadcasts the exact bytes, and the account-signed credential.
+            // (The primary's signed profile CARD arrives via self-sync / full-state and is installed by
+            // setCachedProfile as soon as we hold it — D8.) NEVER register_device / re-sign anything.
+            SeedlessStore.rosterWire()?.let { wire -> runCatching { social.ingestRosterWire(wire) } }
+            SeedlessStore.credential()?.let { DeviceCredentialStore.save(it) }
+        } else {
+            // Self-register AFTER importing persisted state (parity with iOS): registering first wrote a
+            // fresh v1 roster that restoreState's higher-version-wins restore then clobbered — so a stale
+            // revocation of our own device id in the persisted roster could never be cleared. Registering
+            // against the imported roster makes the re-authorization a version-bumped update that
+            // propagates (see DeviceList::merge).
+            social.registerDevice(DeviceKeyStore.deviceBundle(), DeviceKeyStore.deviceName,
+                                  (System.currentTimeMillis() / 1000).toULong())
+        }
         loadContacts()
         loadDeviceHints()
         loadBlocked()
         loadRelayNodes()
         purgeStaleRelays()   // erase relays inactive AND unseen > 7 days (config else survives)
+        if (core.seedless) {
+            // Adopt the grant's bootstrap relays (AFTER loadRelayNodes, which would else clear them) so
+            // the FIRST self-sync has a transport to pull the primary's slot from — the absence-as-
+            // deletion guard depends on that slot arriving before any local diff. Later relays converge
+            // via the primary's self-synced circle records. Skipped if already adopted (idempotent).
+            for (r in SeedlessStore.relays()) {
+                val hex = r.trim().lowercase()
+                if (hex.length == 64 && !hex.startsWith("s3:") && !relayEntries.containsKey(hex)) {
+                    runCatching { adoptRelay(hex, setDefault = defaultRelayHex.isEmpty()) }
+                }
+            }
+        }
         // Restore the last-selected circle (if it still exists), so it survives relaunch.
         val savedCircle = prefs.getString("activeCircle", DEFAULT_CIRCLE) ?: DEFAULT_CIRCLE
         activeCircle.value = if (savedCircle == DEFAULT_CIRCLE ||
@@ -453,6 +484,8 @@ object HavenNet : InboundListener {
                 Wire.HELLO -> handleHello(body, viaNearby, senderDevice)
                 Wire.DEVICE_ENROLL -> handleEnrollmentRequest(body)
                 Wire.DEVICE_GRANT -> handleDeviceGrant(body)
+                Wire.SEEDLESS_ENROLL_REQ -> handleSeedlessEnrollRequest(body)
+                Wire.SEEDLESS_ENROLL_GRANT -> handleSeedlessEnrollGrant(body)
                 Wire.EVENT -> handleEvent(body)
                 Wire.RELAY_NODE -> handleRelayNode(body)
                 Wire.RELAY -> handleRelay(body, viaNearby)
@@ -893,8 +926,10 @@ object HavenNet : InboundListener {
 
     // ---- Multi-device roster (iOS-parity; the signed-credential crypto lives in the shared core) ----
 
-    /** Turn THIS device into the primary (master-key holder) that authorizes/revokes the others. */
+    /** Turn THIS device into the primary (master-key holder) that authorizes/revokes the others. A
+     *  seedless device holds no master seed and can never be the primary — no-op there. */
     fun enableDeviceRoster() {
+        if (core.seedless) return
         DeviceRosterManager.enable(social, core.seed, core.bundle, nodeIdHex)
     }
 
@@ -911,6 +946,7 @@ object HavenNet : InboundListener {
 
     /** Revoke a linked device (primary only) — it can decrypt nothing posted afterward. */
     fun revokeDevice(nodeHex: String) {
+        if (core.seedless) return   // only the seed-holding primary revokes
         DeviceRosterManager.revoke(nodeHex, social, core.seed)
     }
 
@@ -922,6 +958,7 @@ object HavenNet : InboundListener {
     /** I hold the master seed → authorize the requesting device: issue its credential, add it to my
      *  signed roster, send the grant back, and push my state so it backfills. */
     private fun handleEnrollmentRequest(payload: ByteArray) {
+        if (core.seedless) return   // only a seed-holding primary answers enrollment (legacy 24/25 path)
         val r = Wire.Reader(payload)
         val bundle = r.lp() ?: return
         val name = r.lp()?.toString(Charsets.UTF_8) ?: "Device"
@@ -947,6 +984,179 @@ object HavenNet : InboundListener {
         DeviceCredentialStore.save(cred)
         scope.launch(Dispatchers.Main) { feedVersion.value++ }
     }
+
+    // ---- Seedless enrollment (seed-drop S4, plan §3/§4) ----------------------------------------
+    //   New devices get a device key + credential + granted self-sync key and NEVER the seed. The
+    //   request is self-authenticating (MAC under the ticket secret) and the grant carries everything
+    //   a seedless device needs. Frames 28/29 sit alongside the legacy seeded 24/25 path, which stays
+    //   working for old links during the transition.
+
+    /** Single-use enrollment tickets this primary is currently offering, keyed by secret hex. */
+    private val pendingTickets = HashMap<String, uniffi.haven_ffi.EnrollTicketFfi>()
+    /** The ticket secret hex the pending (confirm-gated) request matched. */
+    private var pendingRequestSecret: String? = null
+    /** The ticket the new device is currently linking against (null = not linking). */
+    private var pendingLinkTicket: uniffi.haven_ffi.EnrollTicketFfi? = null
+    private val TICKET_TTL_SECS: ULong = 600u   // 10-minute single-use window (plan §3.2)
+
+    /** A frame-28 request the primary must confirm before granting (plan §4.2). */
+    data class SeedlessEnrollPrompt(val deviceHex: String, val name: String, val deviceBundle: ByteArray)
+
+    /** PRIMARY: the `haven-enroll:` QR text currently offered ("" = none). */
+    val seedlessTicketUri = mutableStateOf("")
+    /** PRIMARY: a pending enroll request awaiting the user's confirm (null = none). */
+    val seedlessPendingRequest = mutableStateOf<SeedlessEnrollPrompt?>(null)
+    /** NEW DEVICE: request sent, awaiting the grant. */
+    val seedlessLinking = mutableStateOf(false)
+    /** NEW DEVICE: last linking error to surface (null = none). */
+    val seedlessLinkError = mutableStateOf<String?>(null)
+
+    /**
+     * PRIMARY: mint a fresh single-use enrollment ticket and return its `haven-enroll:` QR text. Only a
+     * seed-holding device that is (or becomes) the primary can authorize — a seedless device returns
+     * null. Registers this device as the primary (device #0 = the account key) if it isn't already.
+     */
+    fun enrollMintTicket(): String? {
+        if (core.seedless) return null
+        DeviceRosterManager.enable(social, core.seed, core.bundle, nodeIdHex)
+        val primaryDevice = hexToBytes32(runCatching { social.myDeviceNodeHex() }.getOrDefault("")) ?: return null
+        val relays = allRelays().filter { !it.startsWith("s3:") }.take(4)
+        val now = System.currentTimeMillis() / 1000
+        val ticket = runCatching {
+            uniffi.haven_ffi.enrollIssueTicket(core.bundle, primaryDevice, now.toULong(), relays)
+        }.getOrNull() ?: return null
+        pendingTickets[bytesToHex(ticket.secret)] = ticket
+        val uri = runCatching { uniffi.haven_ffi.enrollTicketEncode(ticket) }.getOrNull() ?: return null
+        scope.launch(Dispatchers.Main) { seedlessTicketUri.value = uri }
+        return uri
+    }
+
+    /** PRIMARY: cancel the pending ticket (closing the QR sheet without a link). */
+    fun cancelSeedlessTicket() {
+        pendingRequestSecret?.let { pendingTickets.remove(it) }
+        pendingTickets.clear()
+        pendingRequestSecret = null
+        scope.launch(Dispatchers.Main) { seedlessTicketUri.value = ""; seedlessPendingRequest.value = null }
+    }
+
+    /** PRIMARY: a frame-28 request arrived — verify its MAC against each live ticket, and on a match
+     *  surface a confirm sheet (only an explicit confirm issues the grant). */
+    private fun handleSeedlessEnrollRequest(body: ByteArray) {
+        if (core.seedless) return   // only a seed-holding primary authorizes
+        val now = (System.currentTimeMillis() / 1000).toULong()
+        for ((secretHex, ticket) in pendingTickets.toMap()) {
+            if (runCatching { uniffi.haven_ffi.enrollTicketIsExpired(ticket, now, TICKET_TTL_SECS) }.getOrDefault(true)) {
+                pendingTickets.remove(secretHex); continue
+            }
+            val req = runCatching {
+                uniffi.haven_ffi.enrollVerifyRequest(ticket.secret, body, now, TICKET_TTL_SECS)
+            }.getOrNull() ?: continue
+            pendingRequestSecret = secretHex
+            val deviceHex = nodeHex(req.deviceBundle)
+            scope.launch(Dispatchers.Main) {
+                seedlessPendingRequest.value = SeedlessEnrollPrompt(deviceHex, req.name, req.deviceBundle)
+            }
+            return
+        }
+    }
+
+    /** PRIMARY: the user confirmed the prompt → issue the credential, union the device into the signed
+     *  roster, seal the self-sync-key grant, send frame-29 (nearby + directed), consume the ticket, and
+     *  push full state so the new device backfills. */
+    fun confirmSeedlessEnroll() {
+        if (core.seedless) return
+        val prompt = seedlessPendingRequest.value ?: return
+        val secretHex = pendingRequestSecret ?: return
+        val ticket = pendingTickets[secretHex] ?: return
+        scope.launch(Dispatchers.Main) { seedlessPendingRequest.value = null }
+        scope.launch {
+            // Union the device into MY signed roster (re-signs the DeviceList incl. this device, so the
+            // grant's is_authorized(device) check passes) BEFORE reading the wire we ship in the grant.
+            DeviceRosterManager.enable(social, core.seed, core.bundle, nodeIdHex)
+            DeviceRosterManager.addLinkedDevice(prompt.deviceBundle, prompt.deviceHex, prompt.name, social, core.seed)
+                ?: return@launch
+            val rosterWire = runCatching { social.myDeviceRosterWire() }.getOrDefault(ByteArray(0))
+            if (rosterWire.isEmpty()) return@launch
+            val now = (System.currentTimeMillis() / 1000).toULong()
+            val relays = allRelays().filter { !it.startsWith("s3:") }.take(4)
+            val grant = runCatching {
+                uniffi.haven_ffi.enrollAssembleGrant(core.seed, ticket.secret, prompt.deviceBundle,
+                    prompt.name, now, rosterWire, relays)
+            }.getOrNull() ?: return@launch
+            NearbyTransport.broadcast(Wire.frame(Wire.SEEDLESS_ENROLL_GRANT, grant))
+            runCatching { sendFrame(Wire.SEEDLESS_ENROLL_GRANT, grant, prompt.deviceHex) }
+            pendingTickets.remove(secretHex)
+            pendingRequestSecret = null
+            scope.launch(Dispatchers.Main) { seedlessTicketUri.value = "" }
+            runCatching { SelfSyncCoordinator.sync(social) }   // push my profile + posts to the new device
+        }
+    }
+
+    /** PRIMARY: dismiss the confirm prompt without granting. */
+    fun dismissSeedlessEnroll() {
+        pendingRequestSecret = null
+        scope.launch(Dispatchers.Main) { seedlessPendingRequest.value = null }
+    }
+
+    /**
+     * NEW DEVICE: parse a scanned/pasted `haven-enroll:` ticket and send frame-28 to the primary over
+     * both rails (nearby broadcast + directed iroh to the primary's device id), then enter linking mode.
+     * Idempotent / re-scannable. Returns false if the text isn't a valid ticket.
+     */
+    fun beginSeedlessLink(text: String): Boolean {
+        val ticket = runCatching { uniffi.haven_ffi.enrollTicketParse(text.trim()) }.getOrNull() ?: return false
+        pendingLinkTicket = ticket
+        scope.launch(Dispatchers.Main) { seedlessLinkError.value = null; seedlessLinking.value = true }
+        val now = (System.currentTimeMillis() / 1000).toULong()
+        val req = runCatching {
+            uniffi.haven_ffi.enrollBuildRequest(ticket.secret, DeviceKeyStore.deviceBundle(),
+                DeviceKeyStore.deviceName, now)
+        }.getOrNull() ?: run {
+            scope.launch(Dispatchers.Main) { seedlessLinking.value = false; seedlessLinkError.value = "Couldn't build the link request." }
+            return false
+        }
+        NearbyTransport.broadcast(Wire.frame(Wire.SEEDLESS_ENROLL_REQ, req))
+        val primaryHex = bytesToHex(ticket.primaryDevice)
+        scope.launch { runCatching { sendFrame(Wire.SEEDLESS_ENROLL_REQ, req, primaryHex) } }
+        return true
+    }
+
+    /** NEW DEVICE: cancel an in-progress seedless link (back out of the waiting screen). */
+    fun cancelSeedlessLink() {
+        pendingLinkTicket = null
+        scope.launch(Dispatchers.Main) { seedlessLinking.value = false }
+    }
+
+    /**
+     * NEW DEVICE: accept a frame-29 grant. `enrollOpenGrant` runs ALL FOUR acceptance checks (MAC +
+     * account bundle vs ticket, credential names this device, roster authorizes it, self-sync grant
+     * opens with our device key); any failure leaves us in linking mode (idempotent, re-scannable) —
+     * never a half-identity. On success we persist the grant, discard the throwaway account seed, reset
+     * the self-sync base (absence-as-deletion guard — the primary's pushed slot seeds it BEFORE any
+     * local diff), and restart into seedless mode.
+     */
+    private fun handleSeedlessEnrollGrant(body: ByteArray) {
+        val ticket = pendingLinkTicket ?: return   // not currently linking (a grant meant for a sibling)
+        val grant = runCatching {
+            uniffi.haven_ffi.enrollOpenGrant(DeviceKeyStore.deviceAccount().secretSeed(), ticket, body)
+        }.getOrNull() ?: return
+        val accountNodeHex = bytesToHex(ticket.accountId)
+        val accountVerifyHex = bytesToHex(ticket.verification)
+        // installSeedless writes the grant + resets the self-sync base (SelfSyncCoordinator
+        // beginSeedlessEnrollment) so the first sync ADDS the primary's slot rather than tombstoning.
+        HavenCore.installSeedless(appContext, grant, accountNodeHex, accountVerifyHex)
+        ProfileStore.get(appContext).markOnboarded()
+        pendingLinkTicket = null
+        scope.launch(Dispatchers.Main) {
+            seedlessLinking.value = false
+            restartApp(appContext)   // re-enter init() in seedless mode
+        }
+    }
+
+    /** True on a seedless device (no account master seed) — surfaces to the UI + self-sync. */
+    val isSeedless: Boolean get() = core.seedless
+    /** The granted 32-byte self-sync key (seedless only; null on a seeded/legacy device). */
+    val selfSyncKey: ByteArray? get() = if (core.seedless) SeedlessStore.selfSyncKey() else null
 
     /** The members of a circle, with resolved display names — for the roster/management UI. */
     fun membersOf(circleId: String): List<Contact> =
@@ -1217,7 +1427,10 @@ object HavenNet : InboundListener {
         HiddenStore.hide(target)
         val author = runCatching { social.reports(circleId) }.getOrDefault(emptyList())
             .firstOrNull { it.target == target }?.author
-        ModerationLedger.report(core.account, author ?: "", reason)
+        // The ledger row is account-signed (worker verifies against the account node id). A seedless
+        // device holds no account key, so it files the in-circle report (above) but not the ledger row
+        // — the primary owns account-signed artifacts (D10). Every seeded member can still ledger it.
+        core.account?.let { ModerationLedger.report(it, author ?: "", reason) }
         return author
     }
 
@@ -1361,6 +1574,9 @@ object HavenNet : InboundListener {
      * HKDF-SHA256(ikm=accountSeed, salt="haven-own-media-v1", info=empty, len=32). iOS ownMediaKey parity.
      */
     private val ownMediaKey: javax.crypto.spec.SecretKeySpec? by lazy {
+        // Derived from the account SEED, which a seedless device doesn't hold — its own-device media
+        // rides the normal circle-media path (device-bundle-sealed) instead. Returns null there.
+        if (core.seedless) return@lazy null
         runCatching {
             val seed = core.seed
             val salt = "haven-own-media-v1".toByteArray(Charsets.UTF_8)

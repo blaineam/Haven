@@ -75,6 +75,12 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
     var showScan by remember { mutableStateOf(false) }
     var code by remember { mutableStateOf("") }
     var linkError by remember { mutableStateOf(false) }
+    // Seedless link (seed-drop S4): join an existing account WITHOUT copying the master seed.
+    var showSeedless by remember { mutableStateOf(false) }
+    var showSeedlessScan by remember { mutableStateOf(false) }
+    var enrollCode by remember { mutableStateOf("") }
+    var enrollError by remember { mutableStateOf(false) }
+    val linking by HavenNet.seedlessLinking
 
     // Adopt an existing identity from a `haven-seed:` transfer code (paste or QR), then restart
     // into it. Returns false if the code is invalid. Profile name/emoji arrive via device sync.
@@ -87,6 +93,15 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
             restartApp(context)
         }
         ok
+    }
+
+    // Seedless link: bring up the transient engine + node (under a throwaway identity discarded on
+    // enrollment), then send the frame-28 request. The grant handler flips this device into seedless
+    // mode and restarts. Returns false if the text isn't a `haven-enroll:` ticket.
+    val beginSeedless = { text: String ->
+        HavenNet.init(context)
+        HavenNet.start()
+        HavenNet.beginSeedlessLink(text.trim())
     }
 
     HavenBackground {
@@ -186,8 +201,11 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
                 enabled = name.isNotBlank(),
             ) { onDone(name.trim(), emoji, avatarB64) }
             Spacer(Modifier.height(6.dp))
+            TextButton(onClick = { enrollCode = ""; enrollError = false; showSeedless = true }) {
+                Text("Link to my other device (recommended)", color = HavenTheme.pink, fontSize = 14.sp)
+            }
             TextButton(onClick = { code = ""; linkError = false; showLink = true }) {
-                Text("Already use Haven? Link this device", color = HavenTheme.pink, fontSize = 14.sp)
+                Text("Copy my identity (advanced)", color = HavenTheme.textSecondary, fontSize = 13.sp)
             }
             Spacer(Modifier.height(10.dp))
             Text(
@@ -245,6 +263,81 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
                     onResult = { text -> showScan = false; adopt(text) },
                     onCancel = { showScan = false },
                 )
+            }
+        }
+
+        // Seedless link — scan/paste the `haven-enroll:` code the OTHER device shows.
+        if (showSeedless) {
+            AlertDialog(
+                onDismissRequest = { showSeedless = false },
+                title = { Text("Link to your other device") },
+                text = {
+                    Column {
+                        Text(
+                            "On the device you already use, open You ▸ Settings ▸ Authorized devices ▸ “Link a new device (no seed)”, then scan its QR or paste the code. Your master seed never leaves that device — this one gets its own revocable key.",
+                            color = HavenTheme.textSecondary,
+                            fontSize = 13.sp,
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        OutlinedTextField(
+                            value = enrollCode,
+                            onValueChange = { enrollCode = it; enrollError = false },
+                            label = { Text("haven-enroll:…") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = HavenTheme.pink,
+                                cursorColor = HavenTheme.pink,
+                                focusedLabelColor = HavenTheme.pink,
+                            ),
+                        )
+                        if (enrollError) {
+                            Spacer(Modifier.height(6.dp))
+                            Text("That isn't a valid link code.", color = HavenTheme.pink, fontSize = 12.sp)
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        if (beginSeedless(enrollCode)) showSeedless = false else enrollError = true
+                    }) { Text("Link", color = HavenTheme.pink) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showSeedless = false; showSeedlessScan = true }) { Text("Scan QR") }
+                },
+            )
+        }
+        if (showSeedlessScan) {
+            FullScreenOverlay(onDismiss = { showSeedlessScan = false }) {
+                QrScannerScreen(
+                    onResult = { text -> showSeedlessScan = false; beginSeedless(text) },
+                    onCancel = { showSeedlessScan = false },
+                )
+            }
+        }
+
+        // Waiting for the primary to confirm + send the grant. The grant handler restarts the app into
+        // seedless mode; Cancel backs out (re-scannable — never a half-identity).
+        if (linking) {
+            FullScreenOverlay(onDismiss = { HavenNet.cancelSeedlessLink() }) {
+                Column(
+                    Modifier.fillMaxSize().padding(28.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    androidx.compose.material3.CircularProgressIndicator(color = HavenTheme.pink)
+                    Spacer(Modifier.height(20.dp))
+                    BrandText("Linking…", fontSize = 22)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Confirm “link this device” on your other phone. Keep both phones nearby and unlocked.",
+                        color = HavenTheme.textSecondary, textAlign = TextAlign.Center, fontSize = 13.sp,
+                    )
+                    Spacer(Modifier.height(24.dp))
+                    TextButton(onClick = { HavenNet.cancelSeedlessLink() }) {
+                        Text("Cancel", color = HavenTheme.textSecondary)
+                    }
+                }
             }
         }
     }

@@ -12,10 +12,12 @@ import uniffi.haven_ffi.S3ConfigFfi
 import uniffi.haven_ffi.decodeCircleSync
 import uniffi.haven_ffi.encodeCircleSync
 import uniffi.haven_ffi.openAccountState
+import uniffi.haven_ffi.openAccountStateWithKey
 import uniffi.haven_ffi.s3Get
 import uniffi.haven_ffi.s3List
 import uniffi.haven_ffi.s3Put
 import uniffi.haven_ffi.sealAccountState
+import uniffi.haven_ffi.sealAccountStateWithKey
 import uniffi.haven_ffi.selfSyncSlotKey
 import uniffi.haven_ffi.selfSyncSlotPrefix
 import java.io.File
@@ -75,6 +77,27 @@ object SelfSyncCoordinator {
      *  freshly-restored device never diffs its empty engine against a STALE base and tombstones the whole
      *  account (the data-loss bug). */
     fun reset() { runCatching { baseFile.delete() } }
+
+    /** Persisted one-shot: while set, this (freshly-enrolled seedless) device NEVER tombstones — it only
+     *  ADDS — until the primary's slot has been merged in. */
+    private const val KEY_ENROLL_BASELINE = "seedless.awaiting.first.merge"
+
+    /**
+     * Seed-drop S4 absence-as-deletion guard (plan §7). A freshly-enrolled seedless device starts with an
+     * EMPTY engine; if it diffed that against the base and pushed tombstones before ingesting the primary's
+     * slot, it would wipe the account's circles/contacts. So on enrollment we (a) reset the base to empty
+     * and (b) arm a persisted flag that FORCES additive-only self-sync until the primary's pushed slot has
+     * been merged in — i.e. the base is initialized from the primary's first pushed slot BEFORE any local
+     * diff can produce a removal. Called from HavenCore.installSeedless during grant acceptance.
+     */
+    fun beginSeedlessEnrollment() {
+        reset()   // empty base — the first merge fills it from the primary's slot (never a stale diff)
+        if (::appContext.isInitialized) runCatching { prefs.edit().putBoolean(KEY_ENROLL_BASELINE, true).apply() }
+    }
+
+    private fun awaitingEnrollBaseline(): Boolean =
+        runCatching { prefs.getBoolean(KEY_ENROLL_BASELINE, false) }.getOrDefault(false)
+    private fun clearEnrollBaseline() = runCatching { prefs.edit().remove(KEY_ENROLL_BASELINE).apply() }
 
     /**
      * A stable **per-device** id. All of a user's devices share the account seed (same node id), so
@@ -356,9 +379,14 @@ object SelfSyncCoordinator {
     }
 
     private suspend fun syncLocked(social: HavenSocial?): Boolean {
-        val seed = HavenNet.accountSeed
         val accountHex = HavenNet.accountNodeHex
         if (accountHex.isEmpty()) return false
+        // Seedless devices hold no account seed — they seal/open account state with the granted 32-byte
+        // self-sync key (seal/openAccountStateWithKey) instead of deriving it from the seed. Slot keys
+        // still key on the shared accountHex, so both device kinds converge on the same mailbox.
+        val seedless = HavenNet.isSeedless
+        val selfSyncKey = if (seedless) (HavenNet.selfSyncKey ?: return false) else null
+        val seed = if (seedless) ByteArray(0) else HavenNet.accountSeed
 
         // Transports = every relay (existing) + the user's own S3 bucket if configured. Self-sync
         // now works with a relay OR an S3 bucket (no relay required) — matching iOS/desktop.
@@ -386,9 +414,13 @@ object SelfSyncCoordinator {
         // BUT NOT when the engine looks freshly-empty (no circles locally while the base still has
         // circles). That signature is a just-restored / unready device, and tombstoning there is exactly
         // what wiped accounts. In that state we only ADD, never remove.
+        // A freshly-enrolled seedless device NEVER tombstones until the primary's slot has merged in
+        // (absence-as-deletion guard, plan §7) — even if a stray local circle appears, its empty roster
+        // must not sever the account. The flag clears below once a merge actually brings peer state in.
+        val enrollBaseline = awaitingEnrollBaseline()
         val localHasCircle = local.keys.any { it.startsWith("circle:") }
         val baseHasCircle = base.entries().any { it.key.startsWith("circle:") }
-        if (localHasCircle || !baseHasCircle) {
+        if (!enrollBaseline && (localHasCircle || !baseHasCircle)) {
             for (e in base.entries()) {
                 if (dynamicPrefixes.any { e.key.startsWith(it) } && !local.containsKey(e.key)) {
                     runCatching { base.remove(e.key, now, deviceId) }
@@ -407,12 +439,17 @@ object SelfSyncCoordinator {
             for (key in keys) {
                 if (key == ownKey) continue
                 val blob = t.get(key) ?: continue
-                val peer = runCatching { openAccountState(seed, blob) }.getOrNull() ?: continue
+                val peer = runCatching {
+                    if (seedless) openAccountStateWithKey(selfSyncKey!!, blob) else openAccountState(seed, blob)
+                }.getOrNull() ?: continue
                 base.merge(peer)
             }
         }
 
         val changed = !base.toBytes().contentEquals(preMerge)
+        // The primary's slot has now been folded into the base — it's safe to leave additive-only mode
+        // (subsequent local removals may propagate as tombstones like any seeded device).
+        if (enrollBaseline && changed) clearEnrollBaseline()
 
         // 4. Apply the converged state locally + persist the new base.
         applyLocal(base, social)
@@ -421,7 +458,9 @@ object SelfSyncCoordinator {
         if (changed) HavenNet.selfSyncDidApply()
 
         // 5. Re-publish our own slot (sealed) to every transport for redundancy.
-        val sealed = runCatching { sealAccountState(seed, base) }.getOrNull() ?: return changed
+        val sealed = runCatching {
+            if (seedless) sealAccountStateWithKey(selfSyncKey!!, base) else sealAccountState(seed, base)
+        }.getOrNull() ?: return changed
         for (t in transports) t.put(ownKey, sealed)
         return changed
     }

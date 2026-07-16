@@ -112,40 +112,42 @@ it, the Microsoft-Store MSIX-submit and Google-Play-upload steps consume the art
 stay available as normal CI artifacts (`desktop-windows`, `haven-android-apk`) for a manual store
 upload. Only the *attach-to-Release* step is gated.
 
-### The safe transition (why they're still attached today)
+### Current state — the flip is DONE (both variables set to `false`)
 
-Removing the paid platforms from GH is real, but it must not **strand users**:
+Both paid GUI platforms have moved off GitHub Releases. The attach for each is governed by a
+**repo variable** (repo → *Settings ▸ Secrets and variables ▸ Actions ▸ **Variables***), and
+**both are now set to `false`**:
 
-- **The Microsoft Store listing does not exist yet** (needs the four Azure AD `STORE_*` secrets,
-  or a manual submission — see `STORE-AUTOPUBLISH.md`). Take Windows off GH before that and a
-  Windows user has *no way to install Haven at all*.
-- **Google Play is on the INTERNAL track**, not a public listing. Same risk.
-- iOS/macOS are genuinely live on the App Store, so they were never on GH and nothing changes.
-
-So each paid platform's GitHub attach is governed by a **repo variable** (repo → *Settings ▸
-Secrets and variables ▸ Actions ▸ **Variables***), and the **default (unset) keeps it attached**
-as a stopgap:
-
-| Repo variable | Governs | Unset / ≠ `false` (default) | Set to `false` |
+| Repo variable | Governs | Current value | Effect |
 |---|---|---|---|
-| `PUBLISH_WINDOWS_TO_GH` | Windows `.msi`/`.exe`/`.msix` on the Release (`release.yml` `publish` job) | Attached (stopgap) | Stripped — Store is the channel |
-| `PUBLISH_ANDROID_TO_GH` | Android `.apk`/`.aab` on the Release (`android.yml`) | Attached (stopgap) | Not attached — Play is the channel |
+| `PUBLISH_WINDOWS_TO_GH` | Windows `.msi`/`.exe`/`.msix` on the Release (`release.yml` `publish` job) | **`false`** (set) | Stripped — Microsoft Store is the channel |
+| `PUBLISH_ANDROID_TO_GH` | Android `.apk`/`.aab` on the Release (`android.yml`) | **`false`** (set) | Not attached — Google Play is the channel |
 
-### The exact flip
+The store listings are still processing — **Windows is in Microsoft Store certification** and
+**Android is in Google Play review** (closed testing), so neither is a public store link yet, but
+both go live soon. iOS/macOS are genuinely live on the App Store, so they were never on GH and
+nothing changes there.
 
-Independently, per platform, when its store listing goes **public**:
+Because the GUI installers are off the public Release *before* the store links are public, the
+interim way to grab a build is the **short-retention CI artifact**, not a Release asset:
 
-1. **Windows** — the day the Microsoft Store listing is live: set repo variable
-   `PUBLISH_WINDOWS_TO_GH = false`. From the next tag, `release.yml`'s `publish` job runs
-   `rm -f dist/*.msi dist/*.msix dist/*setup.exe` before publishing — Windows GUI installers
-   stop riding the Release; the Windows relay `.exe`, all Linux artifacts, and everything else
+- **Windows** — `desktop-windows` artifact on the `release.yml` run (Actions → the run → Artifacts).
+- **Android** — `haven-android-apk` artifact on the `android.yml` run.
+
+These are private (repo-collaborator) downloads with a short retention, used for the Store/Play
+submissions and manual testing — not a public distribution channel.
+
+### What the variables do
+
+1. **Windows** (`PUBLISH_WINDOWS_TO_GH = false`) — `release.yml`'s `publish` job runs
+   `rm -f dist/*.msi dist/*.msix dist/*setup.exe` before publishing, so Windows GUI installers
+   don't ride the Release. The Windows relay `.exe`, all Linux artifacts, and everything else
    are untouched.
-2. **Android** — the day the Google Play listing is public: set `PUBLISH_ANDROID_TO_GH = false`.
-   From the next tag, `android.yml` skips both "Attach … to the GitHub Release" steps; the Play
-   upload and the CI APK artifact continue.
+2. **Android** (`PUBLISH_ANDROID_TO_GH = false`) — `android.yml` skips both "Attach … to the
+   GitHub Release" steps; the Play upload and the CI `haven-android-apk` artifact continue.
 
-Both are a single one-time variable change — no code edit, no re-tag of old releases. The old
-tags keep whatever assets they were published with; the switch only affects future releases.
+Each is a single repo-variable value — no code edit, no re-tag of old releases. Old tags keep
+whatever assets they were published with; the switch only affects future releases.
 
 ---
 
@@ -366,8 +368,9 @@ green with zero setup.
 | `STORE_*` (8) | Microsoft Store MSIX | MSIX + submit skipped |
 
 Separate from these secrets, two **repo variables** control the channel policy (see
-[Release channels](#release-channels--what-goes-where)) — they default to attaching the paid
-builds so nobody is stranded, and flip to `false` once each store is public:
+[Release channels](#release-channels--what-goes-where)) — **both are now set to `false`**, so the
+Windows and Android GUI builds no longer ride the public Release (they come off as short-retention
+`desktop-windows` / `haven-android-apk` CI artifacts instead):
 
 | Repo variable | Effect when `false` |
 |---|---|

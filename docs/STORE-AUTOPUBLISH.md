@@ -108,7 +108,7 @@ These are Google's rules, not CI limitations — no API can do them:
 |---|---|
 | `PLAY_TRACK` | standing track for tags: `internal` (default if unset) / `alpha` / `beta` / `production` |
 | `PLAY_USER_FRACTION` | standing staged-rollout fraction `0.0`–`1.0` (blank = full) |
-| `PUBLISH_ANDROID_TO_GH` | (pre-existing) `false` to stop attaching the APK/AAB to the GitHub Release once Play is public |
+| `PUBLISH_ANDROID_TO_GH` | **now set to `false`** — the APK/AAB are no longer attached to the GitHub Release. Google Play is the channel; the interim build is the short-retention `haven-android-apk` CI artifact. |
 
 `versionCode` is the workflow run number (always increasing); `versionName` is the tag (or, on a
 manual run, `apple/project.yml`'s `MARKETING_VERSION`).
@@ -198,11 +198,12 @@ is still in certification.
 
 | Variable | What |
 |---|---|
-| `PUBLISH_WINDOWS_TO_GH` | (pre-existing) `false` to stop attaching `.msi`/`.msix`/`setup.exe` to the GitHub Release once the Store is public |
+| `PUBLISH_WINDOWS_TO_GH` | **now set to `false`** — `.msi`/`.msix`/`setup.exe` are no longer attached to the GitHub Release. The Microsoft Store is the channel; the interim build is the short-retention `desktop-windows` CI artifact. |
 
 The MSIX manifest is generated in CI from `desktop/msix/AppxManifest.xml.in` (nothing
-identity-specific is committed). The `.msix` rides the GitHub Release **only as a stopgap** while
-`PUBLISH_WINDOWS_TO_GH ≠ "false"`; flip that variable the day the Store listing goes public. See
+identity-specific is committed). With `PUBLISH_WINDOWS_TO_GH = "false"` the Windows GUI installers
+no longer ride the GitHub Release — the Microsoft Store (in certification now, live soon) is the
+channel, and the `desktop-windows` CI artifact is the interim download. See
 [`RELEASING.md`](RELEASING.md#release-channels--what-goes-where).
 
 > **Reality check:** the MSIX/Store path is newer than the Play path and can't be fully exercised

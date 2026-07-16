@@ -225,9 +225,10 @@ See [`RELEASING.md`](RELEASING.md) for the scheme and the full checklist.
 to one GitHub Release. **By policy the GitHub Release carries only the platforms that have no
 app store** — the Linux desktop app and the relay CLI. iOS/macOS (App Store), Android (Google
 Play) and Windows (Microsoft Store) are paid apps that ship through their stores and do **not**
-accumulate a Release history. (Windows/Android are still built by CI and are attached as a
-*stopgap* until their store listing is public — see [`RELEASING.md`](RELEASING.md#release-channels--what-goes-where)
-and the `PUBLISH_WINDOWS_TO_GH` / `PUBLISH_ANDROID_TO_GH` toggles.) On the Release you get:
+accumulate a Release history. (Windows/Android are still built by CI but are **no longer attached**
+to the Release — both `PUBLISH_WINDOWS_TO_GH` and `PUBLISH_ANDROID_TO_GH` are now set to `false`;
+the interim builds are the short-retention `desktop-windows` / `haven-android-apk` CI artifacts.
+See [`RELEASING.md`](RELEASING.md#release-channels--what-goes-where).) On the Release you get:
 
 - **Relay** `haven-relay-<target>` for x86_64 / aarch64 / armv7 / armv6 (musl, via
   `cargo-zigbuild`) + macOS + Windows — the exact assets `relay/install.sh` downloads — plus

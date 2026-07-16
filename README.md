@@ -44,12 +44,13 @@ S3-compatible bucket, or a direct peer-to-peer link.
 
 **1.0 is live on the App Store for iPhone, iPad, and Mac**
 (https://apps.apple.com/app/id6782147901 — 1.0.4 public, 1.0.5 in review).
-Android is on Google Play's **internal** track (closed testing, not yet public);
-Windows/Linux installers and the `haven-relay` daemon ship on GitHub Releases.
-Per the [channel policy](docs/RELEASING.md), each platform ships through its own
-store and **GitHub Releases carry only the storeless Linux + relay builds** — so
-you download the paid iPhone/Mac/Android/Windows app from its store, never from a
-release tarball. It's been used device-to-device over the real internet and a
+Android is on Google Play's **internal** track (closed testing, not yet public)
+and Windows is in certification for the **Microsoft Store** — both go live soon,
+and neither GUI app is on GitHub Releases anymore. The **Linux** installers and
+the `haven-relay` daemon still ship on GitHub Releases (free). Per the
+[channel policy](docs/RELEASING.md), each platform ships through its own store and
+**GitHub Releases carry only the storeless Linux + relay builds** — so you download
+the paid iPhone/Mac/Android/Windows app from its store, never from a release tarball. It's been used device-to-device over the real internet and a
 nearby Bluetooth/Wi-Fi mesh daily. Done so far:
 
 - **Hybrid post-quantum core** (`p2pcore`) — identity (Ed25519+ML-DSA, X25519+ML-KEM-768),
@@ -140,9 +141,9 @@ One Rust core (`p2pcore`) powers every client, so new platforms are mostly UI:
   AppImage and a sideloadable `haven.flatpak` (Steam Deck) on **GitHub Releases** for
   **Ubuntu / Debian / Raspberry Pi OS / Arch / SteamOS**; PKGBUILDs live in-repo but Haven is
   **not on the AUR or Flathub yet** (see [`docs/LINUX.md`](docs/LINUX.md)). The `haven-relay`
-  daemon cross-builds for x86_64/aarch64/armv7/armv6. Windows installers build in CI but the
-  install path is still untested on real hardware and Windows is not in the Microsoft Store
-  yet. See [`docs/LINUX.md`](docs/LINUX.md) and [`docs/WINDOWS-PORT.md`](docs/WINDOWS-PORT.md)
+  daemon cross-builds for x86_64/aarch64/armv7/armv6. The Windows GUI (x64 &amp; Arm64) is in
+  certification for the **Microsoft Store** and is no longer attached to GitHub Releases; it
+  goes live soon. See [`docs/LINUX.md`](docs/LINUX.md) and [`docs/WINDOWS-PORT.md`](docs/WINDOWS-PORT.md)
 - **Apple Watch** — glanceable companion (messages/photos/reactions/quick replies;
   not bulk video)
 

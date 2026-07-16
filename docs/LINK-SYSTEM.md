@@ -97,16 +97,18 @@ would silently delete `.well-known/` from the published site.
 > | Install path | Cert on the device | Fingerprint |
 > |---|---|---|
 > | Google Play | Google's **app-signing** cert (Play strips the upload signature and re-signs) | `62:24:04:7F:…` |
-> | Direct APK — the site's "Or download APK" → GitHub Releases | the **release keystore** | `F7:22:EF:7C:…` |
+> | Direct APK — the `haven-android-apk` CI artifact (no longer a public GitHub download) | the **release keystore** | `F7:22:EF:7C:…` |
 >
 > The release keystore and the Play **upload** key are the SAME key here: both
-> `assembleRelease` (→ the GitHub-release APK) and `bundleRelease` (→ the Play AAB) sign
+> `assembleRelease` (→ the CI-artifact APK) and `bundleRelease` (→ the Play AAB) sign
 > with `ANDROID_KEYSTORE_BASE64` in `.github/workflows/android.yml`. So Play Console's
-> "Upload key certificate" is also the direct-download APK's cert — which is why it
-> belongs here even though Play itself never serves it.
+> "Upload key certificate" is also the direct-artifact APK's cert — which is why it
+> belongs here even though Play itself never serves it. (Android is now store-only: the
+> APK/AAB were removed from GitHub Releases, so the only direct build is the private CI
+> artifact used for testing and the Play upload.)
 >
 > **Do not paste Play Console's generated Digital Asset Links JSON verbatim.** It lists
-> only the app-signing cert, because Google has no idea Haven is also distributed as a
+> only the app-signing cert, because Google has no idea Haven is also built as a
 > direct APK. It is correct-but-incomplete for us.
 >
 > To re-derive either, UI-independently:

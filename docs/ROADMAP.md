@@ -11,8 +11,8 @@ marked **UNVERIFIED** rather than asserted.
 | **iOS + iPadOS** | **1.0.4 live on the App Store.** 1.0.5 (build 189) in review — feed blur backdrop + carousel, web post links, relay nudge, call fixes |
 | **macOS** | **1.0.4 live on the App Store** (native `HavenMac`, not Catalyst). 1.0.5 in review |
 | **Apple Watch** | Shipped, embedded in the iOS app (`com.blaineam.kith.watchkitapp`) |
-| **Android** | Signed AAB on the Play **internal** track. Closed testing not yet public |
-| **Windows** | Real `.msi` / NSIS `.exe` on GitHub Releases (`v0.1.0-beta.40`). ⚠️ **install path untested on real hardware.** Not in the Microsoft Store |
+| **Android** | Signed AAB on the Play **internal** track (in review, closed testing not yet public). No longer on GitHub Releases (`PUBLISH_ANDROID_TO_GH=false`); interim build is the `haven-android-apk` CI artifact |
+| **Windows** | Real `.msi` / NSIS `.exe` (x64 &amp; Arm64), **in Microsoft Store certification** (live soon). No longer on GitHub Releases (`PUBLISH_WINDOWS_TO_GH=false`); interim build is the `desktop-windows` CI artifact |
 | **Linux** | `.deb` / `.rpm` / AppImage / sideloadable `haven.flatpak` on GitHub Releases (x86_64). **Not on the AUR. Not on Flathub** |
 | **`haven-relay` daemon** | Static musl binaries for x86_64 / aarch64 / armv7 / armv6 (Pi), plus macOS + Windows |
 | **Web** | Invite-landing / promo page only — the client was abandoned (M6) |

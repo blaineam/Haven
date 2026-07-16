@@ -19,11 +19,17 @@ That single tag fans out to every platform job and produces **one GitHub Release
 
 | Platform | Artifact(s) | Built with NO secrets? |
 | --- | --- | --- |
-| **Android** | `.apk` (universal + per-ABI) | ✅ **debug-signed** beta APK |
-| **Windows** | `.msi`, NSIS `.exe` | ✅ unsigned (SmartScreen warns) |
+| **Android** | `.apk` / `.aab` — **CI artifact only** (`PUBLISH_ANDROID_TO_GH=false`, Google Play is the channel) | ✅ **debug-signed** beta APK |
+| **Windows** | `.msi`, NSIS `.exe` — **CI artifact only** (`PUBLISH_WINDOWS_TO_GH=false`, Microsoft Store is the channel) | ✅ unsigned (SmartScreen warns) |
 | **Linux** | `.deb`, `.rpm`, `.AppImage` | ✅ |
 | **SteamOS / Steam Deck** | `haven.flatpak` + pinned manifest | ✅ |
 | **Relay daemon** | `haven-relay-<target>` + `.deb` | ✅ |
+
+The Windows and Android GUI builds are **no longer attached to the public Release** — both repo
+variables `PUBLISH_WINDOWS_TO_GH` / `PUBLISH_ANDROID_TO_GH` are set to `false`, so they come off
+as the short-retention `desktop-windows` / `haven-android-apk` CI artifacts and ship to their
+stores instead (see [`RELEASING.md`](RELEASING.md#release-channels--what-goes-where)). The Release
+carries only the Linux, Flatpak, and relay builds.
 
 Add the signing secrets later (below) and the *same* tag yields fully-signed/notarized builds.
 
@@ -33,8 +39,8 @@ Add the signing secrets later (below) and the *same* tag yields fully-signed/not
 
 | Workflow | Triggers | Produces |
 | --- | --- | --- |
-| `.github/workflows/release.yml` | `v*` tags, `workflow_dispatch` | Relay, Windows/Linux desktop, Flatpak → one Release (macOS ships on the App Store) |
-| `.github/workflows/android.yml` | push to `main`, `v*` tags, `workflow_dispatch` | Android `.apk` → artifact, attached to the Release on `v*` |
+| `.github/workflows/release.yml` | `v*` tags, `workflow_dispatch` | Relay, Linux desktop, Flatpak → one Release (Windows GUI stripped via `PUBLISH_WINDOWS_TO_GH=false`, kept as the `desktop-windows` CI artifact; macOS ships on the App Store) |
+| `.github/workflows/android.yml` | push to `main`, `v*` tags, `workflow_dispatch` | Android `.apk`/`.aab` → `haven-android-apk` CI artifact + Google Play upload (no longer attached to the Release — `PUBLISH_ANDROID_TO_GH=false`) |
 | `.github/workflows/desktop.yml` | push/PR touching `desktop/` or `core/` | Windows/Linux installers as CI artifacts (no Release) |
 | `.github/workflows/relay-release.yml` | `relay-v*` tags | Relay binaries only (hotfix path) |
 
@@ -54,14 +60,16 @@ softprops updates the existing Release if it already exists, so job ordering doe
 
 ### Artifact download URLs
 
-**Release assets** (after a `v*` tag) — stable, public URLs:
+**Release assets** (after a `v*` tag) — stable, public URLs. These now carry only the Linux,
+Flatpak, and relay builds; the Windows and Android GUI installers are no longer Release assets
+(see the CI-artifact note below):
 
 ```
 https://github.com/blaineam/haven/releases/download/vX.Y.Z/<file>
 https://github.com/blaineam/haven/releases/latest          # human-facing "latest" page
 ```
 
-e.g. `…/releases/download/v0.1.0/app-universal-release.apk`.
+e.g. `…/releases/download/v0.1.0/haven_0.1.0_amd64.deb`.
 
 **CI artifacts** (per-run, e.g. a `main` push with no tag) — download from the run's summary page
 under **Artifacts**, or via the API/`gh`:

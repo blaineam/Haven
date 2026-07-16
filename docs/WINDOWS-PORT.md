@@ -82,14 +82,15 @@ What actually happens today, in [`.github/workflows/release.yml`](../.github/wor
 3. CI submits it with `msstore publish` via the MSStore CLI (`release.yml:243-250`).
 
 Both the packaging and publish steps are **gated on Store secrets being present** and are
-`continue-on-error`, so with no secrets configured they simply skip and the normal
-`.msi`/`.exe` release still ships. The 8 required secrets are listed in `STORE-AUTOPUBLISH.md`.
+`continue-on-error`, so with no secrets configured they simply skip. The 8 required secrets are
+listed in `STORE-AUTOPUBLISH.md`.
 
-**Current state: not in the Microsoft Store.** The 4 Azure AD credentials
-(`STORE_TENANT_ID`, `STORE_CLIENT_ID`, `STORE_CLIENT_SECRET`, `STORE_SELLER_ID`) have not been
-created, so the publish step is inert. Direct download of the `.msi`/NSIS `.exe` from GitHub
-Releases is the shipping path today; those are **not** code-signed, so Windows SmartScreen will
-warn on first run.
+**Current state: the Microsoft Store is the channel.** The Windows submission is **in Store
+certification** (processing now, live soon). The GUI installers are **no longer attached to GitHub
+Releases** — `PUBLISH_WINDOWS_TO_GH` is set to `false`, so `release.yml`'s publish job strips the
+`.msi`/`.msix`/`setup.exe`. The only direct build is the short-retention `desktop-windows` CI
+artifact (used for the Store submission and manual testing). The Windows relay `.exe` — a self-host
+CLI, not the Store app — still ships on the Release.
 
 ## Parity table (iOS → Windows/Tauri)
 

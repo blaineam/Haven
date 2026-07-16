@@ -2419,7 +2419,7 @@ async function settingsSheet() {
     foot("Keep more than one identity on this PC and switch between them. Each has its own profile, circles and contacts."),
 
     group(row("Devices", "laptop", () => devicesSheet())),
-    foot("Link this account to your other devices — each gets its own revocable key and syncs your profile + posts. See which devices are authorized, re-sync, or revoke one."),
+    foot("Link this account to your other devices — each holds a copy of your master key and its own key on top, and syncs your profile + posts. See which devices are authorized, re-sync, or revoke one."),
 
     group(row("Scheduled messages", "clock", () => scheduledSheet())),
     foot("Posts and DMs waiting to send. Compose one with the + menu's “Send later…”."),
@@ -2511,7 +2511,7 @@ async function devicesSheet() {
   const roleTitle = roster.enabled ? "This is your primary device"
     : roster.this_device_authorized ? "This is a linked device" : "This device isn’t linked yet";
   const roleSub = roster.enabled ? "It holds your master key and authorizes or revokes your other devices."
-    : roster.this_device_authorized ? "It acts on behalf of your primary device, which can revoke it at any time."
+    : roster.this_device_authorized ? "It holds a copy of your master key and syncs with your primary device, which can revoke it."
     : "Make it your primary, or link it to the device that already is.";
   const devicesCard = el("div", { class: "col" },
     el("div", {}, el("strong", {}, roleTitle)),
@@ -2523,7 +2523,7 @@ async function devicesSheet() {
       el("div", { style: "flex:1" }, el("div", { class: "name" }, d.name),
         el("div", { class: "muted small" }, d.is_primary ? "Master key" : d.is_this_device ? "This device" : "Linked device")),
       d.is_primary ? null : el("button", { class: "btn small danger", onclick: async () => {
-        if (confirm(`Revoke “${d.name}”? It will no longer receive anything posted afterward.`)) { await invoke("revoke_device", { nodeHex: d.node_hex }); devicesSheet(); }
+        if (confirm(`Revoke “${d.name}”? Revoking stops it receiving what you post afterward — which cuts off a device that is simply lost or stolen. It can’t help if someone has extracted your master key from it: linked devices hold a copy of that key, and revoking doesn’t take it back. If that happened, the only remedy is to start a new identity.`)) { await invoke("revoke_device", { nodeHex: d.node_hex }); devicesSheet(); }
       } }, "Revoke")));
   }
   devicesCard.append(el("div", { class: "row wrap", style: "margin-top:6px" },

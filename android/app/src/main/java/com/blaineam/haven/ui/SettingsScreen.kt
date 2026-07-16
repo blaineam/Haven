@@ -728,7 +728,7 @@ private fun AuthorizedDevicesCard() {
         Spacer(Modifier.height(4.dp))
         val role = when {
             enabled -> "This is your primary device" to "It holds your master key and authorizes or revokes your other devices."
-            authorized -> "This is a linked device" to "It acts on behalf of your primary device, which can revoke it at any time."
+            authorized -> "This is a linked device" to "It holds a copy of your master key and syncs with your primary device, which can revoke it."
             else -> "This device isn’t linked yet" to "Make it your primary, or link it to the device that already is."
         }
         Text(role.first, color = HavenTheme.pink, fontSize = 14.sp, fontWeight = FontWeight.Medium)
@@ -787,7 +787,7 @@ private fun AuthorizedDevicesCard() {
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { revokeTarget = null }, containerColor = HavenTheme.card,
             title = { Text("Revoke “${t.name}”?", color = HavenTheme.textPrimary) },
-            text = { Text("This device will no longer receive anything posted to your circles afterward.", color = HavenTheme.textSecondary) },
+            text = { Text("Revoking stops this device receiving what you post afterward — which cuts off a device that is simply lost or stolen. It can’t help if someone has extracted your master key from it: linked devices hold a copy of that key, and revoking doesn’t take it back. If that happened, the only remedy is to start a new identity.", color = HavenTheme.textSecondary) },
             confirmButton = {
                 Text("Revoke device", color = Color(0xFFF87171),
                     modifier = Modifier.clickable { HavenNet.revokeDevice(t.nodeHex); revokeTarget = null }.padding(8.dp))

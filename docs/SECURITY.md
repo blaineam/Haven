@@ -22,10 +22,21 @@ This document records what Haven protects, how, and the limits — including the
   security, so Haven is never weaker than classical and resists "harvest-now-decrypt-later". The KEM
   derivation binds the full transcript (ephemeral key, ciphertext, recipient keys).
 - **Group keying (sender keys + epochs)** — see `GROUP-KEYING.md`. Each member seals their posts under
-  an epoch key distributed to the current members via the hybrid KEM. Removing/blocking a member, or a
-  device-roster change, rotates the epoch so the removed node **cannot decrypt content posted
-  afterward** — cryptographic revocation, not advisory (`core/p2pcore-ffi/src/lib.rs:1128`, `:1521`,
-  `:2516`). Only the last 4 epoch keys are retained (`prune_epoch_keys`, `lib.rs:1041-1063`).
+  an epoch key distributed to the current members via the hybrid KEM. Removing or blocking a **member**
+  (a contact who never held your account seed) rotates the epoch and seals the new key only to the
+  remaining members, so that node **cannot decrypt content posted afterward** — this member removal is
+  cryptographic, not advisory (`core/p2pcore-ffi/src/lib.rs:1128`, `:1521`, `:2516`). Only the last 4
+  epoch keys are retained (`prune_epoch_keys`, `lib.rs:1041-1063`).
+- **Device-roster revocation is _advisory_, not cryptographic.** Revoking one of your **own** linked
+  devices rotates the epoch too, but every epoch key still seals to the account key as well —
+  `recipients_with_devices` **always** adds it (`core/p2pcore/src/device.rs:358-363`) — and a linked
+  device holds a _copy_ of the master seed (linking transfers `haven-seed:` / `haven-link:`; enrollment
+  only adds a device key to a device that already has the seed). So a revoked device that still holds the
+  seed keeps decrypting, and can even re-sign a higher-version roster re-adding itself. Revocation
+  therefore defeats a device that is **lost or stolen** (keychain intact, seed not extracted), not one
+  that is **compromised**. Making it cryptographic needs the seed-drop re-key (D16 Phase 2), which is
+  **not yet built** (`core/p2pcore/src/device.rs:371-373`); until it lands, the only remedy against a
+  genuinely compromised device is starting a new identity.
 - **Forward secrecy — read this carefully.** Pruning bounds it *only once the epoch has actually
   moved*, and today the epoch moves **only on removal/block/device-roster change**. The periodic
   rotation the design calls for is implemented in core (`rotate_circle`, `lib.rs:1518`) but **is not

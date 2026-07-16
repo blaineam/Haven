@@ -41,10 +41,14 @@ with the people who actually see the content — the members of each circle:
 the developer or to anyone else.
 
 When you **report** someone, a **content-free** record is added to a moderation ledger operated by
-the developer: the reported identity key, the action, and the offense category. Never the content,
-never any personal information, and **never your identity** — the report is signed by your key so
-that nobody can file one in your name, but the signature is checked and discarded, not stored. The
-developer therefore cannot tell who reported whom. Records are deleted after 90 days.
+the developer: the reported identity key, the action, and the offense category. Never the content and
+never any personal information. Your report is **signed by your identity key** so that nobody can file
+one in your name and a captured report cannot be re-aimed at someone else. Verifying that signature
+means your key is transmitted to the developer's server at the moment you report — but it is **not
+stored**: the saved record holds only the reported identity, the action, and the category, and its
+storage key is derived from a one-way hash of the signature, not from your identity. So the stored
+ledger carries **no record of who reported whom**, even though the server briefly sees your key to
+confirm the report is genuine. Records are deleted after 90 days.
 
 Identities that accumulate abuse reports may be refused the services the developer does operate
 (such as push notification relaying). Because identity keys are free to create, this is a limited

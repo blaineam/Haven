@@ -45,7 +45,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn bare_id(reference: &str) -> &str {
+pub fn bare_id(reference: &str) -> &str {
     reference
         .strip_prefix("v:")
         .or_else(|| reference.strip_prefix("a:"))
@@ -351,6 +351,163 @@ impl LocalMedia {
         (bytes, files)
     }
 
+    // ---- Cleanup screen (#1) + local-limit sweep (#4) -----------------------------------
+    // Storage keys on the LOCAL `bare_id` (== `storage_name`), so a stored file's basename IS the
+    // storage_name a ref maps to. Both the size-sorted cleanup inventory and the age/size limit sweep
+    // walk the dir; the caller joins the names back to events (and to the pinned/in-use/evicted sets).
+
+    /// Every stored media blob with its size + mtime (unix secs), for the size-sorted "Manage media"
+    /// screen and as the raw material the caller joins to owning events. Skips in-flight reassembly
+    /// scratch (`incoming_*.part`) and hidden/dot files (the `.gc-stamp`). Returns (name, bytes,
+    /// mtime_secs). Mirrors iOS `MediaStore.storedBlobs`.
+    pub fn stored_blobs(&self) -> Vec<(String, u64, u64)> {
+        let mut out = Vec::new();
+        if let Ok(entries) = fs::read_dir(&self.dir) {
+            for e in entries.flatten() {
+                let Ok(md) = e.metadata() else { continue };
+                if !md.is_file() {
+                    continue;
+                }
+                let path = e.path();
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+                if name.starts_with('.') || name.starts_with("incoming_") {
+                    continue;
+                }
+                let mtime = md
+                    .modified()
+                    .ok()
+                    .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                out.push((name.to_string(), md.len(), mtime));
+            }
+        }
+        out
+    }
+
+    /// The client sibling of the relay's retention: evict this device's cached blobs by AGE then SIZE
+    /// (oldest first) until under the caps. Unlike the orphan sweep, a blob a live event still
+    /// references IS eligible here — it just becomes a re-downloadable placeholder (the caller records
+    /// such refs in the evicted set so the missing-media sweep doesn't auto-refetch them). `pinned`
+    /// (device-pin storage names) and composer-staged / in-flight media (fresh mtime, grace window)
+    /// are never touched. `in_use` (feed+comment storage names) decides which evicted refs to record.
+    /// Returns (bytes_freed, files_removed, evict-map of referenced deleted names -> bytes). Mirrors
+    /// iOS `MediaStore.performLimitSweep`.
+    pub fn perform_limit_sweep(
+        &self,
+        max_days: u32,
+        max_gb: u32,
+        pinned: &std::collections::HashSet<String>,
+        in_use: &std::collections::HashSet<String>,
+        grace_secs: u64,
+    ) -> (u64, usize, std::collections::HashMap<String, u64>) {
+        // Convert the user-facing whole-day / whole-GB caps into the raw seconds / bytes the walk
+        // uses (0 = that cap is off). Splitting the unit conversion out keeps the walk testable with
+        // small values (whole-GB / whole-day caps can't express a KB-scale unit test otherwise).
+        let max_age_secs = (max_days as u64).saturating_mul(86_400);
+        let max_bytes = (max_gb as u64).saturating_mul(1_000_000_000);
+        self.limit_sweep_raw(max_age_secs, max_bytes, pinned, in_use, grace_secs)
+    }
+
+    /// The unit-testable core of [`Self::perform_limit_sweep`]: caps expressed as raw seconds / bytes
+    /// (0 = off). Same age-then-size, oldest-first, pinned-skip semantics.
+    fn limit_sweep_raw(
+        &self,
+        max_age_secs: u64,
+        max_bytes: u64,
+        pinned: &std::collections::HashSet<String>,
+        in_use: &std::collections::HashSet<String>,
+        grace_secs: u64,
+    ) -> (u64, usize, std::collections::HashMap<String, u64>) {
+        let mut evict: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        if max_age_secs == 0 && max_bytes == 0 {
+            return (0, 0, evict);
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        struct Cand {
+            path: PathBuf,
+            name: String,
+            bytes: u64,
+            mtime: u64,
+        }
+        let mut cands: Vec<Cand> = Vec::new();
+        let mut pinned_bytes = 0u64;
+        if let Ok(entries) = fs::read_dir(&self.dir) {
+            for e in entries.flatten() {
+                let Ok(md) = e.metadata() else { continue };
+                if !md.is_file() {
+                    continue;
+                }
+                let path = e.path();
+                let Some(name) = path.file_name().and_then(|n| n.to_str()).map(|s| s.to_string()) else { continue };
+                if name.starts_with('.') || name.starts_with("incoming_") {
+                    continue;
+                }
+                let bytes = md.len();
+                if pinned.contains(&name) {
+                    pinned_bytes += bytes; // device-pinned: never evict, but still counts toward the size cap
+                    continue;
+                }
+                // Unreadable mtime → treat as fresh (never judge it).
+                let Some(mtime) = md
+                    .modified()
+                    .ok()
+                    .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                else {
+                    continue;
+                };
+                if mtime + grace_secs > now {
+                    continue; // too fresh to judge (composer-staged / in-flight)
+                }
+                cands.push(Cand { path, name, bytes, mtime });
+            }
+        }
+        let mut marked: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut order: Vec<usize> = Vec::new();
+        // Age pass: anything older than the age cap.
+        if max_age_secs > 0 {
+            let age_cutoff = now.saturating_sub(max_age_secs);
+            for (i, c) in cands.iter().enumerate() {
+                if c.mtime < age_cutoff && marked.insert(i) {
+                    order.push(i);
+                }
+            }
+        }
+        // Size pass: oldest-first until the (pinned + surviving) total is under the cap.
+        if max_bytes > 0 {
+            let cap = max_bytes;
+            let mut survivors: Vec<usize> = (0..cands.len()).filter(|i| !marked.contains(i)).collect();
+            survivors.sort_by_key(|&i| cands[i].mtime); // oldest first
+            let mut total = pinned_bytes + survivors.iter().map(|&i| cands[i].bytes).sum::<u64>();
+            let mut k = 0;
+            while total > cap && k < survivors.len() {
+                let i = survivors[k];
+                if marked.insert(i) {
+                    order.push(i);
+                    total = total.saturating_sub(cands[i].bytes);
+                }
+                k += 1;
+            }
+        }
+        let mut freed = 0u64;
+        let mut files = 0usize;
+        for i in order {
+            let c = &cands[i];
+            if fs::remove_file(&c.path).is_ok() {
+                freed += c.bytes;
+                files += 1;
+                if in_use.contains(&c.name) {
+                    evict.insert(c.name.clone(), c.bytes);
+                }
+            }
+        }
+        (freed, files, evict)
+    }
+
     /// True when the persisted GC stamp is older than `min_interval_secs` (or absent) — gates the
     /// startup-throttled weekly sweep.
     pub fn gc_due(&self, min_interval_secs: u64) -> bool {
@@ -430,5 +587,135 @@ mod tests {
         assert_eq!(image_mime(b"\x00\x00\x00\x18ftypheic"), "image/heic");
         assert_eq!(image_mime(&[0xFF, 0xD8, 0xFF, 0xE0]), "image/jpeg");
         assert_eq!(image_mime(b"unknownbytes"), "image/jpeg"); // safe default
+    }
+
+    // ---- #1/#4 cleanup + limit-sweep primitives -------------------------------------------
+
+    use std::collections::HashSet;
+
+    /// A LocalMedia backed by a fresh unique temp dir.
+    fn tmp_media() -> (LocalMedia, PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "haven-localmedia-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        (LocalMedia::new(base.clone()), base)
+    }
+
+    /// Write a `size`-byte blob whose mtime is `age_secs` in the past (portable via
+    /// `File::set_modified`, stable since Rust 1.75).
+    fn write_aged(dir: &Path, name: &str, size: usize, age_secs: u64) {
+        let p = dir.join(name);
+        fs::write(&p, vec![0u8; size]).unwrap();
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
+        let f = fs::OpenOptions::new().write(true).open(&p).unwrap();
+        f.set_modified(when).unwrap();
+    }
+
+    #[test]
+    fn stored_blobs_lists_files_skipping_scratch_and_dotfiles() {
+        let (m, dir) = tmp_media();
+        fs::write(dir.join("aaaa"), vec![0u8; 1000]).unwrap();
+        fs::write(dir.join("bbbb"), vec![0u8; 2000]).unwrap();
+        fs::write(dir.join("incoming_cccc.part"), vec![0u8; 500]).unwrap(); // in-flight scratch → skip
+        fs::write(dir.join(".gc-stamp"), b"").unwrap(); // dot-file → skip
+        let mut blobs = m.stored_blobs();
+        blobs.sort_by(|a, b| a.0.cmp(&b.0));
+        let names: Vec<&str> = blobs.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["aaaa", "bbbb"]);
+        assert_eq!(blobs.iter().find(|(n, _, _)| n == "aaaa").unwrap().1, 1000);
+        assert_eq!(blobs.iter().find(|(n, _, _)| n == "bbbb").unwrap().1, 2000);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn limit_sweep_off_when_both_caps_zero() {
+        let (m, dir) = tmp_media();
+        write_aged(&dir, "aaaa", 1000, 100 * 86_400); // ancient, but caps off → untouched
+        let (freed, files, evict) = m.perform_limit_sweep(0, 0, &HashSet::new(), &HashSet::new(), 0);
+        assert_eq!((freed, files, evict.len()), (0, 0, 0));
+        assert!(m.has("aaaa"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn limit_sweep_age_deletes_old_skips_fresh_and_pinned_records_evict() {
+        let (m, dir) = tmp_media();
+        write_aged(&dir, "old_ref", 1000, 40 * 86_400); // 40 days — older than the 30-day cap
+        write_aged(&dir, "old_orphan", 1000, 40 * 86_400); // old, but not referenced
+        write_aged(&dir, "old_pinned", 1000, 40 * 86_400); // old, but device-pinned
+        write_aged(&dir, "fresh_ref", 1000, 1 * 86_400); // 1 day — under the cap
+        let pinned: HashSet<String> = ["old_pinned".into()].into_iter().collect();
+        let in_use: HashSet<String> = ["old_ref".into(), "fresh_ref".into()].into_iter().collect();
+        // 30-day age cap, no size cap, small grace so nothing is "too fresh to judge".
+        let (freed, files, evict) = m.perform_limit_sweep(30, 0, &pinned, &in_use, 3600);
+        assert_eq!(files, 2); // old_ref + old_orphan
+        assert_eq!(freed, 2000);
+        assert!(!m.has("old_ref") && !m.has("old_orphan")); // both deleted
+        assert!(m.has("old_pinned")); // pinned never touched
+        assert!(m.has("fresh_ref")); // fresh never touched
+        // Only the REFERENCED deletion is recorded evicted (→ "Download" placeholder); the orphan isn't.
+        assert_eq!(evict.get("old_ref"), Some(&1000));
+        assert!(!evict.contains_key("old_orphan"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn limit_sweep_size_evicts_oldest_first_and_skips_pinned() {
+        let (m, dir) = tmp_media();
+        // Use the raw (bytes/secs) core so a KB-scale size cap is expressible.
+        write_aged(&dir, "oldest", 1000, 30 * 86_400);
+        write_aged(&dir, "middle_pinned", 1000, 20 * 86_400);
+        write_aged(&dir, "newest_ref", 1000, 10 * 86_400);
+        let pinned: HashSet<String> = ["middle_pinned".into()].into_iter().collect();
+        let in_use: HashSet<String> = ["oldest".into(), "newest_ref".into()].into_iter().collect();
+        // Cap 1500 bytes: pinned (1000) counts toward the total, so 500 of budget remains for the two
+        // candidates (2000 bytes). Oldest-first eviction removes "oldest" (1000) → total 2000 ≤ 1500? no.
+        // total starts pinned(1000)+cands(2000)=3000; remove oldest → 2000; still > 1500 → remove
+        // newest_ref → 1000 ≤ 1500 stop. Both candidates evicted; pinned retained.
+        let (freed, files, evict) = m.limit_sweep_raw(0, 1500, &pinned, &in_use, 3600);
+        assert_eq!(files, 2);
+        assert_eq!(freed, 2000);
+        assert!(m.has("middle_pinned")); // pinned never evicted
+        assert!(!m.has("oldest") && !m.has("newest_ref"));
+        assert_eq!(evict.get("oldest"), Some(&1000)); // referenced → recorded
+        assert_eq!(evict.get("newest_ref"), Some(&1000));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn limit_sweep_size_under_cap_removes_nothing() {
+        let (m, dir) = tmp_media();
+        write_aged(&dir, "a", 1000, 30 * 86_400);
+        write_aged(&dir, "b", 1000, 30 * 86_400);
+        // 5000-byte cap, 2000 bytes on disk → nothing over cap.
+        let (freed, files, evict) = m.limit_sweep_raw(0, 5000, &HashSet::new(), &HashSet::new(), 3600);
+        assert_eq!((freed, files, evict.len()), (0, 0, 0));
+        assert!(m.has("a") && m.has("b"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn limit_sweep_grace_protects_fresh_even_when_over_cap() {
+        let (m, dir) = tmp_media();
+        write_aged(&dir, "a", 1000, 10); // 10s old
+        write_aged(&dir, "b", 1000, 10);
+        // Tiny cap but a 1-day grace window → both are too fresh to judge, nothing removed.
+        let (freed, files, _e) = m.limit_sweep_raw(0, 1, &HashSet::new(), &HashSet::new(), 86_400);
+        assert_eq!((freed, files), (0, 0));
+        assert!(m.has("a") && m.has("b"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bare_id_matches_prefixed_and_bare_refs() {
+        // The evicted/pinned matching in the engine keys on storage_name == bare_id.
+        assert_eq!(LocalMedia::storage_name("v:deadbeef"), "deadbeef");
+        assert_eq!(LocalMedia::storage_name("a:deadbeef"), "deadbeef");
+        assert_eq!(LocalMedia::storage_name("i:deadbeef"), "deadbeef");
+        assert_eq!(LocalMedia::storage_name("deadbeef"), "deadbeef");
+        assert_eq!(bare_id("v:deadbeef"), "deadbeef");
+        assert_eq!(bare_id("img_deadbeef"), "img_deadbeef"); // img_/vid_/aud_ keep their name
     }
 }

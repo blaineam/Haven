@@ -100,6 +100,11 @@ struct DynState {
     last_activity_ms: u64,
     next_sync_due_ms: u64,
     next_poll_due_ms: u64,
+    /// #4 local-limit sweep throttle: last run (ms) + in-flight guard, so the age/size cap enforcement
+    /// runs at most ~every 10 min off the sync tick (a `force` from a settings change bypasses the
+    /// throttle). iOS `FeedStore.lastLimitSweepAt` / `limitSweepInFlight`.
+    last_limit_sweep_ms: u64,
+    limit_sweep_in_flight: bool,
 }
 
 /// Where a self-sync slot can be read/written: a Haven relay (by node hex) or the user's S3.
@@ -111,6 +116,22 @@ enum SelfSyncTransport {
 struct IncomingMedia {
     total: u32,
     chunks: HashMap<u32, Vec<u8>>,
+}
+
+/// One row of the #1 "Manage media" cleanup screen: a stored blob, its size, and the post/DM it
+/// belongs to (best-effort). `is_orphan` = no live event references it (free to delete). `is_pinned`
+/// = kept on this device (shown ineligible for cleanup). The command layer serializes this for the UI.
+pub struct MediaRow {
+    /// The on-disk storage name (bare hash) — also the handle passed back to pin/delete/download.
+    pub reference: String,
+    pub bytes: u64,
+    pub mtime_ms: u64,
+    /// "image" | "video" | "audio".
+    pub kind: &'static str,
+    pub circle_name: String,
+    pub snippet: Option<String>,
+    pub is_orphan: bool,
+    pub is_pinned: bool,
 }
 
 pub struct Engine {
@@ -526,6 +547,7 @@ impl Engine {
         self.fire_due_scheduled(); // flush anything overdue from while the app was closed
         self.purge_stale_relays().await; // erase relays inactive AND unseen > 7 days (config else survives)
         self.maybe_weekly_media_sweep(); // orphaned media blobs (at most once a week; runs off-thread)
+        self.enforce_local_limits(false); // #4 device-local age/size caps (throttled; no-op if both off)
         self.bump_activity(); // seed activity NOW so launch starts at tight cadence (idle=huge would else max-back-off)
         self.start_mailbox_loop();
     }
@@ -1010,6 +1032,8 @@ impl Engine {
             // stale state file and re-request their (now deleted) media forever.
             me.persist();
             // Built AFTER the purge, so this circle's dropped events no longer count as users.
+            // Device-pinned blobs (#2) are already unioned into `media_in_use_names`, so "keep on this
+            // device" survives a purge that orphaned them.
             let in_use = me.media_in_use_names();
             let mut freed = 0u64;
             for r in &purged {
@@ -1054,6 +1078,36 @@ impl Engine {
                 add(&mut names, r);
             }
         }
+        // Device-pinned blobs (#2) are cleanup-exempt everywhere: fold their storage names into the
+        // keep-set so neither the orphan sweep nor the purge-linked GC can ever delete a pinned blob,
+        // whatever its age or referencedness. CRITICAL: this union is what makes "Keep on this device"
+        // safe against the automatic sweeps (parity with the limit-sweep skip-set below).
+        names.extend(self.pinned_names());
+        names
+    }
+
+    /// The on-disk names a LIVE feed/comment event still references — NOT counting scheduled sends or
+    /// device pins. This narrower set decides which deliberately-deleted blobs become re-downloadable
+    /// "evicted" placeholders (a still-referenced deletion) vs a plain orphan removal. iOS
+    /// `FeedStore.mediaInUseStems`. Blocking (`feed` re-opens every envelope).
+    fn media_referenced_names(&self) -> std::collections::HashSet<String> {
+        let mut names = std::collections::HashSet::new();
+        for c in self.social.circles() {
+            for item in self.social.feed(c.id, now_ms(), None) {
+                for r in &item.media {
+                    if !LocalMedia::is_synthetic(r) {
+                        names.insert(LocalMedia::storage_name(r));
+                    }
+                }
+                for cm in &item.comments {
+                    for r in &cm.media {
+                        if !LocalMedia::is_synthetic(r) {
+                            names.insert(LocalMedia::storage_name(r));
+                        }
+                    }
+                }
+            }
+        }
         names
     }
 
@@ -1077,6 +1131,334 @@ impl Engine {
         tauri::async_runtime::spawn_blocking(move || {
             let _ = me.cleanup_unused_media();
             me.media.touch_gc_stamp();
+        });
+    }
+
+    // ---- #2 device pin ("keep on this device") -------------------------------------------
+    // A DEVICE-LOCAL retention exemption (never synced): pinned media is skipped by EVERY cleanup
+    // path. `pinned_names()` (the storage names of every pinned ref) is unioned into both the orphan/
+    // purge keep-set (media_in_use_names) and the limit-sweep skip-set — the one guarantee that
+    // "Keep on this device" is honored against the automatic sweeps.
+
+    /// The storage names (on-disk basenames) of every device-pinned ref.
+    fn pinned_names(&self) -> std::collections::HashSet<String> {
+        self.prefs
+            .lock()
+            .unwrap()
+            .pinned_media
+            .iter()
+            .filter(|r| !LocalMedia::is_synthetic(r))
+            .map(|r| LocalMedia::storage_name(r))
+            .collect()
+    }
+
+    /// True if the ref (or its bare-hash storage name) is device-pinned.
+    pub fn is_pinned(&self, reference: &str) -> bool {
+        self.pinned_names().contains(&LocalMedia::storage_name(reference))
+    }
+
+    pub fn pinned_count(&self) -> usize {
+        self.prefs.lock().unwrap().pinned_media.len()
+    }
+
+    /// Pin refs so no cleanup ever removes them (skips synthetic geo refs; deduped).
+    pub fn pin_media(self: &Arc<Self>, refs: Vec<String>) {
+        let mut p = self.prefs.lock().unwrap();
+        for r in refs {
+            if !LocalMedia::is_synthetic(&r) && !p.pinned_media.contains(&r) {
+                p.pinned_media.push(r);
+            }
+        }
+        let _ = p.save(&self.paths);
+    }
+
+    /// Un-pin refs (matches on the exact ref stored).
+    pub fn unpin_media(self: &Arc<Self>, refs: Vec<String>) {
+        let mut p = self.prefs.lock().unwrap();
+        let drop: std::collections::HashSet<&String> = refs.iter().collect();
+        p.pinned_media.retain(|r| !drop.contains(r));
+        let _ = p.save(&self.paths);
+    }
+
+    // ---- #3/#4 evicted set (deliberately removed, do-not-auto-refetch) --------------------
+
+    /// True if this ref's blob was deliberately evicted (matches the ref AND its bare-hash storage
+    /// name, so an event ref `img_<hash>`/`v:<hash>` resolves an eviction recorded under either key).
+    /// CRITICAL: `request_missing_media` gates on this, or a deliberate cleanup is silently undone.
+    pub fn evicted_contains(&self, reference: &str) -> bool {
+        let p = self.prefs.lock().unwrap();
+        p.evicted_media.contains_key(reference)
+            || p.evicted_media.contains_key(&LocalMedia::storage_name(reference))
+    }
+
+    /// Last-known bytes of an evicted ref (for the "Download N" placeholder), by ref or storage name.
+    pub fn evicted_size(&self, reference: &str) -> Option<u64> {
+        let p = self.prefs.lock().unwrap();
+        p.evicted_media
+            .get(reference)
+            .or_else(|| p.evicted_media.get(&LocalMedia::storage_name(reference)))
+            .copied()
+    }
+
+    /// Record a ref as deliberately evicted (bounded map — prune to 4000 newest-ish when it grows past
+    /// 8000, matching iOS). Persists prefs.
+    fn mark_evicted(&self, reference: &str, bytes: u64) {
+        let mut p = self.prefs.lock().unwrap();
+        p.evicted_media.insert(reference.to_string(), bytes);
+        if p.evicted_media.len() > 8000 {
+            let keep: std::collections::HashMap<String, u64> =
+                p.evicted_media.iter().take(4000).map(|(k, v)| (k.clone(), *v)).collect();
+            p.evicted_media = keep;
+        }
+        let _ = p.save(&self.paths);
+    }
+
+    /// Clear an eviction (both the ref and its bare-hash key). Persists prefs if anything changed.
+    fn clear_evicted(&self, reference: &str) {
+        let mut p = self.prefs.lock().unwrap();
+        let mut changed = p.evicted_media.remove(reference).is_some();
+        if p.evicted_media.remove(&LocalMedia::storage_name(reference)).is_some() {
+            changed = true;
+        }
+        if changed {
+            let _ = p.save(&self.paths);
+        }
+    }
+
+    // ---- #1 cleanup screen (size-sorted inventory + multi-select delete) ------------------
+
+    /// Every stored media blob joined to the post/DM/comment that references it (best-effort), sorted
+    /// by size DESCENDING for the "Manage media" screen. A blob no live event names is an ORPHAN
+    /// (labelled "Unused", or "Scheduled to send" if a pending scheduled send holds it). Deleting a
+    /// row frees only the LOCAL bytes; the event stays and re-renders as a downloadable placeholder.
+    /// Blocking (walks every circle's feed). iOS `FeedStore.mediaInventory`.
+    pub fn media_inventory(&self) -> Vec<MediaRow> {
+        let circle_names: std::collections::HashMap<String, String> =
+            self.social.circles().into_iter().map(|c| (c.id, c.name)).collect();
+        fn kind_of(r: &str) -> &'static str {
+            if LocalMedia::is_video(r) {
+                "video"
+            } else if LocalMedia::is_audio(r) {
+                "audio"
+            } else {
+                "image"
+            }
+        }
+        // storage_name -> kind (a bare on-disk name carries no prefix, so kind must come from the
+        // referencing ref); and the set of names a pending scheduled send holds.
+        let mut ref_kind: std::collections::HashMap<String, &'static str> = std::collections::HashMap::new();
+        let mut scheduled_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for s in &self.scheduled.lock().unwrap().items {
+            for r in &s.media {
+                if LocalMedia::is_synthetic(r) {
+                    continue;
+                }
+                let n = LocalMedia::storage_name(r);
+                scheduled_names.insert(n.clone());
+                ref_kind.entry(n).or_insert_with(|| kind_of(r));
+            }
+        }
+        // storage_name -> the event that references it (first/newest wins).
+        struct Own {
+            circle_id: String,
+            snippet: String,
+        }
+        let mut owner: std::collections::HashMap<String, Own> = std::collections::HashMap::new();
+        for c in self.social.circles() {
+            for item in self.social.feed(c.id.clone(), now_ms(), None) {
+                let snip: String = item.body.chars().take(80).collect();
+                for r in &item.media {
+                    if LocalMedia::is_synthetic(r) {
+                        continue;
+                    }
+                    let n = LocalMedia::storage_name(r);
+                    ref_kind.entry(n.clone()).or_insert_with(|| kind_of(r));
+                    owner.entry(n).or_insert_with(|| Own { circle_id: c.id.clone(), snippet: snip.clone() });
+                }
+                for cm in &item.comments {
+                    let csnip: String = cm.body.chars().take(80).collect();
+                    for r in &cm.media {
+                        if LocalMedia::is_synthetic(r) {
+                            continue;
+                        }
+                        let n = LocalMedia::storage_name(r);
+                        ref_kind.entry(n.clone()).or_insert_with(|| kind_of(r));
+                        owner.entry(n).or_insert_with(|| Own { circle_id: c.id.clone(), snippet: csnip.clone() });
+                    }
+                }
+            }
+        }
+        let pinned = self.pinned_names();
+        let mut rows: Vec<MediaRow> = self
+            .media
+            .stored_blobs()
+            .into_iter()
+            .map(|(name, bytes, mtime_secs)| {
+                let kind = *ref_kind.get(&name).unwrap_or(&"image");
+                let is_pinned = pinned.contains(&name);
+                let mtime_ms = mtime_secs.saturating_mul(1000);
+                if let Some(o) = owner.get(&name) {
+                    let is_dm = o.circle_id.starts_with("dm:");
+                    MediaRow {
+                        reference: name.clone(),
+                        bytes,
+                        mtime_ms,
+                        kind,
+                        circle_name: if is_dm {
+                            "Direct message".to_string()
+                        } else {
+                            circle_names.get(&o.circle_id).cloned().unwrap_or_else(|| "A circle".to_string())
+                        },
+                        snippet: if o.snippet.is_empty() { None } else { Some(o.snippet.clone()) },
+                        is_orphan: false,
+                        is_pinned,
+                    }
+                } else {
+                    let scheduled = scheduled_names.contains(&name);
+                    MediaRow {
+                        reference: name,
+                        bytes,
+                        mtime_ms,
+                        kind,
+                        circle_name: if scheduled { "Scheduled to send".to_string() } else { "Unused".to_string() },
+                        snippet: None,
+                        is_orphan: !scheduled,
+                        is_pinned,
+                    }
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+        rows
+    }
+
+    /// Delete the LOCAL blobs for these refs (the event/metadata stays). A ref a LIVE feed/comment
+    /// event still references is recorded in the evicted set with its size, so it re-renders as a
+    /// "Download N" placeholder instead of being auto-refetched (which would undo the cleanup). Pinned
+    /// rows are skipped. Returns freed bytes. iOS `FeedStore.deleteSelectedMedia`.
+    pub fn media_delete_selected(self: &Arc<Self>, refs: Vec<String>) -> u64 {
+        let referenced = self.media_referenced_names();
+        let pinned = self.pinned_names();
+        let mut freed = 0u64;
+        for reference in refs {
+            let name = LocalMedia::storage_name(&reference);
+            if pinned.contains(&name) {
+                continue; // "Keep on this device" — never delete
+            }
+            let bytes = self.media.delete(&reference);
+            freed += bytes;
+            // A ref a LIVE event still references becomes a re-downloadable placeholder (recorded
+            // evicted so the missing-media sweep won't silently refetch it); a pure orphan just goes.
+            if referenced.contains(&name) {
+                self.mark_evicted(&reference, bytes);
+            }
+        }
+        if freed > 0 {
+            self.emit_changed();
+        }
+        freed
+    }
+
+    // ---- #3 on-demand download of an evicted blob ----------------------------------------
+
+    /// User tapped "Download" on an evicted placeholder: clear the eviction (so the normal missing-
+    /// media path may fetch it), then fetch this one ref now — relay/S3 first (idempotent), peer
+    /// fallback second — like `request_missing_media`'s per-ref path. iOS `FeedStore.downloadEvicted`.
+    pub fn media_download(self: &Arc<Self>, reference: String) {
+        self.clear_evicted(&reference);
+        if self.media.has(&reference) {
+            self.emit_changed();
+            return;
+        }
+        // Find a circle that references it (drives relay selection); media is permission-free so any
+        // circle's relays can serve it, but the owning circle is the best first try.
+        let mut circle_id: Option<String> = None;
+        for c in self.social.circles() {
+            for item in self.social.feed(c.id.clone(), now_ms(), None) {
+                if item.media.iter().any(|r| r == &reference)
+                    || item.comments.iter().any(|cm| cm.media.iter().any(|r| r == &reference))
+                {
+                    circle_id = Some(c.id.clone());
+                    break;
+                }
+            }
+            if circle_id.is_some() {
+                break;
+            }
+        }
+        let circle_id = circle_id
+            .or_else(|| self.social.circles().first().map(|c| c.id.clone()))
+            .unwrap_or_default();
+        let me = self.clone();
+        let my_hex = self.node_id_hex();
+        tauri::async_runtime::spawn(async move {
+            if me.fetch_media_from_relay(&circle_id, &reference).await {
+                me.emit_changed();
+                return;
+            }
+            // Relay couldn't serve it → ask peers directly (same payload shape as request_missing_media).
+            me.dyn_state.lock().unwrap().requested_refs.insert(reference.clone());
+            let mut payload = my_hex.into_bytes();
+            payload.extend_from_slice(reference.as_bytes());
+            let ids: Vec<String> = me.prefs.lock().unwrap().contacts.iter().map(|c| c.id_hex.clone()).collect();
+            for id_hex in ids {
+                me.send_frame(wire::MEDIA_REQ, &payload, &id_hex);
+            }
+        });
+    }
+
+    // ---- #4 local limits (age/size caps) -------------------------------------------------
+
+    pub fn get_media_limits(&self) -> (u32, u32) {
+        let p = self.prefs.lock().unwrap();
+        (p.local_media_max_days, p.local_media_max_gb)
+    }
+
+    /// Persist the device-local age/size caps and enforce them immediately (bypassing the throttle).
+    pub fn set_media_limits(self: &Arc<Self>, days: u32, gb: u32) {
+        {
+            let mut p = self.prefs.lock().unwrap();
+            p.local_media_max_days = days;
+            p.local_media_max_gb = gb;
+            let _ = p.save(&self.paths);
+        }
+        self.enforce_local_limits(true);
+    }
+
+    /// Enforce the device-local age/size caps (Settings ▸ Storage): delete local blobs (metadata stays
+    /// → placeholder) oldest-first, skipping pinned + in-flight media. `force` bypasses the ~10-min
+    /// throttle (used on a settings change). No-op when both caps are off. Runs off-thread.
+    /// iOS `FeedStore.enforceLocalLimits`.
+    pub fn enforce_local_limits(self: &Arc<Self>, force: bool) {
+        let (max_days, max_gb) = self.get_media_limits();
+        if max_days == 0 && max_gb == 0 {
+            return;
+        }
+        {
+            let mut st = self.dyn_state.lock().unwrap();
+            if st.limit_sweep_in_flight {
+                return;
+            }
+            let now = now_ms();
+            if !force && now.saturating_sub(st.last_limit_sweep_ms) < 600_000 {
+                return; // at most every 10 min otherwise
+            }
+            st.last_limit_sweep_ms = now;
+            st.limit_sweep_in_flight = true;
+        }
+        let me = self.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let pinned = me.pinned_names();
+            let in_use = me.media_referenced_names();
+            let (bytes, files, evict) = me.media.perform_limit_sweep(max_days, max_gb, &pinned, &in_use, 48 * 3600);
+            me.dyn_state.lock().unwrap().limit_sweep_in_flight = false;
+            if files > 0 {
+                for (name, b) in &evict {
+                    me.mark_evicted(name, *b);
+                }
+                me.emit_changed();
+                log::info!("media limit sweep: freed {bytes}B across {files} files");
+            }
         });
     }
 
@@ -2983,14 +3365,17 @@ impl Engine {
             for item in feed {
                 // Skip synthetic refs (geo: location pins): they carry no fetchable bytes, so a sweep
                 // would fire a doomed S3-404 + ~30s iroh dial for them every cycle and never converge.
+                // Skip refs the user DELIBERATELY evicted (#3 cleanup screen / #4 limit sweep): auto-
+                // refetching them would silently undo the space the user just freed — they re-download
+                // only on an explicit "Download" tap (media_download clears the eviction first).
                 for r in item.media {
-                    if !LocalMedia::is_synthetic(&r) && !self.media.has(&r) && !missing.iter().any(|(rr, _)| rr == &r) {
+                    if !LocalMedia::is_synthetic(&r) && !self.media.has(&r) && !self.evicted_contains(&r) && !missing.iter().any(|(rr, _)| rr == &r) {
                         missing.push((r, c.id.clone()));
                     }
                 }
                 for cm in item.comments {
                     for r in cm.media {
-                        if !LocalMedia::is_synthetic(&r) && !self.media.has(&r) && !missing.iter().any(|(rr, _)| rr == &r) {
+                        if !LocalMedia::is_synthetic(&r) && !self.media.has(&r) && !self.evicted_contains(&r) && !missing.iter().any(|(rr, _)| rr == &r) {
                             missing.push((r, c.id.clone()));
                         }
                     }

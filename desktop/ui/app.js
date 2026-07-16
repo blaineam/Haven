@@ -199,13 +199,69 @@ function popMenu(anchor, items, opts = {}) {
 const MENU_ICON_CSS = ".menu .mi-svg{width:15px;height:15px;display:block;margin:0 auto}";
 document.head.append(el("style", {}, MENU_ICON_CSS));
 
-// Decrypt + lazy-load a media ref into an <img>/<video>.
+// Human byte size (e.g. "1.2 GB"). Module-level so the media-cleanup screen, the evicted placeholder
+// and the Storage card all format identically.
+function fmtBytes(n) {
+  if (!n) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0, v = n;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
+// Decrypt + lazy-load a media ref into an <img>/<video>. When the bytes aren't on disk, distinguish
+// two cases (iOS MissingMediaPlaceholder parity): a ref the user DELIBERATELY evicted (#3 cleanup /
+// #4 limit sweep) renders a "Download N" affordance (re-fetch on tap — never auto-refetched, or the
+// cleanup would silently undo itself); anything else is simply still syncing.
 async function loadMedia(node, circleId, ref) {
   try {
     const url = await invoke("media_data_url", { circleId, reference: ref });
-    if (url) node.src = url;
+    if (url) { node.src = url; return; }
+    const isVideo = ref.startsWith("v:");
+    const bytes = await invoke("media_evicted_size", { reference: ref }).catch(() => null);
+    if (bytes != null) node.replaceWith(evictedPlaceholder(circleId, ref, bytes, isVideo));
     else node.replaceWith(el("div", { class: "tag" }, "media syncing…"));
   } catch (_) {}
+}
+
+// The #3 placeholder for a deliberately-evicted blob: a tap re-fetches it (media_download clears the
+// eviction first, then pulls it relay-first with a peer fallback). Spinner while pending; "No longer
+// available" + Retry if it hasn't arrived after ~45s (relay/peers don't have it either).
+function evictedPlaceholder(circleId, ref, bytes, isVideo) {
+  const box = el("div", { class: "media-evicted" });
+  const draw = (mode) => {
+    if (mode === "loading") {
+      box.replaceChildren(el("div", { class: "spinner" }), el("div", { class: "muted small" }, "Downloading…"));
+      return;
+    }
+    if (mode === "gone") {
+      box.replaceChildren(
+        el("div", { class: "muted small" }, "No longer available"),
+        el("button", { class: "btn small", onclick: () => start() }, "Retry"));
+      return;
+    }
+    box.replaceChildren(
+      el("button", { class: "btn small primary", onclick: () => start() },
+        `⬇ Download ${fmtBytes(bytes)}`),
+      el("div", { class: "muted small" }, "Removed to save space"));
+  };
+  const start = async () => {
+    draw("loading");
+    try { await invoke("media_download", { reference: ref }); } catch (_) {}
+    // Poll for arrival; the engine emits haven:changed on success and re-renders the feed, but poll
+    // as a fallback so this tile resolves even if the render is coalesced away.
+    let waited = 0;
+    const tick = async () => {
+      const url = await invoke("media_data_url", { circleId, reference: ref }).catch(() => null);
+      if (url) { const n = mediaNode(ref); box.replaceWith(n); loadMedia(n, circleId, ref); return; }
+      waited += 1500;
+      if (waited >= 45000) { draw("gone"); return; }
+      setTimeout(tick, 1500);
+    };
+    setTimeout(tick, 1500);
+  };
+  draw("offer");
+  return box;
 }
 
 // ---- app state -------------------------------------------------------------------------
@@ -1598,7 +1654,13 @@ function emojiPicker(anchor, circleId, target) {
 /** The post's `···` menu — a popover at the glyph, matching macOS `header`'s Menu (not a modal). */
 function postMenu(anchor, it, circleId) {
   const isHidden = Hidden.has(it.id);
+  // #2 device pin: real, fetchable media refs only (a geo: location pin carries no bytes to keep).
+  const keepRefs = (it.media || []).filter((r) => !r.startsWith("geo:"));
   popMenu(anchor, [
+    keepRefs.length ? { label: "Keep on this device", icon: "pin", on: async () => {
+      try { await invoke("media_pin", { refs: keepRefs }); toast("Kept on this device"); }
+      catch (e) { toast("Couldn't keep: " + e); }
+    } } : null,
     // Share a pointer to this post: the web form, so it crosses to iOS/Android and survives being
     // pasted into any chat app. It carries no key — only a device already in the circle can open it.
     { label: "Share post", icon: "square.and.arrow.up", on: async () => {
@@ -2628,14 +2690,97 @@ async function scheduledSheet() {
   sheet("Scheduled", list);
 }
 
-async function advancedSheet() {
-  const fmtBytes = (n) => {
-    if (!n) return "0 B";
-    const units = ["B", "KB", "MB", "GB", "TB"];
-    let i = 0, v = n;
-    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-    return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+// ---- #1 Manage media: size-sorted cleanup screen ----------------------------------------
+// Every cached photo/video/audio blob, largest first, each mapped to the post/DM it belongs to (or
+// flagged Unused). Multi-select to free space; per-row "Keep on this device" pins a blob so no cleanup
+// ever removes it. Deleting frees only the LOCAL bytes — the post stays and re-renders as a
+// downloadable placeholder. Port of iOS MediaCleanupView.
+async function manageMediaSheet() {
+  const listWrap = el("div", { class: "col", style: "gap:8px" });
+  const headEl = el("div", { class: "muted small" }, "Measuring…");
+  const footBar = el("div", { class: "row", style: "gap:8px;align-items:center" });
+  const selection = new Set();
+  let rows = [];
+
+  const totalBytes = () => rows.reduce((a, r) => a + r.bytes, 0);
+  const pinnedBytes = () => rows.filter((r) => r.is_pinned).reduce((a, r) => a + r.bytes, 0);
+  const selectedBytes = () => rows.filter((r) => selection.has(r.reference)).reduce((a, r) => a + r.bytes, 0);
+
+  const kindIcon = (k) => k === "video" ? "🎬" : k === "audio" ? "🎵" : "🖼";
+
+  const renderFoot = () => {
+    footBar.replaceChildren();
+    if (!selection.size) return;
+    const btn = el("button", { class: "btn primary", onclick: async () => {
+      btn.disabled = true; btn.textContent = "Removing…";
+      try {
+        const freed = await invoke("media_delete_selected", { refs: [...selection] });
+        toast(`Freed ${fmtBytes(freed)}`);
+      } catch (e) { toast("Couldn't remove: " + e); }
+      selection.clear();
+      await reload();
+    } }, `Remove ${selection.size} · frees ${fmtBytes(selectedBytes())}`);
+    footBar.append(btn);
   };
+
+  const rowEl = (r) => {
+    const selected = selection.has(r.reference);
+    // Selection control (pinned rows are ineligible — a pin glyph instead of a checkbox).
+    const toggle = r.is_pinned
+      ? el("span", { class: "media-row-pin", title: "Kept on this device" }, "📌")
+      : el("input", { type: "checkbox", style: "width:auto" });
+    if (!r.is_pinned) {
+      toggle.checked = selected;
+      toggle.onchange = () => { if (toggle.checked) selection.add(r.reference); else selection.delete(r.reference); renderFoot(); };
+    }
+    // Thumbnail: images decode inline (load_any_circle handles the key); video/audio show a glyph.
+    const thumb = el("div", { class: "media-row-thumb" }, el("span", {}, kindIcon(r.kind)));
+    if (r.kind === "image") {
+      const img = el("img", { style: "width:100%;height:100%;object-fit:cover;border-radius:6px" });
+      invoke("media_data_url", { circleId: "", reference: r.reference })
+        .then((u) => { if (u) thumb.replaceChildren(img), (img.src = u); })
+        .catch(() => {});
+    }
+    const sub = r.snippet ? r.snippet : (r.is_orphan ? "Not linked to any post" : "");
+    const meta = el("div", { style: "flex:1;min-width:0" },
+      el("div", { class: "name", style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, r.circle_name),
+      sub ? el("div", { class: "muted small", style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, sub) : null,
+      el("div", { class: "muted small mono" }, fmtBytes(r.bytes) + (r.is_pinned ? " · Kept" : "")));
+    const keep = el("button", { class: "btn small ghost", onclick: async () => {
+      try {
+        if (r.is_pinned) await invoke("media_unpin", { refs: [r.reference] });
+        else await invoke("media_pin", { refs: [r.reference] });
+        await reload();
+      } catch (e) { toast("" + e); }
+    } }, r.is_pinned ? "Unkeep" : "Keep");
+    return el("div", { class: "list-item", style: "gap:10px;align-items:center" }, toggle, thumb, meta, keep);
+  };
+
+  const reload = async () => {
+    rows = await invoke("media_inventory").catch(() => []);
+    for (const r of [...selection]) if (!rows.some((x) => x.reference === r)) selection.delete(r);
+    listWrap.replaceChildren();
+    if (!rows.length) {
+      headEl.textContent = "No cached media.";
+      listWrap.append(el("div", { class: "muted small", style: "padding:16px 0" }, "Nothing stored on this device yet."));
+    } else {
+      const kept = pinnedBytes() > 0 ? ` · ${fmtBytes(pinnedBytes())} kept` : "";
+      headEl.textContent = `${rows.length} item${rows.length === 1 ? "" : "s"} · ${fmtBytes(totalBytes())}${kept}`;
+      for (const r of rows) listWrap.append(rowEl(r));
+    }
+    renderFoot();
+  };
+
+  sheet("Manage media",
+    el("div", { class: "col", style: "gap:10px" },
+      headEl,
+      el("div", { class: "muted small" }, "Sorted by size. Removing an item frees only the copy on this device — the post stays and can be re-downloaded. “Keep” exempts an item from every cleanup."),
+      listWrap),
+    footBar);
+  await reload();
+}
+
+async function advancedSheet() {
   const security = el("div", { class: "card col" },
     el("h3", {}, "Security"),
     el("div", { class: "muted small" }, "Run the on-device hybrid post-quantum self-test (Ed25519 + ML-DSA, X25519 + ML-KEM-768)."),
@@ -2644,7 +2789,43 @@ async function advancedSheet() {
 
   const storage = el("div", { class: "card col" },
     el("h3", {}, "Storage"),
-    el("div", { class: "muted small" }, "Remove media on this device that no post, message or scheduled send references anymore."),
+    el("div", { class: "muted small" }, "Photos and videos from your circles, cached on this device. Manage them by size, set automatic limits, or clear media nothing references."),
+    // #1 Manage media — the size-sorted cleanup screen, with the #2 pinned ("kept") count.
+    (() => {
+      const kept = el("span", { class: "muted small" }, "");
+      invoke("media_pinned_count").then((n) => { if (n) kept.textContent = `${n} kept`; }).catch(() => {});
+      return el("button", { class: "btn", style: "display:flex;justify-content:space-between;align-items:center", onclick: () => manageMediaSheet() },
+        el("span", {}, "Manage media"), kept);
+    })(),
+    // #4 device-local age/size caps (default OFF). Changing either enforces immediately.
+    (() => {
+      const daysSel = el("select", { class: "pill-field" },
+        el("option", { value: "0" }, "Never"),
+        el("option", { value: "30" }, "30 days"),
+        el("option", { value: "90" }, "90 days"),
+        el("option", { value: "180" }, "6 months"),
+        el("option", { value: "365" }, "1 year"));
+      const gbSel = el("select", { class: "pill-field" },
+        el("option", { value: "0" }, "No limit"),
+        el("option", { value: "1" }, "1 GB"),
+        el("option", { value: "2" }, "2 GB"),
+        el("option", { value: "5" }, "5 GB"),
+        el("option", { value: "10" }, "10 GB"),
+        el("option", { value: "25" }, "25 GB"));
+      invoke("get_media_limits").then((l) => {
+        if (l) { daysSel.value = String(l.days || 0); gbSel.value = String(l.gb || 0); }
+      }).catch(() => {});
+      const save = async () => {
+        try { await invoke("set_media_limits", { days: Number(daysSel.value), gb: Number(gbSel.value) }); toast("Saved"); }
+        catch (e) { toast("" + e); }
+      };
+      daysSel.onchange = save; gbSel.onchange = save;
+      return el("div", { class: "col", style: "gap:6px" },
+        el("label", { class: "row", style: "gap:8px;align-items:center" }, el("span", { style: "flex:1" }, "Delete local media older than"), daysSel),
+        el("label", { class: "row", style: "gap:8px;align-items:center" }, el("span", { style: "flex:1" }, "Keep local media under"), gbSel),
+        el("div", { class: "muted small" }, "Automatically remove old/excess cached media (oldest first) to stay under your caps — posts stay and re-download on demand. Kept items are never removed."));
+    })(),
+    // Clear only media nothing references anymore.
     (() => {
       const status = el("div", { class: "muted small" }, "");
       const btn = el("button", { class: "btn", onclick: async () => {

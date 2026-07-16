@@ -471,6 +471,100 @@ pub fn media_cleanup(engine: Eng) -> MediaCleanupDto {
     MediaCleanupDto { bytes, files }
 }
 
+// ---- #1 size-sorted cleanup screen -------------------------------------------------------
+
+/// One row of the "Manage media" screen (see engine::MediaRow). `reference` is the on-disk storage
+/// name — the handle for pin/delete/download.
+#[derive(Serialize)]
+pub struct MediaInventoryRowDto {
+    pub reference: String,
+    pub bytes: u64,
+    pub mtime_ms: u64,
+    pub kind: String,
+    pub circle_name: String,
+    pub snippet: Option<String>,
+    pub is_orphan: bool,
+    pub is_pinned: bool,
+}
+
+/// Every stored media blob, largest first, joined to the post/DM it belongs to (best-effort). Blocking
+/// (walks every circle's feed) — the same precedent as `media_cleanup`.
+#[tauri::command]
+pub fn media_inventory(engine: Eng) -> Vec<MediaInventoryRowDto> {
+    engine
+        .media_inventory()
+        .into_iter()
+        .map(|r| MediaInventoryRowDto {
+            reference: r.reference,
+            bytes: r.bytes,
+            mtime_ms: r.mtime_ms,
+            kind: r.kind.to_string(),
+            circle_name: r.circle_name,
+            snippet: r.snippet,
+            is_orphan: r.is_orphan,
+            is_pinned: r.is_pinned,
+        })
+        .collect()
+}
+
+/// Delete the LOCAL blobs for these refs (the posts stay; referenced ones become downloadable
+/// placeholders). Returns freed bytes.
+#[tauri::command]
+pub fn media_delete_selected(engine: Eng, refs: Vec<String>) -> u64 {
+    engine.media_delete_selected(refs)
+}
+
+// ---- #2 device pin ("keep on this device") ----------------------------------------------
+
+#[tauri::command]
+pub fn media_pin(engine: Eng, refs: Vec<String>) {
+    engine.pin_media(refs);
+}
+
+#[tauri::command]
+pub fn media_unpin(engine: Eng, refs: Vec<String>) {
+    engine.unpin_media(refs);
+}
+
+#[tauri::command]
+pub fn media_pinned_count(engine: Eng) -> usize {
+    engine.pinned_count()
+}
+
+// ---- #3 evicted placeholder + on-demand download ----------------------------------------
+
+/// If this ref was deliberately evicted, its last-known bytes (drives the "Download N" placeholder);
+/// `None` otherwise (the tile is simply still syncing).
+#[tauri::command]
+pub fn media_evicted_size(engine: Eng, reference: String) -> Option<u64> {
+    engine.evicted_size(&reference)
+}
+
+/// User tapped "Download" on an evicted placeholder: clear the eviction and fetch this one ref now.
+#[tauri::command]
+pub fn media_download(engine: Eng, reference: String) {
+    engine.media_download(reference);
+}
+
+// ---- #4 local media limits (age/size caps) ----------------------------------------------
+
+#[derive(Serialize)]
+pub struct MediaLimitsDto {
+    pub days: u32,
+    pub gb: u32,
+}
+
+#[tauri::command]
+pub fn get_media_limits(engine: Eng) -> MediaLimitsDto {
+    let (days, gb) = engine.get_media_limits();
+    MediaLimitsDto { days, gb }
+}
+
+#[tauri::command]
+pub fn set_media_limits(engine: Eng, days: u32, gb: u32) {
+    engine.set_media_limits(days, gb);
+}
+
 #[tauri::command]
 pub fn send_dm(engine: Eng, circle_id: String, body: String, media: Vec<String>, music: Option<TrackInput>) {
     engine.send_dm(circle_id, body, media, music.map(|m| m.into_ffi()));

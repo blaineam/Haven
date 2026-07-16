@@ -242,6 +242,30 @@ pub struct Prefs {
     /// this feature ships, pre-existing history doesn't light every conversation up as unread.
     #[serde(default)]
     pub dm_read_seeded_at: u64,
+    /// DEVICE-LOCAL "keep on this device" set (#2): media refs the user asked to retain here, exempt
+    /// from EVERY cleanup path (orphan sweep, the age/size limit sweep, and the cleanup screen marks
+    /// them ineligible). NOT synced to other devices. Refs stored verbatim; callers union each ref's
+    /// on-disk storage_name into the sweep keep-sets. Mirrors iOS `PinnedMediaStore`.
+    #[serde(default)]
+    pub pinned_media: Vec<String>,
+    /// DEVICE-LOCAL "deliberately evicted, do-not-auto-refetch" set (#3/#4): refs whose LOCAL blob was
+    /// removed on purpose (cleanup screen selection of a still-referenced item, or the age/size limit
+    /// sweep) while the EVENT still lives. The missing-media sweep must NOT auto-refetch these (that
+    /// would silently undo the freed space) — they render as an explicit "Download N" placeholder and
+    /// re-fetch only on tap. Keyed by ref/bare-hash storage_name -> last-known bytes. Mirrors iOS
+    /// `EvictedMediaStore`.
+    #[serde(default)]
+    pub evicted_media: std::collections::HashMap<String, u64>,
+    /// LOCAL media age cap in DAYS (#4): delete this device's cached blobs older than N days
+    /// (0 = no age limit, the default). The event stays; the blob becomes a re-downloadable
+    /// placeholder. Mirrors iOS `SettingsStore.localMediaMaxDays`.
+    #[serde(default)]
+    pub local_media_max_days: u32,
+    /// LOCAL media size cap in GB (#4): keep this device's cached blobs under this many GB
+    /// (0 = no size limit, the default). Oldest-first eviction; pinned blobs are never evicted.
+    /// Mirrors iOS `SettingsStore.localMediaMaxGB`.
+    #[serde(default)]
+    pub local_media_max_gb: u32,
 }
 
 impl Prefs {

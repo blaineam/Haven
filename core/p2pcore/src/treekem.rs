@@ -1097,3 +1097,1940 @@ mod tests {
         assert_eq!(RatchetTree::from_bytes(&pt.tree_bytes).unwrap(), ratchet_tree());
     }
 }
+
+// ═════════════════════════════════════════════════════════════════════════════════════════
+// Stage M1 — the pure tree module (§3.2 node key material, §3.3 epoch key schedule,
+// §5.1 fork tie-break + chain rule; design §9 row M1).
+//
+// Everything below is a PURE function of its inputs: entropy and time are caller-supplied,
+// there is no I/O, no engine state, no OsRng. Same inputs → same bytes, always — the M2
+// shadow-mode comparison and cross-device convergence depend on that, so any source of
+// nondeterminism here (an unseeded RNG, a HashMap iteration order, a platform-dependent
+// serialization) is a correctness bug, not a style issue.
+// ═════════════════════════════════════════════════════════════════════════════════════════
+
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
+
+use hkdf::Hkdf;
+use ml_kem::kem::{Decapsulate, Encapsulate};
+use ml_kem::{Encoded, EncodedSizeUser, KemCore, MlKem768};
+use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
+use sha2::Sha256;
+use x25519_dalek::{PublicKey as XPublicKey, StaticSecret as XStaticSecret};
+
+use crate::identity::{DecapKey, EncapKey};
+
+// ── Derivation labels (§3.2, §3.3) ───────────────────────────────────────────────────────
+//
+// These are part of the cryptographic contract exactly like the signature domains above:
+// change one byte and every device derives different keys. The committed test vectors
+// below assert exact output bytes so an accidental label change fails loudly.
+
+/// HKDF salt for every path/node/commit derivation in the tree (§3.2).
+pub const TREEKEM_SALT: &[u8] = b"haven-treekem-v1";
+/// Info label binding a path-secret ciphertext to `(group_id, epoch, node_index)` (§3.2),
+/// so a tree ciphertext can never be confused with a content wrap.
+pub const TREE_CT_DOMAIN: &[u8] = b"haven-treekem-ct-v1";
+/// blake3 domain for the epoch context (§3.3).
+pub const EPOCH_CTX_DOMAIN: &[u8] = b"haven-mls-ctx-v1";
+/// HKDF salt for the epoch secret (§3.3).
+pub const EPOCH_SALT: &[u8] = b"haven-mls-epoch-v1";
+/// Info label for per-leaf sender keys (§3.3) — the 32-byte "epoch keys" the content
+/// layer consumes unchanged.
+pub const SENDER_KEY_DOMAIN: &[u8] = b"haven-mls-sender-v1";
+
+// blake3 domains M1 pins (companions to §3.2/§3.3's table; frozen by the committed vectors).
+const TREE_HASH_DOMAIN: &[u8] = b"haven-mls-treehash-v1";
+const TRANSCRIPT_DOMAIN: &[u8] = b"haven-mls-transcript-v1";
+const COMMIT_CONTENT_DOMAIN: &[u8] = b"haven-mls-commit-content-v1";
+const ENTROPY_DOMAIN: &[u8] = b"haven-treekem-entropy-v1";
+// The SAME salt as `crypto.rs` `combine()` — §3.2 mandates the identical transcript-bound
+// hybrid combine, distinguished only by the info label above.
+const HYBRID_KEM_SALT: &[u8] = b"haven-hybrid-kem-v2";
+
+// ── Secret hygiene ───────────────────────────────────────────────────────────────────────
+
+/// Volatile-zero a 32-byte secret in place. Deletion is a *security property* of the epoch
+/// schedule (§6.2's table): the one-way claim only holds if consumed secrets are actually
+/// destroyed, so the schedule wipes its inputs itself rather than trusting every caller to
+/// remember. `write_volatile` keeps the wipe of a dead buffer from being optimized away.
+pub fn wipe_secret(b: &mut [u8; 32]) {
+    for i in 0..b.len() {
+        unsafe { core::ptr::write_volatile(&mut b[i], 0) };
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+/// HKDF-SHA256 → 32 bytes (the house pattern of `identity.rs:162` / `groupkey.rs:121`).
+fn hkdf32(salt: &[u8], ikm: &[u8], info: &[u8]) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
+    let mut out = [0u8; 32];
+    hk.expand(info, &mut out).expect("32 is a valid HKDF length");
+    out
+}
+
+/// HKDF-*expand* from a 32-byte PRK (§3.3's `HKDF-expand(epoch_secret, label)` lines).
+fn hkdf_expand32(prk: &[u8; 32], info: &[u8]) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::from_prk(prk).expect("32-byte PRK is valid for SHA-256");
+    let mut out = [0u8; 32];
+    hk.expand(info, &mut out).expect("32 is a valid HKDF length");
+    out
+}
+
+// ── Array-tree math (§3.1) ───────────────────────────────────────────────────────────────
+//
+// Left-balanced binary tree over an array of node slots: leaf i at index 2i, parents at
+// odd indices, in-order layout. All pure index arithmetic; the recursive-reference test
+// below cross-checks every function for all tree sizes up to 40 leaves.
+
+/// Number of trailing one bits — the height of the complete subtree rooted at `x`.
+fn level(x: usize) -> u32 {
+    x.trailing_ones()
+}
+
+/// Array width for a tree of `n_leaves` leaves.
+pub fn node_width(n_leaves: usize) -> usize {
+    if n_leaves == 0 {
+        0
+    } else {
+        2 * n_leaves - 1
+    }
+}
+
+/// Array index of the tree root.
+pub fn root_index(n_leaves: usize) -> Result<usize> {
+    if n_leaves == 0 {
+        return Err(CoreError::Encoding("treekem: empty tree has no root"));
+    }
+    let w = node_width(n_leaves);
+    Ok((1usize << (usize::BITS - 1 - w.leading_zeros())) - 1)
+}
+
+/// Left child of an interior node. The left subtree is always complete, so this is pure
+/// bit arithmetic with no width dependence.
+pub fn left_child(x: usize) -> Result<usize> {
+    let k = level(x);
+    if k == 0 {
+        return Err(CoreError::Encoding("treekem: leaf has no children"));
+    }
+    Ok(x ^ (0x01 << (k - 1)))
+}
+
+/// Right child of an interior node. In a left-balanced tree the right subtree may be
+/// truncated, so the complete-tree candidate descends left until it lands in range.
+pub fn right_child(x: usize, n_leaves: usize) -> Result<usize> {
+    let k = level(x);
+    if k == 0 {
+        return Err(CoreError::Encoding("treekem: leaf has no children"));
+    }
+    let w = node_width(n_leaves);
+    if x >= w {
+        return Err(CoreError::Encoding("treekem: node index out of range"));
+    }
+    let mut r = x ^ (0x03 << (k - 1));
+    while r >= w {
+        r = left_child(r)?;
+    }
+    Ok(r)
+}
+
+/// The parent candidate ignoring width (complete-tree step).
+fn parent_step(x: usize) -> usize {
+    let k = level(x);
+    let b = (x >> (k + 1)) & 0x01;
+    (x | (1 << k)) ^ (b << (k + 1))
+}
+
+/// Parent of a node; `None` at the root.
+pub fn parent_index(x: usize, n_leaves: usize) -> Result<Option<usize>> {
+    let w = node_width(n_leaves);
+    if x >= w {
+        return Err(CoreError::Encoding("treekem: node index out of range"));
+    }
+    if x == root_index(n_leaves)? {
+        return Ok(None);
+    }
+    let mut p = parent_step(x);
+    while p >= w {
+        p = parent_step(p);
+    }
+    Ok(Some(p))
+}
+
+/// The other child of `x`'s parent; `None` at the root.
+pub fn sibling_index(x: usize, n_leaves: usize) -> Result<Option<usize>> {
+    match parent_index(x, n_leaves)? {
+        None => Ok(None),
+        Some(p) => {
+            let l = left_child(p)?;
+            Ok(Some(if l == x { right_child(p, n_leaves)? } else { l }))
+        }
+    }
+}
+
+/// The nodes from `x`'s parent up to and including the root (empty for a 1-node tree).
+pub fn direct_path(x: usize, n_leaves: usize) -> Result<Vec<usize>> {
+    let mut out = Vec::new();
+    let mut cur = x;
+    while let Some(p) = parent_index(cur, n_leaves)? {
+        out.push(p);
+        cur = p;
+    }
+    Ok(out)
+}
+
+/// The sibling of `x`, then the sibling of each direct-path node below the root — one
+/// copath node per direct-path node.
+pub fn copath(x: usize, n_leaves: usize) -> Result<Vec<usize>> {
+    let mut out = Vec::new();
+    let mut cur = x;
+    while let Some(s) = sibling_index(cur, n_leaves)? {
+        out.push(s);
+        cur = parent_index(cur, n_leaves)?.expect("sibling exists implies parent exists");
+    }
+    Ok(out)
+}
+
+/// Array slot of leaf `i` (leaf i lives at index 2i).
+pub const fn leaf_slot(leaf_index: u32) -> usize {
+    2 * leaf_index as usize
+}
+
+/// Whether the subtree rooted at `x` contains the given leaf slot. In-order layout makes
+/// every subtree a contiguous index range: `[x - (2^k - 1), min(x + (2^k - 1), width-1)]`.
+pub fn subtree_contains(x: usize, leaf_slot: usize, n_leaves: usize) -> bool {
+    let mask = (1usize << level(x)) - 1;
+    let lo = x - mask;
+    let hi = (x + mask).min(node_width(n_leaves).saturating_sub(1));
+    leaf_slot >= lo && leaf_slot <= hi
+}
+
+// ── Node key material (§3.2) ─────────────────────────────────────────────────────────────
+
+/// A node's hybrid KEM keypair, derived deterministically from its 32-byte node secret via
+/// the exact `Identity::from_seed` pattern (`identity.rs:161-178`) under the tree's own
+/// salt — node keys can never collide with identity keys derived from the same bytes.
+/// Secrets stay private to the module; only the public halves are exposed.
+pub struct NodeKeypair {
+    x_secret: XStaticSecret,
+    pq_dk: DecapKey,
+    /// X25519 public key (classical half).
+    pub kem_x: [u8; KEM_X_LEN],
+    /// ML-KEM-768 encapsulation key (post-quantum half).
+    pub kem_pq: [u8; MLKEM_EK_LEN],
+}
+
+/// `path_secret[i+1] = HKDF(salt="haven-treekem-v1", ikm=path_secret[i], info="path")`.
+pub fn derive_path_secret(prev: &[u8; 32]) -> [u8; 32] {
+    hkdf32(TREEKEM_SALT, prev, b"path")
+}
+
+/// `node_secret[i] = HKDF(salt="haven-treekem-v1", ikm=path_secret[i], info="node")`.
+pub fn derive_node_secret(path_secret: &[u8; 32]) -> [u8; 32] {
+    hkdf32(TREEKEM_SALT, path_secret, b"node")
+}
+
+/// `commit_secret = HKDF(salt="haven-treekem-v1", ikm=path_secret[root], info="commit")`.
+/// For a 1-leaf tree (no parents) the chain is just the leaf secret, which is the root.
+pub fn derive_commit_secret(root_path_secret: &[u8; 32]) -> [u8; 32] {
+    hkdf32(TREEKEM_SALT, root_path_secret, b"commit")
+}
+
+/// Node keypair from a node secret: x25519 sk = HKDF(info="x25519"); ml-kem =
+/// `MlKem768::generate(ChaCha20Rng(HKDF(info="ml-kem-768")))` (§3.2).
+pub fn node_keypair(node_secret: &[u8; 32]) -> NodeKeypair {
+    let x_secret = XStaticSecret::from(hkdf32(TREEKEM_SALT, node_secret, b"x25519"));
+    let mut rng = ChaCha20Rng::from_seed(hkdf32(TREEKEM_SALT, node_secret, b"ml-kem-768"));
+    let (pq_dk, pq_ek) = MlKem768::generate(&mut rng);
+    let kem_x = XPublicKey::from(&x_secret).to_bytes();
+    let ek = pq_ek.as_bytes();
+    let mut kem_pq = [0u8; MLKEM_EK_LEN];
+    kem_pq.copy_from_slice(&ek[..]);
+    NodeKeypair { x_secret, pq_dk, kem_x, kem_pq }
+}
+
+/// Keypair for the node whose secret derives from this path secret (leaf keypairs use the
+/// leaf secret, which is `path_secret[0]`).
+pub fn node_keypair_from_path_secret(path_secret: &[u8; 32]) -> NodeKeypair {
+    node_keypair(&derive_node_secret(path_secret))
+}
+
+/// The DEVICE-signed payload binding a leaf public key to a group (§3.4 `leaf_binding_sig`).
+pub fn leaf_binding_payload(
+    group_id: &[u8],
+    leaf_kem_x: &[u8; KEM_X_LEN],
+    leaf_kem_pq: &[u8; MLKEM_EK_LEN],
+) -> Vec<u8> {
+    let mut v = Vec::with_capacity(LEAF_DOMAIN.len() + group_id.len() + KEM_X_LEN + MLKEM_EK_LEN);
+    v.extend_from_slice(LEAF_DOMAIN);
+    v.extend_from_slice(group_id);
+    v.extend_from_slice(leaf_kem_x);
+    v.extend_from_slice(leaf_kem_pq);
+    v
+}
+
+// ── Path-secret hybrid encryption (§3.2) ─────────────────────────────────────────────────
+
+/// The tree's hybrid KEM key derivation: identical shape to `crypto.rs` `combine()` —
+/// HKDF(salt="haven-hybrid-kem-v2", ikm = dh ‖ pq) with the full KEM transcript in the
+/// info — except the info leads with `TREE_CT_DOMAIN ‖ group_id ‖ epoch ‖ node_index`
+/// instead of `"content-aead-key"`, so no tree wrap can be replayed as a content wrap
+/// (or into another group/epoch/node slot).
+#[allow(clippy::too_many_arguments)]
+fn tree_ct_key(
+    dh: &[u8],
+    pq_ss: &[u8],
+    eph_x: &[u8; KEM_X_LEN],
+    pq_ct: &[u8],
+    recip_x: &[u8; KEM_X_LEN],
+    recip_pq: &[u8; MLKEM_EK_LEN],
+    group_id: &[u8],
+    epoch: u64,
+    resolution_index: u32,
+) -> [u8; 32] {
+    let mut ikm = Vec::with_capacity(dh.len() + pq_ss.len());
+    ikm.extend_from_slice(dh);
+    ikm.extend_from_slice(pq_ss);
+    // group_id is length-prefixed inside the info so a crafted group id can't shift the
+    // fixed fields behind it (unambiguous encoding = unambiguous domain separation).
+    let mut info = Vec::new();
+    info.extend_from_slice(TREE_CT_DOMAIN);
+    info.extend_from_slice(&(group_id.len() as u32).to_le_bytes());
+    info.extend_from_slice(group_id);
+    info.extend_from_slice(&epoch.to_le_bytes());
+    info.extend_from_slice(&resolution_index.to_le_bytes());
+    info.extend_from_slice(eph_x);
+    info.extend_from_slice(pq_ct);
+    info.extend_from_slice(recip_x);
+    info.extend_from_slice(recip_pq);
+    hkdf32(HYBRID_KEM_SALT, &ikm, &info)
+}
+
+/// Per-ciphertext RNG sub-seed: the caller supplies ONE 32-byte entropy input per build
+/// and every encapsulation draws from a distinct deterministic expansion of it, keyed by
+/// which (direct-path node, resolution node) pair it serves. Determinism is the point —
+/// rebuilding the same UpdatePath from the same inputs must reproduce identical bytes.
+fn ct_seed(entropy: &[u8; 32], path_node: u32, resolution_index: u32) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(ENTROPY_DOMAIN);
+    h.update(entropy);
+    h.update(&path_node.to_le_bytes());
+    h.update(&resolution_index.to_le_bytes());
+    *h.finalize().as_bytes()
+}
+
+/// Hybrid-KEM-encrypt a 32-byte path secret to a bare node key pair. Deterministic: all
+/// randomness (ephemeral X25519, ML-KEM encapsulation) comes from the caller's seed.
+pub fn seal_path_secret(
+    recipient_x: &[u8; KEM_X_LEN],
+    recipient_pq: &[u8; MLKEM_EK_LEN],
+    group_id: &[u8],
+    epoch: u64,
+    resolution_index: u32,
+    path_secret: &[u8; 32],
+    seed: &[u8; 32],
+) -> Result<PathSecretCiphertext> {
+    let mut rng = ChaCha20Rng::from_seed(*seed);
+    let eph = XStaticSecret::random_from_rng(&mut rng);
+    let eph_x = XPublicKey::from(&eph).to_bytes();
+    let dh = eph.diffie_hellman(&XPublicKey::from(*recipient_x));
+    let ek_enc = Encoded::<EncapKey>::try_from(&recipient_pq[..])
+        .map_err(|_| CoreError::Crypto("treekem: bad ml-kem encapsulation key"))?;
+    let ek = EncapKey::from_bytes(&ek_enc);
+    let (pq_ct, pq_ss) = ek
+        .encapsulate(&mut rng)
+        .map_err(|_| CoreError::Crypto("treekem: ml-kem encapsulate failed"))?;
+    let key = tree_ct_key(
+        dh.as_bytes(),
+        &pq_ss[..],
+        &eph_x,
+        &pq_ct[..],
+        recipient_x,
+        recipient_pq,
+        group_id,
+        epoch,
+        resolution_index,
+    );
+    // seal_reproducible is sound here because the key is unique per ciphertext (fresh
+    // ephemeral + transcript-bound derivation), and it keeps the whole build deterministic.
+    Ok(PathSecretCiphertext {
+        resolution_index,
+        eph_x,
+        pq_ct: pq_ct[..].to_vec(),
+        wrapped_path_secret: crate::crypto::seal_reproducible(&key, path_secret),
+    })
+}
+
+/// Decrypt a path secret addressed to `kp`'s node. Fails closed on any mismatch — wrong
+/// node, wrong group, wrong epoch, tampered bytes all land in the same AEAD failure.
+pub fn open_path_secret(
+    kp: &NodeKeypair,
+    group_id: &[u8],
+    epoch: u64,
+    ct: &PathSecretCiphertext,
+) -> Result<[u8; 32]> {
+    let dh = kp.x_secret.diffie_hellman(&XPublicKey::from(ct.eph_x));
+    let pq_ct = ml_kem::Ciphertext::<MlKem768>::try_from(&ct.pq_ct[..])
+        .map_err(|_| CoreError::Crypto("treekem: malformed ml-kem ciphertext"))?;
+    let pq_ss = kp
+        .pq_dk
+        .decapsulate(&pq_ct)
+        .map_err(|_| CoreError::Crypto("treekem: ml-kem decapsulate failed"))?;
+    let key = tree_ct_key(
+        dh.as_bytes(),
+        &pq_ss[..],
+        &ct.eph_x,
+        &ct.pq_ct,
+        &kp.kem_x,
+        &kp.kem_pq,
+        group_id,
+        epoch,
+        ct.resolution_index,
+    );
+    let pt = crate::crypto::open(&key, &ct.wrapped_path_secret)?;
+    pt.try_into()
+        .map_err(|_| CoreError::Crypto("treekem: path secret has wrong length"))
+}
+
+// ── Public-tree operations (§3.1, §4.2, §4.3) ────────────────────────────────────────────
+
+impl RatchetTree {
+    /// Build a tree from an ordered list of leaves, all parents blank (a fresh group before
+    /// any UpdatePath, or a §4.1 creator bootstrapping from device lists).
+    pub fn from_leaves(leaves: Vec<LeafNode>) -> Self {
+        let mut slots = Vec::with_capacity(node_width(leaves.len()));
+        for (i, l) in leaves.into_iter().enumerate() {
+            if i > 0 {
+                slots.push(TreeSlot::Blank);
+            }
+            slots.push(TreeSlot::Leaf(l));
+        }
+        Self { slots }
+    }
+
+    /// Leaf capacity of the array (blank leaf slots included — blanks are still slots).
+    pub fn n_leaves(&self) -> usize {
+        (self.slots.len() + 1) / 2
+    }
+
+    /// The leaf at `leaf_index`, if populated.
+    pub fn leaf(&self, leaf_index: u32) -> Option<&LeafNode> {
+        match self.slots.get(leaf_slot(leaf_index)) {
+            Some(TreeSlot::Leaf(l)) => Some(l),
+            _ => None,
+        }
+    }
+}
+
+/// Hash of the public tree: blake3 over the domain tag and the canonical serialization.
+/// Sound as a whole-tree hash because the M0 codec is a byte-stable bijection (tested
+/// there), and the tree travels as one blob anyway — no per-node Merkle structure needed.
+pub fn tree_hash(tree: &RatchetTree) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(TREE_HASH_DOMAIN);
+    h.update(&tree.to_bytes());
+    *h.finalize().as_bytes()
+}
+
+/// MLS resolution of a node: the minimal set of non-blank nodes covering its subtree.
+/// Non-blank leaf → itself. Non-blank parent → itself plus its unmerged leaves (an
+/// unmerged leaf does NOT know the parent's secret, so it must be addressed directly).
+/// Blank parent → resolutions of both children, left to right (order is part of the wire
+/// contract: builders and receivers must enumerate identically).
+pub fn resolution(tree: &RatchetTree, node: usize) -> Result<Vec<usize>> {
+    let slot = tree
+        .slots
+        .get(node)
+        .ok_or(CoreError::Encoding("treekem: node index out of range"))?;
+    if node % 2 == 0 {
+        // Leaf position.
+        match slot {
+            TreeSlot::Blank => Ok(Vec::new()),
+            TreeSlot::Leaf(_) => Ok(vec![node]),
+            TreeSlot::Parent(_) => Err(CoreError::Encoding("treekem: parent node in leaf slot")),
+        }
+    } else {
+        match slot {
+            TreeSlot::Leaf(_) => Err(CoreError::Encoding("treekem: leaf node in parent slot")),
+            TreeSlot::Parent(p) if !p.blank => {
+                let mut v = vec![node];
+                for &l in &p.unmerged_leaves {
+                    v.push(leaf_slot(l));
+                }
+                Ok(v)
+            }
+            // TreeSlot::Blank at a parent position and ParentNode{blank:true} are the same
+            // logical state (M0 carries both encodings); resolve through the children.
+            _ => {
+                let n = tree.n_leaves();
+                let mut v = resolution(tree, left_child(node)?)?;
+                v.extend(resolution(tree, right_child(node, n)?)?);
+                Ok(v)
+            }
+        }
+    }
+}
+
+/// Add a leaf: first blank leaf slot wins (deterministic — every replica must assign the
+/// same index), else the array grows by one leaf. The new leaf is recorded as *unmerged*
+/// at every non-blank ancestor: those nodes' secrets predate the newcomer, so it cannot
+/// know them, and path encryption must address it directly until an UpdatePath re-keys.
+pub fn add_leaf(tree: &mut RatchetTree, leaf: LeafNode) -> Result<u32> {
+    let mut target: Option<usize> = None;
+    let mut i = 0;
+    while i < tree.slots.len() {
+        if matches!(tree.slots[i], TreeSlot::Blank) {
+            target = Some(i);
+            break;
+        }
+        i += 2;
+    }
+    let slot = match target {
+        Some(s) => {
+            tree.slots[s] = TreeSlot::Leaf(leaf);
+            s
+        }
+        None => {
+            if !tree.slots.is_empty() {
+                tree.slots.push(TreeSlot::Blank);
+            }
+            tree.slots.push(TreeSlot::Leaf(leaf));
+            tree.slots.len() - 1
+        }
+    };
+    let leaf_index = (slot / 2) as u32;
+    let n = tree.n_leaves();
+    for p in direct_path(slot, n)? {
+        if let TreeSlot::Parent(pn) = &mut tree.slots[p] {
+            if !pn.blank {
+                if let Err(pos) = pn.unmerged_leaves.binary_search(&leaf_index) {
+                    pn.unmerged_leaves.insert(pos, leaf_index);
+                }
+            }
+        }
+    }
+    Ok(leaf_index)
+}
+
+/// Remove a leaf (§4.3): blank the leaf and every node on its direct path — those nodes'
+/// secrets were known to the removed device, so they are dead the moment it leaves; only
+/// a fresh UpdatePath may repopulate them. Also purge the leaf from every unmerged list.
+/// The array is NOT truncated: index stability keeps replicas trivially convergent, and
+/// blank slots are reused by the next add.
+pub fn remove_leaf(tree: &mut RatchetTree, leaf_index: u32) -> Result<()> {
+    let slot = leaf_slot(leaf_index);
+    match tree.slots.get(slot) {
+        Some(TreeSlot::Leaf(_)) => {}
+        _ => return Err(CoreError::Encoding("treekem: remove of unpopulated leaf")),
+    }
+    tree.slots[slot] = TreeSlot::Blank;
+    let n = tree.n_leaves();
+    for p in direct_path(slot, n)? {
+        tree.slots[p] = TreeSlot::Blank;
+    }
+    for s in &mut tree.slots {
+        if let TreeSlot::Parent(pn) = s {
+            pn.unmerged_leaves.retain(|&l| l != leaf_index);
+        }
+    }
+    Ok(())
+}
+
+/// The leaf's direct path paired with each node's copath child, keeping only nodes whose
+/// copath child has a non-empty resolution (there is someone to encrypt to). Nodes
+/// filtered out stay blank — nothing lives under their other side.
+fn filtered_path_with_copath(tree: &RatchetTree, leaf_index: u32) -> Result<Vec<(usize, usize)>> {
+    let n = tree.n_leaves();
+    let slot = leaf_slot(leaf_index);
+    let mut out = Vec::new();
+    let mut prev = slot;
+    for d in direct_path(slot, n)? {
+        let l = left_child(d)?;
+        let cop = if l == prev { right_child(d, n)? } else { l };
+        if !resolution(tree, cop)?.is_empty() {
+            out.push((d, cop));
+        }
+        prev = d;
+    }
+    Ok(out)
+}
+
+/// The filtered direct path of a leaf (see [`filtered_path_with_copath`]).
+pub fn filtered_direct_path(tree: &RatchetTree, leaf_index: u32) -> Result<Vec<usize>> {
+    Ok(filtered_path_with_copath(tree, leaf_index)?.into_iter().map(|(d, _)| d).collect())
+}
+
+/// Apply an UpdatePath to the public tree: replace the sender's leaf, blank its direct
+/// path, then install the new node keys along the filtered path with EMPTY unmerged lists
+/// (a re-keyed node's secret was just delivered to everyone under it — nobody is unmerged
+/// anymore). One shared code path for committer and receivers, so their trees are
+/// byte-identical by construction.
+pub fn merge_update_path(tree: &mut RatchetTree, sender_leaf: u32, path: &UpdatePath) -> Result<()> {
+    let slot = leaf_slot(sender_leaf);
+    match tree.slots.get(slot) {
+        Some(TreeSlot::Leaf(_)) => {}
+        _ => return Err(CoreError::Encoding("treekem: update path sender leaf not in tree")),
+    }
+    let filtered = filtered_direct_path(tree, sender_leaf)?;
+    if filtered.len() != path.nodes.len() {
+        return Err(CoreError::Encoding("treekem: update path length mismatch"));
+    }
+    let n = tree.n_leaves();
+    tree.slots[slot] = TreeSlot::Leaf(path.leaf_node.clone());
+    for d in direct_path(slot, n)? {
+        tree.slots[d] = TreeSlot::Blank;
+    }
+    for (d, pn) in filtered.iter().zip(&path.nodes) {
+        tree.slots[*d] = TreeSlot::Parent(ParentNode {
+            blank: false,
+            node_kem_x: pn.node_kem_x,
+            node_kem_pq: pn.node_kem_pq,
+            unmerged_leaves: Vec::new(),
+        });
+    }
+    Ok(())
+}
+
+/// Public keys of a resolution node (leaf or non-blank parent).
+fn node_public_keys(tree: &RatchetTree, idx: usize) -> Result<([u8; KEM_X_LEN], [u8; MLKEM_EK_LEN])> {
+    match tree.slots.get(idx) {
+        Some(TreeSlot::Leaf(l)) => Ok((l.leaf_kem_x, l.leaf_kem_pq)),
+        Some(TreeSlot::Parent(p)) if !p.blank => Ok((p.node_kem_x, p.node_kem_pq)),
+        _ => Err(CoreError::Crypto("treekem: resolution node has no public key")),
+    }
+}
+
+// ── UpdatePath build/apply (§4.4) ────────────────────────────────────────────────────────
+
+/// A member's private tree state: its leaf secret plus the path secrets it knows for nodes
+/// on its own direct path. This is the in-memory working set; persistence rides
+/// [`PersistTree`], and the §6.2 deletion table governs lifetimes.
+#[derive(Clone)]
+pub struct TreePrivate {
+    pub leaf_index: u32,
+    /// `path_secret[0]` — replaced wholesale on every own path update.
+    pub leaf_secret: [u8; 32],
+    /// Node array index → path secret, for direct-path nodes this member knows.
+    pub path_secrets: BTreeMap<u32, [u8; 32]>,
+}
+
+impl TreePrivate {
+    pub fn new(leaf_index: u32, leaf_secret: [u8; 32]) -> Self {
+        Self { leaf_index, leaf_secret, path_secrets: BTreeMap::new() }
+    }
+
+    /// This member's leaf keypair (derived from the leaf secret, §3.2).
+    pub fn leaf_keypair(&self) -> NodeKeypair {
+        node_keypair_from_path_secret(&self.leaf_secret)
+    }
+}
+
+/// Everything a committer gets from building an UpdatePath.
+pub struct UpdatePathBuild {
+    pub update_path: UpdatePath,
+    /// The committer's fresh path secrets (node array index → secret) — its next
+    /// [`TreePrivate::path_secrets`] contents.
+    pub path_secrets: BTreeMap<u32, [u8; 32]>,
+    pub commit_secret: [u8; 32],
+}
+
+/// What a receiver learns from decrypting an UpdatePath.
+pub struct PathDecryption {
+    /// Fresh path secrets for the nodes shared with the committer (common ancestor up to
+    /// the root) — merged into the receiver's [`TreePrivate::path_secrets`].
+    pub path_secrets: BTreeMap<u32, [u8; 32]>,
+    pub commit_secret: [u8; 32],
+}
+
+/// Build an UpdatePath (§3.2, §4.4): chain path secrets up from the fresh leaf secret,
+/// derive each filtered-path node's keypair, and hybrid-KEM-wrap each node's path secret
+/// to every node in the resolution of its copath child — the O(log n) rekey.
+///
+/// `tree` is the POST-proposal tree (adds/removes already applied): a removed leaf is
+/// excluded from every resolution by construction, which is the §4.3 revocation guarantee.
+/// Pure and deterministic: the leaf binding signature is produced by the caller-supplied
+/// signer (the device identity lives with the caller), and all encapsulation randomness
+/// expands from `entropy`.
+#[allow(clippy::too_many_arguments)]
+pub fn build_update_path(
+    tree: &RatchetTree,
+    group_id: &[u8],
+    epoch: u64,
+    sender_leaf: u32,
+    leaf_secret: &[u8; 32],
+    device_credential: &[u8],
+    sign_leaf_binding: impl FnOnce(&[u8]) -> Vec<u8>,
+    entropy: &[u8; 32],
+) -> Result<UpdatePathBuild> {
+    match tree.slots.get(leaf_slot(sender_leaf)) {
+        Some(TreeSlot::Leaf(_)) => {}
+        _ => return Err(CoreError::Encoding("treekem: committer leaf not in tree")),
+    }
+    let leaf_kp = node_keypair_from_path_secret(leaf_secret);
+    let payload = leaf_binding_payload(group_id, &leaf_kp.kem_x, &leaf_kp.kem_pq);
+    let leaf_node = LeafNode {
+        leaf_kem_x: leaf_kp.kem_x,
+        leaf_kem_pq: leaf_kp.kem_pq,
+        device_credential: device_credential.to_vec(),
+        leaf_binding_sig: sign_leaf_binding(&payload),
+    };
+    let mut ps = *leaf_secret;
+    let mut nodes = Vec::new();
+    let mut path_secrets = BTreeMap::new();
+    for (d, cop) in filtered_path_with_copath(tree, sender_leaf)? {
+        ps = derive_path_secret(&ps);
+        path_secrets.insert(d as u32, ps);
+        let kp = node_keypair_from_path_secret(&ps);
+        let mut ciphertexts = Vec::new();
+        for r in resolution(tree, cop)? {
+            let (rx, rpq) = node_public_keys(tree, r)?;
+            let seed = ct_seed(entropy, d as u32, r as u32);
+            ciphertexts.push(seal_path_secret(&rx, &rpq, group_id, epoch, r as u32, &ps, &seed)?);
+        }
+        nodes.push(UpdatePathNode { node_kem_x: kp.kem_x, node_kem_pq: kp.kem_pq, ciphertexts });
+    }
+    let commit_secret = derive_commit_secret(&ps);
+    Ok(UpdatePathBuild { update_path: UpdatePath { leaf_node, nodes }, path_secrets, commit_secret })
+}
+
+/// Decrypt an UpdatePath at this member's vantage (§4.4): find the lowest filtered-path
+/// node covering our leaf (the common ancestor with the committer), decrypt its path
+/// secret with whichever key we hold in that copath resolution (our leaf, or an interior
+/// node we know), then derive upward — VERIFYING at every level that the derived public
+/// keys match the UpdatePath's, so a malformed or malicious path cannot silently desync
+/// the tree from the secrets.
+///
+/// `tree` is the POST-proposal, PRE-merge tree (same view the builder used). A removed
+/// member fails here with no decryptable ciphertext — asserted by the §9 M1 proof test.
+pub fn decrypt_update_path(
+    tree: &RatchetTree,
+    group_id: &[u8],
+    epoch: u64,
+    sender_leaf: u32,
+    path: &UpdatePath,
+    my: &TreePrivate,
+) -> Result<PathDecryption> {
+    if sender_leaf == my.leaf_index {
+        return Err(CoreError::Crypto("treekem: committer must use its own build, not decrypt"));
+    }
+    let filtered = filtered_path_with_copath(tree, sender_leaf)?;
+    if filtered.len() != path.nodes.len() {
+        return Err(CoreError::Encoding("treekem: update path length mismatch"));
+    }
+    let n = tree.n_leaves();
+    let my_slot = leaf_slot(my.leaf_index);
+    let anchor = filtered
+        .iter()
+        .position(|(d, _)| subtree_contains(*d, my_slot, n))
+        .ok_or(CoreError::Crypto("treekem: leaf not covered by this update path"))?;
+    let mut got: Option<[u8; 32]> = None;
+    for ct in &path.nodes[anchor].ciphertexts {
+        let kp = if ct.resolution_index as usize == my_slot {
+            Some(my.leaf_keypair())
+        } else {
+            my.path_secrets.get(&ct.resolution_index).map(node_keypair_from_path_secret)
+        };
+        if let Some(kp) = kp {
+            // Addressed to a key we hold: failure here is corruption, not "try the next
+            // one" — fail closed rather than mask a bad ciphertext.
+            got = Some(open_path_secret(&kp, group_id, epoch, ct)?);
+            break;
+        }
+    }
+    let mut ps = got.ok_or(CoreError::Crypto("treekem: no decryptable path secret (removed?)"))?;
+    let mut out = BTreeMap::new();
+    for (i, (d, _)) in filtered.iter().enumerate().skip(anchor) {
+        if i > anchor {
+            ps = derive_path_secret(&ps);
+        }
+        let kp = node_keypair_from_path_secret(&ps);
+        let pn = &path.nodes[i];
+        if kp.kem_x != pn.node_kem_x || kp.kem_pq[..] != pn.node_kem_pq[..] {
+            return Err(CoreError::Crypto("treekem: update path node key inconsistent with derived secret"));
+        }
+        out.insert(*d as u32, ps);
+    }
+    let commit_secret = derive_commit_secret(&ps);
+    Ok(PathDecryption { path_secrets: out, commit_secret })
+}
+
+// ── Epoch key schedule (§3.3) ────────────────────────────────────────────────────────────
+
+/// The derived secrets of one epoch. Deliberately absent (§6.2's table, §6.3-1): the
+/// consumed `commit_secret` and the PREVIOUS epoch's `init_secret` have no field here and
+/// are wiped by [`advance_epoch`] itself — from this struct, epoch n−1 is not derivable.
+/// `init_secret` feeds epoch n+1 and is consumed (and wiped) by the next advance;
+/// `joiner_secret` exists only for Welcome issuance and is retained by the committer only
+/// while a Welcome is un-acked (bounded by the mailbox TTL, §6.3-3).
+#[derive(Clone)]
+pub struct EpochSchedule {
+    pub epoch_secret: [u8; 32],
+    pub init_secret: [u8; 32],
+    pub sender_root: [u8; 32],
+    pub confirm_key: [u8; 32],
+    pub welcome_key: [u8; 32],
+    pub joiner_secret: [u8; 32],
+}
+
+/// `epoch_context_n = blake3("haven-mls-ctx-v1" ‖ group_id ‖ n ‖ tree_hash_n ‖
+/// confirmed_transcript_hash_n)` (§3.3).
+pub fn epoch_context(
+    group_id: &[u8],
+    epoch: u64,
+    tree_hash: &[u8; 32],
+    confirmed_transcript_hash: &[u8; 32],
+) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(EPOCH_CTX_DOMAIN);
+    h.update(group_id);
+    h.update(&epoch.to_le_bytes());
+    h.update(tree_hash);
+    h.update(confirmed_transcript_hash);
+    *h.finalize().as_bytes()
+}
+
+/// Derive every epoch-n secret from a joiner secret + epoch context (§3.3). This is the
+/// entry point a Welcome recipient uses (a Welcome delivers `joiner_secret`); members that
+/// processed the commit go through [`advance_epoch`], which lands here after the one-way
+/// step.
+pub fn epoch_from_joiner(joiner_secret: &[u8; 32], epoch_context: &[u8; 32]) -> EpochSchedule {
+    let epoch_secret = hkdf32(EPOCH_SALT, joiner_secret, epoch_context);
+    EpochSchedule {
+        init_secret: hkdf_expand32(&epoch_secret, b"init"),
+        sender_root: hkdf_expand32(&epoch_secret, b"senders"),
+        confirm_key: hkdf_expand32(&epoch_secret, b"confirm"),
+        welcome_key: hkdf_expand32(joiner_secret, b"welcome"),
+        joiner_secret: *joiner_secret,
+        epoch_secret,
+    }
+}
+
+/// Advance the schedule one epoch: `joiner_secret_n = HKDF(salt=init_secret_{n-1},
+/// ikm=commit_secret_n, info="joiner" ‖ epoch_context_n)` (§3.3), then derive everything
+/// from it.
+///
+/// BOTH inputs are wiped in place before this returns — they are consumed by the one-way
+/// link and must not outlive it (§6.2: `commit_secret` dies immediately; `init_secret_{n-1}`
+/// dies when epoch n confirms). The wipe living inside the schedule, not in every caller,
+/// is what makes the deletion discipline enforceable; the one-way proof test asserts it.
+pub fn advance_epoch(
+    init_secret_prev: &mut [u8; 32],
+    commit_secret: &mut [u8; 32],
+    epoch_context: &[u8; 32],
+) -> EpochSchedule {
+    let mut info = Vec::with_capacity(6 + 32);
+    info.extend_from_slice(b"joiner");
+    info.extend_from_slice(epoch_context);
+    let joiner = hkdf32(init_secret_prev, commit_secret, &info);
+    wipe_secret(init_secret_prev);
+    wipe_secret(commit_secret);
+    epoch_from_joiner(&joiner, epoch_context)
+}
+
+/// `sender_key_n[leaf] = HKDF(salt=leaf_id, ikm=sender_root_n, info="haven-mls-sender-v1"
+/// ‖ group_id ‖ n)` (§3.3) — a 32-byte epoch key in exactly today's `groupkey.rs` sense.
+pub fn sender_key(sender_root: &[u8; 32], leaf_id: &[u8; 32], group_id: &[u8], epoch: u64) -> [u8; 32] {
+    let mut info = Vec::with_capacity(SENDER_KEY_DOMAIN.len() + group_id.len() + 8);
+    info.extend_from_slice(SENDER_KEY_DOMAIN);
+    info.extend_from_slice(group_id);
+    info.extend_from_slice(&epoch.to_le_bytes());
+    hkdf32(leaf_id, sender_root, &info)
+}
+
+/// The commit's confirmation MAC: `blake3-keyed(confirm_key_n, confirmed_transcript_hash_n)`.
+/// Agreeing on this value proves agreement on the entire epoch derivation — tree hash,
+/// transcript, and schedule — which is exactly the §1.2 "group agreement" property.
+pub fn confirmation_mac(confirm_key: &[u8; 32], confirmed_transcript_hash: &[u8; 32]) -> [u8; 32] {
+    *blake3::keyed_hash(confirm_key, confirmed_transcript_hash).as_bytes()
+}
+
+// ── Fork tie-break + chain rule (§5.1) ───────────────────────────────────────────────────
+
+/// blake3 of a commit's FULL signed bytes — the §5.1 ordering key and the
+/// `parent_commit_hash` chain link.
+pub fn commit_hash(commit_bytes: &[u8]) -> [u8; 32] {
+    *blake3::hash(commit_bytes).as_bytes()
+}
+
+/// Hash of a commit's CONTENT — the signed bytes with the confirmation MAC and signature
+/// blanked. The transcript hash must cover the commit without covering the MAC (the MAC is
+/// keyed over the transcript hash — including it would be circular), and the M0 codec's
+/// byte-stability makes the blanked re-serialization canonical.
+pub fn commit_content_hash(commit: &Commit) -> [u8; 32] {
+    let mut c = commit.clone();
+    c.confirmation_mac = Vec::new();
+    c.sig = Vec::new();
+    let mut h = blake3::Hasher::new();
+    h.update(COMMIT_CONTENT_DOMAIN);
+    h.update(&c.to_bytes());
+    *h.finalize().as_bytes()
+}
+
+/// `confirmed_transcript_hash_n = blake3(domain ‖ cth_{n-1} ‖ commit_content_hash_n)` —
+/// the running hash all members provably agree on (via the confirmation MAC).
+pub fn next_confirmed_transcript_hash(prev: &[u8; 32], commit: &Commit) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(TRANSCRIPT_DOMAIN);
+    h.update(prev);
+    h.update(&commit_content_hash(commit));
+    *h.finalize().as_bytes()
+}
+
+/// §5.1 fork tie-break: order two same-parent commits by the blake3 hash of their full
+/// signed bytes; `Greater` wins. Total and deterministic — distinct bytes give distinct
+/// hashes, and every device holding both commits computes the same winner with no
+/// communication (the shipped converge-on-larger-key shape, promoted to transitions).
+pub fn compare_commits(a_bytes: &[u8], b_bytes: &[u8]) -> Ordering {
+    commit_hash(a_bytes).cmp(&commit_hash(b_bytes))
+}
+
+/// Validate a candidate chain: every commit parses, carries the expected group id, epochs
+/// increment by exactly one, and each commit's `parent_commit_hash` is the blake3 of its
+/// predecessor's full bytes (the first links to `parent_hash`). Signature and proposal
+/// authorization are M2's job (they need the roster); this is the pure hash-chain rule.
+pub fn validate_chain(
+    parent_hash: &[u8; 32],
+    first_epoch: u64,
+    group_id: &[u8],
+    chain: &[Vec<u8>],
+) -> Result<()> {
+    let mut expect_parent = *parent_hash;
+    let mut expect_epoch = first_epoch;
+    for bytes in chain {
+        let c = Commit::from_bytes(bytes)?;
+        if c.group_id != group_id {
+            return Err(CoreError::Encoding("treekem: chain commit for wrong group"));
+        }
+        if c.epoch != expect_epoch {
+            return Err(CoreError::Encoding("treekem: chain epoch not contiguous"));
+        }
+        if c.parent_commit_hash != expect_parent {
+            return Err(CoreError::Encoding("treekem: chain parent hash mismatch"));
+        }
+        expect_parent = commit_hash(bytes);
+        expect_epoch += 1;
+    }
+    Ok(())
+}
+
+/// §5.1 chain selection: among candidate chains extending the same parent, the longest
+/// VALID chain wins; equal lengths are broken by the larger tip commit hash. Returns the
+/// winning candidate's index, or `None` if no candidate is valid and non-empty. Invalid
+/// candidates are skipped, never fatal — a hostile chain must not be able to veto
+/// selection. Monotone in information: seeing more candidates can only move every replica
+/// toward the same winner, which is the §5 convergence argument.
+pub fn select_chain(
+    parent_hash: &[u8; 32],
+    first_epoch: u64,
+    group_id: &[u8],
+    candidates: &[Vec<Vec<u8>>],
+) -> Option<usize> {
+    let mut best: Option<(usize, usize, [u8; 32])> = None; // (index, len, tip hash)
+    for (i, chain) in candidates.iter().enumerate() {
+        if chain.is_empty() || validate_chain(parent_hash, first_epoch, group_id, chain).is_err() {
+            continue;
+        }
+        let tip = commit_hash(chain.last().expect("non-empty"));
+        let better = match &best {
+            None => true,
+            Some((_, blen, btip)) => match chain.len().cmp(blen) {
+                Ordering::Greater => true,
+                Ordering::Less => false,
+                Ordering::Equal => tip > *btip,
+            },
+        };
+        if better {
+            best = Some((i, chain.len(), tip));
+        }
+    }
+    best.map(|(i, _, _)| i)
+}
+
+#[cfg(test)]
+mod m1_tests {
+    use super::*;
+    use rand::{Rng, RngCore};
+
+    const GID: &[u8] = b"m1-test-circle";
+
+    /// Deterministic stand-in signature. M1 never verifies signatures (that is M2's
+    /// roster-authorization work), so tests use cheap deterministic bytes instead of
+    /// paying ML-DSA per leaf — what matters here is byte-stability, not validity.
+    fn fake_sig(payload: &[u8]) -> Vec<u8> {
+        blake3::hash(payload).as_bytes().to_vec()
+    }
+
+    fn secret(tag: &str, i: usize) -> [u8; 32] {
+        *blake3::hash(format!("{tag}-{i}").as_bytes()).as_bytes()
+    }
+
+    fn cred(member: usize) -> Vec<u8> {
+        (member as u32).to_le_bytes().to_vec()
+    }
+
+    fn member_from_cred(c: &[u8]) -> usize {
+        u32::from_le_bytes(c.try_into().expect("4-byte sim credential")) as usize
+    }
+
+    fn leaf_node_for(gid: &[u8], leaf_secret: &[u8; 32], credential: &[u8]) -> LeafNode {
+        let kp = node_keypair_from_path_secret(leaf_secret);
+        let payload = leaf_binding_payload(gid, &kp.kem_x, &kp.kem_pq);
+        LeafNode {
+            leaf_kem_x: kp.kem_x,
+            leaf_kem_pq: kp.kem_pq,
+            device_credential: credential.to_vec(),
+            leaf_binding_sig: fake_sig(&payload),
+        }
+    }
+
+    // ── Tree math ────────────────────────────────────────────────────────────────────────
+
+    /// Recursive reference construction of a left-balanced tree: left subtree is the
+    /// largest complete tree, in-order array layout. Everything the arithmetic functions
+    /// claim is cross-checked against this ground truth for every size up to 40 leaves.
+    fn build_ref(
+        a: usize,
+        l: usize,
+        ch: &mut BTreeMap<usize, (usize, usize)>,
+        ls: &mut BTreeMap<usize, Vec<usize>>,
+    ) -> usize {
+        if l == 1 {
+            ls.insert(2 * a, vec![2 * a]);
+            return 2 * a;
+        }
+        let mut k = 1;
+        while k * 2 < l {
+            k *= 2;
+        }
+        let lt = build_ref(a, k, ch, ls);
+        let rt = build_ref(a + k, l - k, ch, ls);
+        let root = 2 * a + 2 * k - 1;
+        ch.insert(root, (lt, rt));
+        let mut v = ls[&lt].clone();
+        v.extend(ls[&rt].iter().copied());
+        ls.insert(root, v);
+        root
+    }
+
+    #[test]
+    fn tree_math_matches_recursive_reference_for_all_sizes() {
+        for n in 1usize..=40 {
+            let mut ch = BTreeMap::new();
+            let mut ls = BTreeMap::new();
+            let root = build_ref(0, n, &mut ch, &mut ls);
+            assert_eq!(root_index(n).unwrap(), root, "root, n={n}");
+            assert_eq!(parent_index(root, n).unwrap(), None);
+            let mut parent_of = BTreeMap::new();
+            for (&p, &(l, r)) in &ch {
+                assert_eq!(left_child(p).unwrap(), l, "left({p}), n={n}");
+                assert_eq!(right_child(p, n).unwrap(), r, "right({p}), n={n}");
+                assert_eq!(parent_index(l, n).unwrap(), Some(p), "parent({l}), n={n}");
+                assert_eq!(parent_index(r, n).unwrap(), Some(p), "parent({r}), n={n}");
+                assert_eq!(sibling_index(l, n).unwrap(), Some(r));
+                assert_eq!(sibling_index(r, n).unwrap(), Some(l));
+                parent_of.insert(l, p);
+                parent_of.insert(r, p);
+            }
+            for leaf in 0..n {
+                let slot = leaf_slot(leaf as u32);
+                // direct path == climbing the reference parents
+                let mut want = Vec::new();
+                let mut cur = slot;
+                while let Some(&p) = parent_of.get(&cur) {
+                    want.push(p);
+                    cur = p;
+                }
+                assert_eq!(direct_path(slot, n).unwrap(), want, "direct_path({slot}), n={n}");
+                // copath[i] is the sibling of the previous path step
+                let cp = copath(slot, n).unwrap();
+                assert_eq!(cp.len(), want.len());
+                let mut prev = slot;
+                for (i, &c) in cp.iter().enumerate() {
+                    assert_eq!(sibling_index(prev, n).unwrap(), Some(c), "copath[{i}]");
+                    prev = want[i];
+                }
+            }
+            // subtree containment matches the reference leaf sets exactly
+            for (&node, leaves) in &ls {
+                for leaf in 0..n {
+                    let slot = leaf_slot(leaf as u32);
+                    assert_eq!(
+                        subtree_contains(node, slot, n),
+                        leaves.contains(&slot),
+                        "subtree_contains({node}, {slot}), n={n}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resolution_handles_blanks_and_unmerged_leaves() {
+        // 4 leaves, all parents blank: resolution of the root is every populated leaf.
+        let mut tree = RatchetTree::from_leaves(
+            (0..4).map(|i| leaf_node_for(GID, &secret("leaf", i), &cred(i))).collect(),
+        );
+        assert_eq!(tree.n_leaves(), 4);
+        assert_eq!(resolution(&tree, 3).unwrap(), vec![0, 2, 4, 6]);
+        // Blank a leaf: it drops out of every resolution.
+        remove_leaf(&mut tree, 1).unwrap();
+        assert_eq!(resolution(&tree, 3).unwrap(), vec![0, 4, 6]);
+        assert_eq!(resolution(&tree, 2).unwrap(), Vec::<usize>::new());
+        // A populated parent resolves to itself plus its unmerged leaves.
+        tree.slots[5] = TreeSlot::Parent(ParentNode {
+            blank: false,
+            node_kem_x: [1; KEM_X_LEN],
+            node_kem_pq: [2; MLKEM_EK_LEN],
+            unmerged_leaves: vec![3],
+        });
+        assert_eq!(resolution(&tree, 5).unwrap(), vec![5, 6]);
+        // ParentNode{blank:true} behaves exactly like TreeSlot::Blank.
+        tree.slots[5] = TreeSlot::Parent(ParentNode {
+            blank: true,
+            node_kem_x: [0; KEM_X_LEN],
+            node_kem_pq: [0; MLKEM_EK_LEN],
+            unmerged_leaves: vec![],
+        });
+        assert_eq!(resolution(&tree, 5).unwrap(), vec![4, 6]);
+    }
+
+    // ── Node keygen + path-secret encryption ─────────────────────────────────────────────
+
+    #[test]
+    fn node_keygen_is_deterministic_and_derivations_are_domain_separated() {
+        let s = [7u8; 32];
+        let a = node_keypair(&s);
+        let b = node_keypair(&s);
+        assert_eq!(a.kem_x, b.kem_x);
+        assert_eq!(a.kem_pq[..], b.kem_pq[..]);
+        // The §3.2 chain: path/node/commit derivations from the same input all differ.
+        let ps = derive_path_secret(&s);
+        let ns = derive_node_secret(&s);
+        let cs = derive_commit_secret(&s);
+        assert_ne!(ps, ns);
+        assert_ne!(ps, cs);
+        assert_ne!(ns, cs);
+        assert_ne!(ps, s);
+        // Node keys are domain-separated from identity keys derived from the same seed
+        // (different HKDF salt): the x25519 public halves must differ.
+        let id = crate::identity::Identity::from_seed(&ns);
+        assert_ne!(node_keypair(&ns).kem_x, id.public().kem_x.to_bytes());
+    }
+
+    #[test]
+    fn path_secret_seal_open_roundtrip_and_wrong_context_fails() {
+        let kp = node_keypair(&[1; 32]);
+        let ps = [9u8; 32];
+        let ct = seal_path_secret(&kp.kem_x, &kp.kem_pq, GID, 5, 4, &ps, &[3; 32]).unwrap();
+        assert_eq!(open_path_secret(&kp, GID, 5, &ct).unwrap(), ps);
+        // Determinism: same seed → identical bytes; different seed → different bytes.
+        let ct2 = seal_path_secret(&kp.kem_x, &kp.kem_pq, GID, 5, 4, &ps, &[3; 32]).unwrap();
+        assert_eq!(ct, ct2);
+        let ct3 = seal_path_secret(&kp.kem_x, &kp.kem_pq, GID, 5, 4, &ps, &[4; 32]).unwrap();
+        assert_ne!(ct, ct3);
+        // Every context field is bound into the key: group, epoch, node index, recipient.
+        assert!(open_path_secret(&kp, b"other-group", 5, &ct).is_err());
+        assert!(open_path_secret(&kp, GID, 6, &ct).is_err());
+        let mut wrong_slot = ct.clone();
+        wrong_slot.resolution_index = 5;
+        assert!(open_path_secret(&kp, GID, 5, &wrong_slot).is_err());
+        let other = node_keypair(&[2; 32]);
+        assert!(open_path_secret(&other, GID, 5, &ct).is_err());
+    }
+
+    // ── UpdatePath build/apply ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn update_path_converges_for_every_member_and_via_interior_nodes() {
+        let secrets: Vec<[u8; 32]> = (0..4).map(|i| secret("leaf", i)).collect();
+        let tree0 = RatchetTree::from_leaves(
+            (0..4).map(|i| leaf_node_for(GID, &secrets[i], &cred(i))).collect(),
+        );
+        let mut privs: Vec<TreePrivate> =
+            (0..4).map(|i| TreePrivate::new(i as u32, secrets[i])).collect();
+
+        // Leaf 0 commits a path over the fresh (all-blank-parents) tree.
+        let new0 = secret("new", 0);
+        let b = build_update_path(&tree0, GID, 1, 0, &new0, &cred(0), fake_sig, &secret("ent", 0))
+            .unwrap();
+        let mut tree1 = tree0.clone();
+        merge_update_path(&mut tree1, 0, &b.update_path).unwrap();
+        privs[0] = TreePrivate::new(0, new0);
+        privs[0].path_secrets = b.path_secrets.clone();
+        for i in 1..4 {
+            let d = decrypt_update_path(&tree0, GID, 1, 0, &b.update_path, &privs[i]).unwrap();
+            assert_eq!(d.commit_secret, b.commit_secret, "member {i} must agree on commit secret");
+            let mut t = tree0.clone();
+            merge_update_path(&mut t, 0, &b.update_path).unwrap();
+            assert_eq!(tree_hash(&t), tree_hash(&tree1), "member {i} must agree on the tree");
+            privs[i].path_secrets.extend(d.path_secrets);
+        }
+
+        // Leaf 3 commits next: leaf 1 sits under the far side, so its only decryption key
+        // for the new root secret is the INTERIOR node it learned above — exercising the
+        // non-leaf decryption branch.
+        let new3 = secret("new", 3);
+        let b2 = build_update_path(&tree1, GID, 2, 3, &new3, &cred(3), fake_sig, &secret("ent", 3))
+            .unwrap();
+        let root_node = b2.update_path.nodes.last().unwrap();
+        assert!(
+            root_node.ciphertexts.iter().any(|ct| ct.resolution_index == 1),
+            "root path secret must be wrapped to interior node 1, not the individual leaves"
+        );
+        for i in [0usize, 1, 2] {
+            let d = decrypt_update_path(&tree1, GID, 2, 3, &b2.update_path, &privs[i]).unwrap();
+            assert_eq!(d.commit_secret, b2.commit_secret);
+        }
+    }
+
+    #[test]
+    fn update_path_consistency_check_rejects_tampered_node_key() {
+        let secrets: Vec<[u8; 32]> = (0..4).map(|i| secret("leaf", i)).collect();
+        let tree0 = RatchetTree::from_leaves(
+            (0..4).map(|i| leaf_node_for(GID, &secrets[i], &cred(i))).collect(),
+        );
+        let b = build_update_path(&tree0, GID, 1, 0, &secret("new", 0), &cred(0), fake_sig, &secret("ent", 0))
+            .unwrap();
+        // Tamper with the ROOT node's public key: leaf 1 decrypts at node 1 (below the
+        // tampered node), derives upward, and must catch the mismatch instead of merging
+        // a tree whose keys disagree with its secrets.
+        let mut evil = b.update_path.clone();
+        evil.nodes.last_mut().unwrap().node_kem_x = [0xEE; KEM_X_LEN];
+        let p1 = TreePrivate::new(1, secrets[1]);
+        let err = decrypt_update_path(&tree0, GID, 1, 0, &evil, &p1);
+        assert!(err.is_err(), "derived node key mismatch must be rejected");
+    }
+
+    #[test]
+    fn added_leaf_is_unmerged_until_a_path_rekeys_and_gets_addressed_directly() {
+        // 8 leaves so a non-root interior node can hold an unmerged entry that a far-side
+        // committer's path must honor.
+        let secrets: Vec<[u8; 32]> = (0..8).map(|i| secret("leaf", i)).collect();
+        let mut tree = RatchetTree::from_leaves(
+            (0..8).map(|i| leaf_node_for(GID, &secrets[i], &cred(i))).collect(),
+        );
+        let mut privs: BTreeMap<u32, TreePrivate> =
+            (0..8).map(|i| (i as u32, TreePrivate::new(i as u32, secrets[i as usize]))).collect();
+
+        // Helper: member `sender` commits a path at `epoch`; every other tracked private
+        // decrypts, agrees on the commit secret, and merges.
+        let mut commit_path = |tree: &mut RatchetTree,
+                               privs: &mut BTreeMap<u32, TreePrivate>,
+                               sender: u32,
+                               epoch: u64| {
+            let new = secret("upd", (sender as usize) * 100 + epoch as usize);
+            let b = build_update_path(tree, GID, epoch, sender, &new, &cred(sender as usize), fake_sig, &secret("ent", epoch as usize))
+                .unwrap();
+            for (&li, p) in privs.iter_mut() {
+                if li == sender {
+                    continue;
+                }
+                let d = decrypt_update_path(tree, GID, epoch, sender, &b.update_path, p).unwrap();
+                assert_eq!(d.commit_secret, b.commit_secret, "leaf {li} commit secret");
+                p.path_secrets.extend(d.path_secrets);
+            }
+            let me = privs.get_mut(&sender).unwrap();
+            me.leaf_secret = new;
+            me.path_secrets = b.path_secrets.clone();
+            merge_update_path(tree, sender, &b.update_path).unwrap();
+            b
+        };
+
+        // Epoch 1: leaf 0 populates its path (1, 3, 7). Epoch 2: leaf 4 populates the
+        // right half (9, 11, 7).
+        commit_path(&mut tree, &mut privs, 0, 1);
+        commit_path(&mut tree, &mut privs, 4, 2);
+
+        // Remove leaf 1: blanks slots 2, 1, 3, 7 and drops its private state.
+        remove_leaf(&mut tree, 1).unwrap();
+        privs.remove(&1);
+        for p in privs.values_mut() {
+            let t = &tree;
+            p.path_secrets.retain(|&ix, _| matches!(t.slots.get(ix as usize), Some(TreeSlot::Parent(pn)) if !pn.blank));
+        }
+
+        // Epoch 3: leaf 0 re-keys — node 1 is filtered out (nothing lives under slot 2),
+        // nodes 3 and 7 come back non-blank.
+        let b3 = commit_path(&mut tree, &mut privs, 0, 3);
+        assert_eq!(b3.update_path.nodes.len(), 2, "node 1 must be filtered out");
+        assert!(matches!(&tree.slots[1], TreeSlot::Blank));
+
+        // Add a newcomer: it reuses blank slot 2 (leaf index 1) and must be listed
+        // unmerged at every non-blank ancestor — those secrets predate it.
+        let new_secret = secret("newcomer", 9);
+        let ln = leaf_node_for(GID, &new_secret, &cred(9));
+        let idx = add_leaf(&mut tree, ln).unwrap();
+        assert_eq!(idx, 1, "first blank leaf slot must be reused deterministically");
+        match &tree.slots[3] {
+            TreeSlot::Parent(p) => assert_eq!(p.unmerged_leaves, vec![1], "unmerged at node 3"),
+            _ => panic!("node 3 must be populated"),
+        }
+        match &tree.slots[7] {
+            TreeSlot::Parent(p) => assert_eq!(p.unmerged_leaves, vec![1], "unmerged at node 7"),
+            _ => panic!("node 7 must be populated"),
+        }
+        privs.insert(1, TreePrivate::new(1, new_secret));
+
+        // Epoch 4: leaf 4 (far side) commits. At the root, the copath child is node 3,
+        // whose resolution is [node 3, unmerged leaf slot 2] — the newcomer must be
+        // addressed DIRECTLY while old members decrypt via node 3.
+        let b4 = commit_path(&mut tree, &mut privs, 4, 4);
+        let root_cts: Vec<u32> = b4
+            .update_path
+            .nodes
+            .last()
+            .unwrap()
+            .ciphertexts
+            .iter()
+            .map(|c| c.resolution_index)
+            .collect();
+        assert!(root_cts.contains(&3), "old members are reached via interior node 3");
+        assert!(root_cts.contains(&2), "the unmerged newcomer is addressed at its leaf");
+        // A fresh path through the newcomer's side clears the unmerged lists it re-keys.
+        commit_path(&mut tree, &mut privs, 1, 5);
+        if let TreeSlot::Parent(p) = &tree.slots[3] {
+            assert!(p.unmerged_leaves.is_empty(), "re-keyed node must clear unmerged");
+        } else {
+            panic!("node 3 must be populated");
+        }
+    }
+
+    /// §9 M1 proof obligation: after Remove+Commit, the removed leaf's key material opens
+    /// NOTHING in the new UpdatePath — asserted at every ciphertext with every key the
+    /// removed device ever held (leaf key and all interior-node secrets, current or stale).
+    #[test]
+    fn removed_leaf_cannot_decrypt_any_path_secret() {
+        let secrets: Vec<[u8; 32]> = (0..4).map(|i| secret("leaf", i)).collect();
+        let mut tree = RatchetTree::from_leaves(
+            (0..4).map(|i| leaf_node_for(GID, &secrets[i], &cred(i))).collect(),
+        );
+        let mut privs: Vec<TreePrivate> =
+            (0..4).map(|i| TreePrivate::new(i as u32, secrets[i])).collect();
+
+        // Epoch 1 (leaf 0) and epoch 2 (leaf 2) populate the tree so leaf 3 holds real
+        // interior secrets — the strongest state a removed member could hoard.
+        for (sender, epoch) in [(0u32, 1u64), (2, 2)] {
+            let new = secret("upd", epoch as usize);
+            let b = build_update_path(&tree, GID, epoch, sender, &new, &cred(sender as usize), fake_sig, &secret("ent", epoch as usize))
+                .unwrap();
+            for (i, p) in privs.iter_mut().enumerate() {
+                if i as u32 == sender {
+                    p.leaf_secret = new;
+                    p.path_secrets = b.path_secrets.clone();
+                } else {
+                    let d = decrypt_update_path(&tree, GID, epoch, sender, &b.update_path, p).unwrap();
+                    p.path_secrets.extend(d.path_secrets);
+                }
+            }
+            merge_update_path(&mut tree, sender, &b.update_path).unwrap();
+        }
+        assert!(!privs[3].path_secrets.is_empty(), "leaf 3 must hold interior secrets");
+
+        // Leaf 1 removes leaf 3 and commits epoch 3 on the post-removal tree.
+        remove_leaf(&mut tree, 3).unwrap();
+        let b = build_update_path(&tree, GID, 3, 1, &secret("upd", 3), &cred(1), fake_sig, &secret("ent", 3))
+            .unwrap();
+
+        // The removed member's structured decryption fails…
+        assert!(
+            decrypt_update_path(&tree, GID, 3, 1, &b.update_path, &privs[3]).is_err(),
+            "removed leaf must not decrypt the update path"
+        );
+        // …and so does brute force: every ciphertext, tried with its leaf key and with a
+        // node key derived from EVERY path secret it ever learned (including stale ones
+        // for since-blanked nodes) — decryption must fail at every node it could try.
+        let mut keys: Vec<NodeKeypair> = vec![privs[3].leaf_keypair()];
+        for s in privs[3].path_secrets.values() {
+            keys.push(node_keypair_from_path_secret(s));
+        }
+        let mut attempts = 0;
+        for node in &b.update_path.nodes {
+            for ct in &node.ciphertexts {
+                for kp in &keys {
+                    assert!(
+                        open_path_secret(kp, GID, 3, ct).is_err(),
+                        "removed leaf key material opened a path secret"
+                    );
+                    attempts += 1;
+                }
+            }
+        }
+        assert!(attempts > 0, "the brute-force sweep must actually try something");
+        // Control: a surviving member still decrypts (the failure above is exclusion,
+        // not a broken path).
+        assert!(decrypt_update_path(&tree, GID, 3, 1, &b.update_path, &privs[0]).is_ok());
+    }
+
+    // ── Epoch schedule ───────────────────────────────────────────────────────────────────
+
+    /// §9 M1 proof obligation: the schedule is one-way. The consumed inputs are wiped in
+    /// place by `advance_epoch` itself (deleted fields actually gone), the returned struct
+    /// carries no field for them, and re-deriving with fresh copies is deterministic.
+    #[test]
+    fn epoch_schedule_is_one_way_and_wipes_consumed_inputs() {
+        let ctx = epoch_context(GID, 1, &[1; 32], &[2; 32]);
+        let mut init = [7u8; 32];
+        let mut cs = [9u8; 32];
+        let s1 = advance_epoch(&mut init, &mut cs, &ctx);
+        // §6.2: init_secret_{n-1} and commit_secret are consumed — and provably zeroed.
+        assert_eq!(init, [0u8; 32], "previous init secret must be wiped");
+        assert_eq!(cs, [0u8; 32], "commit secret must be wiped");
+        for f in [s1.epoch_secret, s1.init_secret, s1.sender_root, s1.confirm_key, s1.welcome_key, s1.joiner_secret] {
+            assert_ne!(f, [0u8; 32], "derived secrets must be populated");
+        }
+        // Deterministic: fresh copies of the same inputs give the identical schedule.
+        let (mut i2, mut c2) = ([7u8; 32], [9u8; 32]);
+        let s2 = advance_epoch(&mut i2, &mut c2, &ctx);
+        assert_eq!(s1.epoch_secret, s2.epoch_secret);
+        assert_eq!(s1.init_secret, s2.init_secret);
+        assert_eq!(s1.sender_root, s2.sender_root);
+        assert_eq!(s1.confirm_key, s2.confirm_key);
+        assert_eq!(s1.welcome_key, s2.welcome_key);
+        assert_eq!(s1.joiner_secret, s2.joiner_secret);
+        // Advance to epoch 2: nothing in the new state reproduces epoch 1's secrets, and
+        // the only backward-pointing value (the consumed init) is gone.
+        let ctx2 = epoch_context(GID, 2, &[1; 32], &[2; 32]);
+        let mut i3 = s1.init_secret;
+        let mut c3 = [5u8; 32];
+        let s3 = advance_epoch(&mut i3, &mut c3, &ctx2);
+        assert_eq!(i3, [0u8; 32], "epoch 1's init secret is consumed by epoch 2");
+        for f in [s3.epoch_secret, s3.init_secret, s3.sender_root, s3.confirm_key, s3.welcome_key, s3.joiner_secret] {
+            assert_ne!(f, s1.epoch_secret, "epoch 1 secrets must not appear in epoch 2 state");
+            assert_ne!(f, s1.sender_root);
+            assert_ne!(f, s1.joiner_secret);
+        }
+        // A Welcome recipient lands on the identical schedule from just the joiner secret.
+        let sj = epoch_from_joiner(&s1.joiner_secret, &ctx);
+        assert_eq!(sj.epoch_secret, s1.epoch_secret);
+        assert_eq!(sj.init_secret, s1.init_secret);
+    }
+
+    #[test]
+    fn sender_keys_are_leaf_and_epoch_scoped() {
+        let root = [3u8; 32];
+        let a = sender_key(&root, &[1; 32], GID, 4);
+        assert_eq!(a, sender_key(&root, &[1; 32], GID, 4), "deterministic");
+        assert_ne!(a, sender_key(&root, &[2; 32], GID, 4), "sibling devices get distinct keys");
+        assert_ne!(a, sender_key(&root, &[1; 32], GID, 5), "epoch-scoped");
+        assert_ne!(a, sender_key(&root, &[1; 32], b"other", 4), "group-scoped");
+    }
+
+    // ── Fork tie-break + chain rule (§5.1) ───────────────────────────────────────────────
+
+    fn bare_commit(parent: [u8; 32], epoch: u64, salt: u8) -> Vec<u8> {
+        Commit {
+            group_id: GID.to_vec(),
+            epoch,
+            parent_commit_hash: parent,
+            proposals: vec![],
+            update_path: None,
+            tree_hash: [salt; 32],
+            confirmation_mac: vec![salt],
+            sender_leaf: 0,
+            sig: vec![salt, 1],
+        }
+        .to_bytes()
+    }
+
+    #[test]
+    fn fork_tiebreak_is_total_and_larger_hash_wins() {
+        let genesis = [0xAA; 32];
+        let a = bare_commit(genesis, 1, 1);
+        let b = bare_commit(genesis, 1, 2);
+        assert_eq!(compare_commits(&a, &a), Ordering::Equal);
+        let ab = compare_commits(&a, &b);
+        assert_ne!(ab, Ordering::Equal, "distinct bytes give distinct hashes");
+        assert_eq!(compare_commits(&b, &a), ab.reverse(), "comparator is antisymmetric");
+        // The winner is exactly the lexicographically larger blake3 hash.
+        let winner_is_a = commit_hash(&a) > commit_hash(&b);
+        assert_eq!(ab == Ordering::Greater, winner_is_a);
+        // Equal-length candidate chains: select_chain picks the larger tip hash.
+        let cands = vec![vec![a.clone()], vec![b.clone()]];
+        let want = if winner_is_a { 0 } else { 1 };
+        assert_eq!(select_chain(&genesis, 1, GID, &cands), Some(want));
+    }
+
+    #[test]
+    fn chain_rule_longest_valid_beats_tip_hash_and_invalid_chains_are_skipped() {
+        let genesis = [0xAB; 32];
+        let a = bare_commit(genesis, 1, 1);
+        let b = bare_commit(genesis, 1, 2);
+        // Extend the tie-break LOSER by one commit: length must beat hash order.
+        let (loser, winner) = if commit_hash(&a) > commit_hash(&b) { (b.clone(), a.clone()) } else { (a.clone(), b.clone()) };
+        let child = bare_commit(commit_hash(&loser), 2, 3);
+        let cands = vec![vec![winner.clone()], vec![loser.clone(), child.clone()]];
+        assert_eq!(select_chain(&genesis, 1, GID, &cands), Some(1), "longest valid chain wins");
+        // Validation: broken parent link, wrong epoch, wrong group are each fatal.
+        assert!(validate_chain(&genesis, 1, GID, &[loser.clone(), child.clone()]).is_ok());
+        assert!(validate_chain(&genesis, 1, GID, &[winner.clone(), child.clone()]).is_err(), "parent hash mismatch");
+        assert!(validate_chain(&genesis, 2, GID, &[loser.clone()]).is_err(), "wrong first epoch");
+        assert!(validate_chain(&genesis, 1, b"other", &[loser.clone()]).is_err(), "wrong group");
+        // An invalid (unlinked) longer chain cannot veto a valid shorter one.
+        let forged = vec![bare_commit([9; 32], 1, 7), bare_commit([8; 32], 2, 8), bare_commit([7; 32], 3, 9)];
+        let cands2 = vec![forged, vec![winner]];
+        assert_eq!(select_chain(&genesis, 1, GID, &cands2), Some(1));
+        // No valid candidate → None (never a guess).
+        assert_eq!(select_chain(&genesis, 1, GID, &[vec![bare_commit([1; 32], 1, 1)]]), None);
+        assert_eq!(select_chain(&genesis, 1, GID, &[]), None);
+    }
+
+    // ── Committed test vectors (§9 M1) ───────────────────────────────────────────────────
+
+    /// Fixed seeds → exact expected bytes, asserted byte-for-byte: any change to a label,
+    /// a derivation, the serialization, or a dependency's deterministic keygen SCREAMS
+    /// here instead of silently forking the fleet. Values were computed by this code once
+    /// and frozen; they are the wire contract now.
+    #[test]
+    fn committed_test_vectors_pin_tree_hash_epoch_secret_and_sender_key() {
+        let gid = b"haven-treekem-vector-v1";
+        let leaf_secrets: [[u8; 32]; 4] = [[0x11; 32], [0x22; 32], [0x33; 32], [0x44; 32]];
+        let tree0 = RatchetTree::from_leaves(
+            (0..4).map(|i| leaf_node_for(gid, &leaf_secrets[i], format!("cred-{i}").as_bytes())).collect(),
+        );
+        assert_eq!(
+            hex::encode(tree_hash(&tree0)),
+            "c4d3e9d50a159c4cdd573c5f3c7b76b528296f14347c0747885f2f65faef8d5f",
+            "genesis tree hash"
+        );
+        let b = build_update_path(&tree0, gid, 1, 0, &[0x55; 32], b"cred-0", fake_sig, &[0x66; 32]).unwrap();
+        assert_eq!(
+            hex::encode(b.commit_secret),
+            "fbdd08cf40efa6a6f90798ec71ead8bb3336f4a26969bffd494f22a2e86d29a0",
+            "commit secret"
+        );
+        // A receiver derives the identical commit secret from the wire bytes alone.
+        let wire = UpdatePath::from_bytes(&b.update_path.to_bytes()).unwrap();
+        let d = decrypt_update_path(&tree0, gid, 1, 0, &wire, &TreePrivate::new(1, leaf_secrets[1])).unwrap();
+        assert_eq!(d.commit_secret, b.commit_secret);
+        let mut tree1 = tree0.clone();
+        merge_update_path(&mut tree1, 0, &b.update_path).unwrap();
+        assert_eq!(
+            hex::encode(tree_hash(&tree1)),
+            "dabde6cc54df493b9ff634ddd4539c94a384879a3101877a8cb42cd816631eed",
+            "post-merge tree hash"
+        );
+        let ctx = epoch_context(gid, 1, &tree_hash(&tree1), &[0xAB; 32]);
+        let mut init = [0x01; 32];
+        let mut cs = b.commit_secret;
+        let s = advance_epoch(&mut init, &mut cs, &ctx);
+        assert_eq!(
+            hex::encode(s.epoch_secret),
+            "42e82ca94225b46b5d9668aef56f90354f96b21591287017e5b090f235d977bd",
+            "epoch secret"
+        );
+        assert_eq!(
+            hex::encode(sender_key(&s.sender_root, &[0xCD; 32], gid, 1)),
+            "febc663bda295f62c8f6d5fae782b00a89bd106f663f65f3b5d114b4bf422859",
+            "sender key"
+        );
+    }
+
+    // ── Convergence property test (§9 M1) ────────────────────────────────────────────────
+    //
+    // N replicas, a seeded randomized schedule of add/remove/update commits, random
+    // delivery orders with partitions, redelivery, and guaranteed forks. At quiescence
+    // every replica that is a member computes the identical winning chain, tree hash, and
+    // epoch secret — from PURE replay of the same commit set, which is exactly the
+    // determinism M2's shadow mode will lean on. All entropy flows from the fixed seed:
+    // failures reproduce byte-for-byte.
+
+    const POOL: usize = 5;
+    const GENESIS_MEMBERS: usize = 4;
+
+    struct WelcomeRec {
+        member: usize,
+        leaf_secret: [u8; 32],
+        joiner_secret: [u8; 32],
+    }
+
+    struct BuildRec {
+        author: usize,
+        leaf_secret: [u8; 32],
+        entropy: [u8; 32],
+    }
+
+    struct World {
+        commits: BTreeMap<[u8; 32], Vec<u8>>,
+        welcomes: BTreeMap<[u8; 32], WelcomeRec>,
+        builds: BTreeMap<[u8; 32], BuildRec>,
+        genesis_tree: RatchetTree,
+        genesis_hash: [u8; 32],
+        genesis_init: [u8; 32],
+        genesis_cth: [u8; 32],
+    }
+
+    struct View {
+        tree: RatchetTree,
+        epoch: u64,
+        tip: [u8; 32],
+        cth: [u8; 32],
+        init: [u8; 32],
+        me: Option<TreePrivate>,
+        sched: Option<EpochSchedule>,
+    }
+
+    fn genesis_leaf_secret(member: usize) -> [u8; 32] {
+        secret("genesis-leaf", member)
+    }
+
+    /// Pure replay of a commit chain from genesis at one member's vantage. Stateless by
+    /// design: replicas converge because replay is a pure function of (chain, member),
+    /// not because incremental state happened to line up.
+    fn replay(world: &World, member: usize, chain: &[Vec<u8>]) -> View {
+        let mut tree = world.genesis_tree.clone();
+        let mut cth = world.genesis_cth;
+        let mut init = world.genesis_init;
+        let mut me = if member < GENESIS_MEMBERS {
+            Some(TreePrivate::new(member as u32, genesis_leaf_secret(member)))
+        } else {
+            None
+        };
+        let mut sched: Option<EpochSchedule> = None;
+        let mut epoch = 0u64;
+        let mut tip = world.genesis_hash;
+        for bytes in chain {
+            let commit = Commit::from_bytes(bytes).unwrap();
+            let h = commit_hash(bytes);
+            let mut joined_now = false;
+            for p in &commit.proposals {
+                match &p.body {
+                    ProposalBody::Add { leaf_node } => {
+                        let idx = add_leaf(&mut tree, leaf_node.clone()).unwrap();
+                        if let Some(w) = world.welcomes.get(&h) {
+                            if w.member == member {
+                                me = Some(TreePrivate::new(idx, w.leaf_secret));
+                                joined_now = true;
+                            }
+                        }
+                    }
+                    ProposalBody::Remove { leaf_index } => {
+                        remove_leaf(&mut tree, *leaf_index).unwrap();
+                        if me.as_ref().map(|m| m.leaf_index) == Some(*leaf_index) {
+                            me = None;
+                            sched = None;
+                        }
+                    }
+                    ProposalBody::Update { .. } => unreachable!("sim commits carry paths, not update proposals"),
+                }
+            }
+            // Deletion discipline: secrets for nodes blanked by the proposals are dead.
+            if let Some(m) = &mut me {
+                let t = &tree;
+                m.path_secrets.retain(|&ix, _| {
+                    matches!(t.slots.get(ix as usize), Some(TreeSlot::Parent(pn)) if !pn.blank)
+                });
+            }
+            let up = commit.update_path.as_ref().expect("sim commits always carry a path");
+            let mut new_secrets = BTreeMap::new();
+            let mut commit_secret: Option<[u8; 32]> = None;
+            let authored = world.builds.get(&h).map(|b| b.author) == Some(member);
+            if authored {
+                let b = &world.builds[&h];
+                let built = build_update_path(&tree, GID, commit.epoch, commit.sender_leaf, &b.leaf_secret, &cred(member), fake_sig, &b.entropy)
+                    .unwrap();
+                assert_eq!(built.update_path, *up, "deterministic rebuild must reproduce the committed path");
+                let m = me.as_mut().expect("author is a member on its own branch");
+                m.leaf_secret = b.leaf_secret;
+                m.path_secrets.clear();
+                new_secrets = built.path_secrets;
+                commit_secret = Some(built.commit_secret);
+            } else if let Some(m) = &me {
+                let d = decrypt_update_path(&tree, GID, commit.epoch, commit.sender_leaf, up, m).unwrap();
+                new_secrets = d.path_secrets;
+                commit_secret = Some(d.commit_secret);
+            }
+            merge_update_path(&mut tree, commit.sender_leaf, up).unwrap();
+            let th = tree_hash(&tree);
+            assert_eq!(th, commit.tree_hash, "replica tree must match the committed tree hash");
+            cth = next_confirmed_transcript_hash(&cth, &commit);
+            if let Some(m) = &mut me {
+                let ctx = epoch_context(GID, commit.epoch, &th, &cth);
+                let s = if joined_now {
+                    // The Welcome rail: a joiner has no init_{n-1}; it gets joiner_secret.
+                    epoch_from_joiner(&world.welcomes[&h].joiner_secret, &ctx)
+                } else {
+                    let mut cs = commit_secret.expect("active member derived a commit secret");
+                    advance_epoch(&mut init, &mut cs, &ctx)
+                };
+                // Agreeing on the MAC proves agreement on the entire derivation.
+                assert_eq!(
+                    &confirmation_mac(&s.confirm_key, &cth)[..],
+                    &commit.confirmation_mac[..],
+                    "confirmation MAC must verify"
+                );
+                init = s.init_secret;
+                m.path_secrets.extend(new_secrets);
+                sched = Some(s);
+            }
+            epoch = commit.epoch;
+            tip = h;
+        }
+        View { tree, epoch, tip, cth, init, me, sched }
+    }
+
+    /// Enumerate every maximal chain from genesis among the known commits and pick the
+    /// §5.1 winner via `select_chain`.
+    fn best_chain(world: &World, known: &BTreeMap<[u8; 32], Vec<u8>>) -> Vec<Vec<u8>> {
+        let mut children: BTreeMap<[u8; 32], Vec<[u8; 32]>> = BTreeMap::new();
+        for (h, bytes) in known {
+            let c = Commit::from_bytes(bytes).unwrap();
+            children.entry(c.parent_commit_hash).or_default().push(*h);
+        }
+        fn dfs(
+            cur: [u8; 32],
+            path: &mut Vec<[u8; 32]>,
+            children: &BTreeMap<[u8; 32], Vec<[u8; 32]>>,
+            out: &mut Vec<Vec<[u8; 32]>>,
+        ) {
+            match children.get(&cur) {
+                None => {
+                    if !path.is_empty() {
+                        out.push(path.clone());
+                    }
+                }
+                Some(kids) => {
+                    for k in kids {
+                        path.push(*k);
+                        dfs(*k, path, children, out);
+                        path.pop();
+                    }
+                }
+            }
+        }
+        let mut chains = Vec::new();
+        dfs(world.genesis_hash, &mut Vec::new(), &children, &mut chains);
+        let candidates: Vec<Vec<Vec<u8>>> = chains
+            .iter()
+            .map(|hs| hs.iter().map(|h| known[h].clone()).collect())
+            .collect();
+        match select_chain(&world.genesis_hash, 1, GID, &candidates) {
+            Some(i) => candidates[i].clone(),
+            None => Vec::new(),
+        }
+    }
+
+    fn rand32(rng: &mut ChaCha20Rng) -> [u8; 32] {
+        let mut b = [0u8; 32];
+        rng.fill_bytes(&mut b);
+        b
+    }
+
+    /// One member builds a commit on its current best tip: a random valid op (update /
+    /// remove / add) plus its UpdatePath, schedule, MAC. Returns the commit hash.
+    fn build_commit(
+        world: &mut World,
+        rng: &mut ChaCha20Rng,
+        author: usize,
+        known: &BTreeMap<[u8; 32], Vec<u8>>,
+    ) -> Option<[u8; 32]> {
+        let chain = best_chain(world, known);
+        let view = replay(world, author, &chain);
+        let me = view.me?;
+        let mut present: Vec<(usize, u32)> = Vec::new();
+        for li in 0..view.tree.n_leaves() {
+            if let Some(l) = view.tree.leaf(li as u32) {
+                present.push((member_from_cred(&l.device_credential), li as u32));
+            }
+        }
+        let mut proposals = Vec::new();
+        let mut tree2 = view.tree.clone();
+        let mut welcome: Option<(usize, [u8; 32])> = None;
+        match rng.gen_range(0u8..3) {
+            1 if present.len() > 2 => {
+                let others: Vec<(usize, u32)> =
+                    present.iter().copied().filter(|(m, _)| *m != author).collect();
+                let (_, target_leaf) = others[rng.gen_range(0..others.len())];
+                proposals.push(Proposal {
+                    group_id: GID.to_vec(),
+                    epoch: view.epoch,
+                    body: ProposalBody::Remove { leaf_index: target_leaf },
+                    sender_leaf: me.leaf_index,
+                    sig: fake_sig(b"remove"),
+                });
+                remove_leaf(&mut tree2, target_leaf).unwrap();
+            }
+            2 => {
+                let absent: Vec<usize> =
+                    (0..POOL).filter(|m| !present.iter().any(|(pm, _)| pm == m)).collect();
+                if !absent.is_empty() {
+                    let joiner = absent[rng.gen_range(0..absent.len())];
+                    let jls = rand32(rng);
+                    let ln = leaf_node_for(GID, &jls, &cred(joiner));
+                    proposals.push(Proposal {
+                        group_id: GID.to_vec(),
+                        epoch: view.epoch,
+                        body: ProposalBody::Add { leaf_node: ln.clone() },
+                        sender_leaf: me.leaf_index,
+                        sig: fake_sig(b"add"),
+                    });
+                    add_leaf(&mut tree2, ln).unwrap();
+                    welcome = Some((joiner, jls));
+                }
+            }
+            _ => {}
+        }
+        let new_ls = rand32(rng);
+        let entropy = rand32(rng);
+        let built = build_update_path(&tree2, GID, view.epoch + 1, me.leaf_index, &new_ls, &cred(author), fake_sig, &entropy)
+            .unwrap();
+        let mut tree3 = tree2.clone();
+        merge_update_path(&mut tree3, me.leaf_index, &built.update_path).unwrap();
+        let th = tree_hash(&tree3);
+        let mut c = Commit {
+            group_id: GID.to_vec(),
+            epoch: view.epoch + 1,
+            parent_commit_hash: view.tip,
+            proposals,
+            update_path: Some(built.update_path),
+            tree_hash: th,
+            confirmation_mac: Vec::new(),
+            sender_leaf: me.leaf_index,
+            sig: Vec::new(),
+        };
+        // The transcript hash covers commit CONTENT (mac/sig blanked), so computing it
+        // before the MAC is set is not circular — same value the receivers compute.
+        let cth = next_confirmed_transcript_hash(&view.cth, &c);
+        let ctx = epoch_context(GID, c.epoch, &th, &cth);
+        let mut init = view.init;
+        let mut cs = built.commit_secret;
+        let sched = advance_epoch(&mut init, &mut cs, &ctx);
+        c.confirmation_mac = confirmation_mac(&sched.confirm_key, &cth).to_vec();
+        c.sig = fake_sig(&c.to_bytes());
+        let bytes = c.to_bytes();
+        let h = commit_hash(&bytes);
+        world.commits.insert(h, bytes);
+        world.builds.insert(h, BuildRec { author, leaf_secret: new_ls, entropy });
+        if let Some((joiner, jls)) = welcome {
+            world.welcomes.insert(h, WelcomeRec { member: joiner, leaf_secret: jls, joiner_secret: sched.joiner_secret });
+        }
+        Some(h)
+    }
+
+    fn run_convergence_sim(seed: u64, steps: usize) {
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
+        let world_tree = RatchetTree::from_leaves(
+            (0..GENESIS_MEMBERS).map(|i| leaf_node_for(GID, &genesis_leaf_secret(i), &cred(i))).collect(),
+        );
+        let mut world = World {
+            commits: BTreeMap::new(),
+            welcomes: BTreeMap::new(),
+            builds: BTreeMap::new(),
+            genesis_tree: world_tree,
+            genesis_hash: *blake3::hash(b"m1-sim-genesis").as_bytes(),
+            genesis_init: *blake3::hash(b"m1-sim-genesis-init").as_bytes(),
+            genesis_cth: *blake3::hash(b"m1-sim-genesis-cth").as_bytes(),
+        };
+        struct Replica {
+            known: BTreeMap<[u8; 32], Vec<u8>>,
+            inbox: Vec<[u8; 32]>,
+        }
+        let mut replicas: Vec<Replica> = (0..POOL).map(|_| Replica { known: BTreeMap::new(), inbox: Vec::new() }).collect();
+        let mut partitioned = vec![false; POOL];
+
+        let mut publish = |world: &World, replicas: &mut Vec<Replica>, author: usize, h: [u8; 32]| {
+            replicas[author].known.insert(h, world.commits[&h].clone());
+            for (r, rep) in replicas.iter_mut().enumerate() {
+                if r != author {
+                    rep.inbox.push(h);
+                }
+            }
+        };
+
+        // Force a fork immediately: two genesis members commit with the same parent
+        // before any delivery — the §5 weather, guaranteed, every run.
+        for a in [0usize, 1] {
+            let known = replicas[a].known.clone();
+            let h = build_commit(&mut world, &mut rng, a, &known).expect("genesis member can commit");
+            publish(&world, &mut replicas, a, h);
+        }
+
+        for _ in 0..steps {
+            match rng.gen_range(0u8..10) {
+                0..=2 => {
+                    let a = rng.gen_range(0..POOL);
+                    let known = replicas[a].known.clone();
+                    if let Some(h) = build_commit(&mut world, &mut rng, a, &known) {
+                        publish(&world, &mut replicas, a, h);
+                    }
+                }
+                3..=8 => {
+                    let r = rng.gen_range(0..POOL);
+                    if !partitioned[r] && !replicas[r].inbox.is_empty() {
+                        let i = rng.gen_range(0..replicas[r].inbox.len());
+                        // Redelivery: sometimes deliver without dequeuing, so the same
+                        // commit arrives again later — ingestion must be idempotent.
+                        let h = if rng.gen_bool(0.25) {
+                            replicas[r].inbox[i]
+                        } else {
+                            replicas[r].inbox.remove(i)
+                        };
+                        let bytes = world.commits[&h].clone();
+                        replicas[r].known.insert(h, bytes);
+                    }
+                }
+                _ => {
+                    let r = rng.gen_range(0..POOL);
+                    partitioned[r] = !partitioned[r];
+                }
+            }
+        }
+
+        // Quiescence: every replica eventually receives every commit (partitions heal,
+        // duplicates and all).
+        for rep in &mut replicas {
+            rep.known = world.commits.clone();
+        }
+        // The run must actually have forked, or this test proves nothing.
+        let mut children: BTreeMap<[u8; 32], usize> = BTreeMap::new();
+        for bytes in world.commits.values() {
+            *children.entry(Commit::from_bytes(bytes).unwrap().parent_commit_hash).or_default() += 1;
+        }
+        assert!(children.values().any(|&c| c >= 2), "seed {seed}: no fork occurred");
+
+        let views: Vec<View> = (0..POOL).map(|m| replay(&world, m, &best_chain(&world, &replicas[m].known))).collect();
+        let mut present: Vec<usize> = Vec::new();
+        for li in 0..views[0].tree.n_leaves() {
+            if let Some(l) = views[0].tree.leaf(li as u32) {
+                present.push(member_from_cred(&l.device_credential));
+            }
+        }
+        assert!(present.len() >= 2, "seed {seed}: membership collapsed");
+        let reference = &views[present[0]];
+        let ref_sched = reference.sched.as_ref().expect("member has a schedule");
+        let probe_leaf_id = *blake3::hash(b"probe-device").as_bytes();
+        for m in 0..POOL {
+            let v = &views[m];
+            // Everyone — member or not — agrees on the public facts: winning tip, tree.
+            assert_eq!(v.tip, reference.tip, "seed {seed}: replica {m} tip diverged");
+            assert_eq!(tree_hash(&v.tree), tree_hash(&reference.tree), "seed {seed}: replica {m} tree diverged");
+            assert_eq!(v.cth, reference.cth, "seed {seed}: replica {m} transcript diverged");
+            assert_eq!(v.epoch, reference.epoch);
+            if present.contains(&m) {
+                // Members agree on every secret of the epoch.
+                let s = v.sched.as_ref().expect("present member must have derived the epoch");
+                assert!(v.me.is_some(), "seed {seed}: present member {m} lost its leaf");
+                assert_eq!(s.epoch_secret, ref_sched.epoch_secret, "seed {seed}: epoch secret diverged");
+                assert_eq!(s.init_secret, ref_sched.init_secret);
+                assert_eq!(
+                    sender_key(&s.sender_root, &probe_leaf_id, GID, v.epoch),
+                    sender_key(&ref_sched.sender_root, &probe_leaf_id, GID, reference.epoch),
+                    "seed {seed}: sender key diverged"
+                );
+            } else {
+                assert!(v.me.is_none(), "seed {seed}: non-member {m} thinks it is in the tree");
+            }
+        }
+    }
+
+    /// §9 M1 proof obligation: replicas converge to identical tree hash + epoch secret at
+    /// quiescence under randomized ops, delivery orders, partitions, redelivery, and
+    /// guaranteed forks. Several fixed seeds; failures reproduce exactly.
+    #[test]
+    fn replicas_converge_under_random_delivery_partitions_and_forks() {
+        for seed in [11u64, 22, 33] {
+            run_convergence_sim(seed, 28);
+        }
+    }
+}

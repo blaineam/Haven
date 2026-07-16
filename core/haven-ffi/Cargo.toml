@@ -21,6 +21,7 @@ tokio = { version = "1.52.3", features = ["rt-multi-thread"] }
 uniffi = { version = "0.31.2", features = ["cli", "tokio"] }
 # Diagnostic: capture iroh/noq connection-level tracing to a file so a relay dial can be watched
 # step-by-step (path selection, DERP fallback, connect, serve). Version pinned to iroh's.
+tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # Android-only: wire the JavaVM + Context into ndk-context so iroh's rustls platform

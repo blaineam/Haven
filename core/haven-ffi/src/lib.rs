@@ -13,9 +13,10 @@ use haven_net::blobstore::BlobClient;
 use std::path::PathBuf;
 use haven_p2p::crypto::{decapsulate, encapsulate_to, open, seal, Encapsulation};
 use haven_p2p::device::{
-    circle_fully_seed_drop_capable, recipients_with_devices, recipients_with_devices_gated,
-    ContactDevices, DeviceCredential, DeviceList, SeedDropCapability,
+    circle_fully_mls_capable, circle_fully_seed_drop_capable, recipients_with_devices,
+    recipients_with_devices_gated, ContactDevices, DeviceCredential, DeviceList, SeedDropCapability,
 };
+use haven_p2p::treekem;
 use haven_p2p::identity::{Identity, HavenId};
 use haven_p2p::link::HavenLink;
 use haven_p2p::social::{
@@ -45,6 +46,15 @@ const MLS_VERSION: u32 = 1;
 const TAG_EPOCH_EVENT: u8 = 0x02; // an EpochEnvelope (event sealed under a circle epoch key)
 const TAG_KEY_COMMIT: u8 = 0x03; // a SealedEnvelope carrying a circle epoch key (KeyCommit)
 const TAG_DEVICE_ROSTER: u8 = 0x04; // an account's signed device roster (DeviceList + DeviceCredentials)
+// TreeKEM M2 SHADOW wire tags (docs/TREEKEM-DESIGN.md §3.4, continuing 0x02/0x03/0x04). They ride
+// the same mailbox as everything else and are only EMITTED for fully-MLS-capable circles (§7.3), so
+// a legacy/non-MLS peer essentially never fetches one; if it does, its tag byte isn't `{` (0x7b) so
+// the raw-JSON `receive_legacy` arm fails the parse and returns a harmless per-envelope error — the
+// exact unknown-tag behavior every corrupt envelope already gets. An M2 peer routes them to the
+// SHADOW handlers below, which never touch content state (the tree is compared, never consumed).
+const TAG_MLS_COMMIT: u8 = 0x05; // a treekem::Commit (a ratchet-tree commit; genesis carries the Adds)
+const TAG_MLS_WELCOME: u8 = 0x06; // a SealedEnvelope delivering a joiner's shadow secrets to its device
+const TAG_MLS_PROPOSAL: u8 = 0x07; // a treekem::Proposal (reserved; unbundled proposals — M4 roster path)
 
 uniffi::setup_scaffolding!();
 
@@ -1269,6 +1279,14 @@ struct NetState {
     /// non-capable member never drops the account key regardless (all-present-positive gate). Not persisted
     /// — the app re-applies it on launch, same as `keep_own_posts`.
     retire_account_key: bool,
+    /// TreeKEM M2 SHADOW state, per circle id (`docs/TREEKEM-DESIGN.md` §9 row M2). For a circle
+    /// where `circle_fully_mls_capable` holds, the elected creator builds a ratchet tree from the
+    /// SAME roster/membership the sender-keys epoch runs on, and every device derives the tree's
+    /// epoch secret in PARALLEL. It is **never consumed for content keys** (that flip is M3) — it
+    /// exists only to be COMPARED via `mls_shadow_status` telemetry (the soak signal). Empty for a
+    /// non-capable circle (shadow doesn't run). Not persisted: it rebuilds from the commit + welcome
+    /// re-emitted in every bundle, exactly like `mls_capable`/`seed_drop_capable` rebuild from sync.
+    shadow_trees: std::collections::HashMap<String, ShadowTree>,
 }
 
 impl NetState {
@@ -1452,6 +1470,353 @@ fn purge_expired_from_circle(
     refs.dedup();
     c.events.retain(|e| !doomed.contains(&e.id));
     refs
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// TreeKEM M2 — SHADOW mode (docs/TREEKEM-DESIGN.md §4, §5, §7, §9 row M2).
+//
+// For a circle where `circle_fully_mls_capable` holds, an elected creator builds a ratchet tree
+// over the SAME roster the sender-keys epoch runs on, and every device derives the tree's epoch
+// secret IN PARALLEL. That secret is NEVER consumed for content keys — content still seals under
+// today's sender-keys + epochs (M0/M1/seed-drop, untouched). The tree is compared against reality
+// via `mls_shadow_status` telemetry; the keying flip is M3. Every function below is inert with
+// respect to content: it stores/derives shadow state and returns `false` from `receive` (no
+// content change), so zero existing behavior moves.
+//
+// Genesis shape (§4.1, simplified for shadow): the creator builds an add-only commit (empty tree
+// → one Add per authorized device of every member, no UpdatePath ⇒ commit_secret = 0, RFC 9420
+// §12.4) and Welcomes every device its epoch's `joiner_secret`. A receiver reconstructs the tree
+// from the commit's Adds (verifying `tree_hash`) and derives the identical epoch secret from the
+// delivered `joiner_secret` — `treekem::welcome_epoch_schedule`. No UpdatePath decryption is on
+// the wiring path: path-based key agreement is proven exhaustively in the pure M1 tests; M2's job
+// is the chain/fork/welcome/telemetry plumbing. Creator election is per §4.1 (lowest ACCOUNT id);
+// when the lowest account has multiple devices they each create, which forks at genesis and
+// resolves via §5.1 `select_chain` — a real, observable soak signal, not an error.
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+
+/// One received (or self-authored) shadow Welcome: the secrets a device needs to derive the
+/// epoch secret of the genesis commit it is keyed to. SHADOW — never consumed for content.
+struct ShadowWelcome {
+    epoch: u64,
+    leaf_index: u32,
+    /// The epoch's `joiner_secret` (§3.3) — with the public context this yields `epoch_secret`.
+    joiner_secret: [u8; 32],
+    /// This device's leaf secret (for future stages; unused by M2's genesis-only derivation).
+    leaf_secret: [u8; 32],
+}
+
+/// Per-circle shadow ratchet-tree state. Holds the known genesis commit(s) — more than one is a
+/// §5 fork — and the Welcomes this device holds. `mls_shadow_status` resolves the fork with
+/// `select_chain` and derives the winner's epoch secret. Not persisted (rebuilds from re-emitted
+/// commit + welcome), matching `mls_capable`/`seed_drop_capable`.
+struct ShadowTree {
+    /// The TreeKEM group id = the circle id bytes.
+    group_id: Vec<u8>,
+    /// Known genesis commits by `commit_hash` → full signed bytes. Two+ = a fork at epoch 1.
+    commits: std::collections::BTreeMap<[u8; 32], Vec<u8>>,
+    /// Welcomes I hold, keyed by the genesis commit hash they belong to.
+    my_welcomes: std::collections::BTreeMap<[u8; 32], ShadowWelcome>,
+    /// The genesis commit I authored (as elected creator), so I don't re-create every bundle.
+    my_genesis: Option<[u8; 32]>,
+    /// Cached tagged wire bytes I re-emit each bundle. Byte-stable so the content-addressed
+    /// mailbox doesn't accumulate a copy per backfill (Welcomes wrap via a random KEM, so they
+    /// MUST be cached — the same reasoning as `Circle::cached_commit`).
+    emit_cache: Vec<Vec<u8>>,
+}
+
+impl ShadowTree {
+    fn new(group_id: Vec<u8>) -> Self {
+        Self {
+            group_id,
+            commits: std::collections::BTreeMap::new(),
+            my_welcomes: std::collections::BTreeMap::new(),
+            my_genesis: None,
+            emit_cache: Vec::new(),
+        }
+    }
+}
+
+/// Deterministic per-group genesis constants (§5.1/§3.3): the genesis parent hash the first
+/// commit chains to, the base transcript hash, and the base init secret. All must be identical on
+/// every device, so each is a pure function of the group id alone.
+fn shadow_domain_hash(domain: &[u8], gid: &[u8]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(domain);
+    h.update(gid);
+    *h.finalize().as_bytes()
+}
+fn shadow_genesis_parent(gid: &[u8]) -> [u8; 32] {
+    shadow_domain_hash(b"haven-mls-shadow-genesis-parent-v1", gid)
+}
+fn shadow_genesis_cth(gid: &[u8]) -> [u8; 32] {
+    shadow_domain_hash(b"haven-mls-shadow-genesis-cth-v1", gid)
+}
+fn shadow_genesis_init(gid: &[u8]) -> [u8; 32] {
+    shadow_domain_hash(b"haven-mls-shadow-genesis-init-v1", gid)
+}
+/// The (shadow) leaf secret a creator assigns to `device_id`. Deterministic + creator-scoped so
+/// the same creator reproduces its genesis across relaunches (no self-fork), while two creators
+/// pick different secrets (their genesis commits differ → a fork §5.1 resolves). SHADOW: these
+/// are never consumed for content, so their secrecy is not load-bearing; derived from the
+/// creator's own id anyway.
+fn shadow_leaf_secret(creator_id: &[u8; 32], gid: &[u8], device_id: &[u8; 32]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"haven-mls-shadow-leaf-v1");
+    h.update(creator_id);
+    h.update(gid);
+    h.update(device_id);
+    *h.finalize().as_bytes()
+}
+
+/// The account members whose devices populate the shadow tree (me + circle members).
+fn circle_mls_accounts(st: &NetState, idx: usize) -> Vec<HavenId> {
+    let mut accounts = vec![st.me().clone()];
+    accounts.extend(st.circles[idx].members.iter().cloned());
+    accounts
+}
+
+/// Does the all-present-positive MLS gate hold for this circle? (§7.2.) Composes seed-drop
+/// capability (nested) with `ml`-capability + a known roster for every member.
+fn circle_is_mls_capable(st: &NetState, idx: usize) -> bool {
+    let accounts = circle_mls_accounts(st, idx);
+    circle_fully_mls_capable(&accounts, &st.device_lists, &st.seed_drop_capable, &st.mls_capable)
+}
+
+/// Every authorized device (bundle + credential) of every member, deterministically ordered by
+/// device node id — the tree's leaf set. Ordering is identical on all devices, so the leaf
+/// indices agree.
+fn shadow_device_leaves(st: &NetState, idx: usize) -> Vec<(HavenId, DeviceCredential)> {
+    let accounts = circle_mls_accounts(st, idx);
+    let mut out: Vec<(HavenId, DeviceCredential)> = Vec::new();
+    let mut seen: HashSet<[u8; 32]> = HashSet::new();
+    for a in &accounts {
+        if let Some(cd) = st.device_lists.get(&a.node_id_bytes()) {
+            for c in &cd.credentials {
+                if cd.list.is_authorized(&c.device_id()) && seen.insert(c.device_id()) {
+                    out.push((c.device.clone(), c.clone()));
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.node_id_bytes().cmp(&b.0.node_id_bytes()));
+    out
+}
+
+/// Am I the elected genesis creator for this circle? Per §4.1: the member with the
+/// lexicographically-smallest ACCOUNT id creates. (A member with multiple devices under the
+/// lowest account has each device create; the resulting genesis fork resolves via §5.1.)
+fn am_shadow_creator(st: &NetState, idx: usize) -> bool {
+    let my_acct = st.me().node_id_bytes();
+    circle_mls_accounts(st, idx)
+        .iter()
+        .map(|a| a.node_id_bytes())
+        .min()
+        == Some(my_acct)
+}
+
+/// Encode a Welcome's secret payload (delivered sealed to a joiner's device bundle):
+/// `commit_hash(32) ‖ epoch(8) ‖ leaf_index(4) ‖ joiner_secret(32) ‖ leaf_secret(32)`.
+fn encode_shadow_welcome(commit_hash: &[u8; 32], w: &ShadowWelcome) -> Vec<u8> {
+    let mut v = Vec::with_capacity(32 + 8 + 4 + 32 + 32);
+    v.extend_from_slice(commit_hash);
+    v.extend_from_slice(&w.epoch.to_le_bytes());
+    v.extend_from_slice(&w.leaf_index.to_le_bytes());
+    v.extend_from_slice(&w.joiner_secret);
+    v.extend_from_slice(&w.leaf_secret);
+    v
+}
+fn decode_shadow_welcome(b: &[u8]) -> Option<([u8; 32], ShadowWelcome)> {
+    if b.len() != 32 + 8 + 4 + 32 + 32 {
+        return None;
+    }
+    let commit_hash: [u8; 32] = b[0..32].try_into().ok()?;
+    let epoch = u64::from_le_bytes(b[32..40].try_into().ok()?);
+    let leaf_index = u32::from_le_bytes(b[40..44].try_into().ok()?);
+    let joiner_secret: [u8; 32] = b[44..76].try_into().ok()?;
+    let leaf_secret: [u8; 32] = b[76..108].try_into().ok()?;
+    Some((commit_hash, ShadowWelcome { epoch, leaf_index, joiner_secret, leaf_secret }))
+}
+
+/// Resolve a shadow commit/welcome signer's device/account hex to its verifying bundle — the
+/// same three-case resolution `receive_key_commit` uses (my account, a member account, or an
+/// authorized device of a member/mine).
+fn resolve_shadow_sender(st: &NetState, idx: usize, sender_hex: &str) -> Option<HavenId> {
+    let me_hex = hex(&st.me().node_id_bytes());
+    if sender_hex == me_hex {
+        return Some(st.me().clone());
+    }
+    if let Some(m) =
+        st.circles[idx].members.iter().find(|m| hex(&m.node_id_bytes()) == sender_hex).cloned()
+    {
+        return Some(m);
+    }
+    authorized_device_and_account(st, idx, sender_hex).map(|(bundle, _)| bundle)
+}
+
+/// Build (once) the elected creator's genesis commit + a Welcome for every device, and cache the
+/// tagged wire bytes for idempotent re-emission. SHADOW — the derived epoch secret is stored for
+/// telemetry only, never consumed for content. No-op if a genesis is already cached.
+fn build_shadow_genesis(st: &mut NetState, idx: usize) {
+    let circle_id = st.circles[idx].id.clone();
+    if st.shadow_trees.get(&circle_id).and_then(|s| s.my_genesis).is_some() {
+        return; // already created — idempotent
+    }
+    let gid = circle_id.as_bytes().to_vec();
+    let devices = shadow_device_leaves(st, idx);
+    if devices.len() < 2 {
+        return; // a 1-leaf shadow group carries no signal; wait for the roster to fill in
+    }
+    // Own an Identity to sign with, so the immutable borrow of `st` ends before we mutate it.
+    // Sign with THIS DEVICE's key (leaves are devices, §3.1): it scopes the genesis so two sibling
+    // devices of one account produce DISTINCT commits (a real §5 fork that resolves), and it lets a
+    // receiver resolve the creator device→account via the roster. Falls back to the account key only
+    // on a seeded device that never adopted a device identity (an edge case; not a capable fleet).
+    let signer = match &st.device {
+        Some(d) => Identity::from_seed(&d.secret_seed()),
+        None => Identity::from_seed(&st.account_or_device_signer().secret_seed()),
+    };
+    // Creator scope for leaf secrets + my own leaf: the signing device's id.
+    let creator_id = signer.public().node_id_bytes();
+    let my_device_id = Some(creator_id);
+
+    // One Add per device, in the deterministic leaf order. leaf_index = position in the order.
+    let mut adds: Vec<treekem::Proposal> = Vec::with_capacity(devices.len());
+    let mut leaf_secrets: Vec<[u8; 32]> = Vec::with_capacity(devices.len());
+    for (li, (bundle, cred)) in devices.iter().enumerate() {
+        let ls = shadow_leaf_secret(&creator_id, &gid, &bundle.node_id_bytes());
+        leaf_secrets.push(ls);
+        let kp = treekem::node_keypair_from_path_secret(&ls);
+        let payload = treekem::leaf_binding_payload(&gid, &kp.kem_x, &kp.kem_pq);
+        // SHADOW: the leaf binding is not DEVICE-signed (the creator generated these leaf
+        // secrets; a device can't sign a key it doesn't hold). M2 does not verify it — that is a
+        // later stage where each device publishes its own leaf. The account-signed
+        // DeviceCredential still travels, so the leaf→account chain is present for the future.
+        let leaf = treekem::LeafNode {
+            leaf_kem_x: kp.kem_x,
+            leaf_kem_pq: kp.kem_pq,
+            device_credential: cred.to_bytes(),
+            leaf_binding_sig: signer.sign(&payload),
+        };
+        adds.push(treekem::build_add_proposal(&gid, 0, li as u32, leaf, |m| signer.sign(m)));
+    }
+    // The creator's own leaf index (its device's position in the order). Fall back to 0 if this
+    // build has no device identity (shouldn't happen for a capable circle).
+    let creator_leaf = my_device_id
+        .and_then(|d| devices.iter().position(|(b, _)| b.node_id_bytes() == d))
+        .unwrap_or(0) as u32;
+
+    let parent = shadow_genesis_parent(&gid);
+    let base_cth = shadow_genesis_cth(&gid);
+    let base_init = shadow_genesis_init(&gid);
+    let build = match treekem::build_commit(
+        &treekem::RatchetTree { slots: vec![] },
+        &gid,
+        1,
+        parent,
+        &base_cth,
+        &base_init,
+        creator_leaf,
+        adds,
+        None, // add-only ⇒ commit_secret = 0
+        |m| signer.sign(m),
+        |m| signer.sign(m),
+    ) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    let commit_bytes = build.commit.to_bytes();
+    let commit_hash = treekem::commit_hash(&commit_bytes);
+    let joiner_secret = build.schedule.joiner_secret;
+
+    // Cache the tagged commit + a Welcome sealed to each device's bundle (except my own device,
+    // whose Welcome I store directly so my status is converged without a round-trip).
+    let mut emit_cache: Vec<Vec<u8>> = vec![tagged(TAG_MLS_COMMIT, &commit_bytes)];
+    let mut my_welcome: Option<ShadowWelcome> = None;
+    for (li, (bundle, _)) in devices.iter().enumerate() {
+        let w = ShadowWelcome {
+            epoch: 1,
+            leaf_index: li as u32,
+            joiner_secret,
+            leaf_secret: leaf_secrets[li],
+        };
+        if my_device_id == Some(bundle.node_id_bytes()) {
+            my_welcome = Some(w);
+            continue; // stored directly below
+        }
+        let plaintext = encode_shadow_welcome(&commit_hash, &w);
+        let group = Group::new("mls-welcome", vec![bundle.clone()]);
+        if let Ok(env) = seal_bytes(&signer, &group, &plaintext) {
+            emit_cache.push(tagged(TAG_MLS_WELCOME, &env.to_bytes()));
+        }
+    }
+
+    // Commit shadow state (the signer borrow of `st` has ended).
+    let shadow = st.shadow_trees.entry(circle_id).or_insert_with(|| ShadowTree::new(gid.clone()));
+    shadow.group_id = gid;
+    shadow.commits.insert(commit_hash, commit_bytes);
+    shadow.my_genesis = Some(commit_hash);
+    if let Some(w) = my_welcome {
+        shadow.my_welcomes.insert(commit_hash, w);
+    }
+    shadow.emit_cache = emit_cache;
+}
+
+/// The tagged shadow wire bytes to append to a circle's sync bundle (§4.5 — alongside, never
+/// replacing, today's key commit). Gated on `circle_fully_mls_capable`; empty otherwise, so a
+/// non-capable circle emits nothing and behaves exactly as today.
+fn shadow_emit_bundle(st: &mut NetState, idx: usize) -> Vec<Vec<u8>> {
+    if !circle_is_mls_capable(st, idx) {
+        return vec![];
+    }
+    if am_shadow_creator(st, idx) {
+        build_shadow_genesis(st, idx);
+    }
+    let circle_id = st.circles[idx].id.clone();
+    st.shadow_trees.get(&circle_id).map(|s| s.emit_cache.clone()).unwrap_or_default()
+}
+
+/// Ingest a shadow Commit (§5.2): store it under its hash so `mls_shadow_status` can resolve the
+/// chain/fork. SHADOW — returns `false` (no content change) always. Ignored harmlessly for a
+/// non-capable circle or malformed bytes (no panic, no state change) — the legacy-peer contract.
+fn receive_mls_commit(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool, HavenError> {
+    if !circle_is_mls_capable(st, idx) {
+        return Ok(false); // shadow doesn't run here; ignore harmlessly
+    }
+    let Ok(commit) = treekem::Commit::from_bytes(body) else { return Ok(false) };
+    let circle_id = st.circles[idx].id.clone();
+    let gid = circle_id.as_bytes().to_vec();
+    if commit.group_id != gid || commit.epoch != 1 || commit.parent_commit_hash != shadow_genesis_parent(&gid) {
+        return Ok(false); // only genesis commits participate in the M2 shadow
+    }
+    let h = treekem::commit_hash(body);
+    let shadow = st.shadow_trees.entry(circle_id).or_insert_with(|| ShadowTree::new(gid));
+    shadow.commits.entry(h).or_insert_with(|| body.to_vec());
+    Ok(false)
+}
+
+/// Ingest a shadow Welcome (§4.2): open it with my device/account key and store the delivered
+/// secrets under the genesis commit hash they belong to. SHADOW — returns `false` always;
+/// unopenable (not addressed to me) or non-capable circles are ignored harmlessly.
+fn receive_mls_welcome(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool, HavenError> {
+    if !circle_is_mls_capable(st, idx) {
+        return Ok(false);
+    }
+    let Ok(env) = SealedEnvelope::from_bytes(body) else { return Ok(false) };
+    let sender_hex = env.sender_hex();
+    let Some(sender) = resolve_shadow_sender(st, idx, &sender_hex) else { return Ok(false) };
+    // Dual-open: my device key first (the Welcome is sealed to my device bundle), then account key.
+    let opened = st
+        .device
+        .as_ref()
+        .and_then(|d| open_bytes(d, &sender, &env).ok())
+        .or_else(|| st.me_secret.as_ref().and_then(|m| open_bytes(m, &sender, &env).ok()));
+    let Some(plaintext) = opened else { return Ok(false) };
+    let Some((commit_hash, welcome)) = decode_shadow_welcome(&plaintext) else { return Ok(false) };
+    let circle_id = st.circles[idx].id.clone();
+    let gid = circle_id.as_bytes().to_vec();
+    let shadow = st.shadow_trees.entry(circle_id).or_insert_with(|| ShadowTree::new(gid));
+    shadow.my_welcomes.entry(commit_hash).or_insert(welcome);
+    Ok(false)
 }
 
 /// Apply a received key commit: store the epoch key (if new) and unlock any buffered events.
@@ -1662,6 +2027,21 @@ pub struct CircleInfoFfi {
     pub member_count: u32,
 }
 
+/// TreeKEM M2 SHADOW telemetry (`docs/TREEKEM-DESIGN.md` §9 row M2) — the soak signal. Reports
+/// this device's view of the parallel ratchet tree for a circle: the epoch it resolved, the
+/// winning tree's hash (hex), whether it converged (holds the winning genesis's Welcome and could
+/// derive its epoch secret), and how many extra genesis commits it saw (a §5 fork count). NONE of
+/// this is consumed for content keys — it exists only to be compared across the fleet during the
+/// M2 beta soak. `converged=false` with an empty hash means the shadow tree isn't running here (a
+/// non-capable circle, or no genesis yet).
+#[derive(uniffi::Record)]
+pub struct MlsShadowStatusFfi {
+    pub epoch: u64,
+    pub tree_hash_hex: String,
+    pub converged: bool,
+    pub fork_count: u32,
+}
+
 /// A verified profile "business card": the authoritative display name plus an optional
 /// one-line bio and a link the user chose to show. Bio/link are empty for legacy peers.
 #[derive(uniffi::Record)]
@@ -1783,6 +2163,7 @@ impl HavenSocial {
                 },
                 keep_own_posts: false,
                 retire_account_key: false,
+                shadow_trees: std::collections::HashMap::new(),
             }),
         }))
     }
@@ -1828,6 +2209,7 @@ impl HavenSocial {
                 },
                 keep_own_posts: false,
                 retire_account_key: false,
+                shadow_trees: std::collections::HashMap::new(),
             }),
         }))
     }
@@ -2608,6 +2990,14 @@ impl HavenSocial {
                 out.push(tagged(TAG_EPOCH_EVENT, &env.to_bytes()));
             }
         }
+        // TreeKEM M2 SHADOW: emit the ratchet-tree genesis commit + Welcomes ALONGSIDE (never
+        // replacing) the sender-keys commit above, gated on `circle_fully_mls_capable`. These
+        // ride the same mailbox; a receiver derives the tree's epoch secret in parallel and it is
+        // COMPARED (mls_shadow_status), never consumed — content keying is untouched (M3 is the
+        // flip). Empty for a non-capable circle, so this is strictly additive.
+        for env in shadow_emit_bundle(&mut st, idx) {
+            out.push(env);
+        }
         out
     }
 
@@ -2627,6 +3017,60 @@ impl HavenSocial {
         self.epoch_sync_bundle_inner(&circle_id, true, 0, true)
     }
 
+    /// TreeKEM M2 SHADOW telemetry (`docs/TREEKEM-DESIGN.md` §9 row M2). Resolves this device's
+    /// known genesis commits for a circle with the §5.1 fork rule (`select_chain`), derives the
+    /// winning epoch secret from the Welcome it holds, and reports `{epoch, tree_hash_hex,
+    /// converged, fork_count}`. Read-only and inert: the derived secret is compared/logged, never
+    /// consumed for content. This is the M2 soak signal — every device in a fully-capable circle
+    /// should report `converged=true` with an equal `tree_hash_hex` once sync has quiesced.
+    pub fn mls_shadow_status(&self, circle_id: String) -> MlsShadowStatusFfi {
+        let st = self.state.lock().unwrap();
+        let none = MlsShadowStatusFfi { epoch: 0, tree_hash_hex: String::new(), converged: false, fork_count: 0 };
+        let Some(shadow) = st.shadow_trees.get(&circle_id) else { return none };
+        if shadow.commits.is_empty() {
+            return none;
+        }
+        let gid = shadow.group_id.clone();
+        // Resolve the fork: every device sees the same candidate set at quiescence and picks the
+        // same winner (largest tip hash), the §5.1 convergence property.
+        let candidates: Vec<Vec<Vec<u8>>> = shadow.commits.values().map(|b| vec![b.clone()]).collect();
+        let Some(win) = treekem::select_chain(&shadow_genesis_parent(&gid), 1, &gid, &candidates) else {
+            return none;
+        };
+        let wbytes = &candidates[win][0];
+        let Ok(wc) = treekem::Commit::from_bytes(wbytes) else { return none };
+        let wh = treekem::commit_hash(wbytes);
+        let cth = treekem::next_confirmed_transcript_hash(&shadow_genesis_cth(&gid), &wc);
+        let fork_count = (shadow.commits.len() - 1) as u32;
+        // Converged iff I hold the WINNER's Welcome and can derive its epoch secret. Deriving it
+        // proves agreement on the whole schedule; the value is logged, not consumed.
+        let converged = match shadow.my_welcomes.get(&wh) {
+            Some(w) if w.epoch == wc.epoch => {
+                let sched = treekem::welcome_epoch_schedule(&w.joiner_secret, &gid, wc.epoch, &wc.tree_hash, &cth);
+                tracing::info!(
+                    circle = %circle_id,
+                    epoch = wc.epoch,
+                    tree_hash = %hex(&wc.tree_hash),
+                    epoch_secret = %hex(&sched.epoch_secret),
+                    fork_count,
+                    "mls shadow: converged on winning tree"
+                );
+                true
+            }
+            _ => {
+                tracing::info!(
+                    circle = %circle_id,
+                    epoch = wc.epoch,
+                    tree_hash = %hex(&wc.tree_hash),
+                    fork_count,
+                    "mls shadow: winning tree known but no matching welcome yet"
+                );
+                false
+            }
+        };
+        MlsShadowStatusFfi { epoch: wc.epoch, tree_hash_hex: hex(&wc.tree_hash), converged, fork_count }
+    }
+
     /// Ingest a sealed envelope received from the network. Routes by wire tag: a key commit (stores
     /// the circle epoch key, then unlocks any buffered events), an epoch-sealed event, or a legacy
     /// per-recipient envelope (read-path compatibility during migration). Returns true if it changed
@@ -2640,6 +3084,12 @@ impl HavenSocial {
         match envelope[0] {
             TAG_KEY_COMMIT => receive_key_commit(&mut st, idx, &envelope[1..]),
             TAG_EPOCH_EVENT => receive_epoch_event(&mut st, idx, &envelope[1..]),
+            // TreeKEM M2 SHADOW tags: stored/derived in parallel, NEVER consumed for content, so
+            // each returns `false` (no content change). A non-capable circle ignores them harmlessly.
+            TAG_MLS_COMMIT => receive_mls_commit(&mut st, idx, &envelope[1..]),
+            TAG_MLS_WELCOME => receive_mls_welcome(&mut st, idx, &envelope[1..]),
+            // Unbundled proposals (§4.2 roster path) are reserved for M4; a stray one is inert.
+            TAG_MLS_PROPOSAL => Ok(false),
             TAG_DEVICE_ROSTER => {
                 // Account-level (not circle-specific) — verify against the carried account bundle, store,
                 // and rotate affected epochs. Forged/stale rosters are rejected inside the verifier.
@@ -4735,5 +5185,169 @@ mod net_tests {
         assert!(seedless.ingest_roster_wire(newer_wire.clone()), "a newer primary-signed roster is adopted");
         assert_eq!(seedless.my_device_roster_wire(), newer_wire, "and becomes the new verbatim wire");
         assert_ne!(newer_wire, primary_wire, "the newer roster really is different bytes");
+    }
+
+    // ── TreeKEM M2 SHADOW wiring (docs/TREEKEM-DESIGN.md §9 row M2) ───────────────────────────
+
+    /// Empty five-field profile card for `s`, signed — carries `sd` + `ml`, so an observer that
+    /// runs it through `profile_seed_drop_version` learns `s` is BOTH seed-drop- and MLS-capable.
+    fn card(s: &HavenSocial, name: &str) -> Vec<u8> {
+        s.my_signed_profile(name.into(), String::new(), String::new(), String::new(), String::new())
+    }
+
+    /// §9 M2 proof (a): a 3-account × 2-device fleet, every member MLS-capable. After arbitrary
+    /// all-to-all sync/redelivery, `mls_shadow_status` reports converged=true with an EQUAL tree
+    /// hash across every instance — the shadow tree agreed on the fleet, single-creator (no fork).
+    #[test]
+    fn mls_shadow_converges_across_fully_capable_three_account_fleet() {
+        let cid = DEFAULT_CIRCLE.to_string();
+        let a = HavenSocial::new([1u8; 32].to_vec()).unwrap();
+        let b = HavenSocial::new([2u8; 32].to_vec()).unwrap();
+        let c = HavenSocial::new([3u8; 32].to_vec()).unwrap();
+        assert!(a.use_device_identity([11u8; 32].to_vec()));
+        assert!(b.use_device_identity([12u8; 32].to_vec()));
+        assert!(c.use_device_identity([13u8; 32].to_vec()));
+        let insts = [&a, &b, &c];
+        let seeds = [[1u8; 32], [2u8; 32], [3u8; 32]];
+        let devs = [[11u8; 32], [12u8; 32], [13u8; 32]];
+        let bundles: Vec<Vec<u8>> = insts.iter().map(|s| s.my_bundle()).collect();
+
+        // Everyone adds everyone; installs its own 2-device roster (account + device leaves).
+        let mut rosters = Vec::new();
+        for i in 0..3 {
+            for j in 0..3 {
+                if i != j {
+                    insts[i].add_contact_bundle(cid.clone(), bundles[j].clone()).unwrap();
+                }
+            }
+            rosters.push(install_two_device_roster(insts[i], seeds[i], devs[i]));
+        }
+        // Cross-ingest rosters (device_lists) and cross-learn capability via signed profiles.
+        let cards: Vec<Vec<u8>> = insts.iter().enumerate().map(|(i, s)| card(s, &format!("m{i}"))).collect();
+        for i in 0..3 {
+            for j in 0..3 {
+                if i != j {
+                    assert!(insts[i].ingest_device_roster(bundles[j].clone(), rosters[j].0.clone(), rosters[j].1.clone()));
+                    insts[i].profile_seed_drop_version(bundles[j].clone(), cards[j].clone());
+                }
+            }
+        }
+
+        // Before any MLS sync, the shadow tree hasn't run anywhere.
+        assert!(!a.mls_shadow_status(cid.clone()).converged, "no genesis before sync");
+
+        // Arbitrary redelivery: several all-to-all rounds (the creator's genesis + welcomes ride
+        // its bundle; everyone else stores them). Order-independent by construction.
+        for _ in 0..4 {
+            for i in 0..3 {
+                for j in 0..3 {
+                    if i != j {
+                        sync(insts[i], insts[j], &cid);
+                    }
+                }
+            }
+        }
+
+        let reference = a.mls_shadow_status(cid.clone());
+        assert!(reference.converged, "the creator converged");
+        assert_eq!(reference.epoch, 1);
+        assert_eq!(reference.fork_count, 0, "one elected creator ⇒ no fork");
+        assert!(!reference.tree_hash_hex.is_empty());
+        for (i, s) in insts.iter().enumerate() {
+            let st = s.mls_shadow_status(cid.clone());
+            assert!(st.converged, "instance {i} converged");
+            assert_eq!(st.tree_hash_hex, reference.tree_hash_hex, "instance {i} tree hash agrees");
+            assert_eq!(st.epoch, reference.epoch);
+            assert_eq!(st.fork_count, 0);
+        }
+
+        // SHADOW invariant: content still flows under sender-keys, untouched by any of the above.
+        a.post(cid.clone(), "hi fleet".into(), vec![], None, None, false, false, 1_000).unwrap();
+        for _ in 0..2 {
+            sync(&a, &b, &cid);
+            sync(&a, &c, &cid);
+        }
+        assert!(b.feed(cid.clone(), 2_000, None).iter().any(|m| m.body == "hi fleet"));
+        assert!(c.feed(cid.clone(), 2_000, None).iter().any(|m| m.body == "hi fleet"));
+    }
+
+    /// §9 M2 proof (a + concurrency): two SIBLING devices of one account are both the elected
+    /// (lowest-account) creator, so each issues its own genesis — a §5.1 same-parent FORK. After
+    /// sync both resolve it to the identical winner (larger tip hash): converged=true, equal tree
+    /// hash, fork_count=1 on both. This is the wiring-level fork-and-converge signal.
+    #[test]
+    fn mls_shadow_two_siblings_fork_and_converge() {
+        let cid = DEFAULT_CIRCLE.to_string();
+        let mac = HavenSocial::new([2u8; 32].to_vec()).unwrap();
+        let phone = HavenSocial::new([2u8; 32].to_vec()).unwrap();
+        assert!(mac.use_device_identity([99u8; 32].to_vec()));
+        assert!(phone.use_device_identity([88u8; 32].to_vec()));
+
+        // Both install the SAME roster (account + both devices), so each computes the circle as
+        // fully MLS-capable and resolves the sibling device locally.
+        let acct_id = Identity::from_seed(&[2u8; 32]).public().node_id_bytes().to_vec();
+        let mac_id = Identity::from_seed(&[99u8; 32]).public().node_id_bytes().to_vec();
+        let phone_id = Identity::from_seed(&[88u8; 32]).public().node_id_bytes().to_vec();
+        let mac_cred = crate::multidevice::issue_device_credential([2u8; 32].to_vec(), mac.my_device_bundle(), "mac".into(), 1).unwrap();
+        let phone_cred = crate::multidevice::issue_device_credential([2u8; 32].to_vec(), phone.my_device_bundle(), "phone".into(), 2).unwrap();
+        let acct_cred = crate::multidevice::issue_device_credential([2u8; 32].to_vec(), mac.my_bundle(), "primary".into(), 0).unwrap();
+        let list = crate::multidevice::sign_device_list([2u8; 32].to_vec(), 1, 0, vec![acct_id, mac_id, phone_id], vec![]).unwrap();
+        let creds = vec![acct_cred, mac_cred, phone_cred];
+        assert!(mac.set_my_device_roster(list.clone(), creds.clone()));
+        assert!(phone.set_my_device_roster(list, creds));
+
+        for _ in 0..4 {
+            sync(&mac, &phone, &cid);
+            sync(&phone, &mac, &cid);
+        }
+
+        let sm = mac.mls_shadow_status(cid.clone());
+        let sp = phone.mls_shadow_status(cid.clone());
+        assert!(sm.converged, "mac resolved the fork and holds the winner's welcome");
+        assert!(sp.converged, "phone resolved the fork and holds the winner's welcome");
+        assert_eq!(sm.tree_hash_hex, sp.tree_hash_hex, "both siblings pick the same winning tree");
+        assert_eq!(sm.fork_count, 1, "two creators ⇒ exactly one fork");
+        assert_eq!(sp.fork_count, 1);
+        assert!(!sm.tree_hash_hex.is_empty());
+    }
+
+    /// §9 M2 proof (b + c): a NON-capable member means the shadow tree simply doesn't run (no
+    /// tree, converged=false), content flows normally; and a legacy/non-participating peer fed a
+    /// `TAG_MLS_*` blob handles it harmlessly (no panic, no state change) with its feed intact.
+    #[test]
+    fn mls_shadow_absent_for_noncapable_and_legacy_blob_is_harmless() {
+        let cid = DEFAULT_CIRCLE.to_string();
+        // Alice is fully upgraded; Bob is a legacy account (no device key, no `ml` marker).
+        let alice = HavenSocial::new([1u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([2u8; 32].to_vec()).unwrap();
+        assert!(alice.use_device_identity([11u8; 32].to_vec()));
+        alice.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+        bob.add_contact_bundle(cid.clone(), alice.my_bundle()).unwrap();
+        install_two_device_roster(&alice, [1u8; 32], [11u8; 32]);
+
+        // Bob never advertised capability, so Alice's circle is NOT fully MLS-capable → no shadow.
+        alice.post(cid.clone(), "normal post".into(), vec![], None, None, false, false, 1_000).unwrap();
+        sync(&alice, &bob, &cid);
+        assert!(bob.feed(cid.clone(), 2_000, None).iter().any(|m| m.body == "normal post"), "content flows normally");
+        let sa = alice.mls_shadow_status(cid.clone());
+        assert!(!sa.converged, "shadow doesn't run in a non-capable circle");
+        assert!(sa.tree_hash_hex.is_empty());
+        assert_eq!(sa.fork_count, 0);
+        // No shadow wire was ever emitted (Alice's bundle carried only legacy tags).
+        assert!(
+            alice.sync_envelopes(cid.clone()).iter().all(|e| e.first() != Some(&TAG_MLS_COMMIT) && e.first() != Some(&TAG_MLS_WELCOME)),
+            "a non-capable circle emits no MLS wire"
+        );
+
+        // Feed Bob (a legacy/non-participating peer) each TAG_MLS_* blob: harmless, no state change.
+        let before = bob.feed(cid.clone(), 2_000, None).len();
+        for tag in [TAG_MLS_COMMIT, TAG_MLS_WELCOME, TAG_MLS_PROPOSAL] {
+            let blob = tagged(tag, &[0xEE; 40]);
+            let r = bob.receive(cid.clone(), blob);
+            assert!(matches!(r, Ok(false)), "a TAG_MLS_* blob is a harmless no-op for a non-participant");
+        }
+        // A genuinely UNKNOWN tag still hits the legacy arm and errors harmlessly (no panic).
+        assert!(bob.receive(cid.clone(), tagged(0x7F, &[1, 2, 3])).is_err(), "unknown tag → harmless per-envelope error");
+        assert_eq!(bob.feed(cid.clone(), 2_000, None).len(), before, "the legacy peer's feed is unchanged");
     }
 }

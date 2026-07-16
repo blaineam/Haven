@@ -2048,6 +2048,476 @@ pub fn select_chain(
     best.map(|(i, _, _)| i)
 }
 
+// ═════════════════════════════════════════════════════════════════════════════════════════
+// Stage M2 — propose / commit / welcome / apply-commit BUILDERS (design §4, §9 row M2).
+//
+// These bundle the M1 primitives (tree ops + `build_update_path`/`decrypt_update_path` +
+// the epoch schedule + the fork rules) into the four operations the engine drives. They stay
+// PURE exactly like M1: entropy and time are caller-supplied, signing is a caller closure
+// (the device/account keys live with the caller), no I/O, no engine state. Same inputs →
+// same bytes, so two devices that apply the same commit chain land on bit-identical trees and
+// epoch secrets — the property the M2 SHADOW mode compares, and the only thing that makes
+// convergence without a delivery service (§5) possible.
+//
+// SHADOW invariant (M2): the epoch secrets these produce are COMPARED via telemetry, never
+// consumed for content keys (that flip is M3). Nothing here decides that — a builder is a
+// builder — but the engine wiring that calls them is gated and its outputs are inert.
+// ═════════════════════════════════════════════════════════════════════════════════════════
+
+// ── Proposal builders (§4.2 Add, §4.3 Remove, §4.4 Update) ───────────────────────────────
+
+/// The exact bytes a [`Proposal`] signature covers: `PROPOSAL_DOMAIN ‖ proposal-with-blank-sig`.
+/// Exposed so the verifier (lib.rs, which holds the roster to resolve the signer) checks the
+/// identical preimage the builder signed. Blanking the sig field before serializing keeps the
+/// preimage a pure function of the proposal's content (the M0 codec's byte-stability makes the
+/// blanked re-serialization canonical).
+pub fn proposal_signing_bytes(p: &Proposal) -> Vec<u8> {
+    let mut c = p.clone();
+    c.sig = Vec::new();
+    let mut v = Vec::with_capacity(PROPOSAL_DOMAIN.len());
+    v.extend_from_slice(PROPOSAL_DOMAIN);
+    v.extend_from_slice(&c.to_bytes());
+    v
+}
+
+/// Build a signed proposal for one membership op. The signer closure is the proposing device's
+/// hybrid signature (roster authorization of the signer is the caller's job, §4.2). Deterministic.
+pub fn build_proposal(
+    group_id: &[u8],
+    epoch: u64,
+    sender_leaf: u32,
+    body: ProposalBody,
+    sign: impl FnOnce(&[u8]) -> Vec<u8>,
+) -> Proposal {
+    let mut p = Proposal { group_id: group_id.to_vec(), epoch, body, sender_leaf, sig: Vec::new() };
+    p.sig = sign(&proposal_signing_bytes(&p));
+    p
+}
+
+/// Convenience: an Add proposal carrying the joiner's [`LeafNode`] (§4.2).
+pub fn build_add_proposal(
+    group_id: &[u8],
+    epoch: u64,
+    sender_leaf: u32,
+    leaf_node: LeafNode,
+    sign: impl FnOnce(&[u8]) -> Vec<u8>,
+) -> Proposal {
+    build_proposal(group_id, epoch, sender_leaf, ProposalBody::Add { leaf_node }, sign)
+}
+
+/// Convenience: a Remove proposal naming the leaf to cut off (§4.3).
+pub fn build_remove_proposal(
+    group_id: &[u8],
+    epoch: u64,
+    sender_leaf: u32,
+    leaf_index: u32,
+    sign: impl FnOnce(&[u8]) -> Vec<u8>,
+) -> Proposal {
+    build_proposal(group_id, epoch, sender_leaf, ProposalBody::Remove { leaf_index }, sign)
+}
+
+// ── Applying proposals to the public tree (shared by builder + receiver) ──────────────────
+
+/// Apply a commit's proposals to the public tree in listed order — the ONE code path both the
+/// committer (before building its path) and every receiver run, so their trees are identical by
+/// construction. `Update` replaces the named leaf's node in place (a member refreshing its own
+/// leaf key without a full path is the degenerate case); `Add`/`Remove` are the M1 tree ops.
+/// Returns whether `my_leaf` (if given) was removed by one of the proposals.
+fn apply_proposals(tree: &mut RatchetTree, proposals: &[Proposal], my_leaf: Option<u32>) -> Result<bool> {
+    let mut removed_me = false;
+    for p in proposals {
+        match &p.body {
+            ProposalBody::Add { leaf_node } => {
+                add_leaf(tree, leaf_node.clone())?;
+            }
+            ProposalBody::Remove { leaf_index } => {
+                remove_leaf(tree, *leaf_index)?;
+                if my_leaf == Some(*leaf_index) {
+                    removed_me = true;
+                }
+            }
+            ProposalBody::Update { leaf_node } => {
+                // A bare Update proposal (no path) refreshes the proposer's leaf public key only;
+                // its path nodes are blanked so a later commit re-keys them. In M2 the committer's
+                // own refresh rides its UpdatePath instead; foreign Update proposals are the rare
+                // case and handled here for completeness.
+                let slot = leaf_slot(p.sender_leaf);
+                match tree.slots.get(slot) {
+                    Some(TreeSlot::Leaf(_)) => {}
+                    _ => return Err(CoreError::Encoding("treekem: update proposal for unpopulated leaf")),
+                }
+                tree.slots[slot] = TreeSlot::Leaf(leaf_node.clone());
+                let n = tree.n_leaves();
+                for d in direct_path(slot, n)? {
+                    tree.slots[d] = TreeSlot::Blank;
+                }
+            }
+        }
+    }
+    Ok(removed_me)
+}
+
+// ── Commit builder (§4.1/§4.2/§4.3 + the epoch advance) ───────────────────────────────────
+
+/// The exact bytes a [`Commit`] signature covers: `COMMIT_DOMAIN ‖ commit-with-blank-sig` (the
+/// confirmation MAC is already set and IS covered — it binds the epoch derivation into the
+/// signature; only the signature field itself is blanked). Exposed for the lib.rs verifier.
+pub fn commit_signing_bytes(commit: &Commit) -> Vec<u8> {
+    let mut c = commit.clone();
+    c.sig = Vec::new();
+    let mut v = Vec::with_capacity(COMMIT_DOMAIN.len());
+    v.extend_from_slice(COMMIT_DOMAIN);
+    v.extend_from_slice(&c.to_bytes());
+    v
+}
+
+/// Everything a committer gets from [`build_commit`]: the signed commit to publish, the
+/// post-commit public tree, the running transcript hash, the new epoch schedule (whose
+/// `joiner_secret` seeds every Welcome), and the committer's updated private state.
+pub struct CommitBuild {
+    pub commit: Commit,
+    /// The public tree AFTER proposals + (optional) path merge — its hash is `commit.tree_hash`.
+    pub tree: RatchetTree,
+    /// `confirmed_transcript_hash_n` — the value receivers must reproduce and the MAC is keyed over.
+    pub confirmed_transcript_hash: [u8; 32],
+    pub schedule: EpochSchedule,
+    /// The committer's private state at epoch n (leaf secret + path secrets).
+    pub my_private: TreePrivate,
+}
+
+/// Build a commit (§4): apply `proposals` to the tree, optionally re-key the committer's direct
+/// path (`new_leaf_secret`/`entropy` given → an UpdatePath; `None` → an add-only commit whose
+/// `commit_secret` is the all-zero vector, RFC 9420 §12.4), advance the epoch schedule, key the
+/// confirmation MAC, and sign. Pure: `sign_leaf_binding`/`sign_commit` are the committer's
+/// device signature, all randomness expands from `entropy`.
+///
+/// `prev_init_secret` is COPIED and consumed by the advance (the original stays with the caller
+/// until epoch n confirms; §6.2). For a genesis (§4.1) pass an empty `prev_tree`, all Adds, and
+/// `path = None`: the tree is built up from the proposals and `prev_init_secret` is the group's
+/// deterministic genesis init.
+#[allow(clippy::too_many_arguments)]
+pub fn build_commit(
+    prev_tree: &RatchetTree,
+    group_id: &[u8],
+    epoch: u64,
+    parent_commit_hash: [u8; 32],
+    prev_cth: &[u8; 32],
+    prev_init_secret: &[u8; 32],
+    committer_leaf: u32,
+    proposals: Vec<Proposal>,
+    path: Option<(&[u8; 32], &[u8], &[u8; 32])>, // (new_leaf_secret, device_credential, entropy)
+    sign_leaf_binding: impl FnOnce(&[u8]) -> Vec<u8>,
+    sign_commit: impl FnOnce(&[u8]) -> Vec<u8>,
+) -> Result<CommitBuild> {
+    let mut tree = prev_tree.clone();
+    apply_proposals(&mut tree, &proposals, Some(committer_leaf))?;
+    let (update_path, path_secrets, mut commit_secret, new_leaf_secret) = match path {
+        Some((leaf_secret, cred, entropy)) => {
+            let b = build_update_path(
+                &tree, group_id, epoch, committer_leaf, leaf_secret, cred, sign_leaf_binding, entropy,
+            )?;
+            merge_update_path(&mut tree, committer_leaf, &b.update_path)?;
+            (Some(b.update_path), b.path_secrets, b.commit_secret, Some(*leaf_secret))
+        }
+        // Add-only / no-path commit: commit_secret is the all-zero vector.
+        None => (None, BTreeMap::new(), [0u8; 32], None),
+    };
+    let th = tree_hash(&tree);
+    // Assemble with blank MAC + sig so the transcript covers commit CONTENT (mac/sig blanked),
+    // which is exactly what receivers reproduce — computing the MAC before it is set is not
+    // circular (the transcript hash never covers the MAC keyed over it).
+    let mut commit = Commit {
+        group_id: group_id.to_vec(),
+        epoch,
+        parent_commit_hash,
+        proposals,
+        update_path,
+        tree_hash: th,
+        confirmation_mac: Vec::new(),
+        sender_leaf: committer_leaf,
+        sig: Vec::new(),
+    };
+    let cth = next_confirmed_transcript_hash(prev_cth, &commit);
+    let ctx = epoch_context(group_id, epoch, &th, &cth);
+    let mut init = *prev_init_secret;
+    let schedule = advance_epoch(&mut init, &mut commit_secret, &ctx);
+    commit.confirmation_mac = confirmation_mac(&schedule.confirm_key, &cth).to_vec();
+    commit.sig = sign_commit(&commit_signing_bytes(&commit));
+    let mut my_private = TreePrivate::new(committer_leaf, new_leaf_secret.unwrap_or([0u8; 32]));
+    my_private.path_secrets = path_secrets;
+    Ok(CommitBuild { commit, tree, confirmed_transcript_hash: cth, schedule, my_private })
+}
+
+// ── Commit application (§4, the receiver side) ────────────────────────────────────────────
+
+/// What a receiver learns from [`apply_commit`]: the new public tree + transcript, and — if the
+/// receiver is an active member that could derive the epoch — the schedule and its updated
+/// private state. `schedule`/`my_private` are `None` for a non-member (or a receiver removed by
+/// this very commit), which still tracks the public facts (tree, transcript) for later.
+pub struct AppliedCommit {
+    pub tree: RatchetTree,
+    pub confirmed_transcript_hash: [u8; 32],
+    pub schedule: Option<EpochSchedule>,
+    pub my_private: Option<TreePrivate>,
+    pub removed_me: bool,
+}
+
+/// Apply a received commit (§4/§5.2 step 1): apply its proposals, decrypt+merge its UpdatePath
+/// (if any and I am a member), verify the tree hash it claims, advance the schedule, and VERIFY
+/// the confirmation MAC — a mismatch anywhere fails closed rather than desyncing the shadow tree
+/// from its secrets. `prev_init_secret` is copied and consumed by the advance.
+///
+/// The committer must not apply its own commit here (it holds the [`CommitBuild`] result); this
+/// errors if `commit.sender_leaf == my_private.leaf_index`. Signature + proposal authorization
+/// are the caller's (they need the roster); this is the pure tree/schedule application.
+pub fn apply_commit(
+    prev_tree: &RatchetTree,
+    group_id: &[u8],
+    prev_cth: &[u8; 32],
+    prev_init_secret: &[u8; 32],
+    commit: &Commit,
+    my_private: Option<&TreePrivate>,
+) -> Result<AppliedCommit> {
+    if commit.group_id != group_id {
+        return Err(CoreError::Encoding("treekem: commit for wrong group"));
+    }
+    let my_leaf = my_private.map(|m| m.leaf_index);
+    if let (Some(mi), true) = (my_leaf, my_private.is_some()) {
+        if commit.sender_leaf == mi {
+            return Err(CoreError::Crypto("treekem: committer must use its own build, not apply_commit"));
+        }
+    }
+    // Decrypt the path BEFORE the proposals mutate the tree only when needed; but the path was
+    // built over the POST-proposal tree (§4.4), so proposals apply first, then decrypt/merge.
+    let mut tree = prev_tree.clone();
+    let removed_me = apply_proposals(&mut tree, &commit.proposals, my_leaf)?;
+    let mut my_out = my_private.cloned();
+    let mut commit_secret = [0u8; 32];
+    if let Some(path) = &commit.update_path {
+        // A member still present decrypts to learn the fresh path secrets + commit secret.
+        if let (Some(mp), false) = (&my_out, removed_me) {
+            let d = decrypt_update_path(&tree, group_id, commit.epoch, commit.sender_leaf, path, mp)?;
+            commit_secret = d.commit_secret;
+            // Deletion discipline: drop secrets for nodes the proposals blanked, then take the new ones.
+            let t = &tree;
+            if let Some(mp) = &mut my_out {
+                mp.path_secrets.retain(|&ix, _| {
+                    matches!(t.slots.get(ix as usize), Some(TreeSlot::Parent(pn)) if !pn.blank)
+                });
+                mp.path_secrets.extend(d.path_secrets);
+            }
+        }
+        merge_update_path(&mut tree, commit.sender_leaf, path)?;
+    }
+    let th = tree_hash(&tree);
+    if th != commit.tree_hash {
+        return Err(CoreError::Crypto("treekem: applied tree hash disagrees with the commit"));
+    }
+    let cth = next_confirmed_transcript_hash(prev_cth, commit);
+    let mut schedule = None;
+    if my_out.is_some() && !removed_me {
+        let ctx = epoch_context(group_id, commit.epoch, &th, &cth);
+        let mut init = *prev_init_secret;
+        let s = advance_epoch(&mut init, &mut commit_secret, &ctx);
+        if confirmation_mac(&s.confirm_key, &cth)[..] != commit.confirmation_mac[..] {
+            return Err(CoreError::Crypto("treekem: confirmation MAC did not verify"));
+        }
+        schedule = Some(s);
+    }
+    if removed_me {
+        my_out = None;
+    }
+    Ok(AppliedCommit { tree, confirmed_transcript_hash: cth, schedule, my_private: my_out, removed_me })
+}
+
+// ── Welcome (§4.2, the joiner rail) ───────────────────────────────────────────────────────
+
+/// The epoch schedule a Welcome recipient derives (§4.2/§3.3): a joiner holds no `init_{n-1}`,
+/// so it bootstraps the schedule straight from the `joiner_secret` the Welcome delivered plus
+/// the public epoch context (group id, epoch, tree hash, confirmed transcript hash — all
+/// verifiable against the commit + `GroupInfo`). This is [`epoch_from_joiner`] with the context
+/// assembled; a member and a joiner that reach the same epoch derive the identical `epoch_secret`.
+pub fn welcome_epoch_schedule(
+    joiner_secret: &[u8; 32],
+    group_id: &[u8],
+    epoch: u64,
+    tree_hash: &[u8; 32],
+    confirmed_transcript_hash: &[u8; 32],
+) -> EpochSchedule {
+    let ctx = epoch_context(group_id, epoch, tree_hash, confirmed_transcript_hash);
+    epoch_from_joiner(joiner_secret, &ctx)
+}
+
+/// Build a signed [`GroupInfo`] — the joiner's bootstrap view (§3.4). The secret-delivery wrap
+/// to each joiner's device bundle is the caller's (`seal_self_sync_key` rail, `device.rs:505`),
+/// which lives with the identity keys; this pins the public, signed half.
+pub fn build_group_info(
+    group_id: &[u8],
+    epoch: u64,
+    tree_blob_ref: &[u8],
+    confirmed_transcript_hash: [u8; 32],
+    tree_hash: [u8; 32],
+    signer_leaf: u32,
+    sign: impl FnOnce(&[u8]) -> Vec<u8>,
+) -> GroupInfo {
+    let mut gi = GroupInfo {
+        group_id: group_id.to_vec(),
+        epoch,
+        tree_blob_ref: tree_blob_ref.to_vec(),
+        confirmed_transcript_hash,
+        tree_hash,
+        signer_leaf,
+        sig: Vec::new(),
+    };
+    let mut payload = Vec::with_capacity(GROUPINFO_DOMAIN.len());
+    payload.extend_from_slice(GROUPINFO_DOMAIN);
+    payload.extend_from_slice(&gi.to_bytes());
+    gi.sig = sign(&payload);
+    gi
+}
+
+#[cfg(test)]
+mod m2_tests {
+    use super::*;
+
+    const GID: &[u8] = b"m2-test-circle";
+
+    fn fake_sig(payload: &[u8]) -> Vec<u8> {
+        blake3::hash(payload).as_bytes().to_vec()
+    }
+    fn secret(tag: &str, i: usize) -> [u8; 32] {
+        *blake3::hash(format!("{tag}-{i}").as_bytes()).as_bytes()
+    }
+    fn cred(member: usize) -> Vec<u8> {
+        (member as u32).to_le_bytes().to_vec()
+    }
+    fn leaf_for(secret: &[u8; 32], credential: &[u8]) -> LeafNode {
+        let kp = node_keypair_from_path_secret(secret);
+        let payload = leaf_binding_payload(GID, &kp.kem_x, &kp.kem_pq);
+        LeafNode {
+            leaf_kem_x: kp.kem_x,
+            leaf_kem_pq: kp.kem_pq,
+            device_credential: credential.to_vec(),
+            leaf_binding_sig: fake_sig(&payload),
+        }
+    }
+
+    /// §9 M2 pure-builder proof: a committer builds a commit (with a path), and every OTHER
+    /// member applies it and lands on the identical tree hash + epoch secret; the confirmation
+    /// MAC verifies for all. Uses the NEW `build_commit`/`apply_commit` (not the M1 harness's
+    /// inline logic) so the builders themselves are the thing under test.
+    #[test]
+    fn commit_builder_and_apply_commit_converge_on_tree_and_epoch_secret() {
+        let secrets: Vec<[u8; 32]> = (0..4).map(|i| secret("leaf", i)).collect();
+        let tree0 =
+            RatchetTree::from_leaves((0..4).map(|i| leaf_for(&secrets[i], &cred(i))).collect());
+        let privs: Vec<TreePrivate> =
+            (0..4).map(|i| TreePrivate::new(i as u32, secrets[i])).collect();
+        let genesis_init = secret("init", 0);
+        let genesis_cth = secret("cth", 0);
+        let parent = secret("parent", 0);
+
+        // Member 0 commits a Remove(3) + a path refresh of its own leaf.
+        let rp = build_remove_proposal(GID, 0, 0, 3, fake_sig);
+        let new0 = secret("new", 0);
+        let ent = secret("ent", 0);
+        let build = build_commit(
+            &tree0, GID, 1, parent, &genesis_cth, &genesis_init, 0, vec![rp],
+            Some((&new0, &cred(0), &ent)), fake_sig, fake_sig,
+        )
+        .unwrap();
+
+        // Members 1 and 2 apply and must converge; member 3 was removed → no schedule.
+        for m in [1usize, 2] {
+            let a = apply_commit(&tree0, GID, &genesis_cth, &genesis_init, &build.commit, Some(&privs[m]))
+                .unwrap();
+            assert_eq!(tree_hash(&a.tree), tree_hash(&build.tree), "member {m} tree diverged");
+            assert_eq!(a.confirmed_transcript_hash, build.confirmed_transcript_hash);
+            let s = a.schedule.expect("present member derives the epoch");
+            assert_eq!(s.epoch_secret, build.schedule.epoch_secret, "member {m} epoch secret diverged");
+        }
+        let removed =
+            apply_commit(&tree0, GID, &genesis_cth, &genesis_init, &build.commit, Some(&privs[3])).unwrap();
+        assert!(removed.removed_me, "leaf 3 must observe its own removal");
+        assert!(removed.schedule.is_none(), "a removed member derives no epoch secret");
+
+        // The committer must not re-apply its own commit.
+        assert!(apply_commit(&tree0, GID, &genesis_cth, &genesis_init, &build.commit, Some(&privs[0])).is_err());
+    }
+
+    /// §9 M2 pure-builder proof: an add-only (no-path) commit lets a Welcomed joiner reach the
+    /// SAME epoch secret via `welcome_epoch_schedule` — the genesis shape the shadow wiring uses.
+    #[test]
+    fn add_only_commit_welcomes_joiners_to_the_same_epoch() {
+        // Genesis: empty tree, Add every device, no path (commit_secret = 0). One creator.
+        let devs = 4usize;
+        let leaf_secrets: Vec<[u8; 32]> = (0..devs).map(|i| secret("g-leaf", i)).collect();
+        let adds: Vec<Proposal> = (0..devs)
+            .map(|i| build_add_proposal(GID, 0, 0, leaf_for(&leaf_secrets[i], &cred(i)), fake_sig))
+            .collect();
+        let genesis_init = secret("g-init", 0);
+        let genesis_cth = secret("g-cth", 0);
+        let parent = secret("g-parent", 0);
+        let build = build_commit(
+            &RatchetTree { slots: vec![] }, GID, 1, parent, &genesis_cth, &genesis_init, 0, adds,
+            None, fake_sig, fake_sig,
+        )
+        .unwrap();
+        assert_eq!(build.tree.n_leaves(), devs, "genesis tree holds every device");
+
+        // Every joiner reconstructs the tree from the commit's Adds and, with the delivered
+        // joiner_secret + the public context, reaches the identical epoch secret.
+        let mut recon = RatchetTree { slots: vec![] };
+        apply_proposals(&mut recon, &build.commit.proposals, None).unwrap();
+        assert_eq!(tree_hash(&recon), build.commit.tree_hash, "joiner reconstructs the tree");
+        let joiner = welcome_epoch_schedule(
+            &build.schedule.joiner_secret, GID, build.commit.epoch, &build.commit.tree_hash,
+            &build.confirmed_transcript_hash,
+        );
+        assert_eq!(joiner.epoch_secret, build.schedule.epoch_secret, "joiner reaches the epoch secret");
+        // Sender keys derived from it match too (the 32-byte content-layer keys).
+        let probe = *blake3::hash(b"probe").as_bytes();
+        assert_eq!(
+            sender_key(&joiner.sender_root, &probe, GID, 1),
+            sender_key(&build.schedule.sender_root, &probe, GID, 1),
+        );
+    }
+
+    /// §9 M2 pure-builder proof: two committers building on the SAME parent fork, and every
+    /// replica resolves the fork to the identical winner via `select_chain` — the wiring's
+    /// convergence backstop, exercised through the real `build_commit`.
+    #[test]
+    fn concurrent_commits_via_builder_fork_and_resolve_identically() {
+        let secrets: Vec<[u8; 32]> = (0..4).map(|i| secret("leaf", i)).collect();
+        let tree0 =
+            RatchetTree::from_leaves((0..4).map(|i| leaf_for(&secrets[i], &cred(i))).collect());
+        let genesis_init = secret("init", 1);
+        let genesis_cth = secret("cth", 1);
+        let parent = secret("parent", 1);
+
+        // Members 0 and 1 both commit an Update of their own leaf at epoch 1 with parent = genesis.
+        let mut forks = Vec::new();
+        for m in [0u32, 1] {
+            let b = build_commit(
+                &tree0, GID, 1, parent, &genesis_cth, &genesis_init, m, vec![],
+                Some((&secret("new", m as usize), &cred(m as usize), &secret("ent", m as usize))),
+                fake_sig, fake_sig,
+            )
+            .unwrap();
+            forks.push(b.commit.to_bytes());
+        }
+        // Both branches are valid, same parent → a fork. Every replica sees the same candidate
+        // set and picks the same winner (largest tip hash).
+        let cands: Vec<Vec<Vec<u8>>> = forks.iter().map(|b| vec![b.clone()]).collect();
+        let winner = select_chain(&parent, 1, GID, &cands).expect("a valid winner");
+        // Determinism: recomputing from a shuffled candidate order still names the same commit.
+        let rev: Vec<Vec<Vec<u8>>> = cands.iter().rev().cloned().collect();
+        let winner_rev = select_chain(&parent, 1, GID, &rev).unwrap();
+        assert_eq!(commit_hash(&cands[winner][0]), commit_hash(&rev[winner_rev][0]));
+        assert_eq!(cands[winner][0], if commit_hash(&forks[0]) > commit_hash(&forks[1]) { forks[0].clone() } else { forks[1].clone() });
+    }
+}
+
 #[cfg(test)]
 mod m1_tests {
     use super::*;

@@ -434,4 +434,48 @@ mod tests {
         let outsider = Identity::from_seed(&[9u8; 32]).self_sync_key();
         assert!(AccountState::open(&outsider, &blob).is_err(), "outsider key must fail");
     }
+
+    #[test]
+    fn seedless_device_converges_from_granted_self_sync_key() {
+        // Seed-drop S2 (§4.3): a device that holds NO account seed still converges account-state,
+        // because the PRIMARY grants it the self-sync key sealed to its device bundle — instead of the
+        // device deriving it from a seed it no longer has. Proof obligation: a device given ONLY the
+        // granted key converges account state identically to a seed-holder.
+        use crate::device::{open_self_sync_key, seal_self_sync_key};
+
+        let account = Identity::from_seed(&[1u8; 32]); // the primary (seed-holder / account identity)
+        let device = Identity::from_seed(&[2u8; 32]); // a SEEDLESS device: only its own device key
+        let account_key = account.self_sync_key();
+
+        // Primary grants the self-sync key to the device's bundle; the device opens it WITHOUT ever
+        // touching the account seed, verifying provenance against the account's pinned public bundle.
+        let grant = seal_self_sync_key(&account, &device.public(), &account_key).expect("seal grant");
+        let granted = open_self_sync_key(&device, &account.public(), &grant).expect("device opens grant");
+        assert_eq!(granted, account_key, "the granted key IS the account self-sync key, byte-identical");
+
+        // End-to-end convergence: the primary seals account state; the seedless device opens it with the
+        // GRANTED key (never a seed) and reads identical state.
+        let mut s = AccountState::default();
+        s.set("profile", b"me".to_vec(), Stamp::new(1, PHONE));
+        let blob = s.seal(&account_key);
+        let opened = AccountState::open(&granted, &blob).expect("seedless device converges");
+        assert_eq!(opened.get("profile"), Some(&b"me"[..]));
+
+        // The seedless device can also seal its OWN update with the granted key, and the primary reads it —
+        // convergence works in both directions with no seed on the device.
+        let mut s2 = AccountState::default();
+        s2.set("pin:home", b"1".to_vec(), Stamp::new(2, PHONE));
+        let blob2 = s2.seal(&granted);
+        assert_eq!(
+            AccountState::open(&account_key, &blob2).expect("primary reads device update").get("pin:home"),
+            Some(&b"1"[..])
+        );
+
+        // A DIFFERENT device (not the grant recipient) cannot open the grant — it is device-scoped.
+        let stranger = Identity::from_seed(&[3u8; 32]);
+        assert!(
+            open_self_sync_key(&stranger, &account.public(), &grant).is_err(),
+            "a grant sealed to one device bundle is not openable by another"
+        );
+    }
 }

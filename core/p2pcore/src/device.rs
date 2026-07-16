@@ -21,6 +21,7 @@
 //! testable on every platform (incl. WASM).
 
 use crate::identity::{HavenId, Identity};
+use crate::social::{self, Group, SealedEnvelope};
 use crate::{CoreError, Result};
 
 /// Domain-separation tag for the bytes an account signs to issue a device credential.
@@ -455,6 +456,47 @@ impl SeedDropCapability {
         let sig = b[36..].to_vec();
         Some(Self { account_id, version, sig })
     }
+}
+
+/// Domain-separation group id for a self-sync key grant (seed-drop S2). Never a real circle id.
+const SELF_SYNC_GRANT_GROUP: &str = "haven-self-sync-grant-v1";
+
+/// Seal the account's 32-byte `self_sync_key` to a **seedless device's bundle** (seed-drop S2, D16
+/// Phase 2, §4.3).
+///
+/// A device that no longer holds the master seed cannot *derive* `self_sync_key`
+/// ([`Identity::self_sync_key`]) and so could not participate in account-state self-sync (the
+/// profile / contacts / settings / circles / pins convergence that makes "my devices show the same
+/// thing" work). Instead the **primary** (the seed-holder) grants the key: it KEM-wraps the 32 bytes to
+/// the device's published bundle over the exact same hybrid, PQ-preserving rail as an epoch
+/// [`crate::groupkey::seal_key_commit`], signed by the account so the device can verify provenance
+/// against its pinned account key.
+///
+/// The key is unchanged and identical across devices, so convergence is untouched — only its
+/// *provenance on the granted device* changes from "derived from the seed" to "granted by the primary".
+/// The device opens it with [`open_self_sync_key`] and stores the 32 bytes. No new crypto: this is the
+/// same `seal_bytes`-to-device-bundle mechanism the epoch KeyCommit already uses.
+pub fn seal_self_sync_key(
+    account: &Identity,
+    device_bundle: &HavenId,
+    self_sync_key: &[u8; 32],
+) -> Result<SealedEnvelope> {
+    let group = Group::new(SELF_SYNC_GRANT_GROUP, vec![device_bundle.clone()]);
+    social::seal_bytes(account, &group, self_sync_key)
+}
+
+/// Open the self-sync key granted to this device's bundle by [`seal_self_sync_key`], verifying the
+/// granting account's hybrid signature against its pinned public bundle. Returns the 32-byte key, to be
+/// stored and used with `seal_account_state` / `open_account_state` in place of a seed derivation. A
+/// grant sealed to a different device (or a tampered/forged one) fails here.
+pub fn open_self_sync_key(
+    device: &Identity,
+    account_pub: &HavenId,
+    env: &SealedEnvelope,
+) -> Result<[u8; 32]> {
+    let bytes = social::open_bytes(device, account_pub, env)?;
+    <[u8; 32]>::try_from(bytes.as_slice())
+        .map_err(|_| CoreError::Encoding("self-sync grant must be exactly 32 bytes"))
 }
 
 /// Is EVERY member of a circle seed-drop-capable? An **all-present positive** signal (never

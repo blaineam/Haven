@@ -288,7 +288,11 @@ jobs:
       #    submitted to the Store here and always kept as the `desktop-windows` CI artifact.
       - name: Package MSIX
         id: msix
-        if: matrix.os == 'windows-latest' && startsWith(github.ref, 'refs/tags/v') && env.STORE_IDENTITY_NAME != ''
+        # Also runs on manual workflow_dispatch so we can produce a corrected MSIX (e.g. a manifest
+        # DisplayName / name-reservation fix) for a manual Partner Center upload WITHOUT cutting a
+        # version tag. The dispatch build only produces the `desktop-windows` artifact — the Store
+        # auto-submit below stays tag-only.
+        if: matrix.os == 'windows-latest' && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && env.STORE_IDENTITY_NAME != ''
         # Non-fatal: the Windows installer + exe already built. An MSIX/Store-packaging issue must never
         # block the (critical) installers + the GitHub Release publish job that depends on this matrix leg.
         continue-on-error: true
@@ -318,7 +322,9 @@ jobs:
           "msix=$msix" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Submit MSIX to the Microsoft Store
-        if: steps.msix.outputs.msix != '' && env.STORE_TENANT_ID != ''
+        # Tag-only: a manual dispatch build is for a hand-upload to Partner Center, so it must NOT
+        # auto-open a Store submission (Partner Center allows only one open submission at a time).
+        if: steps.msix.outputs.msix != '' && env.STORE_TENANT_ID != '' && startsWith(github.ref, 'refs/tags/v')
         # Non-fatal — same reasoning as "Package MSIX" above. The `publish` job that cuts the GitHub
         # Release depends on this `desktop` matrix leg, so a Store-side hiccup (cert queue, an unset
         # age rating, or the current paid-product GitHub-Actions limitation — see below) must NOT

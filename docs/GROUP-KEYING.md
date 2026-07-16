@@ -74,15 +74,18 @@ sealing it to the **new** member set:
 True per-message FS (Double Ratchet) is incompatible with multi-recipient, offline, eventually-consistent
 delivery. Instead:
 
-- Epoch keys rotate on **removal/block** and on a **device-roster change** — both real and wired
-  (`core/p2pcore-ffi/src/lib.rs:1128`, `:1521`, `:2516`, `:2540`).
-  > ⚠️ **The periodic schedule is designed but NOT wired.** `rotate_circle` exists in core
-  > (`lib.rs:1518`) and is exercised only by a unit test (`lib.rs:2921`) — **no client calls it**.
-  > Consequence: in a circle with no removals, blocks, or device changes, **the epoch never
-  > advances**, `prune_epoch_keys` never fires, and one seed compromise decrypts that circle's whole
-  > history — exactly the property this design was meant to remove. Bounded FS is real *only* for
-  > circles that experience membership churn. Don't state the periodic clause as shipped until a
-  > client drives it on a timer.
+- Epoch keys rotate on **removal/block**, on a **device-roster change**, and on a **periodic
+  schedule** — all real and wired (`core/p2pcore-ffi/src/lib.rs:1128`, `:1521`, `:2516`, `:2540`).
+  > ✅ **The periodic schedule is now wired.** Rotation is driven in **core**, not by a per-platform
+  > timer, at the one chokepoint every client already reaches — the full-history sync bundle
+  > (`sync_envelopes` on the P2P path, `export_my_envelopes` on the relay backfill). When a circle's
+  > current epoch has outlived `ROTATE_INTERVAL_SECS` (**7 days** — `lib.rs:1061`) the bundle emits a
+  > fresh key commit *and* re-seals history under it in the same batch, so rotation and re-seal can't
+  > come apart and no client can forget to rotate (`maybe_rotate`, `lib.rs:1131-1149`; `rotated_at`
+  > persists and merges highest-wins, `lib.rs:1034`, `:2641`). `prune_epoch_keys` keeps 4 epochs, so
+  > a seed compromise now exposes ~4 weeks of captured ciphertext, not a circle's whole history —
+  > even in a circle with **no** membership churn. (head-only / limited bundles deliberately don't
+  > rotate: they carry no re-seal and would strand relay-only readers.)
 
   Adding a member does NOT rotate — and doesn't need to: a joiner is handed the
   *current* epoch, so earlier epochs stay unreadable to them without rotating anything. Rotation exists
@@ -93,8 +96,8 @@ delivery. Instead:
   reveals only the *current* epoch plus retained-history epochs — not all history forever.
 
 This is "bounded forward secrecy": the strongest the delivery model admits without breaking offline
-use — **once rotation actually happens**. Until the periodic cadence is wired (see the warning above),
-a churn-free circle gets no forward secrecy at all, only cryptographic revocation.
+use. With the periodic 7-day cadence now wired in core (above), even a churn-free circle advances its
+epoch and prunes old keys, so bounded FS holds without depending on membership churn.
 
 ## Properties
 
@@ -132,13 +135,14 @@ a churn-free circle gets no forward secrecy at all, only cryptographic revocatio
    relay mailbox), so iOS/macOS/Android/desktop inherit this through the shared core with **zero**
    networking changes. (Validation: rebuild bindings + smoke-test each platform.)
 5. ✅ **Relay:** unaffected (still ciphertext-only); KeyCommits ride the same transports as events.
-6. 🟡 **FS scheduling (bounded) — half-shipped.** `prune_epoch_keys` keeps only the last 4 epoch keys
+6. ✅ **FS scheduling (bounded) — shipped.** `prune_epoch_keys` keeps only the last 4 epoch keys
    (mine + per peer) and deletes the rest on every rotation/commit, so a later compromise can't decrypt
-   older wire/relay ciphertext. `rotate_circle(circle_id)` forces a fresh epoch — but **nothing calls
-   it**, so pruning only ever runs on churn-driven rotations. *Remaining (NOT minor — this is the
-   feature): wire the periodic `rotate_circle` cadence into each platform's timer. Also remaining: a
-   "share history → re-seal prior epochs to a new member" path; retire the legacy per-recipient path
-   once all clients are migrated.*
+   older wire/relay ciphertext. Periodic rotation is now wired in core: the full-history sync bundle
+   (`sync_envelopes` / `export_my_envelopes`) advances any circle whose epoch has outlived the 7-day
+   `ROTATE_INTERVAL_SECS`, re-sealing history under the new epoch in the same batch (`maybe_rotate`,
+   `lib.rs:1131-1149`). `rotate_circle(circle_id)` remains available for an explicit forced rotation.
+   *Remaining: a "share history → re-seal prior epochs to a new member" path; retire the legacy
+   per-recipient path once all clients are migrated.*
 
 ## Test obligations (per increment)
 

@@ -25,5 +25,6 @@ shape Haven exists to avoid, for a half-broken UX. Not worth it.
   UniFFI Kotlin), which *is* a real iroh peer.
 
 ## Leftover note
-The `core/haven-wasm` crate still exists in the workspace as a vestige of the old plan;
-it is not built or shipped and is a candidate for removal.
+The `core/haven-wasm` crate has been **deleted** (2026-07 security audit) — it was dead
+code that, among other things, recommended storing the seed in `localStorage`. No WASM
+crate remains in the workspace.

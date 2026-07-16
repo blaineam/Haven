@@ -34,52 +34,34 @@ block *claiming parity*, and they block some of what the docs promise. In priori
 
 ### Outstanding — security-relevant
 
-1. **Revocation is not adversary-proof.** A linked device holds a **copy of the account master
-   seed** (that's what `haven-seed:` move-to-device transfers), and the engine runs under that
+1. **Revocation is advisory, not adversary-proof.** A linked device holds a **copy of the account
+   master seed** (that's what `haven-seed:` move-to-device transfers), and the engine runs under that
    copied seed rather than a per-device key. Revoking marks a device revoked; it does **not**
    invalidate the seed it already holds. Since device lists merge higher-version-wins
    (`core/p2pcore/src/device.rs`), an attacker with the seed can sign a fresh higher-version list
-   and **re-add itself**. The finalizing "seed-drop" is explicitly still to build
-   (`apple/HavenApp/DeviceRoster.swift:11-12`, `:52-54`). Revocation works against a *lost* device,
-   not a *compromised* one. → This is D16 Phase 2's real remaining work. See `MULTI-DEVICE.md`.
-2. **Periodic epoch rotation is not wired.** `rotate_circle` exists in core
-   (`core/p2pcore-ffi/src/lib.rs:1518`) and is called by **no client** — only a unit test
-   (`:2921`). Rotation therefore only ever happens on removal/block/device-roster change. In a
-   circle with no membership churn the epoch **never advances**, `prune_epoch_keys` never fires,
-   and one seed compromise decrypts that circle's whole history. Bounded forward secrecy is real
-   only for circles with churn. → Wire a timer on each platform. See `GROUP-KEYING.md`.
-3. **Video EXIF/GPS gaps.** Photos are stripped on iOS + Android. Video is not: iOS's **default**
-   auto-optimize path never sets `export.metadata` (`apple/HavenApp/Media.swift:552-588`) while the
-   *non-default* "share original" path does (`:364`); Android ships raw video bytes with no strip
-   (`core/LocalMedia.kt:330-337`). The iOS side is a one-liner. See `MEDIA-AND-MUSIC.md`.
-   *(The iOS default-path leak is inferred from the `AVAssetExportSession` contract — **UNVERIFIED**
-   on device; confirm by inspecting an exported file's metadata.)*
+   and **re-add itself**. Revocation works against a *lost/stolen* device, not a *compromised* one.
+   → The finalizing "seed-drop" re-key is **designed and planned for 1.0.7** — see
+   [`SEED-DROP-DESIGN.md`](SEED-DROP-DESIGN.md) (D16 Phase 2); not yet built. Until it ships, the only
+   remedy against a genuinely compromised device is rolling a new identity. See `MULTI-DEVICE.md`.
+
+*(Two items that were security-relevant Outstanding earlier this cycle — **periodic epoch rotation**
+and the **video EXIF/GPS strip** — both shipped 2026-07-15; see Shipped below.)*
 
 ### Outstanding — parity / correctness
 
-4. **Desktop avatar never reaches peers.** You can set one; it stays local.
-   `desktop/src-tauri/src/engine.rs:1398` passes `String::new()` into the signed profile card
-   instead of `profile.avatar`. The comment there claims this "matches Android" — it does not
-   (`android/.../HavenNet.kt:1105` passes `profile.avatarB64`). One-line fix.
-5. **Sensitive-content blur is Apple-only.** The analyzer ships on Apple
-   (`apple/HavenApp/SensitiveContent.swift`) and federates a `SensitiveFlag` to the circle so peers
-   can blur without running it — but **Android and desktop ignore the flag entirely** and render
-   flagged media unblurred. Neither needs a classifier; both need to honor the flag. There is also
-   **no per-circle toggle** anywhere (it follows the system setting).
-6. **Windows install path untested.** CI builds the installers; nobody has installed one on real
+2. **Windows install path untested.** CI builds the installers; nobody has installed one on real
    Windows (the available VM can't build them). Treat Windows as beta until someone does.
    **UNVERIFIED** by construction.
-7. **In-band chunk size is inconsistent**: 32 KB on iOS/Android, 512 KB on desktop
-   (`desktop/src-tauri/src/engine.rs:141`). Interoperable, but unintentional.
-8. **macOS native-view backfill**: camera / in-call video / dual-camera are honest
+3. **macOS native-view backfill**: camera / in-call video / dual-camera are honest
    `isSupported == false` placeholders on macOS (`apple/HavenApp/DualCamera.swift:262-278`).
    Gated, not broken — but a real gap on a shipping platform.
-9. **"Start relay at login" is a no-op on native macOS** — `RelayHost.swift:255-267` is gated
-   inside `#if targetEnvironment(macCatalyst)`, and Catalyst was dropped.
-10. **Music: local-file attach missing on Android.** The portable-reference design has two halves
-    (local file → full; streaming → deep-link). Only deep-link exists.
-11. **No Wear OS companion** (iOS has one).
-12. **No active-speaker highlight** in Android calls (`ui/CallUI.kt:322-323`). Cosmetic.
+4. **No per-circle sensitive-content toggle.** Every platform now honors the federated
+   `SensitiveFlag` (Apple authors it; Android + desktop blur on it as of 2026-07-15), but the blur
+   still follows the system setting — there is **no per-circle toggle** anywhere.
+5. **Music: local-file attach missing on Android.** The portable-reference design has two halves
+   (local file → full; streaming → deep-link). Only deep-link exists.
+6. **No Wear OS companion** (iOS has one).
+7. **No active-speaker highlight** in Android calls (`ui/CallUI.kt:322-323`). Cosmetic.
 
 ### Deliberately not doing (do not "fix" these)
 
@@ -125,8 +107,20 @@ pinning (≤6, self-syncing), DM-delete watermark, group-DM sender rows.
 Epoch keys distributed via the hybrid KEM; removal/block/device-roster change rotates
 (`p2pcore-ffi/src/lib.rs:1128`, `:1521`, `:2516`, `:2540`); last 4 epochs retained
 (`prune_epoch_keys`). Adding a member does **not** rotate — and doesn't need to: a joiner gets the
-current epoch, so earlier epochs stay unreadable without rotating anything. *(Periodic rotation:
-see Outstanding #2.)*
+current epoch, so earlier epochs stay unreadable without rotating anything. **Periodic rotation is
+now wired** (2026-07-15): the full-history sync bundle advances any circle past the 7-day
+`ROTATE_INTERVAL_SECS` and re-seals history under the new epoch in the same batch (`maybe_rotate`,
+`lib.rs:1131-1149`), so a churn-free circle still gets bounded forward secrecy. See `GROUP-KEYING.md`.
+
+### ✅ Security-audit hardening (2026-07)
+The two-round audit (`SECURITY-AUDIT-2026-07.md`) closed its findings: the HTTP relay now requires a
+**signed auth header** (not a bearer token) and authorizes **per-circle membership**, failing closed;
+devroster writes are verified; WebRTC call signaling is **sealed + signed** (no relay MITM); media
+refs are **content addresses** verified client-side; `/flag` reports are signed, store no reporter,
+and carry a 90-day TTL; **video EXIF/GPS is stripped on every iOS export path and on Android**
+(`Media.swift:200`, `LocalMedia.kt:433-437`); periodic epoch rotation is wired (above). The remaining
+security-relevant gap is device-revocation being advisory (Outstanding #1; seed-drop is designed for
+1.0.7).
 
 ### ✅ Multi-device (M2b, D16 Phases 1–3)
 Multi-identity switcher + per-identity profiles; move-to-device via `haven-seed:` code/QR;
@@ -212,8 +206,9 @@ Native UniFFI → Kotlin/JNI (Jetpack Compose + Material 3, minSdk 29). Identity
 Android-Keystore-backed `EncryptedSharedPreferences` (`core/HavenCore.kt:85-97`), circles, feed,
 DMs, reactions/comments, stories, QR handshake, cross-device media chunks + mailbox, WebRTC mesh
 calls + screen share, notifications, nearby, scheduled messages, avatar publish, in-app browser,
-music search, DM parity + own-device sync. See `ANDROID-PARITY.md`. *(Gaps: Outstanding #3, #5,
-#10, #11, #12.)*
+music search, DM parity + own-device sync. Video EXIF/GPS strip and the federated sensitive-content
+blur both landed 2026-07-15. See `ANDROID-PARITY.md`. *(Remaining gaps: Outstanding #5 local-file
+music, #7 active-speaker highlight.)*
 
 ### ✅ Launch surface (M9 / M10)
 Marketing page live at https://wemiller.com/apps/haven/. TestFlight pipeline via rocket

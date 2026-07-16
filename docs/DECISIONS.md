@@ -285,6 +285,17 @@ The account identity key signs a **device credential** per device; each device i
 own **MLS leaf**, so messages are received on all of them. Full design in
 `MULTI-DEVICE.md`.
 
+> **Reality check (2026-07):** the *shipped* system diverges from this ideal, and the docs must
+> not assert the ideal as fact. (1) A linked device today holds a **copy of the account master
+> seed** (`haven-seed:` move-to-device transfers it) and runs under it — a private key **is**
+> effectively copied, contra the sentence above. (2) There is **no MLS** in the tree; group
+> keying is sender-keys + epochs (`GROUP-KEYING.md`), and multi-device is signed device bindings
+> + a CRDT (`selfsync`), not MLS leaves. (3) Consequently device revocation is **advisory, not
+> cryptographic** — a revoked-but-compromised device keeps decrypting and can re-add itself. The
+> cryptographic fix (**seed-drop** re-key) is **designed and planned for 1.0.7**, not shipped —
+> see [`SEED-DROP-DESIGN.md`](SEED-DROP-DESIGN.md). The "instant revocation" and "MLS leaf" phrasing
+> below records the original intent; read it as target, not current behavior.
+
 - **Linking:** new device shows a QR/code → an authorized device confirms a short
   verification phrase → issues a signed credential → adds the device as a leaf to all
   groups. No PII.

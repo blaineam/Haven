@@ -326,7 +326,8 @@
               everyone in your circles.
             </p>
             <p class="why"><b>Why it matters:</b> your life isn't on one screen. Haven follows you across
-              your devices without ever copying a private key over the internet.</p>
+              your devices — your identity moves by a local transfer code or QR, never through a server
+              that could hold it.</p>
             <details class="tech">
               <summary><span class="tag-tech">How this works</span><span class="chev">›</span></summary>
               <div class="tbody">
@@ -336,10 +337,13 @@
                   notifications. A user's own devices self-sync their circles, posts and profile so they
                   converge to the same state — the sync path is strictly additive, so a freshly-restored
                   or empty device can never tombstone content that already exists elsewhere.</p>
-                <p>The target design gives each device its <em>own</em> key, signed into an account
-                  device-list by your long-term identity key — so adding or revoking a device (e.g. a
-                  lost phone) is instant and never changes who you are to your contacts. No private key
-                  is ever copied between devices.</p>
+                <p>Each device is authorized by a credential your long-term identity key signs into an
+                  account device-list, so adding or revoking a device never changes who you are to your
+                  contacts. Today a linked device holds a copy of your account seed, so revoking one is a
+                  strong deterrent against a <em>lost or stolen</em> phone — but not yet a cryptographic
+                  guarantee against a fully <em>compromised</em> one. The design that makes revocation
+                  cryptographic (a per-device re-key, "seed-drop") is built out and planned for a coming
+                  release.</p>
               </div>
             </details>
           </div>

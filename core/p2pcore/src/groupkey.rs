@@ -229,6 +229,37 @@ pub fn open_event_in_epoch(
     Ok(event)
 }
 
+/// Open an epoch event whose SENDER may be a **device acting on behalf of an account** (seed-drop S1,
+/// D16 Phase 2). The sender's hybrid signature over the envelope is verified exactly as in
+/// [`open_event_in_epoch`]; then the event's internal `author` is bound to `expected_author` — an
+/// account id hex the caller resolved from the VERIFIED device roster (the credential chain proving
+/// `sender` is that account's device was checked at roster ingest).
+///
+/// This GENERALIZES the strict `author == sender` bind to `author == account-of-sender-device`, so a peer
+/// can accept content a contact's device signed for the account — the **receive-side verifier that ships
+/// to everyone** ahead of any device switching to sign under its device key. It is a generalization, not a
+/// bypass: a device of account A can still only produce `author == A` (pass a different `expected_author`
+/// and it is rejected), so no re-attribution is possible.
+///
+/// `expected_author == None` skips the bind (own-device self-forward), identical to `allow_forwarded =
+/// true`. Passing the sender's own id reduces exactly to the strict `author == sender` case.
+pub fn open_event_in_epoch_authored(
+    sender_pub: &HavenId,
+    epoch_key: &[u8; 32],
+    env: &EpochEnvelope,
+    expected_author: Option<&str>,
+) -> Result<Event> {
+    // Signature over the transcript is still verified inside (the `true` only relaxes the author/sender
+    // bind, which we re-impose against the account below).
+    let event = open_event_in_epoch(sender_pub, epoch_key, env, true)?;
+    if let Some(author) = expected_author {
+        if event.author != author {
+            return Err(CoreError::Crypto("author not authorized for sender device"));
+        }
+    }
+    Ok(event)
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -370,6 +401,41 @@ mod tests {
         assert_ne!(p1, mailbox_prefix(&new_circle_secret(), "default", "mailbox"));
         // A different kind → a different prefix (mailbox vs media vs presign don't collide).
         assert_ne!(p1, mailbox_prefix(&secret, "default", "media"));
+    }
+
+    #[test]
+    fn device_signed_event_verifies_for_its_account_only() {
+        // Seed-drop S1: a DEVICE signs an event on its ACCOUNT's behalf — sender = device, author =
+        // account. The receive-side verifier accepts it when bound to the correct account, and rejects it
+        // for any other account (no re-attribution).
+        let account = member(1);
+        let device = member(2); // an authorized device of `account` (credential verified elsewhere)
+        let key = new_epoch_key();
+        // The event's author is the ACCOUNT; the envelope is SIGNED by the device.
+        let ev = Event::new(&account.public().node_id_bytes(), 100, EventKind::Message { body: "hi".into() });
+        let env = seal_event_in_epoch(&device, "c1", 0, &key, &ev).unwrap();
+        let account_hex = hex(&account.public().node_id_bytes());
+
+        // Accept: signature checks against the device, author bound to the device's account.
+        assert_eq!(
+            open_event_in_epoch_authored(&device.public(), &key, &env, Some(&account_hex)).unwrap(),
+            ev,
+            "a device-signed event opens when bound to its own account"
+        );
+
+        // Reject: binding to a DIFFERENT account (a device may not author for someone else).
+        let stranger_hex = hex(&member(3).public().node_id_bytes());
+        assert!(
+            open_event_in_epoch_authored(&device.public(), &key, &env, Some(&stranger_hex)).is_err(),
+            "a device cannot author for an account it isn't credentialed to"
+        );
+
+        // The OLD strict bind (author == sender) would have rejected this device-signed event — which is
+        // exactly why the generalized verifier must ship before any device switches signers.
+        assert!(
+            open_event_in_epoch(&device.public(), &key, &env, false).is_err(),
+            "strict author==sender rejects a device-signed, account-authored event"
+        );
     }
 
     #[test]

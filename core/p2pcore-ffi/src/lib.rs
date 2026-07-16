@@ -12,7 +12,9 @@ use haven_net::Node;
 use haven_net::blobstore::BlobClient;
 use std::path::PathBuf;
 use p2pcore::crypto::{decapsulate, encapsulate_to, open, seal, Encapsulation};
-use p2pcore::device::{recipients_with_devices, ContactDevices, DeviceCredential, DeviceList};
+use p2pcore::device::{
+    recipients_with_devices, ContactDevices, DeviceCredential, DeviceList, SeedDropCapability,
+};
 use p2pcore::identity::{Identity, HavenId};
 use p2pcore::link::HavenLink;
 use p2pcore::social::{
@@ -20,9 +22,14 @@ use p2pcore::social::{
     SealedEnvelope, TrackRef,
 };
 use p2pcore::groupkey::{
-    mailbox_prefix, new_circle_secret, new_epoch_key, open_event_in_epoch, open_key_commit,
+    mailbox_prefix, new_circle_secret, new_epoch_key, open_event_in_epoch_authored, open_key_commit,
     seal_event_in_epoch, seal_key_commit, EpochEnvelope,
 };
+
+/// The seed-drop protocol version this build advertises (S0). A build with the S1 receive-side verifier
+/// advertises v1 so peers can NEGOTIATE the migration; nothing in this release *acts* on it to change
+/// what gets sealed or who signs — it is the rail a later release flips on.
+const SEED_DROP_VERSION: u32 = 1;
 
 /// Wire tags prefixed to an envelope so `receive` can route it. Legacy (untagged) envelopes are raw
 /// JSON beginning with `{` (0x7b), so any tag byte we choose that isn't `{` is unambiguous.
@@ -1203,6 +1210,13 @@ struct NetState {
     /// account whose devices I haven't learned yet → that member falls back to its account key, so
     /// pre-multidevice peers keep working. See `recipients_with_devices`.
     device_lists: std::collections::HashMap<[u8; 32], ContactDevices>,
+    /// Accounts we have AFFIRMATIVELY verified as seed-drop-capable (their signed `seedDrop` marker
+    /// checked out), keyed by account node id (D16 Phase 2 / S0). **Monotonic — insert only, never
+    /// remove**: a missing entry means "unknown, treat as legacy," never "downgraded" (absence is never
+    /// information). Populated as signed rosters/profiles arrive; consulted by the dual-seal GATE, which is
+    /// OFF this release, so nothing here changes what a circle seals to yet. Not persisted — it rebuilds
+    /// as rosters/profiles re-sync.
+    seed_drop_capable: std::collections::HashSet<[u8; 32]>,
     /// Viewer preference: keep MY OWN posts in the feed even when viewer auto-delete would age them
     /// out for others (my personal archive). Read by `feed`; set via `set_keep_own_posts`. Not
     /// persisted here — the app owns the toggle and re-applies it on launch.
@@ -1345,23 +1359,26 @@ fn receive_epoch_event(st: &mut NetState, idx: usize, body: &[u8]) -> Result<boo
         .map_err(|e| HavenError::Invalid { msg: format!("bad epoch envelope: {e}") })?;
     let sender_hex = env.sender_hex();
     let me_hex = hex(&st.me.public().node_id_bytes());
-    let sender = if sender_hex == me_hex {
-        // OWN-DEVICE sync: a linked device re-broadcasts events sealed by MY OWN account (both my posts and
-        // ones I RECEIVED from friends, forwarded via export_recent_envelopes). My account is NOT in the
-        // circle's member list (members are contacts), so without this those forwards were dropped — which
-        // is why a linked Mac never showed my latest post or a received DM. The event's INTERNAL author
-        // (me or the friend) is preserved on ingest. Mirrors receive_key_commit's self-acceptance.
-        Some(st.me.public())
+    // Resolve the SENDER to (verifying bundle, expected author account). Three cases, all preserving today's
+    // behavior for existing traffic (no contact device signs in this release):
+    //   • my own account/device  → self-forward: the event's internal author (me or a friend I forwarded) is
+    //     preserved, no author bind (`expected_author = None`).
+    //   • a circle member's ACCOUNT key → strict bind, author must == that account (unchanged).
+    //   • a circle member's AUTHORIZED DEVICE (seed-drop S1) → the device signs for its account, so bind
+    //     author == that account. The credential chain proving device→account was checked at roster ingest.
+    let (sender, expected_author): (Option<HavenId>, Option<String>) = if sender_hex == me_hex {
+        (Some(st.me.public()), None)
+    } else if let Some(m) = st.circles[idx]
+        .members
+        .iter()
+        .find(|m| hex(&m.node_id_bytes()) == sender_hex)
+        .cloned()
+    {
+        (Some(m), Some(sender_hex.clone()))
+    } else if let Some((bundle, acct_id)) = authorized_device_and_account(st, idx, &sender_hex) {
+        (Some(bundle), Some(hex(&acct_id)))
     } else {
-        match st.circles[idx]
-            .members
-            .iter()
-            .find(|m| hex(&m.node_id_bytes()) == sender_hex)
-            .cloned()
-        {
-            Some(m) => Some(m),
-            None => authorized_device_bundle(st, idx, &sender_hex), // a member's authorized device
-        }
+        (None, None)
     };
     let Some(sender) = sender else {
         // Unknown sender — most often a member's authorized device whose signed ROSTER hasn't
@@ -1376,7 +1393,11 @@ fn receive_epoch_event(st: &mut NetState, idx: usize, body: &[u8]) -> Result<boo
         }
         return Ok(false);
     };
-    let Some(key) = st.circles[idx].key_for(&me_hex, &sender_hex, env.epoch) else {
+    // The epoch key is keyed by the ACCOUNT (the committer), not the signing device — so a device-signed
+    // event (S1) looks up under its account (`expected_author`), the same slot the account's key commit
+    // filled. For a member's own account key or my own device this is unchanged (account == sender / me).
+    let key_author_hex = expected_author.as_deref().unwrap_or(&me_hex);
+    let Some(key) = st.circles[idx].key_for(&me_hex, key_author_hex, env.epoch) else {
         // Epoch key not learned yet — buffer (capped + de-duped); a later key commit unlocks it.
         let c = &mut st.circles[idx];
         if c.pending_epoch.len() < 512 && !c.pending_epoch.iter().any(|p| p == body) {
@@ -1384,9 +1405,10 @@ fn receive_epoch_event(st: &mut NetState, idx: usize, body: &[u8]) -> Result<boo
         }
         return Ok(false);
     };
-    // allow_forwarded only for MY OWN self-forwards (own-device sync): a re-sealed friend event has
-    // author=friend but sender=me, which the author/sender bind would otherwise reject.
-    let event = match open_event_in_epoch(&sender, &key, &env, sender_hex == me_hex) {
+    // The device's hybrid signature is verified inside; the author is then bound to `expected_author`
+    // (its authorizing account for a contact device, itself for a member account, or unbound for my own
+    // self-forwards). A device of account A can only produce author==A, so no re-attribution is possible.
+    let event = match open_event_in_epoch_authored(&sender, &key, &env, expected_author.as_deref()) {
         Ok(e) => e,
         Err(_) => return Ok(false),
     };
@@ -1545,6 +1567,13 @@ impl HavenSocial {
                 device: None,
                 circles: vec![Circle::bare(DEFAULT_CIRCLE.to_string(), "My Circle".to_string())],
                 device_lists: std::collections::HashMap::new(),
+                // I ship the S1 verifier, so I'm seed-drop-capable — seed my own account so a fully-upgraded
+                // circle (including me) computes as such. Nothing consumes this in production yet.
+                seed_drop_capable: {
+                    let mut s = std::collections::HashSet::new();
+                    s.insert(Identity::from_seed(&seed).public().node_id_bytes());
+                    s
+                },
                 keep_own_posts: false,
             }),
         }))
@@ -1689,7 +1718,10 @@ impl HavenSocial {
     /// name after the signature, not JSON) is still accepted by the verifiers below.
     pub fn my_signed_profile(&self, name: String, bio: String, link: String, avatar: String, emoji: String) -> Vec<u8> {
         let st = self.state.lock().unwrap();
-        let payload = serde_json::json!({ "n": name, "b": bio, "l": link, "a": avatar, "e": emoji }).to_string();
+        // `sd` is the seed-drop capability version (S0), carried INSIDE the account-signed payload so it
+        // can't be forged or stripped by a relay. An older client ignores the unknown JSON key, so it is
+        // strictly additive; a missing `sd` always means "legacy," never "downgraded."
+        let payload = serde_json::json!({ "n": name, "b": bio, "l": link, "a": avatar, "e": emoji, "sd": SEED_DROP_VERSION }).to_string();
         // Domain-separate so a profile signature can never be confused with another signed object
         // (audit H3). The tag is part of the SIGNED bytes; the wire blob still carries only `payload`.
         let sig = st.me.sign(&profile_signing_bytes(payload.as_bytes()));
@@ -1720,11 +1752,17 @@ impl HavenSocial {
         let sig = &blob[4..4 + sig_len];
         let payload = &blob[4 + sig_len..];
         let id = HavenId::from_bytes(&bundle).ok()?;
-        // Verify the domain-separated signature; fall back to the legacy untagged form so cards
-        // signed by older builds still validate during rollout.
-        id.verify(&profile_signing_bytes(payload), sig)
-            .or_else(|_| id.verify(payload, sig))
-            .ok()?;
+        // Verify the domain-separated signature; fall back to the legacy untagged form so cards signed by
+        // older builds still validate during rollout; and (seed-drop S1) accept a card signed by one of the
+        // account's AUTHORIZED DEVICES, chaining through the verified roster — the receive-side verifier for
+        // when a later release signs profiles under the device key. The device path is additive: it's only
+        // reached after the account-key verifies fail, which for today's account-signed cards never matches.
+        let ok = id.verify(&profile_signing_bytes(payload), sig).is_ok()
+            || id.verify(payload, sig).is_ok()
+            || profile_signed_by_authorized_device(&self.state.lock().unwrap(), &id, &profile_signing_bytes(payload), sig);
+        if !ok {
+            return None;
+        }
         let text = String::from_utf8(payload.to_vec()).ok()?;
         // New card is JSON; anything else is a legacy name-only profile.
         match serde_json::from_str::<serde_json::Value>(&text) {
@@ -1737,6 +1775,39 @@ impl HavenSocial {
             }),
             _ => Some(ProfileCardFfi { name: text, bio: String::new(), link: String::new(), avatar: String::new(), emoji: String::new() }),
         }
+    }
+
+    /// The seed-drop capability version a contact advertises in their SIGNED profile (S0), or 0 if the
+    /// profile is legacy / carries no marker / fails verification. A missing marker is 0 = "legacy," NEVER
+    /// treated as a downgrade (absence is never information). On an affirmatively-verified marker (>= 1) we
+    /// monotonically record the account as seed-drop-capable — real negotiation, learned never inferred.
+    pub fn profile_seed_drop_version(&self, bundle: Vec<u8>, blob: Vec<u8>) -> u32 {
+        if blob.len() < 4 {
+            return 0;
+        }
+        let sig_len = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]) as usize;
+        if blob.len() < 4 + sig_len {
+            return 0;
+        }
+        let sig = &blob[4..4 + sig_len];
+        let payload = &blob[4 + sig_len..];
+        let Ok(id) = HavenId::from_bytes(&bundle) else { return 0 };
+        // The marker is only inside the domain-separated (tagged) payload; verify against the account key or
+        // an authorized device. An unsigned / forged marker is ignored → 0.
+        let signed = profile_signing_bytes(payload);
+        if !(id.verify(&signed, sig).is_ok()
+            || profile_signed_by_authorized_device(&self.state.lock().unwrap(), &id, &signed, sig))
+        {
+            return 0;
+        }
+        let version = serde_json::from_slice::<serde_json::Value>(payload)
+            .ok()
+            .and_then(|v| v.get("sd").and_then(|x| x.as_u64()))
+            .unwrap_or(0) as u32;
+        if version >= 1 {
+            self.state.lock().unwrap().seed_drop_capable.insert(id.node_id_bytes());
+        }
+        version
     }
 
     /// Add a contact's verified public bundle to a circle. Returns their node id hex.
@@ -1900,7 +1971,7 @@ impl HavenSocial {
         match st.device_lists.get(&my_id) {
             Some(cd) => vec![ContactRosterWire {
                 account_hex: hex(&my_id),
-                wire: tagged(TAG_DEVICE_ROSTER, &encode_roster(&me_pub, cd)),
+                wire: my_roster_wire(&st.me, &me_pub, cd),
             }],
             None => Vec::new(),
         }
@@ -1914,10 +1985,14 @@ impl HavenSocial {
             return false;
         }
         let mut st = self.state.lock().unwrap();
-        match decode_roster(&wire[1..]).and_then(|(acct, list, creds)| {
-            HavenId::from_bytes(&acct).ok().map(|a| (a, list, creds))
+        match decode_roster(&wire[1..]).and_then(|(acct, list, creds, trailer)| {
+            HavenId::from_bytes(&acct).ok().map(|a| (a, list, creds, trailer))
         }) {
-            Some((account, list, creds)) => verify_and_store_roster(&mut st, &account, &list, &creds),
+            Some((account, list, creds, trailer)) => {
+                let stored = verify_and_store_roster(&mut st, &account, &list, &creds);
+                note_roster_capability(&mut st, &account, &trailer); // S0: learn capability, never infer absence
+                stored
+            }
             None => false,
         }
     }
@@ -2069,7 +2144,7 @@ impl HavenSocial {
         let st = self.state.lock().unwrap();
         let me_pub = st.me.public();
         match st.device_lists.get(&me_pub.node_id_bytes()) {
-            Some(cd) => tagged(TAG_DEVICE_ROSTER, &encode_roster(&me_pub, cd)),
+            Some(cd) => my_roster_wire(&st.me, &me_pub, cd),
             None => vec![],
         }
     }
@@ -2104,7 +2179,7 @@ impl HavenSocial {
         }
         let me_pub = st.me.public();
         match st.device_lists.get(&acct_id) {
-            Some(cd) => tagged(TAG_DEVICE_ROSTER, &encode_roster(&me_pub, cd)),
+            Some(cd) => my_roster_wire(&st.me, &me_pub, cd),
             None => vec![],
         }
     }
@@ -2157,7 +2232,7 @@ impl HavenSocial {
         // one). Idempotent: a same-version roster is ignored on the receiver, so this can't rotation-storm.
         let me_pub = st.me.public();
         if let Some(cd) = st.device_lists.get(&me_pub.node_id_bytes()) {
-            out.push(tagged(TAG_DEVICE_ROSTER, &encode_roster(&me_pub, cd)));
+            out.push(my_roster_wire(&st.me, &me_pub, cd));
         }
         // Key commit: the hybrid KEM is random, so a re-seal for the SAME context yields new bytes
         // and the content-addressed mailbox would accumulate a copy per backfill. Reuse the cached
@@ -2240,11 +2315,12 @@ impl HavenSocial {
             TAG_DEVICE_ROSTER => {
                 // Account-level (not circle-specific) — verify against the carried account bundle, store,
                 // and rotate affected epochs. Forged/stale rosters are rejected inside the verifier.
-                match decode_roster(&envelope[1..]).and_then(|(acct, list, creds)| {
-                    HavenId::from_bytes(&acct).ok().map(|a| (a, list, creds))
+                match decode_roster(&envelope[1..]).and_then(|(acct, list, creds, trailer)| {
+                    HavenId::from_bytes(&acct).ok().map(|a| (a, list, creds, trailer))
                 }) {
-                    Some((account, list, creds)) => {
+                    Some((account, list, creds, trailer)) => {
                         let stored = verify_and_store_roster(&mut st, &account, &list, &creds);
+                        note_roster_capability(&mut st, &account, &trailer); // S0: learn capability (absence-safe)
                         // A newly-learned roster may make a previously "unknown sender" event openable —
                         // drain the durable buffer so multi-device roster lag no longer loses posts.
                         let drained = drain_all_pending(&mut st);
@@ -2792,6 +2868,14 @@ fn restore_roster(st: &mut NetState, account_bundle: &[u8], list_bytes: &[u8], c
 /// credential chain was already verified when its roster was ingested, so the device's account being a
 /// circle member is the only remaining check.
 fn authorized_device_bundle(st: &NetState, idx: usize, sender_hex: &str) -> Option<HavenId> {
+    authorized_device_and_account(st, idx, sender_hex).map(|(bundle, _)| bundle)
+}
+
+/// Like [`authorized_device_bundle`], but also returns the ACCOUNT id that authorizes the device — the
+/// account whose credential chain (verified at roster ingest) vouches for `sender_hex`. Seed-drop S1 needs
+/// the account to (a) bind a device-signed event's `author` to that account and (b) look up the epoch key,
+/// which is keyed by the account (the committer), not the signing device.
+fn authorized_device_and_account(st: &NetState, idx: usize, sender_hex: &str) -> Option<(HavenId, [u8; 32])> {
     let my_id = st.me.public().node_id_bytes();
     for (acct_id, cd) in &st.device_lists {
         let acct_in_circle =
@@ -2801,14 +2885,39 @@ fn authorized_device_bundle(st: &NetState, idx: usize, sender_hex: &str) -> Opti
         }
         for bundle in cd.authorized_bundles() {
             if hex(&bundle.node_id_bytes()) == sender_hex {
-                return Some(bundle);
+                return Some((bundle, *acct_id));
             }
         }
     }
     None
 }
 
-/// Wire layout: `lp(account_bundle) ‖ lp(device_list) ‖ u32 n ‖ lp(credential)*n` (all u32-LE lengths).
+/// My own roster wire (tagged) with the signed seed-drop capability TRAILER appended (S0). The trailer is
+/// account-signed (forge/strip-proof) and IGNORED by older clients — [`decode_roster`] stops after the
+/// credentials — so carrying it is strictly additive: a 1.0.4 peer reads the roster and skips the trailer.
+/// Only emitted for MY OWN roster (I can only sign my own capability); a contact's re-broadcast roster
+/// carries no trailer, and their capability travels in their own roster + signed profile instead.
+fn my_roster_wire(me: &Identity, me_pub: &HavenId, cd: &ContactDevices) -> Vec<u8> {
+    let mut body = encode_roster(me_pub, cd);
+    body.extend_from_slice(&SeedDropCapability::issue(me, SEED_DROP_VERSION).to_bytes());
+    tagged(TAG_DEVICE_ROSTER, &body)
+}
+
+/// Record a seed-drop capability TRAILER carried alongside a received roster (S0). Verifies the
+/// account-signed marker and, if valid and >= v1, MONOTONICALLY records the account as capable. A
+/// missing / short / forged trailer is simply ignored — never treated as "downgraded" (absence is never
+/// information). This is real negotiation input; the dual-seal gate that would consume it is OFF this
+/// release, so nothing acts on it to change what a circle seals to yet.
+fn note_roster_capability(st: &mut NetState, account: &HavenId, trailer: &[u8]) {
+    if let Some(cap) = SeedDropCapability::from_bytes(trailer) {
+        if cap.version >= 1 && cap.verify(account).is_ok() {
+            st.seed_drop_capable.insert(account.node_id_bytes());
+        }
+    }
+}
+
+/// Wire layout: `lp(account_bundle) ‖ lp(device_list) ‖ u32 n ‖ lp(credential)*n` (all u32-LE lengths),
+/// optionally followed by a seed-drop capability TRAILER (S0, see [`my_roster_wire`]).
 fn encode_roster(account: &HavenId, cd: &ContactDevices) -> Vec<u8> {
     fn lp(out: &mut Vec<u8>, b: &[u8]) {
         out.extend_from_slice(&(b.len() as u32).to_le_bytes());
@@ -2824,8 +2933,11 @@ fn encode_roster(account: &HavenId, cd: &ContactDevices) -> Vec<u8> {
     out
 }
 
-/// Inverse of [`encode_roster`]: returns `(account_bundle, device_list_bytes, credential_bytes)`.
-fn decode_roster(b: &[u8]) -> Option<(Vec<u8>, Vec<u8>, Vec<Vec<u8>>)> {
+/// Inverse of [`encode_roster`]: returns `(account_bundle, device_list_bytes, credential_bytes, trailer)`
+/// where `trailer` is any bytes AFTER the credentials — a seed-drop capability marker (S0) on a newer
+/// peer, empty on an older one. Kept optional/trailing so an old client (which never reads past the
+/// credentials) still decodes a new roster and a new client still decodes an old one.
+fn decode_roster(b: &[u8]) -> Option<(Vec<u8>, Vec<u8>, Vec<Vec<u8>>, Vec<u8>)> {
     let mut i = 0usize;
     fn u32_at(b: &[u8], i: &mut usize) -> Option<usize> {
         if *i + 4 > b.len() { return None; }
@@ -2847,7 +2959,19 @@ fn decode_roster(b: &[u8]) -> Option<(Vec<u8>, Vec<u8>, Vec<Vec<u8>>)> {
     for _ in 0..n {
         creds.push(lp(b, &mut i)?);
     }
-    Some((account, list, creds))
+    let trailer = b[i..].to_vec();
+    Some((account, list, creds, trailer))
+}
+
+/// Seed-drop S1: does one of `account`'s AUTHORIZED devices sign `signed_bytes`? Chains through the
+/// roster verified at ingest (every credential was checked against the pinned account key), so a device
+/// acting for the account is trusted. False when we hold no roster for the account. Additive — callers try
+/// it only after the account-key verify fails, which for today's account-signed content never matches.
+fn profile_signed_by_authorized_device(st: &NetState, account: &HavenId, signed_bytes: &[u8], sig: &[u8]) -> bool {
+    match st.device_lists.get(&account.node_id_bytes()) {
+        Some(cd) => cd.authorized_bundles().iter().any(|dev| dev.verify(signed_bytes, sig).is_ok()),
+        None => false,
+    }
 }
 
 /// Domain-separated bytes for a profile-card signature (audit H3): a purpose tag prefixed to the JSON
@@ -3249,17 +3373,22 @@ mod net_tests {
                 to.receive(cid.clone(), env).unwrap();
             }
         };
-        sync(&alice, &bob);
-        let epoch_before = alice.state.lock().unwrap().circles[0].my_epoch;
-
-        // A sync BEFORE the interval elapses must not rotate — otherwise every sync would re-seal
-        // history and the epoch would run away.
-        sync(&alice, &bob);
-        assert_eq!(
-            alice.state.lock().unwrap().circles[0].my_epoch,
-            epoch_before,
-            "a quiet circle must not rotate before the interval elapses"
-        );
+        // rotate_if_stale reads the GLOBAL test clock skew, so serialize this no-rotation window against
+        // any parallel clock-advancing test by holding the same lock `with_clock_advanced` uses (adding
+        // zero skew) — otherwise another test's transient skew could spuriously rotate this quiet circle.
+        let epoch_before = with_clock_advanced(0, || {
+            sync(&alice, &bob);
+            let e = alice.state.lock().unwrap().circles[0].my_epoch;
+            // A sync BEFORE the interval elapses must not rotate — otherwise every sync would re-seal
+            // history and the epoch would run away.
+            sync(&alice, &bob);
+            assert_eq!(
+                alice.state.lock().unwrap().circles[0].my_epoch,
+                e,
+                "a quiet circle must not rotate before the interval elapses"
+            );
+            e
+        });
 
         // Cross the interval with NO membership change at all: the next sync bundle must rotate.
         with_clock_advanced(ROTATE_INTERVAL_SECS + 1, || {
@@ -3341,10 +3470,11 @@ mod net_tests {
         let cd = ContactDevices { list: list.clone(), credentials: vec![cred.clone()] };
 
         // Wire round-trip.
-        let (acct_b, list_b, creds_b) = decode_roster(&encode_roster(&account.public(), &cd)).expect("decode");
+        let (acct_b, list_b, creds_b, trailer) = decode_roster(&encode_roster(&account.public(), &cd)).expect("decode");
         assert_eq!(acct_b, account.public().to_bytes());
         assert_eq!(list_b, list.to_bytes());
         assert_eq!(creds_b, vec![cred.to_bytes()]);
+        assert!(trailer.is_empty(), "a bare (no-capability) roster has an empty trailer");
 
         let alice = HavenSocial::new([5u8; 32].to_vec()).unwrap();
         // A valid roster (list + creds both signed by the account) is accepted.
@@ -3447,5 +3577,93 @@ mod net_tests {
                 "device-sealed content opens via the device key (Option 1)");
         assert!(feed.iter().any(|m| m.body == "old account-sealed"),
                 "dual-open keeps older account-sealed content readable");
+    }
+
+    /// Seed-drop S1 receive verifier, end-to-end over the FFI: a contact's AUTHORIZED device signs an
+    /// event on the account's behalf (sender = device, author = account) and the peer ACCEPTS it by
+    /// chaining the device→account credential through the verified roster; an event signed by a device
+    /// with no valid credential is NOT accepted. (No device *authors* under its device key in this
+    /// release — the test crafts device-signed content to prove the verifier that must ship first.)
+    #[test]
+    fn receive_verifier_accepts_device_signed_event_rejects_uncredentialed() {
+        use p2pcore::device::{DeviceCredential, DeviceList};
+        let cid = DEFAULT_CIRCLE.to_string();
+        let alice = HavenSocial::new([1u8; 32].to_vec()).unwrap();
+        let bob = Identity::from_seed(&[2u8; 32]); // a contact account
+        let bob_dev = Identity::from_seed(&[77u8; 32]); // an authorized device of Bob
+        let rogue = Identity::from_seed(&[88u8; 32]); // a device with NO credential in Bob's roster
+
+        // Alice knows Bob, and learns Bob's roster: his account + his authorized device.
+        alice.add_contact_bundle(cid.clone(), bob.public().to_bytes()).unwrap();
+        let list = DeviceList::signed(
+            &bob, 1, 0,
+            vec![bob.public().node_id_bytes(), bob_dev.public().node_id_bytes()],
+            vec![],
+        );
+        let creds = vec![
+            DeviceCredential::issue(&bob, &bob.public(), "bob-primary", 0).to_bytes(),
+            DeviceCredential::issue(&bob, &bob_dev.public(), "bob-mac", 1).to_bytes(),
+        ];
+        assert!(alice.ingest_device_roster(bob.public().to_bytes(), list.to_bytes(), creds));
+
+        // Bob's key commit teaches Alice the epoch key (commits stay account-signed this release). Sealed to
+        // Alice's account; committer is Bob (a circle member), so Alice opens it and stores it under Bob's account.
+        let epoch = 0u64;
+        let key = new_epoch_key();
+        let secret = new_circle_secret();
+        let alice_pub = Identity::from_seed(&[1u8; 32]).public();
+        let commit = seal_key_commit(&bob, &[alice_pub], &cid, epoch, &key, &secret).unwrap();
+        assert!(alice.receive(cid.clone(), tagged(TAG_KEY_COMMIT, &commit.to_bytes())).unwrap());
+
+        // ACCEPT: a device-signed event whose author is Bob's account and whose signer is Bob's credentialed device.
+        let ev = Event::new(&bob.public().node_id_bytes(), 100, EventKind::Message { body: "from bob's mac".into() });
+        let env = seal_event_in_epoch(&bob_dev, &cid, epoch, &key, &ev).unwrap();
+        assert!(alice.receive(cid.clone(), tagged(TAG_EPOCH_EVENT, &env.to_bytes())).unwrap(),
+                "device-signed event, credentialed to a member, is accepted");
+        assert!(alice.feed(cid.clone(), 200, None).iter().any(|m| m.body == "from bob's mac"));
+
+        // REJECT: same author claim, but signed by a device with no valid account credential.
+        let ev2 = Event::new(&bob.public().node_id_bytes(), 101, EventKind::Message { body: "forged".into() });
+        let env2 = seal_event_in_epoch(&rogue, &cid, epoch, &key, &ev2).unwrap();
+        assert!(!alice.receive(cid.clone(), tagged(TAG_EPOCH_EVENT, &env2.to_bytes())).unwrap(),
+                "an uncredentialed signer is not accepted");
+        assert!(alice.feed(cid.clone(), 200, None).iter().all(|m| m.body != "forged"));
+    }
+
+    /// A pre-seed-drop (legacy) peer is unaffected by the new capability marker: the profile/roster still
+    /// carry the same fields, posts still flow (the dual-seal account-key path is untouched — the gate is
+    /// OFF), and a forged/absent marker reads as legacy (0), never as a downgrade.
+    #[test]
+    fn legacy_peer_unaffected_by_seed_drop_marker() {
+        let cid = DEFAULT_CIRCLE.to_string();
+        let alice = HavenSocial::new([1u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([2u8; 32].to_vec()).unwrap();
+        alice.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+        bob.add_contact_bundle(cid.clone(), alice.my_bundle()).unwrap();
+
+        // Profile: same name reads back (additive), the signed marker is observed as v1, a forged marker is 0.
+        let prof = alice.my_signed_profile("Alice".into(), "bio".into(), "".into(), "".into(), "".into());
+        assert_eq!(bob.verify_profile(alice.my_bundle(), prof.clone()).as_deref(), Some("Alice"));
+        assert_eq!(bob.profile_seed_drop_version(alice.my_bundle(), prof.clone()), 1, "signed marker is observed");
+        let mut forged = prof.clone();
+        let l = forged.len() - 1;
+        forged[l] ^= 0xff;
+        assert_eq!(bob.profile_seed_drop_version(alice.my_bundle(), forged), 0,
+                   "a forged marker is ignored (absence-safe, never a downgrade)");
+
+        // Zero behavior change: posts still flow (the account-key seal is intact, gate OFF).
+        alice.post(cid.clone(), "hello".into(), vec![], None, None, false, false, 1_000).unwrap();
+        sync(&alice, &bob, &cid);
+        assert!(bob.feed(cid.clone(), 2_000, None).iter().any(|m| m.body == "hello"),
+                "a peer that never acts on the marker still receives everything");
+
+        // Roster wire is additive: it carries the signed capability trailer, yet the roster fields decode
+        // unchanged and the peer still ingests it.
+        assert!(!alice.register_device(alice.my_bundle(), "alice-primary".into(), 0).is_empty());
+        let wire = alice.my_device_roster_wire();
+        assert_eq!(wire.first(), Some(&TAG_DEVICE_ROSTER));
+        let (_a, _list, _creds, trailer) = decode_roster(&wire[1..]).expect("new roster decodes");
+        assert!(!trailer.is_empty(), "a seed-drop build's roster carries the signed capability trailer");
+        assert!(bob.ingest_roster_wire(wire), "peer ingests the roster despite the trailer (additive)");
     }
 }

@@ -4,3 +4,4 @@
 • Group voice & video calls with screen sharing — still peer-to-peer, no call server
 • Scheduled messages and screenshot-protected secret messages
 • Smoother, faster feed scrolling
+• Private, end-to-end encrypted circles — no ads, no tracking, no servers

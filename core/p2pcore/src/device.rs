@@ -383,6 +383,131 @@ pub fn recipients_with_devices(
     out
 }
 
+// ── Seed-drop S0: capability negotiation + dual-seal gating scaffold (D16 Phase 2) ───────────────
+//
+// These are STRICTLY ADDITIVE and shipped OFF: nothing here changes who signs or what a circle seals
+// to in this release. They land the rails that a later release flips on. See docs/SEED-DROP-DESIGN.md.
+
+/// Domain-separation tag for the bytes an account signs over a seed-drop capability marker.
+const CAP_DOMAIN: &[u8] = b"haven-seeddrop-cap-v1";
+
+/// A monotonic, account-signed **seed-drop capability marker** (S0). It advertises the seed-drop
+/// protocol version a peer supports so contacts can NEGOTIATE the graceful migration.
+///
+/// It is **signed by the account key** so a relay can neither forge it (falsely claim a legacy account
+/// is capable) nor strip it from a signed container undetectably. Critically, a **missing** marker
+/// always means "unknown — treat as legacy," NEVER "downgraded/removed": absence is never information
+/// (this codebase has been bitten by absence-as-removal more than once). Capability is monotonic — it is
+/// only ever *learned*, never inferred-absent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeedDropCapability {
+    /// The advertising account's 32-byte node id.
+    pub account_id: [u8; 32],
+    /// Seed-drop protocol version supported (>= 1). 0 is reserved for "no marker / legacy".
+    pub version: u32,
+    /// Hybrid signature by the **account** identity over [`Self::signing_bytes`].
+    pub sig: Vec<u8>,
+}
+
+impl SeedDropCapability {
+    fn signing_bytes(account_id: &[u8; 32], version: u32) -> Vec<u8> {
+        let mut v = Vec::with_capacity(CAP_DOMAIN.len() + 32 + 4);
+        v.extend_from_slice(CAP_DOMAIN);
+        v.extend_from_slice(account_id);
+        v.extend_from_slice(&version.to_le_bytes());
+        v
+    }
+
+    /// Issue a signed capability marker for `version` (>= 1) under the account identity.
+    pub fn issue(account: &Identity, version: u32) -> Self {
+        let account_id = account.public().node_id_bytes();
+        let sig = account.sign(&Self::signing_bytes(&account_id, version));
+        Self { account_id, version, sig }
+    }
+
+    /// Verify against the **pinned account key** (id match + hybrid signature). A forged or tampered
+    /// marker fails here; a caller then treats the account as legacy (absence-safe).
+    pub fn verify(&self, account_pub: &HavenId) -> Result<()> {
+        if account_pub.node_id_bytes() != self.account_id {
+            return Err(CoreError::Crypto("seed-drop capability: account id mismatch"));
+        }
+        account_pub.verify(&Self::signing_bytes(&self.account_id, self.version), &self.sig)
+    }
+
+    /// Wire encoding: `account_id(32) ‖ version(4 LE) ‖ sig`. Designed to be appended as a TRAILER after
+    /// an existing roster body — an older client stops parsing at the end of the credentials and never
+    /// reads these bytes, so carrying it is additive (a 1.0.4 peer ignores it).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(32 + 4 + self.sig.len());
+        v.extend_from_slice(&self.account_id);
+        v.extend_from_slice(&self.version.to_le_bytes());
+        v.extend_from_slice(&self.sig);
+        v
+    }
+
+    /// Inverse of [`Self::to_bytes`]. Returns `None` on a short/empty buffer (no marker present).
+    pub fn from_bytes(b: &[u8]) -> Option<Self> {
+        if b.len() < 32 + 4 + 1 {
+            return None; // need id + version + a non-empty signature
+        }
+        let account_id: [u8; 32] = b[..32].try_into().ok()?;
+        let version = u32::from_le_bytes(b[32..36].try_into().ok()?);
+        let sig = b[36..].to_vec();
+        Some(Self { account_id, version, sig })
+    }
+}
+
+/// Is EVERY member of a circle seed-drop-capable? An **all-present positive** signal (never
+/// absence-inferred): true only when every member account both appears in `capable` (we have
+/// affirmatively verified its signed marker) AND has a known device roster. A single member we have not
+/// seen capability from keeps the whole circle NOT-fully-capable, so the legacy account-key seal is
+/// retained. This is the computation a later release consults before retiring the account-key seal for a
+/// circle; it is wired but OFF this release (see [`recipients_with_devices_gated`]).
+pub fn circle_fully_seed_drop_capable(
+    members: &[HavenId],
+    devices_by_account: &std::collections::HashMap<[u8; 32], ContactDevices>,
+    capable: &std::collections::HashSet<[u8; 32]>,
+) -> bool {
+    !members.is_empty()
+        && members.iter().all(|m| {
+            let a = m.node_id_bytes();
+            capable.contains(&a) && devices_by_account.contains_key(&a)
+        })
+}
+
+/// [`recipients_with_devices`] with the seed-drop dual-seal **gate** wired. When `drop_account_key` is
+/// set AND the circle is fully seed-drop-capable, the bare per-member account key is omitted so content
+/// seals ONLY to authorized device bundles (a revoked device is then cut off cryptographically). With
+/// `drop_account_key = false` — the DEFAULT and the only value the production path passes this release —
+/// it is **byte-identical** to [`recipients_with_devices`]: nothing is dropped, dual-seal (account key +
+/// device bundles) stays in place, and existing behavior is unchanged for everyone. This is the scaffold
+/// a later release flips on per fully-upgraded circle; shipping it OFF keeps this release strictly additive.
+pub fn recipients_with_devices_gated(
+    members: &[HavenId],
+    devices_by_account: &std::collections::HashMap<[u8; 32], ContactDevices>,
+    capable: &std::collections::HashSet<[u8; 32]>,
+    drop_account_key: bool,
+) -> Vec<HavenId> {
+    let drop = drop_account_key && circle_fully_seed_drop_capable(members, devices_by_account, capable);
+    if !drop {
+        // DEFAULT this release: unchanged dual-seal (account key + authorized device bundles).
+        return recipients_with_devices(members, devices_by_account);
+    }
+    // Fully capable + gate ON: seal ONLY to authorized device bundles, no bare account key.
+    let mut out: Vec<HavenId> = Vec::new();
+    let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    for m in members {
+        if let Some(d) = devices_by_account.get(&m.node_id_bytes()) {
+            for b in d.authorized_bundles() {
+                if seen.insert(b.node_id_bytes()) {
+                    out.push(b);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Minimal length-prefixed byte reader for the wire formats above.
 struct Reader<'a> {
     b: &'a [u8],
@@ -634,6 +759,88 @@ mod tests {
         let ids: std::collections::HashSet<[u8; 32]> = recips.iter().map(|h| h.node_id_bytes()).collect();
         assert!(ids.contains(&alice.public().node_id_bytes()));
         assert!(ids.contains(&bob.public().node_id_bytes()));
+    }
+
+    // ── Seed-drop S0 scaffold tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn seed_drop_capability_round_trips_and_rejects_forgery() {
+        let account = id(1);
+        let cap = SeedDropCapability::issue(&account, 1);
+        // A contact who pinned the account key trusts the marker.
+        cap.verify(&account.public()).expect("valid capability must verify");
+        assert_eq!(cap.version, 1);
+        // Wire round-trip is stable.
+        let back = SeedDropCapability::from_bytes(&cap.to_bytes()).expect("decode");
+        assert_eq!(cap, back);
+        back.verify(&account.public()).expect("decoded capability still verifies");
+
+        // FORGED: a relay can't mint a marker for an account whose key it lacks (pin a different account).
+        let imposter = id(9);
+        assert!(cap.verify(&imposter.public()).is_err(), "capability for a foreign account must reject");
+
+        // TAMPERED: bumping the advertised version without re-signing must fail (no forging a higher tier).
+        let mut forged = cap.clone();
+        forged.version = 2;
+        assert!(forged.verify(&account.public()).is_err(), "tampered version must not verify");
+
+        // STRIPPED / absent: an empty or truncated trailer decodes to None → caller treats as legacy,
+        // never as "downgraded" (absence is never information).
+        assert!(SeedDropCapability::from_bytes(&[]).is_none());
+        assert!(SeedDropCapability::from_bytes(&cap.to_bytes()[..30]).is_none());
+    }
+
+    #[test]
+    fn dual_seal_scaffold_gates_account_key_only_when_enabled() {
+        use crate::groupkey::{open_key_commit, seal_key_commit};
+        // A member (Bob) with a device roster authorizing ONE device key, DISTINCT from his account key —
+        // the seedless-device shape, so dropping the bare account key is observable (an account key that is
+        // itself enrolled as a device would legitimately remain a recipient).
+        let bob = id(1);
+        let bob_dev = id(2);
+        let list = DeviceList::signed(&bob, 1, 0, vec![bob_dev.public().node_id_bytes()], vec![]);
+        let creds = vec![DeviceCredential::issue(&bob, &bob_dev.public(), "bob-mac", 1)];
+        let mut map = std::collections::HashMap::new();
+        map.insert(bob.public().node_id_bytes(), ContactDevices { list, credentials: creds });
+        let members = [bob.public()];
+
+        // (a) DEFAULT (gate OFF) is byte-identical to `recipients_with_devices` — dual-seal stays: the
+        //     account key AND the device bundle are both recipients.
+        let mut capable = std::collections::HashSet::new();
+        capable.insert(bob.public().node_id_bytes());
+        let default = recipients_with_devices_gated(&members, &map, &capable, false);
+        let baseline = recipients_with_devices(&members, &map);
+        let ids = |v: &[HavenId]| v.iter().map(|h| h.node_id_bytes()).collect::<Vec<_>>();
+        assert_eq!(ids(&default), ids(&baseline), "gate OFF must equal today's recipients exactly");
+        let def_ids: std::collections::HashSet<[u8; 32]> = ids(&default).into_iter().collect();
+        assert!(def_ids.contains(&bob.public().node_id_bytes()), "account key present (dual-seal)");
+        assert!(def_ids.contains(&bob_dev.public().node_id_bytes()), "device bundle present (dual-seal)");
+
+        // Dual-seal proof: a commit to the default recipients is openable by BOTH an account-key opener
+        // and a device-key opener.
+        let committer = id(7);
+        let (e, s) = ([9u8; 32], [7u8; 32]);
+        let commit = seal_key_commit(&committer, &default, "c", 1, &e, &s).expect("seal");
+        assert_eq!(open_key_commit(&bob, &committer.public(), &commit).unwrap().epoch_key, e,
+                   "account-key opener opens the dual-sealed commit");
+        assert_eq!(open_key_commit(&bob_dev, &committer.public(), &commit).unwrap().epoch_key, e,
+                   "device-key opener opens the dual-sealed commit");
+
+        // (b) Gate ON + fully capable → the bare account key is DROPPED (device-only seal). The account
+        //     key holder can no longer open; the device still can. (This is the future S5 behavior; here it
+        //     only proves the scaffold works.)
+        let gated = recipients_with_devices_gated(&members, &map, &capable, true);
+        let gated_ids: std::collections::HashSet<[u8; 32]> = ids(&gated).into_iter().collect();
+        assert!(!gated_ids.contains(&bob.public().node_id_bytes()), "gate ON drops the bare account key");
+        assert!(gated_ids.contains(&bob_dev.public().node_id_bytes()), "device bundle stays a recipient");
+
+        // (c) A member we have NOT seen capability from keeps the whole circle on the account key even with
+        //     the gate ON — an all-present positive signal, never absence-inferred.
+        let empty_caps = std::collections::HashSet::new();
+        let not_capable = recipients_with_devices_gated(&members, &map, &empty_caps, true);
+        let nc_ids: std::collections::HashSet<[u8; 32]> = ids(&not_capable).into_iter().collect();
+        assert!(nc_ids.contains(&bob.public().node_id_bytes()),
+                "not-fully-capable circle retains the account key (no premature drop)");
     }
 
     /// The end-to-end guarantee: a revoked device cannot open the circle's key commit, so it can decrypt

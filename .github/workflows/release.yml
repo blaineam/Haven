@@ -319,29 +319,12 @@ jobs:
 
       - name: Submit MSIX to the Microsoft Store
         if: steps.msix.outputs.msix != '' && env.STORE_TENANT_ID != ''
-        # Non-fatal — same reasoning as "Package MSIX" above. The `publish` job that cuts the GitHub
-        # Release depends on this `desktop` matrix leg, so a Store-side hiccup (cert queue, an unset
-        # age rating, or the current paid-product GitHub-Actions limitation — see below) must NOT
-        # red-X the leg and strand the Linux app + relay CLI. Surface it, let the release stand.
-        continue-on-error: true
         shell: pwsh
         run: |
           dotnet tool install --global MSStore.CLI
           msstore reconfigure --tenantId $env:STORE_TENANT_ID --clientId $env:STORE_CLIENT_ID `
             --clientSecret $env:STORE_CLIENT_SECRET --sellerId $env:STORE_SELLER_ID
-          # Documented CI form (learn.microsoft.com/.../msstore-dev-cli/github-actions):
-          #   msstore publish '<pkg>.msix' -id <productId>
-          # This opens a NEW submission with the package and COMMITS it → the Store runs
-          # certification automatically, then the update goes live. There is NO per-field listing
-          # flag: title/description/screenshots/age-rating stay exactly as set in Partner Center and
-          # are carried forward unchanged. Listing-TEXT edits are a *separate* submission via
-          # `msstore submission updateMetadata` — deliberately NOT wired here (Partner Center allows
-          # only one open submission at a time, so it can't share this package submission). See
-          # docs/STORE-AUTOPUBLISH.md ("Editing the Microsoft Store listing").
-          # NOTE: Microsoft currently supports msstore GitHub-Actions publishing for FREE products
-          # only; paid-product support is "coming in a future release". If Haven is a paid listing
-          # this step may no-op until then — hence continue-on-error. Documented in STORE-AUTOPUBLISH.md.
-          msstore publish "${{ steps.msix.outputs.msix }}" --appId $env:STORE_APP_ID --verbose
+          msstore publish "${{ steps.msix.outputs.msix }}" --appId $env:STORE_APP_ID --noConfirm
 
       - uses: actions/upload-artifact@v4
         with:

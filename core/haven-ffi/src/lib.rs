@@ -26,7 +26,7 @@ use haven_p2p::social::{
 };
 use haven_p2p::groupkey::{
     mailbox_prefix, new_circle_secret, new_epoch_key, open_event_in_epoch_authored, open_key_commit,
-    seal_event_in_epoch, seal_key_commit, EpochEnvelope,
+    seal_event_in_epoch, seal_event_ratcheted, seal_key_commit, EpochEnvelope,
 };
 
 /// The seed-drop protocol version this build advertises (S0). A build with the S1 receive-side verifier
@@ -1067,6 +1067,22 @@ fn map_feed(events: Vec<Event>, me: &str, now_ms: u64, viewer_retention_secs: Op
 /// keys by `(author_hex, epoch)` so I can open their epoch events. Removing a member rotates MY epoch
 /// (the new commit excludes them), so my future posts are unreadable to them. `pending_epoch` buffers
 /// epoch events that arrived before their author's key commit (eventual consistency).
+/// MLS M6 (§6.5): per-circle in-session state for the DM/live-lane per-message ratchet. NOT
+/// persisted — a pure session cache like `cached_commit`/`mls_live_epoch`. Keeping it out of the
+/// state blob is BOTH the OFF-byte-identical guarantee (persistence is untouched) AND a stronger FS
+/// posture: skipped keys never hit disk, and a restart re-derives the in-order chain from the
+/// (persisted) epoch `sender_key` while any window missed while offline is recovered by the
+/// epoch-keyed re-seal backstop (§6.1). Chains are keyed by CONTENT epoch, so an epoch rotation
+/// naturally strands the old chain for pruning ("epoch rotation resets the chain").
+#[derive(Default)]
+struct RatchetLanes {
+    /// My OUTGOING DM ratchet per content epoch (`SenderChain`).
+    send: HashMap<u64, treekem::SenderChain>,
+    /// A peer's INCOMING DM ratchet per (peer account hex, content epoch) — the skipped-key cache
+    /// lives here, bounded per `treekem::RATCHET_MAX_SKIPPED`.
+    recv: HashMap<(String, u64), treekem::RatchetReceiver>,
+}
+
 struct Circle {
     id: String,
     name: String,
@@ -1113,6 +1129,8 @@ struct Circle {
     /// read by the author/re-seal paths so content seals under the tree key. NOT persisted — it is a
     /// pure function of the tree chain + the master switch, recomputed every bundle/receive.
     mls_live_epoch: Option<u64>,
+    /// MLS M6 (§6.5): DM/live-lane per-message ratchet chains. NOT persisted (see [`RatchetLanes`]).
+    mls_ratchet: RatchetLanes,
 }
 
 /// How long an epoch may live before the periodic rotation retires it (audit C2). SEVEN DAYS —
@@ -1174,6 +1192,7 @@ impl Circle {
             creator_pinned: false,
             admin_grants: vec![],
             mls_live_epoch: None,
+            mls_ratchet: RatchetLanes::default(),
         }
     }
     /// Ensure I have a current epoch key for my own posts AND a stable circle secret (bootstrap on
@@ -1270,6 +1289,16 @@ impl Circle {
                 }
             }
         }
+        // M6 (§6.5): drop any ratchet chain whose content epoch fell out of the retained window —
+        // the chains age out on the SAME pruner as their epoch key, and dropping wipes them (the
+        // `Drop` impls on `SenderChain`/`RatchetReceiver` zero every held key, incl. cached skipped
+        // keys). This is the FS + bounded-memory discipline: no chain (and no skipped-key cache) can
+        // outlive its epoch. `send` is keyed by my own content epoch; `recv` by (peer, content
+        // epoch), matching the pruned key stores above.
+        self.mls_ratchet.send.retain(|e, _| self.my_epoch_keys.contains_key(e));
+        self.mls_ratchet
+            .recv
+            .retain(|(peer, e), _| self.peer_epoch_keys.contains_key(&(peer.clone(), *e)));
     }
     fn current_key(&self) -> Option<[u8; 32]> {
         self.my_epoch_keys.get(&self.my_epoch).copied()
@@ -1361,6 +1390,12 @@ struct NetState {
     /// dual-stack, and one a legacy device (re)joins PARKS back to KeyCommit within one bundle (§7.3).
     /// Ships DARK so this lands like seed-drop retirement; flipped ON per staged cohort after soak.
     mls_keying: bool,
+    /// MLS M6 (§6.5): circle ids the app has marked as the DM / LIVE lane — the ONLY lane the
+    /// per-message ratchet engages on (feed circles stay epoch-keyed, per the task scope). Session
+    /// state, NOT persisted: the app re-marks its DM circles on launch, mirroring `mls_keying` /
+    /// `retire_account_key`. Consulted ONLY inside the `mls_keying`-ON author path, so with the
+    /// master switch OFF this set is never read and content is byte-identical to today.
+    live_lane_circles: std::collections::HashSet<String>,
 }
 
 impl NetState {
@@ -3232,10 +3267,42 @@ fn receive_epoch_event(st: &mut NetState, idx: usize, body: &[u8]) -> Result<boo
         }
         return Ok(false);
     };
+    // M6 (§6.5): a DM sealed under the sender ratchet carries an AUTHENTICATED index. Re-derive its
+    // per-message key `MK_i` from the epoch sender `key` via a per-(sender account, epoch)
+    // `RatchetReceiver`, whose bounded skipped-key cache tolerates OUT-OF-ORDER and DAYS-LATE
+    // delivery (the mailbox contract). A non-ratcheted envelope — feed post, the epoch-keyed re-seal
+    // backstop, or any legacy/OFF traffic — opens under `key` unchanged (the switch-OFF no-op).
+    let mut open_key = key;
+    if let Some(i) = env.ratchet_index() {
+        let gid = st.circles[idx].id.as_bytes().to_vec();
+        let recv = st.circles[idx]
+            .mls_ratchet
+            .recv
+            .entry((key_author_hex.to_string(), env.epoch))
+            .or_insert_with(|| treekem::RatchetReceiver::new(&key, &gid, env.epoch));
+        match recv.message_key(i) {
+            Some(mk) => open_key = mk,
+            None => {
+                // Beyond the cache horizon, or a rejected out-of-cap jump: this ratcheted copy can't
+                // open, and re-buffering would deterministically miss again. Drop it — the
+                // epoch-keyed re-seal backstop (§6.1) recovers the content under the plain epoch key
+                // on the next backfill. (Honest reliability caveat: a DM that is BOTH beyond the
+                // ratchet horizon AND never re-sealed is unreadable — the horizon is documented on
+                // `RATCHET_MAX_SKIPPED`.)
+                return Ok(false);
+            }
+        }
+    }
     // The device's hybrid signature is verified inside; the author is then bound to `expected_author`
     // (its authorizing account for a contact device, itself for a member account, or unbound for my own
     // self-forwards). A device of account A can only produce author==A, so no re-attribution is possible.
-    let event = match open_event_in_epoch_authored(&sender, &key, &env, expected_author.as_deref()) {
+    let opened = open_event_in_epoch_authored(&sender, &open_key, &env, expected_author.as_deref());
+    // FS: wipe the derived per-message key the instant it has been used (or failed). A no-op-ish
+    // wipe of the plain epoch-key copy in the non-ratcheted path is harmless (the map still holds it).
+    if env.ratchet_index().is_some() {
+        treekem::wipe_secret(&mut open_key);
+    }
+    let event = match opened {
         Ok(e) => e,
         Err(_) => return Ok(false),
     };
@@ -3469,6 +3536,7 @@ impl HavenSocial {
                 retire_account_key: false,
                 shadow_trees: std::collections::HashMap::new(),
                 mls_keying: false,
+                live_lane_circles: std::collections::HashSet::new(),
             }),
         }))
     }
@@ -3516,6 +3584,7 @@ impl HavenSocial {
                 retire_account_key: false,
                 shadow_trees: std::collections::HashMap::new(),
                 mls_keying: false,
+                live_lane_circles: std::collections::HashSet::new(),
             }),
         }))
     }
@@ -3558,6 +3627,20 @@ impl HavenSocial {
     /// Changes nothing by itself — the flip/park is recomputed at the next bundle / receive.
     pub fn set_mls_keying(&self, on: bool) {
         self.state.lock().unwrap().mls_keying = on;
+    }
+
+    /// Mark a circle as the DM / LIVE lane (M6, docs/TREEKEM-DESIGN.md §6.5) — the app calls this for
+    /// its one-to-one and live-traffic circles. ONLY a marked, keying-LIVE circle uses the
+    /// per-message sender ratchet; feed circles stay epoch-keyed (the task scope). Session state, NOT
+    /// persisted; the app re-marks on launch, like `set_mls_keying`. Consulted only under the
+    /// `mls_keying`-ON author path, so this is a no-op for content while the master switch is OFF.
+    pub fn set_circle_live_lane(&self, circle_id: String, on: bool) {
+        let mut st = self.state.lock().unwrap();
+        if on {
+            st.live_lane_circles.insert(circle_id);
+        } else {
+            st.live_lane_circles.remove(&circle_id);
+        }
     }
 
     /// Pin the circle CREATOR — the root of Remove/Add authority (§4.3). If `account_hex` is my own
@@ -5192,7 +5275,8 @@ impl HavenSocial {
         // KEY SOURCE moves (§4.5). `mls_refresh_keying` (re)derives it and sets `mls_live_epoch`; when
         // shadow/parked it returns `None` and we fall back to the legacy sender-keys epoch.
         st.circles[idx].ensure_epoch();
-        let (epoch, key) = match mls_refresh_keying(&mut st, idx) {
+        let content_epoch_live = mls_refresh_keying(&mut st, idx);
+        let (epoch, key) = match content_epoch_live {
             Some(content_epoch) => {
                 let key = st.circles[idx]
                     .my_epoch_keys
@@ -5206,8 +5290,34 @@ impl HavenSocial {
                 (epoch, st.circles[idx].current_key().expect("epoch key exists after ensure_epoch"))
             }
         };
-        let env = seal_event_in_epoch(signer_of(&st, under_device), circle_id, epoch, &key, &event)
-            .map_err(|e| HavenError::Invalid { msg: format!("seal failed: {e}") })?;
+        // M6 (§6.5): the DM / LIVE lane gets a per-message ratchet — but ONLY when the tree is
+        // live-keying (`content_epoch_live.is_some()`, which already implies `mls_keying` ON) AND
+        // the app marked this circle a live lane. Feed circles + every OFF/shadow/parked circle fall
+        // through to the unchanged epoch-key seal, so switch-OFF content is byte-identical.
+        let ratchet_lane =
+            content_epoch_live.is_some() && st.live_lane_circles.contains(circle_id);
+        let env = if ratchet_lane {
+            // Chain FROM the epoch sender key (§6.5). The per-epoch `SenderChain` is created lazily
+            // and advanced once per DM; `MK_i` seals this message and its index `i` rides the
+            // (authenticated) envelope. FS: the sender wipes its `MK_i` copy after sealing, and the
+            // chain wiped `CK_i` on advance.
+            let (i, mut mk) = {
+                let gid = circle_id.as_bytes().to_vec();
+                let chain = st.circles[idx]
+                    .mls_ratchet
+                    .send
+                    .entry(epoch)
+                    .or_insert_with(|| treekem::SenderChain::new(&key, &gid, epoch));
+                chain.next_key()
+            };
+            let sealed =
+                seal_event_ratcheted(signer_of(&st, under_device), circle_id, epoch, &mk, i, &event);
+            treekem::wipe_secret(&mut mk);
+            sealed
+        } else {
+            seal_event_in_epoch(signer_of(&st, under_device), circle_id, epoch, &key, &event)
+        }
+        .map_err(|e| HavenError::Invalid { msg: format!("seal failed: {e}") })?;
         st.circles[idx].seen.insert(event.id.clone());
         st.circles[idx].events.push(event);
         Ok(tagged(TAG_EPOCH_EVENT, &env.to_bytes()))
@@ -7167,6 +7277,74 @@ mod net_tests {
         }
         assert!(a.feed(cid.clone(), 3_000, None).iter().any(|m| m.body == "tree-keyed-from-b"), "A reads B's tree-keyed post");
         assert!(c.feed(cid.clone(), 3_000, None).iter().any(|m| m.body == "tree-keyed-from-b"), "C reads B's tree-keyed post");
+    }
+
+    /// Parse the ratchet index carried by a `post()` wire (tagged epoch envelope). `None` ⇒ the DM
+    /// was NOT ratcheted (feed / OFF / legacy).
+    fn wire_ratchet_index(wire: &[u8]) -> Option<u32> {
+        assert_eq!(wire.first(), Some(&TAG_EPOCH_EVENT), "a post is a tagged epoch envelope");
+        EpochEnvelope::from_bytes(&wire[1..]).unwrap().ratchet_index()
+    }
+
+    /// §9 M6 (§6.5) — the DM/live-lane per-message ratchet, wired behind the switch. Proves: (a) with
+    /// the master switch ON but the circle NOT marked a live lane, a post is epoch-keyed (index
+    /// absent) — feed traffic is untouched; (b) once marked a live lane, each DM carries a
+    /// MONOTONIC ratchet index and round-trips; (c) DMs delivered OUT OF ORDER (the ratcheted wires
+    /// fed directly, no epoch-keyed backstop) all open via the receiver's skipped-key cache — the
+    /// mailbox days-late/out-of-order contract holds end-to-end.
+    #[test]
+    fn mls_m6_dm_ratchet_rides_the_lane_and_opens_out_of_order() {
+        let _clk = clock_guard();
+        let cid = DEFAULT_CIRCLE.to_string();
+        // A 2-party circle = a DM. Flip it live (tree-keyed content).
+        let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
+        let (a, b) = (&insts[0], &insts[1]);
+        flip_and_join(&insts, &cid);
+        assert_eq!(a.mls_keying_status(cid.clone()).state, "live", "the pair is keying-live");
+
+        // (a) SWITCH ON, but the circle is NOT yet a live lane → a post stays epoch-keyed (feed
+        // scope: the ratchet does not engage on unmarked circles).
+        let feedish = a.post(cid.clone(), "not-a-dm".into(), vec![], None, None, false, false, 2_000).unwrap();
+        assert_eq!(wire_ratchet_index(&feedish), None, "an unmarked circle is NOT ratcheted");
+
+        // Mark the DM lane on both ends.
+        a.set_circle_live_lane(cid.clone(), true);
+        b.set_circle_live_lane(cid.clone(), true);
+
+        // (b) Each DM now carries a monotonically increasing ratchet index, and round-trips.
+        let w0 = a.post(cid.clone(), "dm-0".into(), vec![], None, None, false, false, 3_000).unwrap();
+        let w1 = a.post(cid.clone(), "dm-1".into(), vec![], None, None, false, false, 3_100).unwrap();
+        let w2 = a.post(cid.clone(), "dm-2".into(), vec![], None, None, false, false, 3_200).unwrap();
+        assert_eq!(wire_ratchet_index(&w0), Some(0), "first DM is ratchet index 0");
+        assert_eq!(wire_ratchet_index(&w1), Some(1), "second DM is ratchet index 1");
+        assert_eq!(wire_ratchet_index(&w2), Some(2), "third DM is ratchet index 2");
+
+        // (c) OUT OF ORDER: deliver the ratcheted wires directly (NO sync — so the epoch-keyed
+        // re-seal backstop cannot mask the ratchet path) in the shuffled order [w2, w0, w1]. The
+        // receiver's skipped-key cache derives + caches the jumped-over keys so every one opens.
+        assert!(b.receive(cid.clone(), w2).unwrap(), "the out-of-order tip (index 2) opens, caching 0..2");
+        assert!(b.receive(cid.clone(), w0).unwrap(), "the late index 0 opens from the skipped cache");
+        assert!(b.receive(cid.clone(), w1).unwrap(), "the late index 1 opens from the skipped cache");
+        let feed = b.feed(cid.clone(), 4_000, None);
+        for body in ["dm-0", "dm-1", "dm-2"] {
+            assert!(feed.iter().any(|m| m.body == body), "B reads {body} despite out-of-order delivery");
+        }
+    }
+
+    /// §9 M6 — SWITCH-OFF byte-identity at the DM lane: even with a circle marked a live lane, a
+    /// circle whose keying is NOT live (master switch OFF ⇒ shadow) posts a plain epoch-keyed
+    /// envelope with NO ratchet field. The ratchet engages ONLY when the tree actually keys content.
+    #[test]
+    fn mls_m6_off_switch_dm_is_not_ratcheted() {
+        let _clk = clock_guard();
+        let cid = DEFAULT_CIRCLE.to_string();
+        let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
+        let a = &insts[0];
+        // Mark the lane, but never flip the keying switch → not live.
+        a.set_circle_live_lane(cid.clone(), true);
+        assert_ne!(a.mls_keying_status(cid.clone()).state, "live", "switch OFF ⇒ not live");
+        let wire = a.post(cid.clone(), "off-dm".into(), vec![], None, None, false, false, 1_000).unwrap();
+        assert_eq!(wire_ratchet_index(&wire), None, "no live keying ⇒ no ratchet (byte-identical to today)");
     }
 
     /// §9 M3 — THE HEADLINE (evolves `s5_revoked_seedless_device_cannot_reenter_or_decrypt`). In a

@@ -2054,6 +2054,218 @@ pub fn sender_key(sender_root: &[u8; 32], leaf_id: &[u8; 32], group_id: &[u8], e
     hkdf32(leaf_id, sender_root, &info)
 }
 
+// ── M6: per-message sender ratchet for the DM / live lane (§6.5) ──────────────────────────
+//
+// A classic MLS-style symmetric sender ratchet layered ON TOP of a leaf's per-epoch
+// `sender_key_n` (above): each DM gets its own message key, so capturing message i's key
+// does NOT open message i-1 (per-message forward secrecy). The construction is deliberately
+// the Signal double-ratchet's *symmetric chain* half:
+//
+//     CK_0     = HKDF(salt=RATCHET_SALT, ikm=sender_key_n[leaf], info="chain-init" ‖ gid ‖ n)
+//     MK_i     = HKDF-expand(CK_i, "msg")     # the message key that seals DM i
+//     CK_{i+1} = HKDF-expand(CK_i, "chain")   # advance; CK_i is WIPED the instant CK_{i+1} exists
+//
+// Two one-way HKDF-expands off the same chain key, separated by info label, give the FS
+// property for free: `MK_i` reveals nothing about `CK_i` (different label), and `CK_{i+1}`
+// cannot be run back to `CK_i` (HKDF is one-way). So a receiver's post-message-i state —
+// `CK_{i+1}` plus whatever it still caches — cannot reconstruct `MK_{i-1}` unless that key is
+// still sitting in the skipped cache (which is itself FS-managed, below).
+//
+// DOMAIN SEPARATION: `RATCHET_SALT` is distinct from the epoch schedule's `EPOCH_SALT` /
+// `TREEKEM_SALT` and from the content KDF (`groupkey.rs` "haven-event-key-v1"), and the two
+// per-chain-key labels are distinct from those and from each other. A ratchet key can never
+// collide with an epoch key, a node key, or a content-event key.
+//
+// The HARD part is Haven's transport (design §6.5 + the task's mailbox contract): DMs arrive
+// DAYS LATE and OUT OF ORDER over content-addressed mailboxes. A naive delete-on-use ratchet
+// would lose the ability to open a message that jumped the queue. The receiver therefore keeps
+// a BOUNDED skipped-key cache ([`RatchetReceiver`]) — the Signal skipped-key mechanism, capped
+// so an adversarial index cannot blow memory or CPU.
+
+/// HKDF salt for the M6 per-message ratchet (§6.5). Domain-separated from `EPOCH_SALT` /
+/// `TREEKEM_SALT` / the content KDF — see the module note above.
+pub const RATCHET_SALT: &[u8] = b"haven-mls-ratchet-v1";
+
+/// The max-JUMP cap: the largest forward gap (`claimed_index - next_expected`) a single received
+/// message may advance the chain. THE bound that makes an adversarial index safe: a message
+/// claiming index `next + 2^32` is rejected BEFORE a single HKDF runs or a single byte is
+/// allocated, so per-message work is capped at `RATCHET_MAX_JUMP` HKDF-expands regardless of what
+/// the envelope claims. Chosen well above any plausible in-flight burst on one epoch's DM chain
+/// (weekly epoch rotation re-roots the chain, §6.5) yet small enough that the worst case is a few
+/// thousand cheap HKDFs.
+pub const RATCHET_MAX_JUMP: u32 = 2048;
+
+/// The cache-SIZE cap: the most skipped message keys a receiver retains per chain. THE memory
+/// bound (~`RATCHET_MAX_SKIPPED * 36` bytes/chain). When a new skip would exceed it the
+/// lowest-index (oldest) key is evicted AND WIPED (FS on eviction). This also fixes the
+/// **late-message horizon**: a message with index `i < next` opens only while `MK_i` is still
+/// cached; once evicted it fails to open *gracefully* (`message_key` returns `None`, no panic) and
+/// the caller falls back to the epoch-keyed re-seal backstop (§6.1). The horizon is therefore "the
+/// most recent `RATCHET_MAX_SKIPPED` skipped indices," documented so no one mistakes an
+/// out-of-horizon miss for a bug.
+pub const RATCHET_MAX_SKIPPED: usize = 2048;
+
+/// `CK_0 = HKDF(salt=RATCHET_SALT, ikm=sender_key, info="chain-init" ‖ group_id ‖ epoch)`.
+/// Both sides derive it from the SAME per-leaf epoch `sender_key` (§3.3) + group + epoch, so the
+/// sender's chain and every receiver's replica agree; a new epoch's `sender_key` re-roots a fresh
+/// chain (the design's "epoch rotation resets the chain").
+pub fn ratchet_chain_init(sender_key: &[u8; 32], group_id: &[u8], epoch: u64) -> [u8; 32] {
+    let mut info = Vec::with_capacity(11 + group_id.len() + 8);
+    info.extend_from_slice(b"chain-init");
+    info.extend_from_slice(group_id);
+    info.extend_from_slice(&epoch.to_le_bytes());
+    hkdf32(RATCHET_SALT, sender_key, &info)
+}
+
+/// `MK_i = HKDF-expand(CK_i, "msg")` — the per-message key. One-way off `CK_i`.
+fn ratchet_message_key(ck: &[u8; 32]) -> [u8; 32] {
+    hkdf_expand32(ck, b"msg")
+}
+
+/// `CK_{i+1} = HKDF-expand(CK_i, "chain")` — advance the chain. One-way off `CK_i`.
+fn ratchet_next_chain(ck: &[u8; 32]) -> [u8; 32] {
+    hkdf_expand32(ck, b"chain")
+}
+
+/// The SENDER side of the ratchet: hands out `(index, MK)` in order and advances. The consumed
+/// chain key is wiped the instant the next one exists — FS deletion point #1 (nothing on the
+/// sender ever holds a key that sealed an already-sent message).
+pub struct SenderChain {
+    ck: [u8; 32],
+    /// Index of the NEXT message key this chain will produce.
+    next: u32,
+}
+
+impl SenderChain {
+    pub fn new(sender_key: &[u8; 32], group_id: &[u8], epoch: u64) -> Self {
+        SenderChain { ck: ratchet_chain_init(sender_key, group_id, epoch), next: 0 }
+    }
+
+    /// The current in-order index (the index the next [`Self::next_key`] will stamp).
+    pub fn index(&self) -> u32 {
+        self.next
+    }
+
+    /// Produce `(i, MK_i)` and advance to `i+1`, WIPING `CK_i`. The caller seals under `MK_i`,
+    /// stamps `i` on the envelope, then wipes its own copy of `MK_i` after sealing.
+    pub fn next_key(&mut self) -> (u32, [u8; 32]) {
+        let i = self.next;
+        let mk = ratchet_message_key(&self.ck);
+        let nck = ratchet_next_chain(&self.ck);
+        wipe_secret(&mut self.ck);
+        self.ck = nck;
+        // u32 space is astronomically larger than one epoch's DM count (the epoch re-roots weekly,
+        // §6.5); a saturating step avoids any wrap even in a pathological run.
+        self.next = i.saturating_add(1);
+        (i, mk)
+    }
+}
+
+impl Drop for SenderChain {
+    fn drop(&mut self) {
+        wipe_secret(&mut self.ck);
+    }
+}
+
+/// The RECEIVER side: derives message keys on demand, tolerating OUT-OF-ORDER and DAYS-LATE
+/// delivery via a BOUNDED skipped-key cache (§6.5). Its two caps ([`RATCHET_MAX_JUMP`],
+/// [`RATCHET_MAX_SKIPPED`]) are what keep an adversarial envelope from turning "open a late DM"
+/// into an unbounded-memory / unbounded-CPU DoS.
+pub struct RatchetReceiver {
+    /// The chain key at position `next` (i.e. `CK_next`).
+    ck: [u8; 32],
+    /// The next in-order index we would derive.
+    next: u32,
+    /// Message keys for indices we jumped OVER (received out of order), awaiting their late
+    /// message. `BTreeMap` so eviction of the lowest (oldest) index is O(log n) and deterministic.
+    /// Every value is a live secret: wiped on eviction, on use (delete-on-use), and on drop.
+    skipped: std::collections::BTreeMap<u32, [u8; 32]>,
+}
+
+impl RatchetReceiver {
+    pub fn new(sender_key: &[u8; 32], group_id: &[u8], epoch: u64) -> Self {
+        RatchetReceiver {
+            ck: ratchet_chain_init(sender_key, group_id, epoch),
+            next: 0,
+            skipped: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Number of cached skipped keys (for the bound tests).
+    pub fn skipped_len(&self) -> usize {
+        self.skipped.len()
+    }
+
+    /// Return `MK_i` for message index `i`, or `None` if it cannot be produced within the bounds.
+    ///
+    /// * `i < next` — a LATE / out-of-order message: served from the skipped cache and removed
+    ///   (delete-on-use FS). `None` if it was already consumed in order, or evicted below the
+    ///   horizon — the graceful late-message miss (caller falls back to the epoch-keyed backstop).
+    /// * `i == next` — the in-order case: derive, advance, WIPE the consumed chain key. Not cached
+    ///   (delete-on-use).
+    /// * `i > next` — a forward JUMP: **rejected before any work** if `i - next > RATCHET_MAX_JUMP`
+    ///   (the CPU/memory bound; an index of `2^32-1` costs one comparison, not billions of HKDFs).
+    ///   Otherwise derive+cache `MK_next..MK_{i-1}` (the skipped keys, honoring the size cap by
+    ///   evicting+wiping the oldest) and return the consumed `MK_i`.
+    pub fn message_key(&mut self, i: u32) -> Option<[u8; 32]> {
+        if i < self.next {
+            // Late arrival: only openable while still within the cache horizon. `remove` moves the
+            // key out of the map (no lingering map copy) — delete-on-use. Caller wipes after use.
+            return self.skipped.remove(&i);
+        }
+        // i >= next. Reject an out-of-bounds jump BEFORE deriving/allocating anything — this single
+        // check is why an adversarial `i` cannot force unbounded derivation or memory (§6.5, §10's
+        // "every cache has a named cap" discipline). `i - self.next` cannot underflow (i >= next).
+        if i - self.next > RATCHET_MAX_JUMP {
+            return None;
+        }
+        // Walk forward to `i`, caching each jumped-over key. The loop runs at most RATCHET_MAX_JUMP
+        // times (bounded above), and `insert_skipped` keeps the cache at most RATCHET_MAX_SKIPPED.
+        while self.next < i {
+            let mk = ratchet_message_key(&self.ck);
+            let at = self.next;
+            self.advance();
+            self.insert_skipped(at, mk);
+        }
+        // now self.next == i: the in-order, delete-on-use case.
+        let mk = ratchet_message_key(&self.ck);
+        self.advance();
+        Some(mk)
+    }
+
+    /// Advance `CK_next → CK_{next+1}`, wiping the consumed chain key (FS deletion point).
+    fn advance(&mut self) {
+        let nck = ratchet_next_chain(&self.ck);
+        wipe_secret(&mut self.ck);
+        self.ck = nck;
+        self.next = self.next.saturating_add(1);
+    }
+
+    /// Cache a skipped key, enforcing [`RATCHET_MAX_SKIPPED`] by evicting AND WIPING the
+    /// lowest-index (oldest) entry first. The eviction wipe is the FS deletion point for a key
+    /// that aged past the horizon before its message arrived.
+    fn insert_skipped(&mut self, idx: u32, mk: [u8; 32]) {
+        while self.skipped.len() >= RATCHET_MAX_SKIPPED {
+            // BTreeMap keeps keys ordered → the first is the oldest index. `pop_first` moves it out
+            // so we can wipe it (dropping a `[u8;32]` does not zero it).
+            match self.skipped.pop_first() {
+                Some((_, mut old)) => wipe_secret(&mut old),
+                None => break,
+            }
+        }
+        self.skipped.insert(idx, mk);
+    }
+}
+
+impl Drop for RatchetReceiver {
+    fn drop(&mut self) {
+        wipe_secret(&mut self.ck);
+        for (_, v) in self.skipped.iter_mut() {
+            wipe_secret(v);
+        }
+    }
+}
+
 /// The commit's confirmation MAC: `blake3-keyed(confirm_key_n, confirmed_transcript_hash_n)`.
 /// Agreeing on this value proves agreement on the entire epoch derivation — tree hash,
 /// transcript, and schedule — which is exactly the §1.2 "group agreement" property.
@@ -4079,5 +4291,165 @@ mod m1_tests {
         for seed in [11u64, 22, 33] {
             run_convergence_sim(seed, 28);
         }
+    }
+}
+
+// ── M6: per-message sender-ratchet proof obligations (§9 M6, §6.5) ────────────────────────
+#[cfg(test)]
+mod ratchet_m6_tests {
+    use super::*;
+
+    const GID: &[u8] = b"dm-circle";
+    const EPOCH: u64 = 7;
+    // A stand-in for a leaf's per-epoch `sender_key_n` — the ratchet's one input.
+    const SENDER_KEY: [u8; 32] = [0x5A; 32];
+
+    /// What one message key opens: the derived event/AEAD-shaped material. For the FS test we only
+    /// need "MK_i is a deterministic function of i and nothing about MK_{i-1} leaks from later
+    /// state", so we compare the raw message keys (the content layer keys off these unchanged).
+    fn all_keys(n: u32) -> Vec<[u8; 32]> {
+        let mut s = SenderChain::new(&SENDER_KEY, GID, EPOCH);
+        (0..n).map(|_| s.next_key().1).collect()
+    }
+
+    /// Sender and receiver agree on every message key, in order — the baseline the FS/order tests
+    /// build on. Distinct keys per index (no accidental reuse).
+    #[test]
+    fn sender_and_receiver_agree_and_keys_are_distinct() {
+        let sent = all_keys(16);
+        let mut r = RatchetReceiver::new(&SENDER_KEY, GID, EPOCH);
+        for (i, mk) in sent.iter().enumerate() {
+            assert_eq!(r.message_key(i as u32).unwrap(), *mk, "receiver derives the same MK_{i}");
+        }
+        for i in 0..sent.len() {
+            for j in (i + 1)..sent.len() {
+                assert_ne!(sent[i], sent[j], "MK_{i} and MK_{j} must differ");
+            }
+        }
+        // A different epoch (weekly re-root) yields a wholly different chain — "epoch rotation
+        // resets the chain".
+        let other = SenderChain::new(&SENDER_KEY, GID, EPOCH + 1).next_key().1;
+        assert_ne!(other, sent[0], "a new epoch re-roots CK_0");
+    }
+
+    /// **Per-message FS (§9 M6):** capturing MK_i (or the receiver state AFTER processing message
+    /// i) does not reveal MK_{i-1}. Proven two ways:
+    ///   (a) the chain is one-way — the message key and the next chain key are independent HKDF
+    ///       expands, so no function of {MK_i, CK_{i+1}} reconstructs MK_{i-1}; we assert the used
+    ///       key is gone from the sender/receiver state and that later state never equals an
+    ///       earlier key;
+    ///   (b) delete-on-use — after the receiver processes i in order, MK_{i-1} is not held anywhere
+    ///       (it was never cached), so a post-i state snapshot cannot yield it.
+    #[test]
+    fn per_message_forward_secrecy_used_key_is_unrecoverable() {
+        let keys = all_keys(8);
+        let mut r = RatchetReceiver::new(&SENDER_KEY, GID, EPOCH);
+        // Process 0..=4 in order (delete-on-use — nothing cached).
+        for i in 0..=4u32 {
+            let _ = r.message_key(i).unwrap();
+        }
+        // Post-message-4 receiver state: the live chain key is CK_5. It must not equal any prior
+        // message key, and the cache must be empty (in-order ⇒ no skips retained). So MK_3, MK_2,
+        // … are unrecoverable from this snapshot.
+        assert_eq!(r.next, 5, "receiver advanced to the next in-order index");
+        assert_eq!(r.skipped_len(), 0, "in-order delivery caches nothing — delete-on-use");
+        for k in &keys[..5] {
+            assert_ne!(&r.ck, k, "the live chain key is not any consumed message key");
+        }
+        // And a late request for an already-consumed, never-cached index fails gracefully (the key
+        // is gone) — you cannot walk the ratchet backwards to recover MK_3.
+        assert!(r.message_key(3).is_none(), "a consumed in-order key cannot be re-derived (FS)");
+
+        // Sender side: after producing MK_i the chain key advanced; the old CK_i is wiped, so the
+        // sender likewise cannot re-emit MK_{i-1}.
+        let mut s = SenderChain::new(&SENDER_KEY, GID, EPOCH);
+        let (_, _mk0) = s.next_key();
+        let ck_after0 = s.ck;
+        let (_, _mk1) = s.next_key();
+        assert_ne!(s.ck, ck_after0, "the sender chain key moved forward (old CK wiped, one-way)");
+    }
+
+    /// **Out-of-order / days-late (§9 M6):** a shuffled delivery order, plus one message delivered
+    /// "days late" (far behind the current chain position), all open via the skipped-key cache —
+    /// the mailbox open-a-late-message contract holds.
+    #[test]
+    fn out_of_order_and_days_late_all_open() {
+        let keys = all_keys(64);
+        let mut r = RatchetReceiver::new(&SENDER_KEY, GID, EPOCH);
+
+        // Shuffled (deterministic) order over 0..12.
+        for &i in &[3u32, 0, 7, 1, 2, 11, 4, 9, 5, 6, 8, 10] {
+            assert_eq!(r.message_key(i).unwrap(), keys[i as usize], "shuffled MK_{i} opens");
+        }
+        // Jump far ahead: process index 60 while the tip was ~12. This caches 12..60 as skipped.
+        assert_eq!(r.message_key(60).unwrap(), keys[60], "a big in-cap jump opens");
+        // Now a DAYS-LATE message: index 20, delivered long after the chain advanced to 61. It is
+        // still within the horizon, so the cache opens it.
+        assert_eq!(r.message_key(20).unwrap(), keys[20], "a days-late message opens from the cache");
+        assert_eq!(r.message_key(45).unwrap(), keys[45], "another late one opens");
+        // Delete-on-use: re-requesting an already-served late index now misses (its key was
+        // consumed) — but that is the dedup layer's job upstream, and it fails gracefully.
+        assert!(r.message_key(20).is_none(), "a served late key is delete-on-use");
+    }
+
+    /// **Bounded skipped-key cache under adversarial gaps (§9 M6):**
+    ///   1. a message claiming `next + HUGE` is rejected by the max-jump cap with NO derivation;
+    ///   2. a normal gap within the cap works;
+    ///   3. the cache honors its size cap — oldest evicted (and, implicitly, wiped).
+    #[test]
+    fn bounded_cache_rejects_adversarial_gap_and_caps_size() {
+        // (1) Adversarial index: 2^32-1 while at 0. Rejected instantly, no state change.
+        let mut r = RatchetReceiver::new(&SENDER_KEY, GID, EPOCH);
+        assert!(r.message_key(u32::MAX).is_none(), "an out-of-cap jump is rejected");
+        assert_eq!(r.next, 0, "a rejected jump advances nothing");
+        assert_eq!(r.skipped_len(), 0, "a rejected jump derives/caches nothing");
+        // Exactly at the cap boundary is allowed; one past is not.
+        assert!(r.message_key(RATCHET_MAX_JUMP).is_some(), "a jump of exactly MAX_JUMP is allowed");
+        let mut r2 = RatchetReceiver::new(&SENDER_KEY, GID, EPOCH);
+        assert!(r2.message_key(RATCHET_MAX_JUMP + 1).is_none(), "one past MAX_JUMP is rejected");
+
+        // (2) A normal in-cap gap opens and caches the skipped keys.
+        let keys = all_keys(40);
+        let mut r3 = RatchetReceiver::new(&SENDER_KEY, GID, EPOCH);
+        assert_eq!(r3.message_key(30).unwrap(), keys[30], "an in-cap gap opens");
+        assert_eq!(r3.skipped_len(), 30, "indices 0..30 are cached as skipped");
+        assert_eq!(r3.message_key(5).unwrap(), keys[5], "a cached skipped key opens");
+
+        // (3) Size cap: force more than RATCHET_MAX_SKIPPED skips across successive jumps and
+        // assert the cache never exceeds the cap and the OLDEST indices are the ones evicted.
+        let mut r4 = RatchetReceiver::new(&SENDER_KEY, GID, EPOCH);
+        // First fill exactly to the cap (skip 0..cap, consume `cap`).
+        let cap = RATCHET_MAX_SKIPPED as u32;
+        assert!(r4.message_key(cap).is_some());
+        assert_eq!(r4.skipped_len(), RATCHET_MAX_SKIPPED, "cache filled to the cap");
+        assert!(r4.skipped.contains_key(&0), "index 0 present before overflow");
+        // Now skip forward by RATCHET_MAX_JUMP more, forcing evictions of the oldest.
+        assert!(r4.message_key(cap + RATCHET_MAX_JUMP).is_some());
+        assert_eq!(r4.skipped_len(), RATCHET_MAX_SKIPPED, "cache stays capped after overflow");
+        assert!(!r4.skipped.contains_key(&0), "the oldest index was evicted (and wiped)");
+        assert!(
+            r4.skipped.keys().min().copied().unwrap() > 0,
+            "eviction removed a contiguous run of the oldest indices"
+        );
+        // The evicted (out-of-horizon) key now fails gracefully — no panic, just None.
+        assert!(r4.message_key(0).is_none(), "an out-of-horizon late message fails gracefully");
+    }
+
+    /// The chain is a pure function of (sender_key, group, epoch): two independently constructed
+    /// receivers agree, and the sender's stream matches a receiver's in-order stream — the
+    /// property the FFI relies on to have peers converge without shared state.
+    #[test]
+    fn ratchet_is_deterministic_across_replicas() {
+        let mut r_a = RatchetReceiver::new(&SENDER_KEY, GID, EPOCH);
+        let mut r_b = RatchetReceiver::new(&SENDER_KEY, GID, EPOCH);
+        for i in 0..20u32 {
+            assert_eq!(r_a.message_key(i), r_b.message_key(i), "independent replicas agree at {i}");
+        }
+        // A different group id gives a different chain (no cross-DM confusion).
+        let cross = RatchetReceiver::new(&SENDER_KEY, b"other-dm", EPOCH)
+            .message_key(0)
+            .unwrap();
+        let mine = RatchetReceiver::new(&SENDER_KEY, GID, EPOCH).message_key(0).unwrap();
+        assert_ne!(cross, mine, "group id is bound into CK_0");
     }
 }

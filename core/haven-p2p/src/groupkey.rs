@@ -138,11 +138,24 @@ pub struct EpochEnvelope {
     sender: Vec<u8>,
     ciphertext: Vec<u8>,
     signature: Vec<u8>, // hybrid signature over the transcript
+    /// MLS M6 (§6.5): the per-message sender-ratchet index this DM was sealed under, when the
+    /// DM/live lane is ratcheting. `None` for every legacy / feed / re-seal-backstop envelope, and
+    /// `skip_serializing_if` keeps the wire BYTE-IDENTICAL to today whenever it is absent — the
+    /// switch-OFF no-regression guarantee. When `Some(i)`, `ciphertext` is sealed under `MK_i`
+    /// (derived from the epoch `sender_key` via the ratchet) rather than the raw epoch key, and the
+    /// index is folded into the signed transcript so it is authenticated, not attacker-malleable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ratchet: Option<u32>,
 }
 
 impl EpochEnvelope {
     pub fn sender_hex(&self) -> String {
         hex(&self.sender)
+    }
+    /// The M6 ratchet index this DM was sealed under, if any (§6.5). `None` ⇒ open under the raw
+    /// epoch key (legacy / feed / re-seal backstop).
+    pub fn ratchet_index(&self) -> Option<u32> {
+        self.ratchet
     }
     pub fn to_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self).expect("epoch envelope serializes")
@@ -159,6 +172,15 @@ impl EpochEnvelope {
         h.update(&self.salt);
         h.update(&self.sender);
         h.update(&self.ciphertext);
+        // M6: fold the ratchet index in ONLY when present — an absent index adds no bytes, so a
+        // non-ratcheted envelope's transcript (and therefore its signature and its
+        // content-addressed mailbox key) is byte-identical to today. When present it is
+        // authenticated, so a relay cannot rewrite the index to point a receiver at the wrong
+        // message key.
+        if let Some(r) = self.ratchet {
+            h.update(b"haven-epoch-ratchet-v1");
+            h.update(&r.to_le_bytes());
+        }
         *h.finalize().as_bytes()
     }
 }
@@ -201,6 +223,46 @@ pub fn seal_event_in_epoch(
         sender: sender.public().node_id_bytes().to_vec(),
         ciphertext,
         signature: Vec::new(),
+        ratchet: None,
+    };
+    env.signature = sender.sign(&env.transcript());
+    Ok(env)
+}
+
+/// M6 (§6.5): seal a DM under a per-message ratchet key `msg_key` (= `MK_i`, derived from the
+/// epoch `sender_key` via `treekem::SenderChain`), stamping the ratchet index `i` on the envelope.
+/// Structurally identical to [`seal_event_in_epoch`] — the salt/nonce derivation, deterministic
+/// seal, and signature are unchanged — only the KEY the content is sealed under moves from the raw
+/// epoch key to `MK_i`, and the authenticated `ratchet` field carries `i` so the receiver can
+/// re-derive `MK_i`. The salt is keyed by `msg_key` (a fresh key per message), so distinct DMs get
+/// distinct salts/nonces exactly as distinct epochs do today.
+pub fn seal_event_ratcheted(
+    sender: &Identity,
+    circle_id: &str,
+    epoch: u64,
+    msg_key: &[u8; 32],
+    ratchet_index: u32,
+    event: &Event,
+) -> Result<EpochEnvelope> {
+    let plaintext = serde_json::to_vec(event).map_err(|_| CoreError::Encoding("event encode"))?;
+    let salt: [u8; 16] = {
+        let mut h = blake3::Hasher::new_keyed(msg_key);
+        h.update(b"haven-event-salt-v1");
+        h.update(circle_id.as_bytes());
+        h.update(&epoch.to_le_bytes());
+        h.update(&plaintext);
+        h.finalize().as_bytes()[..16].try_into().expect("16 bytes")
+    };
+    let event_key = derive_event_key(msg_key, &salt, circle_id, epoch);
+    let ciphertext = seal_reproducible(&event_key, &plaintext);
+    let mut env = EpochEnvelope {
+        circle_id: circle_id.to_string(),
+        epoch,
+        salt: salt.to_vec(),
+        sender: sender.public().node_id_bytes().to_vec(),
+        ciphertext,
+        signature: Vec::new(),
+        ratchet: Some(ratchet_index),
     };
     env.signature = sender.sign(&env.transcript());
     Ok(env)
@@ -295,6 +357,33 @@ mod tests {
         let wrong = new_epoch_key();
         assert!(open_event_in_epoch(&alice.public(), &wrong, &env, false).is_err());
         let _ = bob;
+    }
+
+    #[test]
+    fn m6_ratcheted_seal_round_trips_and_stamps_index() {
+        // M6 (§6.5): a DM sealed under a per-message key `MK_i` opens with that SAME key and carries
+        // the authenticated index `i`; the wrong key (a different message's `MK`) does not open it,
+        // and the index survives the round-trip. This is the groupkey-layer contract the FFI ratchet
+        // lane relies on (the treekem chain provides `MK_i`; groupkey seals/opens under it).
+        use crate::treekem::{ratchet_chain_init, RatchetReceiver, SenderChain};
+        let alice = member(1);
+        let sender_key = [0x11u8; 32]; // stand-in for the epoch `sender_key_n`
+        let mut chain = SenderChain::new(&sender_key, b"c1", 5);
+        let ev = post(&alice, 100, "sealed under a message key");
+        let (i, mk) = chain.next_key();
+        assert_eq!(i, 0);
+        let env = seal_event_ratcheted(&alice, "c1", 5, &mk, i, &ev).unwrap();
+        assert_eq!(env.ratchet_index(), Some(0), "the index rides the envelope");
+        // A receiver re-derives MK_0 from the same epoch key and opens it.
+        let mut rx = RatchetReceiver::new(&sender_key, b"c1", 5);
+        let rk = rx.message_key(env.ratchet_index().unwrap()).unwrap();
+        assert_eq!(open_event_in_epoch(&alice.public(), &rk, &env, false).unwrap(), ev);
+        // The wrong message key (e.g. MK_1) cannot open MK_0's DM.
+        let wrong = ratchet_chain_init(&sender_key, b"c1", 6); // different epoch chain root
+        assert!(open_event_in_epoch(&alice.public(), &wrong, &env, false).is_err());
+        // A non-ratcheted seal carries no index (the OFF/feed case).
+        let plain = seal_event_in_epoch(&alice, "c1", 5, &sender_key, &ev).unwrap();
+        assert_eq!(plain.ratchet_index(), None);
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //!
 //! This is the single Rust implementation meant to retire the per-platform S3 clients (the
 //! Swift `S3Client`); it lives in `core/` so every client can adopt it. It is intentionally
-//! NOT wired into `p2pcore`/`haven-net`/`haven_ffi`, so the iOS/Android build is unaffected.
+//! NOT wired into `haven-p2p`/`haven-net`/`haven_ffi`, so the iOS/Android build is unaffected.
 
 use std::collections::BTreeMap;
 

@@ -180,8 +180,8 @@ authorization.
 sender**)."
 
 **What the code does.** The signature *is* verified, and verified well —
-`core/p2pcore-ffi/src/lib.rs:331-353`, binding recipient + domain tag at `:317-323`. But the core's
-own doc comment warns at `core/p2pcore-ffi/src/lib.rs:309-310`:
+`core/haven-ffi/src/lib.rs:331-353`, binding recipient + domain tag at `:317-323`. But the core's
+own doc comment warns at `core/haven-ffi/src/lib.rs:309-310`:
 
 > "The receiver should still confirm it's a known contact before trusting the display name — **the
 > signature proves authenticity, not authorization**."
@@ -264,9 +264,9 @@ another member's DM — only relay it" (`core/haven-net/src/blobstore.rs:702-706
 - `apple/HavenApp/Media.swift:339` — `let ref = "vid_\(UUID().uuidString)"`
 
 And `seal_bytes` binds **no** context — not the ref, not the circle id, not the post id
-(`core/p2pcore/src/social.rs:208-230`: `group` is used only to enumerate recipients; the signed
+(`core/haven-p2p/src/social.rs:208-230`: `group` is used only to enumerate recipients; the signed
 transcript covers sender/ciphertext/recipients and nothing else). `seal_circle_media`
-(`core/p2pcore-ffi/src/lib.rs:2197-2208`) passes no AAD. On the open side there is no ref check
+(`core/haven-ffi/src/lib.rs:2197-2208`) passes no AAD. On the open side there is no ref check
 either: `open_circle_media` (`lib.rs:2242-2258`) accepts any circle member as sender, and
 `open_circle_media_file` (`lib.rs:2276-2296`) loops **every known circle** until one opens.
 `SharedStore.swift:616-621` does the same. The reassembled blob is never hashed against `ref`.
@@ -306,7 +306,7 @@ use file-protection so they're unreadable on a locked/forensic device."
 **What the code does.** Media is written as raw plaintext and stays that way for the life of the
 install. `apple/HavenApp/Media.swift:320-323` — `img.jpegData(...)` → `try? data.write(to: url)` into
 `haven-media/<ref>.jpg`; video likewise (`:337-352`). Sealing happens only on the way *out* to a
-relay (`core/p2pcore-ffi/src/lib.rs:2220` reads plaintext from `in_path`), and inbound media is
+relay (`core/haven-ffi/src/lib.rs:2220` reads plaintext from `in_path`), and inbound media is
 written back to plaintext (`lib.rs:2299-2306`, `Media.swift:650-653`).
 
 Protection is iOS Data Protection at the **weakest** usable class —
@@ -575,7 +575,7 @@ co-recipient list for one message — up to 32 node ids explicitly grouped. Obse
 the circle membership graph. A storage relay gets it more directly: per-circle key prefixes plus
 which node id PUTs/GETs each.
 
-**Recommended fix.** `groupkey::mailbox_prefix` (`core/p2pcore/src/groupkey.rs:108-115`) already
+**Recommended fix.** `groupkey::mailbox_prefix` (`core/haven-p2p/src/groupkey.rs:108-115`) already
 implements exactly the right primitive for storage keys — a keyed BLAKE3 MAC over `kind:circle_id`
 under a per-member `circle_secret`, so the relay never sees the circle id. It is built, tested
 (`groupkey.rs:364-373`), and distributed in every KeyCommit (`:42-47`) — **but the storage paths do
@@ -737,7 +737,7 @@ These are as valuable as the holes. Each was attacked, not merely read.
 
 ### Cryptography
 
-- **The hybrid is a real hybrid.** `combine` (`core/p2pcore/src/crypto.rs:106-119`) builds
+- **The hybrid is a real hybrid.** `combine` (`core/haven-p2p/src/crypto.rs:106-119`) builds
   `ikm = dh ‖ pq` and runs it through one HKDF-SHA256 extract+expand. Breaking one half leaves the
   other's 32 bytes of entropy in the IKM — you cannot learn the output without both. Both halves are
   fixed-length (32 ‖ 32), so the concatenation is unambiguous and not vulnerable to a
@@ -768,12 +768,12 @@ These are as valuable as the holes. Each was attacked, not merely read.
 - **The `allow_forwarded` author/sender bypass is correctly gated.** `open_event_in_epoch`
   (`groupkey.rs:211-230`) skips the author/sender bind only when the caller passes
   `allow_forwarded` — and the single production call site passes `sender_hex == me_hex`
-  (`core/p2pcore-ffi/src/lib.rs:1273`), i.e. only for my own account's self-forwards. Only my own
+  (`core/haven-ffi/src/lib.rs:1273`), i.e. only for my own account's self-forwards. Only my own
   account can produce a `sender=me` envelope, so a member cannot use this to re-attribute someone
   else's event. I checked every call site; there is no other.
 - **Tamper/forgery rejected** — `groupkey.rs:346-361`.
-- **No crypto backdoors in core.** No `env::var`/`getenv` outside `#[cfg(test)]` in `p2pcore`,
-  `p2pcore-ffi`, `haven-net`; no `#[cfg(test)]` leakage into release paths; no hardcoded keys, no
+- **No crypto backdoors in core.** No `env::var`/`getenv` outside `#[cfg(test)]` in `haven-p2p`,
+  `haven-ffi`, `haven-net`; no `#[cfg(test)]` leakage into release paths; no hardcoded keys, no
   skip-verify flags, no crypto-weakening env overrides.
 
 ### Relay
@@ -817,7 +817,7 @@ These are as valuable as the holes. Each was attacked, not merely read.
   a 5-minute window. `nodeId` **is** the pubkey, so it is self-authenticating. **You cannot register a
   device token under someone else's identity.** Half of `SECURITY.md:23-24` is fully sound (the
   registration half; the notification half is F3).
-- **Notification signing binds the recipient** (`core/p2pcore-ffi/src/lib.rs:317-323`: domain tag ‖
+- **Notification signing binds the recipient** (`core/haven-ffi/src/lib.rs:317-323`: domain tag ‖
   recipient hex ‖ plaintext) — cross-user replay prevented.
 - **No existence oracle** — `/notify` and `/call` return uniform `ok:true` for unknown nodes
   (`worker.js:143,177`).
@@ -874,7 +874,7 @@ These are as valuable as the holes. Each was attacked, not merely read.
   AES-GCM tag and fail closed (`SharedStore.swift:616-621`). **The truncation attack does not work.**
   (F15 is a separate, lesser manifest issue.)
 - **The AEAD ratio-threshold trap is absent** — there is no naive ratio check to misfire. Swept
-  `apple/HavenApp`, `android/app/src`, `desktop/src-tauri/src`, `core/p2pcore*` for
+  `apple/HavenApp`, `android/app/src`, `desktop/src-tauri/src`, `core/haven-p2p*` for
   ratio/plausibility/size-sanity heuristics; found none. The only size logic is `sealedSize >
   mediaChunkBytes` (`SharedStore.swift:325`), an exact byte comparison against a fixed 8 MB constant —
   correct, and immune to the fixed-AEAD-overhead problem. **Media validity is decided by GCM
@@ -936,7 +936,7 @@ content. F1 is the one place the project fell below its own bar.
   random (`relay.rs:63-68`) and a relay builds its own outbound frames (`lib.rs:593-598`) — it can
   re-emit the same payload under fresh msg_ids indefinitely. What actually neutralizes replay is
   application-layer idempotence: event ids are `BLAKE3(author‖created_at‖kind)` and the reducer dedups
-  by id (`core/p2pcore/src/social.rs:82,371-373`), and mailbox keys are content hashes so a re-PUT is
+  by id (`core/haven-p2p/src/social.rs:82,371-373`), and mailbox keys are content hashes so a re-PUT is
   a no-op. Fine for events; **unexamined for call signaling.**
 - **iOS Data Protection classes on the engine state file and the scheduled queue.** I verified only
   the `haven-media` directory (`Media.swift:277-285`). Given F6 found the media half of
@@ -1092,7 +1092,7 @@ blake3(body)`, recomputes the body digest server-side and **enforces** it (`:308
 burns the nonce (`:181`, replay → `None`), and bounds the timestamp in **both** directions (`:166`).
 `blob_forbidden` (`blobstore.rs`) now ends in `true` — **default-deny** for any unrecognized key under
 `haven/` — the inversion round 1 asked for. The signed header reaches all three clients through the
-`http_auth_header` FFI (`p2pcore-ffi/src/lib.rs:410`; `SharedStore.swift:510`, `HavenNet.kt:2422`,
+`http_auth_header` FFI (`haven-ffi/src/lib.rs:410`; `SharedStore.swift:510`, `HavenNet.kt:2422`,
 `engine.rs`), signing with the **device** key.
 
 **F9 remains PARTIAL, and that is the honest state.** `httprelay` is still raw TCP (module doc:
@@ -1177,7 +1177,7 @@ gate did not regress. `cargo test -p haven-net` passes; `cargo check --workspace
 
 ## F5 — RESOLVED, with residuals the fix undersells
 
-`core/p2pcore/tests/media_substitution.rs` passes (6/6), and it is **not** vacuous: it runs real
+`core/haven-p2p/tests/media_substitution.rs` passes (6/6), and it is **not** vacuous: it runs real
 `seal_bytes`/`open_bytes` with a genuine roster member as the attacker, a one-line swap that forges
 nothing, and a negative control that proves the swap **lands** on the check-free path. Refs are
 `kind_hex(sha256(plaintext))` on all platforms (`mediaref.rs:121`, `Media.swift:357`, `LocalMedia.kt:66`;
@@ -1259,13 +1259,13 @@ self-defending.
 
 ## Epoch rotation & Revocation (non-audit) — rotation RESOLVED; revocation code honest, docs/UI NOT
 
-**Rotation.** `rotate_if_stale` (`p2pcore-ffi/src/lib.rs:1113`) advances the epoch once
+**Rotation.** `rotate_if_stale` (`haven-ffi/src/lib.rs:1113`) advances the epoch once
 `ROTATE_INTERVAL_SECS` (7d) elapses, driven from `epoch_sync_bundle_inner` (`:2098`) so every sync
 attempts it, with a backward-clock guard (`:1118`) so skew can't force rotation. This is additive C2
 forward-secrecy hardening; sound.
 
 **Revocation.** Correctly **not** fixed, and the code is now brutally honest:
-`recipients_with_devices` (`core/p2pcore/src/device.rs:350`) **always** pushes the account key for
+`recipients_with_devices` (`core/haven-p2p/src/device.rs:350`) **always** pushes the account key for
 every member ("ALWAYS seal to the account key", `:362`) before adding device bundles, and its own
 comment says "against a device whose seed was extracted, revoking is advisory… do not describe
 revocation as cryptographic." A seed-holder keeps decrypting regardless of the roster. **But the
@@ -1287,7 +1287,7 @@ not; it rides the transport in cleartext. Every SDP offer/answer and ICE candida
 candidate **IP addresses**) is visible to any relay on the frame-9 path.
 
 **Unauthenticated.** The FFI **does** deliver the QUIC-verified sender (`on_inbound(from_hex, payload)`,
-`p2pcore-ffi/src/lib.rs:862`; threaded into `handleInbound` as `senderDevice`, `FeedView.swift:651`),
+`haven-ffi/src/lib.rs:862`; threaded into `handleInbound` as `senderDevice`, `FeedView.swift:651`),
 and `handleHello` **uses** it (compares at `:2380`). But the `switch type` dispatches **every** call
 frame (10/11/12/16/17/18/21/22) passing only `payload` to `CallManager` — the transport-verified id is
 **discarded**. The frame-9 relay path (`:2028`) calls `handleInbound(inner, viaNearby: true)` with **no**
@@ -1319,7 +1319,7 @@ channel" comment at `WebRTCCall.swift:22` must be corrected — it is the exact 
 **sealed *and* signed to the recipient** before it leaves the device — one purpose-specific,
 domain-separated primitive reused from the existing signed-notification path, not a new crypto path
 and not a raw signing oracle (audit H3): `HavenSocial::seal_call_frame` / `open_call_frame`
-(`p2pcore-ffi/src/lib.rs`), the same `seal_media` + `sign` construction posts/notifications use.
+(`haven-ffi/src/lib.rs`), the same `seal_media` + `sign` construction posts/notifications use.
 
 - **(b) SDP/fingerprint — the MITM.** The whole signaling body (SDP offer/answer, ICE, control) is
   encrypted to the recipient's key, so a relay on the frame-9 path can neither read candidate IPs nor
@@ -1343,7 +1343,7 @@ and not a raw signing oracle (audit H3): `HavenSocial::seal_call_frame` / `open_
 
 Shipped on all four surfaces (iOS/macOS `FeedStore.sendCallFrame` + `handleInbound`, Android
 `CallManager` send/handle, desktop `engine.rs` `send_call_frame` + `handle_call`). Proven dead by
-`call_frame_seal_defeats_relay_mitm` (`p2pcore-ffi/src/lib.rs`), which exercises the frame-9 relay
+`call_frame_seal_defeats_relay_mitm` (`haven-ffi/src/lib.rs`), which exercises the frame-9 relay
 path specifically: a genuine signed offer is ACCEPTED with Alice's real fingerprint; a relay-rewritten
 offer, a Mallory-forged offer claiming to be Alice, an offer replayed as another type, a wrong-recipient
 frame, and a legacy unsealed frame are each REJECTED. `cargo test -p haven_ffi` green (13/13); iOS +
@@ -1367,9 +1367,9 @@ the D16 seed-drop, matching `device.rs:367-374`.
 **RESOLVED 2026-07-15.** `docs/SECURITY.md:24-28` rewritten into two bullets: member removal/block is
 labelled cryptographic (unchanged truth), and a new bullet states device-roster revocation is
 **advisory, not cryptographic** — because `recipients_with_devices` **always** also seals to the account
-key (`core/p2pcore/src/device.rs:358-363`) and a linked device holds a copy of the master seed, so a
+key (`core/haven-p2p/src/device.rs:358-363`) and a linked device holds a copy of the master seed, so a
 revoked-but-seed-holding device keeps decrypting; made cryptographic only by the unbuilt D16 seed-drop
-(`core/p2pcore/src/device.rs:371-373`). "cryptographic revocation, not advisory" no longer appears for
+(`core/haven-p2p/src/device.rs:371-373`). "cryptographic revocation, not advisory" no longer appears for
 device changes.
 
 ## R3 — MED-HIGH (UI): Android + desktop still promise a revoked device is cut off
@@ -1424,7 +1424,7 @@ content-free reporting to the developer exists and is signed, matching `SECURITY
 
 **RESOLVED 2026-07-15.** `appstore-metadata.md:61` rewritten: server-side **content** scanning is stated
 impossible (no content leaves the device), but the copy now says user REPORTING **ships** — a circle-scoped
-report (`EventKind::Report` authored per-circle, `core/p2pcore-ffi/src/lib.rs:1960`, read via `reports()`
+report (`EventKind::Report` authored per-circle, `core/haven-ffi/src/lib.rs:1960`, read via `reports()`
 `:1964`) plus a content-free, cryptographically signed developer notice carrying only the reported
 identity, action, and category, with the reporter's key verified but not stored. "reporting is not
 technically possible" is removed; the true member-removal-is-cryptographic clause is kept.

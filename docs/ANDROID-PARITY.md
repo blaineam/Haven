@@ -54,7 +54,7 @@ The original plan (still the map for the rest):
 
 ## The big lever: the core is already portable
 
-The entire trust + data layer is Rust in `core/p2pcore`, exposed through `p2pcore-ffi`
+The entire trust + data layer is Rust in `core/haven-p2p`, exposed through `haven-ffi`
 (crate `haven_ffi`) with **UniFFI**, which generates **Kotlin bindings from the same
 `.udl`/proc-macros that generate Swift**. So everything below the UI ports with *zero
 reimplementation* — only a Gradle/NDK build of the same crate:

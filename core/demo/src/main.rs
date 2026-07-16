@@ -2,7 +2,7 @@
 //!
 //! Two independent iroh endpoints (Alice + Bob) on real QUIC, relays disabled so it
 //! runs fully offline/local. Alice generates a real PNG, seals it to Bob with the
-//! hybrid post-quantum KEM from `p2pcore`, and ships it over a QUIC stream. Bob
+//! hybrid post-quantum KEM from `haven-p2p`, and ships it over a QUIC stream. Bob
 //! accepts, decapsulates, opens, and verifies the bytes match the original by
 //! BLAKE3. Nothing on the wire is ever plaintext.
 //!
@@ -18,8 +18,8 @@ use iroh::{
     endpoint::{presets::Empty, Endpoint},
     EndpointAddr, RelayMode,
 };
-use p2pcore::crypto::{decapsulate, encapsulate_to, open, seal, Encapsulation};
-use p2pcore::identity::{Identity, HavenId};
+use haven_p2p::crypto::{decapsulate, encapsulate_to, open, seal, Encapsulation};
+use haven_p2p::identity::{Identity, HavenId};
 
 /// Application protocol id for this transfer.
 const ALPN: &[u8] = b"haven/photo/0";

@@ -22,8 +22,8 @@ use std::sync::Arc;
 use haven_net::blobstore::{BlobClient, BlobServer};
 use haven_net::livedelivery::{deliver_to_own_devices, TOTAL_BUDGET};
 use haven_net::Node;
-use p2pcore::identity::Identity;
-use p2pcore::social::{open_event, seal_event, Event, EventKind, Group, SealedEnvelope};
+use haven_p2p::identity::Identity;
+use haven_p2p::social::{open_event, seal_event, Event, EventKind, Group, SealedEnvelope};
 use tokio::time::{timeout, Duration};
 
 /// A post the user authors on one of their devices, sealed to their circle.

@@ -45,7 +45,7 @@ keeps 1.0.x peers readable throughout. This is landable in stages.
 ### 1.1 One seed, three derived capabilities
 
 Everything roots in the 32-byte **account master seed**. `Identity::from_seed`
-(`core/p2pcore/src/identity.rs:161`) HKDF-expands it into Ed25519 + ML-DSA-65 signing keys, an X25519
+(`core/haven-p2p/src/identity.rs:161`) HKDF-expands it into Ed25519 + ML-DSA-65 signing keys, an X25519
 secret, and an ML-KEM-768 decapsulation key. From that one seed hang exactly three primitives that the
 rest of the app consumes:
 
@@ -61,7 +61,7 @@ needed to seal to it — **there is no missing encryption key to add.**
 
 ### 1.2 `st.me` is always the account; `st.device` only opens
 
-In the engine, `HavenSocial`'s `me: Identity` field (`core/p2pcore-ffi/src/lib.rs:1195`,
+In the engine, `HavenSocial`'s `me: Identity` field (`core/haven-ffi/src/lib.rs:1195`,
 constructed `:1544`) is **always the account identity built from the master seed**. The
 `device: Option<Identity>` field (`:1199`, set by `use_device_identity` at `:1565`) is used **only to
 open/decapsulate** — it never signs or authors (open sites: `:1293`, `:1414`, `:2401`, `:2467`,
@@ -77,7 +77,7 @@ Grouped by the capability each consumes. This is the list seed-drop must re-poin
 
 | What | Site |
 |---|---|
-| Device credential issue | `core/p2pcore/src/device.rs:75`; FFI `multidevice.rs:38`, `lib.rs:2098` |
+| Device credential issue | `core/haven-p2p/src/device.rs:75`; FFI `multidevice.rs:38`, `lib.rs:2098` |
 | Device list sign / union-merge re-sign | `device.rs:182`, `:224`; FFI `multidevice.rs:63`, `lib.rs:2091`, `:2714+` |
 | Social event / bytes envelope sign | `social.rs:201` (`seal_event`), `:228` (`seal_bytes`) |
 | **Production post/DM authoring** (epoch-sealed) | `groupkey.rs:205` (`seal_event_in_epoch`); called `lib.rs:2672` (author), `:2204` (backfill re-seal) |
@@ -128,7 +128,7 @@ Tracing corrects any impression that Phase 2 is greenfield. Shipped and tested t
 
 - **Per-device keys + account-signed credentials + versioned signed rosters** with higher-version-wins
   adoption, 2P-set union merge for own-account replicas, and "newer verdict wins" revocation defense
-  (`core/p2pcore/src/device.rs` in full; tests `:435-670`).
+  (`core/haven-p2p/src/device.rs` in full; tests `:435-670`).
 - **Device-bundle sealing already works.** `recipients_with_devices` (`device.rs:350`) expands members
   to authorized device bundles and drops revoked ones; `revoked_device_cannot_open_the_key_commit`
   (`device.rs:641`) proves an authorized device opens a commit and a revoked one cannot.

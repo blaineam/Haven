@@ -6,7 +6,7 @@
 //! at `rclone serve s3 127.0.0.1:8333`.
 
 use haven_net::s3tunnel::{tunnel_to_addr, S3Server};
-use p2pcore::identity::Identity;
+use haven_p2p::identity::Identity;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{timeout, Duration};

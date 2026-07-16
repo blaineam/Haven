@@ -1,6 +1,6 @@
 # Haven — Apple app (iOS/macOS)
 
-A SwiftUI app built on the real Rust core (`p2pcore`) via a UniFFI XCFramework. It runs
+A SwiftUI app built on the real Rust core (`haven-p2p`) via a UniFFI XCFramework. It runs
 on iPhone and on macOS (today via **Mac Catalyst**; a native AppKit/SwiftUI port is in
 progress — see [`../docs/MACOS-NATIVE-PORT.md`](../docs/MACOS-NATIVE-PORT.md)). Features
 include circles + multi-circle feed, stories, DMs, in-app camera with filters, Apple
@@ -41,7 +41,7 @@ xcodebuild -project Haven.xcodeproj -scheme Haven \
   switched between, each with its own profile.
 - **Feed** — multi-circle feed: compose posts, react, comment, edit, unsend, stories.
   Every action is sealed end-to-end to the circle and reopened (seal → open → feed) by
-  `p2pcore::social`, then delivered peer-to-peer over iroh (with a nearby Bluetooth/Wi-Fi
+  `haven-p2p::social`, then delivered peer-to-peer over iroh (with a nearby Bluetooth/Wi-Fi
   mesh fallback).
 - **DMs, calls, media** — direct messages, WebRTC 1:1 and group audio/video calls with
   screen share, in-app camera with filters, and Apple Music on posts.

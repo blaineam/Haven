@@ -25,17 +25,17 @@ This document records what Haven protects, how, and the limits — including the
   an epoch key distributed to the current members via the hybrid KEM. Removing or blocking a **member**
   (a contact who never held your account seed) rotates the epoch and seals the new key only to the
   remaining members, so that node **cannot decrypt content posted afterward** — this member removal is
-  cryptographic, not advisory (`core/p2pcore-ffi/src/lib.rs:1128`, `:1521`, `:2516`). Only the last 4
+  cryptographic, not advisory (`core/haven-ffi/src/lib.rs:1128`, `:1521`, `:2516`). Only the last 4
   epoch keys are retained (`prune_epoch_keys`, `lib.rs:1041-1063`).
 - **Device-roster revocation is _advisory_, not cryptographic.** Revoking one of your **own** linked
   devices rotates the epoch too, but every epoch key still seals to the account key as well —
-  `recipients_with_devices` **always** adds it (`core/p2pcore/src/device.rs:358-363`) — and a linked
+  `recipients_with_devices` **always** adds it (`core/haven-p2p/src/device.rs:358-363`) — and a linked
   device holds a _copy_ of the master seed (linking transfers `haven-seed:` / `haven-link:`; enrollment
   only adds a device key to a device that already has the seed). So a revoked device that still holds the
   seed keeps decrypting, and can even re-sign a higher-version roster re-adding itself. Revocation
   therefore defeats a device that is **lost or stolen** (keychain intact, seed not extracted), not one
   that is **compromised**. Making it cryptographic needs the seed-drop re-key (D16 Phase 2), which is
-  **not yet built** (`core/p2pcore/src/device.rs:371-373`); until it lands, the only remedy against a
+  **not yet built** (`core/haven-p2p/src/device.rs:371-373`); until it lands, the only remedy against a
   genuinely compromised device is starting a new identity.
 - **Forward secrecy — read this carefully.** Pruning bounds it *only once the epoch has actually
   moved*. The epoch moves on removal/block/device-roster change **and, as of the 2026-07 hardening,
@@ -45,7 +45,7 @@ This document records what Haven protects, how, and the limits — including the
   month of captured ciphertext rather than a circle's whole history. (The manual `rotate_circle` FFI
   at `lib.rs:1518` remains test-only; the periodic path above is what actually runs.) Haven still
   does **not** have per-message forward secrecy or post-compromise security; that needs MLS, which is
-  **not built** (the current layer is multi-recipient PKE — `core/p2pcore/src/social.rs:14-16`).
+  **not built** (the current layer is multi-recipient PKE — `core/haven-p2p/src/social.rs:14-16`).
 - **Authentication**: every event is signed and the signer is bound to the event author and circle
   epoch; push notifications are signed (the receiver verifies the sender); push registration is signed
   (the worker verifies the device belongs to the identity). Signatures are domain-separated; there is
@@ -89,7 +89,7 @@ claims, and only the first is about cryptography:
   to review, filter, or take down. Nothing in this section changes that.
 - **Reporting is shipped on all three platforms**, and it is *member*-scoped. A report is sealed to
   the **whole circle** as an ordinary event (`EventKind::Report` —
-  `core/p2pcore/src/social.rs:70`, authored at `core/p2pcore-ffi/src/lib.rs:1960`), because circles
+  `core/haven-p2p/src/social.rs:70`, authored at `core/haven-ffi/src/lib.rs:1960`), because circles
   have no owner: every member judges it and acts with the power they already hold — hide, remove, or
   block. The reporter's free-text comment goes **only** to the circle.
 - **An explicit report also sends a content-free entry to the developer**, via `POST /flag` to the

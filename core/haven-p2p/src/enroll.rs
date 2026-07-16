@@ -49,7 +49,7 @@ const GRANT_MAC_DOMAIN: &[u8] = b"haven-enroll-grant-v1";
 
 const MAC_LEN: usize = 32;
 
-/// Roster-wire tag byte. Mirrors `TAG_DEVICE_ROSTER` in `p2pcore-ffi` (`encode_roster` /
+/// Roster-wire tag byte. Mirrors `TAG_DEVICE_ROSTER` in `haven-ffi` (`encode_roster` /
 /// `my_roster_wire`): the grant carries the primary's roster **wire bytes verbatim** so the
 /// seedless device can persist + rebroadcast them without re-encoding (re-encoding would strip
 /// the primary-signed `SeedDropCapability` trailer — the §7 capability-fidelity risk). Core

@@ -366,7 +366,7 @@ any always-on device — even a browser tab left open — can be the bridge for 
 
 The binary lives in the monorepo at `core/haven-relay`. It composes the existing
 `haven-net` (iroh transport, mesh-relay frame, the local-disk **blob mailbox**
-`haven/blob/1`, and the S3-over-iroh tunnel `haven/s3/1`) and `p2pcore` (crypto/identity)
+`haven/blob/1`, and the S3-over-iroh tunnel `haven/s3/1`) and `haven-p2p` (crypto/identity)
 crates — it reinvents nothing.
 
 ```sh

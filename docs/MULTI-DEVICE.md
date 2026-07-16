@@ -7,7 +7,7 @@
 > linked device gets pushes and authored events self-sync through the shared circle mailbox).
 >
 > **Phase 1 (done):** the **device-credential trust layer** is implemented and unit-tested in
-> the core — [`p2pcore::device`](../core/p2pcore/src/device.rs): a per-device keypair, an
+> the core — [`haven-p2p::device`](../core/haven-p2p/src/device.rs): a per-device keypair, an
 > account-signed [`DeviceCredential`] (`{account_id, device bundle, name, created_at}`), and a
 > versioned, account-signed [`DeviceList`] (active + revoked, higher-version-wins merge,
 > rollback-defended). This is deliberately **MLS-independent** — it's just signed bindings the
@@ -15,7 +15,7 @@
 > engine and the MLS hardening (Phase 5) layers on without changing these signatures.
 >
 > **Phase 3 (shipped, all platforms):** the **convergence engine**
-> [`p2pcore::selfsync`](../core/p2pcore/src/selfsync.rs) — an `AccountState` CRDT (last-write-wins
+> [`haven-p2p::selfsync`](../core/haven-p2p/src/selfsync.rs) — an `AccountState` CRDT (last-write-wins
 > registers for roster / contacts / profile / settings / blocked / **pinned conversations**,
 > grow-only max read cursors) with a commutative/associative/idempotent `merge`, plus
 > self-encryption via a seed-derived [`Identity::self_sync_key`] only the user's own devices can
@@ -30,7 +30,7 @@
 > and (2) **epoch-key convergence** — `ensure_epoch` mints a *random* epoch key per device, so a
 > user's iPhone and Mac each generated a different key for the same circle+epoch and could never
 > open each other's events; both devices now deterministically adopt the numerically-larger epoch
-> key + circle secret ([`receive_key_commit`](../core/p2pcore-ffi/src/lib.rs)), so buffered events
+> key + circle secret ([`receive_key_commit`](../core/haven-ffi/src/lib.rs)), so buffered events
 > drain and future re-seals use the agreed key. Consistent across iOS/macOS, Android (shared `.so`),
 > and desktop (links the crate directly).
 >
@@ -49,12 +49,12 @@
 
 | Phase | Scope | Where | State |
 |---|---|---|---|
-| **1. Device-credential trust layer** | Per-device keys; account-signed `DeviceCredential`; versioned signed `DeviceList` (add/revoke, higher-version-wins, rollback defense); verify against the pinned account key. Own-account replicas UNION-merge; where two copies disagree about a revocation the **strictly-newer list's verdict wins**, so `with_self_added`'s explicit (version-bumped) re-authorization propagates instead of a stale copy re-adding the tombstone forever — the roster/epoch-churn flip-flop that kept a device's own id revoked and rotated every circle epoch per launch. Clients must self-register AFTER importing persisted state (the restored roster's higher version clobbers a pre-import self-registration). | `p2pcore::device` | **✅ core done & tested** |
-| **2. Enrollment & UI** | FFI export (done): `issue/verify_device_credential`, `sign/verify_device_list`, `device_list_is_authorized`, plus an `AccountStateHandle` object + `seal/open_account_state`. Ahead: QR/short-code link of a new device + out-of-band verification phrase; the authorizing device issues the credential and publishes a new `DeviceList`; "Blaine linked a new device" notice. Per-client (iOS → Android → desktop). | `p2pcore-ffi::multidevice` + clients | 🟡 **FFI export done**; enrollment QR/verify + UI ahead |
-| **3. Account-state self-sync** | A per-account state blob (roster, circles, contacts, profile, settings, blocked list, read state, **pinned conversations**) **self-sealed to the account's own devices** and synced via the mailbox; CRDT/LWW merge so devices converge. Gives "my devices show the same thing." Plus **own-device event convergence** (per-device epoch keys converge on the numerically-larger key) so authored/received posts + DMs sync across devices. | `p2pcore::selfsync` + `p2pcore-ffi::receive_key_commit` + relay/nearby channel | ✅ **all platforms**: iOS/macOS + desktop (relay+S3) + Android (relay) converge profile + settings + contacts + blocked + circles + message-pins, and own-device posts/DMs sync |
-| **4. Device-aware circle sealing + revocation** | A circle's epoch key seals to each member's AUTHORIZED **device** bundles (`recipients_with_devices`), never a revoked one; receive accepts a member's authorized device as committer/sender; ingest/store signed rosters (rollback-defended) + rotate epochs on add/revoke; rosters ride the sync bundle (`TAG_DEVICE_ROSTER`). | `p2pcore::device` + `p2pcore-ffi` | ✅ **core done & tested** — `linked_device_receives_then_revocation_cuts_it_off` proves a device receives content and revocation cuts it off. App side ahead: enrollment (device keypair + issue credential on link) + Authorized-Devices UI/revoke. |
+| **1. Device-credential trust layer** | Per-device keys; account-signed `DeviceCredential`; versioned signed `DeviceList` (add/revoke, higher-version-wins, rollback defense); verify against the pinned account key. Own-account replicas UNION-merge; where two copies disagree about a revocation the **strictly-newer list's verdict wins**, so `with_self_added`'s explicit (version-bumped) re-authorization propagates instead of a stale copy re-adding the tombstone forever — the roster/epoch-churn flip-flop that kept a device's own id revoked and rotated every circle epoch per launch. Clients must self-register AFTER importing persisted state (the restored roster's higher version clobbers a pre-import self-registration). | `haven-p2p::device` | **✅ core done & tested** |
+| **2. Enrollment & UI** | FFI export (done): `issue/verify_device_credential`, `sign/verify_device_list`, `device_list_is_authorized`, plus an `AccountStateHandle` object + `seal/open_account_state`. Ahead: QR/short-code link of a new device + out-of-band verification phrase; the authorizing device issues the credential and publishes a new `DeviceList`; "Blaine linked a new device" notice. Per-client (iOS → Android → desktop). | `haven-ffi::multidevice` + clients | 🟡 **FFI export done**; enrollment QR/verify + UI ahead |
+| **3. Account-state self-sync** | A per-account state blob (roster, circles, contacts, profile, settings, blocked list, read state, **pinned conversations**) **self-sealed to the account's own devices** and synced via the mailbox; CRDT/LWW merge so devices converge. Gives "my devices show the same thing." Plus **own-device event convergence** (per-device epoch keys converge on the numerically-larger key) so authored/received posts + DMs sync across devices. | `haven-p2p::selfsync` + `haven-ffi::receive_key_commit` + relay/nearby channel | ✅ **all platforms**: iOS/macOS + desktop (relay+S3) + Android (relay) converge profile + settings + contacts + blocked + circles + message-pins, and own-device posts/DMs sync |
+| **4. Device-aware circle sealing + revocation** | A circle's epoch key seals to each member's AUTHORIZED **device** bundles (`recipients_with_devices`), never a revoked one; receive accepts a member's authorized device as committer/sender; ingest/store signed rosters (rollback-defended) + rotate epochs on add/revoke; rosters ride the sync bundle (`TAG_DEVICE_ROSTER`). | `haven-p2p::device` + `haven-ffi` | ✅ **core done & tested** — `linked_device_receives_then_revocation_cuts_it_off` proves a device receives content and revocation cuts it off. App side ahead: enrollment (device keypair + issue credential on link) + Authorized-Devices UI/revoke. |
 | **4b. Live delivery + personal forwarder** | Real-time device-to-device push when both are online ([`haven_net::livedelivery`](../core/haven-net/src/livedelivery.rs)): an event authored on one device is handed straight to the user's other online devices, instead of waiting out their next mailbox poll. **Strictly additive** — the mailbox put is unchanged and unconditional, so live delivery only changes *how fast* a sibling learns, never *whether* (see below). Personal forwarder: not started. | `haven-net` + clients | 🟡 **live delivery done** (core + iOS/macOS + Android); forwarder ⏭️ |
-| **5. MLS hardening** | Each device becomes an MLS leaf; Add/Remove **commits** give forward secrecy + post-compromise security on link/revoke. Gated on the separate MLS (D3) work. | `p2pcore` (mls-rs) | ⏭️ (after MLS) |
+| **5. MLS hardening** | Each device becomes an MLS leaf; Add/Remove **commits** give forward secrecy + post-compromise security on link/revoke. Gated on the separate MLS (D3) work. | `haven-p2p` (mls-rs) | ⏭️ (after MLS) |
 
 ### Self-sync mailbox channel (the recipe clients implement)
 
@@ -132,7 +132,7 @@ devices pick the same winner independently, they converge without coordination; 
 counts as "new" so buffered events drain and future re-seals use the agreed key. Received friends'
 events are re-broadcast to the user's own devices as **self-sealed forwards** (author preserved,
 sender = me), which the ingest path now accepts. This lives in the shared core
-([`receive_key_commit`](../core/p2pcore-ffi/src/lib.rs) / `receive_epoch_event`), so iOS, macOS,
+([`receive_key_commit`](../core/haven-ffi/src/lib.rs) / `receive_epoch_event`), so iOS, macOS,
 Android, and desktop all inherit it.
 
 ## Linking a new device (no PII)
@@ -144,7 +144,7 @@ Android, and desktop all inherit it.
 3. The authorizing device issues a **signed device credential** for the newcomer.
 4. It publishes an updated, account-signed **device list** including the newcomer, and
    rotates the circle epoch so the new device gets a KeyCommit it can open
-   (`core/p2pcore-ffi/src/lib.rs:1960`).
+   (`core/haven-ffi/src/lib.rs:1960`).
 5. Contacts' clients see a device whose credential chains to the **pinned account
    key** → trusted automatically, optionally with a transparent *"Blaine linked a new
    device (MacBook)"* notice (iMessage-style).
@@ -153,14 +153,14 @@ Android, and desktop all inherit it.
 
 > **This is not MLS.** MLS is **not implemented** — there is no `mls-rs` dependency and no
 > MLS code in the tree; it appears only in comments describing future work
-> (`core/p2pcore/src/social.rs:14-16`, `device.rs:13-17`). The description below is the
+> (`core/haven-p2p/src/social.rs:14-16`, `device.rs:13-17`). The description below is the
 > mechanism that actually ships. The MLS design this doc originally described is a *plan*
 > (Phase 5), and D3's rationale for eventually preferring a PQ variant still stands — see
 > `GROUP-KEYING.md`.
 
 Each circle has an **epoch key**. When sealing, the recipient set is expanded from circle
 members to each member's **authorized devices** (`recipients_with_devices` in
-`core/p2pcore-ffi/src/lib.rs`), and the epoch key is wrapped to every device bundle with the
+`core/haven-ffi/src/lib.rs`), and the epoch key is wrapped to every device bundle with the
 hybrid KEM. So a message is decryptable by **all** of the user's authorized devices. This is
 multi-recipient public-key encryption — it works, it's tested, and it gives cryptographic
 revocation, but it does **not** give per-message forward secrecy or post-compromise security.
@@ -184,7 +184,7 @@ poll (or, on iOS only, an APNs wake).
   only ever be served by the durable mailbox. "I reached both devices I know about" is not "everyone
   has it", so a successful live push can never license skipping the put.
 - **Absence is not deletion.** A device that missed a live push has learned *nothing* — least of all
-  that a record is gone. Everything here converges through the [`selfsync`](../core/p2pcore/src/selfsync.rs)
+  that a record is gone. Everything here converges through the [`selfsync`](../core/haven-p2p/src/selfsync.rs)
   CRDT, where a missed message is indistinguishable from one not yet sent and only an explicit,
   newer-stamped tombstone removes anything. Nothing may read "you didn't get it live" as information.
   (This is the same class of bug as the fresh-restored device that had its circles wiped; see
@@ -235,14 +235,14 @@ in-order commit processing becomes a hard requirement rather than a practical on
 
 - **Lost/stolen device:** the account key signs an updated device list excluding it, and
   the circle **epoch rotates** so the removed device is not a recipient of any future
-  KeyCommit — it can't read content posted after removal (`core/p2pcore-ffi/src/lib.rs:2516`).
+  KeyCommit — it can't read content posted after removal (`core/haven-ffi/src/lib.rs:2516`).
   You stay *you*; only that device goes dark. Contacts honor the signed update.
   > ⚠️ **Known limitation — revocation is not yet adversary-proof.** Today a linked device
   > holds a **copy of the account master seed** (that's what `haven-seed:` move-to-device
   > transfers), and the engine still runs under that copied seed rather than under a
   > per-device key. Revoking a device marks it revoked; it does **not** invalidate the seed
   > that device already has. Because device lists merge higher-version-wins
-  > (`core/p2pcore/src/device.rs`), a *cooperative* device honors revocation, but an
+  > (`core/haven-p2p/src/device.rs`), a *cooperative* device honors revocation, but an
   > attacker in possession of the seed can sign a fresh, higher-version device list and
   > re-add itself. The "seed-drop that finalizes revocation" is explicitly still to build
   > (`apple/HavenApp/DeviceRoster.swift:11-12`, `:52-54`). **Treat revocation as effective

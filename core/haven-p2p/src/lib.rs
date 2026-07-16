@@ -1,4 +1,4 @@
-//! # p2pcore — Haven's portable core
+//! # haven-p2p — Haven's portable core
 //!
 //! This crate is the single source of truth for Haven's security-critical logic.
 //! It compiles to:

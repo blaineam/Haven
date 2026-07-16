@@ -7,8 +7,8 @@
 >
 > **Locked decisions (do not relitigate):**
 > - **Path B.** An MLS-*style* TreeKEM built on Haven's **own** hybrid post-quantum primitives —
->   X25519+ML-KEM-768 KEM → AES-256-GCM (`core/p2pcore/src/crypto.rs`), Ed25519+ML-DSA-65
->   signatures (`core/p2pcore/src/identity.rs:216`) — **not** wire-interoperable RFC 9420. Every
+>   X25519+ML-KEM-768 KEM → AES-256-GCM (`core/haven-p2p/src/crypto.rs`), Ed25519+ML-DSA-65
+>   signatures (`core/haven-p2p/src/identity.rs:216`) — **not** wire-interoperable RFC 9420. Every
 >   ratified MLS ciphersuite is classical; Haven doesn't federate; interop would regress the PQ
 >   posture that is the product's headline guarantee. We take the *mechanisms*: ratchet tree,
 >   O(log n) path updates, propose/commit/welcome, and an epoch key schedule with forward secrecy
@@ -18,7 +18,7 @@
 >   advertises it (all-present-positive; absence is never information); otherwise it stays on
 >   today's sender-keys+epochs. Per-circle automatic migration, reversible if a legacy device joins.
 > - **Leaves = devices.** Seed-drop (D16 Phase 2, S2–S5 core landed) gives every device its own
->   keypair plus an account-signed `DeviceCredential` (`core/p2pcore/src/device.rs:43`). A TreeKEM
+>   keypair plus an account-signed `DeviceCredential` (`core/haven-p2p/src/device.rs:43`). A TreeKEM
 >   leaf is a **device** keypair; the leaf credential is the existing device→account chain. MLS
 >   Remove+Commit is the evolution of seed-drop's roster-bump-and-rotate.
 
@@ -711,7 +711,7 @@ two-release arc. Stages are ordered so every release is additive and shippable, 
 | Stage | Scope | Proof obligation | Realistic release |
 |---|---|---|---|
 | **M0. Capability marker + tree state types** | `ml` marker in the signed profile (`"ml":1` beside `"sd"`, `lib.rs:1757`) + `mls_capable` set + `circle_fully_mls_capable` gate, all OFF; wire-format types (§3.4) + `PersistTree` skeleton, serialization only. Strictly additive. | Marker round-trips, forged/tampered/absent all safe (mirror `device.rs:835` test); 1.0.x peer parses a profile carrying `ml` (the `sd` precedent re-proven); types wire-round-trip byte-stably. | **1.0.8** (safe, additive; rides whatever else ships) |
-| **M1. The tree module, pure** | `core/p2pcore/src/treekem.rs`: array tree math, node keygen from secrets (§3.2), UpdatePath build/apply, blank/unmerged handling, epoch schedule (§3.3), fork tie-break + chain rule as pure functions. No engine wiring. Deterministic (caller-supplied entropy/time), WASM-clean. | Test vectors (fixed seeds → exact bytes) committed; property test: N replicas, random op + delivery-order schedules incl. partitions → identical tree hash + epoch secret at quiescence; removed-leaf-cannot-decrypt-path test; one-way test (epoch n secrets ⊬ epoch n−1). | **1.0.8–1.0.9** (additive, unwired — the `groupkey.rs` increment-1 pattern, `groupkey.rs:13-15`) |
+| **M1. The tree module, pure** | `core/haven-p2p/src/treekem.rs`: array tree math, node keygen from secrets (§3.2), UpdatePath build/apply, blank/unmerged handling, epoch schedule (§3.3), fork tie-break + chain rule as pure functions. No engine wiring. Deterministic (caller-supplied entropy/time), WASM-clean. | Test vectors (fixed seeds → exact bytes) committed; property test: N replicas, random op + delivery-order schedules incl. partitions → identical tree hash + epoch secret at quiescence; removed-leaf-cannot-decrypt-path test; one-way test (epoch n secrets ⊬ epoch n−1). | **1.0.8–1.0.9** (additive, unwired — the `groupkey.rs` increment-1 pattern, `groupkey.rs:13-15`) |
 | **M2. Propose/commit/welcome over mailboxes, shadow mode** | New TAGs in the `receive` router; commit chain + fork cache + Welcome flow wired into `NetState` for capable circles — but content keys stay sender-keys; the tree runs in parallel and is compared, never consumed. Creator election. **Named product gate: sign off the circle-wide-Remove semantic (§4.3) or scope MLS to circles that accept it.** | Two-sibling and 3-account×2-device sims: concurrent commits fork and converge identically on every replica; shadow epoch secrets agree across the fleet after arbitrary redelivery; a legacy client fed a `TAG_MLS_*` blob errors harmlessly. | **1.0.9** (beta-soaked shadow telemetry: fork rate, convergence lag) |
 | **M3. Keying flip for fully-joined circles** | §4.5: `my_epoch_keys`/`peer_epoch_keys` filled from `sender_key_n[leaf]`; KeyCommit emission stops for those circles; circle-secret control frame (§4.6); dual-stack + all-joined gate (§7.2); park/resume fallback (§7.3). | **The headline test:** in a fully-MLS circle, a Removed device cannot derive `epoch_secret_{n+1}` nor open any post-Remove content, *and* cannot rejoin without a roster-authorized Add (evolves `s5_revoked_seedless_device_cannot_reenter_or_decrypt`, `device.rs:1038`). Interop: legacy-join mid-flight reverts within one bundle and the newcomer reads full history; deterministic re-seal dedup still byte-stable (mirror `groupkey.rs:301`). | **1.0.10** (the release headline; master switch OFF→staged ON like `set_seed_drop_retire`) |
 | **M4. Welcome for offline joiners + roster integration** | `register_device`/revocation → Add/Remove proposals+commits (§4.2/4.3); Welcome-over-mailbox with TOUCH liveness + ack; sleeper re-entry (§5.5); tree blob as content-addressed ref. | A device offline 45 days (past TTL) re-enters via Welcome and reads full history via backfill; joiner-secret retention bounds (§6.3-3) hold; Welcome to a revoked-in-the-meantime device fails closed. | **1.0.10–1.0.11** |

@@ -6,7 +6,7 @@
 //!
 //! Being content-addressed was never enough on its own: nothing CHECKED that the bytes behind a ref
 //! were the bytes it named, so a relay operator could serve one member's photo under another's ref
-//! and it rendered. Refs are minted and verified through `p2pcore::mediaref` now — one definition of
+//! and it rendered. Refs are minted and verified through `haven_p2p::mediaref` now — one definition of
 //! the address shared with iOS, Android and the relay-side tests, rather than three that can drift.
 
 use std::fs;
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use haven_ffi::HavenSocial;
-use p2pcore::mediaref;
+use haven_p2p::mediaref;
 use sha2::{Digest, Sha256};
 
 pub struct LocalMedia {
@@ -190,7 +190,7 @@ impl LocalMedia {
 
     /// Gate plaintext on it accounting for the ref that named it. `None` = a substitution: the seal
     /// opened, but these are not the bytes the signed post pointed at, so nothing may render them.
-    /// Legacy (non-content-addressed) refs pass — see `p2pcore::mediaref`.
+    /// Legacy (non-content-addressed) refs pass — see `haven_p2p::mediaref`.
     fn checked(reference: &str, plaintext: Vec<u8>) -> Option<Vec<u8>> {
         if mediaref::verify(reference, &plaintext) {
             Some(plaintext)

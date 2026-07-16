@@ -1,10 +1,10 @@
 //! Milestone 1a proof: real hybrid-PQ identity, key establishment, and the
 //! link/ticket system — all verifiable on the host with no devices or network.
 
-use p2pcore::crypto::{decapsulate, encapsulate_to, open, seal};
-use p2pcore::identity::{Identity, HavenId};
-use p2pcore::link::HavenLink;
-use p2pcore::transport::{select, Path};
+use haven_p2p::crypto::{decapsulate, encapsulate_to, open, seal};
+use haven_p2p::identity::{Identity, HavenId};
+use haven_p2p::link::HavenLink;
+use haven_p2p::transport::{select, Path};
 
 #[test]
 fn identity_sign_verify_roundtrip() {

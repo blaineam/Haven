@@ -8,16 +8,16 @@ credential-grant link flow; primary is sole authorizer."* Written 2026-07-16 aga
 ## 0. Where the tree stands (verified)
 
 - Core S2–S5 primitives are landed: `seal_self_sync_key`/`open_self_sync_key`
-  (`core/p2pcore/src/device.rs:505-526`), `SeedDropCapability` (`device.rs:429-485`),
+  (`core/haven-p2p/src/device.rs:505-526`), `SeedDropCapability` (`device.rs:429-485`),
   `circle_fully_seed_drop_capable` + `recipients_with_devices_gated` (`device.rs:534-577`),
   `author_and_bundle_for_device` (`device.rs:399-411`). The S4 core proof exists:
   `s4_seedless_new_device_is_credentialed_but_cannot_forge_a_roster` (`device.rs:1010-1035`) and the
   S5 headline test (`device.rs:1038-1100`).
-- FFI wiring: `signer_of` (`core/p2pcore-ffi/src/lib.rs:2925-2931`) signs commits/re-seals under the
+- FFI wiring: `signer_of` (`core/haven-ffi/src/lib.rs:2925-2931`) signs commits/re-seals under the
   device key gated on `circle_fully_seed_drop_capable` (`lib.rs:2278-2279`, used at `:2309`, `:2332`);
   `set_seed_drop_retire` default OFF (`lib.rs:1617-1619`); receive-side device→account resolution
   (`authorized_device_and_account`, `lib.rs:2938-2953`; consumed at `:1315`, `:1400`).
-- **But the FFI is NOT exposing the S2 grant fns**: `core/p2pcore-ffi/src/multidevice.rs` still only
+- **But the FFI is NOT exposing the S2 grant fns**: `core/haven-ffi/src/multidevice.rs` still only
   has seed-taking `seal_account_state`/`open_account_state` (`:179-183`, `:302-307`). No FFI wrapper
   for `seal_self_sync_key`/`open_self_sync_key` exists. S4 must add them.
 - `HavenSocial::new` (`lib.rs:1582-1603`) requires the 32-byte account seed; `NetState.me: Identity`
@@ -34,7 +34,7 @@ credential-grant link flow; primary is sole authorizer."* Written 2026-07-16 aga
 | Android | `android/.../core/HavenCore.kt:47` `exportSeedUri()` (`haven-seed:` only, no relays) | Settings QR |
 | Desktop | `desktop/src-tauri/src/commands.rs:874-878` parses `haven-seed:`; generation is UI-side (`desktop/ui/app.js`) | code |
 
-Note: `core/p2pcore/src/link.rs` (`HavenLink`, `haven://invite#id.verify`) is the **contact** reach-me
+Note: `core/haven-p2p/src/link.rs` (`HavenLink`, `haven://invite#id.verify`) is the **contact** reach-me
 link — a different thing — but its id + 16-byte verification + discovery-fetch pattern is exactly what
 the S4 enrollment ticket copies (§3): a full hybrid `HavenId` bundle (~3.2 KB: ML-KEM-768 EK +
 ML-DSA-65 VK) does not fit a scannable QR.
@@ -62,7 +62,7 @@ make the grant carry everything a seedless device needs.
 
 ### 2.1 Constructor design
 
-Add to `core/p2pcore-ffi/src/lib.rs`:
+Add to `core/haven-ffi/src/lib.rs`:
 
 ```rust
 #[uniffi::constructor]
@@ -82,7 +82,7 @@ and adopts the device identity internally.
 
 ### 2.2 The gap inventory (the critical correctness list)
 
-Every `st.me` private-key operation in `core/p2pcore-ffi/src/lib.rs` + `multidevice.rs`, and what a
+Every `st.me` private-key operation in `core/haven-ffi/src/lib.rs` + `multidevice.rs`, and what a
 seedless device does instead:
 
 **A. Roster authority — primary-only; seedless must hard-refuse:**
@@ -151,7 +151,7 @@ arm is simply absent). Safe *provided* C is fixed so everything relevant is seal
 
 ### 3.1 The link (no seed, QR-sized)
 
-New scheme `haven-enroll:`, encoded/parsed **in core** (new `core/p2pcore/src/enroll.rs`, FFI-exposed)
+New scheme `haven-enroll:`, encoded/parsed **in core** (new `core/haven-p2p/src/enroll.rs`, FFI-exposed)
 so all platforms share bytes — the same convergence discipline as `encode_circle_sync`
 (`multidevice.rs:209-217`):
 
@@ -258,8 +258,8 @@ Engine boot: `FeedStore.configure(seed:)` (`FeedView.swift:133`) becomes `config
 
 | Step | Scope | Ships | Est. |
 |---|---|---|---|
-| **S4.1 core** (`p2pcore`) | `enroll.rs`: `EnrollTicket` encode/parse, `enroll_request_wire`/`verify_enroll_request`, `enroll_grant_wire`/`open_enroll_grant`; unit tests incl. MAC tamper, wrong-device grant, expired ticket | dark | ~1 day |
-| **S4.2 FFI** (`p2pcore-ffi`) | `NetState` `me` → `me_pub` + `me_secret: Option` refactor; `new_seedless`; gap items A1–A3, B4–B5, C6–C7, D8–D9, F11; enroll FFI; account-public-info helper (node hex/verification from a bundle) | dark (no client calls) | 3–5 days |
+| **S4.1 core** (`haven-p2p`) | `enroll.rs`: `EnrollTicket` encode/parse, `enroll_request_wire`/`verify_enroll_request`, `enroll_grant_wire`/`open_enroll_grant`; unit tests incl. MAC tamper, wrong-device grant, expired ticket | dark | ~1 day |
+| **S4.2 FFI** (`haven-ffi`) | `NetState` `me` → `me_pub` + `me_secret: Option` refactor; `new_seedless`; gap items A1–A3, B4–B5, C6–C7, D8–D9, F11; enroll FFI; account-public-info helper (node hex/verification from a bundle) | dark (no client calls) | 3–5 days |
 | **S4.3 FFI integration tests** | `s4_ffi_seedless_enrollment_end_to_end` (primary grants → seedless authors in a fully-capable circle → contact reads → seedless `register_device` returns empty → forged roster rejected — the FFI sibling of `device.rs:1010`); seedless self-sync via granted key; seedless opens circle media; legacy peer still reads under dual-seal | dark | 1–2 days |
 | **S4.4 Apple** | `EnrollDeviceView` + linking-mode onboarding; frames 28/29 in `FeedView.handleFrame`; `AccountPublicStore`/`SelfSyncKeyStore`; `FeedStore.configure(mode:)`; `SelfSync.swift` granted-key branch; call/notification receive-path device-sender acceptance | user-visible behind "Link (new, seedless)"; legacy seed link kept | 3–4 days |
 | **S4.5 Android + Desktop parity** | mirror S4.4 on `HavenNet.kt`/`Onboarding.kt`/`HavenCore.kt` and `engine.rs`/`roster.rs`/`commands.rs`/`app.js` | user-visible | 2–3 days each |

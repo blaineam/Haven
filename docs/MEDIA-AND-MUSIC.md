@@ -17,7 +17,7 @@ is shown in the composer, then is **sealed E2E before it ever leaves the device*
 - **On-device only:** captured files live in the app's sandbox `tmp`/caches, are
   added to a post as a content-addressed blob, and are **encrypted with the hybrid-PQ
   content key (AES-256-GCM) before any transmission**. No frame, thumbnail, or file
-  ever touches a server in the clear. (Same `p2pcore::social` seal path as text.)
+  ever touches a server in the clear. (Same `haven-p2p::social` seal path as text.)
 - **Metadata hygiene (design intent — *partially* met today):** strip GPS/EXIF location and
   identifying maker tags by default on capture/import. **Holds for photos on iOS + Android;
   video has real gaps** — see the per-platform table under "Metadata hygiene" below before
@@ -65,7 +65,7 @@ or scroll-away.
 
 ## Data-model change (security-reviewed)
 
-`p2pcore::social::EventKind::Post` gains optional `media: [MediaRef]` (already present
+`haven-p2p::social::EventKind::Post` gains optional `media: [MediaRef]` (already present
 as content refs) and `music: Option<TrackRef>`. `TrackRef` is non-secret reference
 data, serialized inside the **already-sealed** event — no schema change weakens the
 encryption boundary; it's just more sealed bytes.
@@ -73,7 +73,7 @@ encryption boundary; it's just more sealed bytes.
 ## Status
 
 **Implemented:**
-- ✅ `TrackRef` + `music`/`media` on posts in `p2pcore` + FFI (sealed-event payload).
+- ✅ `TrackRef` + `music`/`media` on posts in `haven-p2p` + FFI (sealed-event payload).
 - ✅ Feed media rendering + **now-playing pill with audio animation**.
 - ✅ Composer attach: Photos/Videos picker (`PHPicker`), in-app **camera**
   (`AVCaptureSession`, tap=photo / hold=video / flip), **song picker**.

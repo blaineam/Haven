@@ -47,7 +47,7 @@ start = false
 
 [dependencies]
 haven-net = { path = "../haven-net" }
-p2pcore = { path = "../p2pcore" }
+haven-p2p = { path = "../haven-p2p" }
 anyhow = "1"
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }

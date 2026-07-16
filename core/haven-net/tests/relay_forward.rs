@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use haven_net::relay::RoutingFrame;
 use haven_net::{Node, RelayNode};
-use p2pcore::identity::Identity;
-use p2pcore::social::{open_event, seal_event, Event, EventKind, Group, SealedEnvelope};
+use haven_p2p::identity::Identity;
+use haven_p2p::social::{open_event, seal_event, Event, EventKind, Group, SealedEnvelope};
 use tokio::time::{timeout, Duration};
 
 #[tokio::test]

@@ -1,11 +1,11 @@
 //! Haven networking — an iroh-backed P2P node that carries opaque payloads (in
-//! practice, `p2pcore::social::SealedEnvelope` bytes) between peers over QUIC.
+//! practice, `haven_p2p::social::SealedEnvelope` bytes) between peers over QUIC.
 //!
 //! Connections are **kept alive and reused bidirectionally**: each message is a uni
 //! stream on a cached connection keyed by the remote's node id. Whoever can reach the
 //! other dials once; both then send over that same connection. This is what lets
 //! delivery flow both ways even when one peer is behind a NAT that can't be dialed
-//! directly. The bytes on the wire are already end-to-end encrypted by `p2pcore`.
+//! directly. The bytes on the wire are already end-to-end encrypted by `haven-p2p`.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

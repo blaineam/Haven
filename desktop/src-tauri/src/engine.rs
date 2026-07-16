@@ -2977,7 +2977,7 @@ impl Engine {
     /// THIS body, so reusing one is a replay and the relay refuses it.
     fn http_auth(&self, token: &str, method: &str, key: &str, body: &[u8]) -> Option<String> {
         let seed: [u8; 32] = self.roster.lock().unwrap().device_seed.clone().try_into().ok()?;
-        let secret = p2pcore::identity::Identity::from_seed(&seed).node_secret_bytes();
+        let secret = haven_p2p::identity::Identity::from_seed(&seed).node_secret_bytes();
         Some(haven_net::httprelay::auth_header(&secret, token, method, key, body))
     }
     /// GET one key. `Ok(Some)` = bytes, `Ok(None)` = reachable but 404 (a real MISS — the iroh path
@@ -3275,7 +3275,7 @@ impl Engine {
             let end = (offset + MEDIA_CHUNK_SIZE).min(bytes.len());
             let chunk = &bytes[offset..end];
             let sealed = if let Some(key) = own_key.as_ref() {
-                p2pcore::crypto::seal(key, chunk)
+                haven_p2p::crypto::seal(key, chunk)
             } else {
                 match self.social.seal_media(requester_hex.to_string(), chunk.to_vec()) {
                     Ok(s) => s,
@@ -3308,7 +3308,7 @@ impl Engine {
         }
         // Own-device chunks are symmetric (account-key) sealed; friend chunks are KEM. Try the cheap
         // symmetric open first, then fall back to the engine's KEM open.
-        let plain = p2pcore::crypto::open(&self.own_media_key(), sealed)
+        let plain = haven_p2p::crypto::open(&self.own_media_key(), sealed)
             .ok()
             .or_else(|| self.social.open_media(sealed.to_vec()));
         let Some(plain) = plain else { return };
@@ -3650,8 +3650,8 @@ impl Engine {
     /// result locally, persist, and re-publish our own sealed slot. Coalesces if already running.
     /// No-op without any transport (a relay OR the user's S3 bucket).
     pub async fn poll_self_sync(self: &Arc<Self>) {
-        use p2pcore::identity::Identity;
-        use p2pcore::selfsync::{slot_key, slot_prefix, AccountState, Stamp};
+        use haven_p2p::identity::Identity;
+        use haven_p2p::selfsync::{slot_key, slot_prefix, AccountState, Stamp};
 
         // Coalesce concurrent passes (the 15s loop must never overlap itself).
         {

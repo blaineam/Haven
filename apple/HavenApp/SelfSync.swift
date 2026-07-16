@@ -4,7 +4,7 @@ import Foundation
 //
 // Makes a user's OWN devices converge: each device writes a self-encrypted snapshot of its
 // account state to a per-account mailbox slot it owns, and merges its peers' slots. The merge
-// is the CRDT in `p2pcore::selfsync` (last-write-wins per key), exposed through the FFI
+// is the CRDT in `haven-p2p::selfsync` (last-write-wins per key), exposed through the FFI
 // (`AccountStateHandle`, `sealAccountState`/`openAccountState`, `selfSyncSlotKey`). The relay
 // only ever holds ciphertext sealed with a key only this account's devices can derive.
 //

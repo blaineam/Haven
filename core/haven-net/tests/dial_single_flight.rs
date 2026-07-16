@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use haven_net::Node;
-use p2pcore::identity::Identity;
+use haven_p2p::identity::Identity;
 use tokio::time::{sleep, Duration};
 
 #[tokio::test]

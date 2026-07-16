@@ -146,7 +146,7 @@ fn make_link(args: &[String]) -> Result<()> {
 fn print_id(args: &[String]) -> Result<()> {
     let data = arg_value(args, "--data").unwrap_or_else(config::default_data_dir);
     let seed = config::load_or_create_seed(&data)?;
-    let id = p2pcore::identity::Identity::from_seed(&seed);
+    let id = haven_p2p::identity::Identity::from_seed(&seed);
     println!("{}", hex32(&id.public().node_id_bytes()));
     Ok(())
 }

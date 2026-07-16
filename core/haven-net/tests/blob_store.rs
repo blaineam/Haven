@@ -11,8 +11,8 @@
 //! non-key-holder.
 
 use haven_net::blobstore::{BlobClient, BlobServer};
-use p2pcore::identity::Identity;
-use p2pcore::social::{open_bytes, seal_bytes, Group, SealedEnvelope};
+use haven_p2p::identity::Identity;
+use haven_p2p::social::{open_bytes, seal_bytes, Group, SealedEnvelope};
 use tokio::time::{timeout, Duration};
 
 /// Content-address a sealed blob exactly the way the mailbox does: a stable key derived

@@ -75,7 +75,7 @@ True per-message FS (Double Ratchet) is incompatible with multi-recipient, offli
 delivery. Instead:
 
 - Epoch keys rotate on **removal/block**, on a **device-roster change**, and on a **periodic
-  schedule** — all real and wired (`core/p2pcore-ffi/src/lib.rs:1128`, `:1521`, `:2516`, `:2540`).
+  schedule** — all real and wired (`core/haven-ffi/src/lib.rs:1128`, `:1521`, `:2516`, `:2540`).
   > ✅ **The periodic schedule is now wired.** Rotation is driven in **core**, not by a per-platform
   > timer, at the one chokepoint every client already reaches — the full-history sync bundle
   > (`sync_envelopes` on the P2P path, `export_my_envelopes` on the relay backfill). When a circle's
@@ -114,7 +114,7 @@ epoch and prunes old keys, so bounded FS holds without depending on membership c
 
 1. ✅ **Core `groupkey` module + tests.** Epoch-key generation, KeyCommit seal/open (revocation proven),
    per-event key derivation, seal/open-under-epoch.
-2. ✅ **Engine integration** (`p2pcore-ffi`). Implemented as **sender keys**: each member runs their own
+2. ✅ **Engine integration** (`haven-ffi`). Implemented as **sender keys**: each member runs their own
    epoch sequence (`my_epoch`/`my_epoch_keys`) and stores peers' keys by `(author, epoch)`. `post` seals
    under my current epoch; `remove`/`block` rotate my epoch (next commit excludes the removed node);
    `receive` routes tagged envelopes (key commit / epoch event / legacy) with a pending buffer for

@@ -1,6 +1,6 @@
 # Haven on Linux — desktop GUI + headless relay daemon
 
-Haven runs on Linux in **two capacities**, sharing the same Rust core (`p2pcore` +
+Haven runs on Linux in **two capacities**, sharing the same Rust core (`haven-p2p` +
 `haven-net`) as the iOS, macOS, and Android apps:
 
 1. **Desktop GUI** (`desktop/`, Tauri 2) — a real iroh peer at feature parity with the

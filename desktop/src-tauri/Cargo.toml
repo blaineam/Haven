@@ -28,10 +28,10 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 # The shared engine (identity, circles, feed, sealing, iroh node, relay/mailbox).
-haven_ffi = { path = "../../core/p2pcore-ffi" }
+haven_ffi = { path = "../../core/haven-ffi" }
 # The pure core crate — used DIRECTLY for the multi-device self-sync CRDT (AccountState,
 # Stamp, slot_key/slot_prefix) and identity self-sync key, matching the iOS wire format.
-p2pcore = { path = "../../core/p2pcore" }
+haven-p2p = { path = "../../core/haven-p2p" }
 # Shared BYO-storage mailbox (SigV4 S3 client) — additive core crate.
 haven-s3 = { path = "../../core/haven-s3" }
 # The relay's own crate — for `httprelay::auth_header`, so the desktop client signs its plain-HTTP

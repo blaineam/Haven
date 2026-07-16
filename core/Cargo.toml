@@ -1,5 +1,5 @@
 [workspace]
-members = ["p2pcore", "demo", "p2pcore-ffi", "haven-net", "haven-relay", "haven-s3"]
+members = ["haven-p2p", "demo", "haven-ffi", "haven-net", "haven-relay", "haven-s3"]
 resolver = "2"
 
 [profile.release]

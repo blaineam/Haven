@@ -15,9 +15,9 @@
 //! through `mediaref::verify` and it is caught. `legacy_uuid_refs_still_resolve` is the migration
 //! guarantee: the UUID refs in people's existing posts keep working.
 
-use p2pcore::identity::Identity;
-use p2pcore::mediaref::{self, MediaKind};
-use p2pcore::social::{open_bytes, seal_bytes, Group, SealedEnvelope};
+use haven_p2p::identity::Identity;
+use haven_p2p::mediaref::{self, MediaKind};
+use haven_p2p::social::{open_bytes, seal_bytes, Group, SealedEnvelope};
 
 struct Circle {
     alice: Identity,

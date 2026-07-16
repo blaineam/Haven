@@ -7,7 +7,7 @@ use std::process::{Child, Command, Stdio};
 use anyhow::{anyhow, Result};
 use haven_net::s3tunnel::S3Server;
 use haven_net::RelayNode;
-use p2pcore::identity::Identity;
+use haven_p2p::identity::Identity;
 
 use crate::config::{Config, StoreBackend};
 

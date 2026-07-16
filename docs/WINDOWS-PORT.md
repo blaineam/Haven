@@ -7,7 +7,7 @@ the **same Rust core** the iPhone and Android apps use.
 **Stack:** [Tauri 2](https://tauri.app) (Rust backend + WebView2 frontend). Chosen because:
 
 - The backend is Rust, so it links the shared core (`haven_ffi`, which re-exports
-  `p2pcore` + `haven-net`) **directly as a crate — no UniFFI hop**. The iroh peer runs in
+  `haven-p2p` + `haven-net`) **directly as a crate — no UniFFI hop**. The iroh peer runs in
   the native process, not the browser, so the "a browser can't be an iroh peer" problem
   that killed the web client (see [`WEB-PARITY.md`](WEB-PARITY.md)) does **not** apply here.
 - WebView2 (Edge/Chromium) gives camera (`getUserMedia`), WebRTC, `<video>`/`<audio>`, and

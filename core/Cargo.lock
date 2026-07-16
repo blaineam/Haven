@@ -1494,9 +1494,9 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "blake3",
+ "haven-p2p",
  "image",
  "iroh",
- "p2pcore",
  "rustls",
  "tokio",
 ]
@@ -1509,13 +1509,37 @@ dependencies = [
  "blake3",
  "data-encoding",
  "ed25519-dalek 2.2.0",
+ "haven-p2p",
  "iroh",
- "p2pcore",
  "rand 0.8.6",
  "rustls",
  "serde_json",
  "tokio",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "haven-p2p"
+version = "0.0.1"
+dependencies = [
+ "aes-gcm",
+ "blake3",
+ "data-encoding",
+ "ed25519-dalek 2.2.0",
+ "getrandom 0.2.17",
+ "getrandom 0.4.3",
+ "hex",
+ "hkdf",
+ "ml-dsa",
+ "ml-kem",
+ "rand 0.8.6",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "x25519-dalek",
 ]
 
 [[package]]
@@ -1525,7 +1549,7 @@ dependencies = [
  "anyhow",
  "data-encoding",
  "haven-net",
- "p2pcore",
+ "haven-p2p",
  "qrcode",
  "rand 0.8.6",
  "rustls",
@@ -1557,10 +1581,10 @@ dependencies = [
  "blake3",
  "data-encoding",
  "haven-net",
+ "haven-p2p",
  "haven-s3",
  "jni 0.21.1",
  "ndk-context",
- "p2pcore",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -3056,30 +3080,6 @@ name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
-
-[[package]]
-name = "p2pcore"
-version = "0.0.1"
-dependencies = [
- "aes-gcm",
- "blake3",
- "data-encoding",
- "ed25519-dalek 2.2.0",
- "getrandom 0.2.17",
- "getrandom 0.4.3",
- "hex",
- "hkdf",
- "ml-dsa",
- "ml-kem",
- "rand 0.8.6",
- "rand_chacha 0.3.1",
- "rand_core 0.6.4",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 1.0.69",
- "x25519-dalek",
-]
 
 [[package]]
 name = "papaya"

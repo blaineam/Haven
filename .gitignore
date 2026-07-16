@@ -21,7 +21,7 @@ web/node_modules/
 web/dist/
 
 # Generated bindings
-core/p2pcore-ffi/generated/
+core/haven-ffi/generated/
 *.xcframework
 Scripts/export-compliance/
 HavenApp/Info.plist

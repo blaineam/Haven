@@ -3,7 +3,7 @@
 A native desktop client at feature parity with iOS — **and** a headless circle relay — in
 one binary, built on the same Rust core as the iPhone and Android apps.
 
-Because the backend is Rust, it links the shared core (`haven_ffi` → `p2pcore` +
+Because the backend is Rust, it links the shared core (`haven_ffi` → `haven-p2p` +
 `haven-net`) **directly, with no UniFFI hop**. The iroh peer runs in the native process,
 so this is a real peer, not a thin web client. The WebView2/WebKit frontend (`ui/`) gives
 camera, WebRTC, and media playback for free.

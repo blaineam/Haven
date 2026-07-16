@@ -212,7 +212,7 @@ enum MediaKind: String {
         }
     }
     /// The kind is encoded in the ref prefix so a recipient knows how to render it. Matches
-    /// `p2pcore::mediaref::MediaKind::prefix` and Android's `LocalMedia` byte-for-byte.
+    /// `haven-p2p::mediaref::MediaKind::prefix` and Android's `LocalMedia` byte-for-byte.
     var prefix: String {
         switch self {
         case .image: return "img_"
@@ -332,7 +332,7 @@ final class MediaStore: ObservableObject {
     // (fresh key + nonce per seal, recipients vary with the roster) — a ciphertext address would
     // change on every re-seal and differ per device, orphaning the media its own post points at.
     // Plaintext hashing gives one stable address per photo on every platform. This mirrors
-    // `p2pcore::mediaref` exactly, and Android/desktop have minted these same sha-256 refs since
+    // `haven-p2p::mediaref` exactly, and Android/desktop have minted these same sha-256 refs since
     // they shipped; iOS was the odd one out.
 
     nonisolated static func sha256Hex(_ data: Data) -> String {

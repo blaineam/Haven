@@ -16,7 +16,7 @@
 //! | `payload` (sealed envelope) | **NO** — opaque ciphertext | the actual content, E2E to the circle |
 //!
 //! The destination node ids are *Ed25519 routable ids* (already public in reach-me
-//! links), never names or circle ids, and the payload is a `p2pcore` `SealedEnvelope`
+//! links), never names or circle ids, and the payload is a `haven-p2p` `SealedEnvelope`
 //! the relay has no key for. So a relay learns only "ciphertext blob X is headed toward
 //! node ids Y" — never who is in which circle, nor anything about the content.
 //!

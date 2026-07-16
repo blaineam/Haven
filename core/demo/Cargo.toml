@@ -9,6 +9,6 @@ anyhow = "1.0.102"
 blake3 = "1.8.5"
 image = "0.25.10"
 iroh = "1.0.0"
-p2pcore = { path = "../p2pcore" }
+haven-p2p = { path = "../haven-p2p" }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio = { version = "1.52.3", features = ["full"] }

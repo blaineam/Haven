@@ -1,5 +1,5 @@
 [package]
-name = "p2pcore"
+name = "haven-p2p"
 version = "0.0.1"
 edition = "2021"
 description = "Haven P2P core: hybrid post-quantum identity, encryption, and (later) transport."

@@ -9,7 +9,7 @@
 │   • Android: Jetpack Compose          ── UniFFI ─┤            │
 │   • Win/Linux: Tauri WebView2 ── Rust backend ───┤ (direct)   │
 ├──────────────────────────────────────────────────┼───────────┤
-│  p2pcore  (Rust — ONE implementation for all)    ▼           │
+│  haven-p2p  (Rust — ONE implementation for all)    ▼           │
 │   identity   hybrid-PQ crypto   links   social engine   media │
 │                         │                                     │
 │   transport seam  ──►  path-selector: nearby → iroh → relay   │
@@ -29,7 +29,7 @@
 **Invariant:** everything above the transport seam deals only in hybrid-PQ
 encrypted bytes. The transport is interchangeable; the crypto is transport-blind.
 
-## The core (`core/p2pcore`)
+## The core (`core/haven-p2p`)
 
 | Module | Responsibility | Status |
 |---|---|---|

@@ -38,7 +38,7 @@ block *claiming parity*, and they block some of what the docs promise. In priori
    master seed** (that's what `haven-seed:` move-to-device transfers), and the engine runs under that
    copied seed rather than a per-device key. Revoking marks a device revoked; it does **not**
    invalidate the seed it already holds. Since device lists merge higher-version-wins
-   (`core/p2pcore/src/device.rs`), an attacker with the seed can sign a fresh higher-version list
+   (`core/haven-p2p/src/device.rs`), an attacker with the seed can sign a fresh higher-version list
    and **re-add itself**. Revocation works against a *lost/stolen* device, not a *compromised* one.
    → The finalizing "seed-drop" re-key is **designed and planned for 1.0.7** — see
    [`SEED-DROP-DESIGN.md`](SEED-DROP-DESIGN.md) (D16 Phase 2); not yet built. Until it ships, the only
@@ -90,13 +90,13 @@ iroh 1.0: real QUIC, dial-by-address, discovery. `haven-net` `Node` exchanges se
 Async FFI drives it from every client.
 
 ### ✅ Social engine (M2)
-`p2pcore::social`: circles, posts, stories, messages, comments, reactions, edit, unsend, DMs,
+`haven-p2p::social`: circles, posts, stories, messages, comments, reactions, edit, unsend, DMs,
 media + music refs — sealed E2E to all members (fresh content key + per-member hybrid-KEM wrap),
 hybrid-signed, with a `build_feed` reducer enforcing author-authorized edit/unsend. Contact
 approval + blocking; per-circle privacy (Spotlight + Face ID lock). Messages UX: recency sort,
 pinning (≤6, self-syncing), DM-delete watermark, group-DM sender rows.
 
-> **Not MLS.** This is multi-recipient PKE (`core/p2pcore/src/social.rs:14-16`). There is no
+> **Not MLS.** This is multi-recipient PKE (`core/haven-p2p/src/social.rs:14-16`). There is no
 > `mls-rs` dependency and no MLS code in the tree — it appears only in comments about future work.
 > Consequence: **no per-message forward secrecy, no post-compromise security.** Group keying is
 > sender-keys + epochs (`GROUP-KEYING.md`); removal/block rotation gives **cryptographic
@@ -105,7 +105,7 @@ pinning (≤6, self-syncing), DM-delete watermark, group-DM sender rows.
 
 ### ✅ Group keying (epochs)
 Epoch keys distributed via the hybrid KEM; removal/block/device-roster change rotates
-(`p2pcore-ffi/src/lib.rs:1128`, `:1521`, `:2516`, `:2540`); last 4 epochs retained
+(`haven-ffi/src/lib.rs:1128`, `:1521`, `:2516`, `:2540`); last 4 epochs retained
 (`prune_epoch_keys`). Adding a member does **not** rotate — and doesn't need to: a joiner gets the
 current epoch, so earlier epochs stay unreadable without rotating anything. **Periodic rotation is
 now wired** (2026-07-15): the full-history sync bundle advances any circle past the 7-day
@@ -125,8 +125,8 @@ security-relevant gap is device-revocation being advisory (Outstanding #1; seed-
 ### ✅ Multi-device (M2b, D16 Phases 1–3)
 Multi-identity switcher + per-identity profiles; move-to-device via `haven-seed:` code/QR;
 iCloud-Keychain backup/restore of identity history; multi-token push. **Phase 1** device-credential
-trust layer (`p2pcore::device`). **Phase 3** `AccountState` CRDT convergence engine
-(`p2pcore::selfsync`) — wired end to end on iOS/iPadOS, macOS, Android, and desktop — plus
+trust layer (`haven-p2p::device`). **Phase 3** `AccountState` CRDT convergence engine
+(`haven-p2p::selfsync`) — wired end to end on iOS/iPadOS, macOS, Android, and desktop — plus
 own-device event convergence (per-device transport ids + epoch-key convergence). **Phase 2** FFI
 export done; enrollment QR/verify flow + UI ship. **Phase 4b** live device-to-device delivery
 (`haven_net::livedelivery`) — an authored event goes straight to your other online devices instead of
@@ -158,7 +158,7 @@ Chunked media (see `MEDIA-AND-MUSIC.md` for the real sizes) with flat memory; au
 lossless toggle. Shared SigV4 client in `core/haven-s3` — one implementation for all platforms.
 
 ### ✅ `haven-relay` (M5b)
-Single static Rust binary composing `haven-net` + `p2pcore`. Connection relay (forwards mesh-relay
+Single static Rust binary composing `haven-net` + `haven-p2p`. Connection relay (forwards mesh-relay
 frames, non-key-holder, RAM-only bounded de-dup — proven by `relay_forward.rs`) **and** media
 store-and-forward (`rclone serve s3` on loopback + S3-over-iroh tunnel — proven by `s3_tunnel.rs`).
 Relay links carry public routing data only. An in-app `RelayHost` runs it in-process; the Mac runs

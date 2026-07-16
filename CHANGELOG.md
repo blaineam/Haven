@@ -941,7 +941,7 @@ Multi-device and Messages wave (iOS/iPadOS, macOS, Android, and desktop, all sha
   other's events — posts and DMs never synced across devices. Fixed with **own-device epoch-key
   convergence**: when a device receives a key commit it authored itself, both devices deterministically
   adopt the numerically-larger epoch key + circle secret, so buffered events drain and future re-seals
-  use the agreed key (`core/p2pcore-ffi/src/lib.rs` `receive_key_commit`). Consistent across iOS/macOS,
+  use the agreed key (`core/haven-ffi/src/lib.rs` `receive_key_commit`). Consistent across iOS/macOS,
   Android (shared `.so`), and desktop (links the crate directly).
 - **DM-delete no longer restores old messages.** Deleting a conversation records a local "cleared
   before" **watermark** so re-starting the DM doesn't surface previously-deleted messages that a peer

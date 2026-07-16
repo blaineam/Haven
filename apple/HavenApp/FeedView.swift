@@ -29,7 +29,7 @@ struct PostCenterKey: PreferenceKey {
 }
 
 /// Drives the live social demo: every action goes through the real hybrid-PQ social
-/// engine (seal → open → feed) in `p2pcore`. Posts can carry media + a song.
+/// engine (seal → open → feed) in `haven-p2p`. Posts can carry media + a song.
 @MainActor
 final class FeedStore: ObservableObject {
     @Published private(set) var items: [FeedItemFfi] = []

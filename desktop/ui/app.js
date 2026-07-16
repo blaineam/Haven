@@ -1650,7 +1650,7 @@ const StoryCaptions = {
                         "1.000", "0.0000", "0.0000"].join(",") + "\u0001" + t;
   },
   decode(body) {
-    const def = { color: 0, font: 0, style: 1, x: 0.5, y: 0.5, size: 1 };
+    const def = { color: 0, font: 0, style: 1, x: 0.5, y: 0.5, size: 1, mediaScale: 1, mediaOffX: 0, mediaOffY: 0 };
     if (!body || body[0] !== "\u0001") return { text: body || "", spec: def };
     const sep = body.indexOf("\u0001", 1);
     if (sep < 0) return { text: body.slice(1), spec: def };
@@ -1660,6 +1660,9 @@ const StoryCaptions = {
     return { text: body.slice(sep + 1), spec: {
       color: parseInt(n[0], 10) || 0, font: parseInt(n[1], 10) || 0, style,
       x: parseFloat(n[3]) || 0.5, y: parseFloat(n[4]) || 0.5, size: parseFloat(n[5]) || 1,
+      // Author's media framing (fields 6-8, the composer's zoom + pan). Absent on legacy/6-field
+      // bodies → identity, so old stories render exactly as before.
+      mediaScale: parseFloat(n[6]) || 1, mediaOffX: parseFloat(n[7]) || 0, mediaOffY: parseFloat(n[8]) || 0,
     } };
   },
   // A styled, absolutely-positioned overlay for a media container (position:relative required).
@@ -1689,22 +1692,92 @@ const StoryCaptions = {
 
 function addStoryDialog() {
   state.attachments = [];
+  // The author's spec rides the wire format, so phones render the caption styled + positioned.
+  // y starts in the lower third — where the old hardcoded desktop caption sat.
+  const spec = { color: 0, font: 0, style: 1, x: 0.5, y: 0.85, size: 1 };
   const composer = buildComposer(async (body, music) => {
-    // Ship the cross-platform caption wire format (centered, default glow) so phones render
-    // the caption styled + positioned instead of as plain text.
-    const encoded = StoryCaptions.encode(body, { color: 0, font: 0, style: 1, x: 0.5, y: 0.85, size: 1 });
+    const encoded = StoryCaptions.encode(body, spec);
     await invoke("post_story", { body: encoded, media: state.attachments[0] ? state.attachments[0].ref : null, music });
     closeModal();
   }, "Caption your story…", { circleId: state.activeCircle });
+  const ta = $("textarea", composer);
+
+  // ── Live preview: a story frame rendered by the SAME overlay() the viewer uses, so what the
+  //    author sees is exactly what ships. Drag anywhere on it to place the caption.
+  const mediaLayer = el("div", { style: "position:absolute;inset:0" });
+  // container-type on an inset:0 overlay, not the frame itself — same Chromium `contain: size`
+  // trap viewStory documents.
+  const capLayer = el("div", { style: "position:absolute;inset:0;container-type:size;pointer-events:none" });
+  const hint = el("div", { style: "position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.5);font-size:12px;pointer-events:none" }, "Preview");
+  const frame = el("div", { style: "position:relative;width:min(200px,55vw);aspect-ratio:9/16;margin:0 auto;border-radius:12px;overflow:hidden;background:#000;cursor:grab;touch-action:none" },
+    mediaLayer, hint, capLayer);
+  const renderCap = () => {
+    const c = StoryCaptions.overlay(StoryCaptions.encode(ta.value, spec));
+    capLayer.replaceChildren(...(c ? [c] : []));
+    hint.style.display = (ta.value.trim() || state.attachments.length) ? "none" : "";
+  };
+  const renderMedia = () => {
+    const a = state.attachments[0];
+    const fit = "position:absolute;inset:0;width:100%;height:100%;object-fit:cover";
+    mediaLayer.replaceChildren(...(a && a.url
+      ? [a.isVideo ? el("video", { src: a.url, muted: "", autoplay: "", loop: "", style: fit })
+                   : el("img", { src: a.url, style: fit })]
+      : []));
+    renderCap();
+  };
+  ta.addEventListener("input", renderCap);
+  // buildComposer owns attachment add/remove internally — the preview chips are the one signal
+  // that fires on both paths, so mirror the frame off them.
+  new MutationObserver(renderMedia).observe($(".attach-preview", composer), { childList: true });
+  const placeCap = (e) => {
+    const r = frame.getBoundingClientRect();
+    spec.x = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    spec.y = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    renderCap();
+  };
+  frame.addEventListener("pointerdown", (e) => { frame.setPointerCapture(e.pointerId); placeCap(e); });
+  frame.addEventListener("pointermove", (e) => { if (e.buttons & 1) placeCap(e); });
+
+  // ── Styling controls — the wire palette/typography tables, index-for-index. ──
+  const swatches = el("div", { class: "row wrap", style: "gap:6px;justify-content:center" });
+  const drawSwatches = () => {
+    swatches.replaceChildren(...StoryCaptions.colors.map((c, i) =>
+      el("button", { title: "Caption color", style:
+        "width:20px;height:20px;border-radius:50%;padding:0;cursor:pointer;background:" + c +
+        ";border:2px solid " + (i === spec.color ? "var(--text, #fff)" : "rgba(128,128,128,.35)"),
+        onclick: () => { spec.color = i; drawSwatches(); renderCap(); } })));
+  };
+  drawSwatches();
+  const STYLES = ["Plain", "Glow", "Shadow", "Neon", "Highlight"];   // wire styleRaw order
+  const styleBtn = el("button", { class: "btn small ghost", title: "Caption style",
+    onclick: () => { spec.style = (spec.style + 1) % STYLES.length; styleBtn.textContent = "Aa · " + STYLES[spec.style]; renderCap(); } },
+    "Aa · " + STYLES[spec.style]);
+  const fontBtn = el("button", { class: "btn small ghost", title: "Caption font",
+    onclick: () => { spec.font = (spec.font + 1) % StoryCaptions.fonts.length; syncFont(); renderCap(); } }, "Ag");
+  const syncFont = () => {
+    const [family, weight] = StoryCaptions.fonts[spec.font].split("|");
+    fontBtn.style.fontFamily = family; fontBtn.style.fontWeight = weight;
+  };
+  syncFont();
+  const sizeInp = el("input", { type: "range", min: "0.5", max: "2", step: "0.05", value: String(spec.size),
+    style: "flex:1;min-width:70px", oninput: () => { spec.size = parseFloat(sizeInp.value) || 1; renderCap(); } });
+
   sheet("New story", el("div", { class: "col" },
     el("div", { class: "muted small" }, "Add a photo or video with the + button. Stories disappear after 24 hours."),
+    frame,
+    el("div", { class: "muted small", style: "text-align:center" }, "Drag the preview to place the caption"),
+    swatches,
+    el("div", { class: "row", style: "gap:8px;align-items:center" },
+      styleBtn, fontBtn, el("span", { class: "muted small" }, "Size"), sizeInp),
     composer));
+  renderMedia();
 }
 
 function viewStory(it) {
   const inner = el("div", { class: "col", style: "align-items:center" });
   const storyRef = (it.media || []).find((r) => !r.startsWith("geo:") && !r.startsWith("a:"));
   const cap = StoryCaptions.overlay(it.body);
+  const tf = StoryCaptions.decode(it.body).spec;
   if (storyRef) {
     const m = storyRef.startsWith("v:") ? el("video", { "data-ref": storyRef, controls: "", autoplay: "", style: "max-width:100%;border-radius:12px;display:block" }) : el("img", { "data-ref": storyRef, style: "max-width:100%;border-radius:12px;display:block" });
     // The caption's cqh units size it against the MEDIA, like the phones do — but `container-type:
@@ -1716,6 +1789,17 @@ function viewStory(it) {
     // size from the wrapper rather than from its contents, so `contain: size` costs nothing and cqh
     // still resolves to the media's height.
     const wrap = el("div", { style: "position:relative;max-width:100%;display:inline-block" }, m);
+    // The author's framing (iOS Stories.swift:120-121: scaleEffect about center, then an UNSCALED
+    // offset of offX×W/offY×H of the container). CSS `translate(...) scale(...)` composes the same
+    // way — the leftmost translate is applied outside the scale — and the translate percentages
+    // resolve against this element's layout box, which lays out at the wrapper/container's size.
+    if (tf.mediaScale !== 1 || tf.mediaOffX !== 0 || tf.mediaOffY !== 0) {
+      m.style.transform = `translate(${tf.mediaOffX * 100}%, ${tf.mediaOffY * 100}%) scale(${tf.mediaScale})`;
+      // iOS clips the reframed media to the story frame (.clipped()); the wrapper takes over the
+      // media's rounding so the scaled overflow doesn't square the corners.
+      wrap.style.overflow = "hidden";
+      wrap.style.borderRadius = "12px";
+    }
     if (cap) wrap.append(el("div", { style: "position:absolute;inset:0;container-type:size;pointer-events:none" }, cap));
     inner.append(wrap);
   } else if (cap) {

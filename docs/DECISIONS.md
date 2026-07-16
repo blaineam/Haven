@@ -85,7 +85,7 @@ for big files.
 > [`WEB-PARITY.md`](WEB-PARITY.md)). The core is now shared to **Swift** (Apple) and
 > **Kotlin** (Android) via UniFFI; there is no wasm-bindgen client.
 
-**Decision:** One Rust crate (`p2pcore`) is the single source of truth for all
+**Decision:** One Rust crate (`haven-p2p`) is the single source of truth for all
 security-critical logic. It's exposed to Swift via **UniFFI** (XCFramework) and to the
 Android client via **UniFFI Kotlin** bindings.
 
@@ -180,7 +180,7 @@ time-delayed). Swap-in is a one-file change.
 
 ## D13 — One Rust core → every platform
 
-**Decision:** Because all security-critical logic lives in `p2pcore` (Rust), new
+**Decision:** Because all security-critical logic lives in `haven-p2p` (Rust), new
 clients are mostly UI:
 
 > **Updated (2026-06-23):** the web (WASM) client was dropped — a browser can't be an

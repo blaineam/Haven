@@ -1,8 +1,8 @@
-//! `haven_ffi` — the UniFFI surface that bridges `p2pcore` to Swift (and Kotlin).
+//! `haven_ffi` — the UniFFI surface that bridges `haven-p2p` to Swift (and Kotlin).
 //!
 //! Keeps the exposed API tiny and Swift-friendly: an [`Account`] object, a couple of
 //! free functions, and plain records. All the security-critical logic stays in
-//! `p2pcore`; this is only the boundary.
+//! `haven-p2p`; this is only the boundary.
 
 use std::sync::{Arc, Mutex};
 
@@ -11,18 +11,18 @@ use std::collections::{HashMap, HashSet};
 use haven_net::Node;
 use haven_net::blobstore::BlobClient;
 use std::path::PathBuf;
-use p2pcore::crypto::{decapsulate, encapsulate_to, open, seal, Encapsulation};
-use p2pcore::device::{
+use haven_p2p::crypto::{decapsulate, encapsulate_to, open, seal, Encapsulation};
+use haven_p2p::device::{
     circle_fully_seed_drop_capable, recipients_with_devices, recipients_with_devices_gated,
     ContactDevices, DeviceCredential, DeviceList, SeedDropCapability,
 };
-use p2pcore::identity::{Identity, HavenId};
-use p2pcore::link::HavenLink;
-use p2pcore::social::{
+use haven_p2p::identity::{Identity, HavenId};
+use haven_p2p::link::HavenLink;
+use haven_p2p::social::{
     build_feed, is_expired, open_bytes, open_event, seal_bytes, seal_event, Event, EventKind,
     FeedPoll, Group, SealedEnvelope, TrackRef,
 };
-use p2pcore::groupkey::{
+use haven_p2p::groupkey::{
     mailbox_prefix, new_circle_secret, new_epoch_key, open_event_in_epoch_authored, open_key_commit,
     seal_event_in_epoch, seal_key_commit, EpochEnvelope,
 };
@@ -119,7 +119,7 @@ pub enum HavenError {
 }
 
 /// A Haven account: a no-PII identity backed by a hybrid post-quantum keypair.
-/// Wraps `p2pcore::identity::Identity`.
+/// Wraps `haven_p2p::identity::Identity`.
 #[derive(uniffi::Object)]
 pub struct Account {
     inner: Identity,
@@ -903,7 +903,7 @@ pub trait InboundListener: Send + Sync {
 }
 
 /// A live peer-to-peer node: listens for inbound sealed posts and dials peers by
-/// ticket. The bytes it moves are already E2E-encrypted by `p2pcore`.
+/// ticket. The bytes it moves are already E2E-encrypted by `haven-p2p`.
 #[derive(uniffi::Object)]
 pub struct HavenNode {
     node: Node,
@@ -3668,7 +3668,7 @@ mod net_tests {
 
     #[test]
     fn device_roster_wire_verification_and_rollback() {
-        use p2pcore::device::{DeviceCredential, DeviceList};
+        use haven_p2p::device::{DeviceCredential, DeviceList};
         let account = Identity::from_seed(&[1u8; 32]);
         let phone = Identity::from_seed(&[2u8; 32]);
         let imposter = Identity::from_seed(&[9u8; 32]);
@@ -3794,7 +3794,7 @@ mod net_tests {
     /// release — the test crafts device-signed content to prove the verifier that must ship first.)
     #[test]
     fn receive_verifier_accepts_device_signed_event_rejects_uncredentialed() {
-        use p2pcore::device::{DeviceCredential, DeviceList};
+        use haven_p2p::device::{DeviceCredential, DeviceList};
         let cid = DEFAULT_CIRCLE.to_string();
         let alice = HavenSocial::new([1u8; 32].to_vec()).unwrap();
         let bob = Identity::from_seed(&[2u8; 32]); // a contact account

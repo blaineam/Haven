@@ -634,7 +634,7 @@ fn is_broad_prefix(key: &str) -> bool {
 /// the trust comes from the signature check in [`verify_devroster`], never from the write gate — so
 /// EVERY transport must verify the body before storing it (see [`verify_devroster_put`]).
 pub(crate) const DEVROSTER_PREFIX: &str = "haven/devroster/";
-/// Tag byte on the self-sync roster wire (mirror of p2pcore-ffi `TAG_DEVICE_ROSTER`).
+/// Tag byte on the self-sync roster wire (mirror of haven-ffi `TAG_DEVICE_ROSTER`).
 const TAG_DEVICE_ROSTER: u8 = 0x04;
 
 /// Parse + CRYPTOGRAPHICALLY VERIFY a self-describing device-roster blob written to
@@ -654,8 +654,8 @@ fn verify_devroster(expect_account: &str, body: &[u8]) -> Option<(String, Vec<St
 /// Like [`verify_devroster`] but also returns the DeviceList `version`, so a write gate can enforce
 /// rollback defense (higher-version-wins; a replayed OLD roster must never overwrite a newer one).
 fn verify_devroster_full(expect_account: &str, body: &[u8]) -> Option<(String, Vec<String>, u64)> {
-    use p2pcore::device::DeviceList;
-    use p2pcore::identity::HavenId;
+    use haven_p2p::device::DeviceList;
+    use haven_p2p::identity::HavenId;
     let body = match body.split_first() {
         Some((&TAG_DEVICE_ROSTER, rest)) => rest,
         _ => return None,

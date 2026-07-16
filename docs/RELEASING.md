@@ -45,7 +45,7 @@ same code. That's fixed by the gate in `release.yml`, not by convention.
 | Thing | Version | Why |
 |---|---|---|
 | Android `versionCode` | `github.run_number` | Play only requires it to **increase**, and it must do so even for two builds of the same `versionName`. A monotonic CI counter is exactly right; deriving it from the version would be fragile for no gain. |
-| `core/*` crates (`p2pcore`, `haven-net`, …) | `0.0.1`, unversioned | Never published to crates.io. They're internal to this repo and consumed by path. Versioning them would be ceremony with no consumer. (Also noted in `ROADMAP.md`.) |
+| `core/*` crates (`haven-p2p`, `haven-net`, …) | `0.0.1`, unversioned | Never published to crates.io. They're internal to this repo and consumed by path. Versioning them would be ceremony with no consumer. (Also noted in `ROADMAP.md`.) |
 | `desktop/src-tauri/Cargo.toml` `version` | `0.1.0`, cosmetic | `tauri.conf.json`'s `version` takes precedence for every bundle Tauri produces, and CI stamps that. The Cargo value is never user-visible. |
 
 ### Should the desktop app and the relay have their own versions?

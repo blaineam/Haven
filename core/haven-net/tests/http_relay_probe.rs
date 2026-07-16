@@ -144,11 +144,11 @@ async fn audit_probe_is_refused_and_members_still_served() {
 // that exact attack and proves it is now REFUSED, that a genuinely account-signed roster still lands
 // (enrollment must keep working), and that a replayed OLDER version can't clobber a newer one.
 
-/// The self-sync roster wire byte-for-byte as `p2pcore-ffi::encode_roster` builds it: a
+/// The self-sync roster wire byte-for-byte as `haven-ffi::encode_roster` builds it: a
 /// `TAG_DEVICE_ROSTER` byte, then `lp(account_bundle) ‖ lp(device_list) ‖ u32(n_creds)`. The relay's
 /// `verify_devroster` reads the bundle + list and ignores the credential tail.
 fn signed_roster(account: &SigningKeyAccount, version: u64, devices: Vec<[u8; 32]>) -> Vec<u8> {
-    let dl = p2pcore::device::DeviceList::signed(&account.0, version, 1000, devices, vec![]);
+    let dl = haven_p2p::device::DeviceList::signed(&account.0, version, 1000, devices, vec![]);
     let lp = |out: &mut Vec<u8>, b: &[u8]| {
         out.extend_from_slice(&(b.len() as u32).to_le_bytes());
         out.extend_from_slice(b);
@@ -161,7 +161,7 @@ fn signed_roster(account: &SigningKeyAccount, version: u64, devices: Vec<[u8; 32
 }
 
 /// Thin newtype so the helper reads cleanly.
-struct SigningKeyAccount(p2pcore::identity::Identity);
+struct SigningKeyAccount(haven_p2p::identity::Identity);
 
 #[tokio::test]
 async fn devroster_write_requires_a_valid_account_signature() {
@@ -184,7 +184,7 @@ async fn devroster_write_requires_a_valid_account_signature() {
     // The enrolling account: signs its own account-signed roster AND signs the HTTP request with its
     // node key. It is a member of NOTHING — enrollment is exactly the case of a device the relay has
     // never heard of, so this must succeed on the signature alone.
-    let account = SigningKeyAccount(p2pcore::identity::Identity::generate());
+    let account = SigningKeyAccount(haven_p2p::identity::Identity::generate());
     let account_hex: String =
         account.0.public().node_id_bytes().iter().map(|b| format!("{b:02x}")).collect();
     let account_node = account.0.node_secret_bytes();

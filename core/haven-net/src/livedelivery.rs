@@ -13,7 +13,7 @@
 //!    license skipping the put.
 //! 2. **Absence is not deletion.** A device that missed a live push has not learned anything — least
 //!    of all that a record is gone. Every consumer of what we deliver here merges through the
-//!    [`p2pcore::selfsync`] CRDT, where a missed message is indistinguishable from one not yet sent
+//!    [`haven_p2p::selfsync`] CRDT, where a missed message is indistinguishable from one not yet sent
 //!    and only an explicit (newer-stamped) tombstone removes anything. Nothing downstream may treat
 //!    "you didn't get it live" as information.
 //!
@@ -23,7 +23,7 @@
 //! ## What ordering buys here (and what it doesn't)
 //!
 //! The Phase 4b sketch says "ordered store-and-forward". For account state that phrasing oversells
-//! it: [`AccountState::merge`](p2pcore::selfsync::AccountState::merge) is commutative, associative
+//! it: [`AccountState::merge`](haven_p2p::selfsync::AccountState::merge) is commutative, associative
 //! and idempotent, so a live push that arrives out of order, twice, or not at all converges to the
 //! same state anyway. Ordering matters for the **epoch KeyCommit backlog** (a device must see a
 //! commit to hold the key that opens content sealed under it) — that is a property of the mailbox

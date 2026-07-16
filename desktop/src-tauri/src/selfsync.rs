@@ -2,9 +2,9 @@
 //!
 //! Direct port of the iOS `SelfSync.swift` coordinator. Makes a user's OWN devices converge:
 //! each device writes a self-encrypted snapshot of its account state to a per-account mailbox
-//! slot it owns, and merges its peers' slots. The CRDT itself lives in [`p2pcore::selfsync`]
+//! slot it owns, and merges its peers' slots. The CRDT itself lives in [`haven_p2p::selfsync`]
 //! (last-write-wins per key); the relay/S3 only ever holds ciphertext sealed with
-//! [`p2pcore::identity::Identity::self_sync_key`] — a key only this account's devices can derive.
+//! [`haven_p2p::identity::Identity::self_sync_key`] — a key only this account's devices can derive.
 //!
 //! Scope (must match iOS byte-for-byte cross-platform): PROFILE (name/emoji/bio/link), GLOBAL
 //! SETTINGS (retention, host-on-launch), CONTACTS, the BLOCKED list, and CIRCLES (name + member
@@ -374,7 +374,7 @@ pub fn apply_local(
             .filter_map(|e| e.strip_prefix(&prefix).map(|h| h.to_string()))
             .collect();
         for bundle in &cs.member_bundles {
-            let node_hex = p2pcore::identity::HavenId::from_bytes(bundle)
+            let node_hex = haven_p2p::identity::HavenId::from_bytes(bundle)
                 .ok()
                 .map(|hid| hex::encode(hid.node_id_bytes()))
                 .unwrap_or_default();

@@ -1,8 +1,8 @@
 //! Social layer: end-to-end sealed events + feed reduction (posts, comments,
 //! reactions, edit, unsend), verified with the hybrid post-quantum primitives.
 
-use p2pcore::identity::Identity;
-use p2pcore::social::{
+use haven_p2p::identity::Identity;
+use haven_p2p::social::{
     build_feed, open_bytes, open_event, seal_bytes, seal_event, Event, EventKind, Group,
 };
 
@@ -54,7 +54,7 @@ fn sealed_event_is_e2e_to_group_members_only() {
     // A tampered ciphertext fails the sender signature check.
     let mut bytes = env.to_bytes();
     *bytes.last_mut().unwrap() ^= 0x01;
-    let tampered = p2pcore::social::SealedEnvelope::from_bytes(&bytes);
+    let tampered = haven_p2p::social::SealedEnvelope::from_bytes(&bytes);
     if let Ok(t) = tampered {
         assert!(open_event(&bob, &alice.public(), &t).is_err());
     }
@@ -71,7 +71,7 @@ fn envelope_survives_serialization() {
     let event = Event::new(&alice.public().node_id_bytes(), 1, EventKind::Message { body: "hi".into() });
     let env = seal_event(&alice, &group, &event).unwrap();
 
-    let round = p2pcore::social::SealedEnvelope::from_bytes(&env.to_bytes()).unwrap();
+    let round = haven_p2p::social::SealedEnvelope::from_bytes(&env.to_bytes()).unwrap();
     assert_eq!(open_event(&bob, &alice.public(), &round).unwrap(), event);
 }
 

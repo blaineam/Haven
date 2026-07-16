@@ -53,7 +53,7 @@ the `haven-relay` daemon still ship on GitHub Releases (free). Per the
 the paid iPhone/Mac/Android/Windows app from its store, never from a release tarball. It's been used device-to-device over the real internet and a
 nearby Bluetooth/Wi-Fi mesh daily. Done so far:
 
-- **Hybrid post-quantum core** (`p2pcore`) — identity (Ed25519+ML-DSA, X25519+ML-KEM-768),
+- **Hybrid post-quantum core** (`haven-p2p`) — identity (Ed25519+ML-DSA, X25519+ML-KEM-768),
   AEAD seal/open, reach-me links, deterministic seed-based identity; unit-tested.
 - **Real P2P transport** — sealed posts, DMs, reactions, comments, and media move
   peer-to-peer over iroh QUIC (with a nearby Bluetooth/Wi-Fi mesh fallback and a
@@ -107,11 +107,11 @@ abandoned (a browser can't be an iroh peer); `web/` is now just an invite-landin
 
 ```
 core/        Rust workspace — the portable, security-critical core
-  p2pcore/     identity, hybrid-PQ crypto, links, social engine, transport seam
+  haven-p2p/     identity, hybrid-PQ crypto, links, social engine, transport seam
   haven-net/   iroh QUIC networking node (listen/dial, sealed payloads)
   haven-relay/ standalone store-and-forward relay daemon
   haven-s3/    shared AWS SigV4 S3 client (BYO-storage mailbox) — used by the desktop client
-  p2pcore-ffi/ UniFFI crate (`haven_ffi`) — Swift/Kotlin bindings
+  haven-ffi/ UniFFI crate (`haven_ffi`) — Swift/Kotlin bindings
 apple/       SwiftUI app (iOS/macOS) — consumes the core via an XCFramework
 android/     Native Android app (Jetpack Compose) — same core via UniFFI/Kotlin
 desktop/     Windows/Linux Tauri 2 app — Rust backend links the core directly; GUI + relay
@@ -129,7 +129,7 @@ cargo test
 
 ## Platforms
 
-One Rust core (`p2pcore`) powers every client, so new platforms are mostly UI:
+One Rust core (`haven-p2p`) powers every client, so new platforms are mostly UI:
 
 - **iOS / iPadOS** — SwiftUI + UniFFI (primary)
 - **macOS** — native AppKit-backed SwiftUI (`HavenMac` target; Mac Catalyst dropped

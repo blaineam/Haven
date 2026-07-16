@@ -1,5 +1,5 @@
-//! FFI surface for **multi-device** (D16): device credentials (Phase 1, [`p2pcore::device`])
-//! and account-state self-sync (Phase 3, [`p2pcore::selfsync`]).
+//! FFI surface for **multi-device** (D16): device credentials (Phase 1, [`haven_p2p::device`])
+//! and account-state self-sync (Phase 3, [`haven_p2p::selfsync`]).
 //!
 //! Follows the rest of the FFI's seed-taking free-function style (cf. `open_sealed_with_seed`):
 //! the account seed comes in, the account-only secrets (signing key, self-sync key) are derived
@@ -8,9 +8,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use p2pcore::device::{DeviceCredential, DeviceList};
-use p2pcore::identity::{HavenId, Identity};
-use p2pcore::selfsync::{AccountState, Stamp};
+use haven_p2p::device::{DeviceCredential, DeviceList};
+use haven_p2p::identity::{HavenId, Identity};
+use haven_p2p::selfsync::{AccountState, Stamp};
 
 use crate::{hex, HavenError};
 
@@ -288,13 +288,13 @@ pub async fn s3_list(config: S3ConfigFfi, prefix: String) -> Result<Vec<String>,
 /// the blob and `state.merge(...)` it; then re-push your own slot.
 #[uniffi::export]
 pub fn self_sync_slot_key(account_node_hex: String, device_node_hex: String) -> String {
-    p2pcore::selfsync::slot_key(&account_node_hex, &device_node_hex)
+    haven_p2p::selfsync::slot_key(&account_node_hex, &device_node_hex)
 }
 
 /// Canonical prefix to list all of an account's self-sync slots — `self/<account>/state/`.
 #[uniffi::export]
 pub fn self_sync_slot_prefix(account_node_hex: String) -> String {
-    p2pcore::selfsync::slot_prefix(&account_node_hex)
+    haven_p2p::selfsync::slot_prefix(&account_node_hex)
 }
 
 /// Open a blob produced by `seal_account_state` (fails on wrong account / tamper).

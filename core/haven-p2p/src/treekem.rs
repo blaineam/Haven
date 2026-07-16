@@ -791,6 +791,84 @@ impl PersistTree {
     }
 }
 
+impl ForkCacheEntry {
+    /// Zero every losing-fork sender key this entry holds, in place (§6.2 / §6.3-2). Called by the
+    /// pruner the instant an entry ages out of the retained window — wiping, not merely dropping, is
+    /// the forward-secrecy property: a captured state blob must not carry a superseded fork's keys
+    /// past the window, and a `retain` that only drops would leave them in freed memory.
+    pub fn wipe(&mut self) {
+        for (_, key) in self.sender_keys.iter_mut() {
+            wipe_secret(key);
+        }
+    }
+}
+
+impl PersistTree {
+    /// KEEP_EPOCHS (§6.2): retained epoch depth — identical to lib.rs `prune_epoch_keys` so the tree
+    /// state and the sender-key store age out on the SAME 4-epoch window (`init_secret`'s one-way link
+    /// means nothing older is re-derivable anyway; the pruner makes the *stored* material match).
+    pub const KEEP_EPOCHS: usize = 4;
+    /// KEEP_FORKS (§6.2 fork-cache row): losing-fork caches retained PER epoch inside the window.
+    pub const KEEP_FORKS: usize = 2;
+
+    /// Enforce the §6.2 bounded-window deletion on the PERSISTED tree state — the §6.3-2 proof
+    /// obligation ("the fork cache as an FS leak … must age out on the same pruner") plus the
+    /// `epoch_secret_n` window row. WIPES (not merely drops) every secret that ages out: the
+    /// one-way-schedule FS claim is that a captured state blob opens nothing older than the retained
+    /// window, which only holds if aged-out `epoch_secret`s and fork sender keys are zeroed rather
+    /// than left in the serialized bytes. The commit CHAIN is public bytes (no secret) so it is only
+    /// BOUNDED — the §10 "every cache has a named cap and a pruner" discipline — never wiped.
+    pub fn prune(&mut self) {
+        // (a) epoch_secrets: keep the newest KEEP_EPOCHS; WIPE each older one in place, then drop it.
+        // Sort ascending so the oldest sit at the front; wipe+remove from the front until in-window.
+        self.epoch_secrets.sort_by_key(|(e, _)| *e);
+        while self.epoch_secrets.len() > Self::KEEP_EPOCHS {
+            wipe_secret(&mut self.epoch_secrets[0].1);
+            self.epoch_secrets.remove(0);
+        }
+        // The retained window floor — a fork cache older than this is outside the window entirely.
+        let floor = self.epoch_secrets.first().map(|(e, _)| *e).unwrap_or(0);
+
+        // (b) fork_cache: WIPE+drop any entry below the floor, then cap KEEP_FORKS per retained epoch
+        // (keeping the largest commit_hash — deterministic, matching the §5.1 tie-break order).
+        for f in self.fork_cache.iter_mut() {
+            if f.epoch < floor {
+                f.wipe();
+            }
+        }
+        self.fork_cache.retain(|f| f.epoch >= floor);
+        let mut by_epoch: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+        for (i, f) in self.fork_cache.iter().enumerate() {
+            by_epoch.entry(f.epoch).or_default().push(i);
+        }
+        let mut drop_idx: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for (_, mut idxs) in by_epoch {
+            if idxs.len() > Self::KEEP_FORKS {
+                idxs.sort_by(|&a, &b| self.fork_cache[a].commit_hash.cmp(&self.fork_cache[b].commit_hash));
+                for &i in &idxs[..idxs.len() - Self::KEEP_FORKS] {
+                    drop_idx.insert(i);
+                }
+            }
+        }
+        for &i in &drop_idx {
+            self.fork_cache[i].wipe();
+        }
+        let mut i = 0usize;
+        self.fork_cache.retain(|_| {
+            let keep = !drop_idx.contains(&i);
+            i += 1;
+            keep
+        });
+
+        // (c) commit_chain: bound to the newest KEEP_EPOCHS commits (stored oldest→newest). Public
+        // bytes only — no wipe, just cap the growth §10 warns becomes a leak when a bound is missing.
+        if self.commit_chain.len() > Self::KEEP_EPOCHS {
+            let cut = self.commit_chain.len() - Self::KEEP_EPOCHS;
+            self.commit_chain.drain(..cut);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1727,6 +1805,22 @@ impl TreePrivate {
     }
 }
 
+/// Deletion discipline (§6.2 "leaf_secret / path secrets … deleted on next own path update
+/// (replaced), and always on Remove of self"). A leaf/path secret dies when the `TreePrivate`
+/// holding it is REPLACED: a fresh own path update installs a new `TreePrivate` and the old one
+/// drops here, zeroing the superseded leaf secret and every path secret; a removed-self device
+/// sets its `TreePrivate` to `None`, which drops+wipes here. `wipe_secret` (volatile + fence)
+/// makes the erase of the dead buffer real, not optimized away. Nothing downstream needs these:
+/// the node keys they derived are replaced by the very update that supersedes them.
+impl Drop for TreePrivate {
+    fn drop(&mut self) {
+        wipe_secret(&mut self.leaf_secret);
+        for s in self.path_secrets.values_mut() {
+            wipe_secret(s);
+        }
+    }
+}
+
 /// Everything a committer gets from building an UpdatePath.
 pub struct UpdatePathBuild {
     pub update_path: UpdatePath,
@@ -1872,6 +1966,27 @@ pub struct EpochSchedule {
     pub confirm_key: [u8; 32],
     pub welcome_key: [u8; 32],
     pub joiner_secret: [u8; 32],
+}
+
+/// Deletion discipline (§6.2 / §6.3): every epoch secret this struct carries is zeroed when the
+/// struct drops — i.e. when the epoch is SUPERSEDED (a newer schedule replaces it), a LOSING fork's
+/// schedule is discarded (§6.3-2), or a transient copy made only to issue a Welcome goes out of
+/// scope. Consumers copy the specific 32-byte values they retain (`sender_root`/`init_secret`/
+/// `joiner_secret` into a live `KeyingState`, a `sender_key` into the content-key store) BEFORE the
+/// schedule drops; those copies live on independently and are governed by their own deletion points.
+/// The two consumed INPUTS (`commit_secret`, `init_secret_{n-1}`) were already wiped at the moment of
+/// consumption inside [`advance_epoch`]; this Drop closes the schedule's own six fields so a
+/// superseded epoch leaves no derivable material behind (the §6.3-1 "no fossilized secret" property
+/// for the in-memory copy, complementing the `PersistState`-has-no-field property for the blob).
+impl Drop for EpochSchedule {
+    fn drop(&mut self) {
+        wipe_secret(&mut self.epoch_secret);
+        wipe_secret(&mut self.init_secret);
+        wipe_secret(&mut self.sender_root);
+        wipe_secret(&mut self.confirm_key);
+        wipe_secret(&mut self.welcome_key);
+        wipe_secret(&mut self.joiner_secret);
+    }
 }
 
 /// `epoch_context_n = blake3("haven-mls-ctx-v1" ‖ group_id ‖ n ‖ tree_hash_n ‖
@@ -2298,12 +2413,26 @@ pub fn apply_commit(
         if let (Some(mp), false) = (&my_out, removed_me) {
             let d = decrypt_update_path(&tree, group_id, commit.epoch, commit.sender_leaf, path, mp)?;
             commit_secret = d.commit_secret;
-            // Deletion discipline: drop secrets for nodes the proposals blanked, then take the new ones.
+            // Deletion discipline (§6.2 "path secrets … replaced"): a proposal that blanks a node
+            // retires this member's path secret for it. WIPE each retired secret IN PLACE before
+            // dropping the map entry — a `retain` that merely drops would leave the secret in the
+            // freed BTreeMap node; wiping first zeroes the buffer while we still hold it. Nothing
+            // downstream needs these: the node is blank, and the fresh UpdatePath supplies the
+            // replacement secrets we `extend` in immediately after.
             let t = &tree;
             if let Some(mp) = &mut my_out {
-                mp.path_secrets.retain(|&ix, _| {
-                    matches!(t.slots.get(ix as usize), Some(TreeSlot::Parent(pn)) if !pn.blank)
-                });
+                let stale: Vec<u32> = mp
+                    .path_secrets
+                    .keys()
+                    .copied()
+                    .filter(|ix| !matches!(t.slots.get(*ix as usize), Some(TreeSlot::Parent(pn)) if !pn.blank))
+                    .collect();
+                for ix in stale {
+                    if let Some(s) = mp.path_secrets.get_mut(&ix) {
+                        wipe_secret(s);
+                    }
+                    mp.path_secrets.remove(&ix);
+                }
                 mp.path_secrets.extend(d.path_secrets);
             }
         }
@@ -3262,6 +3391,177 @@ mod m1_tests {
         assert_ne!(a, sender_key(&root, &[2; 32], GID, 4), "sibling devices get distinct keys");
         assert_ne!(a, sender_key(&root, &[1; 32], GID, 5), "epoch-scoped");
         assert_ne!(a, sender_key(&root, &[1; 32], b"other", 4), "group-scoped");
+    }
+
+    // ── M5: PCS + the §6.3 forward-secrecy proof obligations ─────────────────────────────
+
+    /// §9 M5 — THE PCS TEST (§6.4). Exfiltrate a device's FULL epoch-1 deriving state, then take two
+    /// futures: (A) D issues a LEAF UPDATE, or (B) the epoch advances WITHOUT one (an add-only
+    /// commit). The stolen state opens NOTHING at epoch 2 in (A) — the fresh leaf secret it lacks is
+    /// what heals — but DOES open epoch 2 in (B). Both futures share the identical stolen `init_1`;
+    /// the ONLY difference is whether the advance mixed a fresh, attacker-unknown `commit_secret` —
+    /// which is exactly the teeth the obligation demands.
+    #[test]
+    fn pcs_leaf_update_heals_epoch_n_plus_1_and_the_test_has_teeth() {
+        // Genesis at epoch 1: 3 devices, add-only (commit_secret = 0). Member 0 = the victim D.
+        let devs = 3usize;
+        let lsec: Vec<[u8; 32]> = (0..devs).map(|i| secret("pcs-leaf", i)).collect();
+        let adds: Vec<Proposal> = (0..devs)
+            .map(|i| build_add_proposal(GID, 1, 0, leaf_node_for(GID, &lsec[i], &cred(i)), fake_sig))
+            .collect();
+        let g_init = secret("pcs-init", 0);
+        let g_cth = secret("pcs-cth", 0);
+        let g_parent = secret("pcs-parent", 0);
+        let genesis = super::build_commit(
+            &RatchetTree { slots: vec![] }, GID, 1, g_parent, &g_cth, &g_init, 0, adds, None, fake_sig, fake_sig,
+        )
+        .unwrap();
+        let tree1 = genesis.tree.clone();
+        let cth1 = genesis.confirmed_transcript_hash;
+        let tip1 = commit_hash(&genesis.commit.to_bytes());
+        // The FULL epoch-1 deriving state the attacker exfiltrates from D: `init_secret_1` (the salt
+        // feeding epoch 2) plus D's private tree state and the public epoch-1 facts.
+        let stolen_init_1 = genesis.schedule.init_secret;
+        let d_leaf_secret_1 = lsec[0];
+        let acct = *blake3::hash(b"pcs-acct").as_bytes();
+
+        // ── FUTURE A — D issues a LEAF UPDATE (no proposals, fresh path). The healing move. ──
+        let fresh_leaf = secret("pcs-fresh", 0); // entropy NOT in the stolen state (D's device-seed lane)
+        let ent_a = secret("pcs-ent-a", 0);
+        let build_a = super::build_commit(
+            &tree1, GID, 2, tip1, &cth1, &stolen_init_1, 0, vec![],
+            Some((&fresh_leaf, &cred(0), &ent_a)), fake_sig, fake_sig,
+        )
+        .unwrap();
+        let real_root_2a = build_a.schedule.sender_root;
+        let real_key_2a = sender_key(&real_root_2a, &acct, GID, 2);
+        // Honest members 1 & 2 DO converge on the healed epoch (the circle keeps working through it).
+        for m in [1usize, 2] {
+            let mp = TreePrivate::new(m as u32, lsec[m]);
+            let a = apply_commit(&tree1, GID, &cth1, &stolen_init_1, &build_a.commit, Some(&mp)).unwrap();
+            assert_eq!(
+                a.schedule.expect("member derives the healed epoch").sender_root, real_root_2a,
+                "member {m} converges on D's healed epoch",
+            );
+        }
+        // The ATTACKER, holding only the stolen epoch-1 state, cannot reach epoch 2's sender_root:
+        // every commit_secret it can form from that state (the public add-only zero; or any 32 bytes
+        // it holds — the stolen init, D's OLD leaf secret) advances the SAME public context to a
+        // DIFFERENT root, because the real advance consumed the fresh secret only D could make.
+        let ctx_2a = epoch_context(GID, 2, &tree_hash(&build_a.tree), &build_a.confirmed_transcript_hash);
+        for guess in [[0u8; 32], stolen_init_1, d_leaf_secret_1] {
+            let (mut i, mut g) = (stolen_init_1, guess);
+            let s = advance_epoch(&mut i, &mut g, &ctx_2a);
+            assert_ne!(s.sender_root, real_root_2a, "stolen state must NOT reconstruct the healed sender_root");
+            assert_ne!(
+                sender_key(&s.sender_root, &acct, GID, 2), real_key_2a,
+                "stolen epoch-1 state opens NOTHING at epoch 2 once D updates",
+            );
+        }
+
+        // ── FUTURE B (the teeth) — the SAME stolen init advances via an ADD-ONLY commit
+        // (commit_secret = 0, PUBLIC). Here the stolen state DOES reach epoch 2: `init_secret_1` plus
+        // the public zero is all it takes. Absent a fresh leaf Update, the exfiltration still reads
+        // n+1 — proving FUTURE A's failure is the Update healing, not a rigged setup. ──
+        let newcomer = leaf_node_for(GID, &secret("pcs-add", 0), &cred(9));
+        let add = build_add_proposal(GID, 2, 0, newcomer, fake_sig);
+        let build_b = super::build_commit(&tree1, GID, 2, tip1, &cth1, &stolen_init_1, 0, vec![add], None, fake_sig, fake_sig)
+            .unwrap();
+        let real_root_2b = build_b.schedule.sender_root;
+        let ctx_2b = epoch_context(GID, 2, &tree_hash(&build_b.tree), &build_b.confirmed_transcript_hash);
+        let (mut i, mut z) = (stolen_init_1, [0u8; 32]);
+        let s = advance_epoch(&mut i, &mut z, &ctx_2b);
+        assert_eq!(s.sender_root, real_root_2b, "WITHOUT a fresh Update the stolen state reproduces epoch 2");
+        assert_eq!(
+            sender_key(&s.sender_root, &acct, GID, 2), sender_key(&real_root_2b, &acct, GID, 2),
+            "and opens epoch 2's content key — the test has teeth",
+        );
+    }
+
+    /// §9 M5 / §6.3-1 — a serialized `PersistTree` carries NO consumed secret. `commit_secret` and
+    /// `init_secret` have no field in the type (a state-blob backup must not fossilize the backward
+    /// link); this serializes post-commit state and byte-scans: both consumed secrets ABSENT, while a
+    /// legitimately RETAINED secret is present (so the negative asserts are not vacuous).
+    #[test]
+    fn fs_bug_1_persist_tree_carries_no_consumed_secret() {
+        let lsec: Vec<[u8; 32]> = (0..2).map(|i| secret("b1-leaf", i)).collect();
+        let tree1 = RatchetTree::from_leaves((0..2).map(|i| leaf_node_for(GID, &lsec[i], &cred(i))).collect());
+        let init_1 = secret("b1-init", 0); // consumed as salt by the epoch-2 advance
+        let cth1 = secret("b1-cth", 0);
+        let fresh = secret("b1-fresh", 0);
+        let ent = secret("b1-ent", 0);
+        // Learn the EXACT commit_secret the advance consumes by building the same update path.
+        let upb = build_update_path(&tree1, GID, 2, 0, &fresh, &cred(0), fake_sig, &ent).unwrap();
+        let known_commit_secret = upb.commit_secret;
+        let build = super::build_commit(
+            &tree1, GID, 2, secret("b1-parent", 0), &cth1, &init_1, 0, vec![],
+            Some((&fresh, &cred(0), &ent)), fake_sig, fake_sig,
+        )
+        .unwrap();
+        let epoch_secret_2 = build.schedule.epoch_secret;
+        let pt = PersistTree {
+            group_id: GID.to_vec(),
+            commit_chain: vec![(commit_hash(&build.commit.to_bytes()), build.commit.to_bytes())],
+            tree_blob_ref: vec![],
+            tree_bytes: build.tree.to_bytes(),
+            my_leaf_index: 0,
+            my_leaf_secret: fresh,
+            my_path_secrets: build.my_private.path_secrets.values().copied().collect(),
+            fork_cache: vec![],
+            epoch_secrets: vec![(2, epoch_secret_2)],
+        };
+        let blob = pt.to_bytes();
+        let contains = |needle: &[u8; 32]| blob.windows(32).any(|w| w == needle);
+        // Sanity — the scan CAN find a retained secret (else the negatives below are vacuous).
+        assert!(contains(&fresh), "the current leaf secret is legitimately in the blob");
+        assert!(contains(&epoch_secret_2), "the retained epoch secret is in the blob");
+        // The proof — consumed secrets are ABSENT from the persisted bytes (§6.3-1).
+        assert!(!contains(&init_1), "the consumed init_secret must never fossilize in the blob");
+        assert!(!contains(&known_commit_secret), "the consumed commit_secret must never fossilize in the blob");
+    }
+
+    /// §9 M5 / §6.3-2 — the fork cache ages out on the pruner, WIPING losing-fork keys. Build a
+    /// `PersistTree` spanning 6 epochs with fork caches below and within the KEEP_EPOCHS window;
+    /// prune; assert the window is 4, out-of-window forks are gone, in-window forks are capped at
+    /// KEEP_FORKS, the chain is bounded, and a re-serialization no longer contains an aged-out fork's
+    /// distinctive sender key.
+    #[test]
+    fn fs_bug_2_fork_cache_ages_out_on_the_pruner() {
+        let dead_key = [0xABu8; 32]; // a distinctive aged-out fork key we can byte-scan for
+        let mut pt = PersistTree {
+            group_id: GID.to_vec(),
+            commit_chain: (1..=6u64).map(|e| ([e as u8; 32], vec![e as u8; 8])).collect(),
+            tree_blob_ref: vec![],
+            tree_bytes: vec![],
+            my_leaf_index: 0,
+            my_leaf_secret: [1u8; 32],
+            my_path_secrets: vec![],
+            fork_cache: vec![
+                // epochs 1 & 2: OUTSIDE the retained window (keeps 3..=6) ⇒ wiped + dropped.
+                ForkCacheEntry { epoch: 1, commit_hash: [1u8; 32], sender_keys: vec![([9u8; 32], dead_key)] },
+                ForkCacheEntry { epoch: 2, commit_hash: [2u8; 32], sender_keys: vec![([8u8; 32], [0xCDu8; 32])] },
+                // epoch 5: FOUR forks ⇒ capped to KEEP_FORKS = 2 (largest commit_hash kept).
+                ForkCacheEntry { epoch: 5, commit_hash: [0x10u8; 32], sender_keys: vec![([1u8; 32], [0x51u8; 32])] },
+                ForkCacheEntry { epoch: 5, commit_hash: [0x20u8; 32], sender_keys: vec![([2u8; 32], [0x52u8; 32])] },
+                ForkCacheEntry { epoch: 5, commit_hash: [0x30u8; 32], sender_keys: vec![([3u8; 32], [0x53u8; 32])] },
+                ForkCacheEntry { epoch: 5, commit_hash: [0x40u8; 32], sender_keys: vec![([4u8; 32], [0x54u8; 32])] },
+            ],
+            epoch_secrets: (1..=6u64).map(|e| (e, [e as u8; 32])).collect(),
+        };
+        pt.prune();
+        let mut kept: Vec<u64> = pt.epoch_secrets.iter().map(|(e, _)| *e).collect();
+        kept.sort_unstable();
+        assert_eq!(kept, vec![3, 4, 5, 6], "epoch secrets kept to the 4-epoch window");
+        assert!(pt.fork_cache.iter().all(|f| f.epoch >= 3), "out-of-window forks aged out");
+        let e5: Vec<[u8; 32]> = pt.fork_cache.iter().filter(|f| f.epoch == 5).map(|f| f.commit_hash).collect();
+        assert_eq!(e5.len(), PersistTree::KEEP_FORKS, "epoch-5 forks capped to KEEP_FORKS");
+        assert!(e5.contains(&[0x40u8; 32]) && e5.contains(&[0x30u8; 32]), "the two largest-hash forks are kept");
+        assert_eq!(pt.commit_chain.len(), PersistTree::KEEP_EPOCHS, "commit chain bounded to the window");
+        let blob = pt.to_bytes();
+        assert!(
+            !blob.windows(32).any(|w| w == dead_key),
+            "the aged-out fork's sender key is wiped, not lingering in the re-serialized blob",
+        );
     }
 
     // ── Fork tie-break + chain rule (§5.1) ───────────────────────────────────────────────

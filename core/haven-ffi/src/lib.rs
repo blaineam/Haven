@@ -1229,6 +1229,22 @@ impl Circle {
         true
     }
 
+    /// PCS cadence window (§6.4): true iff the current epoch has outlived [`ROTATE_INTERVAL_SECS`] —
+    /// the SAME weekly window `rotate_if_stale` uses, so the MLS leaf-Update cadence inherits the one
+    /// safe chokepoint with no new timer. Mirrors `rotate_if_stale`'s handling of an unstamped /
+    /// backwards clock (stamp here, don't fire) but performs NO legacy rotation: when the tree keys
+    /// content the committer authors a leaf Update instead of minting a random epoch key. Shares
+    /// `rotated_at` with the legacy path and with roster commits, so the two never double-rotate.
+    fn pcs_window_elapsed(&mut self) -> bool {
+        self.ensure_epoch();
+        let now = now_secs();
+        if self.rotated_at == 0 || self.rotated_at > now {
+            self.rotated_at = now;
+            return false;
+        }
+        now - self.rotated_at >= ROTATE_INTERVAL_SECS
+    }
+
     /// Bounded forward secrecy (audit C2): keep only the most recent epoch keys (mine + each peer's)
     /// and DELETE the rest. A later seed/device compromise then can't decrypt OLD ciphertext captured
     /// from the wire/relay under a now-deleted key. My own posts always re-seal under the current
@@ -1914,7 +1930,7 @@ fn build_shadow_genesis(st: &mut NetState, idx: usize) {
 /// The tagged shadow wire bytes to append to a circle's sync bundle (§4.5 — alongside, never
 /// replacing, today's key commit). Gated on `circle_fully_mls_capable`; empty otherwise, so a
 /// non-capable circle emits nothing and behaves exactly as today.
-fn shadow_emit_bundle(st: &mut NetState, idx: usize) -> Vec<Vec<u8>> {
+fn shadow_emit_bundle(st: &mut NetState, idx: usize, full_bundle: bool) -> Vec<Vec<u8>> {
     if !circle_is_mls_capable(st, idx) {
         return vec![];
     }
@@ -1924,6 +1940,14 @@ fn shadow_emit_bundle(st: &mut NetState, idx: usize) -> Vec<Vec<u8>> {
         // chained Add for a newly-authorized device, authority-checked Remove for a revoked one.
         // Gated inside on `mls_am_committer`, so this is inert with the keying switch OFF (M2/M3).
         mls_sync_roster_to_tree(st, idx);
+        // M5 PCS cadence (§6.4): on a FULL bundle only (the same chokepoint as `rotate_if_stale`),
+        // if no roster change already re-keyed my leaf this bundle and the weekly window elapsed, the
+        // committer authors a leaf Update so a past leaf compromise heals. Must land BEFORE the
+        // `emit_cache` clone below so the new commit rides THIS bundle. Gated inside on the switch +
+        // live-keying, so it is inert with keying OFF (byte-identical to M4).
+        if full_bundle {
+            mls_pcs_leaf_update(st, idx);
+        }
     }
     let circle_id = st.circles[idx].id.clone();
     st.shadow_trees.get(&circle_id).map(|s| s.emit_cache.clone()).unwrap_or_default()
@@ -2348,6 +2372,23 @@ struct KeyingState {
     removed_devices: std::collections::HashSet<[u8; 32]>,
 }
 
+/// Deletion discipline (§6.2, the commit-CHAIN row of the M5 pruner extension). `mls_replay` walks
+/// the chain by REPLACING `cur` at each epoch (`cur = KeyingState { .. }`); the superseded epoch's
+/// state drops here. Its `init_secret`/`sender_root`/`joiner_secret` are live epoch secrets — a
+/// dropped-not-wiped `Option<[u8; 32]>` would leave the prior epoch's material in freed memory,
+/// exactly the "pruned-epoch's material must be wiped, not just dropped" obligation. `tree`/`cth`/
+/// `tip_hash` are public and need no wipe; `my_private` (a `TreePrivate`) wipes itself via its own
+/// Drop. Nothing downstream needs the superseded epoch: the replay has already advanced past it.
+impl Drop for KeyingState {
+    fn drop(&mut self) {
+        for s in [&mut self.sender_root, &mut self.init_secret, &mut self.joiner_secret] {
+            if let Some(v) = s.as_mut() {
+                treekem::wipe_secret(v);
+            }
+        }
+    }
+}
+
 /// Rebuild MY OWN commit deterministically to recover its post-commit tree/schedule/private state
 /// (`apply_commit` refuses self-application, and the rebuild-each-bundle model stores no build). The
 /// fresh leaf secret + entropy come from `keying_update_material` (the exact material used when the
@@ -2700,6 +2741,9 @@ fn mls_build_remove(st: &mut NetState, idx: usize, removed_leaves: &[u32]) -> bo
     }
     shadow.commits.insert(ch, cbytes.clone());
     shadow.emit_cache.push(tagged(TAG_MLS_COMMIT, &cbytes));
+    // A Remove re-keys the committer's own leaf too, so it resets the PCS window (§6.4): the leaf
+    // was just refreshed — the periodic leaf Update shouldn't also fire this bundle.
+    st.circles[idx].rotated_at = now_secs();
     true
 }
 
@@ -2808,6 +2852,9 @@ fn mls_grow_tree(st: &mut NetState, idx: usize, new_devices: &[(HavenId, DeviceC
     shadow.commits.insert(ch, cbytes.clone());
     shadow.emit_cache.push(tagged(TAG_MLS_COMMIT, &cbytes));
     shadow.emit_cache.extend(welcome_wires);
+    // An Add re-keys the committer's own leaf (its UpdatePath rides the commit), so it resets the
+    // PCS window (§6.4): the periodic leaf Update shouldn't also fire this same bundle.
+    st.circles[idx].rotated_at = now_secs();
     true
 }
 
@@ -2935,6 +2982,70 @@ fn mls_sync_roster_to_tree(st: &mut NetState, idx: usize) {
     if !missing.is_empty() {
         mls_grow_tree(st, idx, &missing);
     }
+}
+
+/// PCS leaf-Update cadence (§6.4) — the M5 headline. Piggybacks the `rotate_if_stale` chokepoint
+/// (no new timer): when a LIVE MLS circle's weekly window elapses, the committer authors a LEAF-ONLY
+/// Update commit — a fresh leaf secret + UpdatePath, NO membership proposals — at the next epoch.
+/// This HEALS a past compromise of the committer's leaf: the fresh leaf secret is entropy an attacker
+/// who exfiltrated the old tree state does not hold, so the fresh `commit_secret` it induces mixes
+/// into `epoch_secret_{n+1}` and the stolen epoch-n state opens nothing from n+1 on (the PCS test).
+///
+/// Fires only on the FULL bundle that also re-seals my history under the new epoch (the caller gates
+/// `full_bundle`), so a leaf Update never strands a relay-only reader — the exact reason
+/// `rotate_if_stale` is the one safe rotation point. No-op (returns false) unless I am the committer,
+/// the window has elapsed, the circle is actually LIVE (all-joined — in shadow mode content isn't
+/// tree-keyed, so a leaf Update would heal nothing and just add epoch noise), and I can derive the
+/// current epoch. The leaf/entropy come from `keying_update_material` (deterministic per epoch), so a
+/// replay reconstructs this own commit byte-identically via `keying_rebuild_own_commit`.
+fn mls_pcs_leaf_update(st: &mut NetState, idx: usize) -> bool {
+    if !mls_am_committer(st, idx) {
+        return false; // switch OFF / not capable / not the committer ⇒ inert (byte-identical to M4)
+    }
+    // Reuse the legacy rotation window + stamp: a roster Add/Remove already re-keyed my leaf and
+    // stamped `rotated_at`, so the two paths never double-commit in one bundle.
+    if !st.circles[idx].pcs_window_elapsed() {
+        return false;
+    }
+    let circle_id = st.circles[idx].id.clone();
+    let gid = circle_id.as_bytes().to_vec();
+    let Some(seed) = st.device.as_ref().map(|d| d.secret_seed()) else { return false };
+    let signer = Identity::from_seed(&seed);
+    let my_secret_root = keying_secret_root(&seed, &gid);
+    let Some(shadow) = st.shadow_trees.get(&circle_id) else { return false };
+    let Some(cur) = mls_replay(shadow, Some(seed)) else { return false };
+    // Only heal a circle that is actually LIVE-keying — shadow content isn't tree-keyed, so there is
+    // nothing for a leaf Update to heal and advancing the shadow epoch would be pure noise.
+    if !keying_all_joined(shadow, &cur.tree) {
+        return false;
+    }
+    let Some(mp) = &cur.my_private else { return false }; // I must be an active member
+    let Some(init) = cur.init_secret else { return false };
+    let my_leaf = mp.leaf_index;
+    let next = cur.epoch + 1;
+    let (new_leaf, entropy) = keying_update_material(&my_secret_root, next);
+    let Some(cred) = cur.tree.leaf(my_leaf).map(|l| l.device_credential.clone()) else { return false };
+    // A LEAF-ONLY Update: empty proposal set, path = Some(fresh) ⇒ a fresh UpdatePath over my direct
+    // path (§6.4). Every other member decrypts it and advances; the fresh leaf secret is the healing
+    // entropy. `build_commit` already covers this shape (no dedicated helper needed).
+    let build = match treekem::build_commit(
+        &cur.tree, &gid, next, cur.tip_hash, &cur.cth, &init, my_leaf, vec![],
+        Some((&new_leaf, &cred, &entropy)), |m| signer.sign(m), |m| signer.sign(m),
+    ) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let cbytes = build.commit.to_bytes();
+    let ch = treekem::commit_hash(&cbytes);
+    let shadow = st.shadow_trees.get_mut(&circle_id).unwrap();
+    if shadow.commits.contains_key(&ch) {
+        return false; // already authored (idempotent across bundles)
+    }
+    shadow.commits.insert(ch, cbytes.clone());
+    shadow.emit_cache.push(tagged(TAG_MLS_COMMIT, &cbytes));
+    // Stamp the window so the next bundle doesn't immediately re-Update — the weekly cadence.
+    st.circles[idx].rotated_at = now_secs();
+    true
 }
 
 /// The keying flip (§4.5) / park-resume (§7.3), recomputed every bundle and receive. Returns the
@@ -4276,7 +4387,11 @@ impl HavenSocial {
         // the bundle regardless of the keying decision — a receiver needs them to build the tree AND
         // (M3) to derive the content epoch. Built BEFORE the flip decision so the tree exists when we
         // compute it. Plus my join ack (§7.2) and a re-broadcast of the verified admin grants (§4.3).
-        let shadow_wires = shadow_emit_bundle(&mut st, idx);
+        // A FULL bundle (mine-only, unlimited, not head-only) is the one place a rotation is safe —
+        // it re-seals my whole history under the new epoch in the same batch. Both the legacy
+        // `rotate_if_stale` and the M5 PCS leaf-Update cadence gate on exactly this predicate.
+        let full_bundle = !head_only && mine_only && limit == 0;
+        let shadow_wires = shadow_emit_bundle(&mut st, idx, full_bundle);
         let join_wire = keying_emit_join(&mut st, idx);
         let admin_wires: Vec<Vec<u8>> =
             st.circles[idx].admin_grants.iter().map(|g| tagged(TAG_ADMIN_GRANT, g)).collect();
@@ -4302,7 +4417,7 @@ impl HavenSocial {
                 (content_epoch, key)
             }
             None => {
-                if !head_only && mine_only && limit == 0 {
+                if full_bundle {
                     st.circles[idx].rotate_if_stale();
                 } else {
                     st.circles[idx].ensure_epoch();
@@ -5037,6 +5152,11 @@ impl HavenSocial {
                 st.circles[idx].admin_grants.push(g);
             }
         }
+        // §6.3-5: import UNIONS epoch keys, so an OLD exported blob could re-inject keys the pruner
+        // already deleted — benign redundancy today, but a regression under the one-way-schedule
+        // claim (a resurrected old key widens the exposure window past KEEP_EPOCHS). Re-prune after
+        // the union so the retained window stays bounded at 4 regardless of what a stale blob carried.
+        st.circles[idx].prune_epoch_keys();
     }
 
     fn author(&self, circle_id: &str, created_at: u64, kind: EventKind) -> Result<Vec<u8>, HavenError> {
@@ -5748,16 +5868,31 @@ mod net_tests {
         assert!(bob.open_call_frame(OFFER, raw_unsealed).is_none(), "legacy unsealed frame refused (no downgrade)");
     }
 
-    /// Advance the test clock by `secs` for the duration of the closure, then restore it. Serialized
-    /// so concurrently-running time-dependent tests can't observe each other's skew.
+    /// The shared skew-serialization lock. EVERY clock-sensitive test participates through it:
+    /// `with_clock_advanced` takes it EXCLUSIVE (write) while it perturbs the global skew, and
+    /// `clock_guard` takes it SHARED (read) for a test that must not observe a parallel test's skew.
+    /// A RwLock (not a Mutex) so the many clock-sensitive readers — the M5 PCS cadence made every
+    /// LIVE-MLS full bundle read the global clock, enrolling all the live-MLS epoch tests — still run
+    /// concurrently with each other, blocking only for the brief window an advancer holds the write.
+    static CLOCK_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+    /// Advance the test clock by `secs` for the duration of the closure, then restore it. Takes the
+    /// EXCLUSIVE lock so no clock-sensitive reader observes the transient skew.
     fn with_clock_advanced<T>(secs: u64, f: impl FnOnce() -> T) -> T {
         use std::sync::atomic::Ordering;
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = CLOCK_LOCK.write().unwrap_or_else(|e| e.into_inner());
         TEST_CLOCK_SKEW.fetch_add(secs, Ordering::Relaxed);
         let out = f();
         TEST_CLOCK_SKEW.fetch_sub(secs, Ordering::Relaxed);
         out
+    }
+
+    /// RAII form: hold the skew lock SHARED (read) for the caller's scope. Add
+    /// `let _clk = clock_guard();` at the top of a rotation-/PCS-sensitive test so a parallel
+    /// clock-advancing test can't leak a week of skew into it and spuriously fire a rotation or a PCS
+    /// leaf Update. Readers share, so guarded tests still run in parallel; one line, no re-indentation.
+    fn clock_guard() -> std::sync::RwLockReadGuard<'static, ()> {
+        CLOCK_LOCK.read().unwrap_or_else(|e| e.into_inner())
     }
 
     /// The PERIODIC rotation (audit C2): a circle with NO membership churn must still advance its
@@ -6986,6 +7121,7 @@ mod net_tests {
     /// all-joined, flips to tree-derived keys, STOPS the KeyCommit, and content round-trips for all.
     #[test]
     fn mls_keying_flips_when_all_joined_and_content_round_trips() {
+        let _clk = clock_guard(); // §6.4 PCS cadence reads the global clock; hold it steady (see clock_guard)
         let cid = DEFAULT_CIRCLE.to_string();
         let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32], [3u8; 32]], &[[11u8; 32], [12u8; 32], [13u8; 32]], 0);
         let (a, b, c) = (&insts[0], &insts[1], &insts[2]);
@@ -7040,6 +7176,7 @@ mod net_tests {
     /// author an authorized Add/Remove).
     #[test]
     fn s5_mls_removed_device_cannot_derive_or_reenter() {
+        let _clk = clock_guard(); // §6.4 PCS cadence reads the global clock; hold it steady (see clock_guard)
         let cid = DEFAULT_CIRCLE.to_string();
         // A is the creator/admin; B stays; C is removed.
         let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32], [3u8; 32]], &[[11u8; 32], [12u8; 32], [13u8; 32]], 0);
@@ -7077,6 +7214,7 @@ mod net_tests {
     /// creator/admin Remove is accepted; and a delegated admin (creator-granted) can then remove.
     #[test]
     fn mls_remove_authority_is_enforced_by_receivers() {
+        let _clk = clock_guard(); // §6.4 PCS cadence reads the global clock; hold it steady (see clock_guard)
         let cid = DEFAULT_CIRCLE.to_string();
         // A creator; B a plain member; C a plain member; D the removal target.
         let insts = mls_capable_fleet(
@@ -7281,6 +7419,7 @@ mod net_tests {
     /// the newcomer upgrades + joins, the circle re-flips.
     #[test]
     fn mls_legacy_join_parks_then_reflips() {
+        let _clk = clock_guard(); // §6.4 PCS cadence reads the global clock; hold it steady (see clock_guard)
         let cid = DEFAULT_CIRCLE.to_string();
         let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
         let (a, b) = (&insts[0], &insts[1]);
@@ -7416,6 +7555,7 @@ mod net_tests {
     /// the Add off the newcomer's roster arriving, with no explicit tree call anywhere.
     #[test]
     fn mls_mid_life_add_enters_at_live_epoch_and_reads_history() {
+        let _clk = clock_guard(); // §6.4 PCS cadence reads the global clock; hold it steady (see clock_guard)
         let cid = DEFAULT_CIRCLE.to_string();
         // A (creator) + B go live at the genesis epoch; A posts history BEFORE C exists.
         let base = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
@@ -7462,6 +7602,7 @@ mod net_tests {
     /// at the current epoch, converges to the live epoch secret, and reads history via the backfill.
     #[test]
     fn mls_sleeper_reenters_via_welcome_after_ttl() {
+        let _clk = clock_guard(); // §6.4 PCS cadence reads the global clock; hold it steady (see clock_guard)
         let cid = DEFAULT_CIRCLE.to_string();
         // A(creator), B, C, D live at the genesis epoch. C is the sleeper; D is a throwaway removed
         // to advance the epoch while C is offline.
@@ -7508,6 +7649,7 @@ mod net_tests {
     /// a device the tree no longer admits.
     #[test]
     fn mls_revoked_device_welcome_fails_closed() {
+        let _clk = clock_guard(); // §6.4 PCS cadence reads the global clock; hold it steady (see clock_guard)
         let cid = DEFAULT_CIRCLE.to_string();
         let base = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
         let (a, b) = (base[0].clone(), base[1].clone());
@@ -7545,6 +7687,7 @@ mod net_tests {
     /// derive), while a NON-admin ingesting the same revocation authors NO accepted Remove.
     #[test]
     fn mls_roster_revocation_drives_authority_checked_remove() {
+        let _clk = clock_guard(); // §6.4 PCS cadence reads the global clock; hold it steady (see clock_guard)
         let cid = DEFAULT_CIRCLE.to_string();
         // A(creator), B, C all live. C will be revoked via its own roster (a lost-device scenario).
         let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32], [3u8; 32]], &[[11u8; 32], [12u8; 32], [13u8; 32]], 0);
@@ -7574,5 +7717,171 @@ mod net_tests {
         sync_all(&[a, b, c], &cid, 6);
         assert!(b.feed(cid.clone(), 4_000, None).iter().any(|m| m.body == "post-revoke"), "a remaining member reads post-revoke content");
         assert!(!c.feed(cid.clone(), 4_000, None).iter().any(|m| m.body == "post-revoke"), "the revoked device is cut off");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════════════
+    // MLS M5 — PCS cadence + the §6.3 forward-secrecy proof obligations at the engine level.
+    // (The pure schedule-level PCS + FS-bug tests live in `treekem.rs`; these drive the wired
+    // cadence and the FFI-only obligations — reseal lane, merge import, welcome retention.)
+    // ═══════════════════════════════════════════════════════════════════════════════════════
+
+    /// A device's live tree-deriving state (what an attacker exfiltrates), captured by replaying the
+    /// committer's own chain — `(tree epoch, sender_root, init_secret, joiner_secret)`.
+    fn mls_capture_state(s: &HavenSocial, cid: &str) -> (u64, [u8; 32], [u8; 32], [u8; 32]) {
+        let st = s.state.lock().unwrap();
+        let seed = st.device.as_ref().unwrap().secret_seed();
+        let shadow = st.shadow_trees.get(cid).expect("live circle has a shadow tree");
+        let ks = mls_replay(shadow, Some(seed)).expect("committer replays its chain");
+        (
+            ks.epoch,
+            ks.sender_root.expect("active member has a sender_root"),
+            ks.init_secret.expect("active member has an init_secret"),
+            ks.joiner_secret.expect("active member has a joiner_secret"),
+        )
+    }
+
+    /// §9 M5 — THE PCS TEST, wired end to end (§6.4). Exfiltrate the committer's full epoch-1
+    /// deriving state, let the weekly `rotate_if_stale` chokepoint fire (no manual Remove/Add — the
+    /// PCS leaf-Update PIGGYBACKS it), and assert the stolen epoch-1 `sender_root` opens nothing at
+    /// the healed epoch 2, while the circle keeps working. The razor-sharp converse (init_1 WOULD
+    /// open n+1 absent a fresh Update) is proven at the schedule level in `treekem.rs`.
+    #[test]
+    fn mls_pcs_cadence_heals_committer_leaf_on_the_rotate_chokepoint() {
+        let cid = DEFAULT_CIRCLE.to_string();
+        let insts = mls_capable_fleet(&[[71u8; 32], [72u8; 32]], &[[81u8; 32], [82u8; 32]], 0);
+        let (a, b) = (&insts[0], &insts[1]);
+        flip_and_join(&insts, &cid);
+        assert_eq!(a.mls_keying_status(cid.clone()).epoch, 1, "the pair is live at the genesis epoch");
+
+        // Exfiltrate A's (the committer's) FULL epoch-1 state, and the epoch-1 content key it derives.
+        let gidbytes = cid.as_bytes().to_vec();
+        let acct_a = Identity::from_seed(&[71u8; 32]).public().node_id_bytes();
+        let (e1, root1, _init1, _js1) = mls_capture_state(a, &cid);
+        assert_eq!(e1, 1);
+        let content_key_1 = treekem::sender_key(&root1, &acct_a, &gidbytes, 1);
+        let live_key_1 = a.state.lock().unwrap().circles.iter().find(|c| c.id == cid).unwrap()
+            .my_epoch_keys.get(&(MLS_EPOCH_BASE + 1)).copied().unwrap();
+        assert_eq!(content_key_1, live_key_1, "the captured sender_root reproduces the live epoch-1 content key");
+
+        // Let a week pass and run ordinary full bundles — the PCS leaf Update fires on the SAME
+        // chokepoint as the legacy rotation, with NO membership change.
+        with_clock_advanced(ROTATE_INTERVAL_SECS + 1, || {
+            sync_all(&[a, b], &cid, 4);
+        });
+        assert_eq!(a.mls_keying_status(cid.clone()).epoch, 2, "the PCS leaf Update advanced the epoch on the stale window");
+        assert_eq!(b.mls_keying_status(cid.clone()).epoch, 2, "B converged on the healed epoch");
+
+        // HEALED: the stolen epoch-1 sender_root cannot derive the epoch-2 content key, but A holds it.
+        let real_key_2 = a.state.lock().unwrap().circles.iter().find(|c| c.id == cid).unwrap()
+            .my_epoch_keys.get(&(MLS_EPOCH_BASE + 2)).copied().unwrap();
+        assert_ne!(
+            treekem::sender_key(&root1, &acct_a, &gidbytes, 2), real_key_2,
+            "the exfiltrated epoch-1 sender_root opens NOTHING at epoch 2 (the compromise window closed)",
+        );
+
+        // The circle keeps working across the heal: content posted at epoch 2 round-trips.
+        a.post(cid.clone(), "healed".into(), vec![], None, None, false, false, 5_000).unwrap();
+        sync_all(&[a, b], &cid, 3);
+        assert!(b.feed(cid.clone(), 6_000, None).iter().any(|m| m.body == "healed"), "post-heal content round-trips");
+    }
+
+    /// §9 M5 / §6.3-3 — Welcome retention is BOUNDED, not pinned forever. The committer issues a fresh
+    /// `joiner_secret` per epoch and does not keep serving the old one: once the weekly cadence
+    /// advances the epoch, the prior epoch's joiner material no longer keys the live epoch, so an
+    /// un-consumed Welcome goes stale within the rotation window (tighter than the 30-day mailbox TTL)
+    /// and re-entry needs a fresh, current-epoch Welcome.
+    #[test]
+    fn fs_bug_3_welcome_joiner_secret_retention_is_bounded() {
+        let cid = DEFAULT_CIRCLE.to_string();
+        let insts = mls_capable_fleet(&[[73u8; 32], [74u8; 32]], &[[83u8; 32], [84u8; 32]], 0);
+        let (a, b) = (&insts[0], &insts[1]);
+        flip_and_join(&insts, &cid);
+        let (e1, root1, _i1, js1) = mls_capture_state(a, &cid);
+        assert_eq!(e1, 1);
+
+        with_clock_advanced(ROTATE_INTERVAL_SECS + 1, || {
+            sync_all(&[a, b], &cid, 4);
+        });
+        let (e2, root2, _i2, js2) = mls_capture_state(a, &cid);
+        assert_eq!(e2, 2, "the epoch advanced via the PCS cadence");
+        // The committer does NOT pin/reuse the old joiner_secret — it derives a fresh one per epoch.
+        assert_ne!(js1, js2, "a fresh joiner_secret per epoch — the old one is not pinned");
+        // A Welcome carrying the epoch-1 joiner_secret keys only epoch-1 material, which is superseded
+        // at the live epoch: retaining it past the epoch admits no one at epoch 2.
+        assert_ne!(root1, root2, "the epoch-1 Welcome material does not key the live epoch (retention bounded)");
+    }
+
+    /// §9 M5 / §6.3-4 — the re-seal lane is not a hidden long-lived archive key. History authored at
+    /// epoch 0 is re-sealed under the CURRENT epoch on every full bundle; after enough weekly
+    /// rotations the epoch-0 key is PRUNED (deleted) from the author, yet a peer still reads the old
+    /// post — because it rides the current epoch key, exactly as §6.1 claims, with no archive key
+    /// preserving old-epoch readability.
+    #[test]
+    fn fs_bug_4_reseal_reads_history_under_the_current_epoch_only() {
+        let a = HavenSocial::new([92u8; 32].to_vec()).unwrap();
+        let b = HavenSocial::new([93u8; 32].to_vec()).unwrap();
+        let cid = DEFAULT_CIRCLE.to_string();
+        a.add_contact_bundle(cid.clone(), b.my_bundle()).unwrap();
+        b.add_contact_bundle(cid.clone(), a.my_bundle()).unwrap();
+        with_clock_advanced(0, || {
+            a.post(cid.clone(), "authored-at-epoch-0".into(), vec![], None, None, false, false, 1).unwrap();
+            sync(&a, &b, &cid);
+            sync(&a, &b, &cid);
+            assert!(
+                b.feed(cid.clone(), 10_000, None).iter().any(|m| m.body == "authored-at-epoch-0"),
+                "control: the post is readable at epoch 0",
+            );
+        });
+        // Roll the clock forward one week at a time so a full bundle rotates once per step (each stamps
+        // `rotated_at`), past the KEEP_EPOCHS window — this DELETES the epoch-0 key from the author.
+        for wk in 1..=6u64 {
+            with_clock_advanced(ROTATE_INTERVAL_SECS * wk + 1, || {
+                sync(&a, &b, &cid);
+                sync(&a, &b, &cid);
+            });
+        }
+        let epoch_now = a.state.lock().unwrap().circles[0].my_epoch;
+        assert!(epoch_now >= 5, "the author rotated well past the 4-epoch window (was {epoch_now})");
+        assert!(
+            !a.state.lock().unwrap().circles[0].my_epoch_keys.contains_key(&0),
+            "the epoch-0 key is genuinely DELETED — no long-lived archive key survives",
+        );
+        // Yet the epoch-0 post is still readable: it was re-sealed under the CURRENT epoch each bundle.
+        assert!(
+            b.feed(cid.clone(), 10_000, None).iter().any(|m| m.body == "authored-at-epoch-0"),
+            "history re-sealed under the current epoch stays readable after the old key is deleted",
+        );
+    }
+
+    /// §9 M5 / §6.3-5 — `merge_circle` (import) UNIONS epoch keys, then RE-PRUNES, so a stale exported
+    /// blob carrying keys the pruner already deleted cannot resurrect the window past KEEP_EPOCHS = 4.
+    #[test]
+    fn fs_bug_5_merge_does_not_resurrect_pruned_epoch_keys() {
+        let _clk = clock_guard();
+        let a = HavenSocial::new([94u8; 32].to_vec()).unwrap();
+        let b = HavenSocial::new([95u8; 32].to_vec()).unwrap();
+        let cid = DEFAULT_CIRCLE.to_string();
+        a.add_contact_bundle(cid.clone(), b.my_bundle()).unwrap();
+        b.add_contact_bundle(cid.clone(), a.my_bundle()).unwrap();
+        a.post(cid.clone(), "seed".into(), vec![], None, None, false, false, 1).unwrap();
+
+        // Craft an OLD exported blob whose circle carries SIX epoch keys — as if it predates a prune
+        // or was unioned across devices — well past the 4-epoch window.
+        let mut ps: PersistState = serde_json::from_slice(&a.export_state()).unwrap();
+        let ci = ps.circles.iter().position(|c| c.id == cid).unwrap();
+        ps.circles[ci].my_epoch_keys = (10u64..16).map(|e| (e, [e as u8; 32])).collect();
+        let blob = serde_json::to_vec(&ps).unwrap();
+
+        // A fresh instance (same identity) imports the stale blob; the union is immediately re-pruned.
+        let c = HavenSocial::new([94u8; 32].to_vec()).unwrap();
+        c.import_state(blob);
+        let keys: Vec<u64> = {
+            let st = c.state.lock().unwrap();
+            let cc = st.circles.iter().find(|cc| cc.id == cid).unwrap();
+            cc.my_epoch_keys.keys().copied().collect()
+        };
+        assert_eq!(keys.len(), 4, "import unions then RE-PRUNES: the retained window stays 4, no resurrection");
+        assert!(!keys.contains(&10) && !keys.contains(&11), "the oldest injected epochs are NOT resurrected");
+        assert!(keys.contains(&14) && keys.contains(&15), "the newest epochs within the window are retained");
     }
 }

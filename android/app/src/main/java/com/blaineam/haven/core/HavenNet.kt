@@ -665,7 +665,10 @@ object HavenNet : InboundListener {
     /** The messages of a circle (a DM thread), oldest→newest for chat display. Hides anything older
      *  than this DM's "cleared before" watermark so re-starting a (deterministic-id) DM shows fresh. */
     fun messages(circleId: String): List<uniffi.haven_ffi.FeedItemFfi> {
-        val all = runCatching { social.feed(circleId, nowMs(), null) }.getOrDefault(emptyList())
+        // Honor this DM's viewer auto-delete window, same as the posts feed (CircleScreen) and iOS
+        // (`messages(in:)`). A DM is a Post under a `dm:` circle, so both the sender's disappearing timer
+        // and the viewer's retention setting apply; passing `null` here silently exempted DM threads.
+        val all = runCatching { social.feed(circleId, nowMs(), CircleSettings.retentionSecs(circleId)) }.getOrDefault(emptyList())
             .sortedBy { it.createdAt }
         val cutoff = dmClearedBefore(circleId) ?: return all
         return all.filter { it.createdAt >= cutoff }

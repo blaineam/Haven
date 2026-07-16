@@ -23,9 +23,11 @@
   }
   .wrap{display:flex;height:100%;align-items:center}
   .left{flex:0 0 660px;padding:0 0 0 76px}
-  .eyebrow{font-size:18px;font-weight:800;letter-spacing:.18em;text-transform:uppercase;
+  .eyebrow{font-size:18px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;
     color:var(--pink);margin-bottom:24px}
   .eyebrow .dot{color:rgba(245,245,247,.30);margin:0 8px}
+  /* Keep each phrase whole so "No ads" can never break across a line. */
+  .eyebrow .nb{white-space:nowrap}
   .wordmark{font-size:130px;font-weight:850;letter-spacing:-.04em;line-height:.95;
     background:var(--brand);-webkit-background-clip:text;background-clip:text;color:transparent}
   .tagline{font-size:44px;font-weight:800;letter-spacing:-.02em;line-height:1.08;margin-top:18px;color:var(--text)}
@@ -46,7 +48,7 @@
 <body>
   <div class="wrap">
     <div class="left">
-      <div class="eyebrow">End-to-end encrypted <span class="dot">•</span> No servers <span class="dot">•</span> No ads</div>
+      <div class="eyebrow"><span class="nb">End-to-end encrypted</span> <span class="dot">•</span> <span class="nb">No tracking</span> <span class="dot">•</span> <span class="nb">No ads</span></div>
       <div class="wordmark">Haven</div>
       <div class="tagline">A private home<br/>for <span class="g">your people.</span></div>
       <div class="sub">Photos, stories, messages &amp; calls — peer-to-peer, post-quantum, nothing leaves your circle.</div>

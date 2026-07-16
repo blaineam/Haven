@@ -33,14 +33,13 @@ A private, end‑to‑end encrypted home for your closest people. No ads, no tra
 
 ## whats_new
 What's new:
-• Photos and videos now fill the width of the feed, with a soft blurred version of the same shot behind them — no more tall photos squeezed into a sliver
-• A post with several photos is now a swipeable carousel instead of a grid of thumbnails
-• Share a post as a link that opens straight to it in Haven — on iPhone, iPad, Mac, or Android. The link is built so the website never learns which post it points to
-• If your circle doesn't have a relay yet, Haven now offers to help you set one up, and explains plainly what a relay can and can't see
-• Calls are opaque now — your feed no longer shows faintly through an active call
-• The in‑call minimize button sits clear of the Dynamic Island and the screen's rounded corners
+• Posts you author now reach your own other devices instantly — no waiting for the next sync
+• Voice and video calls are sealed and signed end-to-end, exactly like your posts and messages
+• Shared photos and videos are verified against a fingerprint of the original, so nothing can be swapped in transit
+• Relay and mailbox access is limited to your circle's members
+• A top-to-bottom security audit, with hardening throughout — same private, serverless Haven
 
-Native on iPhone, iPad, and Mac — with Android and Windows/Linux desktop apps too.
+Native on iPhone, iPad, and Mac.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

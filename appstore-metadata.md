@@ -6,7 +6,7 @@
 Haven 〇
 
 ## subtitle
-Encrypted circles, no servers
+Private, encrypted circles
 
 ## description
 Haven is a private social network for the people who actually matter. No ads. No tracking. No algorithm deciding what you see. No company server holding your memories.
@@ -29,7 +29,7 @@ Haven is a stronghold for the people you love. It's built so that no one — not
 private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,no ads,quantum
 
 ## promotional_text
-A private, end‑to‑end encrypted home for your closest people. No ads, no tracking, no servers — just your people.
+A private, end‑to‑end encrypted home for your closest people. No ads, no tracking, peer‑to‑peer — just your people.
 
 ## whats_new
 What's new:

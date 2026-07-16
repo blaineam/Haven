@@ -44,6 +44,11 @@ object StoryCaptions {
         val x: Float = 0.5f,
         val y: Float = 0.5f,
         val size: Float = 1f,
+        // Author's media framing (wire fields 6-8): zoom about center + translation as a fraction
+        // of the container. Absent on legacy/6-field bodies → identity (no reframing).
+        val mediaScale: Float = 1f,
+        val mediaOffX: Float = 0f,
+        val mediaOffY: Float = 0f,
     )
     data class Decoded(val text: String, val spec: Spec)
 
@@ -86,6 +91,9 @@ object StoryCaptions {
                 x = n.getOrNull(3)?.toFloatOrNull() ?: 0.5f,
                 y = n.getOrNull(4)?.toFloatOrNull() ?: 0.5f,
                 size = n.getOrNull(5)?.toFloatOrNull() ?: 1f,
+                mediaScale = n.getOrNull(6)?.toFloatOrNull() ?: 1f,
+                mediaOffX = n.getOrNull(7)?.toFloatOrNull() ?: 0f,
+                mediaOffY = n.getOrNull(8)?.toFloatOrNull() ?: 0f,
             ),
         )
     }

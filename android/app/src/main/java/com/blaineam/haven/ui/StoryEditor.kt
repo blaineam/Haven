@@ -279,7 +279,10 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
                                                 else runCatching { LocalMedia.store(DEFAULT_CIRCLE, out.readBytes(), isVideo = true) }.getOrNull() ?: ref
                                             }
                                         }
-                                        HavenNet.postStory(encodedCaption(caption, colorIdx, fontIdx, style, capOffset, boxSize, sizeSp), newRef, music)
+                                        // Transcode is filter-only — a video's zoom/pan can't be baked
+                                        // like a photo's, so the framing rides the wire fields instead
+                                        // (viewers apply it, matching iOS).
+                                        HavenNet.postStory(encodedCaption(caption, colorIdx, fontIdx, style, capOffset, boxSize, sizeSp, mediaScale, mediaOffset), newRef, music)
                                     } else {
                                         // Filter + the author's zoom/pan are pixel operations and stay
                                         // baked; the CAPTION rides the wire format instead (parity with
@@ -384,10 +387,14 @@ private fun bakePhoto(
 
 /** Map the editor's on-screen caption state to the normalized wire format (see StoryCaptions):
  *  position = fraction of the preview box from its top-left (drag offset is from center),
- *  size = multiplier on the 28-unit cross-platform base. */
+ *  size = multiplier on the 28-unit cross-platform base. Media framing (video only — photos bake
+ *  it into pixels and send the identity defaults): scale as-is, pan normalized to the box the same
+ *  way iOS does (offset px ÷ container size), since the editor's graphicsLayer translation and
+ *  iOS's .offset() are both unscaled container-space px. */
 private fun encodedCaption(
     caption: String, colorIdx: Int, fontIdx: Int, style: CapStyle,
     capOffset: Offset, boxSize: IntSize, sizeSp: Float,
+    mediaScale: Float = 1f, mediaOffset: Offset = Offset.Zero,
 ): String {
     val wireStyle = when (style) {
         CapStyle.PLAIN -> StoryCaptions.CapStyle.PLAIN
@@ -402,5 +409,8 @@ private fun encodedCaption(
         caption, colorIdx % StoryCaptions.colors.size, fontIdx % StoryCaptions.fontFamilies.size, wireStyle,
         x = x.coerceIn(0f, 1f), y = y.coerceIn(0f, 1f),
         size = (sizeSp / 28f).coerceIn(0.6f, 1.9f),
+        mediaScale = mediaScale,
+        mediaOffX = if (boxSize.width > 0) mediaOffset.x / boxSize.width else 0f,
+        mediaOffY = if (boxSize.height > 0) mediaOffset.y / boxSize.height else 0f,
     )
 }

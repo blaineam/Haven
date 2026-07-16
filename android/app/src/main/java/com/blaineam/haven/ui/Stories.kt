@@ -40,6 +40,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -175,26 +176,41 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
                 )
             },
     ) {
+        // Decoded once: the spec carries the caption style AND the author's media framing.
+        val decoded = StoryCaptions.decode(item.body)
         val mediaId = item.media.firstOrNull()
         if (mediaId != null) {
-            // Honors a flag federated by a member whose platform has an analyzer. cornerRadius 0 —
-            // a story is full-bleed, exactly as iOS passes it (Stories.swift:123).
-            SensitiveGuard(DEFAULT_CIRCLE, mediaId, cornerRadius = 0) { covered ->
-                // A video story must play in a video view, not the image decoder (was rendering nothing).
-                if (com.blaineam.haven.core.LocalMedia.isVideo(mediaId)) {
-                    // A blur hides the picture, not the sound — don't play a covered story.
-                    if (covered) Box(Modifier.fillMaxSize().background(HavenTheme.card))
-                    else VideoTile(DEFAULT_CIRCLE, mediaId, Modifier.fillMaxSize())
-                } else {
-                    // MediaImage defaults to FillWidth, which letterboxed the story into black bands.
-                    // A story is full-bleed on iOS (scaledToFill), so crop to the frame instead.
-                    MediaImage(DEFAULT_CIRCLE, mediaId, Modifier.fillMaxSize(), ContentScale.Crop)
+            // The author's framing (zoom + pan) rides the caption spec — same application as iOS
+            // (Stories.swift:120-121): scale about center, THEN translate by offX/offY fractions of
+            // the container. graphicsLayer translation is unscaled parent-space px, matching
+            // SwiftUI's .scaleEffect().offset() order.
+            val tf = decoded.spec
+            Box(
+                Modifier.fillMaxSize().graphicsLayer {
+                    scaleX = tf.mediaScale
+                    scaleY = tf.mediaScale
+                    translationX = tf.mediaOffX * size.width
+                    translationY = tf.mediaOffY * size.height
+                },
+            ) {
+                // Honors a flag federated by a member whose platform has an analyzer. cornerRadius 0 —
+                // a story is full-bleed, exactly as iOS passes it (Stories.swift:123).
+                SensitiveGuard(DEFAULT_CIRCLE, mediaId, cornerRadius = 0) { covered ->
+                    // A video story must play in a video view, not the image decoder (was rendering nothing).
+                    if (com.blaineam.haven.core.LocalMedia.isVideo(mediaId)) {
+                        // A blur hides the picture, not the sound — don't play a covered story.
+                        if (covered) Box(Modifier.fillMaxSize().background(HavenTheme.card))
+                        else VideoTile(DEFAULT_CIRCLE, mediaId, Modifier.fillMaxSize())
+                    } else {
+                        // MediaImage defaults to FillWidth, which letterboxed the story into black bands.
+                        // A story is full-bleed on iOS (scaledToFill), so crop to the frame instead.
+                        MediaImage(DEFAULT_CIRCLE, mediaId, Modifier.fillMaxSize(), ContentScale.Crop)
+                    }
                 }
             }
         }
-        // Decode the iOS-authored caption (was shown raw → gibberish): position + colour it, with
+        // The iOS-authored caption (was shown raw → gibberish): position + colour it, with
         // a highlight pill if that's the style.
-        val decoded = StoryCaptions.decode(item.body)
         if (decoded.text.isNotBlank()) {
             val spec = decoded.spec
             val isHl = spec.style == StoryCaptions.CapStyle.HIGHLIGHT

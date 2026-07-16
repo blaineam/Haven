@@ -621,14 +621,16 @@ final class FeedStore: ObservableObject {
         purgedCircles.insert(circleId)
         let nowMs = now()
         let scheduledRefs = ScheduledStore.shared.items.flatMap(\.media)
+        let pinnedStems = PinnedMediaStore.shared.inUseStems()   // device-pinned blobs are cleanup-exempt
         Task.detached(priority: .utility) { [weak self] in
             let purged = social.purgeExpired(circleId: circleId, viewerRetentionSecs: retention, nowMs: nowMs)
             guard !purged.isEmpty else { return }
             // Anything a LIVE event anywhere still names keeps its bytes (content addressing means
             // one blob can back many posts). Built AFTER the purge so this circle's dropped events
-            // no longer count as users.
+            // no longer count as users. Device-pinned blobs are held regardless of referencedness.
             var inUse = Self.mediaInUseStems(social: social)
             for r in scheduledRefs { inUse.formUnion(MediaStore.storedStems(for: r)) }
+            inUse.formUnion(pinnedStems)
             await MainActor.run {
                 guard let self else { return }
                 // Persist FIRST: once the blobs are gone, the purged events must not resurrect from
@@ -668,9 +670,11 @@ final class FeedStore: ObservableObject {
     func cleanupUnusedMedia() async -> (bytes: Int64, files: Int) {
         guard let social, !DemoEnv.isDemo else { return (0, 0) }
         let scheduledRefs = ScheduledStore.shared.items.flatMap(\.media)
+        let pinnedStems = PinnedMediaStore.shared.inUseStems()   // device-pinned blobs are cleanup-exempt
         let result = await Task.detached(priority: .utility) { () -> (Int64, Int) in
             var inUse = Self.mediaInUseStems(social: social)
             for r in scheduledRefs { inUse.formUnion(MediaStore.storedStems(for: r)) }
+            inUse.formUnion(pinnedStems)
             return MediaStore.performOrphanSweep(inUse: inUse)
         }.value
         if result.1 > 0 {
@@ -692,6 +696,134 @@ final class FeedStore: ObservableObject {
             _ = await self.cleanupUnusedMedia()
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: key)
             self.weeklySweepInFlight = false
+        }
+    }
+
+    // MARK: - Cleanup screen (#1) — size-sorted inventory + multi-select delete
+
+    /// Every stored media blob, joined to the post/DM/comment that references it (best-effort), sorted
+    /// by size DESCENDING for the "Manage media" screen. A blob no live event names is an ORPHAN. The
+    /// event/metadata is untouched by a delete here — only the local bytes go, so the item re-renders as
+    /// a downloadable placeholder.
+    func mediaInventory() async -> [MediaInventoryRow] {
+        guard let social else { return [] }
+        let pinned = PinnedMediaStore.shared.refs
+        let circleNames = Dictionary(circles.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
+        var scheduledStems = Set<String>()
+        for r in ScheduledStore.shared.items.flatMap(\.media) { scheduledStems.formUnion(MediaStore.storedStems(for: r)) }
+        return await Task.detached(priority: .userInitiated) { () -> [MediaInventoryRow] in
+            // stem -> the event that references it (first/newest wins). Built from every circle's feed
+            // + comments so a row can name where its bytes came from.
+            var owner: [String: (circleId: String, snippet: String, ts: UInt64)] = [:]
+            let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
+            for c in social.circles() {
+                for item in social.feed(circleId: c.id, nowMs: nowMs, viewerRetentionSecs: nil) {
+                    let snip = item.body.isEmpty ? "" : String(item.body.prefix(80))
+                    func attribute(_ refs: [String], _ snippet: String, _ ts: UInt64) {
+                        for r in refs {
+                            for stem in MediaStore.storedStems(for: r) where owner[stem] == nil {
+                                owner[stem] = (c.id, snippet, ts)
+                            }
+                        }
+                    }
+                    attribute(item.media, snip, item.createdAt)
+                    for cm in item.comments {
+                        attribute(cm.media, cm.body.isEmpty ? "" : String(cm.body.prefix(80)), cm.createdAt)
+                    }
+                }
+            }
+            return MediaStore.storedBlobs().map { blob -> MediaInventoryRow in
+                let kind = MediaKind(ref: blob.ref)
+                let scheduled = !MediaStore.storedStems(for: blob.ref).isDisjoint(with: scheduledStems)
+                if let o = owner[blob.ref] {
+                    let isDM = o.circleId.hasPrefix("dm:")
+                    return MediaInventoryRow(
+                        ref: blob.ref, bytes: blob.bytes, mtime: blob.mtime, kind: kind,
+                        circleId: o.circleId,
+                        circleName: isDM ? "Direct message" : (circleNames[o.circleId] ?? "A circle"),
+                        snippet: o.snippet.isEmpty ? nil : o.snippet,
+                        eventMs: o.ts, isOrphan: false,
+                        isPinned: pinned.contains(blob.ref))
+                }
+                return MediaInventoryRow(
+                    ref: blob.ref, bytes: blob.bytes, mtime: blob.mtime, kind: kind,
+                    circleId: nil,
+                    circleName: scheduled ? "Scheduled to send" : "Unused",
+                    snippet: nil, eventMs: UInt64(blob.mtime.timeIntervalSince1970 * 1000),
+                    isOrphan: !scheduled, isPinned: pinned.contains(blob.ref))
+            }.sorted { $0.bytes > $1.bytes }
+        }.value
+    }
+
+    /// Delete the LOCAL blobs for these refs (the event/metadata stays). A ref a live event still
+    /// references is recorded in the evicted set with its size, so it renders as a "Download X MB"
+    /// placeholder instead of being auto-refetched (that would undo the cleanup). Returns freed bytes.
+    @discardableResult
+    func deleteSelectedMedia(_ rows: [MediaInventoryRow]) async -> Int64 {
+        guard let social else { return 0 }
+        let inUse = await Task.detached(priority: .utility) { Self.mediaInUseStems(social: social) }.value
+        var freed: Int64 = 0
+        for row in rows where !row.isPinned {
+            let referenced = !MediaStore.storedStems(for: row.ref).isDisjoint(with: inUse)
+            freed += MediaStore.shared.delete(row.ref)
+            if referenced { EvictedMediaStore.shared.mark(row.ref, bytes: row.bytes) }
+        }
+        if freed > 0 { scheduleRefresh() }
+        return freed
+    }
+
+    // MARK: - Local limits (#4) — age/size caps
+
+    private var lastLimitSweepAt: TimeInterval = 0
+    private var limitSweepInFlight = false
+    /// Enforce the device-local age/size caps (Settings ▸ Storage). Deletes local blobs (metadata stays
+    /// → placeholder) oldest-first, skipping pinned + in-flight media. `force` bypasses the throttle
+    /// (used when the setting changes). No-op when both caps are off.
+    func enforceLocalLimits(force: Bool = false) {
+        guard !DemoEnv.isDemo, let social, !limitSweepInFlight else { return }
+        let maxDays = SettingsStore.shared.localMediaMaxDays
+        let maxGB = SettingsStore.shared.localMediaMaxGB
+        guard maxDays > 0 || maxGB > 0 else { return }
+        let nowSecs = Date().timeIntervalSince1970
+        guard force || nowSecs - lastLimitSweepAt > 600 else { return }   // at most every 10 min otherwise
+        lastLimitSweepAt = nowSecs
+        limitSweepInFlight = true
+        let pinnedStems = PinnedMediaStore.shared.inUseStems()
+        Task.detached(priority: .utility) { [weak self] in
+            let inUse = Self.mediaInUseStems(social: social)
+            let r = MediaStore.performLimitSweep(maxDays: maxDays, maxGB: maxGB, pinnedStems: pinnedStems, inUse: inUse)
+            await MainActor.run {
+                guard let self else { return }
+                self.limitSweepInFlight = false
+                guard r.files > 0 else { return }
+                for (stem, bytes) in r.evict { EvictedMediaStore.shared.mark(stem, bytes: bytes) }
+                MediaStore.shared.clearMemoryCache()
+                self.scheduleRefresh()
+                HavenLog.sync("media limit sweep: freed \(r.bytes)B across \(r.files) files")
+            }
+        }
+    }
+
+    // MARK: - On-demand download of an evicted blob (#3)
+
+    /// Refs a Download tap is actively fetching, and refs the relay no longer has — drive the
+    /// placeholder's spinner / "no longer available" states.
+    @Published var downloadingMedia: Set<String> = []
+    @Published var unavailableMedia: Set<String> = []
+
+    /// User tapped "Download" on a placeholder for a blob we deliberately evicted: clear the eviction
+    /// (so the normal missing-media path may fetch it), request it now, and surface a spinner. If it
+    /// hasn't arrived in ~45s, mark it unavailable (the relay/peers don't have it either).
+    func downloadEvicted(_ ref: String) {
+        EvictedMediaStore.shared.clear(ref)
+        unavailableMedia.remove(ref)
+        guard !MediaStore.shared.has(ref) else { scheduleRefresh(); return }
+        downloadingMedia.insert(ref)
+        requestMedia(ref)
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 45_000_000_000)
+            downloadingMedia.remove(ref)
+            if !MediaStore.shared.has(ref) { unavailableMedia.insert(ref) }
         }
     }
 
@@ -849,6 +981,7 @@ final class FeedStore: ObservableObject {
                 RelayHost.shared.meshSyncTick()   // if we host a relay, pull from sibling relays
                 RelayMailboxStore.shared.purgeStale()   // GC relays inactive + unseen > 7 days
                 self.maybeWeeklyMediaSweep()      // orphaned media blobs (at most once a week)
+                self.enforceLocalLimits()         // device-local age/size caps (throttled ~10 min; no-op if off)
             }
         }
     }
@@ -2218,9 +2351,12 @@ final class FeedStore: ObservableObject {
         var missing = Set<String>()
         // Skip synthetic refs (geo: location pins): they carry no fetchable bytes, so counting them
         // keeps nbMediaPending pinned above 0 forever and fires a doomed restore each sweep.
+        // Skip refs the user DELIBERATELY evicted (cleanup screen / local-limit sweep). Auto-refetching
+        // them would silently undo the space the user just freed — they re-download only on an explicit
+        // "Download" tap (downloadEvicted clears the eviction first). Still fetch media never seen yet.
         for item in items {
-            for ref in item.media where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref) { missing.insert(ref) }
-            for c in item.comments { for ref in c.media where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref) { missing.insert(ref) } }
+            for ref in item.media where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref) && !EvictedMediaStore.shared.contains(ref) { missing.insert(ref) }
+            for c in item.comments { for ref in c.media where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref) && !EvictedMediaStore.shared.contains(ref) { missing.insert(ref) } }
         }
         let circleIds = circles.map { $0.id }
         SyncMetrics.shared.nbMediaPending = missing.count
@@ -3757,6 +3893,17 @@ struct PostCard: View {
                     let media = realMedia
                     if let idx = media.firstIndex(of: ref) { zoomTarget = ZoomTarget(refs: media, index: idx) }
                 }
+        } else if EvictedMediaStore.shared.contains(ref) {
+            // Deliberately evicted — a compact tap-to-download tile (not an endless spinner).
+            Button { FeedStore.shared.downloadEvicted(ref) } label: {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemFill))
+                    Image(systemName: FeedStore.shared.downloadingMedia.contains(ref) ? "arrow.down.circle" : "arrow.down.circle.fill")
+                        .font(.title2).foregroundStyle(HavenTheme.pink)
+                }
+                .frame(width: height * 1.2, height: height)
+            }
+            .buttonStyle(.plain)
         } else {
             // Not downloaded yet — a compact loading tile keeps the gallery layout intact.
             ZStack {
@@ -3781,6 +3928,7 @@ struct PostCard: View {
                     if let url = shareURL(ref) {
                         ShareLink(item: url) { Label("Share…", systemImage: "square.and.arrow.up") }
                     }
+                    keepOnDeviceButton(ref)
                 }
         }
     }
@@ -3903,15 +4051,8 @@ private struct KillHorizontalScroller: NSViewRepresentable {
 /// Shown for a media reference whose bytes haven't arrived yet, so the post doesn't look
     /// broken while it's still downloading from the sender, a relay, or the shared mailbox.
     @ViewBuilder private func mediaLoadingPlaceholder(_ ref: String) -> some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(.secondarySystemFill))
-            VStack(spacing: 8) {
-                ProgressView()
-                Text(isVideo(ref) ? "Video still loading…" : "Media still loading…")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-        }
-        .frame(maxWidth: .infinity, minHeight: 160)
+        MissingMediaPlaceholder(ref: ref, isVideo: MediaKind(ref: ref) == .video)
+            .frame(maxWidth: .infinity, minHeight: 160)
     }
 
     /// The single-media tile's aspect ratio, taken from the image (or a video's thumbnail).
@@ -3946,6 +4087,17 @@ private struct KillHorizontalScroller: NSViewRepresentable {
             if let url = shareURL(ref) {
                 ShareLink(item: url) { Label("Share…", systemImage: "square.and.arrow.up") }
             }
+            keepOnDeviceButton(ref)
+        }
+    }
+
+    /// "Keep on this device" toggle — pins/unpins this ref in the device-local retention set so no
+    /// cleanup (orphan sweep, age/size limit, or the cleanup screen) ever removes its bytes.
+    @ViewBuilder private func keepOnDeviceButton(_ ref: String) -> some View {
+        let pinned = PinnedMediaStore.shared.isPinned(ref)
+        Button { PinnedMediaStore.shared.togglePin([ref]) } label: {
+            Label(pinned ? "Stop keeping on this device" : "Keep on this device",
+                  systemImage: pinned ? "pin.slash" : "pin")
         }
     }
 

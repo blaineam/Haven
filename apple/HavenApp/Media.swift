@@ -445,6 +445,94 @@ final class MediaStore: ObservableObject {
         return (total, count)
     }
 
+    /// One stored blob on disk, keyed by its on-disk STEM (the ref for `img_`/`vid_`/`aud_` files, the
+    /// bare hash for legacy/cross-platform files). Used by the cleanup screen and the local-limit sweep.
+    /// Sendable so it crosses off the main actor.
+    struct StoredBlob: Sendable, Identifiable {
+        var id: String { ref }
+        let ref: String        // on-disk stem — a real media ref (kind-prefixed) or a bare content hash
+        let bytes: Int64
+        let mtime: Date
+    }
+
+    /// Every stored media blob with its size + mtime, for the size-sorted cleanup screen and the
+    /// local-limit sweep. Skips in-flight scratch (`mint_*`, `incoming_*.part`) and hidden files.
+    /// `nonisolated static` so the walk runs off the main actor.
+    nonisolated static func storedBlobs() -> [StoredBlob] {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(
+            at: storageDir,
+            includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey],
+            options: [.skipsHiddenFiles]) else { return [] }
+        var out: [StoredBlob] = []
+        for url in items {
+            let vals = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey])
+            if vals?.isDirectory == true { continue }
+            let name = url.lastPathComponent
+            if name.hasPrefix("mint_") || name.hasPrefix("incoming_") { continue }   // producing / reassembling
+            let stem = url.deletingPathExtension().lastPathComponent
+            out.append(StoredBlob(ref: stem,
+                                  bytes: Int64(vals?.fileSize ?? 0),
+                                  mtime: vals?.contentModificationDate ?? .distantPast))
+        }
+        return out
+    }
+
+    /// The client sibling of the relay's retention: evict this device's cached blobs by AGE then SIZE
+    /// (oldest first) until under the caps. Unlike the orphan sweep, a blob a live event still
+    /// references IS eligible here — it just becomes a re-downloadable placeholder (the caller records
+    /// such refs in the evicted set so they aren't auto-refetched). `pinnedStems` (device pins) and
+    /// composer-staged/in-flight media (fresh mtime, grace window) are never touched. `inUse` is passed
+    /// only to decide which evicted refs to record. Returns freed bytes/files + the referenced refs to
+    /// mark evicted (keyed by on-disk stem → last-known size). `nonisolated static` — runs off-main.
+    nonisolated static func performLimitSweep(maxDays: Int, maxGB: Int,
+                                              pinnedStems: Set<String>, inUse: Set<String>,
+                                              graceSeconds: TimeInterval = 48 * 3600) -> (bytes: Int64, files: Int, evict: [String: Int64]) {
+        guard maxDays > 0 || maxGB > 0 else { return (0, 0, [:]) }
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(
+            at: storageDir,
+            includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey],
+            options: [.skipsHiddenFiles]) else { return (0, 0, [:]) }
+        struct Cand { let url: URL; let stem: String; let bytes: Int64; let mtime: Date }
+        let freshCutoff = Date().addingTimeInterval(-graceSeconds)
+        var cands: [Cand] = []
+        var pinnedBytes: Int64 = 0
+        for url in items {
+            let vals = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey])
+            if vals?.isDirectory == true { continue }
+            let name = url.lastPathComponent
+            if name.hasPrefix("mint_") || name.hasPrefix("incoming_") || name.hasPrefix(".") { continue }
+            let stem = url.deletingPathExtension().lastPathComponent
+            let bytes = Int64(vals?.fileSize ?? 0)
+            let mtime = vals?.contentModificationDate ?? Date()
+            if pinnedStems.contains(stem) { pinnedBytes += bytes; continue }   // device-pinned: never evict
+            if mtime > freshCutoff { continue }                               // too fresh to judge
+            cands.append(Cand(url: url, stem: stem, bytes: bytes, mtime: mtime))
+        }
+        var freed: Int64 = 0, files = 0
+        var evict: [String: Int64] = [:]
+        var deleted = Set<URL>()
+        func remove(_ c: Cand) {
+            guard !deleted.contains(c.url) else { return }
+            try? fm.removeItem(at: c.url); deleted.insert(c.url)
+            freed += c.bytes; files += 1
+            if !storedStems(for: c.stem).isDisjoint(with: inUse) { evict[c.stem] = c.bytes }
+        }
+        if maxDays > 0 {
+            let ageCutoff = Date().addingTimeInterval(-Double(maxDays) * 86_400)
+            for c in cands where c.mtime < ageCutoff { remove(c) }
+        }
+        if maxGB > 0 {
+            let cap = Int64(maxGB) * 1_000_000_000
+            var survivors = cands.filter { !deleted.contains($0.url) }.sorted { $0.mtime < $1.mtime }  // oldest first
+            var total = pinnedBytes + survivors.reduce(0) { $0 + $1.bytes }
+            var i = 0
+            while total > cap, i < survivors.count { remove(survivors[i]); total -= survivors[i].bytes; i += 1 }
+        }
+        return (freed, files, evict)
+    }
+
     // MARK: - Deletion & GC
     //
     // Blobs never deleted themselves: `purge_expired` drops the EVENTS, but the bytes under
@@ -1084,5 +1172,325 @@ final class MediaStore: ObservableObject {
         guard let cg = try? gen.copyCGImage(at: CMTime(seconds: 0.1, preferredTimescale: 600), actualTime: nil)
         else { return nil }
         return PlatformImage(cgImage: cg)
+    }
+}
+
+// MARK: - Device pin (#2) — local retention exemption
+
+/// DEVICE-LOCAL "keep on this device" set: media the user asked to retain here, exempt from EVERY
+/// cleanup path (orphan sweep, the age/size limit sweep, and the cleanup screen marks it ineligible).
+/// It is NOT synced to other devices and NOT hoisted anywhere in the feed — purely a local retention
+/// exemption. Refs are stored verbatim; callers union each ref's on-disk stems into the sweep keep-set.
+@MainActor
+final class PinnedMediaStore: ObservableObject {
+    static let shared = PinnedMediaStore()
+    @Published private(set) var refs: Set<String>
+    private let d = UserDefaults.standard
+    private let key = "haven.media.pinned"
+
+    private init() { refs = Set(d.stringArray(forKey: key) ?? []) }
+
+    func isPinned(_ ref: String) -> Bool { refs.contains(ref) }
+    func anyPinned(_ rs: [String]) -> Bool { rs.contains { refs.contains($0) } }
+    var count: Int { refs.count }
+
+    func pin(_ rs: [String]) {
+        for r in rs where !MediaStore.isSynthetic(r) { refs.insert(r) }
+        save()
+    }
+    func unpin(_ rs: [String]) {
+        for r in rs { refs.remove(r) }
+        save()
+    }
+    func togglePin(_ rs: [String]) { if anyPinned(rs) { unpin(rs) } else { pin(rs) } }
+
+    /// On-disk stems of every pinned ref — unioned into the orphan-sweep and limit-sweep keep-sets so a
+    /// pinned blob is never deleted, whatever its age/referencedness.
+    func inUseStems() -> Set<String> {
+        var s = Set<String>()
+        for r in refs { s.formUnion(MediaStore.storedStems(for: r)) }
+        return s
+    }
+
+    private func save() { d.set(Array(refs), forKey: key) }
+}
+
+// MARK: - Evicted set (#3/#4) — deliberately-removed, do-not-auto-refetch
+
+/// Refs whose LOCAL blob was deliberately removed (cleanup screen selection of a still-referenced item,
+/// or the age/size limit sweep) while the EVENT still lives. The missing-media sweep must NOT auto-refetch
+/// these — that would silently undo the space the user just freed — so they render as an explicit
+/// "Download X MB" placeholder and are re-fetched only on tap. Keyed by on-disk stem → last-known bytes
+/// (for the placeholder label). DEVICE-LOCAL, persisted as JSON in UserDefaults.
+@MainActor
+final class EvictedMediaStore: ObservableObject {
+    static let shared = EvictedMediaStore()
+    @Published private(set) var sizes: [String: Int64]
+    private let d = UserDefaults.standard
+    private let key = "haven.media.evicted"
+
+    private init() {
+        if let data = d.data(forKey: key),
+           let m = try? JSONDecoder().decode([String: Int64].self, from: data) { sizes = m }
+        else { sizes = [:] }
+    }
+
+    /// Matches on the ref itself AND its bare hash, so an event ref (`img_<hash>`) resolves an eviction
+    /// recorded under a bare-hash on-disk stem (cross-platform files) and vice-versa.
+    func contains(_ ref: String) -> Bool { sizes[ref] != nil || sizes[MediaStore.bareId(ref)] != nil }
+    func size(_ ref: String) -> Int64? { sizes[ref] ?? sizes[MediaStore.bareId(ref)] }
+
+    func mark(_ ref: String, bytes: Int64) {
+        sizes[ref] = bytes
+        if sizes.count > 8000 { sizes = Dictionary(sizes.prefix(4000).map { ($0.key, $0.value) }, uniquingKeysWith: { a, _ in a }) }
+        save()
+    }
+    func clear(_ ref: String) {
+        var changed = sizes.removeValue(forKey: ref) != nil
+        if sizes.removeValue(forKey: MediaStore.bareId(ref)) != nil { changed = true }
+        if changed { save() }
+    }
+
+    private func save() {
+        if let data = try? JSONEncoder().encode(sizes) { d.set(data, forKey: key) }
+    }
+}
+
+// MARK: - Missing-media placeholder (#3)
+
+/// A graceful placeholder for a referenced blob whose bytes aren't on disk. Three states:
+///  • deliberately evicted (cleanup / limit sweep) → a "Download N MB" affordance (re-fetches on tap);
+///  • actively downloading → a spinner;
+///  • relay/peers no longer have it → "No longer available" (with Retry).
+/// Media that's simply still syncing (never evicted) keeps the plain "still loading" spinner.
+struct MissingMediaPlaceholder: View {
+    let ref: String
+    var isVideo: Bool = false
+    @ObservedObject private var feed = FeedStore.shared
+    @ObservedObject private var evicted = EvictedMediaStore.shared
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(.secondarySystemFill))
+            content
+        }
+    }
+
+    @ViewBuilder private var content: some View {
+        if feed.downloadingMedia.contains(ref) {
+            VStack(spacing: 8) {
+                ProgressView()
+                Text("Downloading…").font(.caption).foregroundStyle(.secondary)
+            }
+        } else if feed.unavailableMedia.contains(ref) {
+            VStack(spacing: 8) {
+                Image(systemName: "wifi.slash").font(.title2).foregroundStyle(.secondary)
+                Text("No longer available").font(.caption).foregroundStyle(.secondary)
+                Button("Retry") { feed.downloadEvicted(ref) }
+                    .font(.caption.weight(.semibold)).buttonStyle(.borderless).tint(HavenTheme.pink)
+            }
+        } else if let bytes = evicted.size(ref) {
+            Button { feed.downloadEvicted(ref) } label: {
+                VStack(spacing: 8) {
+                    Image(systemName: isVideo ? "arrow.down.circle.fill" : "arrow.down.circle.fill")
+                        .font(.system(size: 34)).foregroundStyle(HavenTheme.pink)
+                    Text("Download \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.primary)
+                    Text("Removed to save space").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .buttonStyle(.plain)
+        } else {
+            VStack(spacing: 8) {
+                ProgressView()
+                Text(isVideo ? "Video still loading…" : "Media still loading…")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+// MARK: - Cleanup screen (#1) — size-sorted inventory
+
+/// One row of the "Manage media" screen: a stored blob, its size, and the post/DM it belongs to
+/// (best-effort). `isOrphan` = no live event references it (safe to delete freely). `isPinned` = kept
+/// on this device, so it's shown as ineligible for cleanup.
+struct MediaInventoryRow: Identifiable, Sendable {
+    var id: String { ref }
+    let ref: String
+    let bytes: Int64
+    let mtime: Date
+    let kind: MediaKind?
+    let circleId: String?
+    let circleName: String
+    let snippet: String?
+    let eventMs: UInt64
+    let isOrphan: Bool
+    let isPinned: Bool
+}
+
+/// The size-sorted storage manager: every cached photo/video/audio blob, largest first, each mapped to
+/// the post/DM it belongs to (or flagged as unused). Multi-select to free space; per-item "Keep on this
+/// device" pins a blob so no cleanup ever removes it. Deleting frees only the LOCAL bytes — the post
+/// stays and re-renders as a downloadable placeholder.
+struct MediaCleanupView: View {
+    @ObservedObject private var pinned = PinnedMediaStore.shared
+    @State private var rows: [MediaInventoryRow] = []
+    @State private var loading = true
+    @State private var selection = Set<String>()
+    @State private var working = false
+    @State private var lastResult: String?
+
+    private var totalBytes: Int64 { rows.reduce(0) { $0 + $1.bytes } }
+    private var pinnedBytes: Int64 { rows.filter(\.isPinned).reduce(0) { $0 + $1.bytes } }
+    private var selectedBytes: Int64 { rows.filter { selection.contains($0.ref) }.reduce(0) { $0 + $1.bytes } }
+
+    var body: some View {
+        ZStack {
+            HavenBackground()
+            if loading {
+                ProgressView("Measuring…")
+            } else if rows.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "internaldrive").font(.largeTitle).foregroundStyle(.secondary)
+                    Text("No cached media").foregroundStyle(.secondary)
+                }
+            } else {
+                List {
+                    Section {
+                        ForEach(rows) { row in rowView(row) }
+                    } header: {
+                        Text("\(rows.count) item\(rows.count == 1 ? "" : "s") · \(fmt(totalBytes))"
+                             + (pinnedBytes > 0 ? " · \(fmt(pinnedBytes)) kept" : ""))
+                    } footer: {
+                        Text("Sorted by size. Removing an item frees only the copy on this device — the post stays and can be re-downloaded from your relay. “Keep on this device” exempts an item from every cleanup.")
+                    }
+                }
+                #if os(iOS)
+                .listStyle(.insetGrouped)
+                #endif
+                .scrollContentBackground(.hidden)
+            }
+        }
+        .navigationTitle("Manage media")
+        .havenInlineNavTitle()
+        .safeAreaInset(edge: .bottom) {
+            if !selection.isEmpty {
+                Button {
+                    Task { await deleteSelected() }
+                } label: {
+                    HStack {
+                        if working { ProgressView().tint(.white) }
+                        Text(working ? "Removing…" : "Remove \(selection.count) · frees \(fmt(selectedBytes))")
+                            .fontWeight(.semibold)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(BrandButtonStyle())
+                .disabled(working)
+                .padding()
+                .background(.ultraThinMaterial)
+            }
+        }
+        .task { await reload() }
+    }
+
+    @ViewBuilder private func rowView(_ row: MediaInventoryRow) -> some View {
+        let selected = selection.contains(row.ref)
+        HStack(spacing: 12) {
+            // Selection toggle (pinned rows are ineligible — no checkbox).
+            if row.isPinned {
+                Image(systemName: "pin.fill").foregroundStyle(HavenTheme.pink).frame(width: 24)
+            } else {
+                Button {
+                    if selected { selection.remove(row.ref) } else { selection.insert(row.ref) }
+                } label: {
+                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                        .font(.title3).foregroundStyle(selected ? HavenTheme.pink : .secondary)
+                }
+                .buttonStyle(.plain).frame(width: 24)
+            }
+            thumb(row)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.circleName).font(.subheadline.weight(.medium)).lineLimit(1)
+                if let s = row.snippet, !s.isEmpty {
+                    Text(s).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                } else if row.isOrphan {
+                    Text("Not linked to any post").font(.caption).foregroundStyle(.secondary)
+                }
+                HStack(spacing: 6) {
+                    Text(fmt(row.bytes)).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                    Text("·").font(.caption2).foregroundStyle(.secondary)
+                    Text(row.mtime, format: .relative(presentation: .named))
+                        .font(.caption2).foregroundStyle(.secondary)
+                    if row.isPinned {
+                        Text("· Kept").font(.caption2.weight(.semibold)).foregroundStyle(HavenTheme.pink)
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard !row.isPinned else { return }
+            if selected { selection.remove(row.ref) } else { selection.insert(row.ref) }
+        }
+        .swipeActions(edge: .leading) {
+            Button {
+                pinned.togglePin([row.ref])
+                Task { await reloadPinnedFlags() }
+            } label: {
+                Label(row.isPinned ? "Unkeep" : "Keep", systemImage: row.isPinned ? "pin.slash" : "pin")
+            }.tint(HavenTheme.pink)
+        }
+    }
+
+    @ViewBuilder private func thumb(_ row: MediaInventoryRow) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 8).fill(Color(.tertiarySystemFill))
+            if row.kind == .audio {
+                Image(systemName: "waveform").foregroundStyle(.secondary)
+            } else if let img = MediaStore.shared.thumbnail(row.ref, maxDimension: 120) {
+                Image(platformImage: img).resizable().scaledToFill()
+            } else {
+                Image(systemName: row.kind == .video ? "video.fill" : "photo.fill").foregroundStyle(.secondary)
+            }
+            if row.kind == .video {
+                Image(systemName: "play.circle.fill").foregroundStyle(.white.opacity(0.9)).shadow(radius: 2)
+            }
+        }
+        .frame(width: 48, height: 48)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func fmt(_ b: Int64) -> String { ByteCountFormatter.string(fromByteCount: b, countStyle: .file) }
+
+    private func reload() async {
+        loading = true
+        rows = await FeedStore.shared.mediaInventory()
+        // Prune selections that no longer exist.
+        selection = selection.intersection(Set(rows.map(\.ref)))
+        loading = false
+    }
+    /// Re-fetch just the pinned flags without a full re-measure (after a pin toggle).
+    private func reloadPinnedFlags() async {
+        let pinnedRefs = pinned.refs
+        rows = rows.map { r in
+            MediaInventoryRow(ref: r.ref, bytes: r.bytes, mtime: r.mtime, kind: r.kind, circleId: r.circleId,
+                              circleName: r.circleName, snippet: r.snippet, eventMs: r.eventMs,
+                              isOrphan: r.isOrphan, isPinned: pinnedRefs.contains(r.ref))
+        }
+        // A newly-pinned row can't stay selected.
+        selection = selection.subtracting(pinnedRefs)
+    }
+
+    private func deleteSelected() async {
+        working = true
+        let chosen = rows.filter { selection.contains($0.ref) && !$0.isPinned }
+        let freed = await FeedStore.shared.deleteSelectedMedia(chosen)
+        lastResult = "Freed \(fmt(freed))"
+        selection.removeAll()
+        working = false
+        await reload()
     }
 }

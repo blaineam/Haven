@@ -31,6 +31,13 @@ final class SettingsStore: ObservableObject {
     /// video stays unmuted across its own loops and as you scroll between videos (default muted, like
     /// every other social feed: you tap once to turn sound on for all of them).
     @Published var videoSoundOn: Bool { didSet { d.set(videoSoundOn, forKey: kVideoSound) } }
+    /// LOCAL media cap — delete this device's cached blobs older than N days (0 = no age limit). The
+    /// EVENT stays; the blob becomes a re-downloadable placeholder. DEVICE-LOCAL, default off. The
+    /// client sibling of the relay's retention; pinned + composer-staged media are exempt.
+    @Published var localMediaMaxDays: Int { didSet { d.set(localMediaMaxDays, forKey: kLocMaxDays); FeedStore.shared.enforceLocalLimits(force: true) } }
+    /// LOCAL media cap — keep this device's cached blobs under this many GB (0 = no size limit).
+    /// Oldest-first eviction until under cap; pinned blobs are never evicted. DEVICE-LOCAL, default off.
+    @Published var localMediaMaxGB: Int { didSet { d.set(localMediaMaxGB, forKey: kLocMaxGB); FeedStore.shared.enforceLocalLimits(force: true) } }
     private let d = UserDefaults.standard
     private let kSave = "haven.saveToPhotos"
     private let kSaveOthers = "haven.saveOthersToPhotos"
@@ -39,6 +46,8 @@ final class SettingsStore: ObservableObject {
     private let kKeepMine = "haven.keepMyPosts"
     private let kSilent = "haven.silent"
     private let kVideoSound = "haven.videoSoundOn"
+    private let kLocMaxDays = "haven.localMediaMaxDays"
+    private let kLocMaxGB = "haven.localMediaMaxGB"
 
     private init() {
         saveToPhotos = d.object(forKey: kSave) as? Bool ?? true   // default ON
@@ -55,6 +64,8 @@ final class SettingsStore: ObservableObject {
         silent = d.object(forKey: kSilent) as? Bool ?? false   // re-seeded from the silent switch on open
         #endif
         videoSoundOn = d.object(forKey: kVideoSound) as? Bool ?? false   // default muted; tap any video to unmute all
+        localMediaMaxDays = d.object(forKey: kLocMaxDays) as? Int ?? 0    // default off (no age limit)
+        localMediaMaxGB = d.object(forKey: kLocMaxGB) as? Int ?? 0        // default off (no size limit)
     }
 
     /// Viewer retention in seconds (nil = forever).
@@ -119,9 +130,11 @@ struct SettingsView: View {
     let accountStore: AccountStore
     var onReset: () -> Void
     @ObservedObject private var settings = SettingsStore.shared
+    @ObservedObject private var pinnedStore = PinnedMediaStore.shared
     @State private var storageText = "…"
     @State private var cleaningMedia = false
     @State private var cleanupResult: String?
+    private var pinnedCount: Int { pinnedStore.count }
 
     /// Walk the media dir off the main actor and format the total (e.g. "1.2 GB · 340 files").
     private func measureStorage() async {
@@ -185,6 +198,32 @@ struct SettingsView: View {
                         Spacer()
                         Text(storageText).foregroundStyle(.secondary).monospacedDigit()
                     }
+                    NavigationLink { MediaCleanupView() } label: {
+                        HStack {
+                            Label("Manage media", systemImage: "square.grid.2x2")
+                            Spacer()
+                            if pinnedCount > 0 {
+                                Text("\(pinnedCount) kept").foregroundStyle(.secondary).font(.caption)
+                            }
+                        }
+                    }
+                    Picker("Delete local media older than", selection: $settings.localMediaMaxDays) {
+                        Text("Never").tag(0)
+                        Text("30 days").tag(30)
+                        Text("90 days").tag(90)
+                        Text("6 months").tag(180)
+                        Text("1 year").tag(365)
+                    }
+                    .tint(HavenTheme.pink)
+                    Picker("Keep local media under", selection: $settings.localMediaMaxGB) {
+                        Text("No limit").tag(0)
+                        Text("1 GB").tag(1)
+                        Text("2 GB").tag(2)
+                        Text("5 GB").tag(5)
+                        Text("10 GB").tag(10)
+                        Text("25 GB").tag(25)
+                    }
+                    .tint(HavenTheme.pink)
                     Button {
                         guard !cleaningMedia else { return }
                         cleaningMedia = true
@@ -210,7 +249,7 @@ struct SettingsView: View {
                     .disabled(cleaningMedia)
                 } header: { Text("Storage") }
                 footer: {
-                    Text("Photos and videos from your circles, cached on this device. Freeing space here just re-downloads them from your relay when you next view them. Cleaning up removes only media no post, message or scheduled send references anymore.")
+                    Text("Photos and videos from your circles, cached on this device. **Manage media** lists everything by size so you can free the biggest items or keep favorites on this device forever. The local limits automatically remove old/excess cached media (oldest first) to stay under your caps — the posts stay and re-download on demand. Kept items are never removed. **Clean up unused media** removes only media no post, message or scheduled send references anymore.")
                 }
                 .task { await measureStorage() }
                 Section {

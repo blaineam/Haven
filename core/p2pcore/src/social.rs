@@ -637,7 +637,9 @@ fn comment_target(events: &[Event], comment_id: &str) -> Option<String> {
 
 /// Effective retention = the SHORTER of the sender's override and the viewer's
 /// default (None = keep forever). Returns true once `created_at + retention` is past.
-fn is_expired(
+/// Public because the engine's `purge_expired` sweep must agree byte-for-byte with the
+/// feed's hide decision — two implementations of "expired" would eventually disagree.
+pub fn is_expired(
     created_at_ms: u64,
     sender_secs: Option<u64>,
     viewer_secs: Option<u64>,

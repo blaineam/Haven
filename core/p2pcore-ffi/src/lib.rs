@@ -19,8 +19,8 @@ use p2pcore::device::{
 use p2pcore::identity::{Identity, HavenId};
 use p2pcore::link::HavenLink;
 use p2pcore::social::{
-    build_feed, open_bytes, open_event, seal_bytes, seal_event, Event, EventKind, FeedPoll, Group,
-    SealedEnvelope, TrackRef,
+    build_feed, is_expired, open_bytes, open_event, seal_bytes, seal_event, Event, EventKind,
+    FeedPoll, Group, SealedEnvelope, TrackRef,
 };
 use p2pcore::groupkey::{
     mailbox_prefix, new_circle_secret, new_epoch_key, open_event_in_epoch_authored, open_key_commit,
@@ -1296,6 +1296,91 @@ fn purge_member_from_circle(c: &mut Circle, node_hex: &str) {
     c.events.retain(|e| !doomed.contains(&e.id));
 }
 
+/// The media content-refs an event carries — what a purge must hand back for blob GC.
+fn event_media_refs(kind: &EventKind) -> &[String] {
+    match kind {
+        EventKind::Post { media, .. }
+        | EventKind::Comment { media, .. }
+        | EventKind::Edit { media, .. } => media,
+        _ => &[],
+    }
+}
+
+/// REAL deletion behind auto-delete. `build_feed` only HIDES expired items; without this sweep
+/// they sit in `Circle.events` forever and get re-sealed into every sync/backfill bundle —
+/// "deleted" content that still ships to every peer breaks the feature's privacy promise.
+///
+/// Sender-set retention (`Post.retention_secs`) purges unconditionally: it's the author's promise
+/// to the whole circle. `viewer_retention_secs` is the circle's configured auto-delete (the app
+/// passes its per-circle setting, NOT an individual viewer's whim), and `keep_own_author` mirrors
+/// the feed's keep-my-posts exemption so a personal archive isn't destroyed by the circle default.
+/// The effective window is the shorter of the two — the same `is_expired` the feed hides with, so
+/// purge and display can never disagree. Messages and Polls carry no sender retention and get no
+/// keep-own exemption, exactly as in `build_feed` (DMs are Messages — circle retention cleans them
+/// too). Events targeting a purged event (comments, reactions, edits, unsends, votes, flags…) go
+/// transitively via the same fixpoint as [`purge_member_from_circle`], and — same reasoning as
+/// there — the `seen` dedup set is left intact so a re-delivered purged event is dropped by
+/// `receive`, not resurrected.
+///
+/// Returns the purged events' media content-refs so the caller can GC blobs (blob deletion itself
+/// is outside the core). Persistence needs nothing extra: `export_state` serializes
+/// `Circle.events` (see `PersistCircle`), so the next save simply writes the smaller log.
+fn purge_expired_from_circle(
+    c: &mut Circle,
+    viewer_retention_secs: Option<u64>,
+    keep_own_author: Option<&str>,
+    now_ms: u64,
+) -> Vec<String> {
+    let mut doomed: HashSet<String> = c
+        .events
+        .iter()
+        .filter(|e| match &e.kind {
+            EventKind::Post { retention_secs, .. } => {
+                let viewer = if keep_own_author == Some(e.author.as_str()) {
+                    None
+                } else {
+                    viewer_retention_secs
+                };
+                is_expired(e.created_at, *retention_secs, viewer, now_ms)
+            }
+            EventKind::Message { .. } | EventKind::Poll { .. } => {
+                is_expired(e.created_at, None, viewer_retention_secs, now_ms)
+            }
+            // Targeted kinds live and die with their target — the fixpoint below catches them.
+            _ => false,
+        })
+        .map(|e| e.id.clone())
+        .collect();
+    if doomed.is_empty() {
+        return vec![];
+    }
+    loop {
+        let before = doomed.len();
+        for e in &c.events {
+            if !doomed.contains(&e.id) {
+                if let Some(t) = event_target(&e.kind) {
+                    if doomed.contains(t) {
+                        doomed.insert(e.id.clone());
+                    }
+                }
+            }
+        }
+        if doomed.len() == before {
+            break;
+        }
+    }
+    let mut refs: Vec<String> = c
+        .events
+        .iter()
+        .filter(|e| doomed.contains(&e.id))
+        .flat_map(|e| event_media_refs(&e.kind).iter().cloned())
+        .collect();
+    refs.sort();
+    refs.dedup();
+    c.events.retain(|e| !doomed.contains(&e.id));
+    refs
+}
+
 /// Apply a received key commit: store the epoch key (if new) and unlock any buffered events.
 fn receive_key_commit(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool, HavenError> {
     let env = SealedEnvelope::from_bytes(body)
@@ -2239,6 +2324,13 @@ impl HavenSocial {
         let mut st = self.state.lock().unwrap();
         let me_hex = hex(&st.me.public().node_id_bytes());
         let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return vec![] };
+        // SENDER-expired content must never ride another bundle: a lapsed `retention_secs` is the
+        // author's promise to the whole circle, so it purges here even if the app never calls
+        // `purge_expired`. Viewer/circle retention is deliberately NOT applied — this path has no
+        // viewer input, and a display preference must not destroy data it never promised to
+        // delete. Wall clock is how `rotate_if_stale` keys its window too; the core has no
+        // injected clock on this path.
+        purge_expired_from_circle(&mut st.circles[idx], None, None, now_secs().saturating_mul(1000));
         // PERIODIC forward-secrecy rotation (audit C2) — the trigger for `rotate_if_stale`. This is the
         // only safe place for it: a full bundle (`sync_envelopes` on the P2P path, `export_my_envelopes`
         // on the relay backfill) emits the new key commit AND re-seals my entire history under it in the
@@ -2403,6 +2495,21 @@ impl HavenSocial {
             .map(|c| c.events.clone())
             .unwrap_or_default();
         map_feed(events, &me, now_ms, viewer_retention_secs, keep_own)
+    }
+
+    /// Really delete expired content from a circle's event log. `feed` only hides expired items —
+    /// this drops them (plus their orphaned comments/reactions/votes…) so they stop riding
+    /// sync/backfill bundles and shrink from the persisted store on the next `export_state`.
+    /// `viewer_retention_secs` = this circle's configured auto-delete, the SAME value the app
+    /// passes to `feed`; my own posts honor the keep-my-posts toggle exactly as the feed does,
+    /// while sender-set expiries purge unconditionally. Call on feed refresh. Returns the purged
+    /// events' media content-refs so the app can GC the blobs (blob deletion is the app's job).
+    pub fn purge_expired(&self, circle_id: String, viewer_retention_secs: Option<u64>, now_ms: u64) -> Vec<String> {
+        let mut st = self.state.lock().unwrap();
+        let me = hex(&st.me.public().node_id_bytes());
+        let keep_own = st.keep_own_posts;
+        let Some(c) = st.circles.iter_mut().find(|c| c.id == circle_id) else { return vec![] };
+        purge_expired_from_circle(c, viewer_retention_secs, if keep_own { Some(&me) } else { None }, now_ms)
     }
 
     /// Seal a media blob to one contact (hybrid KEM → AES-256-GCM). The recipient
@@ -3915,5 +4022,155 @@ mod net_tests {
         let (_a, _list, _creds, trailer) = decode_roster(&wire[1..]).expect("new roster decodes");
         assert!(!trailer.is_empty(), "a seed-drop build's roster carries the signed capability trailer");
         assert!(bob.ingest_roster_wire(wire), "peer ingests the roster despite the trailer (additive)");
+    }
+
+    /// Wall clock in unix millis. The purge tests must use REAL timestamps: the automatic
+    /// sender-expiry sweep in `epoch_sync_bundle_inner` runs against the wall clock, so a post
+    /// stamped 1970 with a retention would be swept before the test ever exercised the interesting
+    /// path.
+    fn wall_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    /// Sealed EVENTS in a bundle (excludes the roster + key-commit envelopes that ride along).
+    fn epoch_event_count(envs: &[Vec<u8>]) -> usize {
+        envs.iter().filter(|e| e.first() == Some(&TAG_EPOCH_EVENT)).count()
+    }
+
+    #[test]
+    fn sender_retention_purges_the_post_its_orphans_and_the_bundles() {
+        // Bundle building auto-purges against the GLOBAL test clock, and this test keeps a live
+        // 10s retention across several bundle builds — hold the skew lock (zero skew) so a
+        // parallel clock-advancing test can't expire the post mid-setup.
+        with_clock_advanced(0, || {
+        let alice = HavenSocial::new([60u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([61u8; 32].to_vec()).unwrap();
+        let cid = DEFAULT_CIRCLE.to_string();
+        alice.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+        bob.add_contact_bundle(cid.clone(), alice.my_bundle()).unwrap();
+
+        let now = wall_ms();
+        // "vanishes" carries a 10s sender expiry + a media ref; "stays" has no retention (control).
+        alice.post(cid.clone(), "vanishes".into(), vec!["ref-a".into()], None, Some(10), false, false, now).unwrap();
+        alice.post(cid.clone(), "stays".into(), vec![], None, None, false, false, now + 1).unwrap();
+        sync(&alice, &bob, &cid);
+
+        // A different member replies on the expiring post — these must go transitively with it.
+        let post_id = bob.feed(cid.clone(), now + 100, None).iter().find(|m| m.body == "vanishes").unwrap().id.clone();
+        bob.comment(cid.clone(), post_id.clone(), "cute!".into(), vec!["ref-c".into()], now + 100).unwrap();
+        bob.react(cid.clone(), post_id.clone(), "❤️".into(), now + 200).unwrap();
+        sync(&bob, &alice, &cid);
+
+        let feed = alice.feed(cid.clone(), now + 500, None);
+        assert_eq!(feed.len(), 2);
+        let item = feed.iter().find(|m| m.body == "vanishes").unwrap();
+        assert_eq!(item.comments.len(), 1);
+        assert_eq!(item.reactions.len(), 1);
+
+        // The raw log ships 4 events (2 posts + comment + reaction) before the purge, and the
+        // mine-only sync bundle ships alice's 2.
+        assert_eq!(epoch_event_count(&alice.export_recent_envelopes(cid.clone(), 0)), 4);
+        assert_eq!(epoch_event_count(&alice.sync_envelopes(cid.clone())), 2);
+
+        // Past the sender expiry: the post, its comment, AND its reaction leave the log; the media
+        // refs of everything purged (the post's and the comment's) come back for blob GC.
+        let refs = alice.purge_expired(cid.clone(), None, now + 11_000);
+        assert_eq!(refs, vec!["ref-a".to_string(), "ref-c".to_string()]);
+        assert_eq!(epoch_event_count(&alice.export_recent_envelopes(cid.clone(), 0)), 1, "only 'stays' still ships");
+        assert_eq!(epoch_event_count(&alice.sync_envelopes(cid.clone())), 1, "expired content no longer rides sync bundles");
+        let after = alice.feed(cid.clone(), now + 11_000, None);
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].body, "stays");
+        });
+    }
+
+    #[test]
+    fn bundles_auto_drop_sender_expired_content_without_an_explicit_purge() {
+        let alice = HavenSocial::new([62u8; 32].to_vec()).unwrap();
+        let cid = DEFAULT_CIRCLE.to_string();
+        let now = wall_ms();
+        // Already past its 10s sender expiry vs the wall clock; the fresh post is the control.
+        alice.post(cid.clone(), "stale promise".into(), vec![], None, Some(10), false, false, now - 60_000).unwrap();
+        alice.post(cid.clone(), "fresh".into(), vec![], None, None, false, false, now).unwrap();
+        // The app never calls purge_expired — building a bundle alone must drop the lapsed post.
+        assert_eq!(epoch_event_count(&alice.sync_envelopes(cid.clone())), 1, "sender-expired post never rides a bundle");
+        assert_eq!(epoch_event_count(&alice.export_recent_envelopes(cid.clone(), 0)), 1, "it was removed from the log, not just filtered");
+    }
+
+    #[test]
+    fn circle_retention_purge_honors_keep_own_posts_and_returns_media_refs() {
+        let alice = HavenSocial::new([63u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([64u8; 32].to_vec()).unwrap();
+        let cid = DEFAULT_CIRCLE.to_string();
+        alice.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+        bob.add_contact_bundle(cid.clone(), alice.my_bundle()).unwrap();
+
+        let now = wall_ms();
+        // Both posts are 100s old with no sender retention; the circle's auto-delete is 50s.
+        bob.post(cid.clone(), "friend's old".into(), vec!["ref-b".into()], None, None, false, false, now - 100_000).unwrap();
+        sync(&bob, &alice, &cid);
+        alice.post(cid.clone(), "my archive".into(), vec![], None, None, false, false, now - 100_000).unwrap();
+
+        // keep-my-posts ON: the friend's stale post purges (media ref returned), mine survives.
+        alice.set_keep_own_posts(true);
+        let refs = alice.purge_expired(cid.clone(), Some(50), now);
+        assert_eq!(refs, vec!["ref-b".to_string()]);
+        // Read back with NO viewer filter — proves the friend's post is gone from the log while
+        // mine is genuinely retained, not merely displayed.
+        let feed = alice.feed(cid.clone(), now, None);
+        assert_eq!(feed.len(), 1);
+        assert_eq!(feed[0].body, "my archive");
+
+        // keep-my-posts OFF: the circle retention now takes my own post too.
+        alice.set_keep_own_posts(false);
+        let refs = alice.purge_expired(cid.clone(), Some(50), now);
+        assert!(refs.is_empty(), "my post carried no media");
+        assert!(alice.feed(cid.clone(), now, None).is_empty());
+    }
+
+    #[test]
+    fn dm_messages_purge_under_circle_retention() {
+        let alice = HavenSocial::new([65u8; 32].to_vec()).unwrap();
+        let cid = "dm-test".to_string();
+        alice.create_circle(cid.clone(), "DM".into());
+        let now = wall_ms();
+        alice.author(&cid, now - 100_000, EventKind::Message { body: "stale dm".into() }).unwrap();
+        alice.author(&cid, now, EventKind::Message { body: "fresh dm".into() }).unwrap();
+        assert_eq!(alice.feed(cid.clone(), now, None).len(), 2);
+
+        // keep-my-posts must NOT shield a Message — same as the feed, the exemption is Posts-only.
+        alice.set_keep_own_posts(true);
+        alice.purge_expired(cid.clone(), Some(50), now);
+        let feed = alice.feed(cid.clone(), now, None);
+        assert_eq!(feed.len(), 1, "the stale DM is really deleted, not display-hidden");
+        assert_eq!(feed[0].body, "fresh dm");
+    }
+
+    #[test]
+    fn purged_event_redelivery_does_not_resurrect_it() {
+        // Same live-retention-across-bundles shape as the sender-retention test: hold the skew
+        // lock so a parallel clock jump can't purge the post before it's delivered.
+        with_clock_advanced(0, || {
+        let alice = HavenSocial::new([66u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([67u8; 32].to_vec()).unwrap();
+        let cid = DEFAULT_CIRCLE.to_string();
+        alice.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+        bob.add_contact_bundle(cid.clone(), alice.my_bundle()).unwrap();
+
+        let now = wall_ms();
+        let env = alice.post(cid.clone(), "ephemeral".into(), vec![], None, Some(10), false, false, now).unwrap();
+        sync(&alice, &bob, &cid);
+        assert_eq!(epoch_event_count(&bob.export_recent_envelopes(cid.clone(), 0)), 1);
+
+        bob.purge_expired(cid.clone(), None, now + 11_000);
+        assert_eq!(epoch_event_count(&bob.export_recent_envelopes(cid.clone(), 0)), 0, "receiver purged it too");
+
+        // A relay/mailbox re-delivering the identical sealed event must hit the intact seen-set.
+        assert!(!bob.receive(cid.clone(), env).unwrap(), "re-delivery is deduped, not resurrected");
+        assert_eq!(epoch_event_count(&bob.export_recent_envelopes(cid.clone(), 0)), 0);
+        });
     }
 }

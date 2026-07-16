@@ -6,9 +6,13 @@
 //! internally and **never cross the boundary**. The only object is [`AccountStateHandle`], a
 //! mutable handle the clients build up and then seal.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use haven_p2p::device::{open_self_sync_key, seal_self_sync_key, DeviceCredential, DeviceList};
+use haven_p2p::device::{
+    open_self_sync_key, open_self_sync_key_epoch, seal_self_sync_key, seal_self_sync_key_epoch,
+    DeviceCredential, DeviceList,
+};
 use haven_p2p::identity::{HavenId, Identity};
 use haven_p2p::selfsync::{AccountState, Stamp};
 use haven_p2p::social::SealedEnvelope;
@@ -194,27 +198,44 @@ pub struct CircleSyncRecord {
     /// Each member's full public bundle bytes (the FFI base64-encodes them on the wire).
     pub member_bundles: Vec<Vec<u8>>,
     pub relays: Vec<String>,
+    /// AUDIT M2: the circle's DEFINITION-bound creator account id (32 bytes), or null for a legacy
+    /// circle with no recorded creator. Carried here so the authority root travels with the
+    /// authenticated (self-sealed) circle definition instead of being TOFU-learned from the first admin
+    /// grant. A consumer pins this as `creator_pinned`, so a hostile grant can never wedge a wrong root.
+    pub creator: Option<Vec<u8>>,
 }
 
 // Field order is ALPHABETICAL so serde_json's declaration-order output matches Apple's
-// JSONEncoder(.sortedKeys): {"members":[...],"name":"...","relays":[...]}.
+// JSONEncoder(.sortedKeys): {"creator":"...",?"members":[...],"name":"...","relays":[...]}.
+// `creator` is skip-if-none, so a legacy circle (no creator) serializes BYTE-IDENTICALLY to before
+// this field existed — the cross-platform convergence contract is preserved for existing circles.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CircleWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    creator: Option<String>,
     members: Vec<String>,
     name: String,
     relays: Vec<String>,
 }
 
 /// Deterministically encode a circle: standard-padding base64 of each member bundle (sorted),
-/// sorted relays, compact JSON with alphabetical keys. Identical on iOS/Android/desktop.
+/// sorted relays, compact JSON with alphabetical keys. Identical on iOS/Android/desktop. The
+/// optional `creator` (32-byte account id, base64) binds the authority root to the definition (M2);
+/// pass null for a legacy circle and the bytes are byte-identical to the pre-M2 encoding.
 #[uniffi::export]
-pub fn encode_circle_sync(name: String, member_bundles: Vec<Vec<u8>>, relays: Vec<String>) -> Vec<u8> {
+pub fn encode_circle_sync(
+    name: String,
+    member_bundles: Vec<Vec<u8>>,
+    relays: Vec<String>,
+    creator: Option<Vec<u8>>,
+) -> Vec<u8> {
     let mut members: Vec<String> =
         member_bundles.iter().map(|b| data_encoding::BASE64.encode(b)).collect();
     members.sort();
     let mut relays = relays;
     relays.sort();
-    serde_json::to_vec(&CircleWire { members, name, relays }).unwrap_or_default()
+    let creator = creator.map(|c| data_encoding::BASE64.encode(&c));
+    serde_json::to_vec(&CircleWire { creator, members, name, relays }).unwrap_or_default()
 }
 
 /// Inverse of [`encode_circle_sync`].
@@ -226,7 +247,8 @@ pub fn decode_circle_sync(bytes: Vec<u8>) -> Option<CircleSyncRecord> {
         .iter()
         .filter_map(|b| data_encoding::BASE64.decode(b.as_bytes()).ok())
         .collect();
-    Some(CircleSyncRecord { name: w.name, member_bundles, relays: w.relays })
+    let creator = w.creator.and_then(|c| data_encoding::BASE64.decode(c.as_bytes()).ok());
+    Some(CircleSyncRecord { name: w.name, member_bundles, relays: w.relays, creator })
 }
 
 // ── Gap 1: S3 transport over the FFI (so Android — which has no native S3 — can self-sync
@@ -359,4 +381,121 @@ pub fn open_self_sync_key_grant(device_seed: Vec<u8>, account_bundle: Vec<u8>, e
     let key = open_self_sync_key(&dev, &acct, &env)
         .map_err(|e| HavenError::Invalid { msg: format!("open self-sync grant failed: {e}") })?;
     Ok(key.to_vec())
+}
+
+// ── Audit M1: ROTATABLE self-sync key (rotate on revocation) ────────────────────────────────────
+//
+// The channel above hands each device a STATIC self-sync key, so a revoked seedless device kept
+// reading AND LWW-writing the account-state stream forever. These wrappers add the rotatable, versioned
+// key: on a device revocation the primary `mint_self_sync_key`s a fresh key, bumps the epoch, and
+// `seal_self_sync_key_epoch_grant`s it to every STILL-authorized device only. Account state is then
+// sealed with `seal_account_state_with_key_epoch` and opened with `open_account_state_dual`, which
+// refuses a stale-epoch (revoked) write. This is gated EXACTLY like the circle dual-seal retirement:
+// while the retirement switch is OFF, clients keep calling `seal_account_state`/`open_account_state`
+// (v0, seed-derived) and every byte on the wire is unchanged. See `docs/SEED-DROP-DESIGN.md` §5.3.
+
+/// An epoch-tagged self-sync key grant: the rotated `key` and the `epoch` it belongs to.
+#[derive(uniffi::Record)]
+pub struct SelfSyncKeyGrant {
+    pub epoch: u64,
+    pub key: Vec<u8>,
+}
+
+/// Mint a fresh 32-byte self-sync key from the OS CSPRNG. Called by the PRIMARY on a device revocation
+/// to rotate the account-state channel (then re-granted to every still-authorized device bundle).
+#[uniffi::export]
+pub fn mint_self_sync_key() -> Vec<u8> {
+    haven_p2p::selfsync::mint_self_sync_key().to_vec()
+}
+
+/// The self-sync rotation GATE — shaped EXACTLY like the circle dual-seal retirement
+/// (`recipients_with_devices_gated`). Returns whether the account-state channel should run on the
+/// ROTATED (v1) key and DROP v0 seed-key authority: only when the retirement switch is ON **and** every
+/// one of the account's OWN authorized devices is seed-drop-capable (so no device still depends on the
+/// seed-derived key). OFF or mixed-capability ⇒ false ⇒ clients keep sealing with `seal_account_state`
+/// and opening with `open_account_state` (v0) and every byte is byte-identical to today. Until this
+/// returns true a reader must keep passing the seed key to `open_account_state_dual`, so the dual-key
+/// transition window (§5.2) never strands a device — mirroring the account-key dual-seal window.
+#[uniffi::export]
+pub fn self_sync_key_should_rotate(retire_switch_on: bool, own_devices_all_seed_drop_capable: bool) -> bool {
+    retire_switch_on && own_devices_all_seed_drop_capable
+}
+
+/// The key-epoch stamped on a sealed account-state blob, or null for a legacy (v0, seed-derived) blob.
+/// Lets the mailbox layer route a pulled slot to the right rotated key without decrypting it.
+#[uniffi::export]
+pub fn self_sync_key_epoch_of(sealed: Vec<u8>) -> Option<u64> {
+    AccountState::peek_epoch(&sealed)
+}
+
+/// Seal an account state under a rotated self-sync `key` at `epoch` (the v1 path). Used once the
+/// account has rotated (retirement ON + fully seed-drop-capable); produces a versioned blob that a
+/// stale-key (revoked) device cannot open.
+#[uniffi::export]
+pub fn seal_account_state_with_key_epoch(
+    self_sync_key: Vec<u8>,
+    epoch: u64,
+    state: Arc<AccountStateHandle>,
+) -> Result<Vec<u8>, HavenError> {
+    let key = id32(&self_sync_key, "self-sync key")?;
+    let st = state.inner.lock().unwrap();
+    Ok(st.seal_epoch(&key, epoch))
+}
+
+/// DUAL-KEY open of any account-state blob (v0 legacy OR v1 rotatable) — the reader side of the M1 cut.
+///
+/// * `current_epoch`/`current_key` — the rotated key the reader currently honors (a 32-byte key; pass an
+///   empty `current_key` for a reader that only accepts v0). A v1 blob at any OTHER epoch (a revoked
+///   device's stale write) is refused.
+/// * `seed_key` — the seed-derived v0 key, or an EMPTY vec once v0 authority is retired (the
+///   fully-capable + switch-ON state), which refuses legacy blobs and completes the revocation cut.
+#[uniffi::export]
+pub fn open_account_state_dual(
+    sealed: Vec<u8>,
+    current_epoch: u64,
+    current_key: Vec<u8>,
+    seed_key: Vec<u8>,
+) -> Result<Arc<AccountStateHandle>, HavenError> {
+    let mut accepted: BTreeMap<u64, [u8; 32]> = BTreeMap::new();
+    if !current_key.is_empty() {
+        accepted.insert(current_epoch, id32(&current_key, "current self-sync key")?);
+    }
+    let seed = if seed_key.is_empty() { None } else { Some(id32(&seed_key, "seed self-sync key")?) };
+    let st = AccountState::open_any(&sealed, seed.as_ref(), &accepted)
+        .map_err(|e| HavenError::Invalid { msg: format!("open account state failed: {e}") })?;
+    Ok(Arc::new(AccountStateHandle { inner: Mutex::new(st) }))
+}
+
+/// PRIMARY side: seal a ROTATED self-sync key (with its epoch) to a still-authorized device's bundle,
+/// account-signed. Returns the sealed grant bytes. Wrapper over `device::seal_self_sync_key_epoch`.
+#[uniffi::export]
+pub fn seal_self_sync_key_epoch_grant(
+    account_seed: Vec<u8>,
+    device_bundle: Vec<u8>,
+    epoch: u64,
+    self_sync_key: Vec<u8>,
+) -> Result<Vec<u8>, HavenError> {
+    let acct = Identity::from_seed(&seed32(account_seed)?);
+    let dev = bundle(&device_bundle)?;
+    let key = id32(&self_sync_key, "self-sync key")?;
+    let env = seal_self_sync_key_epoch(&acct, &dev, epoch, &key)
+        .map_err(|e| HavenError::Invalid { msg: format!("seal epoch self-sync grant failed: {e}") })?;
+    Ok(env.to_bytes())
+}
+
+/// SEEDLESS-DEVICE side: open an epoch-tagged grant from `seal_self_sync_key_epoch_grant`, verifying the
+/// account's signature. Returns `(epoch, key)`. Wrapper over `device::open_self_sync_key_epoch`.
+#[uniffi::export]
+pub fn open_self_sync_key_epoch_grant(
+    device_seed: Vec<u8>,
+    account_bundle: Vec<u8>,
+    envelope: Vec<u8>,
+) -> Result<SelfSyncKeyGrant, HavenError> {
+    let dev = Identity::from_seed(&seed32(device_seed)?);
+    let acct = bundle(&account_bundle)?;
+    let env = SealedEnvelope::from_bytes(&envelope)
+        .map_err(|e| HavenError::Invalid { msg: format!("bad grant envelope: {e}") })?;
+    let (epoch, key) = open_self_sync_key_epoch(&dev, &acct, &env)
+        .map_err(|e| HavenError::Invalid { msg: format!("open epoch self-sync grant failed: {e}") })?;
+    Ok(SelfSyncKeyGrant { epoch, key: key.to_vec() })
 }

@@ -525,6 +525,45 @@ pub fn open_self_sync_key(
         .map_err(|_| CoreError::Encoding("self-sync grant must be exactly 32 bytes"))
 }
 
+/// Seal a ROTATED self-sync key to a device bundle AT a specific key-epoch (audit M1 rotation).
+///
+/// Same hybrid-KEM-to-device-bundle rail as [`seal_self_sync_key`], but the sealed payload carries the
+/// KEY-EPOCH alongside the 32 bytes: `epoch(8 LE) ‖ key(32)`. On a revocation the primary mints a fresh
+/// key, bumps the epoch, and re-grants it (this call) to every STILL-authorized device only — so a
+/// device learns *which* rotated key it holds and reads/writes account state under it
+/// ([`crate::selfsync::AccountState::seal_epoch`]/[`open_any`](crate::selfsync::AccountState::open_any)).
+/// A revoked device is never a recipient of the new grant, so it retains only the stale key and is cut
+/// off. Account-signed for provenance, exactly like the epoch-0 grant.
+pub fn seal_self_sync_key_epoch(
+    account: &Identity,
+    device_bundle: &HavenId,
+    epoch: u64,
+    self_sync_key: &[u8; 32],
+) -> Result<SealedEnvelope> {
+    let mut payload = Vec::with_capacity(8 + 32);
+    payload.extend_from_slice(&epoch.to_le_bytes());
+    payload.extend_from_slice(self_sync_key);
+    let group = Group::new(SELF_SYNC_GRANT_GROUP, vec![device_bundle.clone()]);
+    social::seal_bytes(account, &group, &payload)
+}
+
+/// Open an epoch-tagged self-sync key grant from [`seal_self_sync_key_epoch`], verifying the granting
+/// account's signature. Returns `(epoch, key)`. A grant sealed to another device (or tampered/forged)
+/// fails here; a wrong-length payload is rejected (fail-closed).
+pub fn open_self_sync_key_epoch(
+    device: &Identity,
+    account_pub: &HavenId,
+    env: &SealedEnvelope,
+) -> Result<(u64, [u8; 32])> {
+    let bytes = social::open_bytes(device, account_pub, env)?;
+    if bytes.len() != 8 + 32 {
+        return Err(CoreError::Encoding("self-sync epoch grant must be exactly 40 bytes"));
+    }
+    let epoch = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+    let key: [u8; 32] = bytes[8..40].try_into().unwrap();
+    Ok((epoch, key))
+}
+
 /// Is EVERY member of a circle seed-drop-capable? An **all-present positive** signal (never
 /// absence-inferred): true only when every member account both appears in `capable` (we have
 /// affirmatively verified its signed marker) AND has a known device roster. A single member we have not
@@ -1387,6 +1426,24 @@ mod tests {
         assert_eq!(held.version, 3);
         assert!(!held.adopt_if_newer(&stale), "a stale (lower/equal version) grant loses");
         assert_eq!(held.version, 3, "rollback is refused");
+    }
+
+    #[test]
+    fn epoch_self_sync_grant_round_trips_and_is_device_scoped() {
+        // Audit M1: the rotated key is granted WITH its epoch, to one device bundle only.
+        let account = id(1);
+        let device = id(2);
+        let rotated = [7u8; 32];
+        let grant = seal_self_sync_key_epoch(&account, &device.public(), 5, &rotated).expect("seal");
+        let (epoch, key) = open_self_sync_key_epoch(&device, &account.public(), &grant).expect("open");
+        assert_eq!(epoch, 5, "the key-epoch survives the grant");
+        assert_eq!(key, rotated, "the granted key is the rotated key, byte-identical");
+        // A different device (not the recipient) cannot open it.
+        let stranger = id(3);
+        assert!(
+            open_self_sync_key_epoch(&stranger, &account.public(), &grant).is_err(),
+            "an epoch grant sealed to one device is not openable by another"
+        );
     }
 
     #[test]

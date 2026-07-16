@@ -1096,6 +1096,14 @@ struct Circle {
     /// carried on the control lane; every member agrees on it (or the authority set is empty and no
     /// tree Remove is accepted). Persisted (additive).
     creator: Option<[u8; 32]>,
+    /// AUDIT M2: is `creator` bound to the AUTHENTICATED circle definition (established at creation /
+    /// via `set_circle_creator` / adopted from a signed circle-sync record), rather than TOFU-learned
+    /// from the first admin grant? A grant can only ever *weakly* TOFU-learn a creator when we hold
+    /// none (and never sets this flag); it can NEVER override a definition-pinned creator. This closes
+    /// the first-grant-wins wedge (`receive_admin_grant`): a malicious member can no longer race a
+    /// self-signed grant to install itself as a victim's authority root and permanently reject the real
+    /// creator. Persisted (additive; defaults false so old state = today's TOFU semantics).
+    creator_pinned: bool,
     /// MLS M3: verified [`AdminGrant`] wire bytes riding the roster/control lane — the delegation edges
     /// `admin_closure` walks from the creator. Higher-version-wins per (admin_account); a forged/stale
     /// grant never reaches this vec (verified at ingest). Persisted (additive) and re-broadcast.
@@ -1163,6 +1171,7 @@ impl Circle {
             rotated_at: 0,
             cached_commit: None,
             creator: None,
+            creator_pinned: false,
             admin_grants: vec![],
             mls_live_epoch: None,
         }
@@ -1934,7 +1943,17 @@ fn receive_mls_commit(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool
         return Ok(false);
     }
     let is_genesis = commit.epoch == 1 && commit.parent_commit_hash == shadow_genesis_parent(&gid);
-    if !is_genesis {
+    if is_genesis {
+        // AUDIT L1 — authenticate the genesis to the elected creator/admin. Selection is otherwise by
+        // leaf-count (`keying_winning_genesis`) with NO signer check, so any mls-capable member could
+        // inject a competing genesis. Require the genesis commit's hybrid signature to verify under an
+        // authorized device (or the account key) of the ELECTED creator — the lowest-account member
+        // that §4.1 elects to build — or of a current admin. An unauthenticated genesis is dropped and
+        // never enters the shadow store, closing the door the all-joined gate only guarded.
+        if !genesis_signer_authorized(st, idx, &commit) {
+            return Ok(false);
+        }
+    } else {
         // A chained commit (M3 Remove, §4.3). It participates only if (a) it extends a commit we
         // already hold (a known parent — otherwise it is an orphan we can't place) AND (b) it is
         // AUTHORIZED: its committer must be the circle creator or a current admin, or the commit must
@@ -2005,6 +2024,51 @@ fn mls_commit_authorized(st: &NetState, idx: usize, commit: &treekem::Commit) ->
                 })
         }
     }
+}
+
+/// AUDIT L1 — is this GENESIS commit signed by the elected creator (or a current admin)?
+///
+/// The genesis commit (epoch 1, `parent = genesis_parent`) is add-only and carries no UpdatePath, so
+/// `mls_commit_authorized`'s device→account resolution (which reads the UpdatePath leaf) does not apply.
+/// Instead we authenticate the SIGNER directly: gather the verifying bundles of the elected creator
+/// account (§4.1: the lowest-account member, the one that legitimately builds genesis) plus every
+/// current admin, and require the commit's hybrid signature to verify under one of them — an authorized
+/// device bundle of that account (the normal device-signed genesis) or the account key itself (the
+/// seeded-no-device-identity fallback `build_shadow_genesis` uses). Any genesis signed by anyone else is
+/// unauthenticated and rejected. Legitimate §5.1 forks (two sibling devices of the elected-creator
+/// account each building) still pass — both sign under authorized devices of that account.
+fn genesis_signer_authorized(st: &NetState, idx: usize, commit: &treekem::Commit) -> bool {
+    // Elected creator = lowest ACCOUNT id among the circle's mls accounts (me + members), matching
+    // `am_shadow_creator`. `None` only for an empty account set (never, since me is always present).
+    let Some(elected) = circle_mls_accounts(st, idx).iter().map(|a| a.node_id_bytes()).min() else {
+        return false;
+    };
+    // Candidate signer accounts: the elected creator plus any current admin (creator-delegated).
+    let mut candidates: HashSet<[u8; 32]> = HashSet::new();
+    candidates.insert(elected);
+    if let Some(admins) = circle_admin_set(st, idx) {
+        candidates.extend(admins);
+    }
+    let msg = treekem::commit_signing_bytes(commit);
+    for acct in &candidates {
+        // The account key itself (seeded fallback).
+        if let Some(acct_bundle) = mls_account_bundle(st, idx, acct) {
+            if acct_bundle.verify(&msg, &commit.sig).is_ok() {
+                return true;
+            }
+        }
+        // Any device the account currently authorizes (the normal device-signed genesis).
+        if let Some(cd) = st.device_lists.get(acct) {
+            for cred in &cd.credentials {
+                if cd.list.is_authorized(&cred.device_id())
+                    && cred.device.verify(&msg, &commit.sig).is_ok()
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Whether removed leaf `li` (as located in the tree at `parent_hash`) belongs to `acct` — used to
@@ -2157,11 +2221,19 @@ fn receive_admin_grant(st: &mut NetState, idx: usize, body: &[u8]) -> Result<boo
     if g.verify(&grantor_pub).is_err() {
         return Ok(false);
     }
-    // Learn the pinned creator once (absence is never information; a differing later value is ignored).
-    if st.circles[idx].creator.is_none() {
-        st.circles[idx].creator = Some(g.creator);
-    } else if st.circles[idx].creator != Some(g.creator) {
-        return Ok(false); // a grant for a different authority root is not ours
+    // AUDIT M2 — bind the creator to the authenticated circle DEFINITION, never first-grant-wins TOFU:
+    //   * A grant that DISAGREES with a creator we already hold is rejected outright — and if that
+    //     creator is DEFINITION-pinned (established at creation / via `set_circle_creator` / a signed
+    //     circle-sync record), the grant can never dislodge it. This is the wedge fix: a self-signed
+    //     `AdminGrant{creator=Mallory}` reaching a victim who already knows the real creator is dropped.
+    //   * Only when we hold NO creator at all do we *weakly* TOFU-learn one from the grant (the legacy
+    //     fallback the audit permits) — but WITHOUT marking it definition-pinned, so a later authentic
+    //     definition can still override it (see `set_circle_creator` / `merge_circle`). A grant never
+    //     sets `creator_pinned`.
+    match st.circles[idx].creator {
+        None => st.circles[idx].creator = Some(g.creator),
+        Some(c) if c == g.creator => {}
+        Some(_) => return Ok(false), // a grant for a different authority root is not ours
     }
     // Higher-version-wins per (admin_account): replace a stale stored grant, else append a new one.
     let grants = &mut st.circles[idx].admin_grants;
@@ -3209,6 +3281,10 @@ struct PersistCircle {
     /// files load with no creator (⇒ no tree Remove is accepted until one is learned).
     #[serde(default)]
     creator: Option<[u8; 32]>,
+    /// AUDIT M2: whether `creator` is DEFINITION-bound (authoritative) vs weakly TOFU-learned. Defaulted
+    /// false so old state files load with today's TOFU semantics (an authentic definition re-pins it).
+    #[serde(default)]
+    creator_pinned: bool,
     /// MLS M3: verified admin-grant wire bytes (the delegation edges). Defaulted so old state loads.
     #[serde(default)]
     admin_grants: Vec<Vec<u8>>,
@@ -3376,11 +3452,17 @@ impl HavenSocial {
     /// Pin the circle CREATOR — the root of Remove/Add authority (§4.3). If `account_hex` is my own
     /// account and I hold the account key, this also issues a self-admin grant so the pin propagates to
     /// (and is verifiable by) every member on the control lane. Returns false for an unknown circle.
+    ///
+    /// AUDIT M2: this is the AUTHENTICATED establishment of the creator (the app calls it at circle
+    /// creation and when the creator is learned out-of-band). It marks the pin DEFINITION-bound, which
+    /// (a) overrides any weakly-TOFU'd creator a hostile grant may have raced in, and (b) makes every
+    /// subsequent disagreeing grant unable to dislodge it (`receive_admin_grant`).
     pub fn set_circle_creator(&self, circle_id: String, account_hex: String) -> bool {
         let mut st = self.state.lock().unwrap();
         let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return false };
         let Ok(creator) = decode_hex32(&account_hex) else { return false };
         st.circles[idx].creator = Some(creator);
+        st.circles[idx].creator_pinned = true;
         // Announce the creator to peers via a self-grant (creator→creator), signed by my account key,
         // so a receiver learns + verifies the pin. Only possible when I AM the creator and hold the key.
         let me = st.me().node_id_bytes();
@@ -4812,6 +4894,7 @@ impl HavenSocial {
                 cached_commit: c.cached_commit.clone(),
                 pending_epoch: c.pending_epoch.clone(),
                 creator: c.creator,
+                creator_pinned: c.creator_pinned,
                 admin_grants: c.admin_grants.clone(),
             }).collect(),
             seedless_roster_wire: st.seedless_roster_wire.clone(),
@@ -4874,6 +4957,7 @@ impl HavenSocial {
                 cached_commit: None,
                 pending_epoch: vec![],
                 creator: None,
+                creator_pinned: false,
                 admin_grants: vec![],
             });
         }
@@ -4937,10 +5021,15 @@ impl HavenSocial {
                 c.pending_epoch.push(raw);
             }
         }
-        // MLS M3 authority: adopt the pinned creator (learn-once; a differing later value is ignored —
-        // absence is never information, and the creator is a fixed fact of the circle) and union the
-        // verified admin grants (re-verification against member bundles happens where they are used).
-        if st.circles[idx].creator.is_none() {
+        // MLS M3 / AUDIT M2 authority: adopt the creator, giving a DEFINITION-pinned creator priority.
+        // A signed circle-sync record (or another of my devices) carrying a definition-pinned creator is
+        // authoritative — it re-pins even over a creator we only weakly TOFU-learned from a grant, which
+        // un-wedges a victim a hostile grant may have raced. Absent a definition, we still learn-once
+        // (TOFU carry) so nothing regresses. Admin grants are unioned (re-verified where they are used).
+        if pc.creator_pinned && pc.creator.is_some() && !st.circles[idx].creator_pinned {
+            st.circles[idx].creator = pc.creator;
+            st.circles[idx].creator_pinned = true;
+        } else if st.circles[idx].creator.is_none() {
             st.circles[idx].creator = pc.creator;
         }
         for g in pc.admin_grants {
@@ -6507,6 +6596,80 @@ mod net_tests {
                    "the primary opens what the seedless device sealed");
     }
 
+    /// AUDIT M1 (FFI): ROTATING the self-sync key on revocation cuts a revoked device off the
+    /// account-state channel — it can neither open the post-rotation state NOR have its stale-epoch write
+    /// accepted — while a still-authorized device converges; and with the switch OFF the self-sync path
+    /// is byte-identical to today (legacy v0, no epoch tag, opens with the seed).
+    #[test]
+    fn m1_ffi_rotation_cuts_revoked_device_from_self_sync() {
+        use crate::multidevice::{
+            mint_self_sync_key, open_account_state_dual, open_self_sync_key_epoch_grant,
+            seal_account_state, seal_account_state_with_key_epoch, self_sync_key_should_rotate,
+            seal_self_sync_key_epoch_grant, self_sync_key_epoch_of, AccountStateHandle,
+        };
+        // The gate mirrors retire_account_key EXACTLY: rotate only when the switch is ON and every own
+        // device is seed-drop-capable; OFF or mixed ⇒ stay on v0 (byte-identical to today).
+        assert!(!self_sync_key_should_rotate(false, true), "switch OFF ⇒ no rotation (byte-identical)");
+        assert!(!self_sync_key_should_rotate(true, false), "a non-capable own device keeps v0");
+        assert!(self_sync_key_should_rotate(true, true), "fully capable + switch ON ⇒ rotate");
+        let acct_seed = [1u8; 32];
+        let account_bundle = Identity::from_seed(&acct_seed).public().to_bytes();
+        let stays_seed = [98u8; 32]; // a device that stays authorized
+        let revoked_seed = [97u8; 32]; // a device that will be revoked
+        let stays_bundle = Identity::from_seed(&stays_seed).public().to_bytes();
+        let revoked_bundle = Identity::from_seed(&revoked_seed).public().to_bytes();
+        let dev_id = |s: [u8; 32]| Identity::from_seed(&s).public().node_id_bytes().to_vec();
+
+        // ── Epoch 1: the primary grants the current self-sync key to BOTH devices. ──
+        let k1 = mint_self_sync_key();
+        let g1_stays = seal_self_sync_key_epoch_grant(acct_seed.to_vec(), stays_bundle.clone(), 1, k1.clone()).unwrap();
+        let g1_revoked = seal_self_sync_key_epoch_grant(acct_seed.to_vec(), revoked_bundle.clone(), 1, k1.clone()).unwrap();
+        let held_stays = open_self_sync_key_epoch_grant(stays_seed.to_vec(), account_bundle.clone(), g1_stays).unwrap();
+        let held_revoked = open_self_sync_key_epoch_grant(revoked_seed.to_vec(), account_bundle.clone(), g1_revoked).unwrap();
+        assert_eq!((held_stays.epoch, &held_stays.key), (1, &k1));
+        assert_eq!((held_revoked.epoch, &held_revoked.key), (1, &k1), "both devices hold the epoch-1 key");
+
+        // ── Revocation: mint a fresh key at epoch 2, re-grant it ONLY to the still-authorized device. ──
+        let k2 = mint_self_sync_key();
+        let g2_stays = seal_self_sync_key_epoch_grant(acct_seed.to_vec(), stays_bundle.clone(), 2, k2.clone()).unwrap();
+        let held_stays2 = open_self_sync_key_epoch_grant(stays_seed.to_vec(), account_bundle.clone(), g2_stays).unwrap();
+        assert_eq!((held_stays2.epoch, &held_stays2.key), (2, &k2));
+        // The revoked device is NOT a grant recipient — it keeps only k1.
+
+        // The primary seals the CURRENT account state under the epoch-2 key (retirement ON ⇒ no v0 seal).
+        let st = AccountStateHandle::new();
+        st.set("circle:home".into(), b"home".to_vec(), 10, dev_id(stays_seed)).unwrap();
+        let post_rotation = seal_account_state_with_key_epoch(k2.clone(), 2, st).unwrap();
+        assert_eq!(self_sync_key_epoch_of(post_rotation.clone()), Some(2), "the blob is stamped epoch 2");
+
+        // (a) The revoked device (k1 only, v0 retired ⇒ empty seed_key) CANNOT open the post-rotation state.
+        assert!(
+            open_account_state_dual(post_rotation.clone(), 1, k1.clone(), vec![]).is_err(),
+            "a revoked device cannot open account state sealed under the post-rotation key"
+        );
+        // A still-authorized device (k2) opens it and converges.
+        let opened = open_account_state_dual(post_rotation, 2, k2.clone(), vec![]).unwrap();
+        assert_eq!(opened.get("circle:home".into()), Some(b"home".to_vec()));
+
+        // (b) The revoked device seals a NEWER-stamped write under its STALE key k1…
+        let hijack = AccountStateHandle::new();
+        hijack.set("circle:home".into(), b"HIJACK".to_vec(), 9_999, dev_id(revoked_seed)).unwrap();
+        let revoked_write = seal_account_state_with_key_epoch(k1.clone(), 1, hijack).unwrap();
+        // …and an authorized device (accepts only epoch 2, v0 retired) REJECTS it.
+        assert!(
+            open_account_state_dual(revoked_write, 2, k2.clone(), vec![]).is_err(),
+            "an authorized device rejects the revoked device's stale-epoch write — the channel is cut"
+        );
+
+        // ── Switch OFF ⇒ byte-identical to today: legacy v0 seal (no epoch tag), opens with the seed. ──
+        let off = AccountStateHandle::new();
+        off.set("profile".into(), b"me".to_vec(), 5, dev_id(stays_seed)).unwrap();
+        let off_blob = seal_account_state(acct_seed.to_vec(), off).unwrap();
+        assert_eq!(self_sync_key_epoch_of(off_blob.clone()), None, "OFF path is the untagged legacy v0 blob");
+        let back = crate::multidevice::open_account_state(acct_seed.to_vec(), off_blob).unwrap();
+        assert_eq!(back.get("profile".into()), Some(b"me".to_vec()), "OFF path round-trips unchanged");
+    }
+
     /// C6 (FFI): a seedless device OPENS circle media sealed by a contact (Bob) — the media is sealed to
     /// the seedless device's bundle (the contact holds the account roster), and its device-signed sender
     /// resolves back to the account.
@@ -6952,6 +7115,124 @@ mod net_tests {
         for _ in 0..4 { for i in 0..4 { for j in 0..4 { if i != j { sync(&insts[i], &insts[j], &cid); } } } }
         assert!(insts[2].feed(cid.clone(), 7_000, None).iter().any(|m| m.body == "post-remove"), "a remaining member reads content after the admin Remove");
         assert!(!d.feed(cid.clone(), 7_000, None).iter().any(|m| m.body == "post-remove"), "D is cut off by the admin Remove");
+    }
+
+    /// AUDIT M2 — the circle creator (authority root) is bound to the AUTHENTICATED definition, not
+    /// first-grant-wins TOFU. A self-signed grant naming a false creator that disagrees with the pinned
+    /// definition creator is rejected; the legitimate creator's authority holds; delegation still works.
+    #[test]
+    fn m2_forged_creator_grant_rejected_when_creator_is_definition_pinned() {
+        let cid = DEFAULT_CIRCLE.to_string();
+        let victim = HavenSocial::new([1u8; 32].to_vec()).unwrap();
+        let real = Identity::from_seed(&[2u8; 32]);
+        let mallory = Identity::from_seed(&[9u8; 32]);
+        let alice = Identity::from_seed(&[3u8; 32]);
+        let real_hex = hex(&real.public().node_id_bytes());
+        let alice_hex = hex(&alice.public().node_id_bytes());
+        let mallory_hex = hex(&mallory.public().node_id_bytes());
+        // Mallory, Real, and Alice are members so `receive_admin_grant` can resolve them as grantors.
+        victim.add_contact_bundle(cid.clone(), real.public().to_bytes()).unwrap();
+        victim.add_contact_bundle(cid.clone(), mallory.public().to_bytes()).unwrap();
+        victim.add_contact_bundle(cid.clone(), alice.public().to_bytes()).unwrap();
+        let gid = cid.as_bytes();
+        let feed_grant = |g: &AdminGrant| victim.receive(cid.clone(), tagged(TAG_ADMIN_GRANT, &g.to_bytes()));
+
+        // The victim pins the REAL creator via the authenticated definition (out-of-band agreement).
+        assert!(victim.set_circle_creator(cid.clone(), real_hex.clone()));
+        assert!(victim.circle_admins(cid.clone()).contains(&real_hex), "the real creator is an admin");
+
+        // WEDGE ATTEMPT: Mallory self-signs a grant naming HERSELF as the creator/root. It verifies as a
+        // signature, but it disagrees with the definition-pinned creator → dropped, and Mallory never
+        // becomes the victim's authority root.
+        let forged = AdminGrant::issue(&mallory, gid, mallory.public().node_id_bytes(), mallory.public().node_id_bytes(), 1);
+        assert!(matches!(feed_grant(&forged), Ok(false)), "a grant naming a false creator is dropped");
+        assert!(!victim.circle_admins(cid.clone()).contains(&mallory_hex), "Mallory cannot wedge herself as the root");
+        assert!(victim.circle_admins(cid.clone()).contains(&real_hex), "the real creator's authority still holds");
+
+        // DELEGATION still works: the real creator delegates admin to Alice (grantor=creator, creator matches).
+        let g_alice_v1 = AdminGrant::issue(&real, gid, real.public().node_id_bytes(), alice.public().node_id_bytes(), 1);
+        assert!(matches!(feed_grant(&g_alice_v1), Ok(false))); // control-lane ⇒ no content change
+        assert!(victim.circle_admins(cid.clone()).contains(&alice_hex), "the creator's delegation is honored");
+
+        // HIGHER-VERSION-WINS still holds: a v2 re-grant for Alice supersedes v1 (a stale v1 replay loses).
+        let g_alice_v2 = AdminGrant::issue(&real, gid, real.public().node_id_bytes(), alice.public().node_id_bytes(), 2);
+        feed_grant(&g_alice_v2).unwrap();
+        feed_grant(&g_alice_v1).unwrap(); // stale replay
+        assert!(victim.circle_admins(cid.clone()).contains(&alice_hex), "Alice remains admin (rollback refused)");
+        // And a delegation grant naming a DIFFERENT creator (Mallory's root) is still ignored.
+        let g_wrong_root = AdminGrant::issue(&mallory, gid, mallory.public().node_id_bytes(), alice.public().node_id_bytes(), 5);
+        assert!(matches!(feed_grant(&g_wrong_root), Ok(false)));
+        assert!(!victim.circle_admins(cid.clone()).contains(&mallory_hex), "a foreign-root grant grants no authority");
+    }
+
+    /// AUDIT M2 — a hostile grant that races in FIRST (TOFU) is un-wedged the moment the authenticated
+    /// definition creator is established, and thereafter the hostile grant is rejected. This is the exact
+    /// permanent-wedge the first-grant-wins pin enabled, now closed.
+    #[test]
+    fn m2_definition_creator_unwedges_a_tofu_hostile_grant() {
+        let cid = DEFAULT_CIRCLE.to_string();
+        let victim = HavenSocial::new([1u8; 32].to_vec()).unwrap();
+        let real = Identity::from_seed(&[2u8; 32]);
+        let mallory = Identity::from_seed(&[9u8; 32]);
+        let real_hex = hex(&real.public().node_id_bytes());
+        let mallory_hex = hex(&mallory.public().node_id_bytes());
+        victim.add_contact_bundle(cid.clone(), real.public().to_bytes()).unwrap();
+        victim.add_contact_bundle(cid.clone(), mallory.public().to_bytes()).unwrap();
+        let gid = cid.as_bytes();
+
+        // Mallory's grant reaches the victim BEFORE it learns the real creator ⇒ it weakly TOFU-learns
+        // creator=Mallory (the pre-fix wedge). This is the permitted legacy fallback — but it is NOT pinned.
+        let forged = AdminGrant::issue(&mallory, gid, mallory.public().node_id_bytes(), mallory.public().node_id_bytes(), 1);
+        victim.receive(cid.clone(), tagged(TAG_ADMIN_GRANT, &forged.to_bytes())).unwrap();
+        assert!(victim.circle_admins(cid.clone()).contains(&mallory_hex), "TOFU (legacy fallback) learns Mallory");
+
+        // The authenticated definition creator is then established → it OVERRIDES the TOFU pin (un-wedge).
+        assert!(victim.set_circle_creator(cid.clone(), real_hex.clone()));
+        assert!(victim.circle_admins(cid.clone()).contains(&real_hex), "the definition creator takes over");
+        assert!(!victim.circle_admins(cid.clone()).contains(&mallory_hex), "Mallory's wedge is undone");
+
+        // And Mallory can no longer re-wedge: her grant now disagrees with the pinned creator → dropped.
+        assert!(matches!(victim.receive(cid.clone(), tagged(TAG_ADMIN_GRANT, &forged.to_bytes())), Ok(false)));
+        assert!(!victim.circle_admins(cid.clone()).contains(&mallory_hex), "the pinned creator cannot be dislodged");
+    }
+
+    /// AUDIT L1 — a genesis commit NOT signed by the elected creator (or an admin) is rejected at ingest
+    /// and never enters the shadow store, so it cannot become the winning genesis. Legitimate geneses
+    /// (which the fleet converged on through this same gate) are admitted.
+    #[test]
+    fn m1_low_unauthenticated_genesis_is_rejected() {
+        let cid = DEFAULT_CIRCLE.to_string();
+        let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32], [3u8; 32]], &[[11u8; 32], [12u8; 32], [13u8; 32]], 0);
+        // Converge the shadow tree — every instance accepts the elected creator's genesis (the gate admits it).
+        for _ in 0..4 { for i in 0..3 { for j in 0..3 { if i != j { sync(&insts[i], &insts[j], &cid); } } } }
+        let b = &insts[1];
+        let before = b.mls_shadow_status(cid.clone());
+        assert!(before.converged && before.fork_count == 0, "the legitimate genesis converged with no fork");
+
+        // Capture the winning genesis and FORGE a competitor: identical content, but re-signed by a
+        // FOREIGN key (an account/device that is neither the elected creator nor any admin).
+        let real_genesis = {
+            let st = b.state.lock().unwrap();
+            let shadow = st.shadow_trees.get(&cid).expect("shadow present");
+            shadow
+                .commits
+                .values()
+                .find(|bytes| treekem::Commit::from_bytes(bytes).map(|c| c.epoch == 1).unwrap_or(false))
+                .expect("a genesis commit is stored")
+                .clone()
+        };
+        let mut forged = treekem::Commit::from_bytes(&real_genesis).unwrap();
+        let foreign = Identity::from_seed(&[222u8; 32]);
+        forged.sig = foreign.sign(&treekem::commit_signing_bytes(&forged));
+        let forged_bytes = forged.to_bytes();
+        assert_ne!(forged_bytes, real_genesis, "the forgery is a distinct (different-signer) genesis");
+
+        // Feed the forged genesis to B: REJECTED at ingest (unauthenticated signer). No new fork appears,
+        // and B's converged tree hash is unchanged.
+        assert!(matches!(b.receive(cid.clone(), tagged(TAG_MLS_COMMIT, &forged_bytes)), Ok(false)));
+        let after = b.mls_shadow_status(cid.clone());
+        assert_eq!(after.fork_count, 0, "the unauthenticated genesis did not enter the store as a fork");
+        assert_eq!(after.tree_hash_hex, before.tree_hash_hex, "B's genesis is unchanged");
     }
 
     /// Craft a Remove commit signed by a NON-admin (bypassing the committer-side authority check) to

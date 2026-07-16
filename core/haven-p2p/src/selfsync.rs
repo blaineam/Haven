@@ -44,6 +44,26 @@ fn selfsync_subkey(self_key: &[u8; 32], salt: &[u8]) -> [u8; 32] {
     okm
 }
 
+/// Mint a fresh 32-byte self-sync key from the OS CSPRNG (audit M1). The PRIMARY calls this on a device
+/// revocation to rotate the account-state channel, then re-grants the result to every still-authorized
+/// device bundle. A random key (not a seed derivation) is what a revoked seedless device can never
+/// reconstruct, so it is the anchor of the revocation cut.
+pub fn mint_self_sync_key() -> [u8; 32] {
+    let mut k = [0u8; 32];
+    OsRng.fill_bytes(&mut k);
+    k
+}
+
+/// Magic prefix of a **versioned (v1), rotatable** self-sync blob (audit M1 — *rotate the self-sync
+/// key on revocation*). A legacy **v0** blob (produced by [`AccountState::seal`]) is `salt(16) ‖ ct`
+/// — AEAD ciphertext under a random 16-byte salt — so it begins with these exact 4 bytes only with
+/// probability 2⁻³²; [`AccountState::open_any`] therefore disambiguates v0 vs v1 by peeking them, and
+/// even on that vanishing collision it still falls through to the v0 seed-key attempt, so no
+/// legitimate blob is lost. The versioned layout tags the KEY-EPOCH, which is what lets a reader (a)
+/// pick the matching rotated key and (b) REJECT a write sealed under a stale (pre-revocation) epoch —
+/// the mechanism that finally cuts a revoked seedless device off the account-state channel.
+const SELFSYNC_V1_MAGIC: &[u8; 4] = b"HSS1";
+
 /// A last-write-wins timestamp: the writing device's wall-clock (ms) with the device's 32-byte
 /// id as a deterministic tiebreak when two writes claim the same instant. Ordering is
 /// `(ts, device)` lexicographically — total and identical on every replica.
@@ -232,6 +252,88 @@ impl AccountState {
         let (salt, ct) = sealed.split_at(16);
         let key = selfsync_subkey(self_key, salt);
         Self::from_bytes(&crypto::open(&key, ct)?)
+    }
+
+    // ── Rotatable, versioned self-sync key (audit M1) ─────────────────────────────────────────
+    //
+    // The account keeps a CURRENT self-sync key epoch. On a device revocation (a roster version bump
+    // that drops a device), the account mints a fresh key, bumps the epoch, and re-grants it to every
+    // STILL-authorized device bundle — so a revoked SEEDLESS device (which cannot derive any key from a
+    // seed it no longer holds) is left with only the stale key. This mirrors the epoch-rotation-on-
+    // membership-change discipline the *circle* path already has; without it, revocation cut circle
+    // content but left the account-state channel (profile/contacts/circles/settings) wide open.
+    //
+    // The gate is EXACTLY the circle dual-seal gate's shape: epoch 0 == the seed-derived key
+    // ([`crate::identity::Identity::self_sync_key`]) — the v0 fallback that keeps this byte-identical to
+    // today — and only when the account is fully seed-drop-capable AND the retirement switch is ON does
+    // a reader drop the seed key from its accepted set (`seed_key = None`), at which point a stale-epoch
+    // (revoked) write can no longer be opened. Until enabled, callers still use [`Self::seal`]/[`Self::open`]
+    // and nothing here runs.
+
+    /// The KEY-EPOCH tag of a versioned (v1) blob, or `None` for a legacy (v0) blob. Cheap peek used by
+    /// the mailbox layer / telemetry to route a pulled slot to the right rotated key without decrypting.
+    pub fn peek_epoch(sealed: &[u8]) -> Option<u64> {
+        if sealed.len() >= 4 + 8 + 16 && &sealed[..4] == SELFSYNC_V1_MAGIC {
+            Some(u64::from_le_bytes(sealed[4..12].try_into().unwrap()))
+        } else {
+            None
+        }
+    }
+
+    /// Self-encrypt under a specific self-sync `key` and stamp its `epoch` (the rotatable v1 path).
+    /// Layout: `MAGIC(4) ‖ epoch(8 LE) ‖ salt(16) ‖ AES-GCM(subkey(key,salt))`. A fresh random subkey
+    /// per blob (as in [`Self::seal`]) means the rotated key is never used directly as an AEAD key.
+    pub fn seal_epoch(&self, key: &[u8; 32], epoch: u64) -> Vec<u8> {
+        let mut salt = [0u8; 16];
+        OsRng.fill_bytes(&mut salt);
+        let subkey = selfsync_subkey(key, &salt);
+        let ct = crypto::seal(&subkey, &self.to_bytes());
+        let mut out = Vec::with_capacity(4 + 8 + 16 + ct.len());
+        out.extend_from_slice(SELFSYNC_V1_MAGIC);
+        out.extend_from_slice(&epoch.to_le_bytes());
+        out.extend_from_slice(&salt);
+        out.extend_from_slice(&ct);
+        out
+    }
+
+    /// Open a blob that may be EITHER legacy (v0, seed-derived) OR versioned (v1, rotatable) — the
+    /// **dual-key** reader that mirrors the circle dual-seal open.
+    ///
+    /// * `accepted_epoch_keys` — the `(epoch → key)` the reader currently honors. Typically just the
+    ///   CURRENT epoch (optionally plus a short grace window). A v1 blob whose epoch is absent here is
+    ///   rejected: this is precisely how a **revoked device's stale-epoch write is refused** by every
+    ///   still-authorized device.
+    /// * `seed_key` — the seed-derived v0 key, or `None` once v0 authority has been retired (the
+    ///   fully-capable + switch-ON state). With `None`, a legacy blob is refused, completing the cut.
+    ///
+    /// A v1 blob is tried against its epoch's key first; failing that (unknown epoch, or the 2⁻³² case
+    /// of a legacy blob that happens to start with the magic) it falls through to the v0 seed-key
+    /// attempt. A revoked seedless device holds no seed, so its stale write can never open via the seed
+    /// key either — the fall-through is safe and never re-admits a revoked writer.
+    pub fn open_any(
+        sealed: &[u8],
+        seed_key: Option<&[u8; 32]>,
+        accepted_epoch_keys: &BTreeMap<u64, [u8; 32]>,
+    ) -> Result<Self> {
+        if sealed.len() >= 4 + 8 + 16 && &sealed[..4] == SELFSYNC_V1_MAGIC {
+            let epoch = u64::from_le_bytes(sealed[4..12].try_into().unwrap());
+            if let Some(key) = accepted_epoch_keys.get(&epoch) {
+                let (salt, ct) = sealed[12..].split_at(16);
+                let subkey = selfsync_subkey(key, salt);
+                if let Ok(pt) = crypto::open(&subkey, ct) {
+                    return Self::from_bytes(&pt);
+                }
+            }
+            // v1 magic but no accepted key for its epoch (a revoked device's stale-epoch write) or the
+            // AEAD failed: fall through to the v0 seed-key path below. That path opens a genuine legacy
+            // blob (the 2⁻³² collision) and still refuses a revoked write (a seedless device can't seal v0).
+        }
+        match seed_key {
+            Some(k) => Self::open(k, sealed),
+            None => Err(CoreError::Crypto(
+                "self-sync blob rejected: no accepted rotated key and v0 seed-key authority is retired",
+            )),
+        }
     }
 }
 
@@ -477,5 +579,105 @@ mod tests {
             open_self_sync_key(&stranger, &account.public(), &grant).is_err(),
             "a grant sealed to one device bundle is not openable by another"
         );
+    }
+
+    // ── Rotatable self-sync key (audit M1) ───────────────────────────────────────────────────
+
+    #[test]
+    fn versioned_seal_tags_epoch_and_v0_is_untagged() {
+        let key = [5u8; 32];
+        let mut s = AccountState::default();
+        s.set("profile", b"v".to_vec(), Stamp::new(1, PHONE));
+        let v1 = s.seal_epoch(&key, 7);
+        assert_eq!(AccountState::peek_epoch(&v1), Some(7), "a v1 blob carries its key-epoch");
+        // A legacy v0 blob is NOT tagged (so the two formats never collide on the wire).
+        let v0 = s.seal(&key);
+        assert_eq!(AccountState::peek_epoch(&v0), None, "a v0 blob has no epoch tag");
+    }
+
+    #[test]
+    fn open_any_dual_key_reads_both_v0_and_current_v1() {
+        let seed_key = [1u8; 32];
+        let cur = [2u8; 32];
+        let mut s = AccountState::default();
+        s.set("profile", b"me".to_vec(), Stamp::new(1, PHONE));
+        let accepted: BTreeMap<u64, [u8; 32]> = [(3u64, cur)].into();
+
+        // A legacy v0 blob opens via the seed key.
+        let v0 = s.seal(&seed_key);
+        assert_eq!(
+            AccountState::open_any(&v0, Some(&seed_key), &accepted).unwrap().get("profile"),
+            Some(&b"me"[..])
+        );
+        // A current-epoch v1 blob opens via the rotated key.
+        let v1 = s.seal_epoch(&cur, 3);
+        assert_eq!(
+            AccountState::open_any(&v1, Some(&seed_key), &accepted).unwrap().get("profile"),
+            Some(&b"me"[..])
+        );
+    }
+
+    /// THE M1 PROOF (pure): after rotation a revoked device — holding only the STALE key — can neither
+    /// read the new AccountState blob NOR have its own stale-epoch write accepted by an authorized
+    /// device, while an authorized device (holding the CURRENT key) converges normally.
+    #[test]
+    fn rotation_cuts_a_revoked_device_from_self_sync() {
+        let seed_key = [9u8; 32]; // the account's v0 seed-derived key
+        let epoch1 = [11u8; 32]; // key granted at epoch 1 (revoked device also held this)
+        let epoch2 = [22u8; 32]; // key minted on revocation; granted ONLY to still-authorized devices
+
+        // The primary writes the current account state, sealed under the NEW (epoch-2) key.
+        let mut primary = AccountState::default();
+        primary.set("circle:home", b"home".to_vec(), Stamp::new(10, PHONE));
+        let post_rotation = primary.seal_epoch(&epoch2, 2);
+
+        // The account is fully seed-drop-capable + retirement ON ⇒ v0 authority is DROPPED (seed_key None),
+        // and the reader accepts ONLY the current epoch (2).
+        let authorized_accept: BTreeMap<u64, [u8; 32]> = [(2u64, epoch2)].into();
+        let revoked_accept: BTreeMap<u64, [u8; 32]> = [(1u64, epoch1)].into(); // stale: never got epoch 2
+
+        // (1) The revoked device CANNOT open the post-rotation blob (it lacks the epoch-2 key, and v0 is retired).
+        assert!(
+            AccountState::open_any(&post_rotation, None, &revoked_accept).is_err(),
+            "a revoked device cannot open account state sealed under the post-rotation key"
+        );
+        // An authorized device opens it fine and converges.
+        let opened = AccountState::open_any(&post_rotation, None, &authorized_accept).unwrap();
+        assert_eq!(opened.get("circle:home"), Some(&b"home"[..]));
+
+        // (2) The revoked device seals a NEWER-stamped write under its STALE (epoch-1) key…
+        let mut revoked = AccountState::default();
+        revoked.set("circle:home", b"HIJACK".to_vec(), Stamp::new(9_999, MAC));
+        let revoked_write = revoked.seal_epoch(&epoch1, 1);
+        // …and an authorized device REJECTS it (epoch 1 is not in its accepted set; v0 is retired).
+        assert!(
+            AccountState::open_any(&revoked_write, None, &authorized_accept).is_err(),
+            "an authorized device rejects a revoked device's stale-epoch write — the channel is cut"
+        );
+
+        // A still-authorized peer's epoch-2 write IS accepted and converges (the channel stays live for them).
+        let mut peer = AccountState::default();
+        peer.set("setting:theme", b"dark".to_vec(), Stamp::new(20, PHONE));
+        let peer_write = peer.seal_epoch(&epoch2, 2);
+        let mut merged = opened;
+        merged.merge(&AccountState::open_any(&peer_write, None, &authorized_accept).unwrap());
+        assert_eq!(merged.get("setting:theme"), Some(&b"dark"[..]));
+        assert_eq!(merged.get("circle:home"), Some(&b"home"[..]), "the hijack write never entered");
+    }
+
+    #[test]
+    fn dual_key_window_keeps_reading_v0_until_retired() {
+        // During the dual-key transition (retirement OFF), a reader still honors the seed key, so a
+        // legacy seed-holding writer converges — exactly like the circle dual-seal window.
+        let seed_key = [3u8; 32];
+        let cur = [4u8; 32];
+        let accepted: BTreeMap<u64, [u8; 32]> = [(1u64, cur)].into();
+        let mut legacy = AccountState::default();
+        legacy.set("profile", b"legacy".to_vec(), Stamp::new(1, PHONE));
+        let v0 = legacy.seal(&seed_key);
+        // OFF (seed_key Some): the legacy blob is readable.
+        assert!(AccountState::open_any(&v0, Some(&seed_key), &accepted).is_ok());
+        // Retired (seed_key None): the same legacy blob is refused.
+        assert!(AccountState::open_any(&v0, None, &accepted).is_err(), "retiring v0 refuses legacy blobs");
     }
 }

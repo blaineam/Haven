@@ -1494,10 +1494,31 @@ final class FeedStore: ObservableObject {
         // once per transition instead of once per packet.
         if viaNearby { if !nearbyActive { nearbyActive = true } }
         else { if !internetActive { internetActive = true } }
-        let payload = Data(data.dropFirst())
-        // Frames that lead with a 64-char sender id (media req + calls + camera state): drop if
-        // blocked (audit F4 — 22 was previously missing from this list).
-        if [3, 10, 11, 12, 13, 15, 16, 17, 18, 21, 22].contains(type) {
+        var payload = Data(data.dropFirst())
+        // Call-signaling frames are SEALED + SIGNED to us (audit R1). Open + verify BEFORE anything
+        // else: reject any frame we can't decrypt or whose signature doesn't verify (a relay-forged,
+        // relay-rewritten, or replayed-as-another-type frame all fail here), and reject one whose
+        // proven sender doesn't match the self-declared `from` prefix the call handlers key on. This
+        // runs identically for direct and frame-9-relayed frames — authentication is the signature,
+        // not the transport id the relay path lacks. Only after this do we have a PROVEN sender hex to
+        // block-check and to hand (as unchanged plaintext) to CallManager.
+        let callFrameTypes: Set<UInt8> = [10, 11, 12, 16, 17, 18, 21, 22]
+        if callFrameTypes.contains(type) {
+            guard let opened = social?.openCallFrame(frameType: type, blob: payload) else { return }
+            let verified = opened.senderHex.lowercased()
+            let plaintext = Data(opened.data)
+            let declared = String(data: plaintext.prefix(64), encoding: .utf8)?.lowercased() ?? ""
+            guard verified.count == 64, declared == verified else { return }   // proven == self-declared
+            // Defense in depth: when the transport gave us a verified device id, it must resolve to
+            // the same account (nil on the relay path, where the signature already did the work).
+            if let senderDevice, senderDevice.count == 64,
+               let acct = social?.accountForDevice(deviceHex: senderDevice)?.lowercased(),
+               acct != verified { return }
+            if ConnectionsStore.shared.isBlocked(verified) { return }
+            payload = plaintext
+        } else if [3, 13, 15].contains(type) {
+            // Remaining sender-prefixed frames (media req + call audio/video placeholders): drop if
+            // blocked (audit F4). These are not call SIGNALING and keep the plaintext-prefix check.
             let head = String(data: payload.prefix(64), encoding: .utf8) ?? ""
             if head.count == 64, ConnectionsStore.shared.isBlocked(head) { return }
         }
@@ -1926,15 +1947,26 @@ final class FeedStore: ObservableObject {
     }
 
     /// Send a call signaling/audio frame to a peer (direct, over the internet transport).
+    ///
+    /// The frame is SEALED + SIGNED to the recipient before it leaves this device (audit R1): the
+    /// SDP/ICE/control body is encrypted so a relay on the frame-9 forward path can neither read
+    /// candidate IPs nor rewrite the DTLS-SRTP fingerprint, and it carries our Ed25519 signature so
+    /// the recipient proves the sender instead of trusting the plaintext `from` prefix. If sealing
+    /// fails (no engine, or the recipient isn't a known member we can seal to) we send NOTHING —
+    /// there is deliberately no plaintext fallback, so a relay can't force a downgrade to the old
+    /// spoofable/rewritable form.
     func sendCallFrame(_ type: UInt8, _ payload: Data, to nodeHex: String) {
-        sendIroh(type, payload, to: nodeHex)
-        // Cross-NAT fallback: hop the same frame LIVE through the circle relays (frame 9 — the
+        guard let sealed = try? social?.sealCallFrame(recipientNodeHex: nodeHex, frameType: type, data: payload),
+              !sealed.isEmpty else { return }
+        sendIroh(type, sealed, to: nodeHex)
+        // Cross-NAT fallback: hop the same SEALED frame LIVE through the circle relays (frame 9 — the
         // relay host unwraps + sends it onward over its own connections). The nearby originateRelay
         // flood never leaves the room, so a callee whose direct dial back to the caller failed had
-        // NO way to deliver the ACCEPT — the push rang her, but the answer died in the NAT.
+        // NO way to deliver the ACCEPT — the push rang her, but the answer died in the NAT. The relay
+        // only ever handles the sealed blob; it cannot read or alter the signaling.
         var dests = social?.deviceNodeIdsFor(accountHex: nodeHex) ?? [nodeHex]
         for h in deviceHints(for: nodeHex) where !dests.contains(where: { $0.lowercased() == h }) { dests.append(h) }
-        originateRelayInternet(dests: dests, inner: frame(type, payload))
+        originateRelayInternet(dests: dests, inner: frame(type, sealed))
     }
 
     /// Originate a frame-9 live forward of `inner` to `dests` via up to 3 adopted INTERNET relays

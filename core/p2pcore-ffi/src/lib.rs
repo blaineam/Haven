@@ -322,6 +322,30 @@ fn notif_signing_bytes(recipient_hex: &str, plaintext: &[u8]) -> Vec<u8> {
     v
 }
 
+/// A call-signaling frame opened + cryptographically verified: the PROVEN sender account hex and the
+/// plaintext body. The caller still gates the sender against its roster / contact list (that is
+/// *authorization*), but `sender_hex` is now proven by an Ed25519 signature, not a self-declared
+/// prefix a relay could forge (audit R1).
+#[derive(uniffi::Record)]
+pub struct SignedCallFrame {
+    pub sender_hex: String,
+    pub data: Vec<u8>,
+}
+
+/// The bytes a call-frame signature covers: a domain tag ‖ the recipient node id ‖ the wire frame
+/// type ‖ the plaintext. Binding the recipient stops a captured frame being replayed at a different
+/// user; binding the frame type stops a captured offer (16) being replayed as, say, a hangup (12) or
+/// an answer (17). Distinct domain tag from `notif_signing_bytes` so the two signature families can
+/// never be cross-replayed.
+fn call_signing_bytes(recipient_hex: &str, frame_type: u8, plaintext: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(13 + 1 + recipient_hex.len() + plaintext.len());
+    v.extend_from_slice(b"haven-call-v1");
+    v.extend_from_slice(recipient_hex.as_bytes());
+    v.push(frame_type);
+    v.extend_from_slice(plaintext);
+    v
+}
+
 /// NSE/recipient side: open a SIGNED push notification with the seed alone, verifying the carried
 /// sender bundle actually authored it. Defeats the spoof where anyone holding the recipient's public
 /// key seals an arbitrary "Alice|…" alert — a forger can only sign as *themselves*, never as a
@@ -1807,6 +1831,26 @@ impl HavenSocial {
         vec![acct]
     }
 
+    /// Resolve an authenticated transport DEVICE id back to the ACCOUNT id that authorized it, using
+    /// the signed device rosters we hold. Returns the account hex, or `None` if we don't (yet) know
+    /// which account owns this device. A device id that IS an account id we know (a pre-multidevice
+    /// peer) resolves to itself. Used as a defense-in-depth cross-check that a directly-delivered call
+    /// frame's cryptographically-proven sender matches the transport it arrived on (audit R1 rec a).
+    pub fn account_for_device(&self, device_hex: String) -> Option<String> {
+        let dev = device_hex.to_lowercase();
+        let st = self.state.lock().unwrap();
+        for (id, cd) in st.device_lists.iter() {
+            let acct = hex(id);
+            if acct == dev {
+                return Some(acct);
+            }
+            if cd.authorized_bundles().iter().any(|b| hex(&b.node_id_bytes()) == dev) {
+                return Some(acct);
+            }
+        }
+        None
+    }
+
     /// Export every CONTACT device roster I currently hold, each as tagged wire + the contact's account
     /// hex. My OTHER devices fold these into self-sync so a freshly-linked device learns which device ids
     /// to dial/seal for each friend WITHOUT first having to reach that friend itself — the bootstrap gap
@@ -2278,6 +2322,65 @@ impl HavenSocial {
         out.extend_from_slice(&sig);
         out.extend_from_slice(&sealed);
         Ok(out)
+    }
+
+    /// Seal + sign a WebRTC call-signaling frame to ONE recipient (their account node hex). This is
+    /// the ONLY call-signaling send path (audit R1): the SDP / ICE / control body is encrypted to the
+    /// recipient — so a relay on the frame-9 forward path can neither read candidate IP addresses nor
+    /// rewrite the DTLS-SRTP fingerprint inside an offer — AND signed by us, so the recipient
+    /// cryptographically verifies who sent it instead of trusting a self-declared 64-hex prefix a
+    /// relay could forge. Same construction as [`Self::seal_signed_notification`]; the signature is
+    /// purpose-specific + domain-separated + binds the recipient and the wire frame type (NOT a raw
+    /// signing oracle, audit H3). Recipient-per-frame, so a group call (one sealed frame per pairwise
+    /// peer) is covered exactly like a 1:1. Layout:
+    /// `[u32 bundle_len][sender bundle][u32 sig_len][sig][seal_media output]`.
+    pub fn seal_call_frame(&self, recipient_node_hex: String, frame_type: u8, data: Vec<u8>) -> Result<Vec<u8>, HavenError> {
+        let sealed = self.seal_media(recipient_node_hex.clone(), data.clone())?;
+        let st = self.state.lock().unwrap();
+        let bundle = st.me.public().to_bytes();
+        let sig = st.me.sign(&call_signing_bytes(&recipient_node_hex, frame_type, &data));
+        let mut out = Vec::with_capacity(8 + bundle.len() + sig.len() + sealed.len());
+        out.extend_from_slice(&(bundle.len() as u32).to_le_bytes());
+        out.extend_from_slice(&bundle);
+        out.extend_from_slice(&(sig.len() as u32).to_le_bytes());
+        out.extend_from_slice(&sig);
+        out.extend_from_slice(&sealed);
+        Ok(out)
+    }
+
+    /// Open + verify a call frame sealed to us with [`Self::seal_call_frame`]. Returns the PROVEN
+    /// sender account hex + plaintext, or `None` if the blob can't be decrypted, or the carried
+    /// signature doesn't verify against the carried sender bundle for THIS recipient + frame type.
+    /// A malicious relay that (a) forged the sender, (b) rewrote the sealed body (e.g. swapped the
+    /// DTLS-SRTP fingerprint), or (c) replayed a captured offer under a different frame type all fail
+    /// here — the frame is dropped before any signaling logic sees it. Works identically on the direct
+    /// iroh path and the frame-9 relay-forward path, because authentication rests on the signature,
+    /// not on a transport-verified sender the relay path lacks.
+    pub fn open_call_frame(&self, frame_type: u8, blob: Vec<u8>) -> Option<SignedCallFrame> {
+        if blob.len() < 4 {
+            return None;
+        }
+        let blen = u32::from_le_bytes(blob[0..4].try_into().ok()?) as usize;
+        if blob.len() < 8 + blen {
+            return None;
+        }
+        let bundle = &blob[4..4 + blen];
+        let slen = u32::from_le_bytes(blob[4 + blen..8 + blen].try_into().ok()?) as usize;
+        if blob.len() < 8 + blen + slen {
+            return None;
+        }
+        let sig = &blob[8 + blen..8 + blen + slen];
+        let sealed = blob[8 + blen + slen..].to_vec();
+        let plaintext = self.open_media(sealed)?;
+        let me_hex = {
+            let st = self.state.lock().unwrap();
+            hex(&st.me.public().node_id_bytes())
+        };
+        let sender = HavenId::from_bytes(bundle).ok()?;
+        sender
+            .verify(&call_signing_bytes(&me_hex, frame_type, &plaintext), sig)
+            .ok()?;
+        Some(SignedCallFrame { sender_hex: hex(&sender.node_id_bytes()), data: plaintext })
     }
 
     /// Open a media blob sealed to us by a contact. Returns the plaintext bytes.
@@ -3026,6 +3129,95 @@ mod net_tests {
         // A plain (unsigned) seal_media blob — the old spoofable form — can't pass as signed.
         let plain = alice.seal_media(bob.my_node_hex(), b"spoof".to_vec()).unwrap();
         assert!(open_signed_notification_with_seed([31u8; 32].to_vec(), plain).is_none());
+    }
+
+    // A minimal SDP offer body in the on-wire call-frame shape `[hex64][…][json]`; only the DTLS
+    // fingerprint matters for the MITM test.
+    fn offer_body(from_hex: &str, fingerprint: &str) -> Vec<u8> {
+        let mut v = from_hex.as_bytes().to_vec();
+        let json = format!(r#"{{"t":"offer","sdp":"a=fingerprint:sha-256 {fingerprint}"}}"#);
+        v.extend_from_slice(json.as_bytes());
+        v
+    }
+
+    /// R1: a WebRTC call frame is now sealed + signed, so the relay-MITM (rewrite the DTLS-SRTP
+    /// fingerprint in a plaintext offer to intercept the media) and the caller-ID spoof are both dead.
+    /// This exercises the frame-9 relay-forward path specifically: the relay (Mallory) sees only the
+    /// opaque sealed blob it must forward, and every tamper/forge she can attempt is REJECTED, while
+    /// the genuine signed frame is ACCEPTED.
+    #[test]
+    fn call_frame_seal_defeats_relay_mitm() {
+        const OFFER: u8 = 16;
+        let alice = HavenSocial::new([40u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([41u8; 32].to_vec()).unwrap();
+        let mallory = HavenSocial::new([42u8; 32].to_vec()).unwrap(); // a circle-member relay (e.g. a Pi)
+        let cid = DEFAULT_CIRCLE.to_string();
+        // Everyone is in the same circle (Mallory is an ordinary member who also runs the relay).
+        let bob_hex = alice.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+        bob.add_contact_bundle(cid.clone(), alice.my_bundle()).unwrap();
+        alice.add_contact_bundle(cid.clone(), mallory.my_bundle()).unwrap();
+        bob.add_contact_bundle(cid.clone(), mallory.my_bundle()).unwrap();
+        mallory.add_contact_bundle(cid.clone(), alice.my_bundle()).unwrap();
+        mallory.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+
+        let good_fpr = "AA:BB:CC"; // Alice's real DTLS-SRTP fingerprint
+        let evil_fpr = "EE:VV:IL"; // the attacker's — accepting it terminates DTLS at the attacker
+
+        // Alice → Bob: the genuine sealed+signed offer. This is the exact blob a relay must forward.
+        let blob = alice
+            .seal_call_frame(bob_hex.clone(), OFFER, offer_body(&alice.my_node_hex(), good_fpr))
+            .unwrap();
+
+        // (0) ACCEPT: Bob opens the genuine frame, the sender is PROVEN to be Alice, and the
+        //     fingerprint he'll pin is Alice's real one.
+        let opened = bob.open_call_frame(OFFER, blob.clone()).expect("genuine frame accepted");
+        assert_eq!(opened.sender_hex, alice.my_node_hex(), "sender cryptographically proven to be Alice");
+        assert!(
+            String::from_utf8_lossy(&opened.data).contains(good_fpr),
+            "Bob pins Alice's real fingerprint"
+        );
+
+        // (1) The relay can't even READ the offer: the fingerprint is not present anywhere in the
+        //     forwarded bytes (it's inside the seal), so candidate IPs + the fingerprint stay private.
+        assert!(
+            !String::from_utf8_lossy(&blob).contains(good_fpr),
+            "sealed frame does not expose the fingerprint to the relay"
+        );
+
+        // (2) MITM REJECTED — the relay flips bytes in the sealed body to try to rewrite the
+        //     fingerprint. The AEAD seal fails to open → dropped, so Bob never sees the evil fingerprint.
+        let mut rewritten = blob.clone();
+        let n = rewritten.len() - 1;
+        rewritten[n] ^= 0xff;
+        assert!(bob.open_call_frame(OFFER, rewritten).is_none(), "relay-rewritten offer rejected");
+
+        // (3) SPOOF REJECTED — Mallory forges her OWN sealed+signed offer to Bob carrying the evil
+        //     fingerprint but claims (in the plaintext `from` prefix) to be Alice. open_call_frame
+        //     returns MALLORY as the proven sender, never Alice: she cannot sign as Alice. Bob's
+        //     roster gate then sees the sender is not the claimed contact and drops it.
+        let forged = mallory
+            .seal_call_frame(bob_hex.clone(), OFFER, offer_body(&alice.my_node_hex(), evil_fpr))
+            .unwrap();
+        let opened = bob.open_call_frame(OFFER, forged).expect("Mallory's own frame opens");
+        assert_eq!(
+            opened.sender_hex,
+            mallory.my_node_hex(),
+            "the proven sender is Mallory, NOT the Alice she impersonated in the plaintext"
+        );
+        assert_ne!(opened.sender_hex, alice.my_node_hex());
+        let claimed = String::from_utf8_lossy(&opened.data[..64]);
+        assert_eq!(claimed, alice.my_node_hex(), "she DID claim to be Alice in the body…");
+        assert_ne!(opened.sender_hex, claimed, "…but the crypto exposes the lie");
+
+        // (4) REPLAY-AS-OTHER-TYPE REJECTED — the captured genuine offer replayed under a different
+        //     frame type (e.g. 17 answer) fails, because the frame type is bound into the signature.
+        assert!(bob.open_call_frame(17, blob.clone()).is_none(), "offer replayed as answer rejected");
+
+        // (5) WRONG-RECIPIENT REJECTED — the frame sealed to Bob can't be opened by anyone else, and
+        //     an OLD unsealed frame (the pre-R1 spoofable form) is refused outright.
+        assert!(mallory.open_call_frame(OFFER, blob.clone()).is_none(), "frame sealed to Bob unreadable by the relay");
+        let raw_unsealed = offer_body(&alice.my_node_hex(), good_fpr);
+        assert!(bob.open_call_frame(OFFER, raw_unsealed).is_none(), "legacy unsealed frame refused (no downgrade)");
     }
 
     /// Advance the test clock by `secs` for the duration of the closure, then restore it. Serialized

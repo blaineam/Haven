@@ -122,6 +122,19 @@ object CallManager {
             .setVideoDecoderFactory(DefaultVideoDecoderFactory(eglBase.eglBaseContext))
             .createPeerConnectionFactory().also { factory = it }
 
+    // ---- Sealed + signed call signaling (audit R1) ----
+
+    /** Seal + sign a call frame to [to] before handing it to the transport. The SDP/ICE/control body
+     *  is encrypted to the recipient (so a relay on the frame-9 forward path can't read candidate IPs
+     *  or rewrite the DTLS-SRTP fingerprint) and carries our Ed25519 signature (so the recipient
+     *  proves the sender). No plaintext fallback: if sealing fails we send NOTHING, so a relay can't
+     *  force a downgrade to the old spoofable form. Mirrors iOS `FeedStore.sendCallFrame`. */
+    private fun send(type: Int, body: ByteArray, to: String) {
+        val sealed = runCatching { HavenNet.engine.sealCallFrame(to, type.toUByte(), body) }.getOrNull() ?: return
+        if (sealed.isEmpty()) return
+        HavenNet.sendCallFrame(type, sealed, to)
+    }
+
     // ---- Starting / joining ----
 
     private fun invitees(): List<String> = (roster - myHex).sorted()
@@ -143,7 +156,7 @@ object CallManager {
         refreshParticipants()
         // Frame 21 group invite to everyone.
         val frame = CallWire.groupInvite(myHex, sessionId, name, rosterCsv())
-        invitees().forEach { HavenNet.sendCallFrame(CallWire.GROUP_INVITE, frame, it) }
+        invitees().forEach { send(CallWire.GROUP_INVITE, frame, it) }
         startMesh()
     }
 
@@ -158,7 +171,7 @@ object CallManager {
         // Frame 21 with the NEW roster — to the newcomers (so they ring/join) AND existing members (so
         // they learn the newcomer and open a peer to them; handleGroupInvite fills the mesh in).
         val frame = CallWire.groupInvite(myHex, sessionId, peerName.value, rosterCsv())
-        invitees().forEach { HavenNet.sendCallFrame(CallWire.GROUP_INVITE, frame, it) }
+        invitees().forEach { send(CallWire.GROUP_INVITE, frame, it) }
         if (mediaStarted) fresh.forEach { connectPeerIfNeeded(it) }
     }
 
@@ -170,7 +183,7 @@ object CallManager {
         mainHandler.removeCallbacks(ringTimeoutRunnable)
         ringing.value = false
         inCall.value = true
-        invitees().forEach { HavenNet.sendCallFrame(CallWire.ACCEPT, CallWire.accept(myHex, sessionId), it) }
+        invitees().forEach { send(CallWire.ACCEPT, CallWire.accept(myHex, sessionId), it) }
         startMesh()
         invitees().forEach { connectPeerIfNeeded(it) }
     }
@@ -184,14 +197,32 @@ object CallManager {
         val targets = invitees().toList()
         val h = android.os.Handler(android.os.Looper.getMainLooper())
         repeat(3) { i ->
-            h.postDelayed({ targets.forEach { HavenNet.sendCallFrame(CallWire.HANGUP, CallWire.hangup(myHex), it) } }, 90L * i)
+            h.postDelayed({ targets.forEach { send(CallWire.HANGUP, CallWire.hangup(myHex), it) } }, 90L * i)
         }
         teardown()
     }
 
     // ---- Inbound signaling (from HavenNet.callRouter, on main) ----
 
-    private fun handle(type: Int, body: ByteArray) {
+    /** Open + verify a sealed+signed call frame (audit R1) BEFORE any signaling logic sees it: reject
+     *  anything we can't decrypt or whose Ed25519 signature doesn't verify against the carried sender
+     *  bundle for this recipient + frame type (a relay-forged, relay-rewritten, or replayed-as-another-
+     *  type frame all fail), and reject one whose proven sender doesn't match the self-declared `from`
+     *  the sub-handlers key on. Runs identically for direct and frame-9-relayed frames — authentication
+     *  is the signature, not the transport id. Returns the verified PLAINTEXT body, or null to drop. */
+    private fun openCallFrame(type: Int, sealedBody: ByteArray): ByteArray? {
+        val opened = runCatching { HavenNet.engine.openCallFrame(type.toUByte(), sealedBody) }.getOrNull() ?: return null
+        val verified = opened.senderHex.lowercase()
+        val plaintext = opened.data
+        if (verified.length != 64 || plaintext.size < 64) return null
+        val declared = runCatching { String(plaintext.copyOfRange(0, 64), Charsets.UTF_8) }.getOrNull()?.lowercase() ?: ""
+        if (declared != verified) return null            // proven sender must equal the self-declared from
+        if (HavenNet.blocked.contains(verified)) return null
+        return plaintext
+    }
+
+    private fun handle(type: Int, sealedBody: ByteArray) {
+        val body = openCallFrame(type, sealedBody) ?: return
         when (type) {
             CallWire.GROUP_INVITE -> handleGroupInvite(body)
             CallWire.INVITE -> CallWire.parseInviteName(body)?.let { (from, name) ->
@@ -315,8 +346,10 @@ object CallManager {
 
     private fun validSession(sid: String) = sid == sessionId || sessionId.isEmpty()
 
-    /// An unsealed call control frame's self-asserted sender must be a known contact — a stranger
-    /// can't ring you, inject participants, or negotiate a call (audit F3, iOS parity).
+    /// Call frames are sealed + SIGNATURE-verified before dispatch (audit R1), so `hex` here is the
+    /// cryptographically-PROVEN sender, not a self-asserted one. This gate applies AUTHORIZATION on
+    /// top of that: a stranger who can sign as themselves still can't ring you, inject participants,
+    /// or negotiate a call unless they're a known contact (audit F3, iOS parity).
     private fun knownContact(hex: String): Boolean = HavenNet.contacts.any { it.idHex == hex }
 
     // ---- Media + mesh ----
@@ -370,10 +403,10 @@ object CallManager {
             localVideo = localVideo,
             onLocalSdp = { type, sdp ->
                 val t = if (type == "offer") CallWire.OFFER else CallWire.ANSWER
-                HavenNet.sendCallFrame(t, CallWire.signal(myHex, sessionId, CallSignal.encodeSdp(type, sdp)), peer)
+                send(t, CallWire.signal(myHex, sessionId, CallSignal.encodeSdp(type, sdp)), peer)
             },
             onLocalIce = { cand, m, mid ->
-                HavenNet.sendCallFrame(CallWire.ICE, CallWire.signal(myHex, sessionId, CallSignal.encodeCandidate(cand, m, mid)), peer)
+                send(CallWire.ICE, CallWire.signal(myHex, sessionId, CallSignal.encodeCandidate(cand, m, mid)), peer)
             },
             onRemoteVideo = { track -> remoteVideo[peer] = track },
             onRemoteScreen = { track -> remoteScreen[peer] = track },
@@ -412,7 +445,7 @@ object CallManager {
         localVideo?.setEnabled(cameraOn.value)
         // Tell every peer so they swap to my avatar instead of freezing on my last camera frame.
         val on = cameraOn.value
-        invitees().forEach { HavenNet.sendCallFrame(CallWire.CAMERA, CallWire.cameraState(myHex, sessionId, on), it) }
+        invitees().forEach { send(CallWire.CAMERA, CallWire.cameraState(myHex, sessionId, on), it) }
     }
     fun switchCamera() { if (!screenShare.value) capturer?.switchCamera(null) }
 

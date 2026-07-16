@@ -4,12 +4,15 @@ import AVFoundation
 
 /// A single WebRTC peer connection for one call. Media (audio + optional video) flows directly
 /// peer-to-peer, encrypted by WebRTC's DTLS-SRTP (end-to-end for a 1:1 direct connection). The
-/// SDP offer/answer and ICE candidates are produced here and handed to the caller, which seals
-/// and sends them over Haven's existing P2P channel — so there is no signaling server. STUN
-/// handles most NATs; a TURN relay (e.g. haven-relay) can be added for symmetric NATs.
+/// SDP offer/answer and ICE candidates are produced here and handed to `CallManager`, which sends
+/// them via `FeedStore.sendCallFrame` — where each frame is SEALED + SIGNED to the recipient
+/// (`seal_call_frame`) before it leaves the device, so there is no signaling server and no relay on
+/// the path can read or rewrite the signaling (audit R1). The DTLS-SRTP fingerprint inside the
+/// offer is therefore integrity-protected end-to-end: a relay cannot swap it to MITM the media.
+/// STUN handles most NATs; a TURN relay (e.g. haven-relay) can be added for symmetric NATs.
 ///
-/// Signaling payloads are tiny JSON, framed on the wire as:
-///   16 = SDP offer · 17 = SDP answer · 18 = ICE candidate   (each prefixed with our node hex).
+/// Signaling payloads are tiny JSON, framed as `[hex64][lp sessionId?][json]` then sealed+signed:
+///   16 = SDP offer · 17 = SDP answer · 18 = ICE candidate.
 final class WebRTCCall: NSObject {
     /// One shared factory (creating several is wasteful and can crash).
     static let factory: RTCPeerConnectionFactory = {

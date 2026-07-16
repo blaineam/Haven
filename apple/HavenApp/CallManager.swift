@@ -19,7 +19,10 @@ import ReplayKit
 /// Peer-to-peer **mesh** audio/video calls over **WebRTC**, fully **in-app** (CallKit is used only
 /// for the system call UI + audio-session coordination on iOS — never to drive the mesh). The media
 /// path is DTLS-SRTP (E2EE per pairwise connection); all signaling (invite/accept/hangup + SDP
-/// offer/answer + ICE) rides Haven's existing sealed P2P channel — no call/signaling server.
+/// offer/answer + ICE) is **sealed + signed per-recipient** (`FeedStore.sendCallFrame` →
+/// `seal_call_frame`) and opened + sender-verified on receipt (`openCallFrame`), so a relay can
+/// neither spoof caller-id, forge control, nor rewrite the DTLS-SRTP fingerprint (audit R1). No
+/// call/signaling server.
 ///
 /// A "group call" is a session (`sessionId` UUID) with a roster of participant node-id hexes. Every
 /// participant opens ONE `WebRTCCall` to EVERY OTHER participant (full mesh — there is no SFU). A
@@ -270,9 +273,11 @@ final class CallManager: NSObject, ObservableObject {
     // MARK: - Inbound signaling
 
     /// Legacy 1:1 invite (frame 10). Treated as a 2-person group with a synthetic session id.
-    /// An UNSEALED call control frame's self-asserted sender must be a known contact — a stranger
-    /// can't ring you, inject participants, or negotiate a call (audit F3). Sealed posts are already
-    /// author-verified; this gates the call signaling, which is plaintext-authenticated only.
+    /// Call frames are sealed + SIGNATURE-verified before dispatch (audit R1), so by the time a
+    /// handler runs the `from` hex is the cryptographically-PROVEN sender, not a self-asserted one.
+    /// This gate then applies *authorization* on top of that authenticity — a stranger who can sign
+    /// as themselves still can't ring you, inject participants, or negotiate a call unless they're a
+    /// known contact (audit F3).
     private func knownContact(_ hex: String) -> Bool {
         ContactsStore.shared.contacts.contains { $0.idHex == hex }
     }

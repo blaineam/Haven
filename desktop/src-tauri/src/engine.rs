@@ -3375,8 +3375,29 @@ impl Engine {
     // ---- calls (signaling only; WebRTC media lives in the WebView) ----------------------
 
     /// Parse an inbound call frame and forward it to the UI's WebRTC mesh via `haven:call`.
-    fn handle_call(self: &Arc<Self>, t: u8, body: &[u8]) {
+    ///
+    /// The frame is sealed + signed to us (audit R1). Open + verify BEFORE anything else: drop any
+    /// frame we can't decrypt or whose Ed25519 signature doesn't verify against the carried sender
+    /// bundle for this recipient + frame type (a relay-forged, relay-rewritten, or replayed-as-
+    /// another-type frame all fail here), and drop one whose PROVEN sender doesn't match the
+    /// self-declared `from` prefix the parsers key on. This runs identically for direct and
+    /// frame-9-relayed frames — authentication is the signature, not a transport id.
+    fn handle_call(self: &Arc<Self>, t: u8, sealed: &[u8]) {
         let Some(app) = self.app.lock().unwrap().clone() else { return };
+        let Some(opened) = self.social.open_call_frame(t, sealed.to_vec()) else { return };
+        let verified = opened.sender_hex.to_lowercase();
+        let body = &opened.data;
+        if verified.len() != 64 || body.len() < 64 {
+            return;
+        }
+        let declared = String::from_utf8_lossy(&body[..64]).to_lowercase();
+        if declared != verified {
+            return; // proven sender must equal the self-declared `from`
+        }
+        if self.prefs.lock().unwrap().blocked.contains(&verified) {
+            return;
+        }
+        let body = body.as_slice();
         let ev = match t {
             wire::CALL_INVITE => callwire::parse_invite_name(body).map(|(from, name)| {
                 serde_json::json!({ "kind": "invite", "from": from, "name": name, "sessionId": format!("legacy:{from}"), "roster": [from] })
@@ -3429,7 +3450,15 @@ impl Engine {
     /// fallback: a callee whose direct dial back to the caller fails still lands the ACCEPT within
     /// the ring window. (The invite push rings the callee, but the answer path was direct-only.)
     fn send_call_frame(self: &Arc<Self>, t: u8, frame_body: &[u8], to_hex: &str) {
-        self.send_frame(t, frame_body, to_hex);
+        // Seal + sign the frame to the recipient before it leaves the device (audit R1): the body is
+        // encrypted (a relay on the frame-9 path can't read candidate IPs or rewrite the DTLS-SRTP
+        // fingerprint) and signed (the recipient proves the sender). No plaintext fallback — if
+        // sealing fails we send NOTHING, so a relay can't force a downgrade to the spoofable form.
+        let sealed = match self.social.seal_call_frame(to_hex.to_string(), t, frame_body.to_vec()) {
+            Ok(s) if !s.is_empty() => s,
+            _ => return,
+        };
+        self.send_frame(t, &sealed, to_hex);
         let mut dests = self.social.device_node_ids_for(to_hex.to_string());
         if dests.is_empty() {
             dests.push(to_hex.to_string());
@@ -3439,7 +3468,7 @@ impl Engine {
                 dests.push(h);
             }
         }
-        self.originate_relay_internet(&dests, &wire::frame(t, frame_body));
+        self.originate_relay_internet(&dests, &wire::frame(t, &sealed));
     }
 
     /// Originate a frame-9 live forward of `inner` to `dests` via up to 3 adopted internet relays.

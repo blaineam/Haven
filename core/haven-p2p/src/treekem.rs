@@ -2376,6 +2376,283 @@ pub fn build_group_info(
     gi
 }
 
+// ═════════════════════════════════════════════════════════════════════════════════════════
+// Stage M4 — offline / mid-chain Welcome ENTRY (design §4.2 Add, §4.4/§5.5 Welcome + sleeper
+// re-entry, §9 row M4).
+//
+// M2's `welcome_epoch_schedule` bootstraps a joiner from a genesis Welcome ONLY: the tree is
+// reconstructed by the caller from the genesis Adds. M4 adds the SELF-CONTAINED entry a joiner
+// added mid-life (or a sleeper past the mailbox TTL, §5.5) needs — one that does NOT replay the
+// commit chain: the Welcome carries a `GroupInfo` (epoch n, tree_blob_ref, tree_hash,
+// confirmed_transcript_hash) plus the serialized public tree as a content-addressed blob, so the
+// joiner reconstructs epoch n directly and derives the SAME epoch secret every member at n holds.
+//
+// TWO invariants this file is the home of, both asserted by the M4 tests:
+//   * "Enter at epoch n, never rebuild genesis." `enter_via_welcome` lands the joiner at the
+//     GroupInfo's epoch — the live epoch — with epoch CONTINUITY preserved; it never resets to a
+//     fresh epoch-1 tree. A mid-life Add is a chained commit, not a superseding genesis.
+//   * "Revoked-in-the-meantime fails closed." The entry VERIFIES the joiner's own leaf is present
+//     in the delivered tree AND that its public key matches the delivered leaf secret. A device
+//     removed (leaf blanked) or handed a leaf secret that doesn't match the tree cannot enter —
+//     the tree does not admit it, by construction, with no separate policy check to forget.
+// Everything here is PURE (caller-supplied secrets, no I/O, no RNG) exactly like M1/M2.
+// ═════════════════════════════════════════════════════════════════════════════════════════
+
+/// The content-addressed ref of a serialized [`RatchetTree`] blob (§3.4/§4.6, design point 4):
+/// a domain-separated blake3 over the tree bytes. A [`GroupInfo`] names the tree by this ref so
+/// the tree can travel as a mailbox blob (like media/commit refs) instead of inline in every
+/// Welcome, and a receiver can VERIFY the blob it fetched is the one the signed GroupInfo meant.
+pub fn tree_blob_ref(tree_bytes: &[u8]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"haven-mls-treeblob-v1");
+    h.update(tree_bytes);
+    *h.finalize().as_bytes()
+}
+
+/// The secrets a Welcome delivers to ONE joiner (sealed to its device bundle by the caller via
+/// the `seal_self_sync_key` rail, `device.rs:505`): the epoch's `joiner_secret` (§3.3 — with the
+/// public context this yields the shared `epoch_secret`), the joiner's own tree leaf secret (for
+/// participating in future path updates/removes), and its leaf index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WelcomeSecrets {
+    pub joiner_secret: [u8; 32],
+    pub leaf_secret: [u8; 32],
+    pub leaf_index: u32,
+}
+
+/// What a joiner gets from [`enter_via_welcome`]: the reconstructed public tree at the Welcome's
+/// epoch, the derived epoch schedule (the same one members at that epoch hold), and the joiner's
+/// private tree state — everything a keying replay needs to CONTINUE forward from epoch n.
+pub struct WelcomeEntry {
+    pub tree: RatchetTree,
+    pub schedule: EpochSchedule,
+    pub my_private: TreePrivate,
+}
+
+/// Enter a live group at a mid-chain (or re-entry) Welcome WITHOUT replaying the commit chain
+/// (§4.2 mid-life Add, §5.5 sleeper re-entry). The joiner:
+///   1. verifies the delivered tree blob hashes to the signed GroupInfo's `tree_blob_ref` AND
+///      that its `tree_hash` matches — so a tampered/substituted tree is rejected;
+///   2. FAILS CLOSED unless its own leaf is present in that tree with a public key matching the
+///      delivered `leaf_secret` — a device revoked (leaf blanked/absent) or fed a mismatched leaf
+///      secret cannot enter; the tree does not admit it (the "revoked-in-the-meantime" invariant);
+///   3. derives epoch n's schedule from the delivered `joiner_secret` + the PUBLIC epoch context
+///      (group id, epoch, tree hash, confirmed transcript hash) — the identical `epoch_secret`
+///      every member at epoch n derives (epoch CONTINUITY; it never rebuilds a genesis).
+///
+/// Pure: no chain, no RNG, no I/O. The GroupInfo signature is verified by the CALLER (it holds the
+/// roster to resolve the signer); this is the cryptographic tree/schedule bootstrap.
+pub fn enter_via_welcome(
+    group_info: &GroupInfo,
+    tree_bytes: &[u8],
+    secrets: &WelcomeSecrets,
+) -> Result<WelcomeEntry> {
+    // (1) The blob the joiner fetched must be the one the signed GroupInfo named — bind ref+hash.
+    if tree_blob_ref(tree_bytes) != group_info.tree_blob_ref[..] {
+        return Err(CoreError::Crypto("treekem: welcome tree blob ref mismatch"));
+    }
+    let tree = RatchetTree::from_bytes(tree_bytes)?;
+    if tree_hash(&tree) != group_info.tree_hash {
+        return Err(CoreError::Crypto("treekem: welcome tree hash mismatch"));
+    }
+    // (2) FAIL CLOSED: my leaf must be present AND its key must match the leaf secret I was handed.
+    // A removed device's leaf is blanked (absent) ⇒ rejected here; a leaf secret that doesn't match
+    // the tree ⇒ rejected here. Either way the tree refuses to admit a device it doesn't carry.
+    let leaf = tree
+        .leaf(secrets.leaf_index)
+        .ok_or(CoreError::Crypto("treekem: welcome leaf absent from tree (revoked?)"))?;
+    let kp = node_keypair_from_path_secret(&secrets.leaf_secret);
+    if kp.kem_x != leaf.leaf_kem_x || kp.kem_pq[..] != leaf.leaf_kem_pq[..] {
+        return Err(CoreError::Crypto("treekem: welcome leaf key inconsistent with delivered secret"));
+    }
+    // (3) Derive epoch n straight from the joiner secret + PUBLIC context — the shared epoch_secret,
+    // at the LIVE epoch (never a rebuilt genesis).
+    let schedule = welcome_epoch_schedule(
+        &secrets.joiner_secret,
+        &group_info.group_id,
+        group_info.epoch,
+        &group_info.tree_hash,
+        &group_info.confirmed_transcript_hash,
+    );
+    Ok(WelcomeEntry { tree, schedule, my_private: TreePrivate::new(secrets.leaf_index, secrets.leaf_secret) })
+}
+
+#[cfg(test)]
+mod m4_tests {
+    use super::*;
+
+    const GID: &[u8] = b"m4-test-circle";
+
+    fn fake_sig(payload: &[u8]) -> Vec<u8> {
+        blake3::hash(payload).as_bytes().to_vec()
+    }
+    fn secret(tag: &str, i: usize) -> [u8; 32] {
+        *blake3::hash(format!("{tag}-{i}").as_bytes()).as_bytes()
+    }
+    fn leaf_for(secret: &[u8; 32], cred: &[u8]) -> LeafNode {
+        let kp = node_keypair_from_path_secret(secret);
+        let payload = leaf_binding_payload(GID, &kp.kem_x, &kp.kem_pq);
+        LeafNode {
+            leaf_kem_x: kp.kem_x,
+            leaf_kem_pq: kp.kem_pq,
+            device_credential: cred.to_vec(),
+            leaf_binding_sig: fake_sig(&payload),
+        }
+    }
+
+    /// A genesis of `n` leaves, keyed off a fixed `base_init`, built by leaf 0 (add-only, no path).
+    /// Returns (commit, post-genesis tree, cth_1, epoch-1 schedule, per-leaf secrets).
+    #[allow(clippy::type_complexity)]
+    fn genesis(n: usize) -> (Commit, RatchetTree, [u8; 32], EpochSchedule, Vec<[u8; 32]>) {
+        let base_init = secret("base-init", 0);
+        let base_cth = secret("base-cth", 0);
+        let parent = secret("genesis-parent", 0);
+        let leaf_secrets: Vec<[u8; 32]> = (0..n).map(|i| secret("leaf", i)).collect();
+        let adds: Vec<Proposal> = (0..n)
+            .map(|i| {
+                let ln = leaf_for(&leaf_secrets[i], &[0xC0, i as u8]);
+                build_add_proposal(GID, 0, i as u32, ln, fake_sig)
+            })
+            .collect();
+        let build = build_commit(
+            &RatchetTree { slots: vec![] }, GID, 1, parent, &base_cth, &base_init, 0, adds, None,
+            fake_sig, fake_sig,
+        )
+        .unwrap();
+        (build.commit, build.tree, build.confirmed_transcript_hash, build.schedule, leaf_secrets)
+    }
+
+    /// §9 M4 proof — MID-LIFE ADD + WELCOME with epoch CONTINUITY: a live 3-leaf group; the
+    /// committer chains an Add+UpdatePath at epoch 2 (NOT a fresh genesis); an existing member
+    /// applies it and lands at epoch 2; the NEW joiner enters via a self-contained Welcome and
+    /// derives the IDENTICAL epoch-2 secret — proving it entered at the live epoch, not a rebuild.
+    #[test]
+    fn mid_chain_add_welcome_enters_at_live_epoch_not_genesis() {
+        let (gcommit, gtree, gcth, gsched, lsecs) = genesis(3);
+        let gparent_hash = commit_hash(&gcommit.to_bytes());
+
+        // The committer (leaf 0) chains an Add for a brand-new leaf 3 + its own path re-key at epoch 2.
+        let joiner_secret_val = secret("joiner-leaf", 3);
+        let joiner_ln = leaf_for(&joiner_secret_val, &[0xC0, 3]);
+        let add = build_add_proposal(GID, 2, 0, joiner_ln, fake_sig);
+        let new_leaf = secret("upd-leaf", 2);
+        let entropy = secret("upd-ent", 2);
+        let cred0 = gtree.leaf(0).unwrap().device_credential.clone();
+        let build = build_commit(
+            &gtree, GID, 2, gparent_hash, &gcth, &gsched.init_secret, 0, vec![add],
+            Some((&new_leaf, &cred0, &entropy)), fake_sig, fake_sig,
+        )
+        .unwrap();
+        assert_eq!(build.commit.epoch, 2, "the Add is a CHAINED commit at epoch 2, not a genesis");
+
+        // An EXISTING member (leaf 1) applies the chained commit → lands at epoch 2 with the same secret.
+        let mp1 = TreePrivate::new(1, lsecs[1]);
+        let applied = apply_commit(&gtree, GID, &gcth, &gsched.init_secret, &build.commit, Some(&mp1)).unwrap();
+        let member_sched = applied.schedule.expect("existing member derives epoch 2");
+        assert_eq!(member_sched.epoch_secret, build.schedule.epoch_secret, "member converges on committer's epoch 2");
+
+        // The NEW joiner enters via a self-contained Welcome — tree blob + GroupInfo at epoch 2.
+        let tree_bytes = build.tree.to_bytes();
+        let gi = build_group_info(
+            GID, 2, &tree_blob_ref(&tree_bytes), build.confirmed_transcript_hash, build.commit.tree_hash, 0, fake_sig,
+        );
+        // The joiner's leaf index is the one the Add placed it at (leaf 3 in a 4-leaf tree).
+        let joiner_leaf = build.tree.slots.iter().enumerate().find_map(|(i, s)| match s {
+            TreeSlot::Leaf(l) if l.leaf_kem_x == node_keypair_from_path_secret(&joiner_secret_val).kem_x => Some((i / 2) as u32),
+            _ => None,
+        }).unwrap();
+        let entry = enter_via_welcome(
+            &gi, &tree_bytes,
+            &WelcomeSecrets { joiner_secret: build.schedule.joiner_secret, leaf_secret: joiner_secret_val, leaf_index: joiner_leaf },
+        )
+        .unwrap();
+        assert_eq!(entry.schedule.epoch_secret, build.schedule.epoch_secret, "the joiner derives the LIVE epoch-2 secret");
+        assert_eq!(entry.schedule.sender_root, member_sched.sender_root, "joiner + member share sender_root at the live epoch");
+
+        // Continuity: the joiner did NOT land at a genesis. sender_key at epoch 2 for account bytes agrees.
+        let acct = [0x42u8; 32];
+        assert_eq!(
+            sender_key(&entry.schedule.sender_root, &acct, GID, 2),
+            sender_key(&member_sched.sender_root, &acct, GID, 2),
+            "joiner and member compute the identical epoch-2 content key",
+        );
+    }
+
+    /// §9 M4 proof — SLEEPER RE-ENTRY (§5.5): a device that cannot replay the chain (its intermediate
+    /// commits are gone past the mailbox TTL) re-enters via a FRESH self-contained Welcome at the
+    /// current epoch and converges to the live epoch secret — no chain replay required.
+    #[test]
+    fn sleeper_reenters_via_selfcontained_welcome_and_converges() {
+        // A 4-leaf group has advanced to some epoch; the sleeper is leaf 2. The current committer
+        // holds the live schedule and re-Welcomes the sleeper's EXISTING leaf.
+        let (_gc, gtree, gcth, gsched, lsecs) = genesis(4);
+        // Advance one epoch via a committer (leaf 0) path re-key so "current" != genesis.
+        let new_leaf = secret("upd-leaf", 9);
+        let entropy = secret("upd-ent", 9);
+        let cred0 = gtree.leaf(0).unwrap().device_credential.clone();
+        let gparent = commit_hash(&_gc.to_bytes());
+        let build = build_commit(
+            &gtree, GID, 2, gparent, &gcth, &gsched.init_secret, 0, vec![],
+            Some((&new_leaf, &cred0, &entropy)), fake_sig, fake_sig,
+        )
+        .unwrap();
+        let cur_tree = build.tree.clone();
+        let cur_cth = build.confirmed_transcript_hash;
+        let cur_epoch = 2u64;
+        let cur_joiner = build.schedule.joiner_secret;
+
+        // The sleeper (leaf 2) lost ALL state; a fresh Welcome carries the CURRENT tree + context.
+        let tree_bytes = cur_tree.to_bytes();
+        let gi = build_group_info(
+            GID, cur_epoch, &tree_blob_ref(&tree_bytes), cur_cth, build.commit.tree_hash, 0, fake_sig,
+        );
+        let entry = enter_via_welcome(
+            &gi, &tree_bytes,
+            &WelcomeSecrets { joiner_secret: cur_joiner, leaf_secret: lsecs[2], leaf_index: 2 },
+        )
+        .unwrap();
+        assert_eq!(entry.schedule.epoch_secret, build.schedule.epoch_secret, "the sleeper converges to the live epoch secret");
+        // It is at the CURRENT epoch, not epoch 1.
+        assert_eq!(gi.epoch, 2);
+    }
+
+    /// §9 M4 proof — REVOKED FAILS CLOSED: a Welcome addressed to a device whose leaf is not in the
+    /// (post-revocation) tree, or whose delivered leaf secret does not match the tree, is REJECTED —
+    /// the joiner cannot enter; the tree does not admit it.
+    #[test]
+    fn revoked_welcome_fails_closed() {
+        let (_gc, mut tree, gcth, gsched, lsecs) = genesis(3);
+        // The device at leaf 1 is REVOKED: its leaf is blanked (a Remove would have done this).
+        remove_leaf(&mut tree, 1).unwrap();
+        let tree_bytes = tree.to_bytes();
+        let gi = build_group_info(
+            GID, 2, &tree_blob_ref(&tree_bytes), gcth, tree_hash(&tree), 0, fake_sig,
+        );
+        // A stale Welcome still names leaf 1 with its old secret — entry must FAIL CLOSED (leaf absent).
+        let err = enter_via_welcome(
+            &gi, &tree_bytes,
+            &WelcomeSecrets { joiner_secret: gsched.joiner_secret, leaf_secret: lsecs[1], leaf_index: 1 },
+        );
+        assert!(err.is_err(), "a revoked (blanked-leaf) device cannot enter via a stale Welcome");
+
+        // A mismatched leaf secret for a STILL-present leaf also fails closed (no leaf-secret grinding).
+        let bad = enter_via_welcome(
+            &gi, &tree_bytes,
+            &WelcomeSecrets { joiner_secret: gsched.joiner_secret, leaf_secret: secret("wrong", 0), leaf_index: 0 },
+        );
+        assert!(bad.is_err(), "a leaf secret that doesn't match the tree leaf is rejected");
+
+        // A substituted tree blob (ref/hash mismatch) is rejected before any secret is used.
+        let mut tampered = tree_bytes.clone();
+        *tampered.last_mut().unwrap() ^= 0xFF;
+        let sub = enter_via_welcome(
+            &gi, &tampered,
+            &WelcomeSecrets { joiner_secret: gsched.joiner_secret, leaf_secret: lsecs[0], leaf_index: 0 },
+        );
+        assert!(sub.is_err(), "a tree blob that doesn't match the signed GroupInfo ref is rejected");
+    }
+}
+
 #[cfg(test)]
 mod m2_tests {
     use super::*;

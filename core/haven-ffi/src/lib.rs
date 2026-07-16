@@ -1543,15 +1543,26 @@ fn purge_expired_from_circle(
 // resolves via §5.1 `select_chain` — a real, observable soak signal, not an error.
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 
-/// One received (or self-authored) shadow Welcome: the secrets a device needs to derive the
-/// epoch secret of the genesis commit it is keyed to. SHADOW — never consumed for content.
+/// One received (or self-authored) Welcome: the secrets a device needs to derive the epoch secret
+/// of the commit it is keyed to. In M2/M3 this is a GENESIS Welcome (`tree_bytes` empty ⇒ the tree
+/// is reconstructed from the genesis Adds). M4 adds SELF-CONTAINED entry (`docs/TREEKEM-DESIGN.md`
+/// §4.2 mid-life Add, §5.5 sleeper re-entry): a mid-chain / re-entry Welcome carries `cth` (the
+/// confirmed transcript hash at its epoch) and `tree_bytes` (the public tree as a content-addressed
+/// blob) so a joiner enters at the LIVE epoch WITHOUT replaying the chain — never a genesis rebuild.
 struct ShadowWelcome {
     epoch: u64,
     leaf_index: u32,
     /// The epoch's `joiner_secret` (§3.3) — with the public context this yields `epoch_secret`.
     joiner_secret: [u8; 32],
-    /// This device's leaf secret (for future stages; unused by M2's genesis-only derivation).
+    /// This device's leaf secret (for participating in future path updates/removes).
     leaf_secret: [u8; 32],
+    /// M4: the confirmed transcript hash at this Welcome's epoch. Empty-array for a genesis Welcome
+    /// (reconstructed instead); set for a self-contained mid-chain / re-entry Welcome.
+    cth: [u8; 32],
+    /// M4: the serialized public tree at this epoch (a content-addressed blob, §4.6/design point 4).
+    /// Empty for a genesis Welcome. Present ⇒ the joiner bootstraps epoch n directly from it (§5.5),
+    /// so a sleeper past the mailbox TTL — which can no longer replay the pruned chain — still enters.
+    tree_bytes: Vec<u8>,
 }
 
 /// Per-circle shadow ratchet-tree state. Holds the known genesis commit(s) — more than one is a
@@ -1714,18 +1725,25 @@ fn am_shadow_creator(st: &NetState, idx: usize) -> bool {
 }
 
 /// Encode a Welcome's secret payload (delivered sealed to a joiner's device bundle):
-/// `commit_hash(32) ‖ epoch(8) ‖ leaf_index(4) ‖ joiner_secret(32) ‖ leaf_secret(32)`.
+/// `commit_hash(32) ‖ epoch(8) ‖ leaf_index(4) ‖ joiner_secret(32) ‖ leaf_secret(32) ‖ cth(32)
+/// ‖ u32 tree_len ‖ tree_bytes` (M4 appended `cth` + the content-addressed tree blob).
 fn encode_shadow_welcome(commit_hash: &[u8; 32], w: &ShadowWelcome) -> Vec<u8> {
-    let mut v = Vec::with_capacity(32 + 8 + 4 + 32 + 32);
+    let mut v = Vec::with_capacity(32 + 8 + 4 + 32 + 32 + 32 + 4 + w.tree_bytes.len());
     v.extend_from_slice(commit_hash);
     v.extend_from_slice(&w.epoch.to_le_bytes());
     v.extend_from_slice(&w.leaf_index.to_le_bytes());
     v.extend_from_slice(&w.joiner_secret);
     v.extend_from_slice(&w.leaf_secret);
+    v.extend_from_slice(&w.cth);
+    v.extend_from_slice(&(w.tree_bytes.len() as u32).to_le_bytes());
+    v.extend_from_slice(&w.tree_bytes);
     v
 }
 fn decode_shadow_welcome(b: &[u8]) -> Option<([u8; 32], ShadowWelcome)> {
-    if b.len() != 32 + 8 + 4 + 32 + 32 {
+    // Fixed head + a length-prefixed tree blob; exact-consumption (no trailing bytes) so a
+    // tampered/truncated payload fails closed rather than decoding into a plausible Welcome.
+    const HEAD: usize = 32 + 8 + 4 + 32 + 32 + 32 + 4;
+    if b.len() < HEAD {
         return None;
     }
     let commit_hash: [u8; 32] = b[0..32].try_into().ok()?;
@@ -1733,7 +1751,13 @@ fn decode_shadow_welcome(b: &[u8]) -> Option<([u8; 32], ShadowWelcome)> {
     let leaf_index = u32::from_le_bytes(b[40..44].try_into().ok()?);
     let joiner_secret: [u8; 32] = b[44..76].try_into().ok()?;
     let leaf_secret: [u8; 32] = b[76..108].try_into().ok()?;
-    Some((commit_hash, ShadowWelcome { epoch, leaf_index, joiner_secret, leaf_secret }))
+    let cth: [u8; 32] = b[108..140].try_into().ok()?;
+    let tree_len = u32::from_le_bytes(b[140..144].try_into().ok()?) as usize;
+    if b.len() != HEAD + tree_len {
+        return None;
+    }
+    let tree_bytes = b[HEAD..].to_vec();
+    Some((commit_hash, ShadowWelcome { epoch, leaf_index, joiner_secret, leaf_secret, cth, tree_bytes }))
 }
 
 /// Resolve a shadow commit/welcome signer's device/account hex to its verifying bundle — the
@@ -1763,11 +1787,14 @@ fn build_shadow_genesis(st: &mut NetState, idx: usize) {
         return; // a 1-leaf shadow group carries no signal; wait for the roster to fill in
     }
     let device_ids: Vec<[u8; 32]> = devices.iter().map(|(b, _)| b.node_id_bytes()).collect();
-    // Idempotent — but REBUILD if the authorized device set has GROWN (§7.3 resume: a straggler
-    // upgraded and must be Welcomed). A rebuild is a fresh genesis (a §5.1 fork the fleet reconverges
-    // on); a Remove never routes here (it is a chained commit that shrinks the tree, §4.3).
+    // Idempotent. With KEYING ON (M4), build the genesis ONCE: when the authorized device set later
+    // GROWS we no longer rebuild a superseding genesis (which reset the epoch and re-Welcomed the whole
+    // fleet) — `mls_grow_tree` chains an Add+Welcome at the NEXT epoch instead, so a newcomer enters the
+    // LIVE tree at the current epoch and existing members keep their epoch continuity (§4.2, §9 M4).
+    // With keying OFF (M2 SHADOW), the superseding-genesis rebuild-on-growth is PRESERVED so OFF stays
+    // byte-identical to pre-M4 (the switch-gated no-regression guarantee).
     if let Some(s) = st.shadow_trees.get(&circle_id) {
-        if s.my_genesis.is_some() && s.genesis_devices == device_ids {
+        if s.my_genesis.is_some() && (st.mls_keying || s.genesis_devices == device_ids) {
             return;
         }
     }
@@ -1836,7 +1863,8 @@ fn build_shadow_genesis(st: &mut NetState, idx: usize) {
     let joiner_secret = build.schedule.joiner_secret;
 
     // Cache the tagged commit + a Welcome sealed to each device's bundle (except my own device,
-    // whose Welcome I store directly so my status is converged without a round-trip).
+    // whose Welcome I store directly so my status is converged without a round-trip). A GENESIS
+    // Welcome carries no `tree_bytes` — every holder reconstructs the tree from the genesis Adds.
     let mut emit_cache: Vec<Vec<u8>> = vec![tagged(TAG_MLS_COMMIT, &commit_bytes)];
     let mut my_welcome: Option<ShadowWelcome> = None;
     for (li, (bundle, _)) in devices.iter().enumerate() {
@@ -1845,6 +1873,8 @@ fn build_shadow_genesis(st: &mut NetState, idx: usize) {
             leaf_index: li as u32,
             joiner_secret,
             leaf_secret: leaf_secrets[li],
+            cth: build.confirmed_transcript_hash,
+            tree_bytes: Vec::new(),
         };
         if my_device_id == Some(bundle.node_id_bytes()) {
             my_welcome = Some(w);
@@ -1881,6 +1911,10 @@ fn shadow_emit_bundle(st: &mut NetState, idx: usize) -> Vec<Vec<u8>> {
     }
     if am_shadow_creator(st, idx) {
         build_shadow_genesis(st, idx);
+        // M4 roster automation: once a genesis exists, reconcile the LIVE tree with the roster —
+        // chained Add for a newly-authorized device, authority-checked Remove for a revoked one.
+        // Gated inside on `mls_am_committer`, so this is inert with the keying switch OFF (M2/M3).
+        mls_sync_roster_to_tree(st, idx);
     }
     let circle_id = st.circles[idx].id.clone();
     st.shadow_trees.get(&circle_id).map(|s| s.emit_cache.clone()).unwrap_or_default()
@@ -2033,6 +2067,31 @@ fn receive_mls_welcome(st: &mut NetState, idx: usize, body: &[u8]) -> Result<boo
         .or_else(|| st.me_secret.as_ref().and_then(|m| open_bytes(m, &sender, &env).ok()));
     let Some(plaintext) = opened else { return Ok(false) };
     let Some((commit_hash, welcome)) = decode_shadow_welcome(&plaintext) else { return Ok(false) };
+    // FAIL CLOSED (§4.2 revoked-in-the-meantime): reject a SELF-CONTAINED Welcome unless MY device is
+    // still authorized in my own roster (not revoked) AND my leaf is present in the delivered tree
+    // with a key matching the delivered secret. A device revoked while its Welcome was in flight
+    // cannot enter — the tree does not admit it, and I never store a Welcome that would key me to a
+    // membership I've been cut from. (A genesis Welcome carries no tree; the genesis path re-checks.)
+    if !welcome.tree_bytes.is_empty() {
+        let my_dev = st.device.as_ref().map(|d| d.public().node_id_bytes());
+        let my_acct = st.me().node_id_bytes();
+        let authorized_here = my_dev
+            .map(|d| {
+                st.device_lists.get(&my_acct).map(|cd| cd.list.is_authorized(&d)).unwrap_or(true)
+            })
+            .unwrap_or(false);
+        let leaf_ok = treekem::RatchetTree::from_bytes(&welcome.tree_bytes)
+            .ok()
+            .and_then(|t| t.leaf(welcome.leaf_index).cloned())
+            .map(|l| {
+                let kp = treekem::node_keypair_from_path_secret(&welcome.leaf_secret);
+                kp.kem_x == l.leaf_kem_x && kp.kem_pq[..] == l.leaf_kem_pq[..]
+            })
+            .unwrap_or(false);
+        if !authorized_here || !leaf_ok {
+            return Ok(false);
+        }
+    }
     let circle_id = st.circles[idx].id.clone();
     let gid = circle_id.as_bytes().to_vec();
     let shadow = st.shadow_trees.entry(circle_id).or_insert_with(|| ShadowTree::new(gid));
@@ -2195,18 +2254,26 @@ fn keying_winning_genesis(shadow: &ShadowTree) -> Option<([u8; 32], Vec<u8>)> {
 
 /// This device's keying state after replaying the tree commit chain from its Welcome (§4.5, §5.1).
 struct KeyingState {
-    /// Tree epoch (1 = genesis; +1 per applied Remove commit).
+    /// Tree epoch (1 = genesis; +1 per applied Add/Remove commit).
     epoch: u64,
     tree: treekem::RatchetTree,
     /// My private tree state at the current epoch, or `None` if I was removed / can't derive.
     my_private: Option<treekem::TreePrivate>,
     /// The current epoch's `sender_root` — `None` if I am the removed device (cut off from the epoch).
     sender_root: Option<[u8; 32]>,
-    /// The current epoch's `init_secret` (feeds the next Remove's advance).
+    /// The current epoch's `init_secret` (feeds the next commit's advance).
     init_secret: Option<[u8; 32]>,
+    /// M4: the current epoch's `joiner_secret` — what a committer re-delivers to Welcome a mid-life
+    /// joiner or re-admit a sleeper AT the live epoch (§4.2/§5.5). `None` if I can't derive the epoch.
+    joiner_secret: Option<[u8; 32]>,
     cth: [u8; 32],
     tip_hash: [u8; 32],
     removed_me: bool,
+    /// M4: device ids ever cut from this chain by a Remove (removal-STICKY, the LWW-removal shape the
+    /// codebase uses elsewhere). The roster→Add automation skips these so a deliberately-removed device
+    /// is never silently re-Added just because it is still "authorized" in a stale roster view. Only
+    /// meaningful when replayed from genesis (the creator's vantage); a mid-chain entrant leaves it empty.
+    removed_devices: std::collections::HashSet<[u8; 32]>,
 }
 
 /// Rebuild MY OWN commit deterministically to recover its post-commit tree/schedule/private state
@@ -2248,40 +2315,88 @@ fn keying_rebuild_own_commit(
     .ok()
 }
 
-/// Replay the tree commit chain from my Welcome to the current epoch (§5.1). Pure function of
-/// {known commits, my Welcome, my device seed}: pick the winning genesis, reconstruct its tree,
-/// derive epoch 1 from the Welcome's `joiner_secret`, then walk each subsequent epoch's winning
-/// commit — applying it (or rebuilding it if I authored it) — until the chain ends. Returns `None`
-/// if I hold no Welcome for the winning genesis (I haven't joined).
+/// Replay the tree commit chain to the current epoch (§5.1, §4.2/§5.5). Pure function of {known
+/// commits, my Welcomes, my device seed}. Two entry modes, unified:
+///   * SELF-CONTAINED (M4): if I hold a mid-chain / re-entry Welcome carrying `tree_bytes` (the
+///     highest-epoch one wins), I bootstrap at THAT epoch directly from the delivered tree +
+///     `joiner_secret` + `cth` — no chain replay. This is how a mid-life joiner enters at the LIVE
+///     epoch (never a genesis rebuild) and how a sleeper past the mailbox TTL re-enters (§5.5).
+///   * GENESIS (M2/M3): else I bootstrap from the winning genesis Welcome and reconstruct its tree
+///     from the genesis Adds — the original path, byte-identical.
+/// Either way I then walk each subsequent epoch's winning commit — applying it (or rebuilding it if
+/// I authored it) — until the chain ends. Returns `None` if I hold no usable Welcome (I haven't
+/// joined), or if a self-contained Welcome FAILS CLOSED (my leaf absent / key mismatch ⇒ revoked).
 fn mls_replay(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>) -> Option<KeyingState> {
     let gid = shadow.group_id.clone();
-    let (gh, gbytes) = keying_winning_genesis(shadow)?;
-    let welcome = shadow.my_welcomes.get(&gh)?;
-    let gc = treekem::Commit::from_bytes(&gbytes).ok()?;
-    // Reconstruct the genesis tree from its Add proposals (add-only ⇒ from_leaves).
-    let mut leaves = Vec::new();
-    for p in &gc.proposals {
-        if let treekem::ProposalBody::Add { leaf_node } = &p.body {
-            leaves.push(leaf_node.clone());
-        }
-    }
-    let tree = treekem::RatchetTree::from_leaves(leaves);
-    if treekem::tree_hash(&tree) != gc.tree_hash {
-        return None;
-    }
-    let cth1 = treekem::next_confirmed_transcript_hash(&shadow_genesis_cth(&gid), &gc);
-    let sched1 = treekem::welcome_epoch_schedule(&welcome.joiner_secret, &gid, 1, &gc.tree_hash, &cth1);
-    let mut cur = KeyingState {
-        epoch: 1,
-        tree,
-        my_private: Some(treekem::TreePrivate::new(welcome.leaf_index, welcome.leaf_secret)),
-        sender_root: Some(sched1.sender_root),
-        init_secret: Some(sched1.init_secret),
-        cth: cth1,
-        tip_hash: gh,
-        removed_me: false,
-    };
     let my_secret_root = my_device_seed.map(|s| keying_secret_root(&s, &gid));
+    // Prefer the highest-epoch SELF-CONTAINED Welcome I hold (a mid-life Add or a re-entry). It lets
+    // me enter at the live epoch without the chain; the genesis path is the fallback.
+    let self_contained = shadow
+        .my_welcomes
+        .iter()
+        .filter(|(_, w)| !w.tree_bytes.is_empty())
+        .max_by_key(|(h, w)| (w.epoch, **h));
+    let mut cur = if let Some((tip_hash, welcome)) = self_contained {
+        let tree = treekem::RatchetTree::from_bytes(&welcome.tree_bytes).ok()?;
+        let th = treekem::tree_hash(&tree);
+        // FAIL CLOSED (§4.2 revoked-in-the-meantime): my leaf must be present AND its public key must
+        // match the delivered leaf secret. A removed device (blanked leaf) or a mismatched secret is
+        // rejected here — the tree refuses to admit it, no separate policy check to forget.
+        let leaf_ok = tree
+            .leaf(welcome.leaf_index)
+            .map(|l| {
+                let kp = treekem::node_keypair_from_path_secret(&welcome.leaf_secret);
+                kp.kem_x == l.leaf_kem_x && kp.kem_pq[..] == l.leaf_kem_pq[..]
+            })
+            .unwrap_or(false);
+        if !leaf_ok {
+            return None;
+        }
+        let sched =
+            treekem::welcome_epoch_schedule(&welcome.joiner_secret, &gid, welcome.epoch, &th, &welcome.cth);
+        KeyingState {
+            epoch: welcome.epoch,
+            tree,
+            my_private: Some(treekem::TreePrivate::new(welcome.leaf_index, welcome.leaf_secret)),
+            sender_root: Some(sched.sender_root),
+            init_secret: Some(sched.init_secret),
+            joiner_secret: Some(sched.joiner_secret),
+            cth: welcome.cth,
+            tip_hash: *tip_hash,
+            removed_me: false,
+            removed_devices: std::collections::HashSet::new(),
+        }
+    } else {
+        let (gh, gbytes) = keying_winning_genesis(shadow)?;
+        let welcome = shadow.my_welcomes.get(&gh)?;
+        let gc = treekem::Commit::from_bytes(&gbytes).ok()?;
+        // Reconstruct the genesis tree from its Add proposals (add-only ⇒ from_leaves).
+        let mut leaves = Vec::new();
+        for p in &gc.proposals {
+            if let treekem::ProposalBody::Add { leaf_node } = &p.body {
+                leaves.push(leaf_node.clone());
+            }
+        }
+        let tree = treekem::RatchetTree::from_leaves(leaves);
+        if treekem::tree_hash(&tree) != gc.tree_hash {
+            return None;
+        }
+        let cth1 = treekem::next_confirmed_transcript_hash(&shadow_genesis_cth(&gid), &gc);
+        let sched1 =
+            treekem::welcome_epoch_schedule(&welcome.joiner_secret, &gid, 1, &gc.tree_hash, &cth1);
+        KeyingState {
+            epoch: 1,
+            tree,
+            my_private: Some(treekem::TreePrivate::new(welcome.leaf_index, welcome.leaf_secret)),
+            sender_root: Some(sched1.sender_root),
+            init_secret: Some(sched1.init_secret),
+            joiner_secret: Some(sched1.joiner_secret),
+            cth: cth1,
+            tip_hash: gh,
+            removed_me: false,
+            removed_devices: std::collections::HashSet::new(),
+        }
+    };
     loop {
         let next = cur.epoch + 1;
         // Children of the current tip at the next epoch (a §5 fork at this level is resolved by hash).
@@ -2302,6 +2417,18 @@ fn mls_replay(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>) -> Option<K
         let cbytes = children.last().unwrap().clone();
         let Ok(c) = treekem::Commit::from_bytes(&cbytes) else { break };
         let tip = treekem::commit_hash(&cbytes);
+        // Removal-sticky (M4): before this commit mutates the tree, record the device id of every leaf
+        // it Removes (resolved against the PRE-commit tree) so the roster→Add automation never re-Adds it.
+        let mut removed_devices = cur.removed_devices.clone();
+        for p in &c.proposals {
+            if let treekem::ProposalBody::Remove { leaf_index } = &p.body {
+                if let Some(l) = cur.tree.leaf(*leaf_index) {
+                    if let Ok(dc) = DeviceCredential::from_bytes(&l.device_credential) {
+                        removed_devices.insert(dc.device.node_id_bytes());
+                    }
+                }
+            }
+        }
         let i_committed = cur.my_private.as_ref().map(|p| p.leaf_index) == Some(c.sender_leaf);
         if i_committed {
             let (Some(sroot), Some(mp)) = (my_secret_root, cur.my_private.as_ref()) else { break };
@@ -2312,10 +2439,12 @@ fn mls_replay(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>) -> Option<K
                 tree: build.tree,
                 sender_root: Some(build.schedule.sender_root),
                 init_secret: Some(build.schedule.init_secret),
+                joiner_secret: Some(build.schedule.joiner_secret),
                 cth: build.confirmed_transcript_hash,
                 tip_hash: tip,
                 my_private: Some(build.my_private),
                 removed_me: false,
+                removed_devices,
             };
         } else {
             let Some(init) = cur.init_secret else { break };
@@ -2331,10 +2460,12 @@ fn mls_replay(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>) -> Option<K
                     tree: applied.tree,
                     sender_root: None,
                     init_secret: None,
+                    joiner_secret: None,
                     cth: applied.confirmed_transcript_hash,
                     tip_hash: tip,
                     my_private: None,
                     removed_me: true,
+                    removed_devices,
                 };
                 break;
             }
@@ -2344,10 +2475,12 @@ fn mls_replay(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>) -> Option<K
                 tree: applied.tree,
                 sender_root: Some(sched.sender_root),
                 init_secret: Some(sched.init_secret),
+                joiner_secret: Some(sched.joiner_secret),
                 cth: applied.confirmed_transcript_hash,
                 tip_hash: tip,
                 my_private: applied.my_private,
                 removed_me: false,
+                removed_devices,
             };
         }
     }
@@ -2371,8 +2504,12 @@ fn keying_join_payload(genesis_hash: &[u8; 32], device_id: &[u8; 32]) -> Vec<u8>
     v
 }
 
-/// Emit my join ack for the winning genesis (§7.2), and mark myself joined locally, once I hold its
-/// Welcome. `None` if there is no genesis, I hold no Welcome for it, or I have no device identity.
+/// Emit my join ack for the winning genesis (§7.2), and mark myself joined locally, once I can
+/// DERIVE the current epoch. The ack is keyed by the (public) genesis hash — a stable per-group
+/// anchor all members agree on — but M4 attests on "I can replay to an active deriving membership,"
+/// not "I hold the genesis Welcome," so a device that entered mid-life (or re-entered as a sleeper,
+/// §5.5) via a self-contained Welcome — and so holds no GENESIS Welcome — can still join the gate.
+/// `None` if there is no genesis, I can't derive the epoch, or I have no device identity.
 fn keying_emit_join(st: &mut NetState, idx: usize) -> Option<Vec<u8>> {
     if !st.mls_keying {
         return None; // join acks only flow once keying is switched on — OFF stays byte-identical to M2
@@ -2381,8 +2518,13 @@ fn keying_emit_join(st: &mut NetState, idx: usize) -> Option<Vec<u8>> {
     let seed = st.device.as_ref().map(|d| d.secret_seed())?;
     let shadow = st.shadow_trees.get(&circle_id)?;
     let (gh, _) = keying_winning_genesis(shadow)?;
-    if !shadow.my_welcomes.contains_key(&gh) {
-        return None; // I haven't joined (no Welcome) — nothing to attest
+    // I attest only if I can actually derive the live epoch (active member, not removed) — via the
+    // genesis Welcome OR a self-contained mid-chain / re-entry Welcome.
+    let can_derive = mls_replay(shadow, Some(seed))
+        .map(|s| s.my_private.is_some() && s.sender_root.is_some())
+        .unwrap_or(false);
+    if !can_derive {
+        return None;
     }
     let signer = Identity::from_seed(&seed);
     let did = signer.public().node_id_bytes();
@@ -2487,6 +2629,240 @@ fn mls_build_remove(st: &mut NetState, idx: usize, removed_leaves: &[u32]) -> bo
     shadow.commits.insert(ch, cbytes.clone());
     shadow.emit_cache.push(tagged(TAG_MLS_COMMIT, &cbytes));
     true
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// MLS M4 — offline / mid-chain Welcomes + roster→Add/Remove automation
+// (docs/TREEKEM-DESIGN.md §4.2 Add, §4.3 Remove, §4.4/§5.5 Welcome + sleeper re-entry, §9 row M4).
+//
+// This is the roster INTEGRATION: `register_device`/revocation, which already drive today's
+// sender-keys `rotate_epoch`, now ALSO drive the tree — the creator chains an Add+Welcome for a
+// newly-authorized device (entering it at the LIVE epoch, not a superseding genesis) and an
+// authority-checked Remove for a revoked one. All of it is GATED: it fires only for a circle with
+// the keying switch ON that is fully-MLS-capable and has a live tree; an OFF / shadow / non-capable
+// circle is byte-identical to before (M3). Idempotent + crash-safe: it is recomputed each bundle
+// from verified state (the "absence is never information" discipline), never edge-triggered.
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+
+/// True iff I am the tree's committing authority (the elected creator) for this circle AND the
+/// keying switch is ON — the gate on every M4 automation write. Only the creator maintains the tree
+/// (chained Add/Remove), so two admins never race concurrent membership commits (§4.1 election).
+fn mls_am_committer(st: &NetState, idx: usize) -> bool {
+    st.mls_keying && circle_is_mls_capable(st, idx) && am_shadow_creator(st, idx)
+}
+
+/// Build one chained Add+Welcome commit admitting `new_devices` (bundle + credential) to the LIVE
+/// tree at the next epoch (§4.2): the creator adds each device's leaf, re-keys its own path, and
+/// Welcomes each newcomer a SELF-CONTAINED Welcome (GroupInfo epoch n + the tree blob) so the
+/// joiner enters at epoch n WITHOUT replaying the chain — the replacement for M3's superseding
+/// genesis. The added leaf secrets derive from the creator's secret root (as at genesis), so a
+/// replay of this own commit reproduces identical bytes. No-op (returns false) if I'm not the
+/// committer, can't derive the epoch, or the build fails.
+fn mls_grow_tree(st: &mut NetState, idx: usize, new_devices: &[(HavenId, DeviceCredential)]) -> bool {
+    if new_devices.is_empty() || !mls_am_committer(st, idx) {
+        return false;
+    }
+    let circle_id = st.circles[idx].id.clone();
+    let gid = circle_id.as_bytes().to_vec();
+    let Some(seed) = st.device.as_ref().map(|d| d.secret_seed()) else { return false };
+    let signer = Identity::from_seed(&seed);
+    let my_secret_root = keying_secret_root(&seed, &gid);
+    let Some(shadow) = st.shadow_trees.get(&circle_id) else { return false };
+    let Some(cur) = mls_replay(shadow, Some(seed)) else { return false };
+    let Some(mp) = &cur.my_private else { return false }; // I must be an active member to commit
+    let Some(init) = cur.init_secret else { return false };
+    let my_leaf = mp.leaf_index;
+    let next = cur.epoch + 1;
+
+    // One Add proposal per new device; the leaf secret is derived from MY secret root (I generate it
+    // and deliver it in the Welcome), so a device can't be admitted with a key it doesn't receive.
+    let mut adds: Vec<treekem::Proposal> = Vec::with_capacity(new_devices.len());
+    let mut joiners: Vec<(HavenId, [u8; 32])> = Vec::with_capacity(new_devices.len()); // (bundle, leaf_secret)
+    for (bundle, cred) in new_devices {
+        let ls = keying_leaf_secret(&my_secret_root, &bundle.node_id_bytes());
+        let kp = treekem::node_keypair_from_path_secret(&ls);
+        let payload = treekem::leaf_binding_payload(&gid, &kp.kem_x, &kp.kem_pq);
+        let leaf = treekem::LeafNode {
+            leaf_kem_x: kp.kem_x,
+            leaf_kem_pq: kp.kem_pq,
+            device_credential: cred.to_bytes(),
+            leaf_binding_sig: signer.sign(&payload),
+        };
+        adds.push(treekem::build_add_proposal(&gid, next, my_leaf, leaf, |m| signer.sign(m)));
+        joiners.push((bundle.clone(), ls));
+    }
+    let (new_leaf, entropy) = keying_update_material(&my_secret_root, next);
+    let Some(cred) = cur.tree.leaf(my_leaf).map(|l| l.device_credential.clone()) else { return false };
+    let build = match treekem::build_commit(
+        &cur.tree, &gid, next, cur.tip_hash, &cur.cth, &init, my_leaf, adds,
+        Some((&new_leaf, &cred, &entropy)), |m| signer.sign(m), |m| signer.sign(m),
+    ) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let cbytes = build.commit.to_bytes();
+    let ch = treekem::commit_hash(&cbytes);
+    let tree_bytes = build.tree.to_bytes();
+    let joiner_secret = build.schedule.joiner_secret;
+    let cth = build.confirmed_transcript_hash;
+    // A Welcome per newcomer: self-contained (carries the tree blob + epoch n context) so a joiner —
+    // or a sleeper past the TTL — enters at epoch n without the chain (§4.2/§5.5).
+    let mut welcome_wires: Vec<Vec<u8>> = Vec::new();
+    for (bundle, ls) in &joiners {
+        // The leaf index the Add placed this device at, located by its (unique) leaf key.
+        let kp = treekem::node_keypair_from_path_secret(ls);
+        let Some(li) = build.tree.slots.iter().enumerate().find_map(|(i, s)| match s {
+            treekem::TreeSlot::Leaf(l) if l.leaf_kem_x == kp.kem_x => Some((i / 2) as u32),
+            _ => None,
+        }) else { continue };
+        let w = ShadowWelcome {
+            epoch: next,
+            leaf_index: li,
+            joiner_secret,
+            leaf_secret: *ls,
+            cth,
+            tree_bytes: tree_bytes.clone(),
+        };
+        let plaintext = encode_shadow_welcome(&ch, &w);
+        let group = Group::new("mls-welcome", vec![bundle.clone()]);
+        if let Ok(env) = seal_bytes(&signer, &group, &plaintext) {
+            welcome_wires.push(tagged(TAG_MLS_WELCOME, &env.to_bytes()));
+        }
+    }
+    let shadow = st.shadow_trees.get_mut(&circle_id).unwrap();
+    if shadow.commits.contains_key(&ch) {
+        return false; // already authored (idempotent across bundles)
+    }
+    shadow.commits.insert(ch, cbytes.clone());
+    shadow.emit_cache.push(tagged(TAG_MLS_COMMIT, &cbytes));
+    shadow.emit_cache.extend(welcome_wires);
+    true
+}
+
+/// Re-Welcome a device that is STILL in the tree but can no longer derive the live epoch — a sleeper
+/// past the mailbox TTL whose chain was pruned and whose private tree state lapsed (§5.5). The
+/// creator hands it a FRESH self-contained Welcome at the CURRENT epoch (the tree blob + the live
+/// `joiner_secret` it already holds in its replay + the device's leaf secret, which the creator
+/// re-derives from its secret root), so the sleeper jumps straight to the live epoch and reads
+/// history from the ordinary re-seal backfill — no chain replay. No-op if I'm not the committer, the
+/// device isn't a current tree leaf, or I can't derive the live epoch.
+fn mls_rewelcome_device(st: &mut NetState, idx: usize, device_id: &[u8; 32]) -> bool {
+    if !mls_am_committer(st, idx) {
+        return false;
+    }
+    let circle_id = st.circles[idx].id.clone();
+    let gid = circle_id.as_bytes().to_vec();
+    let Some(seed) = st.device.as_ref().map(|d| d.secret_seed()) else { return false };
+    let signer = Identity::from_seed(&seed);
+    let my_secret_root = keying_secret_root(&seed, &gid);
+    let Some(shadow) = st.shadow_trees.get(&circle_id) else { return false };
+    let Some(cur) = mls_replay(shadow, Some(seed)) else { return false };
+    let Some(joiner_secret) = cur.joiner_secret else { return false }; // I must derive the live epoch
+    // The device must be a CURRENT leaf (still admitted), and its leaf key must match the secret I
+    // re-derive — the same fail-closed binding the joiner re-checks (a revoked device is blanked).
+    let ls = keying_leaf_secret(&my_secret_root, device_id);
+    let kp = treekem::node_keypair_from_path_secret(&ls);
+    let Some(li) = cur.tree.slots.iter().enumerate().find_map(|(i, s)| match s {
+        treekem::TreeSlot::Leaf(l)
+            if i % 2 == 0 && l.leaf_kem_x == kp.kem_x && l.leaf_kem_pq[..] == kp.kem_pq[..] =>
+        {
+            Some((i / 2) as u32)
+        }
+        _ => None,
+    }) else { return false };
+    let Some(bundle) = mls_device_bundle(st, idx, device_id) else { return false };
+    let w = ShadowWelcome {
+        epoch: cur.epoch,
+        leaf_index: li,
+        joiner_secret,
+        leaf_secret: ls,
+        cth: cur.cth,
+        tree_bytes: cur.tree.to_bytes(),
+    };
+    let plaintext = encode_shadow_welcome(&cur.tip_hash, &w);
+    let group = Group::new("mls-welcome", vec![bundle]);
+    let Ok(env) = seal_bytes(&signer, &group, &plaintext) else { return false };
+    let shadow = st.shadow_trees.get_mut(&circle_id).unwrap();
+    shadow.emit_cache.push(tagged(TAG_MLS_WELCOME, &env.to_bytes()));
+    true
+}
+
+/// Resolve a device node id to its public bundle among the circle's authorized devices (mine or a
+/// member's) — the seal target for a re-Welcome.
+fn mls_device_bundle(st: &NetState, idx: usize, device_id: &[u8; 32]) -> Option<HavenId> {
+    for (bundle, _) in shadow_device_leaves(st, idx) {
+        if bundle.node_id_bytes() == *device_id {
+            return Some(bundle);
+        }
+    }
+    None
+}
+
+/// Reconcile the LIVE tree with the verified roster (§4.2/§4.3 roster automation), creator-driven and
+/// recomputed each bundle. Adds authorized devices missing from the tree (chained Add+Welcome) and
+/// Removes tree leaves whose device is no longer authorized (revoked) via the authority-checked
+/// re-key. One structural change per call (Removes first, then Adds) — the sync loop converges over
+/// successive bundles. Gated on `mls_am_committer`, so OFF/shadow/non-capable circles are untouched.
+fn mls_sync_roster_to_tree(st: &mut NetState, idx: usize) {
+    if !mls_am_committer(st, idx) {
+        return;
+    }
+    let circle_id = st.circles[idx].id.clone();
+    let Some(shadow) = st.shadow_trees.get(&circle_id) else { return };
+    if shadow.my_genesis.is_none() {
+        return; // no live tree yet — genesis builds first, growth follows
+    }
+    let seed = st.device.as_ref().map(|d| d.secret_seed());
+    let Some(cur) = mls_replay(shadow, seed) else { return };
+    let tree_devices: HashSet<[u8; 32]> = tree_leaf_device_ids(&cur.tree).into_iter().collect();
+    let authorized = shadow_device_leaves(st, idx);
+    let auth_ids: HashSet<[u8; 32]> = authorized.iter().map(|(b, _)| b.node_id_bytes()).collect();
+
+    // REVOKED first: any tree leaf whose device is no longer authorized is Removed (re-key). This is
+    // the revocation→Remove wiring; `mls_build_remove` enforces the same authority gate receivers do.
+    let mut revoked_leaves: Vec<u32> = Vec::new();
+    let mut revoked_accounts: HashSet<[u8; 32]> = HashSet::new();
+    for (i, slot) in cur.tree.slots.iter().enumerate() {
+        if i % 2 != 0 {
+            continue;
+        }
+        if let treekem::TreeSlot::Leaf(l) = slot {
+            if let Ok(c) = DeviceCredential::from_bytes(&l.device_credential) {
+                if !auth_ids.contains(&c.device.node_id_bytes()) {
+                    revoked_leaves.push((i / 2) as u32);
+                    revoked_accounts.insert(c.account_id);
+                }
+            }
+        }
+    }
+    if !revoked_leaves.is_empty() {
+        if mls_build_remove(st, idx, &revoked_leaves) {
+            // Keep membership consistent (§4.3): a member whose devices are ALL revoked has no remaining
+            // authorized device — drop it from circle membership so the circle recomputes capability over
+            // the members that remain (and the growth pass never tries to re-Add a device-less member).
+            let still_authorized: HashSet<[u8; 32]> =
+                shadow_device_leaves(st, idx).iter().map(|(_, cred)| cred.account_id).collect();
+            for acct in &revoked_accounts {
+                if !still_authorized.contains(acct) {
+                    purge_member_from_circle(&mut st.circles[idx], &hex(acct));
+                }
+            }
+        }
+        return; // one structural change per call
+    }
+
+    // Then ADD authorized devices missing from the tree (the register_device→Add wiring) — but NEVER
+    // a device that was deliberately Removed (removal-sticky): re-admitting a cut-off device is an
+    // explicit act, not an automation side effect of it still lingering in a roster view.
+    let missing: Vec<(HavenId, DeviceCredential)> = authorized
+        .into_iter()
+        .filter(|(b, _)| {
+            !tree_devices.contains(&b.node_id_bytes()) && !cur.removed_devices.contains(&b.node_id_bytes())
+        })
+        .collect();
+    if !missing.is_empty() {
+        mls_grow_tree(st, idx, &missing);
+    }
 }
 
 /// The keying flip (§4.5) / park-resume (§7.3), recomputed every bundle and receive. Returns the
@@ -3079,8 +3455,10 @@ impl HavenSocial {
     /// (§4.3, the headline). Authorized only for the creator/an admin (checked inside `mls_build_remove`
     /// against the same verified chain receivers use); a non-admin call is a no-op. Builds ONE chained
     /// Remove+UpdatePath commit removing every leaf of `account_hex` at the next epoch; the removed
-    /// device cannot derive the new `commit_secret` and so cannot open content sealed afterward. Returns
-    /// whether a Remove commit was authored. (Membership-list / roster automation is M4.)
+    /// device cannot derive the new `commit_secret` and so cannot open content sealed afterward. On a
+    /// successful Remove it ALSO drops the account from circle membership (M4: keeps the roster and the
+    /// tree consistent — a member cut from the tree is cut from the circle, not silently re-Added by the
+    /// growth automation). Returns whether a Remove commit was authored.
     pub fn mls_remove_member(&self, circle_id: String, account_hex: String) -> bool {
         let mut st = self.state.lock().unwrap();
         let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return false };
@@ -3104,7 +3482,25 @@ impl HavenSocial {
         if leaves.is_empty() {
             return false;
         }
-        mls_build_remove(&mut st, idx, &leaves)
+        let removed = mls_build_remove(&mut st, idx, &leaves);
+        if removed {
+            // Drop the member from circle membership so the roster automation (`mls_grow_tree`) does
+            // not immediately re-Add them: a tree Remove and a circle removal are one act (§4.3).
+            let target_hex = hex(&target);
+            purge_member_from_circle(&mut st.circles[idx], &target_hex);
+        }
+        removed
+    }
+
+    /// Re-Welcome a device that slept past the mailbox TTL (§5.5): hand it a FRESH self-contained
+    /// Welcome at the CURRENT epoch so it re-enters without replaying the (pruned) chain and reads
+    /// history from the ordinary re-seal backfill. Creator/keying-gated inside; a no-op otherwise.
+    /// Returns whether a re-Welcome was emitted (it rides the next sync bundle to the sleeper).
+    pub fn mls_rewelcome(&self, circle_id: String, device_hex: String) -> bool {
+        let mut st = self.state.lock().unwrap();
+        let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return false };
+        let Ok(device_id) = decode_hex32(&device_hex) else { return false };
+        mls_rewelcome_device(&mut st, idx, &device_id)
     }
 
     /// M3 keying telemetry (§4.5/§7.2/§7.3): `{state, epoch}` — see [`MlsKeyingStatusFfi`].
@@ -3754,6 +4150,12 @@ impl HavenSocial {
             st.device_lists.insert(acct_id, ContactDevices { list: new_list, credentials: creds });
             for c in st.circles.iter_mut() {
                 c.rotate_epoch();
+            }
+            // M4 roster→Add automation: a newly-registered device of a member drives a chained
+            // Add into the LIVE tree (gated inside on the keying committer — inert with the switch
+            // OFF, so this is a no-op unless I am the elected creator of a keying-live circle).
+            for i in 0..st.circles.len() {
+                mls_sync_roster_to_tree(&mut st, i);
             }
         }
         st.own_roster_wire().unwrap_or_default()
@@ -4716,6 +5118,13 @@ fn verify_and_store_roster(st: &mut NetState, account: &HavenId, list_bytes: &[u
         if c.members.iter().any(|m| m.node_id_bytes() == acct_id) {
             c.rotate_epoch();
         }
+    }
+    // M4 roster→Add/Remove automation: a contact's roster change — a newly-authorized device, or a
+    // revocation — drives the LIVE tree to Add or authority-checked-Remove. Gated inside on the
+    // keying committer, so an OFF/shadow circle is untouched (a non-admin's roster change can never
+    // produce an accepted Remove: it is only ever authored by the circle's elected creator).
+    for i in 0..st.circles.len() {
+        mls_sync_roster_to_tree(st, i);
     }
     true
 }
@@ -6662,5 +7071,227 @@ mod net_tests {
             }
         }
         assert!(legacy.feed(cid.clone(), 7_000, None).iter().any(|m| m.body == "reflipped"), "the re-added device reads tree-keyed content");
+    }
+
+    // ── TreeKEM M4: offline / mid-chain Welcomes + roster→Add/Remove automation (§4.2/§4.3/§5.5) ──
+
+    /// Wire a brand-new capable member `newcomer` into an already-live `fleet` mid-life: contact
+    /// bundles both ways, its own device roster, cross-ingest of every roster + capability card, the
+    /// creator pin, and the keying switch. Returns the full instance list (fleet + newcomer). After
+    /// this the creator's roster automation will chain an Add+Welcome for the newcomer on its bundle.
+    fn wire_new_member(
+        fleet: &[Arc<HavenSocial>],
+        fleet_seeds: &[[u8; 32]],
+        newcomer: &Arc<HavenSocial>,
+        newcomer_seed: [u8; 32],
+        creator_seed: [u8; 32],
+        cid: &str,
+    ) {
+        install_device_only_roster(newcomer, newcomer_seed);
+        let mut all: Vec<&Arc<HavenSocial>> = fleet.iter().collect();
+        all.push(newcomer);
+        let mut seeds: Vec<[u8; 32]> = fleet_seeds.to_vec();
+        seeds.push(newcomer_seed);
+        let bundles: Vec<Vec<u8>> = all.iter().map(|s| s.my_bundle()).collect();
+        for i in 0..all.len() {
+            for j in 0..all.len() {
+                if i != j {
+                    let _ = all[i].add_contact_bundle(cid.to_string(), bundles[j].clone());
+                }
+            }
+        }
+        let rosters: Vec<(Vec<u8>, Vec<Vec<u8>>)> =
+            all.iter().enumerate().map(|(i, s)| device_only_roster_wire(s, seeds[i])).collect();
+        let cards: Vec<Vec<u8>> = all.iter().enumerate().map(|(i, s)| card(s, &format!("n{i}"))).collect();
+        for i in 0..all.len() {
+            for j in 0..all.len() {
+                if i != j {
+                    let _ =
+                        all[i].ingest_device_roster(bundles[j].clone(), rosters[j].0.clone(), rosters[j].1.clone());
+                    all[i].profile_seed_drop_version(bundles[j].clone(), cards[j].clone());
+                }
+            }
+        }
+        let creator_hex = hex(&Identity::from_seed(&creator_seed).public().node_id_bytes());
+        assert!(newcomer.set_circle_creator(cid.to_string(), creator_hex));
+        newcomer.set_mls_keying(true);
+    }
+
+    fn sync_all(insts: &[&Arc<HavenSocial>], cid: &str, rounds: usize) {
+        for _ in 0..rounds {
+            for i in 0..insts.len() {
+                for j in 0..insts.len() {
+                    if i != j {
+                        sync(insts[i], insts[j], cid);
+                    }
+                }
+            }
+        }
+    }
+
+    /// §9 M4 proof — a device that becomes authorized MID-LIFE gets a chained Add+Welcome, enters at
+    /// the CURRENT epoch (epoch CONTINUITY — NOT a genesis rebuild), and reads full history via the
+    /// re-seal backfill. This is also the `register_device`→Add roster automation: the creator issues
+    /// the Add off the newcomer's roster arriving, with no explicit tree call anywhere.
+    #[test]
+    fn mls_mid_life_add_enters_at_live_epoch_and_reads_history() {
+        let cid = DEFAULT_CIRCLE.to_string();
+        // A (creator) + B go live at the genesis epoch; A posts history BEFORE C exists.
+        let base = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
+        let (a, b) = (base[0].clone(), base[1].clone());
+        flip_and_join(&base, &cid);
+        assert_eq!(a.mls_keying_status(cid.clone()).state, "live");
+        assert_eq!(a.mls_keying_status(cid.clone()).epoch, 1, "the pair is at the genesis epoch");
+        a.post(cid.clone(), "history-1".into(), vec![], None, None, false, false, 1_000).unwrap();
+        sync_all(&[&a, &b], &cid, 3);
+        assert!(b.feed(cid.clone(), 2_000, None).iter().any(|m| m.body == "history-1"));
+
+        // C becomes authorized mid-life. Its register_device roster propagates to the creator, whose
+        // automation chains an Add+Welcome at epoch 2 (no explicit mls_* call).
+        let c = HavenSocial::new([3u8; 32].to_vec()).unwrap();
+        assert!(c.use_device_identity([13u8; 32].to_vec()));
+        wire_new_member(&base, &[[1u8; 32], [2u8; 32]], &c, [3u8; 32], [1u8; 32], &cid);
+        let trio = [&a, &b, &c];
+        sync_all(&trio, &cid, 12);
+
+        // EPOCH CONTINUITY: the fleet chained to epoch 2 — it did NOT reset to a fresh genesis (which
+        // would have put everyone back at epoch 1). C entered at the LIVE epoch.
+        assert_eq!(a.mls_keying_status(cid.clone()).epoch, 2, "a chained Add advanced to epoch 2, not a rebuild");
+        assert_eq!(b.mls_keying_status(cid.clone()).epoch, 2, "B stayed on the same chain, now epoch 2");
+        assert_eq!(c.mls_keying_status(cid.clone()).state, "live", "C joined the live tree");
+        assert_eq!(c.mls_keying_status(cid.clone()).epoch, 2, "C entered at the LIVE epoch (not a genesis)");
+
+        // C reads FULL HISTORY (a post from before it joined) via the ordinary re-seal backfill.
+        assert!(
+            c.feed(cid.clone(), 3_000, None).iter().any(|m| m.body == "history-1"),
+            "the mid-life joiner reads pre-join history via backfill"
+        );
+
+        // New epoch-2 content round-trips for all three, and A still reads B's.
+        a.post(cid.clone(), "after-add".into(), vec![], None, None, false, false, 4_000).unwrap();
+        b.post(cid.clone(), "b-after-add".into(), vec![], None, None, false, false, 4_100).unwrap();
+        sync_all(&trio, &cid, 4);
+        assert!(c.feed(cid.clone(), 5_000, None).iter().any(|m| m.body == "after-add"), "C reads new content");
+        assert!(a.feed(cid.clone(), 5_000, None).iter().any(|m| m.body == "b-after-add"), "A reads B's new content");
+        assert!(c.feed(cid.clone(), 5_000, None).iter().any(|m| m.body == "b-after-add"), "C reads B's new content");
+    }
+
+    /// §9 M4 proof — SLEEPER (§5.5): a device offline past the mailbox TTL, whose private tree state
+    /// has lapsed so it can no longer replay the chain, re-enters via a FRESH self-contained Welcome
+    /// at the current epoch, converges to the live epoch secret, and reads history via the backfill.
+    #[test]
+    fn mls_sleeper_reenters_via_welcome_after_ttl() {
+        let cid = DEFAULT_CIRCLE.to_string();
+        // A(creator), B, C, D live at the genesis epoch. C is the sleeper; D is a throwaway removed
+        // to advance the epoch while C is offline.
+        let insts = mls_capable_fleet(
+            &[[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]],
+            &[[11u8; 32], [12u8; 32], [13u8; 32], [14u8; 32]],
+            0,
+        );
+        let (a, b, c, d) = (&insts[0], &insts[1], &insts[2], &insts[3]);
+        flip_and_join(&insts, &cid);
+        a.post(cid.clone(), "history-1".into(), vec![], None, None, false, false, 1_000).unwrap();
+        sync_all(&[a, b, c, d], &cid, 3);
+        assert!(c.feed(cid.clone(), 2_000, None).iter().any(|m| m.body == "history-1"), "C reads history while awake");
+
+        // The epoch advances while C sleeps: A removes D. Sync only among A and B (C stays offline).
+        let d_acct = hex(&Identity::from_seed(&[4u8; 32]).public().node_id_bytes());
+        assert!(a.mls_remove_member(cid.clone(), d_acct), "A removes the throwaway D");
+        sync_all(&[a, b], &cid, 4);
+        assert_eq!(a.mls_keying_status(cid.clone()).epoch, 2, "A advanced to epoch 2 while C slept");
+
+        // Simulate 45+ days past the mailbox TTL: C's private entry (its Welcome) lapsed — it can no
+        // longer replay to derive ANY epoch. (Its public commit knowledge is irrelevant without it.)
+        c.state.lock().unwrap().shadow_trees.get_mut(&cid).unwrap().my_welcomes.clear();
+        assert_ne!(c.mls_keying_status(cid.clone()).state, "live", "the sleeper can't derive after its state lapses");
+
+        // The creator re-Welcomes C at the CURRENT epoch — a fresh, self-contained Welcome.
+        let c_dev = hex(&Identity::from_seed(&[13u8; 32]).public().node_id_bytes());
+        assert!(a.mls_rewelcome(cid.clone(), c_dev), "A issues a fresh Welcome to the sleeper");
+        sync_all(&[a, b, c], &cid, 8);
+
+        // C re-entered at the LIVE epoch and converges to the live epoch secret; it reads history via
+        // the re-seal backfill — never having replayed the (pruned) chain.
+        assert_eq!(c.mls_keying_status(cid.clone()).state, "live", "the sleeper re-enters live");
+        assert_eq!(c.mls_keying_status(cid.clone()).epoch, 2, "at the current epoch");
+        assert!(c.feed(cid.clone(), 3_000, None).iter().any(|m| m.body == "history-1"), "the sleeper reads history via backfill");
+        a.post(cid.clone(), "post-reentry".into(), vec![], None, None, false, false, 4_000).unwrap();
+        sync_all(&[a, b, c], &cid, 4);
+        assert!(c.feed(cid.clone(), 5_000, None).iter().any(|m| m.body == "post-reentry"), "the sleeper reads live content");
+    }
+
+    /// §9 M4 proof — a Welcome addressed to a device REVOKED in the meantime FAILS CLOSED. A joiner is
+    /// added mid-life (Welcome issued at epoch n), then removed at epoch n+1; it cannot enter the live
+    /// tree — the forward walk applies the Remove and cuts it off — and the creator refuses to re-Welcome
+    /// a device the tree no longer admits.
+    #[test]
+    fn mls_revoked_device_welcome_fails_closed() {
+        let cid = DEFAULT_CIRCLE.to_string();
+        let base = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
+        let (a, b) = (base[0].clone(), base[1].clone());
+        flip_and_join(&base, &cid);
+
+        // N joins mid-life (Add+Welcome at epoch 2) and goes live.
+        let n = HavenSocial::new([5u8; 32].to_vec()).unwrap();
+        assert!(n.use_device_identity([15u8; 32].to_vec()));
+        wire_new_member(&base, &[[1u8; 32], [2u8; 32]], &n, [5u8; 32], [1u8; 32], &cid);
+        let trio = [&a, &b, &n];
+        sync_all(&trio, &cid, 12);
+        assert_eq!(n.mls_keying_status(cid.clone()).state, "live", "N joined at epoch 2");
+        assert_eq!(n.mls_keying_status(cid.clone()).epoch, 2);
+
+        // N is REVOKED: the creator removes it → epoch 3, N's leaf blanked, N dropped from membership.
+        let n_acct = hex(&Identity::from_seed(&[5u8; 32]).public().node_id_bytes());
+        assert!(a.mls_remove_member(cid.clone(), n_acct), "the creator revokes N");
+        sync_all(&trio, &cid, 6);
+
+        // FAILS CLOSED: N cannot enter the live tree — the Remove it just received cuts it off, so it
+        // can't derive the new epoch, even though it once held a valid Welcome for the (now stale) epoch.
+        assert_ne!(n.mls_keying_status(cid.clone()).state, "live", "the revoked device can't derive the live epoch");
+        a.post(cid.clone(), "after-revoke".into(), vec![], None, None, false, false, 6_000).unwrap();
+        sync_all(&trio, &cid, 6);
+        assert!(b.feed(cid.clone(), 7_000, None).iter().any(|m| m.body == "after-revoke"), "a remaining member reads post-revoke content");
+        assert!(!n.feed(cid.clone(), 7_000, None).iter().any(|m| m.body == "after-revoke"), "the revoked device is cut off from post-revoke content");
+
+        // The creator will NOT re-Welcome a device the tree no longer admits (its leaf is blanked).
+        let n_dev = hex(&Identity::from_seed(&[15u8; 32]).public().node_id_bytes());
+        assert!(!a.mls_rewelcome(cid.clone(), n_dev), "the tree does not admit a revoked device — no Welcome is issued");
+    }
+
+    /// §9 M4 proof — ROSTER automation drives an authority-checked Remove: a member whose device is
+    /// revoked in the DEVICE roster is auto-Removed by the CREATOR (a re-key the removed device can't
+    /// derive), while a NON-admin ingesting the same revocation authors NO accepted Remove.
+    #[test]
+    fn mls_roster_revocation_drives_authority_checked_remove() {
+        let cid = DEFAULT_CIRCLE.to_string();
+        // A(creator), B, C all live. C will be revoked via its own roster (a lost-device scenario).
+        let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32], [3u8; 32]], &[[11u8; 32], [12u8; 32], [13u8; 32]], 0);
+        let (a, b, c) = (&insts[0], &insts[1], &insts[2]);
+        flip_and_join(&insts, &cid);
+        assert_eq!(a.mls_keying_status(cid.clone()).epoch, 1, "genesis epoch");
+
+        // C's device is revoked in a NEWER signed roster (version 2, C's device in the revoked set).
+        let c_dev_id = Identity::from_seed(&[13u8; 32]).public().node_id_bytes().to_vec();
+        let revoked_list =
+            crate::multidevice::sign_device_list([3u8; 32].to_vec(), 2, 10, vec![], vec![c_dev_id]).unwrap();
+
+        // NON-ADMIN FIRST: B (not the creator) ingests the revocation. B rotates its sender-keys epoch
+        // but authors NO tree Remove — the automation is creator-gated, so no accepted Remove exists.
+        assert!(b.ingest_device_roster(c.my_bundle(), revoked_list.clone(), vec![]));
+        for _ in 0..3 { sync(b, a, &cid); }
+        assert_eq!(a.mls_keying_status(cid.clone()).epoch, 1, "a non-admin's roster ingest produces no accepted Remove");
+
+        // CREATOR: A ingests the same revocation → its automation authors the authority-checked Remove,
+        // re-keying to epoch 2. C (the revoked device) is cut off; B (a remaining member) is not.
+        assert!(a.ingest_device_roster(c.my_bundle(), revoked_list, vec![]));
+        sync_all(&[a, b, c], &cid, 6);
+        assert_eq!(a.mls_keying_status(cid.clone()).epoch, 2, "the creator's roster-driven Remove re-keyed to epoch 2");
+        assert_ne!(c.mls_keying_status(cid.clone()).state, "live", "the revoked device cannot derive the new epoch");
+
+        a.post(cid.clone(), "post-revoke".into(), vec![], None, None, false, false, 3_000).unwrap();
+        sync_all(&[a, b, c], &cid, 6);
+        assert!(b.feed(cid.clone(), 4_000, None).iter().any(|m| m.body == "post-revoke"), "a remaining member reads post-revoke content");
+        assert!(!c.feed(cid.clone(), 4_000, None).iter().any(|m| m.body == "post-revoke"), "the revoked device is cut off");
     }
 }

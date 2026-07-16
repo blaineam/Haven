@@ -2903,7 +2903,45 @@ async function devicesSheet() {
     roster.enabled ? null : el("button", { class: "btn small ghost", onclick: async () => { await invoke("request_device_enrollment"); toast("Asked your primary device to authorize this one"); } },
       roster.this_device_authorized ? "Re-sync from my primary" : "Make this a linked device")));
 
+  // seed-drop S4: the SECURE link. Only a seed-holding primary can grant, so offer it once this
+  // device is the primary. A new device scans/pastes the one-time code, gets its OWN key + a
+  // revocable credential + a granted self-sync key — and NEVER the master seed.
+  const seedless = await invoke("seedless_status").catch(() => ({ seedless: false }));
+  if (roster.enabled && !seedless.seedless) {
+    devicesCard.append(el("div", { class: "row wrap", style: "margin-top:6px" },
+      el("button", { class: "btn small primary", onclick: () => enrollDeviceSheet() }, "＋ Add a device (secure link)")));
+  }
+
+  // Any pending link requests waiting on this primary's approval.
+  const pending = await invoke("enroll_pending").catch(() => []);
+  for (const p of pending) {
+    devicesCard.append(el("div", { class: "list-item" },
+      el("div", {}, "🔗"),
+      el("div", { style: "flex:1" },
+        el("div", { class: "name" }, p.name || "New device"),
+        el("div", { class: "muted small" }, "wants to link with a secure code")),
+      el("button", { class: "btn small primary", onclick: async () => { try { await invoke("enroll_approve", { deviceHex: p.device_hex }); toast("Device approved — sending its keys"); } catch (e) { toast("" + e); } devicesSheet(); } }, "Approve"),
+      el("button", { class: "btn small ghost", onclick: async () => { await invoke("enroll_reject", { deviceHex: p.device_hex }); devicesSheet(); } }, "Dismiss")));
+  }
+
   sheet("Devices", devicesCard);
+}
+
+/// PRIMARY: mint a one-time `haven-enroll:` ticket and show it as a QR + copyable string for the new
+/// device to scan/paste. The confirm step happens back in the Devices sheet when the request arrives.
+async function enrollDeviceSheet() {
+  let ticket = "";
+  try { ticket = await invoke("enroll_mint_ticket"); }
+  catch (e) { toast("Couldn't create a link code: " + e); return; }
+  const qrBox = el("div", { class: "qr-box" });
+  try { qrBox.innerHTML = makeQrSvg(ticket); } catch (_) { qrBox.textContent = "QR unavailable"; }
+  const body = el("div", { class: "col", style: "gap:12px;align-items:center;text-align:center" },
+    el("div", { class: "muted small" }, "On the new device choose “Link this as another of my devices” and scan this code (or paste the text). It's single-use and expires in about 10 minutes."),
+    qrBox,
+    el("button", { class: "btn small", onclick: async () => { try { await navigator.clipboard.writeText(ticket); toast("Link code copied"); } catch (_) { toast("Copy failed"); } } }, "Copy link code"),
+    el("div", { class: "muted small", style: "word-break:break-all;opacity:0.7" }, ticket),
+    el("div", { class: "muted small" }, "When the new device asks, come back to Devices and approve it."));
+  sheet("Add a device", body);
 }
 
 const line = (label, ok) => el("div", { class: "row" }, el("span", { style: "flex:1" }, label), el("span", { class: ok ? "ok-text" : "warn-text" }, ok ? "✓ pass" : "✗ fail"));
@@ -3320,17 +3358,23 @@ function renderOnboarding() {
     return m;
   };
 
-  const code = el("input", { class: "field-capsule", placeholder: "haven-seed:…", style: "width:100%" });
+  const code = el("input", { class: "field-capsule", placeholder: "haven-enroll:… or haven-seed:…", style: "width:100%" });
   const linkBox = () => el("div", { class: "col", style: "width:100%;gap:8px" },
-    el("div", { class: "muted small" }, "On your other device open You ▸ Link a new device, copy its transfer code, then paste it here."),
+    el("div", { class: "muted small" }, "On your other device open You ▸ Devices ▸ Add a device (secure link) for a one-time code, or copy its transfer code. Paste it here."),
     code,
     el("button", { class: "btn primary", style: "width:100%", onclick: async () => {
       const c = code.value.trim();
-      if (!c) { toast("Paste a transfer code first"); return; }
+      if (!c) { toast("Paste a link code first"); return; }
       // A linked device inherits an identity that already agreed elsewhere — but acceptance is
       // per-device local state, so record it here too rather than drop them on the gate.
       Terms.accept();
-      try { await invoke("onboard_link", { code: c }); }
+      try {
+        // seed-drop S4: the new secure link (`haven-enroll:`) gives this device its OWN key +
+        // credential + granted self-sync key and NEVER the master seed. The legacy `haven-seed:` /
+        // raw-seed transfer still works (an old primary in the wild) via onboard_link.
+        if (/^haven-enroll:/i.test(c)) await invoke("onboard_link_seedless", { ticket: c });
+        else await invoke("onboard_link", { code: c });
+      }
       catch (e) { toast("Couldn't link: " + e); }
     } }, "Link this device"));
 
@@ -3419,12 +3463,35 @@ function renderOnboarding() {
   draw();
 }
 
+/// Seed-drop S4 linking screen: a seedless device that has scanned a `haven-enroll:` ticket but
+/// hasn't been granted yet. The engine re-sends the frame-28 request on a loop; we sit here until
+/// the primary approves (which fires `haven:enrolled` → relaunch into the fully-linked app).
+function renderSeedlessLinking() {
+  const spinner = el("div", { style: "font-size:40px" }, "🔗");
+  const card = el("div", { class: "col", style: "max-width:460px;width:100%;align-items:center;gap:16px;text-align:center" },
+    spinner,
+    el("h1", { style: "font-size:26px;font-weight:800;margin:0" }, "Waiting for your other device"),
+    el("p", { class: "muted", style: "margin:0" },
+      "Open Haven on the device that has your account, go to You ▸ Devices, and approve this device. It'll get its own key — your master seed never leaves that device."),
+    el("button", { class: "btn ghost small", onclick: () => location.reload() }, "Check again"));
+  document.getElementById("onboard-overlay")?.remove();
+  document.body.appendChild(el("div", { id: "onboard-overlay", style: "position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:32px;overflow:auto;background:var(--bg, #0d0b1a)" }, card));
+  // The grant lands over iroh → the engine emits `haven:enrolled`; relaunch to rebuild seedless-linked.
+  listen("haven:enrolled", async () => { try { await invoke("finish_enroll"); } catch (_) { location.reload(); } });
+}
+
 async function boot() {
   initTheme();
   // Fresh install → no identity/engine yet. Show the welcome screen and stop before touching any
   // engine command (which would error). onboard_create/onboard_link relaunch into the real app.
   try {
     if (await invoke("needs_onboarding")) { renderOnboarding(); return; }
+  } catch (_) {}
+  // Seed-drop S4: a seedless device still LINKING (scanned a ticket, no grant yet) sits on a
+  // waiting screen until its primary approves. A fully-linked seedless device falls through as normal.
+  try {
+    const ss = await invoke("seedless_status");
+    if (ss && ss.linking) { renderSeedlessLinking(); return; }
   } catch (_) {}
   // An identity exists. Two things onboarding couldn't do until now, because both need an engine:
   //
@@ -3474,6 +3541,9 @@ async function boot() {
     await render();
   });
   listen("haven:notify", (e) => { const p = e.payload || {}; toast(`${p.title}: ${p.body}`); });
+  // seed-drop S4: a new device asked THIS primary to link with a secure code. Nudge the user to the
+  // Devices sheet, where the request shows an Approve/Dismiss row.
+  listen("haven:enroll-request", (e) => { const p = e.payload || {}; toast(`“${p.name || "A device"}” wants to link — open You ▸ Devices to approve`); });
   // Deep links (`haven://…` from the OS). The backend QUEUES them and pings us rather than putting the
   // URL in the event, because a link that launched Haven arrives long before this webview has a
   // listener — so we drain once at boot too, or a cold-start link is silently dropped.

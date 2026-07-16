@@ -30,6 +30,8 @@ pub const GROUP_INVITE: u8 = 21;
 pub const DEVICE_ENROLL: u8 = 24; // a device asks its primary to authorize it (multi-device, iOS-compat)
 pub const DEVICE_GRANT: u8 = 25; // the primary returns a signed credential to the requesting device
 pub const DEVICE_ROSTER: u8 = 27; // a contact's signed device roster announce (iOS/Android-compat)
+pub const SEEDLESS_ENROLL_REQ: u8 = 28; // a SEEDLESS new device proves ticket possession (seed-drop S4)
+pub const SEEDLESS_ENROLL_GRANT: u8 = 29; // the primary grants credential + roster + self-sync key back
 
 /// Prepend the one-byte frame type.
 pub fn frame(t: u8, payload: &[u8]) -> Vec<u8> {

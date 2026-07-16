@@ -93,11 +93,19 @@ fn ensure_active_identity() -> Result<([u8; 32], Paths)> {
     Ok((seed, Paths::resolve_for(&entry.dir)?))
 }
 
+/// How the GUI should boot the active identity: with an account seed (primary/legacy) or seedless
+/// (seed-drop S4 — the identity holds only a granted public bundle + self-sync key, no master seed).
+pub enum Startup {
+    Seeded { seed: [u8; 32], paths: Paths },
+    Seedless { paths: Paths },
+}
+
 /// GUI variant of `ensure_active_identity`: returns `None` on a truly fresh install (empty roster
 /// + no legacy seed) instead of auto-minting. The GUI then shows a welcome screen and the user
-/// explicitly creates or links an identity (which persists the seed and relaunches into the
-/// normal startup path). A legacy single-seed install is still migrated and counts as existing.
-fn active_identity_if_exists() -> Result<Option<([u8; 32], Paths)>> {
+/// explicitly creates or links an identity (which persists the seed/seedless state and relaunches
+/// into the normal startup path). A legacy single-seed install is still migrated and counts as
+/// existing. A seedless identity (no keyring seed, but a `seedless.json` marker) boots seedless.
+fn active_identity_if_exists() -> Result<Option<Startup>> {
     let base = Paths::resolve()?;
     let ids = store::Identities::load(&base);
 
@@ -111,7 +119,7 @@ fn active_identity_if_exists() -> Result<Option<([u8; 32], Paths)>> {
             let mut ids = ids;
             ids.add(&hex, "Identity 1");
             ids.save(&base)?;
-            return Ok(Some((seed, Paths::resolve_for("")?)));
+            return Ok(Some(Startup::Seeded { seed, paths: Paths::resolve_for("")? }));
         }
         return Ok(None); // fresh — no auto-create; the frontend onboards.
     }
@@ -120,12 +128,23 @@ fn active_identity_if_exists() -> Result<Option<([u8; 32], Paths)>> {
         .active_entry()
         .cloned()
         .ok_or_else(|| anyhow!("roster has no active identity"))?;
-    let seed = match store::load_identity_seed(&entry.node_hex)? {
-        Some(s) => s,
-        None => store::load_seed()?.ok_or_else(|| anyhow!("active identity seed missing"))?,
-    };
-    let _ = store::save_seed(&seed);
-    Ok(Some((seed, Paths::resolve_for(&entry.dir)?)))
+    let paths = Paths::resolve_for(&entry.dir)?;
+    match store::load_identity_seed(&entry.node_hex)? {
+        Some(seed) => {
+            let _ = store::save_seed(&seed);
+            Ok(Some(Startup::Seeded { seed, paths }))
+        }
+        None => {
+            // No keyring seed for this identity. A seedless device is expected to have none — it boots
+            // from its `seedless.json` marker instead. Otherwise fall back to the legacy master seed.
+            if crate::roster::Seedless::is_enabled(&paths) {
+                return Ok(Some(Startup::Seedless { paths }));
+            }
+            let seed = store::load_seed()?.ok_or_else(|| anyhow!("active identity seed missing"))?;
+            let _ = store::save_seed(&seed);
+            Ok(Some(Startup::Seeded { seed, paths }))
+        }
+    }
 }
 
 /// Give the main window the chrome its OS actually uses.
@@ -186,10 +205,10 @@ fn no_net() -> bool {
 
 /// The identity to run as: normally the roster's active one, but `HAVEN_DEMO=1` (debug only) swaps in
 /// the demo identity, which lives in its OWN data dir — so seeding can't write into the real store.
-fn startup_identity() -> Result<Option<([u8; 32], Paths)>> {
+fn startup_identity() -> Result<Option<Startup>> {
     #[cfg(debug_assertions)]
     if demo::is_demo() {
-        return demo::identity().map(Some);
+        return demo::identity().map(|(seed, paths)| Some(Startup::Seeded { seed, paths }));
     }
     active_identity_if_exists()
 }
@@ -224,8 +243,11 @@ pub fn run() {
         .manage(DeepLinks::default());
 
     let builder = match existing {
-        Some((seed, paths)) => {
-            let engine = Engine::new(paths, seed).expect("build engine");
+        Some(startup) => {
+            let engine = match startup {
+                Startup::Seeded { seed, paths } => Engine::new(paths, seed).expect("build engine"),
+                Startup::Seedless { paths } => Engine::new_seedless(paths).expect("build seedless engine"),
+            };
             let setup_engine = engine.clone();
             builder.manage(engine).setup(move |app| {
                 let handle = app.handle().clone();
@@ -361,6 +383,13 @@ pub fn run() {
             commands::request_device_enrollment,
             commands::revoke_device,
             commands::step_down_as_primary,
+            commands::seedless_status,
+            commands::onboard_link_seedless,
+            commands::enroll_mint_ticket,
+            commands::enroll_pending,
+            commands::enroll_approve,
+            commands::enroll_reject,
+            commands::finish_enroll,
             commands::messages,
             commands::send_dm,
             commands::connect_by_link,

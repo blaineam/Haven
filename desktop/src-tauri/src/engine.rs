@@ -134,8 +134,32 @@ pub struct MediaRow {
     pub is_pinned: bool,
 }
 
+/// PRIMARY side: a minted enrollment ticket kept in memory until it's consumed or expires. The
+/// `secret` keys both handshake MACs; `consumed` guards single-use once a grant is sent.
+struct PendingEnrollTicket {
+    secret: [u8; 32],
+    issued_at: u64,
+    consumed: bool,
+}
+
+/// PRIMARY side: a frame-28 request that passed MAC + freshness, waiting on the user's confirm sheet.
+#[derive(Clone)]
+struct PendingEnrollRequest {
+    /// The requesting device's full public bundle.
+    device_bundle: Vec<u8>,
+    /// The requesting device's transport node id hex (the frame-29 dial target).
+    device_hex: String,
+    /// The device name it advertised (shown in the confirm sheet).
+    name: String,
+    /// The ticket secret this request authenticated against (MACs the grant).
+    secret: [u8; 32],
+}
+
 pub struct Engine {
-    seed: [u8; 32],
+    /// The account master seed — `Some` on a primary/legacy device, `None` on a SEEDLESS device
+    /// (seed-drop S4). Making it an `Option` turns every account-key use into a compile-checked
+    /// decision, so a missed seedless guard is a build error, not a runtime forge/panic.
+    seed: Option<[u8; 32]>,
     social: Arc<HavenSocial>,
     paths: Paths,
     media: LocalMedia,
@@ -146,6 +170,13 @@ pub struct Engine {
     dyn_state: StdMutex<DynState>,
     scheduled: StdMutex<crate::scheduled::ScheduledStore>,
     roster: StdMutex<crate::roster::DeviceRoster>,
+    /// Device-local seedless state (account public bundle + granted self-sync key + verbatim roster).
+    /// `enabled=false` on a primary/legacy device.
+    seedless: StdMutex<crate::roster::Seedless>,
+    /// PRIMARY side: live `haven-enroll:` tickets awaiting a frame-28 request (in-memory, short-lived).
+    enroll_tickets: StdMutex<Vec<PendingEnrollTicket>>,
+    /// PRIMARY side: verified frame-28 requests awaiting the user's confirm (surfaced to the UI).
+    enroll_requests: StdMutex<Vec<PendingEnrollRequest>>,
     sched_counter: std::sync::atomic::AtomicU64,
     relay_clients: TokioMutex<HashMap<String, Arc<RelayClient>>>,
     /// Per-relay backoff health, keyed by node hex — drives graceful fallback.
@@ -236,6 +267,49 @@ fn flag_body(seed: &[u8; 32], subject: &str, reason: &str, ts: u64) -> Option<se
     }))
 }
 
+/// NEW DEVICE onboarding for a seedless link (seed-drop S4): parse a scanned/pasted `haven-enroll:`
+/// ticket, register a seedless identity (keyed by the account node id, NO account seed), mint this
+/// device's stable transport key, and persist the linking state. The caller then relaunches — the
+/// GUI boot resolver picks `Engine::new_seedless`, which brings up the handshake. Runs with no engine
+/// (parity with `onboard_link` for the legacy seed path).
+pub fn onboard_seedless(ticket_text: &str) -> std::result::Result<(), String> {
+    let ticket = haven_ffi::enroll::enroll_ticket_parse(ticket_text.trim().to_string())
+        .map_err(|e| format!("not a valid device-link code: {e}"))?;
+    if ticket.account_id.len() != 32 || ticket.secret.len() != 32 || ticket.primary_device.len() != 32 {
+        return Err("device-link code is malformed".into());
+    }
+    // Reject an expired ticket up front (10-min TTL; clock skew earlier than issue is NOT expired).
+    let now = now_ms() / 1000;
+    if now > ticket.issued_at && now.saturating_sub(ticket.issued_at) > 600 {
+        return Err("this link has expired — generate a fresh one on your other device".into());
+    }
+    let account_hex = bytes_to_hex(&ticket.account_id);
+    let base = Paths::resolve().map_err(|e| e.to_string())?;
+    let mut ids = store::Identities::load(&base);
+    ids.add(&account_hex, "Linked device (seedless)");
+    ids.save(&base).map_err(|e| e.to_string())?;
+    let entry_dir = ids.find(&account_hex).map(|e| e.dir.clone()).unwrap_or_default();
+    let paths = Paths::resolve_for(&entry_dir).map_err(|e| e.to_string())?;
+    // Mint (or load) this device's stable transport key in the identity's data dir.
+    let _ = crate::roster::DeviceRoster::load(&paths);
+    // Persist the seedless LINKING state (0600). The grant acceptance is the only writer that flips
+    // `linked` and installs the account bundle / self-sync key.
+    let mut s = crate::roster::Seedless::load(&paths);
+    s.enabled = true;
+    s.linked = false;
+    s.relays = ticket.relays.clone();
+    s.pending_ticket = Some(crate::roster::PendingTicketRec {
+        account_id: ticket.account_id.clone(),
+        verification: ticket.verification.clone(),
+        secret: ticket.secret.clone(),
+        primary_device: ticket.primary_device.clone(),
+        issued_at: ticket.issued_at,
+        relays: ticket.relays.clone(),
+    });
+    s.save(&paths).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 impl Engine {
     /// Build the engine for an existing or freshly-created seed. Loads prefs + restores state.
     pub fn new(paths: Paths, seed: [u8; 32]) -> Result<Arc<Self>> {
@@ -271,7 +345,7 @@ impl Engine {
             ..DynState::default()
         };
         Ok(Arc::new(Self {
-            seed,
+            seed: Some(seed),
             social,
             paths,
             media,
@@ -282,6 +356,9 @@ impl Engine {
             dyn_state: StdMutex::new(dyn_state),
             scheduled: StdMutex::new(scheduled),
             roster: StdMutex::new(roster),
+            seedless: StdMutex::new(crate::roster::Seedless::default()),
+            enroll_tickets: StdMutex::new(Vec::new()),
+            enroll_requests: StdMutex::new(Vec::new()),
             sched_counter: std::sync::atomic::AtomicU64::new(0),
             relay_clients: TokioMutex::new(HashMap::new()),
             relay_health: StdMutex::new(HashMap::new()),
@@ -294,6 +371,101 @@ impl Engine {
             seen_relay: StdMutex::new(std::collections::HashSet::new()),
             media_purged: StdMutex::new(std::collections::HashSet::new()),
         }))
+    }
+
+    /// Build the engine for a **SEEDLESS** identity (seed-drop S4): no account master seed. The account
+    /// identity is the granted PUBLIC bundle; this device authors + opens under its own device key plus
+    /// the account-signed credential. Two sub-states, both handled here:
+    ///   - **linked** (`seedless.account_bundle` present): `new_seedless(account_bundle, device_seed)`,
+    ///     ingest the primary-signed roster wire verbatim (A3), run with the granted self-sync key.
+    ///   - **linking** (bundle not yet granted): a provisional engine under the device's own bundle so
+    ///     the transport comes up and the frame-28 request can be sent; it flips to linked on frame-29.
+    /// `register_device` + push registration are always SKIPPED (A1: only the primary authors a roster).
+    pub fn new_seedless(paths: Paths) -> Result<Arc<Self>> {
+        let roster = crate::roster::DeviceRoster::load(&paths);
+        let seedless = crate::roster::Seedless::load(&paths);
+        // Linked: the real account bundle; linking: a placeholder (the device's own bundle) so the
+        // constructor's invariants hold — it's never used to seal real content before the relaunch.
+        let account_bundle = if seedless.account_bundle.len() >= 32 {
+            seedless.account_bundle.clone()
+        } else {
+            roster.device_bundle()
+        };
+        let social = HavenSocial::new_seedless(account_bundle, roster.device_seed.clone())
+            .map_err(|e| anyhow::anyhow!("HavenSocial::new_seedless: {e}"))?;
+        if let Some(state) = store::read_state(&paths) {
+            social.import_state(state);
+        }
+        // Rebroadcast the primary's roster wire VERBATIM (A3) — installs our credential + capability
+        // trailer without re-signing (a seedless device cannot mint a roster).
+        if seedless.linked && !seedless.roster_wire.is_empty() {
+            let _ = social.ingest_roster_wire(seedless.roster_wire.clone());
+        }
+        let prefs = Prefs::load(&paths);
+        let media = LocalMedia::new(paths.media_dir());
+        let scheduled = crate::scheduled::ScheduledStore::load(&paths.scheduled_file());
+        // NB: NO register_device — the primary is the sole roster authority (guarded in-core too, but
+        // we never even call it here). The transport still binds to the device seed in `start()`.
+        let dyn_state = DynState {
+            seen_mailbox: std::fs::read_to_string(paths.root.join("mailbox-seen.txt"))
+                .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
+                .unwrap_or_default(),
+            notified: std::fs::read_to_string(paths.root.join("notified.txt"))
+                .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
+                .unwrap_or_default(),
+            media_backed_up: std::fs::read_to_string(paths.root.join("media-backed-up.txt"))
+                .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
+                .unwrap_or_default(),
+            ..DynState::default()
+        };
+        Ok(Arc::new(Self {
+            seed: None,
+            social,
+            paths,
+            media,
+            app: StdMutex::new(None),
+            node: StdMutex::new(None),
+            relay_host: StdMutex::new(None),
+            prefs: StdMutex::new(prefs),
+            dyn_state: StdMutex::new(dyn_state),
+            scheduled: StdMutex::new(scheduled),
+            roster: StdMutex::new(roster),
+            seedless: StdMutex::new(seedless),
+            enroll_tickets: StdMutex::new(Vec::new()),
+            enroll_requests: StdMutex::new(Vec::new()),
+            sched_counter: std::sync::atomic::AtomicU64::new(0),
+            relay_clients: TokioMutex::new(HashMap::new()),
+            relay_health: StdMutex::new(HashMap::new()),
+            s3: TokioMutex::new(None),
+            http: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(4))
+                .build()
+                .unwrap_or_default(),
+            http_url_bad: StdMutex::new(HashMap::new()),
+            seen_relay: StdMutex::new(std::collections::HashSet::new()),
+            media_purged: StdMutex::new(std::collections::HashSet::new()),
+        }))
+    }
+
+    /// True on a seedless device (no account master seed). Drives the enroll / self-sync-grant flow.
+    pub fn is_seedless(&self) -> bool {
+        self.seed.is_none()
+    }
+
+    /// (seedless, linked, linking) for the UI — `linking` = seedless but the grant hasn't landed yet.
+    pub fn seedless_status(&self) -> (bool, bool, bool) {
+        let seedless = self.is_seedless();
+        let linked = self.seedless.lock().unwrap().linked;
+        (seedless, linked, seedless && !linked)
+    }
+
+    /// The self-sync key: derived from the account seed on a primary/legacy device, or the granted
+    /// 32-byte key on a seedless device. `None` on a seedless device whose grant hasn't landed yet.
+    fn self_sync_key(&self) -> Option<[u8; 32]> {
+        match &self.seed {
+            Some(seed) => Some(haven_p2p::identity::Identity::from_seed(seed).self_sync_key()),
+            None => self.seedless.lock().unwrap().self_sync_key32(),
+        }
     }
 
     pub fn set_app(&self, app: AppHandle) {
@@ -332,17 +504,24 @@ impl Engine {
         self.social.my_node_hex()
     }
 
+    /// The account's reach-me `HavenLink`, derived from its PUBLIC bundle. Works without the account
+    /// seed (a seedless device shares the same account id), so it's built from the bundle either way.
+    fn reach_link(&self) -> Option<haven_p2p::link::HavenLink> {
+        let bundle = self.account_bundle();
+        if bundle.len() < 32 {
+            return None;
+        }
+        let id = haven_p2p::identity::HavenId::from_bytes(&bundle).ok()?;
+        Some(haven_p2p::link::HavenLink::from_identity(&id))
+    }
+
     pub fn invite_uri(&self) -> String {
-        let base = Account::from_seed(self.seed.to_vec())
-            .map(|a| a.haven_uri())
-            .unwrap_or_default();
+        let base = self.reach_link().map(|l| l.to_uri()).unwrap_or_default();
         self.embed_invite_hints(base)
     }
 
     pub fn invite_link(&self, domain: &str) -> String {
-        let base = Account::from_seed(self.seed.to_vec())
-            .map(|a| a.haven_link(domain.to_string()))
-            .unwrap_or_default();
+        let base = self.reach_link().map(|l| l.to_web(domain)).unwrap_or_default();
         self.embed_invite_hints(base)
     }
 
@@ -537,6 +716,9 @@ impl Engine {
                 self.dyn_state.lock().unwrap().started = true;
                 self.emit_changed();
                 self.sync_with_contacts();
+                // Seedless LINKING device: fire the frame-28 request now that the transport is up (the
+                // mailbox loop keeps re-sending until the grant lands).
+                self.send_seedless_enroll_request();
                 self.poll_mailbox().await;
                 self.request_missing_media();
             }
@@ -619,6 +801,9 @@ impl Engine {
                     }
                 };
                 if sync_due {
+                    // Seedless LINKING device: keep re-sending frame-28 until the primary grants (the
+                    // handshake is idempotent; the primary de-dups a pending request by device hex).
+                    me.send_seedless_enroll_request();
                     me.request_missing_media();
                     me.mesh_sync().await;
                     me.reannounce_own_relay();
@@ -808,13 +993,23 @@ impl Engine {
     // ---- Multi-device roster (iOS/Android parity; the signed-credential crypto is in the shared core) ----
 
     fn account_bundle(&self) -> Vec<u8> {
-        haven_ffi::Account::from_seed(self.seed.to_vec()).map(|a| a.public_bundle()).unwrap_or_default()
+        match &self.seed {
+            Some(seed) => haven_ffi::Account::from_seed(seed.to_vec()).map(|a| a.public_bundle()).unwrap_or_default(),
+            // Seedless: the account PUBLIC bundle was granted + persisted; `my_bundle()` also returns it
+            // (me_pub) once the engine booted linked, but the persisted copy is the source of truth.
+            None => {
+                let b = self.seedless.lock().unwrap().account_bundle.clone();
+                if b.len() >= 32 { b } else { self.social.my_bundle() }
+            }
+        }
     }
 
-    /// Sign + push the current roster to the engine, then persist.
+    /// Sign + push the current roster to the engine, then persist. A1: only a seed-holding primary
+    /// signs a roster — a seedless device is never the authority and never reaches here.
     fn push_roster(self: &Arc<Self>) {
+        let Some(seed) = self.seed else { return };
         let now = now_ms() / 1000;
-        let signed = self.roster.lock().unwrap().resign(&self.seed, now);
+        let signed = self.roster.lock().unwrap().resign(&seed, now);
         if let Some((list, creds)) = signed {
             self.social.set_my_device_roster(list, creds);
         }
@@ -864,8 +1059,9 @@ impl Engine {
     }
 
     /// I hold the master seed → authorize the requesting device: issue its credential, add it to my
-    /// signed roster, and send the grant back.
+    /// signed roster, and send the grant back. Legacy (type 24/25) path — seedless links use 28/29.
     fn handle_enrollment_request(self: &Arc<Self>, payload: &[u8]) {
+        let Some(seed) = self.seed else { return }; // A1: only a seed-holder authorizes
         let mut r = wire::Reader::new(payload);
         let Some(bundle) = r.lp() else { return };
         let name = r.lp().map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_else(|| "Device".into());
@@ -881,7 +1077,7 @@ impl Engine {
         let cred = {
             let mut rr = self.roster.lock().unwrap();
             rr.enable(&account_bundle, &account_hex);
-            rr.add_linked_device(&bundle, &hex, &name, &self.seed, now)
+            rr.add_linked_device(&bundle, &hex, &name, &seed, now)
         };
         let Some(cred) = cred else { return };
         self.push_roster();
@@ -910,6 +1106,334 @@ impl Engine {
     pub fn device_roster_dto(&self) -> (bool, bool, Vec<crate::roster::RosterDeviceDto>) {
         let r = self.roster.lock().unwrap();
         (r.is_enabled(), r.is_authorized(), r.devices(&self.node_id_hex()))
+    }
+
+    // ---- seedless enrollment (seed-drop S4, plan §3/§4) --------------------------------------
+    //
+    // Frames 28 (SEEDLESS_ENROLL_REQ) / 29 (SEEDLESS_ENROLL_GRANT) mirror the legacy 24/25 rails but
+    // carry self-authenticating bytes: the request is MAC'd under the one-time ticket secret (no seed
+    // to already "be" the account), and the grant carries everything a seedless device needs
+    // (credential + verbatim roster + sealed self-sync key). The whole request/grant body IS the core
+    // `enroll_*_wire` — no extra desktop framing.
+
+    /// PRIMARY: mint a `haven-enroll:` ticket for a new seedless device. Requires the account seed +
+    /// an enabled roster (this device must actually be the primary authority). Returns the QR/copy text.
+    pub fn mint_enroll_ticket(self: &Arc<Self>) -> Result<String> {
+        let Some(_seed) = self.seed else {
+            return Err(anyhow::anyhow!("this device holds no account seed — a seedless device can't authorize links"));
+        };
+        // Ensure this device is registered as the primary (idempotent) so its roster exists to grant.
+        {
+            let bundle = self.account_bundle();
+            let hex = self.node_id_hex();
+            self.roster.lock().unwrap().enable(&bundle, &hex);
+        }
+        self.push_roster();
+        let account_bundle = self.account_bundle();
+        // The primary's DEVICE transport id — the directed dial target the new device sends frame-28 to.
+        let primary_device = hex_to_bytes32(&self.social.my_device_node_hex())
+            .ok_or_else(|| anyhow::anyhow!("no device transport id"))?;
+        let relays = self.active_relay_hexes();
+        let now = now_ms() / 1000;
+        let ticket = haven_ffi::enroll::enroll_issue_ticket(account_bundle, primary_device, now, relays)
+            .map_err(|e| anyhow::anyhow!("issue ticket: {e}"))?;
+        // Remember the secret so a frame-28 request can be verified against it (single-use, 10-min TTL).
+        let secret: [u8; 32] = ticket.secret.clone().try_into().map_err(|_| anyhow::anyhow!("bad secret"))?;
+        {
+            let mut t = self.enroll_tickets.lock().unwrap();
+            t.retain(|p| now.saturating_sub(p.issued_at) < 600 && !p.consumed); // prune stale/used
+            t.push(PendingEnrollTicket { secret, issued_at: now, consumed: false });
+        }
+        haven_ffi::enroll::enroll_ticket_encode(ticket).map_err(|e| anyhow::anyhow!("encode ticket: {e}"))
+    }
+
+    /// Active relay node hexes (bootstrap relays carried in the ticket + grant, so the new device can
+    /// reach the primary's self-sync slot). Excludes S3 pseudo-relays (not iroh-dialable by hex).
+    fn active_relay_hexes(&self) -> Vec<String> {
+        let prefs = self.prefs.lock().unwrap();
+        let mut out: Vec<String> = prefs
+            .relays
+            .values()
+            .flatten()
+            .filter(|h| prefs.relay_is_active(h) && !h.starts_with("s3:"))
+            .cloned()
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// PRIMARY: a frame-28 request arrived. Verify its MAC + freshness against every live ticket; on
+    /// success stash it as a pending request and surface a confirm sheet to the UI (only the user's
+    /// explicit approval issues the grant). `sender_device` is the authenticated transport id.
+    fn handle_seedless_enroll_request(self: &Arc<Self>, sender_device: Option<&str>, wire: &[u8]) {
+        if self.seed.is_none() {
+            return; // only a seed-holding primary answers (a seedless device ignores 28)
+        }
+        let now = now_ms() / 1000;
+        let secrets: Vec<[u8; 32]> = {
+            let mut t = self.enroll_tickets.lock().unwrap();
+            t.retain(|p| now.saturating_sub(p.issued_at) < 600 && !p.consumed);
+            t.iter().map(|p| p.secret).collect()
+        };
+        for secret in secrets {
+            let Ok(req) = haven_ffi::enroll::enroll_verify_request(secret.to_vec(), wire.to_vec(), now, 600) else {
+                continue;
+            };
+            // Derive the requester's transport hex from its bundle (fallback: the authenticated sender).
+            let device_hex = wire::node_hex(&req.device_bundle);
+            let device_hex = if device_hex.len() == 64 {
+                device_hex
+            } else {
+                sender_device.unwrap_or_default().to_lowercase()
+            };
+            {
+                let mut reqs = self.enroll_requests.lock().unwrap();
+                if reqs.iter().any(|r| r.device_hex == device_hex) {
+                    return; // already pending confirm — ignore the resend
+                }
+                reqs.push(PendingEnrollRequest {
+                    device_bundle: req.device_bundle.clone(),
+                    device_hex: device_hex.clone(),
+                    name: req.name.clone(),
+                    secret,
+                });
+            }
+            if let Some(app) = self.app.lock().unwrap().clone() {
+                let _ = app.emit(
+                    "haven:enroll-request",
+                    serde_json::json!({ "deviceHex": device_hex, "name": req.name }),
+                );
+            }
+            self.emit_changed();
+            return; // matched one ticket; done
+        }
+    }
+
+    /// PRIMARY-side UI query: the seedless-enroll requests awaiting the user's confirm.
+    pub fn enroll_pending(&self) -> Vec<(String, String)> {
+        self.enroll_requests.lock().unwrap().iter().map(|r| (r.device_hex.clone(), r.name.clone())).collect()
+    }
+
+    /// PRIMARY: the user CONFIRMED a pending seedless-enroll request → issue the credential, union the
+    /// device into the roster, seal the self-sync-key grant, send frame-29 to the requester, and push
+    /// full state (self-sync slot) so the new device can prime its base.
+    pub fn approve_enroll(self: &Arc<Self>, device_hex: String) -> Result<()> {
+        let Some(seed) = self.seed else {
+            return Err(anyhow::anyhow!("no account seed"));
+        };
+        let req = {
+            let mut reqs = self.enroll_requests.lock().unwrap();
+            let idx = reqs.iter().position(|r| r.device_hex.eq_ignore_ascii_case(&device_hex));
+            match idx {
+                Some(i) => reqs.remove(i),
+                None => return Err(anyhow::anyhow!("no such pending enrollment")),
+            }
+        };
+        let now = now_ms() / 1000;
+        // 1. Union the device into my signed roster (the existing register/resign path).
+        {
+            let bundle = self.account_bundle();
+            let hex = self.node_id_hex();
+            let mut rr = self.roster.lock().unwrap();
+            rr.enable(&bundle, &hex);
+            let _ = rr.add_linked_device(&req.device_bundle, &req.device_hex, &req.name, &seed, now);
+        }
+        self.push_roster();
+        // 2. The primary-signed roster WIRE, verbatim (incl. capability trailer) — rides the grant (A3).
+        let roster_wire = self.social.my_device_roster_wire();
+        let relays = self.active_relay_hexes();
+        // 3. Assemble frame-29: credential + verbatim roster + sealed self-sync grant, all MAC'd.
+        let grant = haven_ffi::enroll::enroll_assemble_grant(
+            seed.to_vec(),
+            req.secret.to_vec(),
+            req.device_bundle.clone(),
+            req.name.clone(),
+            now,
+            roster_wire,
+            relays,
+        )
+        .map_err(|e| anyhow::anyhow!("assemble grant: {e}"))?;
+        // 4. Send the grant directed to the requesting device (both rails: directed + roster-expanded).
+        self.send_frame(wire::SEEDLESS_ENROLL_GRANT, &grant, &req.device_hex);
+        // 5. Consume the ticket (single-use).
+        {
+            let mut t = self.enroll_tickets.lock().unwrap();
+            for p in t.iter_mut() {
+                if p.secret == req.secret {
+                    p.consumed = true;
+                }
+            }
+        }
+        // 6. Push full state so the new device can prime its self-sync base from my pushed slot.
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move {
+            me.poll_self_sync().await;
+        });
+        self.emit_changed();
+        Ok(())
+    }
+
+    /// PRIMARY: the user DISMISSED a pending seedless-enroll request.
+    pub fn reject_enroll(self: &Arc<Self>, device_hex: String) {
+        self.enroll_requests.lock().unwrap().retain(|r| !r.device_hex.eq_ignore_ascii_case(&device_hex));
+        self.emit_changed();
+    }
+
+    /// NEW DEVICE: (re)send the frame-28 request to the primary, using the pending ticket. Broadcast on
+    /// both rails — directed iroh to the primary's device id AND the account id (roster-expanded) — so
+    /// whichever path resolves reaches the primary. No-op once linked or without a pending ticket.
+    fn send_seedless_enroll_request(self: &Arc<Self>) {
+        let ticket = {
+            let s = self.seedless.lock().unwrap();
+            if s.linked {
+                return;
+            }
+            s.pending_ticket.clone()
+        };
+        let Some(ticket) = ticket else { return };
+        let device_bundle = self.roster.lock().unwrap().device_bundle();
+        let name = crate::roster::DeviceRoster::device_name();
+        let now = now_ms() / 1000;
+        let Ok(req) = haven_ffi::enroll::enroll_build_request(ticket.secret.clone(), device_bundle, name, now) else {
+            return;
+        };
+        let primary_device = bytes_to_hex(&ticket.primary_device);
+        if primary_device.len() == 64 {
+            self.send_frame(wire::SEEDLESS_ENROLL_REQ, &req, &primary_device);
+        }
+        // Also address the account id (the send-frame layer expands it to authorized device ids).
+        let account_hex = bytes_to_hex(&ticket.account_id);
+        if account_hex.len() == 64 && account_hex != primary_device {
+            self.send_frame(wire::SEEDLESS_ENROLL_REQ, &req, &account_hex);
+        }
+    }
+
+    /// NEW DEVICE: a frame-29 grant arrived. Open it against the pending ticket (all-positive: MAC,
+    /// account tamper, credential-names-me, roster authorizes me, self-sync grant opens). On success:
+    /// persist EVERYTHING, initialize the self-sync base from the primary's pushed slot BEFORE any
+    /// local diff (the absence-as-deletion guard), then signal the frontend to relaunch into seedless
+    /// mode. A partial/failed grant is a no-op — the device stays linking (idempotent, re-scannable).
+    async fn handle_seedless_enroll_grant(self: &Arc<Self>, wire: &[u8]) {
+        // Only a linking device accepts a grant, and only once.
+        let (ticket, device_seed) = {
+            let s = self.seedless.lock().unwrap();
+            if s.linked {
+                return;
+            }
+            let Some(t) = s.pending_ticket.clone() else { return };
+            (t, self.roster.lock().unwrap().device_seed.clone())
+        };
+        let ticket_ffi = haven_ffi::enroll::EnrollTicketFfi {
+            account_id: ticket.account_id.clone(),
+            verification: ticket.verification.clone(),
+            secret: ticket.secret.clone(),
+            primary_device: ticket.primary_device.clone(),
+            issued_at: ticket.issued_at,
+            relays: ticket.relays.clone(),
+        };
+        let grant = match haven_ffi::enroll::enroll_open_grant(device_seed, ticket_ffi, wire.to_vec()) {
+            Ok(g) => g,
+            Err(e) => {
+                log::warn!("seedless enroll grant rejected: {e}");
+                return; // stay in linking mode — re-scannable
+            }
+        };
+        // Persist the granted credential (roster credential store).
+        {
+            let mut rr = self.roster.lock().unwrap();
+            rr.credential = Some(grant.credential.clone());
+            let _ = rr.save(&self.paths);
+        }
+        // Persist the seedless identity state (0600). This is the ONLY writer of these secrets.
+        {
+            let mut s = self.seedless.lock().unwrap();
+            s.enabled = true;
+            s.linked = true;
+            s.account_bundle = grant.account_bundle.clone();
+            s.self_sync_key = grant.self_sync_key.clone();
+            s.roster_wire = grant.roster_wire.clone();
+            // Union the ticket's relays with the grant's so we can reach the primary's slot.
+            let mut relays = ticket.relays.clone();
+            for r in &grant.relays {
+                if !relays.contains(r) {
+                    relays.push(r.clone());
+                }
+            }
+            s.relays = relays.clone();
+            s.pending_ticket = None;
+            let _ = s.save(&self.paths);
+        }
+        // Adopt the grant's relays into prefs so the self-sync transport can reach the primary's slot.
+        self.adopt_bootstrap_relays(&grant.relays).await;
+        // Install the verbatim roster so we rebroadcast it (A3) — even before the relaunch.
+        if !grant.roster_wire.is_empty() {
+            let _ = self.social.ingest_roster_wire(grant.roster_wire.clone());
+        }
+        // *** Absence-as-deletion guard *** — initialize the self-sync base from the primary's pushed
+        // slot BEFORE any local diff/push runs, so a freshly-empty engine never tombstones the account's
+        // circles/contacts (plan §7). Uses the granted key (equals the account self-sync key).
+        if let Some(key) = grant.self_sync_key.clone().try_into().ok() {
+            self.prime_self_sync_base(key).await;
+        }
+        log::info!("seedless enrollment complete — device credentialed under account {}", &wire::node_hex(&grant.account_bundle));
+        if let Some(app) = self.app.lock().unwrap().clone() {
+            let _ = app.emit("haven:enrolled", ());
+        }
+        self.emit_changed();
+    }
+
+    /// Adopt bootstrap relay node hexes into prefs (best-effort) so a freshly-enrolled seedless device
+    /// has a self-sync transport before its first pass. Idempotent.
+    async fn adopt_bootstrap_relays(self: &Arc<Self>, relays: &[String]) {
+        for hex in relays {
+            if hex.len() != 64 || hex.starts_with("s3:") {
+                continue;
+            }
+            let _ = self.adopt_relay(hex.clone()).await;
+        }
+    }
+
+    /// Pull the account's self-sync slots (opened with `self_key`), merge them, apply locally, and
+    /// WRITE the converged state as the self-sync base — all BEFORE any local diff. This is the ordered
+    /// grant-acceptance step that stops a just-enrolled empty device from tombstoning the account.
+    async fn prime_self_sync_base(self: &Arc<Self>, self_key: [u8; 32]) {
+        use haven_p2p::selfsync::{slot_prefix, AccountState};
+        let account_hex = wire::node_hex(&self.account_bundle());
+        if account_hex.len() != 64 {
+            return;
+        }
+        let transports = self.gather_self_sync_transports().await;
+        if transports.is_empty() {
+            return; // no relay/bucket yet — the loop will prime on the first pass with the base guard
+        }
+        let mut base = AccountState::default();
+        let prefix = format!("haven/{}", slot_prefix(&account_hex));
+        let mut got_any = false;
+        for t in &transports {
+            for key in self.self_sync_list(t, &prefix).await {
+                let Some(blob) = self.self_sync_fetch(t, &key).await else { continue };
+                if let Ok(peer) = AccountState::open(&self_key, &blob) {
+                    base.merge(&peer);
+                    got_any = true;
+                }
+            }
+        }
+        if !got_any {
+            return; // nothing pushed yet; the loop's empty-base guard keeps the first pass additive
+        }
+        // Apply the primary's converged state locally (circles/contacts/settings) + persist as the base.
+        let entries: Vec<(String, Vec<u8>)> =
+            base.entries().map(|(k, v)| (k.to_string(), v.to_vec())).collect();
+        {
+            let mut prefs = self.prefs.lock().unwrap();
+            if crate::selfsync::apply_local(&entries, &mut prefs, &self.social) {
+                let _ = prefs.save(&self.paths);
+            }
+        }
+        self.persist();
+        let _ = std::fs::write(self.paths.selfsync_state_file(), base.to_bytes());
+        log::info!("seedless self-sync base primed from primary slot ({} keys)", entries.len());
     }
 
     // ---- circles ------------------------------------------------------------------------
@@ -1577,7 +2101,10 @@ impl Engine {
     /// a private, local decision to stop seeing someone, and it stays on the device. `action` is
     /// report-only server-side, so a block is unrepresentable here by construction.
     fn moderation_report(&self, subject: String, reason: String) {
-        let Some(body) = flag_body(&self.seed, &subject, &reason, now_ms() / 1000) else {
+        // The moderation flag is signed with the account identity key. A seedless device holds no
+        // account seed, so it can't sign one (the primary owns this, like push registration — S6).
+        let Some(seed) = self.seed else { return };
+        let Some(body) = flag_body(&seed, &subject, &reason, now_ms() / 1000) else {
             return;
         };
         let http = self.http.clone();
@@ -2062,6 +2589,8 @@ impl Engine {
                 | wire::SDP_OFFER | wire::SDP_ANSWER | wire::ICE => me.handle_call(t, &body),
                 wire::DEVICE_ENROLL => me.handle_enrollment_request(&body),
                 wire::DEVICE_GRANT => me.handle_device_grant(&body),
+                wire::SEEDLESS_ENROLL_REQ => me.handle_seedless_enroll_request(sender_device.as_deref(), &body),
+                wire::SEEDLESS_ENROLL_GRANT => me.handle_seedless_enroll_grant(&body).await,
                 wire::DEVICE_ROSTER => me.handle_device_roster_announce(&body),
                 wire::RELAY => me.handle_relay(&body),
                 _ => log::debug!("ignoring frame type {t} (not yet handled)"),
@@ -3351,7 +3880,16 @@ impl Engine {
     /// media-v1", info="", len=32) — byte-identical to the iOS CryptoKit derivation, so a chunk sealed on
     /// the PC opens on the iPhone and vice-versa.
     fn own_media_key(&self) -> [u8; 32] {
-        let hk = hkdf::Hkdf::<Sha256>::new(Some(b"haven-own-media-v1"), &self.seed);
+        // Primary/legacy: IKM = account seed (every own device derives the identical key). Seedless: no
+        // account seed, so IKM = the granted self-sync key (also account-derived + shared by all the
+        // account's devices via the grant). NB: a seedless device's own-media key won't match a
+        // seed-holding sibling's — cross-open of THIS legacy own-media path degrades on seedless; the
+        // seed-drop C7 device-bundle sealing is the real cross-device media path there. (S4 follow-on.)
+        let ikm: Vec<u8> = match &self.seed {
+            Some(seed) => seed.to_vec(),
+            None => self.self_sync_key().map(|k| k.to_vec()).unwrap_or_default(),
+        };
+        let hk = hkdf::Hkdf::<Sha256>::new(Some(b"haven-own-media-v1"), &ikm);
         let mut okm = [0u8; 32];
         hk.expand(&[], &mut okm).expect("32 is a valid HKDF length");
         okm
@@ -3883,9 +4421,17 @@ impl Engine {
         }
         let declared = String::from_utf8_lossy(&body[..64]).to_lowercase();
         if declared != verified {
-            return; // proven sender must equal the self-declared `from`
+            // D9: a SEEDLESS sender signs call frames with its DEVICE key, so the proven signer is the
+            // device id while the body's `from` is the account id. Accept when the verified device
+            // resolves (via the verified roster) to the declared account — otherwise it's a forgery.
+            match self.social.account_for_device(verified.clone()) {
+                Some(acct) if acct.eq_ignore_ascii_case(&declared) => {}
+                _ => return, // proven sender must equal, or speak for, the self-declared `from`
+            }
         }
-        if self.prefs.lock().unwrap().blocked.contains(&verified) {
+        // Block by ACCOUNT id (`declared`), which for a device-signed frame is the account behind the
+        // device, not the transient device hex.
+        if self.prefs.lock().unwrap().blocked.contains(&declared) {
             return;
         }
         let body = body.as_slice();
@@ -4141,7 +4687,6 @@ impl Engine {
     /// result locally, persist, and re-publish our own sealed slot. Coalesces if already running.
     /// No-op without any transport (a relay OR the user's S3 bucket).
     pub async fn poll_self_sync(self: &Arc<Self>) {
-        use haven_p2p::identity::Identity;
         use haven_p2p::selfsync::{slot_key, slot_prefix, AccountState, Stamp};
 
         // Coalesce concurrent passes (the 15s loop must never overlap itself).
@@ -4170,7 +4715,10 @@ impl Engine {
             return; // needs a relay OR an S3 bucket
         }
 
-        let self_key = Identity::from_seed(&self.seed).self_sync_key();
+        // The account-derived self-sync key: from the account seed on a primary, or the granted key on
+        // a seedless device (both are the same value account-wide, so a seedless device converges with
+        // its siblings). A seedless device that hasn't been granted the key yet can't self-sync.
+        let Some(self_key) = self.self_sync_key() else { return };
 
         // 1. Base = last converged state (or empty).
         let mut base = match std::fs::read(self.paths.selfsync_state_file()) {

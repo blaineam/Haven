@@ -451,6 +451,74 @@ pub fn step_down_as_primary(engine: Eng) {
     engine.step_down_as_primary();
 }
 
+// ---- seedless enrollment (seed-drop S4) ---------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct SeedlessStatusDto {
+    /// This device holds no account seed (runs seedless).
+    pub seedless: bool,
+    /// The enroll grant has been accepted — fully credentialed + operational.
+    pub linked: bool,
+    /// Still waiting on a grant (a scanned ticket, no credential yet).
+    pub linking: bool,
+}
+
+/// UI status for the seedless linking flow (drives the "waiting for your other device…" screen).
+#[tauri::command]
+pub fn seedless_status(engine: Eng) -> SeedlessStatusDto {
+    let (seedless, linked, linking) = engine.seedless_status();
+    SeedlessStatusDto { seedless, linked, linking }
+}
+
+/// NEW DEVICE: adopt a scanned/pasted `haven-enroll:` ticket, register a seedless identity, and
+/// relaunch into linking mode (the engine then handshakes with the primary). Legacy `haven-seed:` /
+/// raw-seed codes still go through `onboard_link` — this is the new, seedless link path.
+#[tauri::command]
+pub fn onboard_link_seedless(app: tauri::AppHandle, ticket: String) -> R<()> {
+    crate::engine::onboard_seedless(&ticket)?;
+    app.restart();
+}
+
+/// PRIMARY: mint a `haven-enroll:` ticket string (render as QR + copyable) for a new seedless device.
+#[tauri::command]
+pub fn enroll_mint_ticket(engine: Eng) -> R<String> {
+    engine.mint_enroll_ticket().map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize)]
+pub struct EnrollRequestDto {
+    pub device_hex: String,
+    pub name: String,
+}
+
+/// PRIMARY: the seedless-enroll requests awaiting the user's confirm.
+#[tauri::command]
+pub fn enroll_pending(engine: Eng) -> Vec<EnrollRequestDto> {
+    engine
+        .enroll_pending()
+        .into_iter()
+        .map(|(device_hex, name)| EnrollRequestDto { device_hex, name })
+        .collect()
+}
+
+/// PRIMARY: confirm a pending seedless-enroll request → issue the grant + push full state.
+#[tauri::command]
+pub fn enroll_approve(engine: Eng, device_hex: String) -> R<()> {
+    engine.approve_enroll(device_hex).map_err(|e| e.to_string())
+}
+
+/// PRIMARY: dismiss a pending seedless-enroll request.
+#[tauri::command]
+pub fn enroll_reject(engine: Eng, device_hex: String) {
+    engine.reject_enroll(device_hex);
+}
+
+/// NEW DEVICE: the grant landed (`haven:enrolled`) → relaunch so the engine rebuilds seedless-linked.
+#[tauri::command]
+pub fn finish_enroll(app: tauri::AppHandle) {
+    app.restart();
+}
+
 #[tauri::command]
 pub fn messages(engine: Eng, circle_id: String) -> Vec<FeedItemDto> {
     engine.maybe_purge_expired_media(&circle_id); // really drop expired DMs + GC their blobs (throttled)

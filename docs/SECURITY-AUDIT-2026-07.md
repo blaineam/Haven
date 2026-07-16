@@ -1008,9 +1008,9 @@ made to fail, it is marked RESOLVED **with the evidence that would have caught i
 | F1 | Critical | **RESOLVED** (documented residual) | Live `wrangler dev` + a 7-case forgery suite; KV dumped |
 | F2 | Critical | **RESOLVED** | The round-1 probe, now green: non-member 401/403, member 200 |
 | F3 | High | *out of round-2 scope for the push path;* call path = **new R1** | NSE known-contact check present; call signaling separately broken |
-| F4 | High | **RESOLVED for reads**, **reopened for devroster writes → R6** | Executable probe: non-member destroyed a roster over HTTP |
+| F4 | High | **RESOLVED** (reads + devroster writes; see R6) | Round-2 probe now green: stranger's roster PUT refused, signed enrollment 200 |
 | F5 | High | **RESOLVED** (real residuals) | `media_substitution` test green; legacy path traced on 3 platforms |
-| F7 | High (docs) | **PARTIAL** | Reporting section honest; new/remaining false claims → R2,R4,R5 |
+| F7 | High (docs) | **RESOLVED** | Reporting section honest; the follow-on false claims (R2/R4/R5) are now all resolved |
 | F8 | High (docs) | **RESOLVED** | "rendezvous tokens" gone; signed-auth doc text matches code |
 | F9 | High | **PARTIAL — as intended** | No TLS on non-loopback binds; confirmed still the honest state |
 | F10 | High | **RESOLVED** | Same signed-auth + `blob_forbidden` default-deny gate |
@@ -1024,13 +1024,13 @@ made to fail, it is marked RESOLVED **with the evidence that would have caught i
 
 | # | Finding | Severity | Blocks v1? |
 |---|---|---|---|
-| R1 | WebRTC call signaling is unauthenticated **and** unsealed → spoofed call control + SDP/DTLS-SRTP MITM | **High** | **Yes** |
-| R2 | `SECURITY.md` still calls device-roster-change revocation "cryptographic, not advisory" — false | **High** (docs) | **Yes** |
-| R3 | Android + desktop still tell a user a revoked device "will no longer receive anything posted afterward" | **Med-High** (UI) | **Yes** |
-| R4 | `TERMS.md` says the developer "cannot tell who reported whom"; the actor **is** transmitted | **Medium** (docs) | Yes (legal doc) |
-| R5 | `appstore-metadata.md` says reporting "is not technically possible"; the `/flag` ledger ships | **Medium** (docs) | Yes (review copy) |
-| R6 | Non-member can destroy/fabricate any account's device roster over plain HTTP (proven) | **Med** | Recommended |
-| R7 | `haven-wasm` is dead code but exports `seed_hex()` and advises `localStorage` — delete the crate | **Info** | No |
+| R1 | WebRTC call signaling is unauthenticated **and** unsealed → spoofed call control + SDP/DTLS-SRTP MITM | **High** | ~~Yes~~ **RESOLVED** |
+| R2 | `SECURITY.md` still calls device-roster-change revocation "cryptographic, not advisory" — false | **High** (docs) | ~~Yes~~ **RESOLVED** |
+| R3 | Android + desktop still tell a user a revoked device "will no longer receive anything posted afterward" | **Med-High** (UI) | ~~Yes~~ **RESOLVED** |
+| R4 | `TERMS.md` says the developer "cannot tell who reported whom"; the actor **is** transmitted | **Medium** (docs) | ~~Yes~~ **RESOLVED** |
+| R5 | `appstore-metadata.md` says reporting "is not technically possible"; the `/flag` ledger ships | **Medium** (docs) | ~~Yes~~ **RESOLVED** |
+| R6 | Non-member can destroy/fabricate any account's device roster over plain HTTP (proven) | **Med** | ~~Recommended~~ **RESOLVED** |
+| R7 | `haven-wasm` is dead code but exports `seed_hex()` and advises `localStorage` — delete the crate | **Info** | ~~No~~ **RESOLVED** |
 
 ---
 
@@ -1139,6 +1139,39 @@ fan-out; worsened by mesh anti-entropy potentially propagating the clobber.
 `verify_devroster(account_from_key, &body)` and refuse (`400`) if it fails — exactly what the iroh path
 does at `blobstore.rs:696`. Do not rely on `blob_forbidden` un-gating a verb whose safety lives in a
 verifier the HTTP path never invokes.
+
+### RESOLVED — the write is now verified on BOTH transports, with rollback defense
+
+A new write gate, `blobstore::verify_devroster_put(root, account, body)`, is the write-side twin of
+the read gate and fails closed the same way: it parses + hybrid-verifies the account-signed DeviceList
+in the body (via the existing `verify_devroster` machinery, now returning the `version` too) and
+returns `None` — REFUSE — for any unsigned, malformed, or wrong-account body. It also reads the roster
+already on disk and refuses a validly-signed but **strictly older** version, so a replayed stale roster
+can only lose (the roster flip-flop rollback rule from `DeviceList::adopt_if_newer`).
+
+The HTTP PUT path (`httprelay.rs`) now routes every `haven/devroster/<acct>` write through this gate
+before `local_put`, and — matching the iroh path — expands the account's membership from the verified
+device ids. The iroh path (`blobstore.rs handle_request`) had the *same* latent clobber (it renamed the
+blob over the target *before* verifying, verifying only to gate membership expansion); it now verifies
+**before** the rename too, so neither transport is a weaker boundary than the other.
+
+The round-2 probe is committed as a permanent regression test
+(`core/haven-net/tests/http_relay_probe.rs::devroster_write_requires_a_valid_account_signature`).
+Before/after:
+
+```
+BEFORE:  PUT /k/haven/devroster/deadbeef  → 200   (garbage renamed over a stranger's real roster)
+
+AFTER (probe output):
+  [ATTACK ] PUT /k/haven/devroster/deadbeef            -> 403   victim roster on disk: UNCHANGED
+  [ATTACK ] PUT /k/haven/devroster/0000…0000           -> 403   (fabricated roster not stored)
+  [LEGIT  ] PUT /k/haven/devroster/<acct> (v2, signed) -> 200   (enrollment still works)
+  [ROLLBACK] PUT /k/haven/devroster/<acct> (v1, stale) -> 403   (v2 survives the replay)
+  [LEGIT  ] PUT /k/haven/devroster/<acct> (v3, signed) -> 200   (roster genuinely advances)
+```
+
+The round-1 read probe (`audit_probe_is_refused_and_members_still_served`) stays green — the F2 read
+gate did not regress. `cargo test -p haven-net` passes; `cargo check --workspace` clean.
 
 ---
 
@@ -1282,6 +1315,40 @@ signaling end-to-end like posts — the SDP/ICE payload should be a `SealedEnvel
 relay can neither read candidate IPs nor rewrite the DTLS fingerprint. Until (b), the "sealed P2P
 channel" comment at `WebRTCCall.swift:22` must be corrected — it is the exact false-claim class as F7.
 
+**RESOLVED (2026-07-15).** Both properties landed, the strong form of each. Every call frame is now
+**sealed *and* signed to the recipient** before it leaves the device — one purpose-specific,
+domain-separated primitive reused from the existing signed-notification path, not a new crypto path
+and not a raw signing oracle (audit H3): `HavenSocial::seal_call_frame` / `open_call_frame`
+(`p2pcore-ffi/src/lib.rs`), the same `seal_media` + `sign` construction posts/notifications use.
+
+- **(b) SDP/fingerprint — the MITM.** The whole signaling body (SDP offer/answer, ICE, control) is
+  encrypted to the recipient's key, so a relay on the frame-9 path can neither read candidate IPs nor
+  rewrite the DTLS-SRTP fingerprint: a flipped byte fails the AEAD and the frame is dropped. Chose the
+  full seal over the signature-only minimum because it *also* closes the candidate-IP disclosure.
+- **(a) Authentication.** The recipient verifies an Ed25519 signature over
+  `domain ‖ recipient ‖ frame_type ‖ plaintext` against the *carried* sender bundle, then requires the
+  proven sender to equal the self-declared `from` prefix the handlers key on. This works **identically
+  on the direct and the frame-9 relay paths** — authentication now rests on the signature, not on a
+  transport id the relay path never had — so the "refuse relayed control frames unless origin-signed"
+  requirement is met by making *all* frames origin-signed. Binding `frame_type` blocks replay of a
+  captured offer as another control type; binding `recipient` blocks cross-user replay. As
+  defense-in-depth, the direct path additionally cross-checks the transport id via `account_for_device`.
+- **No downgrade.** There is deliberately **no plaintext fallback**: if sealing fails nothing is sent,
+  and an unsealed/legacy frame is refused on receipt, so a relay cannot strip the seal to force the old
+  spoofable/rewritable form.
+- **Group calls.** Frames are per-recipient already (`sendCallFrame(..., to: peer)`), so a mesh group
+  call seals one frame per pairwise peer — covered exactly like a 1:1.
+- **The false comment** (`WebRTCCall.swift`, `CallManager.swift`, `knownContact`) is corrected on every
+  platform: it now describes the seal + signature accurately.
+
+Shipped on all four surfaces (iOS/macOS `FeedStore.sendCallFrame` + `handleInbound`, Android
+`CallManager` send/handle, desktop `engine.rs` `send_call_frame` + `handle_call`). Proven dead by
+`call_frame_seal_defeats_relay_mitm` (`p2pcore-ffi/src/lib.rs`), which exercises the frame-9 relay
+path specifically: a genuine signed offer is ACCEPTED with Alice's real fingerprint; a relay-rewritten
+offer, a Mallory-forged offer claiming to be Alice, an offer replayed as another type, a wrong-recipient
+frame, and a legacy unsealed frame are each REJECTED. `cargo test -p haven_ffi` green (13/13); iOS +
+macOS + Android + desktop all build. Live 1:1/group call is build-verified only in this environment.
+
 ---
 
 ## R2 — HIGH (docs): SECURITY.md still calls device-roster revocation "cryptographic, not advisory"
@@ -1297,6 +1364,14 @@ genuinely cryptographic (the account key leaves the set); *device* revocation is
 conflates them. **Fix:** scope the claim to member removal; state device revocation is advisory until
 the D16 seed-drop, matching `device.rs:367-374`.
 
+**RESOLVED 2026-07-15.** `docs/SECURITY.md:24-28` rewritten into two bullets: member removal/block is
+labelled cryptographic (unchanged truth), and a new bullet states device-roster revocation is
+**advisory, not cryptographic** — because `recipients_with_devices` **always** also seals to the account
+key (`core/p2pcore/src/device.rs:358-363`) and a linked device holds a copy of the master seed, so a
+revoked-but-seed-holding device keeps decrypting; made cryptographic only by the unbuilt D16 seed-drop
+(`core/p2pcore/src/device.rs:371-373`). "cryptographic revocation, not advisory" no longer appears for
+device changes.
+
 ## R3 — MED-HIGH (UI): Android + desktop still promise a revoked device is cut off
 
 186e25b fixed the Apple string only (`git show 186e25b --stat` = one file). Still shipping the promise:
@@ -1307,6 +1382,14 @@ the D16 seed-drop, matching `device.rs:367-374`.
 Both are false against every linked device today (all hold the seed). A user revoking a phone they
 believe was compromised reads a safety guarantee they do not have. **Fix:** port Apple's corrected copy
 (and its `revocationCaveat`) to both.
+
+**RESOLVED 2026-07-15.** Both revoke dialogs now mirror 186e25b's honest caveat: `SettingsScreen.kt:790`
+and `desktop/ui/app.js:2526` state revoking cuts off a **lost/stolen** device but cannot help against a
+device whose master key was extracted (linked devices hold a copy), and that the only remedy there is a
+new identity. Also corrected the parallel "revoke it at any time" role subtitles (`SettingsScreen.kt:731`,
+`app.js:2514` → "holds a copy of your master key and syncs with your primary device, which can revoke it")
+and the desktop devices footer's "each gets its own revocable key" (`app.js:2422`). Android + desktop
+compile clean.
 
 ## R4 — MEDIUM (docs): TERMS.md overstates "cannot tell who reported whom"
 
@@ -1321,6 +1404,14 @@ document that attaches service refusal and legal disclosure to these rows, the o
 **Fix:** change "cannot tell" to "does not retain, as a matter of code and policy", and cross-reference
 `SECURITY.md:99-104`.
 
+**RESOLVED 2026-07-15.** `docs/TERMS.md:43-47` rewritten: it now states the report is signed by the
+reporter's key (not forgeable / not re-aimable), that verifying the signature means the key **is
+transmitted** to the developer's server at report time, but is **not stored** — the saved record holds
+only `{subject, action, category}` (`push/worker.js:174`) and its key derives from a one-way hash of the
+signature (`worker.js:173`, `sigTag` `:298-301`), so the stored ledger carries "no record of who reported
+whom." The absolute "cannot tell who reported whom" is gone; the real-time transmission (`worker.js:158`
+actor in body, `:168` `verifyReg`) is now disclosed.
+
 ## R5 — MEDIUM (docs): appstore-metadata.md says reporting "is not technically possible"
 
 `appstore-metadata.md:61`: "there is no copy of user content to moderate or **to report to** —
@@ -1330,6 +1421,13 @@ says the opposite ("reporting exists and ships"). The 4178230 fix updated SECURI
 never touched this App-Review-facing file. (The same sentence's "a removed member… cannot decrypt
 anything posted afterward" is **true** for member removal, so leave that clause.) **Fix:** state that
 content-free reporting to the developer exists and is signed, matching `SECURITY.md:72`.
+
+**RESOLVED 2026-07-15.** `appstore-metadata.md:61` rewritten: server-side **content** scanning is stated
+impossible (no content leaves the device), but the copy now says user REPORTING **ships** — a circle-scoped
+report (`EventKind::Report` authored per-circle, `core/p2pcore-ffi/src/lib.rs:1960`, read via `reports()`
+`:1964`) plus a content-free, cryptographically signed developer notice carrying only the reported
+identity, action, and category, with the reporter's key verified but not stored. "reporting is not
+technically possible" is removed; the true member-removal-is-cryptographic clause is kept.
 
 ## R7 — INFO: haven-wasm is dead code with a seed-exfil footgun; delete it
 
@@ -1346,6 +1444,11 @@ revived. Round 1's premise that the transfer-code flow "advertises moving the se
 **Fix:** drop `haven-wasm` from `core/Cargo.toml` and delete the crate, removing the footgun before
 someone finds it.
 
+**RESOLVED 2026-07-15.** Crate directory `core/haven-wasm` deleted and its workspace member entry removed
+from `core/Cargo.toml`. Verified no dependents beyond that line (no Cargo.toml dep, no JS/wasm glue, no
+`.rs` reference). `cargo check --workspace` is clean. Note: `docs/WEB-PARITY.md:28` still describes the
+crate "as a vestige… candidate for removal" — now stale (out of this pass's scope; flag for a follow-up).
+
 ---
 
 ## Round-2 ship gate
@@ -1359,7 +1462,9 @@ someone finds it.
 2. **R2 + R3 + R4 + R5** — the revocation and reporting truth landed on some surfaces and not others.
    Every one of these is a public, load-bearing claim that the code contradicts. Cheapest category to
    fix, most damaging if a researcher finds it first (same reasoning as round-1 F7/F8).
-3. **R6** — close the HTTP devroster-PUT hole with `verify_devroster`; it reopens F4 for that namespace.
+3. **R6** — ~~close the HTTP devroster-PUT hole with `verify_devroster`; it reopens F4 for that
+   namespace.~~ **RESOLVED**: `verify_devroster_put` gates the write on BOTH transports (fail-closed +
+   rollback defense); the round-2 attack PUT now returns 403 while signed enrollment still lands 200.
 
 **Acceptable to ship with, tracked:** F5's legacy/self-downgrade residuals, F9's no-TLS partial, the F1
 sybil floor (documented), R7 (delete the dead crate).
@@ -1371,7 +1476,8 @@ ship. The blockers are the new call-signaling surface and the honesty gap betwee
 strings still promise and what the code does.
 
 **Honest confidence.** *High* on everything I executed — F1 (live forgery suite), F2/F4-reads (probe
-green), F4-writes/R6 (probe attack succeeded), video GPS (exiftool), F17 (`cargo tree`). *High* on R1,
+green), F4-writes/R6 (round-2 attack succeeded, then fixed — the attack PUT now 403), video GPS
+(exiftool), F17 (`cargo tree`). *High* on R1,
 R2, R3, R4, R5: R1 is a code-path traced end-to-end (send is raw, `senderDevice` is provably discarded
 for call frames, frame-9 drops it) and the others are direct doc/UI-vs-code contradictions I read on
 both sides. *High* on F11 (read completely). *Medium-high* on F5 (test green, legacy path reasoned not

@@ -222,11 +222,17 @@ Haven ships one version across every store. `release.yml` fails the build if it 
 See [`RELEASING.md`](RELEASING.md) for the scheme and the full checklist.
 
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) then builds and attaches
-to one GitHub Release:
+to one GitHub Release. **By policy the GitHub Release carries only the platforms that have no
+app store** — the Linux desktop app and the relay CLI. iOS/macOS (App Store), Android (Google
+Play) and Windows (Microsoft Store) are paid apps that ship through their stores and do **not**
+accumulate a Release history. (Windows/Android are still built by CI and are attached as a
+*stopgap* until their store listing is public — see [`RELEASING.md`](RELEASING.md#release-channels--what-goes-where)
+and the `PUBLISH_WINDOWS_TO_GH` / `PUBLISH_ANDROID_TO_GH` toggles.) On the Release you get:
 
 - **Relay** `haven-relay-<target>` for x86_64 / aarch64 / armv7 / armv6 (musl, via
-  `cargo-zigbuild`) + macOS — the exact assets `relay/install.sh` downloads — plus `.deb`s.
-- **Desktop** installers: Windows `.msi`/NSIS, Linux `.deb`/`.rpm`/AppImage.
+  `cargo-zigbuild`) + macOS + Windows — the exact assets `relay/install.sh` downloads — plus
+  `.deb`s. (The Windows relay `.exe` is a self-host CLI, not the Store app, so it stays here.)
+- **Linux desktop** installers: `.deb`/`.rpm`/AppImage.
 - **SteamOS** `haven.flatpak` **plus a version-pinned `com.blaineam.haven.yml`** (the real
   `.deb` `sha256` is computed and injected at release time, so building the Flatpak from the
   release manifest needs no manual pin). This is a **sideload** bundle — Haven is not on

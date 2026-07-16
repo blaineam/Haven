@@ -77,8 +77,12 @@ no SmartScreen warning.
 | `STORE_SELLER_ID` | Partner Center seller ID |
 
 The MSIX manifest is generated in CI from `desktop/msix/AppxManifest.xml.in` (nothing
-identity-specific is committed). The `.msix` is also attached to the GitHub Release as a
-sideloadable download.
+identity-specific is committed). The `.msix` is attached to the GitHub Release **only as a
+stopgap** while the Store listing isn't public yet: per Haven's channel policy the GitHub
+Release carries just the Linux app + relay CLI, so once the Store is live, set the repo
+variable `PUBLISH_WINDOWS_TO_GH = false` and the `.msi`/`.exe`/`.msix` stop riding the Release
+(the Store becomes the sole Windows channel). See
+[`RELEASING.md`](RELEASING.md#release-channels--what-goes-where).
 
 > **Note:** the MSIX/Store path is new and can't be fully exercised without a Partner Center
 > account, so expect to shake out the first tagged run (makeappx output, `msstore` flags, manifest

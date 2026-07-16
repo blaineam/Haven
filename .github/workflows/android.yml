@@ -11,8 +11,24 @@ name: android
 # (android/app/build.gradle.kts `release {}` has no signingConfig, so an unsigned assembleRelease
 # can't be installed — the debug fallback is what makes a no-secrets beta sideloadable.)
 #
-# Triggers: push to main (always-fresh link), workflow_dispatch, and `v*` tags (attached to the
-# GitHub Release alongside the desktop installers from release.yml).
+# Triggers: push to main (always-fresh link), workflow_dispatch, and `v*` tags.
+#
+# ── CHANNEL POLICY ─────────────────────────────────────────────────────────────────────────
+# Android is a *paid Google Play app*; its proper channel is Play, not a GitHub Release. We
+# always BUILD the APK/AAB (CI compile check + the Play-publish step consume them) and always
+# keep the APK as a CI artifact — the policy is only about what gets ATTACHED to the public
+# GitHub Release. Because the Play listing is not public yet (the AAB currently lands on the
+# INTERNAL track), removing Android from GH now would leave Android users no install path. So
+# the two "Attach … to the GitHub Release" steps below are gated on a repo variable that
+# defaults to ON:
+#
+#     PUBLISH_ANDROID_TO_GH   unset/anything ≠ "false"  → APK + AAB ride the Release (stopgap)
+#                             "false"                    → Android comes off GH (set this the day
+#                                                          the Google Play listing goes public)
+#
+# Set it at repo → Settings ▸ Secrets and variables ▸ Actions ▸ Variables. Rationale + the exact
+# trigger are in docs/RELEASING.md ("Release channels"). (Windows' equivalent toggle,
+# PUBLISH_WINDOWS_TO_GH, lives in release.yml.)
 
 on:
   push:
@@ -124,8 +140,11 @@ jobs:
           path: out/*.apk
           if-no-files-found: error
 
-      - name: Attach APKs to the GitHub Release (on v* tags)
-        if: startsWith(github.ref, 'refs/tags/v')
+      # CHANNEL POLICY (see file header): the APK only rides the GitHub Release as a stopgap
+      # until the Google Play listing is public. Flip PUBLISH_ANDROID_TO_GH=false to take it off.
+      # UNSET is the safe default so Android users aren't stranded before Play goes live.
+      - name: Attach APKs to the GitHub Release (on v* tags, until Play is public)
+        if: startsWith(github.ref, 'refs/tags/v') && vars.PUBLISH_ANDROID_TO_GH != 'false'
         uses: softprops/action-gh-release@v2
         with:
           files: out/*.apk
@@ -152,8 +171,11 @@ jobs:
           find app/build/outputs/bundle -name '*.aab' -exec cp {} ../out/ \;
           ls -la ../out
 
-      - name: Attach AAB to the GitHub Release (always — so it's downloadable for a manual Play upload)
-        if: startsWith(github.ref, 'refs/tags/v') && steps.keystore.outputs.have_keystore == 'true'
+      # CHANNEL POLICY (see file header): the AAB rides the Release only as a stopgap so it's
+      # downloadable for a manual Play upload while the listing isn't automated/public yet. Once
+      # Play is public + auto-publishing, set PUBLISH_ANDROID_TO_GH=false to keep it off GH.
+      - name: Attach AAB to the GitHub Release (stopgap for manual Play upload, until Play is public)
+        if: startsWith(github.ref, 'refs/tags/v') && steps.keystore.outputs.have_keystore == 'true' && vars.PUBLISH_ANDROID_TO_GH != 'false'
         uses: softprops/action-gh-release@v2
         with:
           files: out/*.aab

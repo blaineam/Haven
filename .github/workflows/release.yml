@@ -4,11 +4,32 @@ name: release
 # and publishes it to a single GitHub Release:
 #
 #   • haven-relay static binary  → x86_64 / aarch64 / armv7 / armv6 (musl) + macOS arm64/x86_64
-#     named `haven-relay-<target>` (exactly what relay/install.sh downloads) + .deb packages
+#     + Windows .exe, named `haven-relay-<target>` (exactly what relay/install.sh downloads) + .deb packages
 #   • Desktop installers          → Windows .msi + NSIS .exe, Linux .deb/.rpm/AppImage
 #   • SteamOS Flatpak bundle       → haven.flatpak (built from the freshly-built .deb)
 #   • A version-pinned Flatpak manifest (com.blaineam.haven.yml) with the real .deb sha256,
 #     so `flatpak-builder` against the release manifest Just Works.
+#
+# ── CHANNEL POLICY ─────────────────────────────────────────────────────────────────────────
+# The public GitHub Release is the download channel for ONLY the things that have no app store:
+# the **Linux desktop app** (.deb/.rpm/AppImage + haven.flatpak) and the **haven-relay CLI**
+# for every arch. The *paid* apps go through *proper* channels — iOS/macOS via the App Store,
+# Android via Google Play, Windows via the Microsoft Store — and must NOT accumulate a GitHub
+# Release history.
+#
+# We still BUILD the Windows GUI installers here (CI must verify they compile, and the
+# Microsoft-Store submit step consumes the MSIX) — the policy is only about what gets ATTACHED
+# to the public Release. Because the Microsoft Store listing does not exist yet, removing
+# Windows from GH before it's live would strand Windows users with no install path. So the
+# attach is governed by a repo variable and defaults to ON:
+#
+#     PUBLISH_WINDOWS_TO_GH   unset/anything ≠ "false"  → Windows installers ride the Release (stopgap)
+#                             "false"                    → Windows comes off GH (set this the day
+#                                                          the Microsoft Store listing goes public)
+#
+# The one-line flip lives in the `publish` job below; the rationale + the exact trigger are in
+# docs/RELEASING.md ("Release channels"). (Android's equivalent toggle is PUBLISH_ANDROID_TO_GH
+# in android.yml.)
 #
 # The tag drives the version: it's stamped into tauri.conf.json + the relay crate before build.
 # Cut a release by tagging:  git tag v0.1.0 && git push origin v0.1.0
@@ -261,7 +282,10 @@ jobs:
 
       # ── Microsoft Store: package an MSIX and submit it (Windows · tags · only when the Store
       #    secrets are set). Inert otherwise, so installer-only releases are untouched. The MSIX is
-      #    also dropped in out/ so it rides the GitHub Release as a sideloadable download.
+      #    also dropped in out/ — but per the CHANNEL POLICY (top of file) it only *rides the
+      #    GitHub Release* as a stopgap while PUBLISH_WINDOWS_TO_GH ≠ "false"; the `publish` job
+      #    strips it (and the .msi/.exe) once the Microsoft Store listing is live. It is always
+      #    submitted to the Store here and always kept as the `desktop-windows` CI artifact.
       - name: Package MSIX
         id: msix
         if: matrix.os == 'windows-latest' && startsWith(github.ref, 'refs/tags/v') && env.STORE_IDENTITY_NAME != ''
@@ -393,6 +417,26 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      # ── CHANNEL POLICY enforcement (see the header of this file + docs/RELEASING.md) ────────
+      # The public Release carries ONLY the Linux desktop app + the haven-relay CLI. Windows is
+      # a *paid Microsoft-Store app*; it does NOT belong in the GitHub Release history once the
+      # Store listing is live. This is the ONE line that flips it: set the repo variable
+      #     PUBLISH_WINDOWS_TO_GH = false
+      # (repo → Settings ▸ Secrets and variables ▸ Actions ▸ Variables) the day the Store goes
+      # public. UNSET is the safe default — Windows stays attached so users are never stranded
+      # without a download before the Store exists. We strip only the Windows *GUI* installers:
+      #   • *.msi / *-setup.exe (NSIS) / *.msix  — the Haven desktop app installers
+      # The haven-relay Windows binary (`haven-relay-*-pc-windows-*.exe`) is a self-host CLI, not
+      # a store app, so it STAYS on the Release — those globs never match it.
+      - name: Enforce channel policy — keep the Windows Store app off the public Release
+        if: vars.PUBLISH_WINDOWS_TO_GH == 'false'
+        run: |
+          echo "PUBLISH_WINDOWS_TO_GH=false → stripping Windows GUI installers from the Release (Store is the channel)."
+          rm -f dist/*.msi dist/*.msix dist/*setup.exe
+          echo "Remaining Release assets:"
+          ls -la dist
+
       - name: Pin the Flatpak manifest to the released .deb
         env:
           TAG: ${{ github.ref_name }}
@@ -415,20 +459,37 @@ jobs:
               print("no desktop .deb found; skipping manifest pin")
           PY
       - name: Generate release notes
+        # Notes must match the assets: the paid-store apps only show up here as a stopgap while
+        # their store listing isn't public yet (the PUBLISH_*_TO_GH toggles). Say so honestly.
+        env:
+          WIN_ON_GH: ${{ vars.PUBLISH_WINDOWS_TO_GH }}
+          AND_ON_GH: ${{ vars.PUBLISH_ANDROID_TO_GH }}
         run: |
           cat > NOTES.md <<EOF
           Haven ${{ needs.meta.outputs.version }}
 
-          **iPhone · iPad · Mac** — on the App Store: https://apps.apple.com/app/id6782147901
-          **Desktop GUI** — Windows (.msi / NSIS .exe) · Linux (.deb / .rpm / AppImage) ·
-          SteamOS / Steam Deck (\`haven.flatpak\` + the pinned \`com.blaineam.haven.yml\`).
-          **Android** — sideloadable .apk (universal + per-ABI), attached by the \`android\` workflow.
+          **This GitHub Release is the download channel for the Linux desktop app and the relay
+          daemon.** The paid apps ship through their proper stores:
+
+          **iPhone · iPad · Mac** — App Store: https://apps.apple.com/app/id6782147901
+          **Android** — Google Play.
+          **Windows** — Microsoft Store.
+
+          **Linux desktop GUI** — \`.deb\` / \`.rpm\` / AppImage · SteamOS / Steam Deck
+          (\`haven.flatpak\` + the pinned \`com.blaineam.haven.yml\`).
           **Relay daemon** (\`haven-relay-<target>\`) — x86_64 / aarch64 / armv7 / armv6 (every
-          Raspberry Pi) + macOS, plus .deb packages. Installed by \`relay/install.sh\`.
+          Raspberry Pi) + macOS + Windows, plus .deb packages. Installed by \`relay/install.sh\`.
 
           See [docs/LINUX.md](https://github.com/${{ github.repository }}/blob/main/docs/LINUX.md)
           for per-distro install instructions.
           EOF
+          # Transition stopgaps — only while the store listing isn't public (toggle ≠ "false").
+          if [ "$WIN_ON_GH" != "false" ]; then
+            printf '\n> _Windows (.msi / NSIS .exe / .msix) is also attached here as a stopgap until the Microsoft Store listing is public._\n' >> NOTES.md
+          fi
+          if [ "$AND_ON_GH" != "false" ]; then
+            printf '> _Android (.apk / .aab) is attached by the `android` workflow as a stopgap until the Google Play listing is public._\n' >> NOTES.md
+          fi
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:

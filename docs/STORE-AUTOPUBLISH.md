@@ -202,8 +202,8 @@ is still in certification.
 
 The MSIX manifest is generated in CI from `desktop/msix/AppxManifest.xml.in` (nothing
 identity-specific is committed). With `PUBLISH_WINDOWS_TO_GH = "false"` the Windows GUI installers
-no longer ride the GitHub Release — the Microsoft Store (in certification now, live soon) is the
-channel, and the `desktop-windows` CI artifact is the interim download. See
+no longer ride the GitHub Release — the [Microsoft Store](https://apps.microsoft.com/store/detail/9NKTFH1MF4LM)
+(now live) is the channel, and the `desktop-windows` CI artifact is the interim download. See
 [`RELEASING.md`](RELEASING.md#release-channels--what-goes-where).
 
 > **Reality check:** the MSIX/Store path is newer than the Play path and can't be fully exercised

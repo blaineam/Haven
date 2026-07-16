@@ -12,7 +12,7 @@ marked **UNVERIFIED** rather than asserted.
 | **macOS** | **1.0.4 live on the App Store** (native `HavenMac`, not Catalyst). 1.0.5 in review |
 | **Apple Watch** | Shipped, embedded in the iOS app (`com.blaineam.kith.watchkitapp`) |
 | **Android** | Signed AAB on the Play **internal** track (in review, closed testing not yet public). No longer on GitHub Releases (`PUBLISH_ANDROID_TO_GH=false`); interim build is the `haven-android-apk` CI artifact |
-| **Windows** | Real `.msi` / NSIS `.exe` (x64 &amp; Arm64), **in Microsoft Store certification** (live soon). No longer on GitHub Releases (`PUBLISH_WINDOWS_TO_GH=false`); interim build is the `desktop-windows` CI artifact |
+| **Windows** | Real `.msi` / NSIS `.exe` (x64 &amp; Arm64), **live on the [Microsoft Store](https://apps.microsoft.com/store/detail/9NKTFH1MF4LM)**. No longer on GitHub Releases (`PUBLISH_WINDOWS_TO_GH=false`); interim build is the `desktop-windows` CI artifact |
 | **Linux** | `.deb` / `.rpm` / AppImage / sideloadable `haven.flatpak` on GitHub Releases (x86_64). **Not on the AUR. Not on Flathub** |
 | **`haven-relay` daemon** | Static musl binaries for x86_64 / aarch64 / armv7 / armv6 (Pi), plus macOS + Windows |
 | **Web** | Invite-landing / promo page only — the client was abandoned (M6) |
@@ -232,7 +232,7 @@ push.
 - **Relay self-registration to discovery**; true two-machine field run.
 - **AUR + Flathub publication.** PKGBUILDs exist in-repo (`packaging/aur/`); nothing in CI
   publishes them, and there is no Flathub submission step. See `LINUX.md`.
-- **Microsoft Store listing** — blocked only on creating the 4 Azure AD secrets.
+- ~~**Microsoft Store listing**~~ — **shipped.** Windows is [live on the Microsoft Store](https://apps.microsoft.com/store/detail/9NKTFH1MF4LM).
 - **Group-gossip cache** for the fallback chain.
 - ~~**Xcode Cloud CI**~~ — **shipped.** The `Main` workflow archives iOS + macOS and distributes to
   TestFlight (`apple/ci_scripts/ci_post_clone.sh` builds the xcframework; a root shim execs it).

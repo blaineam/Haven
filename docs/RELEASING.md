@@ -96,7 +96,7 @@ store** and the GitHub Release *is* their distribution point.
 |---|---|---|
 | iPhone · iPad · Mac | **App Store** | No — never was (built by `rocket`, not CI) |
 | Android | **Google Play** | No (once Play is public) — *stopgap until then* |
-| Windows | **Microsoft Store** | No (once the Store is live) — *stopgap until then* |
+| Windows | **Microsoft Store** (live) | No — [live on the Store](https://apps.microsoft.com/store/detail/9NKTFH1MF4LM) |
 | Linux desktop GUI | *(no store)* → GitHub Release | **Yes** — `.deb` / `.rpm` / AppImage / `haven.flatpak` |
 | Relay daemon (all arches, incl. Windows/macOS) | *(admin CLI, no store)* → GitHub Release | **Yes** — `haven-relay-<target>` + `.deb`s |
 
@@ -123,9 +123,9 @@ Both paid GUI platforms have moved off GitHub Releases. The attach for each is g
 | `PUBLISH_WINDOWS_TO_GH` | Windows `.msi`/`.exe`/`.msix` on the Release (`release.yml` `publish` job) | **`false`** (set) | Stripped — Microsoft Store is the channel |
 | `PUBLISH_ANDROID_TO_GH` | Android `.apk`/`.aab` on the Release (`android.yml`) | **`false`** (set) | Not attached — Google Play is the channel |
 
-The store listings are still processing — **Windows is in Microsoft Store certification** and
-**Android is in Google Play review** (closed testing), so neither is a public store link yet, but
-both go live soon. iOS/macOS are genuinely live on the App Store, so they were never on GH and
+**Windows is live on the [Microsoft Store](https://apps.microsoft.com/store/detail/9NKTFH1MF4LM).**
+**Android is in Google Play review** (closed testing), so it is not a public store link yet but
+goes live soon. iOS/macOS are genuinely live on the App Store, so they were never on GH and
 nothing changes there.
 
 Because the GUI installers are off the public Release *before* the store links are public, the

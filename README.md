@@ -7,7 +7,7 @@
 > Your friends *and* your family. That's the whole product.
 
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE)
-[![Status: 1.0 live on the App Store](https://img.shields.io/badge/status-1.0%20live%20on%20the%20App%20Store-brightgreen.svg)](docs/ROADMAP.md)
+[![Status: 1.0 live on the App Store & Microsoft Store](https://img.shields.io/badge/status-1.0%20live%20on%20App%20Store%20%26%20Microsoft%20Store-brightgreen.svg)](docs/ROADMAP.md)
 [![Platforms](https://img.shields.io/badge/platforms-iOS%20%7C%20macOS%20%7C%20Android%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](#platforms)
 [![Crypto](https://img.shields.io/badge/crypto-hybrid%20post--quantum-success.svg)](docs/DECISIONS.md)
 
@@ -43,10 +43,12 @@ S3-compatible bucket, or a direct peer-to-peer link.
 ## Status
 
 **1.0 is live on the App Store for iPhone, iPad, and Mac**
-(https://apps.apple.com/app/id6782147901 — 1.0.4 public, 1.0.5 in review).
+(https://apps.apple.com/app/id6782147901 — 1.0.4 public, 1.0.5 in review)
+and **Windows is live on the Microsoft Store**
+(https://apps.microsoft.com/store/detail/9NKTFH1MF4LM).
 Android is on Google Play's **internal** track (closed testing, not yet public)
-and Windows is in certification for the **Microsoft Store** — both go live soon,
-and neither GUI app is on GitHub Releases anymore. The **Linux** installers and
+and goes live soon; neither the Windows nor Android GUI app is on GitHub Releases
+anymore. The **Linux** installers and
 the `haven-relay` daemon still ship on GitHub Releases (free). Per the
 [channel policy](docs/RELEASING.md), each platform ships through its own store and
 **GitHub Releases carry only the storeless Linux + relay builds** — so you download
@@ -141,9 +143,9 @@ One Rust core (`haven-p2p`) powers every client, so new platforms are mostly UI:
   AppImage and a sideloadable `haven.flatpak` (Steam Deck) on **GitHub Releases** for
   **Ubuntu / Debian / Raspberry Pi OS / Arch / SteamOS**; PKGBUILDs live in-repo but Haven is
   **not on the AUR or Flathub yet** (see [`docs/LINUX.md`](docs/LINUX.md)). The `haven-relay`
-  daemon cross-builds for x86_64/aarch64/armv7/armv6. The Windows GUI (x64 &amp; Arm64) is in
-  certification for the **Microsoft Store** and is no longer attached to GitHub Releases; it
-  goes live soon. See [`docs/LINUX.md`](docs/LINUX.md) and [`docs/WINDOWS-PORT.md`](docs/WINDOWS-PORT.md)
+  daemon cross-builds for x86_64/aarch64/armv7/armv6. The Windows GUI (x64 &amp; Arm64) is
+  **live on the [Microsoft Store](https://apps.microsoft.com/store/detail/9NKTFH1MF4LM)** and is
+  no longer attached to GitHub Releases. See [`docs/LINUX.md`](docs/LINUX.md) and [`docs/WINDOWS-PORT.md`](docs/WINDOWS-PORT.md)
 - **Apple Watch** — glanceable companion (messages/photos/reactions/quick replies;
   not bulk video)
 

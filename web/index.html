@@ -80,9 +80,9 @@
             <span class="pill"><span class="ic"></span>Linux</span>
           </div>
           <p class="hero-note">
-            <b>$9.99, once.</b> Now on the App&nbsp;Store for iPhone, iPad &amp; Mac — no
-            subscription, no ads, no tracking. Android &amp; Windows are coming to Google&nbsp;Play
-            &amp; the Microsoft&nbsp;Store; Linux is a free download today.
+            <b>$9.99, once.</b> Now on the App&nbsp;Store for iPhone, iPad &amp; Mac and live on the
+            Microsoft&nbsp;Store for Windows — no subscription, no ads, no tracking. Android is coming to
+            Google&nbsp;Play; Linux is a free download today.
             <a class="inline" href="#pricing">Why paid?</a>
           </p>
         </div>
@@ -400,10 +400,10 @@ haven-relay run --link "haven-relay://circle#…"</code></pre>
         <span class="eyebrow">$9.99 · one-time · yours</span>
         <h2 style="font-size:clamp(24px,4vw,34px)">You're the customer, not the product.</h2>
         <p class="muted" style="font-size:17px;margin-top:14px">
-          Haven is a <b>one-time $9.99 purchase</b> on the App&nbsp;Store — buy it once, own it,
-          no subscription and no monthly cost, ever. <b>Linux is a free download</b> from the
-          latest GitHub release; <b>Android and Windows</b> are now in review on Google&nbsp;Play and
-          the Microsoft&nbsp;Store and go live soon. Same one-time price wherever it lands.
+          Haven is a <b>one-time $9.99 purchase</b> on the App&nbsp;Store and the Microsoft&nbsp;Store —
+          buy it once, own it, no subscription and no monthly cost, ever. <b>Linux is a free download</b>
+          from the latest GitHub release; <b>Windows is live on the Microsoft&nbsp;Store</b> and
+          <b>Android</b> is coming to Google&nbsp;Play. Same one-time price wherever it lands.
         </p>
         <p class="muted" style="font-size:17px;margin-top:14px">
           That price is the whole business model. When you pay for the app, your privacy is the
@@ -429,16 +429,16 @@ haven-relay run --link "haven-relay://circle#…"</code></pre>
 
   <!-- ── Final CTA ── -->
   <!-- ════════════════════════════════════════════════════════════════════
-       DOWNLOAD — Apple ships on the App Store; Android & Windows ship through
-       Google Play & the Microsoft Store (coming soon); Linux, Steam Deck and the
-       relay pull live from the latest GitHub release. See the note below the grid.
+       DOWNLOAD — Apple ships on the App Store; Windows is live on the Microsoft
+       Store; Android is coming to Google Play; Linux, Steam Deck and the relay
+       pull live from the latest GitHub release. See the note below the grid.
   ═════════════════════════════════════════════════════════════════════ -->
   <section class="section" id="download">
     <div class="container">
       <div class="center reveal">
         <span class="eyebrow">Now on the App&nbsp;Store</span>
         <h2 style="font-size:clamp(26px,4.5vw,40px)">Get <span class="h-grad">Haven</span> on every screen</h2>
-        <p class="lead">iPhone, iPad &amp; Mac on the App&nbsp;Store; Android &amp; Windows coming to Google&nbsp;Play &amp; the Microsoft&nbsp;Store; Linux and Steam&nbsp;Deck straight from the latest release; a tiny relay for a Pi or server.</p>
+        <p class="lead">iPhone, iPad &amp; Mac on the App&nbsp;Store; Windows on the Microsoft&nbsp;Store; Android coming to Google&nbsp;Play; Linux and Steam&nbsp;Deck straight from the latest release; a tiny relay for a Pi or server.</p>
       </div>
 
       <!-- Device lineup — the one place the non-Apple platforms get their own art. The iPhone
@@ -475,7 +475,7 @@ haven-relay run --link "haven-relay://circle#…"</code></pre>
         <p class="muted center" id="download-loading">Loading the latest release…</p>
       </div>
       <p class="muted small center" style="margin-top:16px">
-        Android &amp; Windows are coming to Google&nbsp;Play &amp; the Microsoft&nbsp;Store — in review now, live soon.
+        Windows is live on the Microsoft&nbsp;Store; Android is coming to Google&nbsp;Play.
         The Linux desktop, Steam&nbsp;Deck &amp; relay builds come from the
         <a class="inline" id="download-release-link" href="https://github.com/blaineam/haven/releases/latest" rel="noopener">latest GitHub release</a>
         — real installers, not a preview.
@@ -555,10 +555,9 @@ var DOWNLOADS = {
   // the card then shows an honest "Coming soon to Google Play" state instead of a dead link.
   PLAY_BETA_URL: "",         /* TODO: paste the Google Play listing URL when it goes public */
   // Windows: store-only now. The GUI installers are no longer attached to GitHub releases — the
-  // app ships through the Microsoft Store. The submission is IN CERTIFICATION and not public yet,
-  // so there is no store URL to link. Deliberately "" until it goes live: the card then shows an
-  // honest "Coming soon to the Microsoft Store" state instead of a dead link.
-  WINDOWS_STORE_URL: "",     /* TODO: paste the Microsoft Store product URL when the listing is public */
+  // app ships through the Microsoft Store, where it is now LIVE. The store URL below wins wherever
+  // a Windows download is offered (hero button + Windows card).
+  WINDOWS_STORE_URL: "https://apps.microsoft.com/store/detail/9NKTFH1MF4LM",
   // Desktop / Linux / relay builds are served from the latest GitHub release and
   // resolved automatically by the download script below — no fixed URL needed.
   GITHUB_RELEASE_URL: "https://github.com/blaineam/haven/releases/latest"
@@ -763,8 +762,8 @@ var DOWNLOADS = {
       if (link && rel.html_url) link.href = rel.html_url;
 
       // Windows is store-only now — the GUI installers were removed from GitHub releases and the
-      // app ships through the Microsoft Store. Link the listing when it's public; until then show
-      // an honest "coming soon", never a GitHub download and never "Building…".
+      // app ships through the Microsoft Store, where it is now LIVE. WINDOWS_STORE_URL is set, so
+      // the card links straight to the listing — never a GitHub download and never "Building…".
       var winStore = DOWNLOADS.WINDOWS_STORE_URL;
       var winBtns = (winStore && winStore !== "#")
         ? [btn(winStore, "Get it from the Microsoft Store", true)]
@@ -808,11 +807,16 @@ var DOWNLOADS = {
       wireHeroButton({ linux: (deb || appimg || rpm) });
     })
     .catch(function () {
+      var winStoreFallback = DOWNLOADS.WINDOWS_STORE_URL && DOWNLOADS.WINDOWS_STORE_URL !== "#"
+        ? btn(DOWNLOADS.WINDOWS_STORE_URL, "Get it from the Microsoft Store", true)
+        : '<span class="muted small">Coming soon to the Microsoft Store</span>';
       grid.innerHTML = iosCard() + macCard() +
+        '<div class="dl-card"><h4>Windows</h4><div class="muted small">x64 &amp; Arm64 — Microsoft Store</div>' +
+        '<div class="dl-btns">' + winStoreFallback + '</div></div>' +
         '<div class="dl-card"><h4>Linux · Steam Deck · relay</h4><div class="muted small">free on GitHub</div>' +
         '<div class="dl-btns">' + btn("https://github.com/" + REPO + "/releases/latest", "Browse downloads on GitHub", true) + '</div></div>' +
-        '<div class="dl-card"><h4>Android &amp; Windows</h4><div class="muted small">Google Play &amp; the Microsoft Store</div>' +
-        '<div class="dl-btns"><span class="muted small">Coming soon</span></div></div>';
+        '<div class="dl-card"><h4>Android</h4><div class="muted small">Google Play</div>' +
+        '<div class="dl-btns"><span class="muted small">Coming soon to Google Play</span></div></div>';
       // Release fetch failed — hero still auto-detects; store links work, desktop falls back to #download.
       wireHeroButton(null);
     });

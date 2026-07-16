@@ -85,8 +85,8 @@ Both the packaging and publish steps are **gated on Store secrets being present*
 `continue-on-error`, so with no secrets configured they simply skip. The 8 required secrets are
 listed in `STORE-AUTOPUBLISH.md`.
 
-**Current state: the Microsoft Store is the channel.** The Windows submission is **in Store
-certification** (processing now, live soon). The GUI installers are **no longer attached to GitHub
+**Current state: the Microsoft Store is the channel.** The Windows app is **live on the
+[Microsoft Store](https://apps.microsoft.com/store/detail/9NKTFH1MF4LM)**. The GUI installers are **no longer attached to GitHub
 Releases** — `PUBLISH_WINDOWS_TO_GH` is set to `false`, so `release.yml`'s publish job strips the
 `.msi`/`.msix`/`setup.exe`. The only direct build is the short-retention `desktop-windows` CI
 artifact (used for the Store submission and manual testing). The Windows relay `.exe` — a self-host

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="web/assets/og-image.jpg" alt="Haven — a private home for your people. End-to-end encrypted, no servers, no ads. On iPhone, iPad, Mac, Android, Windows, and Linux." width="900" />
+</p>
+
 # Haven
 
 > Your friends *and* your family. That's the whole product.

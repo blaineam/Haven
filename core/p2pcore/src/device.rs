@@ -384,6 +384,32 @@ pub fn recipients_with_devices(
     out
 }
 
+/// Resolve a **sender/committer device id** to the account it is authorized to act for, plus that
+/// device's routable public bundle (seed-drop S3, D16 Phase 2 §4.2).
+///
+/// Scans the caller's verified `devices_by_account` — each entry's [`DeviceList`] and
+/// [`DeviceCredential`]s were checked against the contact's *pinned account key* at ingest — and returns
+/// `(account_id, device_bundle)` for the first account whose roster currently **authorizes** `device_id`
+/// (present, not revoked) and carries its credential. This is the **sender-authorization oracle** the
+/// receive side uses to (a) obtain the device's public bundle to verify a device-signed envelope's
+/// hybrid signature, and (b) compute the `expected_author` account for
+/// [`crate::groupkey::open_event_in_epoch_authored`] and to resolve the committer of a device-signed
+/// [`crate::groupkey::open_key_commit`]. Returns `None` for a device in no known roster — so a device the
+/// account never authorized (or one it revoked) can never be treated as an authorized sender.
+pub fn author_and_bundle_for_device(
+    device_id: &[u8; 32],
+    devices_by_account: &std::collections::HashMap<[u8; 32], ContactDevices>,
+) -> Option<([u8; 32], HavenId)> {
+    for (account_id, cd) in devices_by_account {
+        if cd.list.is_authorized(device_id) {
+            if let Some(cred) = cd.credentials.iter().find(|c| &c.device_id() == device_id) {
+                return Some((*account_id, cred.device.clone()));
+            }
+        }
+    }
+    None
+}
+
 // ── Seed-drop S0: capability negotiation + dual-seal gating scaffold (D16 Phase 2) ───────────────
 //
 // These are STRICTLY ADDITIVE and shipped OFF: nothing here changes who signs or what a circle seals
@@ -916,5 +942,187 @@ mod tests {
                 "authorized device opens the commit");
         assert!(open_key_commit(&stolen, &committer.public(), &commit).is_err(),
                 "REVOKED device must not open the commit");
+    }
+
+    #[test]
+    fn s3_device_authors_and_commits_under_device_key_verified_via_roster() {
+        // Seed-drop S3 (§4.2): a seedless DEVICE authors an event AND commits an epoch key under its
+        // DEVICE key (sender = device, author = account). A contact holding the account's verified roster
+        // resolves the signer device → its account + bundle and opens both; the dual-seal account-key
+        // recipient keeps the content readable by a seed-holder / legacy peer. A device in no roster is
+        // rejected as an authorized signer.
+        use crate::groupkey::{
+            new_circle_secret, new_epoch_key, open_event_in_epoch_authored, open_key_commit,
+            seal_event_in_epoch, seal_key_commit,
+        };
+        use crate::social::{Event, EventKind};
+
+        let account = id(1);
+        let device = id(2); // an authorized device of `account`
+        let contact = id(5); // a circle member who will read
+
+        // The account's verified roster: device authorized + a credential carrying its routable bundle.
+        let cred = DeviceCredential::issue(&account, &device.public(), "phone", 100);
+        let list = DeviceList::signed(&account, 1, 100, vec![device.public().node_id_bytes()], vec![]);
+        let mut roster = std::collections::HashMap::new();
+        roster.insert(account.public().node_id_bytes(), ContactDevices { list, credentials: vec![cred] });
+
+        // Sender-authorization oracle: the device resolves to its account + bundle; a foreign one doesn't.
+        let (resolved_acct, bundle) =
+            author_and_bundle_for_device(&device.public().node_id_bytes(), &roster).expect("device resolves");
+        assert_eq!(resolved_acct, account.public().node_id_bytes());
+        assert!(
+            author_and_bundle_for_device(&id(9).public().node_id_bytes(), &roster).is_none(),
+            "a device in no roster is not an authorized signer"
+        );
+
+        // Dual-seal recipients: account key (legacy path) + authorized device bundles.
+        let members = recipients_with_devices(&[account.public(), contact.public()], &roster);
+        let epoch = new_epoch_key();
+        let secret = new_circle_secret();
+
+        // The DEVICE commits the epoch key (signed by the device key).
+        let commit = seal_key_commit(&device, &members, "c1", 0, &epoch, &secret).unwrap();
+        // Contact opens it using the RESOLVED device bundle as committer_pub (device-key verify path).
+        assert_eq!(open_key_commit(&contact, &bundle, &commit).unwrap().epoch_key, epoch);
+        // Legacy / seed-holder path stays open: the account itself opens the same commit via its
+        // account-key recipient (present because of dual-seal) — coexistence preserved.
+        assert_eq!(open_key_commit(&account, &bundle, &commit).unwrap().epoch_key, epoch);
+
+        // The DEVICE authors an event FOR ITS ACCOUNT; the contact resolves + opens it (device-signed,
+        // account-authored). Binding to a different account is rejected (no re-attribution).
+        let ev = Event::new(&account.public().node_id_bytes(), 200, EventKind::Message { body: "device-authored".into() });
+        let env = seal_event_in_epoch(&device, "c1", 0, &epoch, &ev).unwrap();
+        let acct_hex: String = resolved_acct.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            open_event_in_epoch_authored(&bundle, &epoch, &env, Some(&acct_hex)).unwrap(),
+            ev,
+            "a device-signed, account-authored event opens when bound to its account"
+        );
+        let stranger_hex: String = id(7).public().node_id_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        assert!(
+            open_event_in_epoch_authored(&bundle, &epoch, &env, Some(&stranger_hex)).is_err(),
+            "the device cannot author for an account it isn't credentialed to"
+        );
+    }
+
+    #[test]
+    fn s4_seedless_new_device_is_credentialed_but_cannot_forge_a_roster() {
+        // Seed-drop S4 (§3.2 easy case): a NEW device holds only its own device key + an account-signed
+        // credential (+ the granted self-sync key from S2) — never the master seed. The distinctive S4
+        // property proven here: it CANNOT produce a DeviceList that verifies against the pinned account
+        // key, so it can neither authorize itself nor add a rogue. Roster authority is the account key it
+        // does not hold. (Author + sync are covered by S2/S3.)
+        let account = id(1);
+        let new_device = id(2); // seedless: only its own device key
+
+        // The primary authorizes it: an account-signed credential + roster entry, both verifying.
+        let cred = DeviceCredential::issue(&account, &new_device.public(), "new-ipad", 100);
+        assert!(cred.verify(&account.public()).is_ok(), "the account-signed credential verifies");
+        let list = DeviceList::signed(&account, 1, 100, vec![new_device.public().node_id_bytes()], vec![]);
+        assert!(list.verify(&account.public()).is_ok() && list.is_authorized(&new_device.public().node_id_bytes()));
+
+        // Forge attempt 1 — sign honestly with the device key: account_id becomes the DEVICE's id, so it
+        // fails verify() against the real account on the id mismatch (it isn't even the account's roster).
+        let honest_forge = DeviceList::signed(&new_device, 99, 200, vec![new_device.public().node_id_bytes(), id(9).public().node_id_bytes()], vec![]);
+        assert!(honest_forge.verify(&account.public()).is_err(), "a device-signed roster is not the account's roster");
+
+        // Forge attempt 2 — CLAIM the account's id but sign with the device key: the id now matches, so
+        // verification reaches the SIGNATURE, which was made by the device, not the account → rejected.
+        let mut claimed_forge = DeviceList::signed(&new_device, 99, 200, vec![new_device.public().node_id_bytes(), id(9).public().node_id_bytes()], vec![]);
+        claimed_forge.account_id = account.public().node_id_bytes();
+        assert!(claimed_forge.verify(&account.public()).is_err(), "a device signature can't stand in for the account key on a roster");
+    }
+
+    #[test]
+    fn s5_revoked_seedless_device_cannot_reenter_or_decrypt() {
+        // THE HEADLINE TEST (§7). A device holds ONLY its device key + credential (no account seed),
+        // authorized in roster v1. After revocation + epoch rotation, with the account-key seal GATED OFF
+        // (circle fully seed-drop-capable), it (a) cannot decrypt post-revocation content, and (b) cannot
+        // re-add itself — roster authority is the account key it never held. This is the cryptographic cut
+        // that "advisory revocation" was not: it now holds for a COMPROMISED device, not just a lost one.
+        use crate::groupkey::{
+            new_circle_secret, new_epoch_key, open_event_in_epoch, open_key_commit, seal_event_in_epoch,
+            seal_key_commit,
+        };
+        use crate::social::{Event, EventKind};
+
+        let account = id(1); // the primary / account (seed-holder, signs the roster)
+        let compromised = id(2); // seedless device: only its device key + credential
+        let good = id(3); // another authorized device that stays
+
+        let cred_c = DeviceCredential::issue(&account, &compromised.public(), "compromised", 100);
+        let cred_g = DeviceCredential::issue(&account, &good.public(), "good", 100);
+        let mut roster = std::collections::HashMap::new();
+        let mut capable = std::collections::HashSet::new();
+        capable.insert(account.public().node_id_bytes());
+
+        // Roster v1: both devices authorized. Fully seed-drop-capable → account-key seal GATED OFF.
+        let list_v1 = DeviceList::signed(
+            &account,
+            1,
+            100,
+            vec![compromised.public().node_id_bytes(), good.public().node_id_bytes()],
+            vec![],
+        );
+        roster.insert(account.public().node_id_bytes(), ContactDevices { list: list_v1.clone(), credentials: vec![cred_c.clone(), cred_g.clone()] });
+        let secret = new_circle_secret();
+
+        // Epoch 0 (pre-revocation): sealed ONLY to authorized device bundles (no bare account key).
+        let e0 = new_epoch_key();
+        let recips0 = recipients_with_devices_gated(&[account.public()], &roster, &capable, true);
+        let commit0 = seal_key_commit(&account, &recips0, "c1", 0, &e0, &secret).unwrap();
+        assert_eq!(open_key_commit(&compromised, &account.public(), &commit0).unwrap().epoch_key, e0, "pre-revocation, the device is a recipient");
+
+        // REVOKE it: roster v2 (higher version, account-signed) + epoch rotation to e1.
+        let list_v2 = DeviceList::signed(&account, 2, 200, vec![good.public().node_id_bytes()], vec![compromised.public().node_id_bytes()]);
+        roster.insert(account.public().node_id_bytes(), ContactDevices { list: list_v2.clone(), credentials: vec![cred_c.clone(), cred_g.clone()] });
+        let e1 = new_epoch_key();
+        let recips1 = recipients_with_devices_gated(&[account.public()], &roster, &capable, true);
+        let commit1 = seal_key_commit(&account, &recips1, "c1", 1, &e1, &secret).unwrap();
+
+        // (a) CRYPTOGRAPHIC CUT: the revoked device is NOT a recipient of the epoch-1 commit, and the
+        // account-key path is gated off, so no epoch-1 key ever reaches it. The good device still gets e1.
+        assert!(open_key_commit(&compromised, &account.public(), &commit1).is_err(), "revoked seedless device cannot obtain the new epoch key");
+        assert_eq!(open_key_commit(&good, &account.public(), &commit1).unwrap().epoch_key, e1);
+        let ev = Event::new(&account.public().node_id_bytes(), 300, EventKind::Message { body: "after revoke".into() });
+        let env = seal_event_in_epoch(&account, "c1", 1, &e1, &ev).unwrap();
+        assert!(open_event_in_epoch(&account.public(), &e0, &env, false).is_err(), "the device's stale epoch key cannot open post-revocation content");
+
+        // (b) CANNOT RE-ENTER: it forges a higher-version roster re-adding itself, but can only sign with
+        // its device key — verify() against the pinned account key rejects it, so no honest peer adopts it.
+        let mut forged = DeviceList::signed(&compromised, 99, 300, vec![compromised.public().node_id_bytes(), good.public().node_id_bytes()], vec![]);
+        forged.account_id = account.public().node_id_bytes();
+        assert!(forged.verify(&account.public()).is_err(), "the device cannot forge a roster that verifies against the account key");
+        // The account's genuine v2 revocation is what an honest peer adopts (higher version, verified).
+        let mut held = list_v1.clone();
+        assert!(held.adopt_if_newer(&list_v2) && !held.is_authorized(&compromised.public().node_id_bytes()), "the account's revocation stands");
+    }
+
+    #[test]
+    fn s5_legacy_account_key_device_still_reads_when_circle_not_fully_upgraded() {
+        // Coexistence guard (§5): retiring the account-key seal is an ALL-PRESENT positive signal. If any
+        // member is not yet seed-drop-capable, the gate does NOT drop the account key, so a legacy
+        // account-key-only holder keeps opening the commit — we don't buy revocation by breaking interop.
+        use crate::groupkey::{new_circle_secret, new_epoch_key, open_key_commit, seal_key_commit};
+
+        let account = id(1);
+        let device = id(2);
+        let legacy_peer = id(6); // a circle member with NO roster / capability (still on the old app)
+
+        let cred = DeviceCredential::issue(&account, &device.public(), "phone", 100);
+        let list = DeviceList::signed(&account, 1, 100, vec![device.public().node_id_bytes()], vec![]);
+        let mut roster = std::collections::HashMap::new();
+        roster.insert(account.public().node_id_bytes(), ContactDevices { list, credentials: vec![cred] });
+        // Only `account` is capable; `legacy_peer` is not → circle NOT fully capable → gate stays OFF.
+        let mut capable = std::collections::HashSet::new();
+        capable.insert(account.public().node_id_bytes());
+
+        let e0 = new_epoch_key();
+        let secret = new_circle_secret();
+        let recips = recipients_with_devices_gated(&[account.public(), legacy_peer.public()], &roster, &capable, true);
+        let commit = seal_key_commit(&account, &recips, "c1", 0, &e0, &secret).unwrap();
+        // The legacy peer (account-key only, no devices) still opens the commit via its account-key recipient.
+        assert_eq!(open_key_commit(&legacy_peer, &account.public(), &commit).unwrap().epoch_key, e0, "a straggler keeps the whole circle on dual-seal");
     }
 }

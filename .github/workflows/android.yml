@@ -35,6 +35,22 @@ on:
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      # ── Deliberate Play-track promotion (see docs/STORE-AUTOPUBLISH.md "Promoting to production").
+      # A routine `v*` tag NEVER reads these — it ships to `internal` (or the repo variable
+      # PLAY_TRACK, if you set one). Production is reached only by running this workflow by hand and
+      # picking `production` here, OR by deliberately setting the PLAY_TRACK repo variable. The
+      # DEFAULT below is `internal`, so a manual run you forget to configure is still safe.
+      play_track:
+        description: "Google Play track to publish to (deliberate promotion; tags ignore this)"
+        required: false
+        default: internal
+        type: choice
+        options: [internal, alpha, beta, production]
+      play_rollout:
+        description: "Staged-rollout fraction 0.0-1.0 for a partial release (blank/1.0 = full). Only for alpha/beta/production."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -112,6 +128,66 @@ jobs:
             echo "::notice::No ANDROID_KEYSTORE_BASE64 secret — building a DEBUG-signed beta APK."
           fi
 
+      # ── Resolve the Play target (version name + track + rollout) ──────────────────────────────
+      # PROMOTION POLICY (mandatory safe default): a routine `v*` tag publishes to `internal` unless
+      # the repo variable PLAY_TRACK overrides it; a manual workflow_dispatch may pick any track via
+      # the play_track input. Precedence: dispatch input > PLAY_TRACK variable > "internal".
+      #   • Routine tag, no variable set        → internal            (never accidentally prod)
+      #   • workflow_dispatch play_track=beta    → beta (closed test)
+      #   • workflow_dispatch play_track=production (+ play_rollout)  → staged/full production
+      #   • PLAY_TRACK=production variable set    → every tag then targets production (deliberate,
+      #                                             persistent — the Console-free "always ship prod")
+      # A rollout fraction < 1.0 switches the release to status=inProgress (Play staged rollout);
+      # blank or 1.0 means a fully-live release (status=completed). See docs/STORE-AUTOPUBLISH.md.
+      - name: Resolve Play version + track
+        id: cfg
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          EVENT: ${{ github.event_name }}
+          IN_TRACK: ${{ github.event.inputs.play_track }}
+          IN_ROLLOUT: ${{ github.event.inputs.play_rollout }}
+          VAR_TRACK: ${{ vars.PLAY_TRACK }}
+          VAR_ROLLOUT: ${{ vars.PLAY_USER_FRACTION }}
+        run: |
+          set -euo pipefail
+          # versionName: a tag carries it ("v1.0.5" → "1.0.5"); a manual run has no tag, so fall
+          # back to the single source of truth (apple/project.yml MARKETING_VERSION, same value the
+          # release.yml meta-gate enforces) rather than stamp the branch name.
+          if [ "$REF_TYPE" = "tag" ]; then
+            VN="${REF_NAME#v}"
+          else
+            VN="$(grep -m1 -E 'MARKETING_VERSION:' apple/project.yml | sed -E 's/.*"([^"]+)".*/\1/')"
+          fi
+          # track: dispatch input > repo variable > safe default (internal)
+          if [ "$EVENT" = "workflow_dispatch" ] && [ -n "${IN_TRACK:-}" ]; then
+            TRACK="$IN_TRACK"
+          elif [ -n "${VAR_TRACK:-}" ]; then
+            TRACK="$VAR_TRACK"
+          else
+            TRACK="internal"
+          fi
+          # rollout fraction: dispatch input > repo variable > none
+          if [ "$EVENT" = "workflow_dispatch" ] && [ -n "${IN_ROLLOUT:-}" ]; then
+            FRAC="$IN_ROLLOUT"
+          else
+            FRAC="${VAR_ROLLOUT:-}"
+          fi
+          # A partial fraction ⇒ staged rollout (inProgress); blank/1.0 ⇒ fully live (completed).
+          if [ -n "$FRAC" ] && [ "$FRAC" != "1" ] && [ "$FRAC" != "1.0" ]; then
+            STATUS="inProgress"; USERFRACTION="$FRAC"
+          else
+            STATUS="completed"; USERFRACTION=""
+          fi
+          {
+            echo "version_name=$VN"
+            echo "track=$TRACK"
+            echo "status=$STATUS"
+            echo "user_fraction=$USERFRACTION"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::Play target → track=$TRACK status=$STATUS userFraction=${USERFRACTION:-<none>} version=$VN"
+
       - name: Build signed release APK
         if: steps.keystore.outputs.have_keystore == 'true'
         working-directory: android
@@ -156,16 +232,18 @@ jobs:
       # gates: missing either just skips the upload, so betas keep building untouched.
       # FIRST RELEASE CAVEAT: Google requires the very first AAB of a new app to be uploaded by
       # hand in the Play Console (to enroll App Signing). After that, this job takes over.
+      # Built on `v*` tags AND on manual workflow_dispatch (so a deliberate track promotion can
+      # rebuild + re-upload the same version to production). versionName comes from steps.cfg.
       - name: Build signed release AAB (for Play)
-        if: startsWith(github.ref, 'refs/tags/v') && steps.keystore.outputs.have_keystore == 'true'
+        if: (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && steps.keystore.outputs.have_keystore == 'true'
         working-directory: android
         env:
           HAVEN_KEYSTORE_FILE: ${{ runner.temp }}/haven-release.keystore
           HAVEN_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           HAVEN_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           HAVEN_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          VN: ${{ steps.cfg.outputs.version_name }}
         run: |
-          VN="${GITHUB_REF_NAME#v}"
           ./gradlew bundleRelease -PhavenVersionCode=${{ github.run_number }} -PhavenVersionName="$VN"
           mkdir -p ../out
           find app/build/outputs/bundle -name '*.aab' -exec cp {} ../out/ \;
@@ -183,7 +261,7 @@ jobs:
 
       - name: Check Play credentials
         id: play
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         env:
           SA: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
         run: |
@@ -194,7 +272,28 @@ jobs:
             echo "::notice::No PLAY_SERVICE_ACCOUNT_JSON (or no release keystore) — skipping Play upload."
           fi
 
-      - name: Publish AAB to Google Play (internal track)
+      # r0adkll/upload-google-play uploads the AAB + release notes ("what's new") only — it has NO
+      # inputs for title/description/graphics (verified against its action.yml). So we hand it the
+      # release notes via whatsNewDirectory and let `fastlane supply` (below) push the rest of the
+      # listing. whatsNewDirectory wants files named `whatsnew-<locale>`; build one from the fastlane
+      # changelog (a versionCode-specific changelogs/<code>.txt wins over changelogs/default.txt).
+      # Google caps this at 500 chars/locale, so default.txt is kept under that.
+      - name: Prepare Play what's-new (from the fastlane changelog)
+        if: steps.play.outputs.submit == 'true'
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/whatsnew"
+          mkdir -p "$dir"
+          base="android/fastlane/metadata/android/en-US/changelogs"
+          src="$base/${{ github.run_number }}.txt"
+          [ -f "$src" ] || src="$base/default.txt"
+          cp "$src" "$dir/whatsnew-en-US"
+          echo "whatsnew<<EOF" >> "$GITHUB_ENV"
+          echo "$dir" >> "$GITHUB_ENV"
+          echo "EOF" >> "$GITHUB_ENV"
+
+      # ── Upload the AAB + assign it to the resolved track (staged rollout when set) ────────────
+      - name: Publish AAB to Google Play (${{ steps.cfg.outputs.track }} track)
         if: steps.play.outputs.submit == 'true'
         # Non-fatal: the APK + AAB are already published to the GitHub Release above. A Play-side gate
         # (e.g. the one-time "advertising ID" App Content declaration not yet set) shouldn't red-X the
@@ -205,5 +304,34 @@ jobs:
           serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
           packageName: com.blaineam.haven
           releaseFiles: out/*.aab
-          track: internal
-          status: completed
+          releaseName: ${{ steps.cfg.outputs.version_name }}
+          track: ${{ steps.cfg.outputs.track }}
+          status: ${{ steps.cfg.outputs.status }}
+          # Empty string is falsy to the action, so a non-staged release simply omits it.
+          userFraction: ${{ steps.cfg.outputs.user_fraction }}
+          whatsNewDirectory: ${{ env.whatsnew }}
+
+      # ── Sync the FULL store listing (title, short/long description, feature graphic, screenshots)
+      #    from android/fastlane/metadata via `fastlane supply`. r0adkll can't do this; supply reads
+      #    the exact fastlane layout the repo already has. Binaries + changelogs are skipped here
+      #    (the AAB + what's-new were handled above), so this edit only touches listing text/images.
+      #    Non-fatal: a listing hiccup must never fail the release. Listing metadata is app-global in
+      #    Play (not per-track), so the track passed is only for supply's edit context.
+      - name: Sync Play store listing (text + images) via fastlane supply
+        if: steps.play.outputs.submit == 'true'
+        continue-on-error: true
+        env:
+          SUPPLY_JSON_KEY_DATA: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          TRACK: ${{ steps.cfg.outputs.track }}
+        run: |
+          set -euo pipefail
+          sudo gem install fastlane --no-document
+          fastlane supply \
+            --json_key_data "$SUPPLY_JSON_KEY_DATA" \
+            --package_name com.blaineam.haven \
+            --track "$TRACK" \
+            --metadata_path android/fastlane/metadata/android \
+            --skip_upload_apk true \
+            --skip_upload_aab true \
+            --skip_upload_changelogs true \
+            --changes_not_sent_for_review false

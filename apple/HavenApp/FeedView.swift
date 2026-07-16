@@ -130,23 +130,61 @@ final class FeedStore: ObservableObject {
         configure(seed: seed)
     }
 
-    func configure(seed: Data) {
+    /// How the engine boots (plan §5, Apple column): a SEEDED device (today's path — primary/legacy
+    /// link, holds the account master seed) or a SEEDLESS device (S4 — holds only the account public
+    /// bundle + its device seed, runs under `HavenSocial.newSeedless` and never signs a roster).
+    enum BootMode {
+        case seeded(Data)
+        case seedless(accountBundle: Data, deviceSeed: Data)
+    }
+
+    /// Legacy entry point — unchanged callers keep working. Seedless devices boot via `configure(mode:)`.
+    func configure(seed: Data) { configure(mode: .seeded(seed)) }
+
+    /// Boot the engine in whichever mode this device is persisted as: seedless (S4 — account public
+    /// bundle + device seed) or seeded (account master seed). The single boot entry the app/scene
+    /// call sites use so a seedless device never accidentally boots seeded off a throwaway seed.
+    func configureForCurrentIdentity() {
+        if SeedlessState.isEnabled, let bundle = AccountPublicStore.load() {
+            configure(mode: .seedless(accountBundle: bundle, deviceSeed: DeviceKeyStore.deviceAccount().secretSeed()))
+        } else if let seed = AccountStore.storedSeed() {
+            configure(seed: seed)
+        }
+    }
+
+    func configure(mode: BootMode) {
         guard social == nil else { return }
-        social = try? HavenSocial(accountSeed: seed)
-        // Multi-device reachability: iroh discovery is one-owner-per-id, so two devices on the SAME account
-        // id collide (the host loses → can't be reached). Resolution:
-        //  • The RELAY-HOST device keeps the ACCOUNT id — it's the always-on, reachable mailbox friends dial,
-        //    and its in-app relay (shared endpoint) serves on that id. One endpoint, no leak.
-        //  • A NON-HOST device takes a per-DEVICE transport id so it never competes with the host for the
-        //    account id; friends learn it via the host's roster. (Sealing stays account-based either way.)
-        if let social {
-            // Per-INSTANCE identity: every client instance takes its OWN unique transport/relay id
-            // (DeviceKeyStore — unique per install), so any number of clients can run under ONE account id
-            // without colliding on iroh discovery. The account id is the IDENTITY only (signing + the
-            // contact card friends pin), never a transport address. Each client hosts its relay on its own
-            // id; friends reach each via the circle's relay list (the set of these ids).
-            _ = social.useDeviceIdentity(deviceSeed: DeviceKeyStore.deviceAccount().secretSeed())
-            HavenLog.net("configure account=\(social.myNodeHex().prefix(10)) instance=\(social.myDeviceNodeHex().prefix(10))")
+        let seedless: Bool
+        switch mode {
+        case .seeded(let seed):
+            seedless = false
+            social = try? HavenSocial(accountSeed: seed)
+            // Multi-device reachability: iroh discovery is one-owner-per-id, so two devices on the SAME account
+            // id collide (the host loses → can't be reached). Resolution:
+            //  • The RELAY-HOST device keeps the ACCOUNT id — it's the always-on, reachable mailbox friends dial,
+            //    and its in-app relay (shared endpoint) serves on that id. One endpoint, no leak.
+            //  • A NON-HOST device takes a per-DEVICE transport id so it never competes with the host for the
+            //    account id; friends learn it via the host's roster. (Sealing stays account-based either way.)
+            if let social {
+                // Per-INSTANCE identity: every client instance takes its OWN unique transport/relay id
+                // (DeviceKeyStore — unique per install), so any number of clients can run under ONE account id
+                // without colliding on iroh discovery. The account id is the IDENTITY only (signing + the
+                // contact card friends pin), never a transport address. Each client hosts its relay on its own
+                // id; friends reach each via the circle's relay list (the set of these ids).
+                _ = social.useDeviceIdentity(deviceSeed: DeviceKeyStore.deviceAccount().secretSeed())
+                HavenLog.net("configure account=\(social.myNodeHex().prefix(10)) instance=\(social.myDeviceNodeHex().prefix(10))")
+            }
+        case .seedless(let bundle, let deviceSeed):
+            seedless = true
+            // The engine runs under the DEVICE key with the account PUBLIC bundle as its trust anchor.
+            // `newSeedless` adopts the device identity internally, so no separate useDeviceIdentity call.
+            social = try? HavenSocial.newSeedless(accountPublicBundle: bundle, deviceSeed: deviceSeed)
+            if let social {
+                // Reinstall the primary-signed roster wire we persisted at enrollment (VERBATIM, incl. the
+                // SeedDropCapability trailer) so this device is authorized + rebroadcasts the exact bytes.
+                if let wire = SeedlessRosterStore.load(), !wire.isEmpty { _ = social.ingestRosterWire(wire: wire) }
+                HavenLog.net("configure SEEDLESS account=\(social.myNodeHex().prefix(10)) instance=\(social.myDeviceNodeHex().prefix(10))")
+            }
         }
         loadPersisted()
         // Self-register THIS device AFTER importing persisted state. Registering first wrote a fresh
@@ -156,7 +194,10 @@ final class FeedStore: ObservableObject {
         // the re-register/re-revoke flip-flop rotated every circle epoch on each launch).
         // Registering against the imported roster makes the re-authorization an explicit,
         // version-bumped update that propagates (see DeviceList::merge).
-        if let social {
+        // SEEDLESS: skip it entirely — a seedless device has no account key to sign a roster with
+        // (register_device returns empty; the primary is the sole roster authority, plan §2.2 A1). Its
+        // authorization comes from the primary-signed roster wire ingested above.
+        if let social, !seedless {
             _ = social.registerDevice(deviceBundle: DeviceKeyStore.deviceBundle(),
                                       name: DeviceKeyStore.deviceName,
                                       createdAt: UInt64(Date().timeIntervalSince1970))
@@ -172,7 +213,7 @@ final class FeedStore: ObservableObject {
         CallManager.shared.debugSimulateIncomingRing()   // HAVEN_RING_TEST=1 only — bounded-ring self-test
         #endif
         guard ProcessInfo.processInfo.environment["HAVEN_NO_NET"] != "1" else { return }
-        bringOnline(seed: seed)
+        bringOnline()
         startMailboxPolling()
         ingestPushInbox()   // drain any events delivered inline by push while we were away
         RelayMailboxStore.shared.purgeStale()   // erase relays inactive AND unseen > 7 days (config else survives)
@@ -853,7 +894,7 @@ final class FeedStore: ObservableObject {
         }
     }
 
-    private func bringOnline(seed: Data) {
+    private func bringOnline() {
         // Nearby Bluetooth / Wi-Fi mesh — works even with no internet at all.
         if let social {
             // Display name must be UNIQUE PER DEVICE, not per account: two of my own devices share the
@@ -1438,6 +1479,9 @@ final class FeedStore: ObservableObject {
         guard let social else { return }
         nearbyActive = true
         bumpActivity()   // a peer just appeared → sync tight for the catch-up burst
+        // S4: if this device is mid seedless-enrollment, a primary that only just came into range now
+        // gets our frame-28 request (the ticket is single-use but the request is safe to resend).
+        if pendingEnrollTicket != nil { sendEnrollRequest() }
         reannounceOwnRelay()   // a freshly-connected sibling/friend immediately learns this host's relay
         // FIRST: offer this device's sealed self-sync slot to nearby peers. ONLY our own devices (same
         // seed) can open it — it's how a linked Mac/phone bootstraps circles + profile + posts LOCALLY,
@@ -1736,12 +1780,17 @@ final class FeedStore: ObservableObject {
             let verified = opened.senderHex.lowercased()
             let plaintext = Data(opened.data)
             let declared = String(data: plaintext.prefix(64), encoding: .utf8)?.lowercased() ?? ""
-            guard verified.count == 64, declared == verified else { return }   // proven == self-declared
-            // Defense in depth: when the transport gave us a verified device id, it must resolve to
-            // the same account (nil on the relay path, where the signature already did the work).
+            // The signer's ACCOUNT. A SEEDLESS sender (S4, D9) signs call/notification frames with its
+            // DEVICE key and carries the device bundle, so `verified` is a device id — resolve it to the
+            // account that authorized it (a seeded sender signs with the account key, where the account
+            // resolves to itself). This is the receive-side half of accepting device-signed frames.
+            let signerAccount = social?.accountForDevice(deviceHex: verified)?.lowercased() ?? verified
+            guard verified.count == 64, declared == signerAccount else { return }   // proven signer's account == self-declared
+            // Defense in depth: when the transport gave us a verified device id, it must resolve to the
+            // SAME account as the signer (nil on the relay path, where the signature already did the work).
             if let senderDevice, senderDevice.count == 64,
                let acct = social?.accountForDevice(deviceHex: senderDevice)?.lowercased(),
-               acct != verified { return }
+               acct != signerAccount { return }
             if ConnectionsStore.shared.isBlocked(verified) { return }
             payload = plaintext
         } else if [3, 13, 15].contains(type) {
@@ -1774,6 +1823,8 @@ final class FeedStore: ObservableObject {
         case 25: handleDeviceEnrollmentGrant(payload)           // the primary granted my device a credential
         case 26: handleRequestFullState(payload)                // a newly-linked device of mine asks for my full state
         case 27: handleDeviceRosterAnnounce(payload)            // a friend's signed device roster (device-id auth/dial)
+        case 28: handleSeedlessEnrollRequest(payload)           // S4: a new seedless device asks my primary to enroll it
+        case 29: handleSeedlessEnrollGrant(payload)             // S4: the primary granted my new device its seedless identity
         default: break
         }
     }
@@ -1873,6 +1924,168 @@ final class FeedStore: ObservableObject {
     private func handleRequestFullState(_ payload: Data) {
         guard AccountStore.storedSeed() != nil else { return }   // only a seed-holder can push the account state
         pushFullStateToMyDevices()
+    }
+
+    // MARK: - Seedless enrollment (seed-drop S4) — frames 28 (request) / 29 (grant)
+    //
+    // The seedless linking flow. A NEW device holds only its device key: it scans a `haven-enroll:`
+    // ticket, sends a self-authenticating frame-28 request (MAC'd under the ticket secret), and the
+    // seed-holding PRIMARY answers with a frame-29 grant carrying the account public bundle, an
+    // account-signed device credential, the primary-signed roster wire, and a self-sync-key grant.
+    // Only after all four verify does the new device flip into seedless mode — never a half-identity.
+
+    /// One verified frame-28 request awaiting the primary user's confirmation ("Link 'device name'?").
+    struct PendingEnrollRequest: Identifiable {
+        let id = UUID()
+        let deviceBundle: Data
+        let deviceHex: String
+        let name: String
+    }
+    /// Set on the PRIMARY when a valid frame-28 arrives → drives the confirmation sheet.
+    @Published var pendingEnrollRequest: PendingEnrollRequest?
+    /// Surfaced to the new-device linking UI so a failed grant is visible (device stays re-scannable).
+    @Published var seedlessEnrollFailed = false
+
+    /// PRIMARY side: the currently-advertised enrollment ticket (single-use, short-lived). The secret
+    /// verifies the incoming request's MAC; `enrollTicket` is what the QR encodes.
+    private var activeEnrollTicket: EnrollTicketFfi?
+    /// NEW-DEVICE side: the ticket this device is enrolling with (kept to open the frame-29 grant).
+    private var pendingEnrollTicket: EnrollTicketFfi?
+
+    /// PRIMARY: mint a fresh enrollment ticket to advertise as a `haven-enroll:` QR. Only a seed-holding
+    /// primary can (it must issue credentials + seal the self-sync grant). Returns nil if not a primary.
+    func mintEnrollTicket() -> EnrollTicketFfi? {
+        guard let seed = AccountStore.storedSeed(),
+              let accountBundle = (try? Account.fromSeed(seed: seed))?.publicBundle(),
+              let primaryDevice = DeviceRosterManager.hexToData(DeviceKeyStore.deviceNodeHex()) else { return nil }
+        let relays = RelayMailboxStore.shared.allRelays()
+        let ticket = try? enrollIssueTicket(accountBundle: accountBundle, primaryDevice: primaryDevice,
+                                            issuedAt: UInt64(Date().timeIntervalSince1970), relays: relays)
+        activeEnrollTicket = ticket
+        return ticket
+    }
+
+    /// NEW DEVICE: begin enrolling with a scanned/pasted `haven-enroll:` ticket. Adopts the bootstrap
+    /// relays so the directed request can reach the primary, then sends frame-28 over both rails.
+    /// Idempotent — safe to call again if the first attempt didn't land (the ticket is re-scannable).
+    func beginSeedlessEnroll(ticket: EnrollTicketFfi) {
+        pendingEnrollTicket = ticket
+        seedlessEnrollFailed = false
+        if !ticket.relays.isEmpty { RelayMailboxStore.shared.adoptBootstrapRelays(ticket.relays) }
+        sendEnrollRequest()
+    }
+
+    /// Re-send the frame-28 request for the pending ticket (called on begin and on a nearby peer
+    /// connecting, so a primary that only just came into range still receives it).
+    func sendEnrollRequest() {
+        guard let ticket = pendingEnrollTicket else { return }
+        let name = DeviceKeyStore.deviceName
+        guard let wire = try? enrollBuildRequest(secret: ticket.secret,
+                                                 deviceBundle: DeviceKeyStore.deviceBundle(),
+                                                 name: name, ts: UInt64(Date().timeIntervalSince1970)) else { return }
+        nearbyBroadcast(28, wire)
+        // Directed to the primary's device transport id from the ticket (the reliable rail).
+        let primaryHex = ticket.primaryDevice.map { String(format: "%02x", $0) }.joined()
+        sendToDeviceHex(28, wire, primaryHex)
+    }
+
+    /// PRIMARY: a frame-28 request arrived. Verify its MAC + freshness against our active ticket; on
+    /// success surface a confirmation sheet (only the user's confirm issues the grant). Never
+    /// auto-grants — unlike the legacy type-24 path, S4 authorization is an explicit, MAC-gated step.
+    private func handleSeedlessEnrollRequest(_ payload: Data) {
+        guard AccountStore.storedSeed() != nil, let ticket = activeEnrollTicket else { return }   // only a primary with a live ticket
+        guard let req = try? enrollVerifyRequest(secret: ticket.secret, wire: payload,
+                                                 now: UInt64(Date().timeIntervalSince1970), maxAgeSecs: 600) else { return }
+        let deviceHex = nodeHex(req.deviceBundle.prefix(32))
+        guard deviceHex != DeviceKeyStore.deviceNodeHex() else { return }   // not our own device
+        // Idempotent: don't stack duplicate sheets while one is already up for this device.
+        if pendingEnrollRequest?.deviceHex == deviceHex { return }
+        pendingEnrollRequest = PendingEnrollRequest(deviceBundle: req.deviceBundle, deviceHex: deviceHex,
+                                                    name: req.name.isEmpty ? "New device" : req.name)
+    }
+
+    /// PRIMARY: the user confirmed the link. Issue the credential + union the device into the roster +
+    /// seal the self-sync-key grant, assemble frame 29, and send it (directed to the requester + to my
+    /// own devices), then push full state so the new device populates. Consumes the ticket (single-use).
+    func confirmSeedlessEnroll(_ request: PendingEnrollRequest) {
+        defer { pendingEnrollRequest = nil }
+        guard let seed = AccountStore.storedSeed(), let ticket = activeEnrollTicket else { return }
+        let now = UInt64(Date().timeIntervalSince1970)
+        // Ensure roster is enabled (this device becomes/confirms primary) and union the new device in —
+        // the same path legacy linking uses, so the roster wire we then export carries the new device.
+        guard let accountBundle = (try? Account.fromSeed(seed: seed))?.publicBundle() else { return }
+        DeviceRosterManager.shared.enable(social: social, accountSeed: seed, accountBundle: accountBundle,
+                                          accountHex: AccountStore.currentNodeHex())
+        _ = DeviceRosterManager.shared.addLinkedDevice(bundle: request.deviceBundle, nodeHex: request.deviceHex,
+                                                       name: request.name, social: social, accountSeed: seed)
+        // The primary-signed roster WIRE (verbatim, incl. capability trailer) the new device installs.
+        let rosterWire = social?.myDeviceRosterWire() ?? Data()
+        let relays = RelayMailboxStore.shared.allRelays()
+        // Convenience path: issues the credential, unions the device, and seals the self-sync grant.
+        guard let grant = try? enrollAssembleGrant(accountSeed: seed, ticketSecret: ticket.secret,
+                                                   deviceBundle: request.deviceBundle, name: request.name,
+                                                   createdAt: now, rosterWire: rosterWire, relays: relays) else { return }
+        nearbyBroadcast(29, grant)
+        sendToDeviceHex(29, grant, request.deviceHex)   // directed to the requester
+        activeEnrollTicket = nil                          // single-use — consume it
+        // Populate the newly-seedless device: its self-sync base initializes from this pushed slot.
+        pushFullStateToMyDevices()
+        NotificationManager.shared.notify(title: "New device linked",
+                                          body: "“\(request.name)” is now a secure linked device.",
+                                          dedupeKey: "seedless-enroll-\(request.deviceHex)", persist: false)
+    }
+
+    /// PRIMARY: the user declined the link. Drop the pending request; the ticket stays live so a genuine
+    /// device can retry (or the user can revoke the ticket by leaving the QR screen).
+    func declineSeedlessEnroll() { pendingEnrollRequest = nil }
+
+    /// NEW DEVICE: a frame-29 grant arrived. Open it against our pending ticket (all-positive: MAC,
+    /// account-bundle tamper-check, credential names this device, roster authorizes us, self-sync grant
+    /// opens with our device key). Only on full success do we persist + flip to seedless — otherwise the
+    /// device stays in linking mode, idempotent + re-scannable (never a half-identity).
+    private func handleSeedlessEnrollGrant(_ payload: Data) {
+        guard let ticket = pendingEnrollTicket, !SeedlessState.isEnabled else { return }   // ignore once already seedless
+        let deviceSeed = DeviceKeyStore.deviceAccount().secretSeed()
+        guard let grant = try? enrollOpenGrant(deviceSeed: deviceSeed, ticket: ticket, wire: payload) else {
+            seedlessEnrollFailed = true
+            return
+        }
+        // ORDERED grant acceptance (plan §7 absence-as-deletion guard):
+        // 1. Persist the seedless secrets/anchors — BEFORE booting so the engine reads them.
+        SelfSyncKeyStore.save(grant.selfSyncKey)
+        SeedlessRosterStore.save(grant.rosterWire)
+        DeviceCredentialStore.save(grant.credential)
+        AccountStore.adoptSeedless(accountBundle: grant.accountBundle)   // account public bundle + flag + drop throwaway seed
+        if !grant.relays.isEmpty { RelayMailboxStore.shared.adoptBootstrapRelays(grant.relays) }
+        // 2. RESET the self-sync base so the freshly-seedless engine never diffs its empty state against
+        //    a STALE base (the throwaway pre-enroll identity's, or nothing) and tombstones the account.
+        //    The primary's pushed slot (type-23, arriving next) becomes the authoritative base via
+        //    ingestPeerSlot against this empty base — the initialize-before-first-diff ordering.
+        SelfSyncCoordinator.shared.reset()
+        SharedStore.resetSeenMailbox()
+        pendingEnrollTicket = nil
+        // 3. Tear down the throwaway engine + its on-disk state, then boot SEEDLESS.
+        if FileManager.default.fileExists(atPath: stateURL.path) {
+            let backup = stateURL.deletingLastPathComponent().appendingPathComponent("haven-feed.prev.json")
+            try? FileManager.default.removeItem(at: backup)
+            try? FileManager.default.moveItem(at: stateURL, to: backup)
+        }
+        node = nil; nearby = nil; social = nil; items.removeAll(); circles.removeAll()
+        configure(mode: .seedless(accountBundle: grant.accountBundle, deviceSeed: deviceSeed))
+        // 4. Ask the primary to push full state now (profile/circles/posts) → it answers with the
+        //    type-23 slot that seeds our base, plus the circle events.
+        sendToMyDevices(26, Data(DeviceKeyStore.deviceNodeHex().utf8))
+        NotificationManager.shared.notify(title: "Device linked",
+                                          body: "This device is now linked — syncing your circles…",
+                                          dedupeKey: "seedless-grant", persist: false)
+    }
+
+    /// Send a frame directly to one 64-hex device transport id (no account→device expansion). Used for
+    /// the enrollment request (dial the primary's device from the ticket) and the directed grant.
+    private func sendToDeviceHex(_ type: UInt8, _ payload: Data, _ deviceHex: String) {
+        guard let node, deviceHex.count == 64 else { return }
+        let f = frame(type, payload)
+        Task { try? await node.sendToNode(nodeIdHex: deviceHex, payload: f) }
     }
 
     /// Send to MY OWN other devices over BOTH transports — the local mesh AND iroh (directed at my own
@@ -2648,6 +2861,9 @@ final class FeedStore: ObservableObject {
         // the two devices converge. This is the fix for the "asked to connect with an identity of myself
         // when linking my Mac" bug.
         if idHex == social.myNodeHex() {
+            // D8: a seedless device can't MINT its own account-signed profile card (no account key), so it
+            // caches the primary's signed card — carried on this self-hello — and rebroadcasts it verbatim.
+            if SeedlessState.isEnabled, !profileBlob.isEmpty { social.setCachedProfile(blob: profileBlob) }
             if let slot = SelfSyncCoordinator.shared.sealedLocalSlot(social: social) { nearbyBroadcast(23, slot) }
             return
         }
@@ -3069,7 +3285,7 @@ struct FeedView: View {
                 #endif
             }
             .onAppear {
-                store.configure(seed: seed)
+                store.configureForCurrentIdentity()   // seeded or seedless (S4) — never boot off a throwaway seed
                 // Screenshot harness: open the full-screen story viewer for its hero shot.
                 // The feed rebuild is async now, so RETRY until the demo stories are published
                 // (a single fixed delay raced the off-main refresh and silently skipped the scene).

@@ -120,6 +120,174 @@ struct LinkDeviceView: View {
     }
 }
 
+// MARK: - Seedless enrollment (seed-drop S4)
+
+/// PRIMARY side: show a one-time `haven-enroll:` QR so a NEW device can link WITHOUT ever receiving
+/// the master seed. The new device gets its own key + an account-signed credential + a granted
+/// self-sync key + a copy of the circles — all cryptographically revocable, unlike a copied seed.
+/// Only a seed-holding primary can mint the ticket (it must issue the credential + seal the grant).
+struct EnrollDeviceView: View {
+    @ObservedObject private var store = FeedStore.shared
+    @State private var ticket: EnrollTicketFfi?
+    @State private var code = ""
+    @State private var copied = false
+
+    private var canPrimary: Bool { AccountStore.storedSeed() != nil }
+
+    var body: some View {
+        ZStack {
+            HavenBackground()
+            ScrollView {
+                VStack(spacing: 20) {
+                    Image(systemName: "qrcode").font(.system(size: 44)).foregroundStyle(HavenTheme.pink).padding(.top, 8)
+                    Text("Link a new device").font(.title3.bold())
+                    if !canPrimary {
+                        // A seedless (linked) device can't authorize others — the primary is the sole authority.
+                        Text("This is a linked device. Link new devices from your **primary device** (the one that holds your master key).")
+                            .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    } else {
+                        Text("On your new device, choose **“Link a device”** on its welcome screen, then scan this code. It gets its own key and a copy of your circles — it **never receives your master key**, so you can revoke it anytime.")
+                            .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+
+                        if let img = QRCode.image(from: code), !code.isEmpty {
+                            Image(platformImage: img).interpolation(.none).resizable().scaledToFit()
+                                .frame(width: 240, height: 240)
+                                .padding(12).background(.white, in: RoundedRectangle(cornerRadius: 16))
+                                .screenshotProtected()   // one-time, but still an authorization credential (H2)
+                            Button {
+                                PlatformPasteboard.string = code
+                                copied = true
+                            } label: {
+                                Label(copied ? "Copied" : "Copy link code", systemImage: copied ? "checkmark" : "doc.on.doc")
+                            }
+                            .buttonStyle(.bordered).tint(HavenTheme.pink)
+                            Label("This code links one device, once, and expires after a few minutes. Only scan it onto a device you own.",
+                                  systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption).foregroundStyle(.orange).multilineTextAlignment(.center).padding(.horizontal)
+                        } else {
+                            ProgressView().padding(.vertical, 40)
+                        }
+                        Label("Your primary device keeps handling notifications for the new device for now.",
+                              systemImage: "bell.badge").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                .padding(20).frame(maxWidth: 520).frame(maxWidth: .infinity)
+            }
+        }
+        .navigationTitle("Link device").havenInlineNavTitle()
+        .onAppear { mint() }
+        // The confirmation the plan requires: a frame-28 request pops a sheet naming the device; only
+        // the user's confirm issues the grant.
+        .confirmationDialog(store.pendingEnrollRequest.map { "Link “\($0.name)”?" } ?? "",
+                            isPresented: Binding(get: { store.pendingEnrollRequest != nil },
+                                                 set: { if !$0 { store.declineSeedlessEnroll() } }),
+                            titleVisibility: .visible) {
+            if let req = store.pendingEnrollRequest {
+                Button("Link this device") { store.confirmSeedlessEnroll(req) }
+            }
+            Button("Not now", role: .cancel) { store.declineSeedlessEnroll() }
+        } message: {
+            Text("A device calling itself “\(store.pendingEnrollRequest?.name ?? "")” is asking to join your account. Only link it if it's yours and in front of you.")
+        }
+    }
+
+    private func mint() {
+        guard canPrimary, let t = store.mintEnrollTicket() else { return }
+        ticket = t
+        code = (try? enrollTicketEncode(ticket: t)) ?? ""
+    }
+}
+
+/// NEW-DEVICE side: scan/paste a `haven-enroll:` code (or a legacy `haven-seed:`/`haven-link:` code
+/// from an older primary) to link this device. On a seedless enroll the device sends a frame-28
+/// request and waits for the primary's confirmation; the flow completes when the account flips to
+/// seedless. A legacy code falls back to the seed-adopting path so old primaries keep working.
+struct EnrollScanView: View {
+    @ObservedObject var accountStore: AccountStore
+    var onLinked: () -> Void
+    @ObservedObject private var store = FeedStore.shared
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var pasted = ""
+    @State private var scanning = true
+    @State private var error = false
+    @State private var waiting = false
+
+    var body: some View {
+        ZStack {
+            HavenBackground()
+            ScrollView {
+                VStack(spacing: 18) {
+                    Text("Link this device").font(.title3.bold()).padding(.top, 8)
+                    Text("On your primary device, open **Settings → Devices → Link a device** (or its welcome screen) to show a code, then scan it here — or paste it below.")
+                        .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+
+                    if scanning && !waiting {
+                        QRScannerView { code in attempt(code) }
+                            .frame(height: 280).clipShape(RoundedRectangle(cornerRadius: 18))
+                            .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(HavenTheme.brandHorizontal, lineWidth: 2))
+                    }
+
+                    if waiting {
+                        VStack(spacing: 10) {
+                            ProgressView()
+                            Text("Waiting for your primary device to confirm…").font(.subheadline).foregroundStyle(.secondary)
+                            Text("Keep your primary device (iPhone) nearby or online and confirm the prompt there.")
+                                .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                        }.padding(.vertical, 8)
+                    }
+
+                    VStack(spacing: 8) {
+                        TextField("Paste your link code", text: $pasted, axis: .vertical)
+                            .havenAutocap(.never).autocorrectionDisabled()
+                            .textFieldStyle(.plain).padding(12)
+                            .havenGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        Button { attempt(pasted) } label: { Label("Link from code", systemImage: "link.badge.plus") }
+                            .buttonStyle(BrandButtonStyle())
+                            .disabled(pasted.trimmingCharacters(in: .whitespaces).isEmpty || waiting)
+                    }
+
+                    if error {
+                        Label("That code isn't valid. Check you copied the whole thing.", systemImage: "xmark.octagon.fill")
+                            .font(.caption).foregroundStyle(.red)
+                    }
+                    Label("This device joins your account with its own key and a copy of your circles. Your primary device can revoke it anytime.",
+                          systemImage: "info.circle").font(.caption2).foregroundStyle(.secondary)
+                }
+                .padding(20).frame(maxWidth: 520).frame(maxWidth: .infinity)
+            }
+        }
+        .navigationTitle("Link").havenInlineNavTitle()
+        // Enrollment completed: the account flipped to seedless (grant accepted + engine booted).
+        .onChange(of: accountStore.seedless) { _, isSeedless in
+            if isSeedless { onLinked(); dismiss() }
+        }
+        // The primary rejected/failed the grant — surface it and let the user re-scan.
+        .onChange(of: store.seedlessEnrollFailed) { _, failed in
+            if failed { error = true; waiting = false }
+        }
+    }
+
+    private func attempt(_ raw: String) {
+        let code = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if code.hasPrefix("haven-enroll:") {
+            guard let ticket = try? enrollTicketParse(text: code) else { error = true; return }
+            error = false; waiting = true
+            store.beginSeedlessEnroll(ticket: ticket)   // sends frame-28; completes when accountStore.seedless flips
+            return
+        }
+        // Legacy `haven-seed:` / `haven-link:` from an older primary → adopt the seed directly (kept
+        // working per plan §6: the seed link stays valid during the transition).
+        if accountStore.restore(fromTransferCode: code) {
+            FeedStore.shared.reconfigure(seed: accountStore.account.secretSeed())
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { FeedStore.shared.requestDeviceEnrollment() }
+            onLinked(); dismiss()
+            return
+        }
+        error = true
+    }
+}
+
 /// Adopt an existing identity on this device by scanning/pasting a transfer code.
 struct RestoreIdentityView: View {
     let accountStore: AccountStore

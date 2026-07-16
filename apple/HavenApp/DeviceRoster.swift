@@ -316,12 +316,14 @@ struct AuthorizedDevicesView: View {
                 }
                 // Show a link code for a NEW device to scan/paste — this was missing, so there was no way
                 // to actually link from here. Any device holding the account can present it.
-                if let accountStore, hasSeed {
+                if hasSeed {
                     Section {
-                        NavigationLink { LinkDeviceView(accountStore: accountStore) } label: {
-                            Label("Link another device…", systemImage: "qrcode")
+                        // Seed-drop S4: the seedless credential-grant link (the new device never gets the
+                        // master seed — cryptographically revocable).
+                        NavigationLink { EnrollDeviceView() } label: {
+                            Label("Link a device…", systemImage: "qrcode")
                         }
-                    } footer: { Text("Show a QR/code for your other device to scan or paste on its welcome screen (“Link this as another of my devices”).")
+                    } footer: { Text("Show a QR/code for your new device to scan on its welcome screen (“Link a device”). It gets its own key and a copy of your circles — never your master key, so you can revoke it anytime.")
                         .fixedSize(horizontal: false, vertical: true) }
                 }
                 Section {

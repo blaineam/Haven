@@ -42,7 +42,8 @@ struct OnboardingView: View {
         }
         .sheet(isPresented: $showLink) {
             NavigationStack {
-                RestoreIdentityView(accountStore: accountStore, linkMode: true) {
+                // Seed-drop S4: the seedless "Link a device" path (auto-detects a legacy seed code too).
+                EnrollScanView(accountStore: accountStore) {
                     withAnimation(HavenTheme.smooth) { profile.onboarded = true }
                 }
             }
@@ -82,7 +83,7 @@ struct OnboardingView: View {
             // push-button bezel, and the house style is circles and pills everywhere.
             VStack(spacing: 10) {
                 Button { showLink = true } label: {
-                    Label("Link this as another of my devices", systemImage: "laptopcomputer.and.iphone")
+                    Label("Link a device", systemImage: "laptopcomputer.and.iphone")
                 }
                 Button { showRestore = true } label: {
                     Text("Restore my identity from a code")

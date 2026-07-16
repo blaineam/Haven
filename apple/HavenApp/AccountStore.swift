@@ -14,12 +14,27 @@ final class AccountStore: ObservableObject {
     /// we use a throwaway identity and DID NOT touch the real seed. `reloadIfTemporary()`
     /// swaps in the real one once the keychain is accessible.
     private(set) var usingTemporaryIdentity = false
+    /// Seed-drop S4: this device runs SEEDLESS — it holds no account master seed, only the account
+    /// public bundle + a granted self-sync key + its device credential. `account` is then an inert
+    /// device-local placeholder (never used as the account identity — the engine runs under
+    /// `HavenSocial.newSeedless`, and every seed-holder path is gated on `storedSeed() == nil`).
+    @Published private(set) var seedless = false
 
     private static let service = "com.blaineam.kith"
     private static let seedKey = "account-master-seed"
     private static let syncDefaultsKey = "haven.icloud.identitySync"
 
     init() {
+        // Seedless devices (S4) hold no account seed. Branch BEFORE the seed-load switch so we never
+        // read/generate/save a master seed for them — a seedless first launch must not mint a real
+        // identity, and `storedSeed()` below is forced to nil so no seed-holder path ever fires.
+        if SeedlessState.isEnabled, AccountPublicStore.load() != nil {
+            account = Account.generate()   // inert placeholder; its keys are never the account identity
+            seedless = true
+            observeSeedlessAdoption()
+            return
+        }
+        defer { observeSeedlessAdoption() }
         switch Self.loadSeedStatus() {
         case .found(let seed):
             if let restored = try? Account.fromSeed(seed: seed) {
@@ -51,6 +66,14 @@ final class AccountStore: ObservableObject {
             // identity — the bug that flipped your old content to "not me". Use a throwaway and
             // reload the real seed once unlocked. Do NOT save.
             account = Account.generate(); usingTemporaryIdentity = true
+        }
+    }
+
+    /// Flip this live store into seedless once `FeedStore`'s enrollment grant handler has persisted the
+    /// anchors (it can't reach this instance directly, so it posts a notification).
+    private func observeSeedlessAdoption() {
+        NotificationCenter.default.addObserver(forName: Self.didAdoptSeedlessNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.seedless = true }
         }
     }
 
@@ -88,13 +111,36 @@ final class AccountStore: ObservableObject {
 
     /// The existing master seed if the user already has an identity — never creates one.
     /// Used by App Intents so they act as *this* account without spinning up a new one.
-    static func storedSeed() -> Data? { loadSeed() }
+    /// A SEEDLESS device (S4) has none: returning nil here is what makes every seed-holder-only path
+    /// (authoring a roster, authorizing a device, sealing self-sync from the seed) correctly no-op.
+    static func storedSeed() -> Data? { SeedlessState.isEnabled ? nil : loadSeed() }
 
     /// The node-id hex of the currently stored identity (empty if none/locked). Used to namespace
-    /// per-identity data (the profile) so each identity keeps its own name/photo.
+    /// per-identity data (the profile) so each identity keeps its own name/photo. On a seedless
+    /// device the identity is the account PUBLIC bundle, so read the hex from there.
     static func currentNodeHex() -> String {
+        if SeedlessState.isEnabled {
+            let hex = AccountPublicStore.hex()
+            if !hex.isEmpty { return hex }
+        }
         guard let seed = loadSeed(), let acct = try? Account.fromSeed(seed: seed) else { return "" }
         return acct.nodeIdHex()
+    }
+
+    /// Posted after `adoptSeedless` persists the seedless anchors, so any live `AccountStore` flips its
+    /// `@Published seedless` (the enrollment grant runs in `FeedStore`, which can't reach the instance).
+    static let didAdoptSeedlessNotification = Notification.Name("haven.didAdoptSeedless")
+
+    /// Adopt SEEDLESS mode after a completed enrollment grant (plan §5). Persists the account public
+    /// bundle, sets the seedless flag, and drops the throwaway first-run account seed. The granted
+    /// self-sync key + credential + roster wire are persisted by the caller (SelfSyncKeyStore /
+    /// DeviceCredentialStore / SeedlessRosterStore). Never writes SharedSeed — a seedless device must
+    /// not mirror a seed to the NSE. Static so `FeedStore`'s grant handler can call it directly.
+    static func adoptSeedless(accountBundle: Data) {
+        AccountPublicStore.save(accountBundle)
+        SeedlessState.enable()
+        deleteSeed()   // remove the throwaway account seed minted at first run — it isn't the account
+        NotificationCenter.default.post(name: didAdoptSeedlessNotification, object: nil)
     }
 
     /// Turn iCloud Keychain identity sync on/off and re-store the seed accordingly.
@@ -575,6 +621,12 @@ final class AccountStore: ObservableObject {
         MediaStore.shared.clearMemoryCache()
         DeviceRosterManager.shared.stepDown()
         DeviceCredentialStore.clear()
+        // Seedless (S4) secrets + flag: clear them so a factory reset genuinely leaves nothing behind
+        // and the fresh identity below is a real seeded account, not a stranded seedless shell.
+        AccountPublicStore.clear()
+        SelfSyncKeyStore.clear()
+        SeedlessState.disable()
+        seedless = false
         Self.deleteAllOnDiskMedia()
 
         // Back to a single blank identity AND the welcome/setup flow.

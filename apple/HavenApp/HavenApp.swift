@@ -23,9 +23,7 @@ final class HavenAppDelegate: NSObject, UIApplicationDelegate {
         // Start P2P networking immediately on launch — including a background VoIP wake — so an
         // incoming call answered from the CallKit screen can connect without the user first
         // opening the app. (Previously configure() only ran when the SwiftUI view appeared.)
-        if let seed = AccountStore.storedSeed() {
-            Task { @MainActor in FeedStore.shared.configure(seed: seed) }
-        }
+        Task { @MainActor in FeedStore.shared.configureForCurrentIdentity() }   // seeded or seedless (S4)
         // PushKit REQUIRES its registry to exist by the end of didFinishLaunching: a VoIP push
         // that launches the killed app in the BACKGROUND never renders a view, so the old
         // `.onAppear`-only startVoip() meant no registry existed, the queued call push had
@@ -77,9 +75,7 @@ final class HavenAppDelegate: NSObject, UIApplicationDelegate {
 /// orientation lock (irrelevant on Mac); no background-fetch completion handler on macOS.
 final class HavenAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        if let seed = AccountStore.storedSeed() {
-            Task { @MainActor in FeedStore.shared.configure(seed: seed) }
-        }
+        Task { @MainActor in FeedStore.shared.configureForCurrentIdentity() }   // seeded or seedless (S4)
         // Resume serving as a circle relay if the user left it on (mirrors iOS startIfEnabled).
         Task { @MainActor in RelayHost.shared.startIfEnabled() }
     }
@@ -401,7 +397,7 @@ struct RootView: View {
         }
         .onAppear {
             accountStore.reloadIfTemporary()
-            FeedStore.shared.configure(seed: accountStore.account.secretSeed())
+            FeedStore.shared.configureForCurrentIdentity()   // seeded or seedless (S4)
             // Screenshot harness: bring up the group-call overlay over the seeded feed.
             if DemoEnv.scene == .call { DemoSeeder.startDemoCall() }
             if ProcessInfo.processInfo.environment["HAVEN_OPEN_CONNECT"] == "1" {

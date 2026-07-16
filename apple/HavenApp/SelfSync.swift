@@ -38,6 +38,38 @@ final class SelfSyncCoordinator {
 
     private var inFlight = false
 
+    // MARK: seedless (S4) — seal/open with the granted self-sync key instead of the master seed
+    //
+    // A seedless device has NO account seed; it holds a granted 32-byte self-sync key
+    // (`SelfSyncKeyStore`) that decrypts the exact same account-state slots. These helpers pick the
+    // right primitive so every call site below is identity-agnostic (plan §2.2 F11 / §5).
+
+    /// True when this device can produce/consume its self-sync slot: a master seed (seeded) or the
+    /// granted key (seedless). Guards every sync entry.
+    private func canSelfSync() -> Bool {
+        SeedlessState.isEnabled ? (SelfSyncKeyStore.load() != nil) : (AccountStore.storedSeed() != nil)
+    }
+
+    /// Seal account state — with the master seed (seeded) or the granted self-sync key (seedless).
+    private func sealState(_ state: AccountStateHandle) -> Data? {
+        if SeedlessState.isEnabled {
+            guard let key = SelfSyncKeyStore.load() else { return nil }
+            return try? sealAccountStateWithKey(selfSyncKey: key, state: state)
+        }
+        guard let seed = AccountStore.storedSeed() else { return nil }
+        return try? sealAccountState(accountSeed: seed, state: state)
+    }
+
+    /// Open a peer/self slot — with the master seed (seeded) or the granted self-sync key (seedless).
+    private func openState(_ blob: Data) -> AccountStateHandle? {
+        if SeedlessState.isEnabled {
+            guard let key = SelfSyncKeyStore.load() else { return nil }
+            return try? openAccountStateWithKey(selfSyncKey: key, sealed: blob)
+        }
+        guard let seed = AccountStore.storedSeed() else { return nil }
+        return try? openAccountState(accountSeed: seed, sealed: blob)
+    }
+
     // Circle records are encoded/decoded by the shared FFI `encodeCircleSync`/`decodeCircleSync`
     // so iOS/desktop/Android emit byte-identical bytes (no per-platform JSON/base64 drift).
 
@@ -307,7 +339,7 @@ final class SelfSyncCoordinator {
     @discardableResult
     func sync(social: HavenSocial?) async -> Bool {
         guard !inFlight else { return false }
-        guard let seed = AccountStore.storedSeed() else { return false }
+        guard canSelfSync() else { return false }
         let accountHex = AccountStore.currentNodeHex()
         guard !accountHex.isEmpty else { return false }
         let transports = gatherTransports()
@@ -354,7 +386,7 @@ final class SelfSyncCoordinator {
             let keys = await tList(t, prefix)
             for key in keys where key != ownKey {
                 guard let blob = await tFetch(t, key) else { continue }
-                if let peer = try? openAccountState(accountSeed: seed, sealed: blob) {
+                if let peer = openState(blob) {
                     base.merge(other: peer)
                 }
             }
@@ -367,7 +399,7 @@ final class SelfSyncCoordinator {
         try? base.toBytes().write(to: baseURL, options: .atomic)
 
         // 5. Re-publish our own slot (sealed) to every relay/bucket for redundancy.
-        guard let sealed = try? sealAccountState(accountSeed: seed, state: base) else { return changed }
+        guard let sealed = sealState(base) else { return changed }
         for t in transports { _ = await tUpload(t, ownKey, sealed) }
         return changed
     }
@@ -417,19 +449,18 @@ final class SelfSyncCoordinator {
     /// This device's sealed self-sync slot, folding in local changes first — the payload to hand a
     /// peer device directly over the nearby mesh. No relay/S3 involved.
     func sealedLocalSlot(social: HavenSocial?) -> Data? {
-        guard let seed = AccountStore.storedSeed() else { return nil }
+        guard canSelfSync() else { return nil }
         let base = loadBase()
         foldLocal(into: base, social: social)
         try? base.toBytes().write(to: baseURL, options: .atomic)
-        return try? sealAccountState(accountSeed: seed, state: base)
+        return sealState(base)
     }
 
     /// Merge a peer device's sealed slot received over a direct transport, apply + persist. Returns
     /// true if anything new arrived (so the caller can refresh the feed).
     @discardableResult
     func ingestPeerSlot(_ blob: Data, social: HavenSocial?) -> Bool {
-        guard let seed = AccountStore.storedSeed(),
-              let peer = try? openAccountState(accountSeed: seed, sealed: blob) else { return false }
+        guard let peer = openState(blob) else { return false }
         let base = loadBase()
         let before = base.toBytes()
         base.merge(other: peer)

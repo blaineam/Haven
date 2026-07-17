@@ -383,23 +383,25 @@ struct DMThreadView: View {
     var body: some View {
         ZStack {
             HavenBackground()
-            VStack(spacing: 0) {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(spacing: 8) {
-                            ForEach(ordered, id: \.id) { m in
-                                bubble(m).id(m.id)
-                            }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        ForEach(ordered, id: \.id) { m in
+                            bubble(m).id(m.id)
                         }
-                        .padding(16)
                     }
-                    .scrollDismissesKeyboard(.interactively)
-                    .onChange(of: store.postTick) { scrollToBottom(proxy) }
-                    .onChange(of: store.items.count) { scrollToBottom(proxy) }
-                    .onAppear { scrollToBottom(proxy) }
+                    .padding(16)
+                    // Clear the floating composer so the newest bubble sits just above the input;
+                    // older messages scroll UNDER it (and the tab bar) — same as the feed, no band.
+                    .padding(.bottom, 64)
                 }
-                composer
+                .scrollDismissesKeyboard(.interactively)
+                .onChange(of: store.postTick) { scrollToBottom(proxy) }
+                .onChange(of: store.items.count) { scrollToBottom(proxy) }
+                .onAppear { scrollToBottom(proxy) }
             }
+            // Floating input — no background slab; content scrolls beneath it (matches the feed).
+            VStack { Spacer(); composer }
         }
         .havenInlineNavTitle()
         .toolbar {
@@ -648,7 +650,10 @@ struct DMThreadView: View {
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
-        .havenGlass(in: Rectangle())
+        // NO band behind the composer (matches the feed): a material slab read as a detached grey
+        // bar. The + / field / send each carry their own glass surface and float over the backdrop;
+        // contentShape keeps the whole bar tappable without one.
+        .contentShape(Rectangle())
         .sheet(isPresented: $showMedia) { MediaPicker { refs in attachedMedia.append(contentsOf: refs) }.macSheetFrame() }
         .sheet(isPresented: $showSongs) { SongPicker { t in attachedTrack = t }.macSheetFrame() }
         .sheet(isPresented: $showAudio) { AudioRecorderView { ref in attachedMedia.append(ref) }.macSheetFrame() }

@@ -112,6 +112,9 @@ struct GlassIconButtonStyle: ButtonStyle {
             .foregroundStyle(tint ?? .primary)
             .frame(width: size, height: size)
             .havenGlass(in: Circle())
+            // Clip the glass surface to the circle too — interactive Liquid Glass can bleed past
+            // its shape and read as an ellipse/rounded-rect. Square frame + Circle clip = true circle.
+            .clipShape(Circle())
             .contentShape(Circle())
             .scaleEffect(configuration.isPressed ? 0.94 : 1)
             .opacity(configuration.isPressed ? 0.8 : 1)

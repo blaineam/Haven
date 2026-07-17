@@ -52,8 +52,12 @@ struct MediaZoomViewer: View {
                 HStack {
                     Spacer()
                     Button { dismiss() } label: {
+                        // ONE clean circular patch: a SQUARE frame clipped to a circle. A padded
+                        // (non-square) frame made the Circle read as an oval/rounded-rect slab.
                         Image(systemName: "xmark").font(.headline).foregroundStyle(.white)
-                            .padding(10).background(.black.opacity(0.4), in: Circle())
+                            .frame(width: 38, height: 38)
+                            .background(.black.opacity(0.4), in: Circle())
+                            .contentShape(Circle())
                     }
                     .padding()
                 }

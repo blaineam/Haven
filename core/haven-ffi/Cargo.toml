@@ -30,6 +30,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 [dev-dependencies]
 data-encoding = "2.11.0"
 serde_json = "1.0.150"
+# The `enabled_paths` end-to-end harness reads the ratchet index off a live-lane DM wire
+# (haven_p2p::groupkey::EpochEnvelope) to prove per-message forward secrecy — the ONE piece of
+# wire structure the public FFI does not surface. Test-only; no effect on the shipped lib.
+haven-p2p = { path = "../haven-p2p" }
 
 # Android-only: wire the JavaVM + Context into ndk-context so iroh's rustls platform
 # verifier can reach the system trust store (otherwise the node panics with

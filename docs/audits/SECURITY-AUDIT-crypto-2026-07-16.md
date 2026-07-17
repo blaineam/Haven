@@ -1,5 +1,21 @@
 # Security Audit — Seed-drop + MLS/TreeKEM Cryptography
 
+> **Addendum — 2026-07-16 (post-audit, before the 1.0.7 cut).** This report was written while the
+> M3 keying switch (`set_mls_keying`) still shipped OFF in every client, so several findings below
+> are described as "latent / contained because the switch ships dark." That is **no longer the
+> containment story:** the 1.0.7 clients **enable** the switch per fully-capable circle. The two
+> MEDIUM findings that this report contained via the off-switch were **remediated first** (tracked
+> in the switch-flip prerequisite work), and only then was the switch turned on:
+> - **#2 creator-TOFU race** → the creator pin is now **bound to the authenticated circle definition**
+>   (not first-grant-wins), so a raced self-grant can't install a false authority root.
+> - **self-sync key lifecycle (M1)** → the self-sync key now **rotates on every revocation** and is
+>   re-granted only to still-authorized device bundles (`docs/SWITCH-FLIP-1.0.7.md` §6).
+>
+> Read every "latent because the switch is OFF" sentence below with that in mind: the residual risk
+> is governed by those remediations, not by the switch. The core library still *defaults* the switch
+> OFF, and the design's **M7 gate — an independent cryptographer's review — remains outstanding and
+> is not discharged by this document.**
+
 - **Date:** 2026-07-16
 - **Commit audited:** `593a72fe665b7b4351358f4f6de36e30da10b282` (branch `main`)
 - **Reviewer:** Claude (Opus 4.8) — adversarial static review, human-directed

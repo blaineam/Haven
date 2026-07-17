@@ -207,6 +207,7 @@ final class FeedStore: ObservableObject {
                                       createdAt: UInt64(Date().timeIntervalSince1970))
         }
         social?.setKeepOwnPosts(on: SettingsStore.shared.keepMyPosts)   // apply the archive preference
+        ensureDefaultCircle()   // a brand-new identity must have its own "default" circle to post into
         bumpActivity()   // seed activity NOW so launch starts at tight cadence (not instant max backoff)
         loadLastHeard()   // so "last seen" survives an app restart
         refreshCircles()     // also purges any contaminated DM membership (see refreshCircles)
@@ -312,6 +313,21 @@ final class FeedStore: ObservableObject {
     }
 
     /// Create a circle from scratch and switch to it. Add existing contacts next.
+    /// A fresh identity has no circle to post into: the "default" circle ("Your circle") was only
+    /// ever created as a side effect of accepting your first connection. That left a brand-new user's
+    /// very first post silently dropped — `post(circleId: "default")` targets a circle the engine
+    /// doesn't hold yet, so `social.post` returns nil and the composer clears with nothing to show.
+    /// Create it up front (seed-holders only; a seedless device receives it from the primary's roster
+    /// sync) so posting works the moment the app opens. Idempotent — a no-op once the circle exists.
+    private func ensureDefaultCircle() {
+        guard let social, AccountStore.storedSeed() != nil else { return }   // seed-holder only
+        guard !social.circles().contains(where: { $0.id == "default" }) else { return }
+        social.createCircle(id: "default", name: "Your circle")
+        _ = social.setCircleCreator(circleId: "default", accountHex: social.myNodeHex())
+        CircleCreatorStore.markCreated("default")
+        persist()
+    }
+
     func createCircle(name: String, memberIds: [String] = []) {
         guard let social else { return }
         let id = UUID().uuidString

@@ -43,6 +43,10 @@ export default {
       project: 'apple/Haven.xcodeproj',
       scheme: 'Haven',
       destination: 'platform=iOS Simulator,name=iPhone 17 Pro',
+      // These UI tests drive the REAL keychain-backed identity; an unsigned build has no
+      // data-protection keychain entitlement, so the seed never persists and the social engine
+      // never builds. Sign with the team so the identity path actually runs.
+      signing: { team: '8ZVSPZYSVF' },
       description: 'iOS simulator tests (Haven scheme)',
     },
 

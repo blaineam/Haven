@@ -1513,6 +1513,7 @@ struct CallOverlay: View {
                     HStack {
                         Button { call.minimized = true } label: { Image(systemName: "chevron.down") }
                             .buttonStyle(GlassIconButtonStyle(size: 40, tint: .white))
+                            .accessibilityIdentifier("callMinimize")
                         Spacer()
                     }
                 }

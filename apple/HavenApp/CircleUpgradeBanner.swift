@@ -13,6 +13,11 @@ import SwiftUI
 /// the replacement is genuinely theirs — but nothing can prove they made the ORIGINAL circle, since
 /// it never had an owner to record. So we show who is asking and let the user choose. If two people
 /// both claim it, both are shown; the app picks neither.
+///
+/// That reasoning only holds where a circle has no owner, so the core refuses to author, carry,
+/// surface, or follow an offer on a circle that already names its creator — there the app CAN tell,
+/// and asking the user to weigh a claim it has already disproven would be handing them a decision
+/// under false pretences. Nothing here should ever present an offer the core didn't return.
 struct CircleUpgradeBanner: View {
     let circleId: String
     @ObservedObject private var store = FeedStore.shared

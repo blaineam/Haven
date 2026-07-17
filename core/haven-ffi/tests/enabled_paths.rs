@@ -154,23 +154,27 @@ fn wire_ratchet_index(wire: &[u8]) -> Option<u32> {
 /// Load a golden LEGACY persisted state (a real multi-circle account: two circles, contacts, a post
 /// with a media ref + a comment, an ingested peer post, a device roster), turn EVERY 1.0.7 switch ON,
 /// and prove the enabled path is content-preserving — the absence-as-deletion guard holds under the
-/// enabled path. Then revive the migrated contact as a live capable peer, build the shadow MLS tree
-/// over the migrated data, and prove the migrated history + new content still round-trip.
+/// enabled path. Then RETIRE THE ACCOUNT LEAF, revive the migrated contact as a live capable peer, and
+/// prove the migrated circle now reaches LIVE MLS keying and that retirement cuts an account-seed-only
+/// holder — the migration that was previously unreachable.
 ///
 /// Invariant asserted: enabling all switches on an existing account wipes NOTHING (exact circle set,
 /// per-circle membership, feed bodies + authorship + media ref + comment all identical before/after
-/// the flip), the account stays a functioning engine, the shadow MLS tree converges over the migrated
-/// circle WITHOUT consuming content keys, and every pre-migration post plus new content round-trips to
-/// the revived peer.
+/// the flip), the account stays a functioning engine, and — the FIX — once the account calls
+/// `retire_account_leaf`, its legacy `{account, device}` roster settles at the device-only shape, the
+/// circle reaches `state == "live"`, retirement cuts a bare-account-seed holder (that read fine before
+/// retirement), and every pre-migration post plus new content still round-trips to the revived peer.
 ///
-/// FINDING (flagged, not a test failure): a migrated multi-device account keeps its existing
-/// `{account, device}` roster — the own-roster merge is grow-only union, so it can never shed the bare
-/// account leaf to become the device-only shape live MLS keying requires. Such a circle therefore
-/// settles at "shadow" (dual-stack, content still keyed the legacy way), never "live". This is SAFE
-/// (nothing lost, shadow tree converges), but it means an already-multi-device user never gets
-/// tree-keyed content until a device-only-roster migration path exists. See the final report.
+/// THE FIX (was a flagged FINDING before the account-leaf-retirement migration path landed): a migrated
+/// multi-device account's own roster is grow-only union-merged, so it could never shed the bare account
+/// leaf to reach the device-only shape live MLS keying + account-key retirement require — the circle was
+/// stranded at "shadow" (dual-stack, legacy-keyed) forever. `retire_account_leaf` mints an authenticated,
+/// versioned, sticky "account-leaf retired" flag on the signed roster (the account id STAYS in `devices`
+/// but stops being authorized), so the roster reaches device-only, the all-joined gate completes, and the
+/// circle flips to live. New installs that register device-only from day one were always fine; this is the
+/// path for EXISTING upgraders — the central 1.0.7 requirement. See docs/SWITCH-FLIP-1.0.7.md §1.
 #[test]
-fn migration_all_switches_on_loses_nothing_and_shadow_converges_over_migrated_data() {
+fn migration_all_switches_on_loses_nothing_and_retire_account_leaf_reaches_live() {
     // Load the frozen state under the identity it was authored with (seed 1 + device 91).
     let me = account(1);
     assert!(me.use_device_identity(vec![91u8; 32]));
@@ -225,46 +229,72 @@ fn migration_all_switches_on_loses_nothing_and_shadow_converges_over_migrated_da
     assert!(me.post("default".into(), "post-flip-authored".into(), vec![], None, None, false, false, 5_000).is_ok());
     assert!(bodies(&me, "default", 10_000).contains("post-flip-authored"), "engine authors after the flip");
 
-    // ── Revive the migrated contact as a live, capable peer and build the shadow tree over migrated
-    //    data. The migrated contact is account(2); instantiate it live with a device. `me` keeps its
-    //    fixture {account, device 91} roster (grow-only union — it can't shed the account leaf), so the
-    //    circle settles at "shadow" (see FINDING above), not "live". Cross-learn via the self-describing
-    //    tagged roster wires exactly as a client does.
+    // ── Revive the migrated contact as a live, capable peer. The migrated contact is account(2);
+    //    instantiate it live with a device. Cross-learn via the self-describing tagged roster wires
+    //    exactly as a client does. `me` STILL carries its fixture {account, device 91} roster at this
+    //    point — the account leaf has not been retired yet.
     let bob = account(2);
     assert!(bob.use_device_identity(vec![12u8; 32]));
     bob.add_contact_bundle("default".into(), me.my_bundle()).unwrap();
 
     let bob_wire = bob.register_device(bob.my_device_bundle(), "bob-dev".into(), 0);
     assert!(me.ingest_roster_wire(bob_wire));
-    assert!(bob.ingest_roster_wire(me.my_device_roster_wire()));
     me.profile_seed_drop_version(bob.my_bundle(), capability_card(&bob, "bob"));
     bob.profile_seed_drop_version(me.my_bundle(), capability_card(&me, "me"));
     assert!(bob.set_circle_creator("default".into(), me_hex.clone()));
     bob.set_seed_drop_retire(true);
     bob.set_mls_keying(true);
 
+    // ── (A) BEFORE retiring: `me` still carries the legacy {account, device 91} roster (account leaf
+    //    present + authorized), so a fresh account-seed-only sibling still opens content — the migration
+    //    never strands a seed holder while the fleet is converging (backward compatible).
+    assert!(bob.ingest_roster_wire(me.my_device_roster_wire()), "bob learns the pre-retirement account-plus-device roster");
+    let acct_only_before = account(1); // account(1) SEED only — no device key (a bare-seed sibling)
+    acct_only_before.add_contact_bundle("default".into(), me.my_bundle()).unwrap();
+    me.post("default".into(), "pre-retire-dual-seal".into(), vec![], None, None, false, false, 5_500).unwrap();
+    sync(&me, &acct_only_before, "default");
+    assert!(bodies(&acct_only_before, "default", 10_000).contains("pre-retire-dual-seal"),
+            "pre-retirement the bare account key still opens content (the account leaf is still authorized)");
+
+    // ── (B) RETIRE THE ACCOUNT LEAF — the migration action. `me`'s roster becomes device-only: the
+    //    account id stays in `devices` (grow-only) but is no longer authorized, version-bumped + signed.
+    assert!(!me.account_leaf_retired(), "not retired before the call");
+    assert!(me.retire_account_leaf(), "a fully-capable primary retires its bare account leaf");
+    assert!(me.account_leaf_retired(), "the account-leaf-retired flag is set on my own signed roster");
+    assert!(bob.ingest_roster_wire(me.my_device_roster_wire()),
+            "bob adopts the retired (higher-version) roster and drops my account leaf");
+
     let pair = [me.clone(), bob.clone()];
     flip_and_join(&pair, "default");
-    // Dual-stack shadow (not live) — the safe migration resting state for an account+device roster.
-    assert_eq!(me.mls_keying_status("default".into()).state, "shadow",
-               "a migrated account+device roster settles at dual-stack shadow, not live (see FINDING)");
+    // ── THE FIX: with the account leaf retired the migrated {account, device} roster reaches the
+    //    device-only shape → the §7.2 all-joined gate completes → the circle flips to LIVE (previously
+    //    it was stranded permanently at "shadow"). This is the assertion the FINDING said was unreachable.
+    assert_eq!(me.mls_keying_status("default".into()).state, "live",
+               "after retire_account_leaf the migrated circle reaches LIVE MLS keying (the fix)");
+    assert_eq!(bob.mls_keying_status("default".into()).state, "live", "the revived peer is live too");
 
     // The migrated history is still readable to the revived peer, and new content round-trips — the
-    // shadow tree is built over the migrated data WITHOUT ever consuming content keys.
+    // whole migration is content-preserving.
     sync_all(&[&me, &bob], "default", 4);
     assert!(bodies(&bob, "default", 10_000).contains("p-default-1"),
             "the revived peer reads pre-migration history");
     me.post("default".into(), "post-migration-content".into(), vec![], None, None, false, false, 6_000).unwrap();
     sync_all(&[&me, &bob], "default", 3);
     assert!(bodies(&bob, "default", 10_000).contains("post-migration-content"),
-            "new content round-trips on the migrated circle");
+            "new content round-trips on the migrated, now-live circle");
     assert!(bodies(&me, "default", 10_000).is_superset(&default_before),
             "every pre-migration default post is still present after the whole transition");
-    // The shadow MLS tree converged over the migrated circle (equal hash, no fork) — content untouched.
-    let sh_me = me.mls_shadow_status("default".into());
-    let sh_bob = bob.mls_shadow_status("default".into());
-    assert!(sh_me.converged && sh_me.fork_count == 0, "the shadow tree converged over migrated data");
-    assert_eq!(sh_me.tree_hash_hex, sh_bob.tree_hash_hex, "both sides agree on the shadow tree hash");
+
+    // ── (C) RETIREMENT CUTS THE ACCOUNT-SEED HOLDER: a fresh account-seed-only sibling — which read
+    //    fine in (A) — can no longer obtain the (now device-only-keyed) post-retirement content, while
+    //    bob's authorized device does. The bare account seed with no authorized device is cut off.
+    let acct_only_after = account(1); // account(1) SEED only — no device key
+    acct_only_after.add_contact_bundle("default".into(), me.my_bundle()).unwrap();
+    sync(&me, &acct_only_after, "default");
+    assert!(!bodies(&acct_only_after, "default", 10_000).contains("post-migration-content"),
+            "after retirement the account-seed-only holder is cryptographically cut off (device-only keying)");
+    assert!(bodies(&bob, "default", 10_000).contains("post-migration-content"),
+            "the authorized device still reads post-retirement content");
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════════

@@ -4437,6 +4437,69 @@ impl HavenSocial {
         st.own_roster_wire().unwrap_or_default()
     }
 
+    /// **Migration: retire the bare account-id leaf** from my own signed roster (docs/SWITCH-FLIP-1.0.7.md
+    /// §1). An account that registered a legacy `{account, device}` roster before 1.0.7 cannot otherwise
+    /// shed its bare account leaf — the own-roster merge is grow-only union — so the all-joined gate never
+    /// completes and the circle settles permanently at `shadow` (dual-stack, legacy-keyed). Calling this
+    /// mints a HIGHER-VERSION, account-signed roster with the account-leaf-retired flag set: the account
+    /// id STAYS in `devices` (grow-only device set untouched) but stops being authorized, so the roster
+    /// settles at the DEVICE-ONLY shape live MLS keying + seed-drop retirement require. Rebroadcast the
+    /// returned-wire (`my_device_roster_wire`) to contacts so they drop my account leaf from their sealing
+    /// set + tree.
+    ///
+    /// GATED, mirroring `self_sync_key_should_rotate` / the retirement switch — returns `false` and
+    /// changes NOTHING unless the retirement path is actually being enabled AND the account is fully
+    /// device-capable:
+    ///   * I hold the account seed (only the account key can re-sign a roster — a seedless device never
+    ///     mints one; A1, same guard as `register_device`),
+    ///   * I have adopted a device identity (`use_device_identity`) — a device key to key content to, so
+    ///     retiring the account leaf never strands the account with zero authorized leaves,
+    ///   * the retirement switch is ON (`set_seed_drop_retire(true)`), and
+    ///   * my own account is affirmatively seed-drop-capable.
+    /// Idempotent: a no-op (returns `false`) once already retired — the flag is monotone/sticky, so this
+    /// never churns a needless version bump / epoch rotation. With the gate unmet it is byte-identical to
+    /// today (the account leaf is never dropped by absence).
+    pub fn retire_account_leaf(&self) -> bool {
+        let mut st = self.state.lock().unwrap();
+        // Gate — all four conditions, else inert (byte-identical to today).
+        if st.me_secret.is_none() || st.device.is_none() || !st.retire_account_key {
+            return false;
+        }
+        let acct_id = st.me().node_id_bytes();
+        if !st.seed_drop_capable.contains(&acct_id) {
+            return false; // my own account not yet marked capable — don't retire prematurely
+        }
+        let Some(cd) = st.device_lists.get(&acct_id) else {
+            return false; // no roster registered yet — nothing to retire (call register_device first)
+        };
+        let me = st.me_secret.as_ref().unwrap();
+        // POSITIVE, versioned, account-signed retirement. `None` ⇒ already retired ⇒ sticky no-op.
+        let Some(new_list) = cd.list.with_account_leaf_retired(me, now_secs()) else {
+            return false;
+        };
+        let creds = cd.credentials.clone();
+        st.device_lists.insert(acct_id, ContactDevices { list: new_list, credentials: creds });
+        // The authorized-leaf set shrank (account leaf dropped) — rotate every epoch so the change takes
+        // effect at the next key commit, exactly like register_device / a revocation.
+        for c in st.circles.iter_mut() {
+            c.rotate_epoch();
+        }
+        // Roster→tree: the retired account leaf is now unauthorized, so `mls_sync_roster_to_tree` Removes
+        // it from any LIVE tree (gated inside on the keying committer — inert on an OFF/shadow circle).
+        for i in 0..st.circles.len() {
+            mls_sync_roster_to_tree(&mut st, i);
+        }
+        true
+    }
+
+    /// Whether MY OWN signed roster has retired the bare account-id leaf (the migration flag above).
+    /// `false` on every legacy / not-yet-migrated account (absence is never "retired").
+    pub fn account_leaf_retired(&self) -> bool {
+        let st = self.state.lock().unwrap();
+        let acct_id = st.me().node_id_bytes();
+        st.device_lists.get(&acct_id).map(|cd| cd.list.account_leaf_retired).unwrap_or(false)
+    }
+
     /// Everything a freshly-synced peer (or the relay mailbox) needs to read my contributions to a
     /// circle: the current epoch **key commit** (so they can open my epoch events) followed by my own
     /// events re-sealed under that epoch. Tagged for `receive`'s router. This is the *only* transport

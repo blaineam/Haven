@@ -43,13 +43,28 @@ to map to a live, joining device — i.e. a **device-only** roster that lists yo
 **not** the bare account id. `register_device` / `sign_device_list` should emit a device-only list for
 a fully-upgraded account.
 
-> ⚠️ **Migration caveat (see enabled_paths §1 FINDING).** An account's *own* roster is grow-only
-> union-merged — it can never shed a leaf it already registered. A user who already had a legacy
-> `{account, device}` roster therefore **cannot** shrink to device-only and will settle at **shadow**
-> (dual-stack, legacy-keyed content), never **live**. That is safe (nothing is lost, the shadow tree
-> converges), but such users do not get tree-keyed content or account-key retirement until core grows
-> a device-only-roster migration path. New installs that register device-only from day one are
-> unaffected. Do **not** try to force live keying on a migrated account+device roster.
+> ⚠️ **Migration step (existing multi-device upgraders): `retire_account_leaf()`.** An account's *own*
+> roster is grow-only union-merged — it can never *delete* a leaf it already registered. A user who
+> already had a legacy `{account, device}` roster therefore cannot silently shrink to device-only, and
+> without help would settle at **shadow** (dual-stack, legacy-keyed), never **live**. The migration path
+> is `retire_account_leaf()`: it mints a HIGHER-VERSION, account-signed roster carrying an authenticated,
+> versioned, sticky **account-leaf-retired** flag. The account id STAYS in `devices` (grow-only set
+> untouched) but is no longer *authorized*, so the roster reaches the device-only shape live keying +
+> account-key retirement require — the all-joined gate completes and the circle flips to **live**.
+>
+> ```
+> // once the fleet is device-capable (device identity adopted + seed-drop-capable) and the retire
+> // switch is on, retire the bare account leaf. Idempotent + gated: a no-op until fully capable.
+> set_seed_drop_retire(true)
+> retire_account_leaf()                                // → device-only roster; rebroadcast the wire
+> ```
+>
+> The flag is a POSITIVE signal only — **absence never retires**. A legacy peer that cannot parse the
+> retired roster simply keeps your prior `{account, device}` roster (higher-version-wins) and keeps
+> dual-sealing to you, which is safe: a circle containing a legacy peer is never fully capable, so the
+> account leaf is never dropped for anyone regardless. New installs that register device-only from day
+> one never need this. (Proven in `enabled_paths.rs` scenario 1 —
+> `migration_all_switches_on_loses_nothing_and_retire_account_leaf_reaches_live`.)
 
 Cross-learn peers both directions:
 
@@ -221,7 +236,10 @@ stranded or loses data.
 2. Cross-learn peers: `ingest_roster_wire` + `profile_seed_drop_version` (both directions).
 3. `set_circle_creator` on every circle at creation (+ `grant_circle_admin` for delegates).
 4. `set_mls_keying(true)`; sync; watch `mls_keying_status` climb off→shadow→live.
-5. `set_seed_drop_retire(true)` (gated; safe to set any time).
+5. `set_seed_drop_retire(true)` (gated; safe to set any time). **Existing multi-device upgraders** then
+   call `retire_account_leaf()` once (gated + idempotent) to shed the legacy bare account leaf and
+   rebroadcast the device-only roster — without it a migrated `{account, device}` roster is stranded at
+   shadow (see §1).
 6. `set_circle_live_lane(true)` on `dm:` circles.
 7. On each revocation: `mint_self_sync_key` → `seal_self_sync_key_epoch_grant` to survivors →
    `seal_account_state_with_key_epoch`; readers use `open_account_state_dual` (empty `seed_key` once

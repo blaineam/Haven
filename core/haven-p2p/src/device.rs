@@ -29,6 +29,28 @@ const CRED_DOMAIN: &[u8] = b"haven-device-cred-v1";
 /// Domain-separation tag for the bytes an account signs over a device list.
 const LIST_DOMAIN: &[u8] = b"haven-device-list-v1";
 
+/// Domain-separation tail folded into a [`DeviceList`]'s signed preimage **only** when the account has
+/// retired its bare account-id leaf (migration path, docs/SWITCH-FLIP-1.0.7.md §1). Appended solely in
+/// the retired case, so a NON-retired list's signed bytes — and therefore its signature — are
+/// byte-for-byte identical to a pre-1.0.7 roster (legacy sigs keep verifying; the account leaf is
+/// dropped ONLY via this signed flag, NEVER by its absence).
+const LEAF_RETIRE_DOMAIN: &[u8] = b"haven-device-list-acct-leaf-retired-v1";
+
+/// Wire suffix that marks a serialized [`DeviceList`] as carrying the account-leaf-retired flag.
+/// Appended AFTER the signature and present ONLY when retired. Rationale for this framing:
+///   * A NON-retired list has no suffix, so [`DeviceList::to_bytes`] stays byte-identical to today
+///     (the roster byte-equality the FFI tests assert, and legacy on-wire compatibility).
+///   * A pre-1.0.7 decoder reads the signature as the trailing bytes (`sig = rest()`), so this suffix
+///     folds into its `sig` and verification fails — the legacy peer simply REJECTS the retired roster
+///     and keeps the account's PRIOR ({account, device}) roster (higher-version-wins). That is safe: a
+///     circle containing a legacy peer is never fully seed-drop-capable, so the account leaf is never
+///     dropped for anyone regardless.
+///   * A 1.0.7 decoder recognizes the suffix, sets the flag, and verifies the signature over the exact
+///     retired preimage the signer used. A ~2^-64 chance that a non-retired signature happens to END in
+///     these 8 bytes is fail-closed: the decoder would set retired=true, verify() would recompute the
+///     retired preimage over a truncated sig and reject the list — never a false authorization.
+const LEAF_RETIRE_WIRE_SUFFIX: &[u8; 8] = b"HVNLEAF1";
+
 /// A device authorized by an account.
 ///
 /// The `sig` is a **hybrid** (Ed25519 + ML-DSA) signature **by the account identity** over
@@ -142,6 +164,17 @@ pub struct DeviceList {
     pub devices: Vec<[u8; 32]>,
     /// Revoked device node ids (kept so an old credential can't be replayed as live).
     pub revoked: Vec<[u8; 32]>,
+    /// **Account-leaf retirement** (migration path, docs/SWITCH-FLIP-1.0.7.md §1). A POSITIVE,
+    /// account-signed, sticky-by-version fact: the bare account-id leaf is no longer an authorized
+    /// recipient/leaf (its DEVICE leaves remain — `devices` is untouched, grow-only). When set,
+    /// [`Self::is_authorized`] returns false for `account_id`, so both the tree-leaf set and the
+    /// device-only sealing set shed the bare account, letting an already-multi-device upgrader reach the
+    /// device-only roster shape live MLS keying + retirement require. Governed EXACTLY like the
+    /// `revoked` set's stickiness: it can only be LEARNED (via a higher-version account-signed list),
+    /// never inferred from absence — a legacy roster has it `false`, and a stale roster can never
+    /// resurrect the account leaf (`merge` unions it; `adopt_if_newer` is version-monotone). The account
+    /// leaf is dropped ONLY via this signed flag, NEVER by absence.
+    pub account_leaf_retired: bool,
     /// Hybrid signature by the **account** identity over [`Self::signing_bytes`].
     pub sig: Vec<u8>,
 }
@@ -153,6 +186,7 @@ impl DeviceList {
         updated_at: u64,
         devices: &[[u8; 32]],
         revoked: &[[u8; 32]],
+        account_leaf_retired: bool,
     ) -> Vec<u8> {
         let mut v = Vec::with_capacity(LIST_DOMAIN.len() + 32 + 8 + 8 + 8 + (devices.len() + revoked.len()) * 32);
         v.extend_from_slice(LIST_DOMAIN);
@@ -167,10 +201,17 @@ impl DeviceList {
         for d in revoked {
             v.extend_from_slice(d);
         }
+        // The retirement tail is folded in ONLY when set — so a non-retired list's preimage (and thus
+        // its signature) is byte-identical to a pre-1.0.7 roster's. Absence of the tail is never
+        // "retired"; the account leaf is dropped ONLY via this positive, signed flag.
+        if account_leaf_retired {
+            v.extend_from_slice(LEAF_RETIRE_DOMAIN);
+        }
         v
     }
 
-    /// Build and sign a device list with the account identity.
+    /// Build and sign a NON-retired device list with the account identity (byte-identical to the
+    /// pre-1.0.7 constructor — every existing caller keeps producing the exact same bytes).
     pub fn signed(
         account: &Identity,
         version: u64,
@@ -178,28 +219,61 @@ impl DeviceList {
         devices: Vec<[u8; 32]>,
         revoked: Vec<[u8; 32]>,
     ) -> Self {
-        let account_id = account.public().node_id_bytes();
-        let msg = Self::signing_bytes(&account_id, version, updated_at, &devices, &revoked);
-        let sig = account.sign(&msg);
-        Self { account_id, version, updated_at, devices, revoked, sig }
+        Self::signed_inner(account, version, updated_at, devices, revoked, false)
     }
 
-    /// Verify the list against the pinned account key (id match + hybrid signature).
+    /// Build and sign a device list, choosing whether the account-leaf-retired flag is set. The public
+    /// [`Self::signed`] delegates here with `false`; retirement mints its list via
+    /// [`Self::with_account_leaf_retired`], which passes `true`.
+    fn signed_inner(
+        account: &Identity,
+        version: u64,
+        updated_at: u64,
+        devices: Vec<[u8; 32]>,
+        revoked: Vec<[u8; 32]>,
+        account_leaf_retired: bool,
+    ) -> Self {
+        let account_id = account.public().node_id_bytes();
+        let msg = Self::signing_bytes(&account_id, version, updated_at, &devices, &revoked, account_leaf_retired);
+        let sig = account.sign(&msg);
+        Self { account_id, version, updated_at, devices, revoked, account_leaf_retired, sig }
+    }
+
+    /// Verify the list against the pinned account key (id match + hybrid signature). The signed preimage
+    /// includes the retirement tail iff the flag is set, so a tampered flag (flipped either way without
+    /// the account re-signing) fails here.
     pub fn verify(&self, account_pub: &HavenId) -> Result<()> {
         if account_pub.node_id_bytes() != self.account_id {
             return Err(CoreError::Crypto("device list: account id mismatch"));
         }
-        let msg = Self::signing_bytes(&self.account_id, self.version, self.updated_at, &self.devices, &self.revoked);
+        let msg = Self::signing_bytes(
+            &self.account_id,
+            self.version,
+            self.updated_at,
+            &self.devices,
+            &self.revoked,
+            self.account_leaf_retired,
+        );
         account_pub.verify(&msg, &self.sig)
     }
 
-    /// Is `device_id` currently authorized? (present and not revoked).
+    /// Is `device_id` currently authorized? (present and not revoked). Once the account has SIGNED the
+    /// account-leaf retirement, the bare account id is no longer authorized — its DEVICE leaves remain.
+    /// The account leaf is dropped ONLY via this signed higher-version flag, NEVER by absence.
     pub fn is_authorized(&self, device_id: &[u8; 32]) -> bool {
+        if self.account_leaf_retired && device_id == &self.account_id {
+            return false;
+        }
         !self.revoked.contains(device_id) && self.devices.contains(device_id)
     }
 
     /// Merge rule across devices/replicas: **higher `version` wins**. Returns `true` if
     /// `other` is newer and was adopted. Both must already be `verify()`-ed by the caller.
+    ///
+    /// This carries the account-leaf-retired flag along in the adopted (strictly-newer, account-signed)
+    /// clone, and it is the rollback defense for retirement: a stale roster (version ≤ ours) is refused,
+    /// so a copy that still authorizes the account leaf can never DOWNGRADE a retired one back. (The
+    /// account only ever retires forward at a higher version, so no un-retire clone exists to adopt.)
     pub fn adopt_if_newer(&mut self, other: &DeviceList) -> bool {
         if other.account_id == self.account_id && other.version > self.version {
             *self = other.clone();
@@ -250,16 +324,23 @@ impl DeviceList {
         }
         devices.sort_unstable();
         revoked.sort_unstable();
-        // No membership change → don't churn a new signed version (idempotent convergence).
+        // Account-leaf retirement is STICKY exactly like a revocation: once EITHER copy has retired the
+        // bare account leaf, the union keeps it retired. A stale (older) roster that still authorizes the
+        // account leaf can therefore never resurrect it through a merge — the same "revoked only grows"
+        // discipline, extended to this one flag. (It only ever goes false→true; the account never
+        // un-retires, so there is no un-retire branch to get wrong.)
+        let account_leaf_retired = self.account_leaf_retired || other.account_leaf_retired;
+        // No membership change AND no retirement change → don't churn a new signed version (idempotent
+        // convergence). Retirement is part of "membership" here: flipping it on IS a change worth signing.
         let mut cur_dev = self.devices.clone();
         cur_dev.sort_unstable();
         let mut cur_rev = self.revoked.clone();
         cur_rev.sort_unstable();
-        if devices == cur_dev && revoked == cur_rev {
+        if devices == cur_dev && revoked == cur_rev && account_leaf_retired == self.account_leaf_retired {
             return None;
         }
         let version = self.version.max(other.version) + 1;
-        Some(DeviceList::signed(account, version, updated_at, devices, revoked))
+        Some(DeviceList::signed_inner(account, version, updated_at, devices, revoked, account_leaf_retired))
     }
 
     /// Add this device's own id to the roster (self-registration on launch) and re-sign. Returns `None`
@@ -274,11 +355,36 @@ impl DeviceList {
         }
         // Re-adding a previously-revoked device id is an explicit re-authorization: clear its tombstone.
         let revoked: Vec<[u8; 32]> = self.revoked.iter().copied().filter(|r| r != &device_id).collect();
-        Some(DeviceList::signed(account, self.version + 1, updated_at, devices, revoked))
+        // Retirement is STICKY across a self-registration: adding another device must NOT un-retire the
+        // account leaf (that would silently re-open the bare account as a recipient). Carry it forward.
+        Some(DeviceList::signed_inner(account, self.version + 1, updated_at, devices, revoked, self.account_leaf_retired))
+    }
+
+    /// Re-sign this roster with the **account-leaf-retired** flag SET, bumping the version. The bare
+    /// account id stays in `devices` (grow-only device set is untouched) but stops being *authorized* —
+    /// so the roster settles at the DEVICE-ONLY shape that live MLS keying + seed-drop retirement need,
+    /// letting an already-multi-device upgrader migrate (docs/SWITCH-FLIP-1.0.7.md §1). Returns `None`
+    /// when already retired — the flag is monotone/sticky, so re-retiring is a no-op (no needless
+    /// version bump / epoch rotation). Only the account key can produce this (the account signs it), so
+    /// a device that lacks the account seed can never mint it — roster authority is unchanged.
+    pub fn with_account_leaf_retired(&self, account: &Identity, updated_at: u64) -> Option<DeviceList> {
+        if self.account_leaf_retired {
+            return None;
+        }
+        Some(DeviceList::signed_inner(
+            account,
+            self.version + 1,
+            updated_at,
+            self.devices.clone(),
+            self.revoked.clone(),
+            true,
+        ))
     }
 
     /// Wire encoding: `account_id(32) ‖ version(8) ‖ updated_at(8) ‖ n_dev(4) ‖ dev*32 ‖
-    /// n_rev(4) ‖ rev*32 ‖ sig`.
+    /// n_rev(4) ‖ rev*32 ‖ sig` — and, ONLY when the account leaf is retired, a trailing
+    /// [`LEAF_RETIRE_WIRE_SUFFIX`]. A non-retired list is thus byte-for-byte identical to a pre-1.0.7
+    /// roster (the account leaf is carried ONLY as a positive suffix, never inferred from its absence).
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut v = Vec::with_capacity(32 + 16 + 8 + (self.devices.len() + self.revoked.len()) * 32 + self.sig.len());
         v.extend_from_slice(&self.account_id);
@@ -293,12 +399,24 @@ impl DeviceList {
             v.extend_from_slice(d);
         }
         v.extend_from_slice(&self.sig);
+        if self.account_leaf_retired {
+            v.extend_from_slice(LEAF_RETIRE_WIRE_SUFFIX);
+        }
         v
     }
 
-    /// Inverse of [`Self::to_bytes`].
+    /// Inverse of [`Self::to_bytes`]. The OPTIONAL account-leaf-retired suffix is detected FIRST, off the
+    /// tail: present ⇒ retired (a positive signal); absent ⇒ not retired (never inferred as a downgrade).
+    /// A legacy encoder never appends it, so a legacy roster decodes with `account_leaf_retired = false`.
     pub fn from_bytes(b: &[u8]) -> Result<Self> {
-        let mut r = Reader::new(b);
+        let (body, account_leaf_retired) = if b.len() >= LEAF_RETIRE_WIRE_SUFFIX.len()
+            && &b[b.len() - LEAF_RETIRE_WIRE_SUFFIX.len()..] == LEAF_RETIRE_WIRE_SUFFIX.as_slice()
+        {
+            (&b[..b.len() - LEAF_RETIRE_WIRE_SUFFIX.len()], true)
+        } else {
+            (b, false)
+        };
+        let mut r = Reader::new(body);
         let account_id = r.array32()?;
         let version = r.u64()?;
         let updated_at = r.u64()?;
@@ -316,7 +434,7 @@ impl DeviceList {
         if sig.is_empty() {
             return Err(CoreError::Encoding("device list: missing signature"));
         }
-        Ok(Self { account_id, version, updated_at, devices, revoked, sig })
+        Ok(Self { account_id, version, updated_at, devices, revoked, account_leaf_retired, sig })
     }
 }
 
@@ -874,6 +992,139 @@ mod tests {
         if let Some(m4) = tie_a.merge(&tie_b, &account, 700) {
             assert!(!m4.is_authorized(&dev));
         }
+    }
+
+    #[test]
+    fn account_leaf_retirement_drops_only_the_account_leaf_and_keeps_devices() {
+        // A legacy {account, device} roster: the bare account id is enrolled as its OWN leaf alongside a
+        // real device. Retiring drops the account leaf from authorization WITHOUT touching the device set
+        // (grow-only devices preserved) — the device-only shape live keying + retirement require.
+        let account = id(1);
+        let acct_id = account.public().node_id_bytes();
+        let dev = id(2).public().node_id_bytes();
+        let legacy = DeviceList::signed(&account, 1, 0, vec![acct_id, dev], vec![]);
+        assert!(!legacy.account_leaf_retired);
+        assert!(legacy.is_authorized(&acct_id), "legacy roster authorizes the bare account leaf");
+        assert!(legacy.is_authorized(&dev));
+
+        let retired = legacy.with_account_leaf_retired(&account, 1).expect("retire bumps + re-signs");
+        assert_eq!(retired.version, 2, "retirement bumps the version");
+        assert!(retired.account_leaf_retired);
+        assert!(retired.verify(&account.public()).is_ok(), "the retired roster is validly account-signed");
+        assert!(!retired.is_authorized(&acct_id), "the bare account leaf is no longer authorized");
+        assert!(retired.is_authorized(&dev), "the DEVICE leaf remains authorized");
+        assert!(retired.devices.contains(&acct_id), "the account id STAYS in devices (grow-only set untouched)");
+
+        // Re-retiring is a sticky no-op (no needless version bump / epoch churn).
+        assert!(retired.with_account_leaf_retired(&account, 2).is_none(), "already-retired re-retire is a no-op");
+    }
+
+    #[test]
+    fn non_retired_wire_is_byte_identical_and_flag_round_trips() {
+        // The switch-OFF guarantee at the wire level: a non-retired list encodes EXACTLY as before, and a
+        // retired one round-trips its flag while remaining verifiable.
+        let account = id(1);
+        let acct_id = account.public().node_id_bytes();
+        let dev = id(2).public().node_id_bytes();
+        let list = DeviceList::signed(&account, 3, 9, vec![acct_id, dev], vec![]);
+        assert!(!list.to_bytes().ends_with(LEAF_RETIRE_WIRE_SUFFIX.as_slice()),
+                "a non-retired list carries NO retirement suffix (byte-identical to pre-1.0.7)");
+        let back = DeviceList::from_bytes(&list.to_bytes()).expect("decode non-retired");
+        assert_eq!(list, back);
+        assert!(!back.account_leaf_retired);
+
+        let retired = list.with_account_leaf_retired(&account, 10).unwrap();
+        let wire = retired.to_bytes();
+        assert!(wire.ends_with(LEAF_RETIRE_WIRE_SUFFIX.as_slice()), "a retired list carries the suffix");
+        let back = DeviceList::from_bytes(&wire).expect("decode retired");
+        assert_eq!(retired, back, "retired flag survives the wire round-trip");
+        assert!(back.account_leaf_retired);
+        back.verify(&account.public()).expect("decoded retired list still verifies");
+    }
+
+    #[test]
+    fn retirement_flag_is_signed_tamper_is_rejected() {
+        // The flag is part of the SIGNED preimage: flipping it either direction without the account
+        // re-signing must fail verify() — a relay can neither forge a retirement (to strand a seed-holder)
+        // nor strip one (to resurrect the account leaf) undetectably.
+        let account = id(1);
+        let acct_id = account.public().node_id_bytes();
+        // Forge a retirement onto a genuinely non-retired signature.
+        let mut forged_on = DeviceList::signed(&account, 1, 0, vec![acct_id], vec![]);
+        forged_on.account_leaf_retired = true;
+        assert!(forged_on.verify(&account.public()).is_err(), "forging retirement onto a plain sig fails");
+        // Strip a genuine retirement without re-signing.
+        let mut stripped = account_leaf_retired_list(&account, 2, acct_id);
+        stripped.account_leaf_retired = false;
+        assert!(stripped.verify(&account.public()).is_err(), "stripping a signed retirement fails");
+    }
+
+    #[test]
+    fn retirement_is_sticky_across_merge_and_rollback_defended() {
+        // Mirrors `merge_keeps_revocations_sticky`: once EITHER copy has retired the account leaf, no
+        // stale copy that still authorizes it can resurrect it — the same "grows, never shrinks" rule.
+        let account = id(1);
+        let acct_id = account.public().node_id_bytes();
+        let dev = id(2).public().node_id_bytes();
+        // v3 retired; a stale v2 still authorizes the account leaf.
+        let retired = DeviceList::signed(&account, 3, 0, vec![acct_id, dev], vec![])
+            .with_account_leaf_retired(&account, 0)
+            .unwrap(); // version 4
+        let stale_authorizing = DeviceList::signed(&account, 2, 0, vec![acct_id, dev], vec![]);
+
+        // Merge in EITHER direction keeps the account leaf retired (never un-retires).
+        let merged = stale_authorizing.merge(&retired, &account, 5).expect("stale picks up retirement");
+        assert!(merged.account_leaf_retired && !merged.is_authorized(&acct_id), "retirement wins the merge");
+        merged.verify(&account.public()).expect("merged roster is validly account-signed");
+        if let Some(m2) = retired.merge(&stale_authorizing, &account, 5) {
+            assert!(m2.account_leaf_retired, "the stale side can never un-retire the account leaf");
+        } // None = no change, which also preserves retirement.
+
+        // adopt_if_newer rollback defense: a stale (lower-version) authorizing copy is refused outright.
+        let mut held = retired.clone();
+        assert!(!held.adopt_if_newer(&stale_authorizing), "a stale roster loses the version race");
+        assert!(held.account_leaf_retired, "the retired leaf is not resurrected by a rolled-back copy");
+    }
+
+    /// Helper: a validly-signed, account-leaf-retired list at `version` for `account`.
+    fn account_leaf_retired_list(account: &Identity, version: u64, acct_id: [u8; 32]) -> DeviceList {
+        DeviceList::signed(account, version, 0, vec![acct_id], vec![])
+            .with_account_leaf_retired(account, 0)
+            .unwrap()
+    }
+
+    #[test]
+    fn retired_account_is_dropped_from_recipients_but_devices_still_seal() {
+        // The end-to-end recipient effect: once retired, `authorized_bundles` (and so the device-only
+        // gated seal) sheds the bare account bundle, while the device bundle stays a recipient.
+        let account = id(1);
+        let device = id(2);
+        let list = DeviceList::signed(
+            &account, 1, 0,
+            vec![account.public().node_id_bytes(), device.public().node_id_bytes()],
+            vec![],
+        )
+        .with_account_leaf_retired(&account, 1)
+        .unwrap();
+        let creds = vec![
+            DeviceCredential::issue(&account, &account.public(), "account-as-leaf", 0),
+            DeviceCredential::issue(&account, &device.public(), "device", 1),
+        ];
+        let cd = ContactDevices { list, credentials: creds };
+        let bundles: std::collections::HashSet<[u8; 32]> =
+            cd.authorized_bundles().iter().map(|b| b.node_id_bytes()).collect();
+        assert!(!bundles.contains(&account.public().node_id_bytes()), "retired account bundle is dropped");
+        assert!(bundles.contains(&device.public().node_id_bytes()), "the device bundle still seals");
+
+        // The gated device-only recipient set excludes the bare account too.
+        let mut map = std::collections::HashMap::new();
+        map.insert(account.public().node_id_bytes(), cd);
+        let mut capable = std::collections::HashSet::new();
+        capable.insert(account.public().node_id_bytes());
+        let gated = recipients_with_devices_gated(&[account.public()], &map, &capable, true);
+        let gated_ids: std::collections::HashSet<[u8; 32]> = gated.iter().map(|b| b.node_id_bytes()).collect();
+        assert!(!gated_ids.contains(&account.public().node_id_bytes()), "device-only seal cuts the account seed holder");
+        assert!(gated_ids.contains(&device.public().node_id_bytes()));
     }
 
     #[test]

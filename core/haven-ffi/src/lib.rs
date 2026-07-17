@@ -5297,17 +5297,19 @@ impl HavenSocial {
         let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else {
             return Err(HavenError::Invalid { msg: "unknown circle".into() });
         };
-        // C6: seal to authorized DEVICE bundles (via the gated recipient set) and sign via `signer_of`, so a
-        // seedless sibling — whose only id is a device id — can open circle media. With no rosters this is
-        // byte-identical to the old `[me] + members` account-only seal; with rosters it dual-seals to devices
-        // too (a superset, so existing readers are unaffected). `signer_of` signs under the device only in a
-        // fully-capable circle (else the account, or — on seedless — the device, its sole key).
+        // Media is ALWAYS dual-sealed (account bundles + authorized devices) and, when a seed is held,
+        // account-SIGNED — never device-only. The media ref lives inside the post event, which is itself
+        // epoch/tree-keyed and retirement-gated, so anyone who can't open the post never learns the ref
+        // to fetch the media: device-only-sealing the blob adds no confidentiality over the post's own
+        // gating, while it introduced a fragile per-blob dependency on holding the author's current
+        // device roster — and since a sealed blob is cached once and never re-sealed, any roster skew
+        // froze a friend's media as permanently unopenable. Account-signing keeps it openable by any
+        // authorized reader (the 1.0.6 robustness). Only a SEEDLESS device (no account key) signs under
+        // its device, as it must — its media still needs peers to hold its roster, which is inherent.
         let mut accounts = vec![st.me().clone()];
         accounts.extend(st.circles[idx].members.iter().cloned());
-        let recipients = recipients_with_devices_gated(
-            &accounts, &st.device_lists, &st.seed_drop_capable, st.retire_account_key);
-        let under_device = st.device.is_some()
-            && circle_fully_seed_drop_capable(&accounts, &st.device_lists, &st.seed_drop_capable);
+        let recipients = recipients_with_devices(&accounts, &st.device_lists);
+        let under_device = st.me_secret.is_none();
         let group = Group::new(circle_id, recipients);
         seal_bytes(signer_of(&st, under_device), &group, &data)
             .map(|env| env.to_bytes())
@@ -5328,13 +5330,12 @@ impl HavenSocial {
         let sealed: Option<Vec<u8>> = (|| {
             let st = self.state.lock().unwrap();
             let idx = st.circles.iter().position(|c| c.id == circle_id)?;
-            // C6, mirroring `seal_circle_media`: gated device recipients + `signer_of` (see there).
+            // Account-signed + dual-sealed, mirroring `seal_circle_media` (see the rationale there):
+            // media must stay openable by any authorized reader, not gated on holding a device roster.
             let mut accounts = vec![st.me().clone()];
             accounts.extend(st.circles[idx].members.iter().cloned());
-            let recipients = recipients_with_devices_gated(
-                &accounts, &st.device_lists, &st.seed_drop_capable, st.retire_account_key);
-            let under_device = st.device.is_some()
-                && circle_fully_seed_drop_capable(&accounts, &st.device_lists, &st.seed_drop_capable);
+            let recipients = recipients_with_devices(&accounts, &st.device_lists);
+            let under_device = st.me_secret.is_none();
             let group = Group::new(circle_id.clone(), recipients);
             seal_bytes(signer_of(&st, under_device), &group, &data).ok().map(|env| env.to_bytes())
         })();
@@ -7864,6 +7865,42 @@ mod net_tests {
         let g_wrong_root = AdminGrant::issue(&mallory, gid, mallory.public().node_id_bytes(), alice.public().node_id_bytes(), 5);
         assert!(matches!(feed_grant(&g_wrong_root), Ok(false)));
         assert!(!victim.circle_admins(cid.clone()).contains(&mallory_hex), "a foreign-root grant grants no authority");
+    }
+
+    /// A friend's posted media opens even when you don't hold that friend's device roster. 1.0.7
+    /// device-signed media in a fully-capable circle, so opening it required the author's up-to-date
+    /// roster — and because a sealed blob is cached once and never re-sealed, any roster skew froze a
+    /// friend's media as permanently unopenable. Media is account-signed + dual-sealed again, so any
+    /// authorized reader opens it regardless of roster state.
+    #[test]
+    fn a_friends_media_opens_without_holding_the_authors_device_roster() {
+        let cid = "fam".to_string();
+        let alice = HavenSocial::new([1u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([2u8; 32].to_vec()).unwrap();
+        assert!(alice.use_device_identity([11u8; 32].to_vec()));
+        assert!(bob.use_device_identity([12u8; 32].to_vec()));
+        let (_al, _ac) = install_device_only_roster(&alice, [1u8; 32]);
+        let (b_list, b_creds) = install_device_only_roster(&bob, [2u8; 32]);
+        let a_bundle = alice.my_bundle();
+        let b_bundle = bob.my_bundle();
+        let b_card = card(&bob, "bob");
+
+        for s in [&alice, &bob] {
+            s.create_circle(cid.clone(), "Family".into());
+        }
+        alice.add_contact_bundle(cid.clone(), b_bundle.clone()).unwrap();
+        bob.add_contact_bundle(cid.clone(), a_bundle.clone()).unwrap();
+
+        // ALICE becomes fully seed-drop-capable in her view (own device + Bob's roster & capability).
+        // Under 1.0.7 this made her DEVICE-SIGN her media — the exact condition that broke it.
+        assert!(alice.ingest_device_roster(b_bundle.clone(), b_list, b_creds));
+        alice.profile_seed_drop_version(b_bundle, b_card);
+
+        // BOB deliberately never ingests Alice's device roster — the skew that froze media forever.
+        let sealed = alice.seal_circle_media(cid.clone(), b"a sunset photo".to_vec()).expect("seal");
+        let opened = bob.open_circle_media(cid.clone(), sealed);
+        assert_eq!(opened.as_deref(), Some(&b"a sunset photo"[..]),
+                   "a friend's media opens by account-sender resolution — no device roster required");
     }
 
     /// A member you remove stays removed after a state merge that still lists them — the multi-device

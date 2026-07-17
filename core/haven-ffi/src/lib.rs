@@ -1103,6 +1103,12 @@ struct Circle {
     id: String,
     name: String,
     members: Vec<HavenId>,
+    /// Members explicitly removed from this circle — a durable tombstone the ENGINE honors, so a
+    /// removal survives a state merge instead of being silently re-grown. `members` is unioned on
+    /// every `merge_circle` (multi-device sync / reload), and without this a member you removed on one
+    /// device reappears the moment another device's still-has-them state merges back. Removal adds to
+    /// this set; an explicit re-add (`add_contact_bundle` / `add_existing_to_circle`) clears it.
+    removed_members: Vec<HavenId>,
     events: Vec<Event>,
     seen: HashSet<String>,
     my_epoch: u64,
@@ -1208,6 +1214,7 @@ impl Circle {
             id,
             name,
             members: vec![],
+            removed_members: vec![],
             events: vec![],
             seen: HashSet::new(),
             my_epoch: 0,
@@ -1491,8 +1498,15 @@ fn event_target(kind: &EventKind) -> Option<&str> {
 /// of these orphan events, and keeping its id in `seen` makes `receive` drop it instead of
 /// resurrecting the fragment.
 fn purge_member_from_circle(c: &mut Circle, node_hex: &str) {
-    let was_member = c.members.iter().any(|m| hex(&m.node_id_bytes()) == node_hex);
+    let removed_id = c.members.iter().find(|m| hex(&m.node_id_bytes()) == node_hex).cloned();
+    let was_member = removed_id.is_some();
     c.members.retain(|m| hex(&m.node_id_bytes()) != node_hex);
+    // Tombstone the removal so a later state merge can't silently re-grow them (multi-device sync).
+    if let Some(id) = removed_id {
+        if !c.removed_members.iter().any(|m| m.node_id_bytes() == id.node_id_bytes()) {
+            c.removed_members.push(id);
+        }
+    }
     // Removing a member advances the circle to a fresh epoch whose key is sealed (in the next key
     // commit) only to the REMAINING members — so the removed node can never open content posted
     // afterward. This is the cryptographic revocation the audit required.
@@ -3531,6 +3545,9 @@ struct PersistCircle {
     name: String,
     /// Members as their public-bundle bytes (HavenId isn't directly Serialize).
     members: Vec<Vec<u8>>,
+    /// Removed-member tombstones (bundle bytes). Defaulted so older state files load with none.
+    #[serde(default)]
+    removed_members: Vec<Vec<u8>>,
     events: Vec<Event>,
     /// Sender-keys epoch ratchet (defaulted so pre-epoch state files still load → bootstrap on next post).
     #[serde(default)]
@@ -4335,6 +4352,9 @@ impl HavenSocial {
             .iter_mut()
             .find(|c| c.id == circle_id)
             .ok_or_else(|| HavenError::Invalid { msg: "unknown circle".into() })?;
+        // An explicit re-add clears any removal tombstone — the user (or a self-synced deliberate
+        // re-add) is putting them back on purpose, so they must stop being filtered out on merge.
+        circle.removed_members.retain(|m| m.node_id_bytes() != id.node_id_bytes());
         if !circle.members.iter().any(|c| c.node_id_bytes() == id.node_id_bytes()) {
             circle.members.push(id);
         }
@@ -4357,6 +4377,7 @@ impl HavenSocial {
             .iter_mut()
             .find(|c| c.id == circle_id)
             .ok_or_else(|| HavenError::Invalid { msg: "unknown circle".into() })?;
+        circle.removed_members.retain(|m| m.node_id_bytes() != bundle.node_id_bytes()); // explicit re-add clears the tombstone
         if !circle.members.iter().any(|m| m.node_id_bytes() == bundle.node_id_bytes()) {
             circle.members.push(bundle);
         }
@@ -5424,6 +5445,7 @@ impl HavenSocial {
                 id: c.id.clone(),
                 name: c.name.clone(),
                 members: c.members.iter().map(|m| m.to_bytes()).collect(),
+                removed_members: c.removed_members.iter().map(|m| m.to_bytes()).collect(),
                 events: c.events.clone(),
                 my_epoch: c.my_epoch,
                 my_epoch_keys: c.my_epoch_keys.iter().map(|(e, k)| (*e, *k)).collect(),
@@ -5487,6 +5509,7 @@ impl HavenSocial {
                 id: DEFAULT_CIRCLE.to_string(),
                 name: "My Circle".to_string(),
                 members: old.contacts,
+                removed_members: vec![],
                 events: old.events,
                 my_epoch: 0,
                 my_epoch_keys: vec![],
@@ -5513,13 +5536,29 @@ impl HavenSocial {
                 st.circles.len() - 1
             }
         };
+        // Union the removal tombstones FIRST (grow-only across devices), so the member union below
+        // can never re-admit someone a peer device removed.
+        for mb in &pc.removed_members {
+            if let Ok(id) = HavenId::from_bytes(mb) {
+                if !st.circles[idx].removed_members.iter().any(|m| m.node_id_bytes() == id.node_id_bytes()) {
+                    st.circles[idx].removed_members.push(id);
+                }
+            }
+        }
         for mb in pc.members {
             if let Ok(id) = HavenId::from_bytes(&mb) {
-                if !st.circles[idx].members.iter().any(|m| m.node_id_bytes() == id.node_id_bytes()) {
+                let removed = st.circles[idx].removed_members.iter().any(|m| m.node_id_bytes() == id.node_id_bytes());
+                let present = st.circles[idx].members.iter().any(|m| m.node_id_bytes() == id.node_id_bytes());
+                if !removed && !present {
                     st.circles[idx].members.push(id);
                 }
             }
         }
+        // Belt-and-suspenders: drop any current member that the merged tombstone set now covers (a
+        // removal that arrived after they were already present locally).
+        let removed_ids: HashSet<[u8; 32]> =
+            st.circles[idx].removed_members.iter().map(|m| m.node_id_bytes()).collect();
+        st.circles[idx].members.retain(|m| !removed_ids.contains(&m.node_id_bytes()));
         for e in pc.events {
             if !st.circles[idx].seen.contains(&e.id) {
                 st.circles[idx].seen.insert(e.id.clone());
@@ -7825,6 +7864,41 @@ mod net_tests {
         let g_wrong_root = AdminGrant::issue(&mallory, gid, mallory.public().node_id_bytes(), alice.public().node_id_bytes(), 5);
         assert!(matches!(feed_grant(&g_wrong_root), Ok(false)));
         assert!(!victim.circle_admins(cid.clone()).contains(&mallory_hex), "a foreign-root grant grants no authority");
+    }
+
+    /// A member you remove stays removed after a state merge that still lists them — the multi-device
+    /// bug where removing someone on your phone was undone by your Mac's still-has-them state syncing
+    /// back. The removal tombstone lives in the engine, so `merge_circle` can't silently re-grow it.
+    #[test]
+    fn a_removed_member_is_not_resurrected_by_a_state_merge() {
+        let me = HavenSocial::new([1u8; 32].to_vec()).unwrap();
+        let bob = Identity::from_seed(&[2u8; 32]);
+        let carol = Identity::from_seed(&[3u8; 32]);
+        let bob_hex = hex(&bob.public().node_id_bytes());
+        me.create_circle("fam".into(), "Family".into());
+        me.add_contact_bundle("fam".into(), bob.public().to_bytes()).unwrap();
+        me.add_contact_bundle("fam".into(), carol.public().to_bytes()).unwrap();
+
+        // Capture the pre-removal state — this is exactly what another of my devices still holds.
+        let stale = me.export_state();
+
+        // Remove Bob on THIS device.
+        me.remove_from_circle("fam".into(), bob_hex.clone());
+        assert!(!me.contact_node_ids("fam".into()).contains(&bob_hex), "Bob is gone locally");
+
+        // My other device's state (still listing Bob) merges back in — a normal multi-device sync.
+        me.import_state(stale);
+        assert!(!me.contact_node_ids("fam".into()).contains(&bob_hex),
+                "Bob must STAY removed — the merge cannot resurrect a tombstoned member");
+        // Carol, who was never removed, is unaffected.
+        assert!(me.contact_node_ids("fam".into()).contains(&hex(&carol.public().node_id_bytes())));
+
+        // A deliberate re-add clears the tombstone, and then a merge does NOT re-strip him.
+        me.add_contact_bundle("fam".into(), bob.public().to_bytes()).unwrap();
+        assert!(me.contact_node_ids("fam".into()).contains(&bob_hex), "explicit re-add brings Bob back");
+        let with_bob = me.export_state();
+        me.import_state(with_bob);
+        assert!(me.contact_node_ids("fam".into()).contains(&bob_hex), "re-added Bob survives a merge");
     }
 
     /// A legacy circle gains an authority root only by being carried onto a creator-bound successor,

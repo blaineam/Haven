@@ -610,6 +610,37 @@ final class MediaStore: ObservableObject {
         return (bytes, files)
     }
 
+    /// Reclaim leaked produce/reassembly scratch promptly. A `mint_*` (media being sealed for upload)
+    /// or `incoming_*.part` (chunks being reassembled) is deleted on the normal path, but an
+    /// interrupted operation orphans it: the app killed mid-export of a big video, or a download that
+    /// keeps failing to reassemble — and each failed reassembly ATTEMPT mints a fresh `incoming_<uuid>`,
+    /// so they accumulate. Nothing removes them promptly — the orphan sweep is weekly with a 48h grace,
+    /// and the cleanup screen hides scratch entirely — so they surface as gigabytes of unaccountable
+    /// used space (`diskUsage` counts them; `storedBlobs`/Manage-media does not). Anything WRITTEN in
+    /// the last `grace` may be a live operation and is left alone; scratch stems are UUIDs, never a real
+    /// ref, so no feed scan is needed. Cheap — safe to run at every launch.
+    @discardableResult
+    nonisolated static func sweepStaleScratch(grace: TimeInterval = 3600) -> (bytes: Int64, files: Int) {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(
+            at: storageDir,
+            includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]) else { return (0, 0) }
+        let cutoff = Date().addingTimeInterval(-grace)
+        var bytes: Int64 = 0
+        var files = 0
+        for url in items {
+            let name = url.lastPathComponent
+            guard name.hasPrefix("mint_") || name.hasPrefix("incoming_") else { continue }
+            let vals = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            if let m = vals?.contentModificationDate, m > cutoff { continue }   // still being written
+            bytes += Int64(vals?.fileSize ?? 0)
+            files += 1
+            try? fm.removeItem(at: url)
+        }
+        return (bytes, files)
+    }
+
     @discardableResult
     func addImage(_ image: PlatformImage) -> String {
         // Optimize: downscale very large photos + compress, so they're light to send —

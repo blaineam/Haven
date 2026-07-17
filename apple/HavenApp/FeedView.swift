@@ -215,6 +215,13 @@ final class FeedStore: ObservableObject {
         refresh()
         recomputeUnreadDMs()   // one-time badge compute at startup (kept OFF the per-refresh hot path)
         seedDemoIfNeeded()   // HAVEN_DEMO=1 only — PII-free synthetic dataset for screenshots
+        // Reclaim leaked produce/reassembly scratch every launch (an interrupted big-video export or a
+        // failed reassembly leaves mint_/incoming_ behind — invisible to Manage media, but counted in
+        // storage). Off-main, and only touches scratch untouched for an hour.
+        Task.detached(priority: .utility) {
+            let f = MediaStore.sweepStaleScratch()
+            if f.files > 0 { HavenLog.sync("media scratch sweep: freed \(f.bytes)B across \(f.files) files") }
+        }
         #if DEBUG
         CallManager.shared.debugSimulateIncomingRing()   // HAVEN_RING_TEST=1 only — bounded-ring self-test
         #endif

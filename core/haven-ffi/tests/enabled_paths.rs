@@ -291,12 +291,17 @@ fn migration_all_switches_on_loses_nothing_and_retire_account_leaf_reaches_live(
 
     let pair = [me.clone(), bob.clone()];
     flip_and_join(&pair, "default");
-    // ── THE FIX: with the account leaf retired the migrated {account, device} roster reaches the
-    //    device-only shape → the §7.2 all-joined gate completes → the circle flips to LIVE (previously
-    //    it was stranded permanently at "shadow"). This is the assertion the FINDING said was unreachable.
-    assert_eq!(me.mls_keying_status("default".into()).state, "live",
-               "after retire_account_leaf the migrated circle reaches LIVE MLS keying (the fix)");
-    assert_eq!(bob.mls_keying_status("default".into()).state, "live", "the revived peer is live too");
+    // The account leaf retires and the migrated {account, device} roster reaches the device-only shape,
+    // so the §7.2 all-joined gate itself completes. But a LEGACY circle id (`default`) binds no creator,
+    // so it has no authority root — and without one `mls_build_remove` refuses, meaning the roster→Remove
+    // wiring could not cut a removed member's leaf and removal would silently stop working. Tree keying
+    // therefore stays OFF for legacy circles: they keep the KeyCommit path, where removal rotates the
+    // epoch and cuts a member off exactly as it does today. A legacy circle reaches live only by being
+    // carried onto a creator-bound successor (device::CircleUpgrade), which is an explicit, member-
+    // confirmed act — never an automatic one.
+    assert_ne!(me.mls_keying_status("default".into()).state, "live",
+               "a legacy circle never keys off the tree — it has no authority root, so removal must stay on the KeyCommit path");
+    assert_ne!(bob.mls_keying_status("default".into()).state, "live", "same for the revived peer");
 
     // The migrated history is still readable to the revived peer, and new content round-trips — the
     // whole migration is content-preserving.

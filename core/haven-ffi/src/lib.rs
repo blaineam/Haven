@@ -60,6 +60,7 @@ const TAG_MLS_PROPOSAL: u8 = 0x07; // a treekem::Proposal (reserved; unbundled p
 // any non-`{` tag a legacy peer fetches fails its raw-JSON parse and errors per-envelope harmlessly.
 const TAG_MLS_JOIN: u8 = 0x08; // a signed join ack: "device D holds genesis G's Welcome" (the §7.2 gate)
 const TAG_ADMIN_GRANT: u8 = 0x09; // an account-signed device::AdminGrant riding the circle control lane
+const TAG_CIRCLE_UPGRADE: u8 = 0x0a; // a device::CircleUpgrade offer: legacy circle → creator-bound successor
 
 /// Content-epoch namespace for MLS-keyed circles (M3, §4.5). When the keying flip is live, the
 /// circle's content seals under `MLS_EPOCH_BASE + tree_epoch` instead of a legacy sender-keys epoch.
@@ -3110,6 +3111,15 @@ fn mls_refresh_keying(st: &mut NetState, idx: usize) -> Option<u64> {
         st.circles[idx].mls_live_epoch = None;
     };
     if !st.mls_keying || !circle_is_mls_capable(st, idx) {
+        clear(st, idx);
+        return None;
+    }
+    // Tree keying requires a circle whose authority root is established by its id (an owned circle).
+    // Without one there are no admins, so `mls_build_remove` refuses and the roster→Remove wiring
+    // (`mls_sync_roster_to_tree`) cannot cut a removed member's leaf — they would keep deriving epoch
+    // keys and reading new content. A legacy/ownerless circle therefore stays on the KeyCommit path,
+    // where removal rotates the epoch and cuts them off exactly as it does today.
+    if circle_admin_set(st, idx).is_none() {
         clear(st, idx);
         return None;
     }

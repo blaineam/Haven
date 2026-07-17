@@ -923,6 +923,123 @@ impl AdminGrant {
     }
 }
 
+const UPGRADE_DOMAIN: &[u8] = b"haven-circle-upgrade-v1";
+
+/// An account-signed offer to carry a **legacy** circle onto a creator-bound **successor**.
+///
+/// Legacy circle ids (`default`, `dm:…`, a bare pre-1.0.7 id) are neither globally unique nor bound
+/// to anyone, so they can't be a sound shared group: there is no authority root, which means no
+/// authenticated eviction. A circle can't gain one in place — nothing in existing state records who
+/// created it — so the owner instead offers a **successor** whose id commits to them
+/// (`mint_owned_circle_id`), and each member decides whether to follow.
+///
+/// What the signature proves and what it does NOT: `verify` proves the offer really came from
+/// `creator` and wasn't tampered with, and a receiver additionally checks `new_circle_id` binds
+/// `creator`. Neither fact establishes that `creator` owned the LEGACY circle — nothing can, because
+/// legacy circles never had an owner. That last step is a human one: a receiver MUST surface the
+/// offer for confirmation and must never adopt it automatically. Two members can each sign a valid,
+/// competing offer for the same legacy circle; both are legitimate records and the user picks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CircleUpgrade {
+    /// The legacy circle being upgraded (its id bytes, as this member knows it).
+    pub legacy_circle_id: Vec<u8>,
+    /// The creator-bound successor id (`c1…`) — MUST bind `creator`; a receiver re-checks.
+    pub new_circle_id: Vec<u8>,
+    /// The account offering the upgrade, and the successor's cryptographic creator.
+    pub creator: [u8; 32],
+    /// Display name to carry over, so a member can show a meaningful prompt before accepting.
+    pub name: String,
+    /// Monotonic per (legacy_circle_id, creator) — higher wins, so a re-offer supersedes.
+    pub version: u64,
+    /// Hybrid signature by `creator`'s account identity over [`Self::signing_bytes`].
+    pub sig: Vec<u8>,
+}
+
+impl CircleUpgrade {
+    fn signing_bytes(
+        legacy_circle_id: &[u8],
+        new_circle_id: &[u8],
+        creator: &[u8; 32],
+        name: &str,
+        version: u64,
+    ) -> Vec<u8> {
+        let mut v = Vec::with_capacity(UPGRADE_DOMAIN.len() + 12 + legacy_circle_id.len() + new_circle_id.len() + name.len() + 32 + 8);
+        v.extend_from_slice(UPGRADE_DOMAIN);
+        v.extend_from_slice(&(legacy_circle_id.len() as u32).to_le_bytes());
+        v.extend_from_slice(legacy_circle_id);
+        v.extend_from_slice(&(new_circle_id.len() as u32).to_le_bytes());
+        v.extend_from_slice(new_circle_id);
+        v.extend_from_slice(creator);
+        v.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        v.extend_from_slice(name.as_bytes());
+        v.extend_from_slice(&version.to_le_bytes());
+        v
+    }
+
+    /// Offer an upgrade under the `creator` account identity. `new_circle_id` must have been minted
+    /// by `mint_owned_circle_id(creator)`; [`Self::verify`] refuses one that doesn't bind.
+    pub fn issue(creator_id: &Identity, legacy_circle_id: &[u8], new_circle_id: &[u8], name: &str, version: u64) -> Self {
+        let creator = creator_id.public().node_id_bytes();
+        let sig = creator_id.sign(&Self::signing_bytes(legacy_circle_id, new_circle_id, &creator, name, version));
+        Self {
+            legacy_circle_id: legacy_circle_id.to_vec(),
+            new_circle_id: new_circle_id.to_vec(),
+            creator,
+            name: name.to_string(),
+            version,
+            sig,
+        }
+    }
+
+    /// Verify the offer: the signer is `creator`, the signature covers every field, and the successor
+    /// id genuinely binds `creator`. A receiver still must NOT act on it without user confirmation —
+    /// see the type docs.
+    pub fn verify(&self, creator_pub: &HavenId) -> Result<()> {
+        if creator_pub.node_id_bytes() != self.creator {
+            return Err(CoreError::Crypto("circle upgrade: creator id mismatch"));
+        }
+        let Ok(new_id) = std::str::from_utf8(&self.new_circle_id) else {
+            return Err(CoreError::Encoding("circle upgrade: successor id is not utf-8"));
+        };
+        if !circle_id_binds_creator(new_id, &self.creator) {
+            return Err(CoreError::Crypto("circle upgrade: successor id does not bind the creator"));
+        }
+        let msg = Self::signing_bytes(&self.legacy_circle_id, &self.new_circle_id, &self.creator, &self.name, self.version);
+        creator_pub.verify(&msg, &self.sig)
+    }
+
+    /// Wire: `lp(legacy) ‖ lp(new) ‖ creator(32) ‖ lp(name) ‖ version(8) ‖ sig`.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(16 + self.legacy_circle_id.len() + self.new_circle_id.len() + self.name.len() + 32 + 8 + self.sig.len());
+        v.extend_from_slice(&(self.legacy_circle_id.len() as u32).to_le_bytes());
+        v.extend_from_slice(&self.legacy_circle_id);
+        v.extend_from_slice(&(self.new_circle_id.len() as u32).to_le_bytes());
+        v.extend_from_slice(&self.new_circle_id);
+        v.extend_from_slice(&self.creator);
+        v.extend_from_slice(&(self.name.len() as u32).to_le_bytes());
+        v.extend_from_slice(self.name.as_bytes());
+        v.extend_from_slice(&self.version.to_le_bytes());
+        v.extend_from_slice(&self.sig);
+        v
+    }
+
+    /// Inverse of [`Self::to_bytes`].
+    pub fn from_bytes(b: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(b);
+        let legacy_circle_id = r.bytes_lp()?.to_vec();
+        let new_circle_id = r.bytes_lp()?.to_vec();
+        let creator = r.array32()?;
+        let name = String::from_utf8(r.bytes_lp()?.to_vec())
+            .map_err(|_| CoreError::Encoding("circle upgrade: name is not utf-8"))?;
+        let version = r.u64()?;
+        let sig = r.rest().to_vec();
+        if sig.is_empty() {
+            return Err(CoreError::Encoding("circle upgrade: missing signature"));
+        }
+        Ok(Self { legacy_circle_id, new_circle_id, creator, name, version, sig })
+    }
+}
+
 /// Compute the transitive admin closure from the pinned `creator` and a set of ALREADY-VERIFIED
 /// `(grantor_account, admin_account)` delegation edges (§4.3). Pure, monotone fixpoint: seed with the
 /// creator, then repeatedly admit any account whose grantor is already an admin. An edge whose grantor
@@ -1735,6 +1852,43 @@ mod tests {
             open_self_sync_key_epoch(&stranger, &account.public(), &grant).is_err(),
             "an epoch grant sealed to one device is not openable by another"
         );
+    }
+
+    #[test]
+    fn circle_upgrade_round_trips_and_binds_its_successor_to_the_signer() {
+        let alice = Identity::from_seed(&[2u8; 32]);
+        let mallory = Identity::from_seed(&[9u8; 32]);
+        let alice_acct = alice.public().node_id_bytes();
+        let new_id = mint_owned_circle_id(&alice_acct);
+
+        let up = CircleUpgrade::issue(&alice, b"fam", new_id.as_bytes(), "Family", 1);
+        let wire = CircleUpgrade::to_bytes(&up);
+        let back = CircleUpgrade::from_bytes(&wire).expect("round-trips");
+        assert_eq!(back, up);
+        assert!(back.verify(&alice.public()).is_ok(), "a genuine offer verifies");
+
+        // Signed by someone else ⇒ id mismatch.
+        assert!(back.verify(&mallory.public()).is_err(), "the offer is bound to its signer");
+
+        // Tampering with any covered field breaks the signature.
+        let mut tampered = up.clone();
+        tampered.name = "Not Family".into();
+        assert!(tampered.verify(&alice.public()).is_err(), "the name is signed");
+        let mut tampered = up.clone();
+        tampered.legacy_circle_id = b"other".to_vec();
+        assert!(tampered.verify(&alice.public()).is_err(), "the legacy id is signed");
+
+        // The successor MUST bind the signer: Mallory can't offer a successor she owns while
+        // claiming Alice as its creator, nor claim a successor bound to Alice as her own.
+        let mallory_id = mint_owned_circle_id(&mallory.public().node_id_bytes());
+        let cross = CircleUpgrade::issue(&mallory, b"fam", mallory_id.as_bytes(), "Family", 1);
+        assert!(cross.verify(&mallory.public()).is_ok(), "Mallory may offer her OWN successor");
+        // …but an offer whose successor doesn't bind the signer is refused outright.
+        let forged = CircleUpgrade::issue(&mallory, b"fam", new_id.as_bytes(), "Family", 1);
+        assert!(forged.verify(&mallory.public()).is_err(), "successor must bind the signer");
+        // A legacy (unbound) id can never be a successor.
+        let legacy_succ = CircleUpgrade::issue(&alice, b"fam", b"default", "Family", 1);
+        assert!(legacy_succ.verify(&alice.public()).is_err(), "successor must be an owned id");
     }
 
     #[test]

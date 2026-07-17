@@ -11,8 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use base64::Engine as _; // for `.encode` on the base64 engine (this module's `Engine` is unrelated)
 use haven_ffi::{
-    parse_link, Account, FeedItemFfi, HavenNode, HavenSocial, InboundListener, RelayClient,
-    RelayServerHandle, TrackRefFfi,
+    parse_link, Account, CircleUpgradeOffer, FeedItemFfi, HavenNode, HavenSocial, InboundListener,
+    RelayClient, RelayServerHandle, TrackRefFfi,
 };
 use haven_s3::{S3Config, S3Mailbox};
 use sha2::{Digest, Sha256};
@@ -208,6 +208,9 @@ const MEDIA_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 /// 9-byte ASCII magic marking a chunk manifest blob. A sealed envelope is JSON starting with '{',
 /// so it can never collide. Must be byte-identical across iOS/macOS + Android.
 const MEDIA_MANIFEST_MAGIC: &[u8] = b"HVCHUNK1\n";
+/// The marker an owned circle's id carries. The core mints and verifies these ids — nothing here
+/// should ever try to construct one; this only tells "already owned" from "still legacy".
+const OWNED_CIRCLE_PREFIX: &str = "c1";
 
 fn hex_to_bytes32(hex: &str) -> Option<Vec<u8>> {
     if hex.len() != 64 {
@@ -1647,6 +1650,57 @@ impl Engine {
         self.persist();
         self.emit_changed();
         id
+    }
+
+    /// Upgrade offers on `circle_id` I haven't followed — "so-and-so says this circle's replacement is
+    /// theirs". Each is verified as genuinely from its signer, but NOT as proof they made the circle:
+    /// legacy circles never recorded an owner, so nothing can establish that. The user decides, and
+    /// every competing offer is returned — the pick is never made here.
+    pub fn pending_circle_upgrades(&self, circle_id: String) -> Vec<CircleUpgradeOffer> {
+        self.social.pending_circle_upgrades(circle_id)
+    }
+
+    /// Can I offer to carry this circle onto an owned one? Only a shared circle I made — the
+    /// created-here set is device-local (prefs), so the UI can't answer this on its own. `default` is
+    /// your own personal circle and `dm:` threads are two-party (both sides derive the same id, and
+    /// there's nobody to remove), so neither has anything to gain here.
+    pub fn can_offer_circle_upgrade(&self, circle_id: String) -> bool {
+        if circle_id.starts_with(OWNED_CIRCLE_PREFIX) || circle_id == "default" || circle_id.starts_with("dm:") {
+            return false;
+        }
+        if !self.prefs.lock().unwrap().created_circles.iter().any(|c| c == &circle_id) {
+            return false;
+        }
+        !self.social.pending_circle_upgrades(circle_id).iter().any(|o| o.mine)
+    }
+
+    /// Offer to carry a circle I made onto its replacement: mints the replacement, carries the members
+    /// over, and puts the signed offer on the old circle's lane. Returns the replacement's id.
+    pub fn upgrade_circle(self: &Arc<Self>, circle_id: String) -> Option<String> {
+        let id = self.social.upgrade_circle(circle_id)?;
+        // §2: remember it (device-local) so the pin is re-applied every launch, like any circle I made.
+        {
+            let mut p = self.prefs.lock().unwrap();
+            if !p.created_circles.iter().any(|c| c == &id) {
+                p.created_circles.push(id.clone());
+                let _ = p.save(&self.paths);
+            }
+        }
+        self.persist();
+        self.emit_changed();
+        Some(id)
+    }
+
+    /// Follow someone's offer: stand up the replacement and pin them as its verified owner. Only ever
+    /// reached from an explicit click — the banner has already named who is claiming the circle,
+    /// because nothing can prove the claim and whoever is followed can remove people.
+    pub fn accept_circle_upgrade(self: &Arc<Self>, circle_id: String, new_circle_id: String) -> bool {
+        let ok = self.social.accept_circle_upgrade(circle_id, new_circle_id);
+        if ok {
+            self.persist();
+            self.emit_changed();
+        }
+        ok
     }
 
     pub fn rename_circle(self: &Arc<Self>, id: String, name: String) {

@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -25,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddReaction
 import androidx.compose.material.icons.filled.ArrowCircleUp
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PersonAdd
@@ -33,6 +35,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -98,6 +101,7 @@ import com.blaineam.haven.core.SyncMetrics
 import com.blaineam.haven.core.loadAndDownscale
 import com.blaineam.haven.core.nowMs
 import kotlinx.coroutines.launch
+import uniffi.haven_ffi.CircleUpgradeOffer
 import uniffi.haven_ffi.FeedItemFfi
 
 /** The Circle (feed) — real posts from the shared engine, a composer, and pending requests. */
@@ -259,6 +263,8 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                     if (HavenNet.pending.isNotEmpty()) item {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { HavenNet.pending.forEach { PendingCard(it) } }
                     }
+                    // Renders nothing unless someone has offered to carry this circle onto an owned one.
+                    item { CircleUpgradeBanner(active) }
                     // Renders nothing until the circle outgrows a pair and still has no relay of its own.
                     item { RelayNudgeBanner(active) }
                     if (posts.isEmpty()) item {
@@ -651,6 +657,109 @@ private fun PendingCard(req: PendingRequest) {
         Text("Ignore", color = HavenTheme.textSecondary,
             modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { HavenNet.dismiss(req) }.padding(8.dp))
     }
+}
+
+/** The marker an owned circle's id carries. Kept next to the UI that reasons about it; the core mints
+ *  and verifies these ids — nothing here should ever try to construct one. */
+private const val OWNED_CIRCLE_PREFIX = "c1"
+
+/**
+ * Carrying an older circle onto one with a verified owner.
+ *
+ * Circles made before 1.0.7 have no owner — nothing recorded who created them, because until the
+ * group became shared it never mattered. Without an owner there's nobody a circle can check a removal
+ * against, so those circles keep the encryption they already have rather than moving to the newer
+ * group layer.
+ *
+ * The way across is an offer: whoever made the circle offers a replacement whose id is tied to them,
+ * and each member decides whether to follow it. That decision is deliberately a person's, not the
+ * app's: the offer is signed, and we can prove it really came from whoever signed it and that the
+ * replacement is genuinely theirs — but nothing can prove they made the ORIGINAL circle, since it
+ * never had an owner to record. So we show who is asking and let the user choose. If two people both
+ * claim it, both are shown; the app picks neither.
+ */
+@Composable
+private fun CircleUpgradeBanner(circleId: String) {
+    // Following an offer stands up a new circle (circles); an offer ARRIVING is inbound traffic (feed).
+    val circlesV by HavenNet.circlesVersion
+    val feedV by HavenNet.feedVersion
+    val offers = remember(circleId, circlesV, feedV) { HavenNet.pendingCircleUpgrades(circleId) }
+    // Offers from OTHER people — mine need no confirmation (I made the offer).
+    val theirs = offers.filter { !it.mine }
+
+    if (theirs.isNotEmpty()) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { theirs.forEach { FollowUpgradeCard(circleId, it) } }
+        return
+    }
+    // Can I offer to upgrade this one? Only a shared circle I made. `default` is your own personal
+    // circle and `dm:` threads are two-party (both sides derive the same id, and there's nobody to
+    // remove), so neither has anything to gain here.
+    val iCanOffer = HavenNet.selfSyncCreatedCircle(circleId) &&
+        !circleId.startsWith(OWNED_CIRCLE_PREFIX) && circleId != DEFAULT_CIRCLE && !circleId.startsWith("dm:") &&
+        offers.none { it.mine }
+    if (iCanOffer) OfferUpgradeCard(circleId)
+}
+
+/** Someone is asking us to follow their replacement. Named, never auto-accepted. */
+@Composable
+private fun FollowUpgradeCard(circleId: String, offer: CircleUpgradeOffer) {
+    // Everything in this banner is white-on-brand-gradient — never themed.
+    Row(
+        Modifier.fillMaxWidth()
+            .background(HavenTheme.brandHorizontal, RoundedCornerShape(16.dp))
+            .padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.VerifiedUser, contentDescription = null, tint = Color.White, modifier = Modifier.size(24.dp))
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text("${HavenNet.displayName(offer.fromHex)} is upgrading “${offer.name}”",
+                color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(2.dp))
+            // Say plainly what we can and can't vouch for — the user is the one deciding.
+            Text(
+                "They say they made this circle. We can't check that, so only follow if that's right — whoever you follow will be able to remove people.",
+                color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp,
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        UpgradeAction("Follow") { HavenNet.followCircleUpgrade(circleId, offer.newCircleId) }
+    }
+}
+
+/** I made this circle — offer its replacement. */
+@Composable
+private fun OfferUpgradeCard(circleId: String) {
+    Row(
+        Modifier.fillMaxWidth()
+            .background(HavenTheme.brandHorizontal, RoundedCornerShape(16.dp))
+            .padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.Lock, contentDescription = null, tint = Color.White, modifier = Modifier.size(24.dp))
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text("Upgrade this circle", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(2.dp))
+            Text(
+                "Give it a verified owner, so removing someone cuts them off for good. Everyone here will be asked to follow.",
+                color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp,
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        UpgradeAction("Upgrade") { HavenNet.offerCircleUpgrade(circleId) }
+    }
+}
+
+/** The banner's action pill — solid white on the gradient, so it reads as the prominent action. */
+@Composable
+private fun UpgradeAction(text: String, onClick: () -> Unit) {
+    Text(
+        text,
+        color = HavenTheme.violet, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.clip(RoundedCornerShape(50)).background(Color.White)
+            .clickable { onClick() }.padding(horizontal = 14.dp, vertical = 8.dp),
+    )
 }
 
 /**

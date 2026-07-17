@@ -847,6 +847,12 @@ button.set-row:hover { background: var(--panel); }
 }
 .nudge-x:hover { background: rgba(255, 255, 255, 0.3); }
 .nudge-x:active { transform: scale(0.9); }
+/* A banner's prominent action (Follow / Upgrade) — solid white ON the gradient, since a glass pill
+   reads as secondary and these are the whole point of the card (.borderedProminent on Apple). */
+.nudge-cta {
+  flex: 0 0 auto; align-self: center; background: #fff; color: var(--violet);
+}
+.nudge-cta:hover { opacity: 0.92; }
 .nudge-point {
   display: flex; align-items: flex-start; gap: 11px; padding: 12px;
   background: var(--panel2); border: 1px solid var(--line); border-radius: var(--r-md);

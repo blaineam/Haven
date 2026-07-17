@@ -645,7 +645,7 @@ const Hidden = {
 };
 
 /** The Circle feed. Column order is the macOS LazyVStack's, exactly:
- *    banner → pending requests → relay nudge → STORIES TRAY → posts
+ *    banner → pending requests → circle upgrade → relay nudge → STORIES TRAY → posts
  *  and the composer floats over the lot as a pill pinned to the bottom (FeedView ▸ composerBar). */
 async function renderFeed() {
   const root = $("#view-circle");
@@ -690,6 +690,8 @@ async function renderFeed() {
   list.append(banner);
   const pend = await pendingBanner();
   if (pend) list.append(pend);
+  const upgrade = await circleUpgradeBanner(state.activeCircle);
+  if (upgrade) list.append(upgrade);
   const nudge = await relayNudgeBanner(state.activeCircle, (active || {}).member_count || 0);
   if (nudge) list.append(nudge);
   list.append(await storiesTray());
@@ -731,6 +733,70 @@ async function pendingBanner() {
       ),
     ),
     el("span", { class: "nudge-icon", style: "opacity:.85" }, icon("chevron.right")),
+  );
+}
+
+// ---- Carrying an older circle onto one with a verified owner ---------------------------
+
+/** Circles made before 1.0.7 have no owner — nothing recorded who created them, because until the
+ *  group became shared it never mattered. Without an owner there's nobody a circle can check a
+ *  removal against, so those circles keep the encryption they already have.
+ *
+ *  The way across is an offer: whoever made the circle offers a replacement whose id is tied to them,
+ *  and each member decides whether to follow it. That decision is deliberately a person's, not the
+ *  app's: the offer is signed, and we can prove it really came from whoever signed it and that the
+ *  replacement is genuinely theirs — but nothing can prove they made the ORIGINAL circle, since it
+ *  never had an owner to record. So we name who is asking and let the user choose. If two people both
+ *  claim it, BOTH are rendered; the app picks neither. Returns null when there's nothing to say, so
+ *  the call site is one line (mirrors relayNudgeBanner). */
+async function circleUpgradeBanner(circleId) {
+  const offers = await invoke("pending_circle_upgrades", { circleId }).catch(() => []);
+  // Offers from OTHER people — mine need no confirmation (I made the offer).
+  const theirs = offers.filter((o) => !o.mine);
+  if (theirs.length) {
+    const wrap = el("div", { style: "display:flex; flex-direction:column; gap:8px" });
+    for (const o of theirs) wrap.append(followUpgradeCard(circleId, o));
+    return wrap;
+  }
+  if (!(await invoke("can_offer_circle_upgrade", { circleId }).catch(() => false))) return null;
+  return el("div", { class: "nudge-banner" },
+    el("div", { class: "nudge-body", style: "cursor:default" },
+      el("span", { class: "nudge-icon" }, icon("lock.shield.fill")),
+      el("div", { style: "min-width:0" },
+        el("div", { class: "nudge-title" }, "Upgrade this circle"),
+        el("div", { class: "nudge-sub" }, "Give it a verified owner, so removing someone cuts them off for good. Everyone here will be asked to follow."),
+      ),
+    ),
+    el("button", {
+      class: "pill-btn nudge-cta",
+      onclick: async () => {
+        const id = await invoke("upgrade_circle", { circleId }).catch(() => null);
+        if (id) state.activeCircle = id;
+        renderFeed();
+      },
+    }, "Upgrade"),
+  );
+}
+
+/** Someone is asking us to follow their replacement. Names them, and says plainly what we can't
+ *  vouch for — following is only ever this button, never automatic. */
+function followUpgradeCard(circleId, o) {
+  return el("div", { class: "nudge-banner" },
+    el("div", { class: "nudge-body", style: "cursor:default" },
+      el("span", { class: "nudge-icon" }, icon("person.2.fill")),
+      el("div", { style: "min-width:0" },
+        el("div", { class: "nudge-title" }, `${o.from_name} is upgrading “${o.name}”`),
+        el("div", { class: "nudge-sub" }, "They say they made this circle. We can't check that, so only follow if that's right — whoever you follow will be able to remove people."),
+      ),
+    ),
+    el("button", {
+      class: "pill-btn nudge-cta",
+      onclick: async () => {
+        const ok = await invoke("accept_circle_upgrade", { circleId, newCircleId: o.new_circle_id }).catch(() => false);
+        if (ok) state.activeCircle = o.new_circle_id;
+        renderFeed();
+      },
+    }, "Follow"),
   );
 }
 

@@ -239,6 +239,58 @@ pub fn create_circle(engine: Eng, name: String) -> String {
     engine.create_circle(name)
 }
 
+/// An upgrade offer awaiting a decision. `from_name` is resolved here so the banner can NAME whoever
+/// is claiming the circle — the one thing the user needs to judge a claim nothing can verify.
+#[derive(Serialize)]
+pub struct CircleUpgradeOfferDto {
+    pub legacy_circle_id: String,
+    pub new_circle_id: String,
+    /// Who is claiming the circle — full node hex + the resolved display name for the banner.
+    pub from_hex: String,
+    pub from_name: String,
+    pub name: String,
+    /// True when I authored this offer — no confirmation needed.
+    pub mine: bool,
+}
+
+/// Upgrade offers on this circle I haven't followed. Every competing offer is returned: two people
+/// can both claim a legacy circle, and nothing can settle it — so the UI shows them all and the
+/// person picks. Never auto-followed.
+#[tauri::command]
+pub fn pending_circle_upgrades(engine: Eng, circle_id: String) -> Vec<CircleUpgradeOfferDto> {
+    engine
+        .pending_circle_upgrades(circle_id)
+        .into_iter()
+        .map(|o| CircleUpgradeOfferDto {
+            from_name: engine.display_name(&o.from_hex),
+            legacy_circle_id: o.legacy_circle_id,
+            new_circle_id: o.new_circle_id,
+            from_hex: o.from_hex,
+            name: o.name,
+            mine: o.mine,
+        })
+        .collect()
+}
+
+/// Whether the "upgrade this circle" action belongs on this circle — a shared one I made, not yet
+/// offered. The created-here set is device-local, so only the engine can answer it.
+#[tauri::command]
+pub fn can_offer_circle_upgrade(engine: Eng, circle_id: String) -> bool {
+    engine.can_offer_circle_upgrade(circle_id)
+}
+
+/// Offer to carry a circle I made onto its replacement. Returns the replacement's id.
+#[tauri::command]
+pub fn upgrade_circle(engine: Eng, circle_id: String) -> Option<String> {
+    engine.upgrade_circle(circle_id)
+}
+
+/// Follow someone's offer — only ever from an explicit click on a banner that named them.
+#[tauri::command]
+pub fn accept_circle_upgrade(engine: Eng, circle_id: String, new_circle_id: String) -> bool {
+    engine.accept_circle_upgrade(circle_id, new_circle_id)
+}
+
 #[tauri::command]
 pub fn rename_circle(engine: Eng, id: String, name: String) {
     engine.rename_circle(id, name);

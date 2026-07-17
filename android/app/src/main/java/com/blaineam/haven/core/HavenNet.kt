@@ -18,6 +18,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import uniffi.haven_ffi.CircleUpgradeOffer
 import uniffi.haven_ffi.HavenNode
 import uniffi.haven_ffi.HavenSocial
 import uniffi.haven_ffi.InboundListener
@@ -496,6 +497,37 @@ object HavenNet : InboundListener {
         persist(); bumpCircles()
         setActiveCircle(id)
         return id
+    }
+
+    // ---- Carrying an older circle onto one with a verified owner -------------------------
+
+    /** Upgrade offers on [circleId] I haven't followed — "so-and-so says this circle's replacement is
+     *  theirs". Each is verified as genuinely from its signer, but NOT as proof they made the circle:
+     *  legacy circles never recorded an owner, so nothing can establish that. The user decides — see
+     *  CircleUpgradeBanner. More than one offer is a legitimate state; all of them are surfaced. */
+    fun pendingCircleUpgrades(circleId: String): List<CircleUpgradeOffer> =
+        runCatching { social.pendingCircleUpgrades(circleId) }.getOrDefault(emptyList())
+
+    /** Offer to carry a circle I made onto its replacement: mints the replacement, carries the members
+     *  over, and puts the signed offer on the old circle's lane. Returns the replacement's id. */
+    fun offerCircleUpgrade(circleId: String): String? {
+        val id = runCatching { social.upgradeCircle(circleId) }.getOrNull() ?: return null
+        // §2 — remembered so the pin is re-applied on every launch, like any circle I made.
+        markCreatedCircle(id)
+        persist(); bumpCircles()
+        setActiveCircle(id)
+        return id
+    }
+
+    /** Follow someone's offer: stand up the replacement and pin them as its verified owner. Only ever
+     *  called from an explicit tap — the banner has already named who is claiming the circle, because
+     *  nothing can prove the claim and whoever is followed can remove people. */
+    fun followCircleUpgrade(circleId: String, newCircleId: String): Boolean {
+        val ok = runCatching { social.acceptCircleUpgrade(circleId, newCircleId) }.getOrDefault(false)
+        if (!ok) return false
+        persist(); bumpCircles()
+        setActiveCircle(newCircleId)
+        return true
     }
 
     /**

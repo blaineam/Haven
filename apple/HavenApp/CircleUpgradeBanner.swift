@@ -27,12 +27,14 @@ struct CircleUpgradeBanner: View {
     /// Offers from OTHER people — mine need no confirmation (I made the offer).
     private var theirs: [CircleUpgradeOffer] { offers.filter { !$0.mine } }
 
-    /// Can I offer to upgrade this one? Only a shared circle I made. `default` is your own personal
-    /// circle and `dm:` threads are two-party (both sides derive the same id, and there's nobody to
-    /// remove), so neither has anything to gain here.
+    /// Can I offer to upgrade this one? Any legacy circle with no verified owner yet (the core's
+    /// empty-admin signal), excluding the personal `default` circle and two-party `dm:` threads.
+    /// No device records who made a pre-1.0.7 circle, so the offer is shown to every member and the
+    /// core still refuses to author one on a circle that already names its creator — the follow side
+    /// names each claimant so members choose the real creator. (Previously this required a per-device
+    /// created-circles record that legacy circles never had, so the offer never appeared at all.)
     private var iCanOffer: Bool {
-        guard CircleCreatorStore.iCreated(circleId) else { return false }
-        guard !circleId.hasPrefix(OwnedCircle.prefix), circleId != "default", !circleId.hasPrefix("dm:") else { return false }
+        guard store.circleIsUpgradable(circleId) else { return false }
         return offers.first(where: { $0.mine }) == nil
     }
 
@@ -93,7 +95,7 @@ struct CircleUpgradeBanner: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Upgrade this circle")
                     .font(.subheadline.weight(.semibold)).foregroundStyle(.white)
-                Text("Give it a verified owner, so removing someone cuts them off for good. Everyone here will be asked to follow.")
+                Text("If you made this circle, give it a verified owner so removing someone cuts them off for good. Everyone here chooses whether to follow you.")
                     .font(.caption).foregroundStyle(.white.opacity(0.85))
                     .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.leading)

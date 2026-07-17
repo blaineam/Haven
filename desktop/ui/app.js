@@ -764,7 +764,7 @@ async function circleUpgradeBanner(circleId) {
       el("span", { class: "nudge-icon" }, icon("lock.shield.fill")),
       el("div", { style: "min-width:0" },
         el("div", { class: "nudge-title" }, "Upgrade this circle"),
-        el("div", { class: "nudge-sub" }, "Give it a verified owner, so removing someone cuts them off for good. Everyone here will be asked to follow."),
+        el("div", { class: "nudge-sub" }, "If you made this circle, give it a verified owner so removing someone cuts them off for good. Everyone here chooses whether to follow you."),
       ),
     ),
     el("button", {

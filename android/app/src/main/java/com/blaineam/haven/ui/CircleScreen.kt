@@ -691,11 +691,11 @@ private fun CircleUpgradeBanner(circleId: String) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { theirs.forEach { FollowUpgradeCard(circleId, it) } }
         return
     }
-    // Can I offer to upgrade this one? Only a shared circle I made. `default` is your own personal
-    // circle and `dm:` threads are two-party (both sides derive the same id, and there's nobody to
-    // remove), so neither has anything to gain here.
-    val iCanOffer = HavenNet.selfSyncCreatedCircle(circleId) &&
-        !circleId.startsWith(OWNED_CIRCLE_PREFIX) && circleId != DEFAULT_CIRCLE && !circleId.startsWith("dm:") &&
+    // Can I offer to upgrade this one? Any legacy circle with no verified owner yet — shown to every
+    // member (no device records who made a pre-1.0.7 circle), and the core refuses to author one on a
+    // circle that already names its creator. (Previously this required a per-device created-circles
+    // record that legacy circles never had, so the offer never appeared at all.)
+    val iCanOffer = remember(circleId, circlesV, feedV) { HavenNet.circleIsUpgradable(circleId) } &&
         offers.none { it.mine }
     if (iCanOffer) OfferUpgradeCard(circleId)
 }
@@ -742,7 +742,7 @@ private fun OfferUpgradeCard(circleId: String) {
             Text("Upgrade this circle", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(2.dp))
             Text(
-                "Give it a verified owner, so removing someone cuts them off for good. Everyone here will be asked to follow.",
+                "If you made this circle, give it a verified owner so removing someone cuts them off for good. Everyone here chooses whether to follow you.",
                 color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp,
             )
         }
@@ -1703,6 +1703,18 @@ fun PostCard(
                         DropdownMenuItem(
                             text = { Text("Delete", color = Color(0xFFF87171)) },
                             onClick = { postMenu = false; HavenNet.unsendPost(circleId, item.id) },
+                        )
+                    }
+                    // Keep the post's photos/videos on THIS device so no cleanup (orphan sweep, age/size
+                    // limit, or the Manage-media screen) ever removes their bytes. Pins every real media
+                    // ref on the post at once — the discoverable home for the per-image long-press
+                    // "Keep on this device" the storage screen advertises. Parity with iOS.
+                    val keepRefs = item.media.filter { !com.blaineam.haven.core.LocalMedia.isSynthetic(it) }
+                    if (keepRefs.isNotEmpty()) {
+                        val anyPinned = keepRefs.any { com.blaineam.haven.core.PinnedMediaStore.refs.contains(it) }
+                        DropdownMenuItem(
+                            text = { Text(if (anyPinned) "Stop keeping on this device" else "Keep on this device", color = HavenTheme.textPrimary) },
+                            onClick = { postMenu = false; com.blaineam.haven.core.PinnedMediaStore.togglePin(keepRefs) },
                         )
                     }
                     val hidden = com.blaineam.haven.core.HiddenStore.isHidden(item.id)

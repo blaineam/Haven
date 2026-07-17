@@ -863,7 +863,11 @@ impl Engine {
         }
         let mut done: HashSet<String> =
             self.prefs.lock().unwrap().media_reseal_refs.iter().cloned().collect();
-        for (circle_id, r) in held.iter().filter(|(_, r)| !done.contains(r)) {
+        // Collect the not-yet-confirmed refs first so the loop can mutate `done` without holding an
+        // immutable borrow of it through the filter iterator.
+        let todo: Vec<(String, String)> =
+            held.iter().filter(|(_, r)| !done.contains(r)).cloned().collect();
+        for (circle_id, r) in &todo {
             // A destination accepted the fresh blob → this ref is repaired.
             if self.upload_media_inner(circle_id, r, true).await {
                 done.insert(r.clone());
@@ -1725,7 +1729,12 @@ impl Engine {
         if circle_id.starts_with(OWNED_CIRCLE_PREFIX) || circle_id == "default" || circle_id.starts_with("dm:") {
             return false;
         }
-        if !self.prefs.lock().unwrap().created_circles.iter().any(|c| c == &circle_id) {
+        // Empty admins = the core's authoritative "no verified owner yet" signal. No device records
+        // who made a pre-1.0.7 circle, so the offer is shown to ANY member (the follow side names each
+        // claimant); the core still refuses to author one on a circle that already names its creator.
+        // (Previously this required a per-device created-circles record that legacy circles never had,
+        // so the offer never appeared at all.)
+        if !self.circle_admins(&circle_id).is_empty() {
             return false;
         }
         !self.social.pending_circle_upgrades(circle_id).iter().any(|o| o.mine)

@@ -27,6 +27,14 @@ Everything in 1.0.7 (below), plus the fixes for bugs caught right after it was s
   re-sealed and the stored copy is overwritten in place, so a friend's previously-stuck photos and
   videos start loading. The repair runs once in the background, only for media you still hold, and
   retries across launches until every reachable copy is refreshed.
+- **"Keep on this device" is now in the post ⋯ menu.** The storage screen advertised it, but it was
+  only reachable by long-pressing an individual photo. It now lives on each post's menu (pinning all
+  of the post's photos/videos so no cleanup ever removes them), on every platform.
+- **"Upgrade this circle" now actually appears on the circles that need it.** The offer was gated on a
+  per-device record of which circles you created — which the pre-1.0.7 circles that need upgrading
+  never had, so it never showed. It now appears on any circle with no verified owner yet; because no
+  device can know who made a legacy circle, the offer is shown to every member and the follow prompt
+  names each claimant so members pick the real creator.
 
 ## [1.0.7] — 2026-07-16
 

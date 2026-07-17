@@ -350,7 +350,7 @@ object HavenNet : InboundListener {
             val seen = HashSet<String>()
             val held = ArrayList<Pair<String, String>>()   // (circleId, ref) I still hold the plaintext for
             for (c in runCatching { social.circles() }.getOrDefault(emptyList())) {
-                val feed = runCatching { social.feed(c.id, System.currentTimeMillis(), null) }.getOrDefault(emptyList())
+                val feed = runCatching { social.feed(c.id, nowMs(), null) }.getOrDefault(emptyList())
                 for (item in feed) {
                     if (!item.isMe) continue
                     for (r in item.media) if (!LocalMedia.isSynthetic(r) && LocalMedia.has(r) && seen.add(r)) held.add(c.id to r)
@@ -559,6 +559,16 @@ object HavenNet : InboundListener {
      *  CircleUpgradeBanner. More than one offer is a legitimate state; all of them are surfaced. */
     fun pendingCircleUpgrades(circleId: String): List<CircleUpgradeOffer> =
         runCatching { social.pendingCircleUpgrades(circleId) }.getOrDefault(emptyList())
+
+    /** A legacy circle with no verified owner yet — the app can offer to upgrade it, and the offer is
+     *  shown to ANY member (no device records who made a pre-1.0.7 circle; the follow side names each
+     *  claimant). Excludes owned (`c1`) ids, the personal `default` circle, and two-party `dm:` threads.
+     *  Empty circle admins is the core's authoritative "no owner root yet" signal — so this no longer
+     *  depends on the per-device created-circles record that legacy circles never had. */
+    fun circleIsUpgradable(circleId: String): Boolean {
+        if (circleId.startsWith("c1") || circleId == DEFAULT_CIRCLE || circleId.startsWith("dm:")) return false
+        return runCatching { social.circleAdmins(circleId).isEmpty() }.getOrDefault(false)
+    }
 
     /** Offer to carry a circle I made onto its replacement: mints the replacement, carries the members
      *  over, and puts the signed offer on the old circle's lane. Returns the replacement's id. */

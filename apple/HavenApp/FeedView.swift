@@ -345,6 +345,17 @@ final class FeedStore: ObservableObject {
         social?.pendingCircleUpgrades(circleId: circleId) ?? []
     }
 
+    /// A legacy circle with no verified owner yet — the app can offer to upgrade it, and the offer
+    /// card is shown to ANY member (no device records who made a pre-1.0.7 circle; the follow side
+    /// names each claimant so members pick the real creator). Excludes owned (`c1`) ids, the personal
+    /// `default` circle, and two-party `dm:` threads. The empty-admin check is the core's authoritative
+    /// "no owner root yet" signal (`circle_admins`), so this no longer depends on a per-device
+    /// created-circles record that legacy circles never had.
+    func circleIsUpgradable(_ circleId: String) -> Bool {
+        guard !circleId.hasPrefix(OwnedCircle.prefix), circleId != "default", !circleId.hasPrefix("dm:") else { return false }
+        return (social?.circleAdmins(circleId: circleId) ?? []).isEmpty
+    }
+
     /// Offer to upgrade a circle I made: mints its replacement, carries the members over, and puts the
     /// signed offer on the old circle's lane. Returns the new circle's id.
     @discardableResult
@@ -4622,6 +4633,18 @@ private struct KillHorizontalScroller: NSViewRepresentable {
                     if item.isMe {
                         Button { showEdit = true } label: { Label("Edit", systemImage: "pencil") }
                         Button(role: .destructive) { onUnsend() } label: { Label("Unsend", systemImage: "arrow.uturn.backward") }
+                    }
+                    // Keep the post's photos/videos on THIS device so no cleanup (orphan sweep, age/size
+                    // limit, or the Manage-media screen) ever removes their bytes. Pins every real media
+                    // ref on the post at once — this is the discoverable home for the per-image long-press
+                    // "Keep on this device" the storage screen advertises.
+                    let keepRefs = item.media.filter { !MediaStore.isSynthetic($0) }
+                    if !keepRefs.isEmpty {
+                        let anyPinned = keepRefs.contains { PinnedMediaStore.shared.isPinned($0) }
+                        Button { PinnedMediaStore.shared.togglePin(keepRefs) } label: {
+                            Label(anyPinned ? "Stop keeping on this device" : "Keep on this device",
+                                  systemImage: anyPinned ? "pin.slash" : "pin")
+                        }
                     }
                     // Hide any post from my own feed (reversible). Local + per-device.
                     let isHidden = HiddenStore.shared.isHidden(item.id)

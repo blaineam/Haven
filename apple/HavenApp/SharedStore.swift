@@ -91,6 +91,69 @@ enum MediaBackupLedger {
     }
 }
 
+/// One-time recovery for media posted during the 1.0.7 device-signed-media bug. Media I authored then
+/// was sealed under a device key and frozen (the blob is content-addressed + write-once), so friends
+/// could never open it. This re-seals my OWN authored media under the fixed (account-signed) scheme and
+/// OVERWRITES the frozen blob on every destination, so a friend's stuck media loads again. Only media I
+/// still hold the plaintext for (the seal reads the original file); anything cleared by the storage
+/// sweep is gone. Runs once, in the background, off-main — it re-uploads that media a single time.
+enum MediaRecovery {
+    private static let doneKey = "haven.media.reseal.1_0_8.done"
+    private static let refsKey = "haven.media.reseal.1_0_8.refs"      // refs confirmed overwritten on ≥1 dest
+    private static let attemptsKey = "haven.media.reseal.1_0_8.attempts"
+    // A content-addressed blob can ONLY be repaired by the force-overwrite (the normal backfill sees the
+    // frozen blob as "present" and skips it forever), and the overwrite lands only on destinations
+    // reachable during the pass. So we RETRY across launches until every repairable ref is confirmed —
+    // capped so a user with no reachable destination (nothing was ever uploaded, nothing to repair)
+    // still stops after a bounded number of cheap passes.
+    private static let maxAttempts = 10
+    private static var inFlight = false
+
+    static func runOnceIfNeeded(social: HavenSocial) {
+        guard !UserDefaults.standard.bool(forKey: doneKey), !inFlight else { return }
+        inFlight = true
+        Task.detached(priority: .background) {
+            defer { Task { @MainActor in inFlight = false } }
+            let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
+            var owned: [(ref: String, cid: String)] = []
+            var seen = Set<String>()
+            for c in social.circles() {
+                for item in social.feed(circleId: c.id, nowMs: nowMs, viewerRetentionSecs: nil) where item.isMe {
+                    for r in item.media where seen.insert(r).inserted { owned.append((r, c.id)) }
+                    for cm in item.comments where cm.isMe {
+                        for r in cm.media where seen.insert(r).inserted { owned.append((r, c.id)) }
+                    }
+                }
+            }
+            // Only media I still hold the plaintext for — the re-seal reads the original file. Anything
+            // the storage sweep cleared is gone and must not block the latch.
+            var held: [(ref: String, cid: String)] = []
+            for m in owned {
+                if let u = await MediaStore.shared.storagePath(for: m.ref),
+                   FileManager.default.fileExists(atPath: u.path) { held.append(m) }
+            }
+            var done = Set(UserDefaults.standard.stringArray(forKey: refsKey) ?? [])
+            let todo = held.filter { !done.contains($0.ref) }
+            for m in todo {
+                if await SharedStore.backup(ref: m.ref, circleId: m.cid, social: social, force: true) {
+                    done.insert(m.ref)   // a destination accepted the fresh blob → this ref is repaired
+                }
+            }
+            UserDefaults.standard.set(Array(done), forKey: refsKey)
+            let attempts = UserDefaults.standard.integer(forKey: attemptsKey) + 1
+            UserDefaults.standard.set(attempts, forKey: attemptsKey)
+            // Latch when every repairable ref is confirmed, or after enough tries that a still-failing
+            // ref is almost certainly un-repairable (its destination is gone / was never reachable).
+            if held.allSatisfy({ done.contains($0.ref) }) || attempts >= maxAttempts {
+                UserDefaults.standard.set(true, forKey: doneKey)
+            }
+            if !todo.isEmpty {
+                HavenLog.sync("media recovery: \(done.count)/\(held.count) authored blobs re-sealed + overwritten (attempt \(attempts))")
+            }
+        }
+    }
+}
+
 /// Exponential backoff for media backups that keep FAILING to land on any destination. Without this,
 /// the every-2-min `backfillMailboxMedia` re-reads, re-seals and re-uploads the same blob forever when
 /// no relay can hold it (e.g. every relay is behind a NAT the iroh blob ALPN can't traverse and there's
@@ -223,7 +286,15 @@ enum SharedStore {
 
     /// Seal a locally-held media blob to the circle and store it in the circle's mailbox
     /// (relay if set, else S3) — idempotent.
-    static func backup(ref: String, circleId: String, social: HavenSocial) async {
+    /// `force` (recovery only): re-seal and OVERWRITE the blob on every reachable destination,
+    /// bypassing the "already has it" probe. A blob is content-addressed and write-once, so a blob
+    /// sealed the wrong way (the 1.0.7 device-signed media bug) stays frozen — the normal path probes,
+    /// sees the relay already holds THAT ref, and skips. Forcing re-uploads the correctly-sealed bytes
+    /// to the same key (every PUT replaces by key), which is what recovers a friend's stuck media.
+    /// Returns whether some destination now holds the blob (a probe hit, or — under `force` — accepted
+    /// the freshly re-sealed overwrite). The recovery migration uses this to know a ref is repaired.
+    @discardableResult
+    static func backup(ref: String, circleId: String, social: HavenSocial, force: Bool = false) async -> Bool {
         // Skip entirely if this blob is already confirmed on EVERY destination — before the expensive
         // file read + seal. Content-addressed keys never change, so a confirmed upload is permanent.
         // This is what stops the periodic backfill from re-sending media the relay already has.
@@ -231,10 +302,11 @@ enum SharedStore {
         // shared relay, so a video isn't stranded when the circle's relay is offline.
         let destNodes = mediaDests(circleId)
         let s3 = mediaS3(for: circleId)
-        let allConfirmed = destNodes.allSatisfy { MediaBackupLedger.has($0, ref) }
+        let allConfirmed = !force
+            && destNodes.allSatisfy { MediaBackupLedger.has($0, ref) }
             && (s3 == nil || MediaBackupLedger.has("s3", ref))
-        if allConfirmed && (!destNodes.isEmpty || s3 != nil) { MediaBackupBackoff.recordLanded(ref); return }
-        guard let url = MediaStore.shared.storagePath(for: ref) else { return }
+        if allConfirmed && (!destNodes.isEmpty || s3 != nil) { MediaBackupBackoff.recordLanded(ref); return true }
+        guard let url = MediaStore.shared.storagePath(for: ref) else { return false }
 
         // ---- Probe phase: NO file read, NO seal. `key(ref)` is content-addressed — independent of
         // the sealed bytes — so every unconfirmed destination can be asked "do you already hold it?"
@@ -248,7 +320,9 @@ enum SharedStore {
         var landed = false   // some destination holds it (probe hit) or accepted it (upload)
 
         // S3/HTTP bucket — the DEFAULT media transport (see the upload ordering note below).
-        if let s3, !MediaBackupLedger.has("s3", ref) {
+        if let s3, force {
+            s3Needs = true   // recovery: overwrite unconditionally, no head probe
+        } else if let s3, !MediaBackupLedger.has("s3", ref) {
             switch await s3.headObjectExists(key: key(ref)) {
             case .some(true): MediaBackupLedger.mark("s3", ref); landed = true
             case .some(false): s3Needs = true
@@ -257,16 +331,23 @@ enum SharedStore {
         } else if s3 != nil { landed = true }
 
         for node in destNodes {
-            if MediaBackupLedger.has(node, ref) { landed = true; continue }   // already confirmed on this relay
+            if !force && MediaBackupLedger.has(node, ref) { landed = true; continue }   // already confirmed
             // Our OWN hosted relay: the local store answers instantly (no dial).
             if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
-                if RelayHost.shared.localGet(key(ref)) != nil { MediaBackupLedger.mark(node, ref); landed = true }
+                if !force, RelayHost.shared.localGet(key(ref)) != nil { MediaBackupLedger.mark(node, ref); landed = true }
                 else { uploads.append((node, .ownRelay)) }
                 continue
             }
             // Plain-HTTP interface first (the reliable cross-NAT path). A reachable relay that
             // answers is authoritative — the iroh path serves the SAME store, so don't also dial.
             if let http = RelayMailboxStore.shared.httpInterface(node) {
+                // Recovery: don't probe — queue an overwrite to the first good base and move on.
+                if force {
+                    if let base = http.urls.first(where: { !httpUrlBad($0) }) {
+                        uploads.append((node, .http(base: base, token: http.token)))
+                        continue
+                    }
+                }
                 var resolved = false
                 for base in http.urls where !httpUrlBad(base) {
                     switch await httpGet(base, http.token, key(ref)) {
@@ -290,7 +371,7 @@ enum SharedStore {
                 HavenLog.sync("backup probe SKIP ref=\(ref) relay=\(node.prefix(8)) — unreachable/backing off (no http, no dial)")
                 continue
             }
-            if await c.has(key: key(ref)) {
+            if !force, await c.has(key: key(ref)) {
                 RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
                 MediaBackupLedger.mark(node, ref); landed = true
             } else {
@@ -303,7 +384,7 @@ enum SharedStore {
             // ledger) or was unreachable/backing off — the file is never read or sealed this pass.
             if !landed { HavenLog.sync("backup NO-DEST ref=\(ref)"); MediaBackupBackoff.recordStalled(ref) }
             else { MediaBackupBackoff.recordLanded(ref) }
-            return
+            return landed
         }
 
         // ---- Seal to a TEMP FILE, now known to be needed by at least one reachable destination.
@@ -321,7 +402,7 @@ enum SharedStore {
         }.value
         guard sealedOK,
               let sealedSize = (try? FileManager.default.attributesOfItem(atPath: sealedURL.path)[.size] as? Int) ?? nil
-        else { HavenLog.sync("backup SEAL-FAIL ref=\(ref)"); MediaBackupBackoff.recordStalled(ref); return }
+        else { HavenLog.sync("backup SEAL-FAIL ref=\(ref)"); MediaBackupBackoff.recordStalled(ref); return false }
         let chunked = sealedSize > mediaChunkBytes
         HavenLog.sync("backup ref=\(ref) size=\(sealedSize) chunked=\(chunked) dests=\(uploads.count + (s3Needs ? 1 : 0)) s3=\(s3Needs)")
 
@@ -384,6 +465,7 @@ enum SharedStore {
         }
         if !landed { HavenLog.sync("backup NO-DEST ref=\(ref)"); MediaBackupBackoff.recordStalled(ref) }
         else { MediaBackupBackoff.recordLanded(ref) }
+        return landed
     }
 
     /// Publish this device's account-signed device roster to every known relay under

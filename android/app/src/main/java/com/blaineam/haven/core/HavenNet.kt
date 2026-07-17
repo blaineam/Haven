@@ -325,6 +325,58 @@ object HavenNet : InboundListener {
         }
         // §1 — existing multi-device upgraders shed the legacy bare account leaf ONCE.
         maybeRetireAccountLeaf()
+        // 1.0.8 — overwrite media a 1.0.7 build device-signed + froze, so friends can open it (once).
+        maybeResealOwnMedia()
+    }
+
+    /**
+     * 1.0.8 media recovery — run ONCE. A 1.0.7 build device-signed my posted media and, because a blob
+     * is content-addressed + write-once, froze it so friends could never open it. The core fix re-seals
+     * account-signed; this force-re-uploads my OWN media (only what I still hold the plaintext for) to
+     * overwrite the stale frozen blob on every reachable destination. Sticky SharedPreferences latch —
+     * a fresh 1.0.8+ install never posted a bad blob. Mirrors iOS `MediaRecovery` / desktop
+     * `maybe_reseal_own_media`.
+     */
+    @Volatile private var resealInFlight = false
+    private fun maybeResealOwnMedia() {
+        if (cryptoPrefs.getBoolean("mediaResealedV108", false) || resealInFlight) return
+        resealInFlight = true
+        // A content-addressed blob is only repairable by the force-overwrite (normal backfill sees the
+        // frozen blob as "present" and skips it forever), and the overwrite lands only on destinations
+        // reachable during the pass — so RETRY across launches until every held ref is confirmed on ≥1
+        // dest. Capped so a user with no reachable destination (nothing uploaded, nothing to repair)
+        // still stops. Runs in a coroutine, one blob at a time (peak RAM ≈ one media file).
+        scope.launch {
+            val seen = HashSet<String>()
+            val held = ArrayList<Pair<String, String>>()   // (circleId, ref) I still hold the plaintext for
+            for (c in runCatching { social.circles() }.getOrDefault(emptyList())) {
+                val feed = runCatching { social.feed(c.id, System.currentTimeMillis(), null) }.getOrDefault(emptyList())
+                for (item in feed) {
+                    if (!item.isMe) continue
+                    for (r in item.media) if (!LocalMedia.isSynthetic(r) && LocalMedia.has(r) && seen.add(r)) held.add(c.id to r)
+                    for (cm in item.comments) {
+                        if (!cm.isMe) continue
+                        for (r in cm.media) if (!LocalMedia.isSynthetic(r) && LocalMedia.has(r) && seen.add(r)) held.add(c.id to r)
+                    }
+                }
+            }
+            val done = HashSet(cryptoPrefs.getStringSet("mediaResealRefs", emptySet()) ?: emptySet())
+            for ((cid, r) in held) {
+                if (done.contains(r)) continue
+                if (uploadMedia(cid, r, force = true)) done.add(r)   // a dest accepted the fresh blob → repaired
+            }
+            val attempts = cryptoPrefs.getInt("mediaResealAttempts", 0) + 1
+            // Latch when every repairable ref is confirmed, or after enough tries that a still-failing
+            // ref is almost certainly un-repairable (its destination is gone / was never reachable).
+            val latched = held.all { done.contains(it.second) } || attempts >= 10
+            cryptoPrefs.edit()
+                .putStringSet("mediaResealRefs", done)
+                .putInt("mediaResealAttempts", attempts)
+                .putBoolean("mediaResealedV108", latched)
+                .apply()
+            if (held.isNotEmpty()) android.util.Log.i("MediaSync", "media recovery: ${done.size}/${held.size} authored blobs re-sealed + overwritten (attempt $attempts)")
+            resealInFlight = false
+        }
     }
 
     /** SharedPreferences-backed set of circle ids THIS device created — the circles it may pin itself as
@@ -2600,7 +2652,7 @@ object HavenNet : InboundListener {
     // single serial consumer so peak memory is ~one blob, not the whole library. Mirrors iOS
     // SharedStore.MediaBackupQueue (enqueue(ref, circleId); one drain loop runs them one at a time).
     private sealed class MediaJob(val ref: String, val circleId: String) {
-        class Backup(ref: String, circleId: String) : MediaJob(ref, circleId)
+        class Backup(ref: String, circleId: String, val force: Boolean = false) : MediaJob(ref, circleId)
         class Restore(ref: String, circleId: String) : MediaJob(ref, circleId)
     }
     // Unlimited buffer + a single consumer = strictly serial; the dedup set + cap below bound it.
@@ -2622,7 +2674,7 @@ object HavenNet : InboundListener {
                 // Process ONE blob at a time — peak memory ≈ a single media file, not the library.
                 runCatching {
                     when (job) {
-                        is MediaJob.Backup -> uploadMedia(job.circleId, job.ref)
+                        is MediaJob.Backup -> uploadMedia(job.circleId, job.ref, job.force)
                         is MediaJob.Restore -> {
                             if (fetchMediaFromRelay(job.circleId, job.ref)) {
                                 withContext(Dispatchers.Main) { feedVersion.value++ }
@@ -2636,12 +2688,13 @@ object HavenNet : InboundListener {
     }
 
     private fun jobKey(job: MediaJob) =
-        (if (job is MediaJob.Backup) "B|" else "R|") + job.ref + "|" + job.circleId
+        (if (job is MediaJob.Backup) (if (job.force) "BF|" else "B|") else "R|") + job.ref + "|" + job.circleId
 
-    /** Enqueue a media blob to mirror to the circle's relays — serialized (one in RAM at a time). */
-    private fun enqueueBackup(circleId: String, ref: String) {
+    /** Enqueue a media blob to mirror to the circle's relays — serialized (one in RAM at a time).
+     *  [force] = the 1.0.8 recovery overwrite (bypass the "already held?" probe + ledger). */
+    private fun enqueueBackup(circleId: String, ref: String, force: Boolean = false) {
         if (LocalMedia.isSynthetic(ref)) return   // geo: pins et al. carry no bytes — never relay-storable
-        val job = MediaJob.Backup(ref, circleId)
+        val job = MediaJob.Backup(ref, circleId, force)
         if (!offerMediaJob(jobKey(job))) return
         ensureMediaQueueDraining()
         mediaQueue.trySend(job)
@@ -3084,12 +3137,19 @@ object HavenNet : InboundListener {
         }
     }
 
-    suspend fun uploadMedia(circleId: String, ref: String) {
+    /**
+     * [force] = the 1.0.8 media-recovery path: skip every "already held?" probe and the persisted
+     * ledger, and OVERWRITE the blob on every reachable destination. A blob is content-addressed +
+     * write-once, so a 1.0.7 build that device-signed it froze it forever; the only cure is to
+     * re-seal (now account-signed, done by the core fix) and overwrite the stored copy.
+     */
+    suspend fun uploadMedia(circleId: String, ref: String, force: Boolean = false): Boolean {
         // Skip entirely if every destination already has this blob (before the expensive rawSealed read).
         val dests = mediaRelaysFor(circleId)
-        if (dests.isNotEmpty() && dests.all { isBackedUp(it, ref) }) return
+        if (!force && dests.isNotEmpty() && dests.all { isBackedUp(it, ref) }) return true
         val key = mediaKey(ref)
         val hostedHex = runCatching { relayHost?.nodeIdHex() }.getOrNull()
+        var landed = false   // a destination holds it (probe hit) or accepted it (upload)
 
         // ---- Probe phase: NO blob read. The media key is content-addressed (independent of the
         // sealed bytes), so every unconfirmed destination can be asked "do you already hold it?"
@@ -3102,48 +3162,56 @@ object HavenNet : InboundListener {
         val uploadHttp = ArrayList<Pair<String, RelayEntry>>()                // node → HTTP interface
         val uploadDial = ArrayList<Pair<String, RelayClient>>()               // node → connected client
         for (nodeHex in dests) {
-            if (isBackedUp(nodeHex, ref)) continue   // already confirmed on this relay
+            if (!force && isBackedUp(nodeHex, ref)) { landed = true; continue }   // already confirmed on this relay
             // S3-BUCKET relay: probe via the S3 FFI (relayClientFor can't dial an "s3:" pseudo-node).
             // success(bytes) = already mirrored, success(null) = reachable miss, failure = unreachable.
             if (nodeHex.startsWith("s3:")) {
                 val cfg = StorageStore.s3Config(appContext) ?: continue
+                if (force) { uploadS3.add(nodeHex to cfg); continue }   // overwrite, no probe
                 runCatching { uniffi.haven_ffi.s3Get(cfg, key) }.onSuccess {
-                    if (it != null) { markRelaySeen(nodeHex); markBackedUp(nodeHex, ref) }
+                    if (it != null) { markRelaySeen(nodeHex); markBackedUp(nodeHex, ref); landed = true }
                     else uploadS3.add(nodeHex to cfg)
                 }
                 continue
             }
             // Our OWN hosted relay: the local store answers instantly (never dial/HTTP ourselves).
             if (hostedHex != null && nodeHex == hostedHex) {
-                if (relayHost?.localGet(key) != null) markBackedUp(nodeHex, ref)
-                else uploadLocal.add(nodeHex)
+                if (force || relayHost?.localGet(key) == null) uploadLocal.add(nodeHex)
+                else { markBackedUp(nodeHex, ref); landed = true }
                 continue
             }
             // Relay HTTP interface — a reachable relay is authoritative (the iroh path serves the
             // SAME store): hit → ledger, 404 → upload over HTTP; only unreachable falls to the dial.
             val entry = relayEntries[nodeHex]
             if (entry != null) {
-                var resolved = false
-                for (base in httpUrlsFor(entry)) {
-                    val r = relayHttpGet(base, entry.httpToken, key)
-                    if (r.isFailure) { markHttpUrlBad(base); continue }
-                    if (r.getOrNull() != null) { markRelaySeen(nodeHex); markBackedUp(nodeHex, ref) }
-                    else uploadHttp.add(nodeHex to entry)
-                    resolved = true
-                    break
+                if (force) {
+                    // Overwrite over the HTTP interface without asking whether it's held; a mid-upload
+                    // failure below falls back to the iroh dial (same store).
+                    if (httpUrlsFor(entry).isNotEmpty()) { uploadHttp.add(nodeHex to entry); continue }
+                } else {
+                    var resolved = false
+                    for (base in httpUrlsFor(entry)) {
+                        val r = relayHttpGet(base, entry.httpToken, key)
+                        if (r.isFailure) { markHttpUrlBad(base); continue }
+                        if (r.getOrNull() != null) { markRelaySeen(nodeHex); markBackedUp(nodeHex, ref); landed = true }
+                        else uploadHttp.add(nodeHex to entry)
+                        resolved = true
+                        break
+                    }
+                    if (resolved) continue
                 }
-                if (resolved) continue
             }
             val client = relayClientFor(nodeHex) ?: continue   // honors backoff — skip WITHOUT reading
+            if (force) { uploadDial.add(nodeHex to client); continue }
             runCatching { client.has(key) }.onSuccess {
-                if (it) { markRelayOk(nodeHex); markBackedUp(nodeHex, ref) }
+                if (it) { markRelayOk(nodeHex); markBackedUp(nodeHex, ref); landed = true }
                 else uploadDial.add(nodeHex to client)
             }.onFailure { relayFailed(nodeHex) }
         }
-        if (uploadS3.isEmpty() && uploadLocal.isEmpty() && uploadHttp.isEmpty() && uploadDial.isEmpty()) return
+        if (uploadS3.isEmpty() && uploadLocal.isEmpty() && uploadHttp.isEmpty() && uploadDial.isEmpty()) return landed
 
         // ---- Read the sealed blob, now known to be needed by at least one reachable destination.
-        val blob = LocalMedia.rawSealed(ref) ?: return
+        val blob = LocalMedia.rawSealed(ref) ?: return landed
         val chunked = blob.size > mediaChunkBytes
         for ((nodeHex, cfg) in uploadS3) {
             runCatching {
@@ -3155,7 +3223,7 @@ object HavenNet : InboundListener {
                 } else {
                     uniffi.haven_ffi.s3Put(cfg, key, blob)
                 }
-            }.onSuccess { markRelaySeen(nodeHex); markBackedUp(nodeHex, ref) }
+            }.onSuccess { markRelaySeen(nodeHex); markBackedUp(nodeHex, ref); landed = true }
                 .onFailure { android.util.Log.d(TAG, "s3 media put failed ($nodeHex): ${it.message}") }
         }
         // Our OWN hosted relay: write straight into the local store.
@@ -3169,13 +3237,13 @@ object HavenNet : InboundListener {
                 } else {
                     relayHost?.localPut(key, blob)
                 }
-            }.onSuccess { markBackedUp(nodeHex, ref) }
+            }.onSuccess { markBackedUp(nodeHex, ref); landed = true }
         }
         // Relay HTTP interface — the DEFAULT cross-NAT path. Success = done for this relay
         // (the iroh path serves the same store); a mid-upload failure falls back to the iroh put.
         for ((nodeHex, entry) in uploadHttp) {
             if (httpUploadMedia(entry, ref, key, blob, chunked)) {
-                markRelaySeen(nodeHex); markBackedUp(nodeHex, ref)
+                markRelaySeen(nodeHex); markBackedUp(nodeHex, ref); landed = true
                 android.util.Log.i("MediaSync", "HTTP uploaded ref=$ref to ${nodeHex.take(8)}")
                 continue
             }
@@ -3192,9 +3260,10 @@ object HavenNet : InboundListener {
                     client.put(key, blob)
                 }
             }
-                .onSuccess { markRelayOk(nodeHex); markBackedUp(nodeHex, ref) }
+                .onSuccess { markRelayOk(nodeHex); markBackedUp(nodeHex, ref); landed = true }
                 .onFailure { relayFailed(nodeHex) }
         }
+        return landed
     }
 
     /** Byte ranges of each 8 MB chunk over a blob of [size] bytes: list of (from, toExclusive). */

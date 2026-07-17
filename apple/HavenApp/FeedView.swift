@@ -228,6 +228,7 @@ final class FeedStore: ObservableObject {
         guard ProcessInfo.processInfo.environment["HAVEN_NO_NET"] != "1" else { return }
         bringOnline()
         startMailboxPolling()
+        if let social { MediaRecovery.runOnceIfNeeded(social: social) }   // one-time re-seal of my 1.0.7-era media
         ingestPushInbox()   // drain any events delivered inline by push while we were away
         RelayMailboxStore.shared.purgeStale()   // erase relays inactive AND unseen > 7 days (config else survives)
         RelayHost.shared.startIfEnabled()   // resume serving as the circle's relay if toggled on

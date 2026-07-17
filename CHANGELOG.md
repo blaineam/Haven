@@ -7,10 +7,10 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [1.0.8] — 2026-07-17
+## [1.0.9] — 2026-07-17
 
-Everything in 1.0.7 (below), plus two fixes for bugs caught right after it was submitted —
-1.0.8 replaces 1.0.7 so no one receives the broken build.
+Everything in 1.0.7 (below), plus the fixes for bugs caught right after it was submitted —
+1.0.9 replaces 1.0.7/1.0.8 so no one receives the broken build.
 
 ### Fixed
 
@@ -19,12 +19,14 @@ Everything in 1.0.7 (below), plus two fixes for bugs caught right after it was s
   back — circle membership merged additively, and the removal was only tracked in the app layer, not
   the engine that does the merge. The removal is now a durable engine-level tombstone: a removed
   member is never re-admitted by a sync/restore, and a deliberate re-add clears it.
-- **A friend's photos and videos load again.** 1.0.7 signed posted media with a device key once a
-  circle was fully upgraded, so opening a friend's media needed their current device roster — and
-  because a sealed media file is cached once and never re-sealed, any mismatch froze that media as
-  unopenable. Media is signed and sealed so any authorized member opens it, regardless of device
-  state (this changes nothing about who *can* open it — the media reference already lives inside the
-  end-to-end-encrypted post, which gates access).
+- **A friend's photos and videos load again.** Posted media is signed and sealed so any authorized
+  member opens it, regardless of device state (this changes nothing about who *can* open it — the
+  media reference already lives inside the end-to-end-encrypted post, which gates access). Media
+  posted before this fix could be stuck unopenable because a stored media file is cached once and
+  never re-sealed; the next time each person opens Haven, their own affected media is quietly
+  re-sealed and the stored copy is overwritten in place, so a friend's previously-stuck photos and
+  videos start loading. The repair runs once in the background, only for media you still hold, and
+  retries across launches until every reachable copy is refreshed.
 
 ## [1.0.7] — 2026-07-16
 

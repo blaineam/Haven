@@ -747,6 +747,7 @@ impl Engine {
         // account leaf ONCE (gated + idempotent) so the roster reaches the device-only shape live
         // keying + retirement require. No-op for a fresh device-only install or until fully capable.
         self.maybe_migrate_retire_account_leaf().await;
+        self.maybe_reseal_own_media().await; // 1.0.8: overwrite my media a 1.0.7 build froze (once)
         self.fire_due_scheduled(); // flush anything overdue from while the app was closed
         self.purge_stale_relays().await; // erase relays inactive AND unseen > 7 days (config else survives)
         self.maybe_weekly_media_sweep(); // orphaned media blobs (at most once a week; runs off-thread)
@@ -825,6 +826,62 @@ impl Engine {
             self.publish_device_roster().await;
             self.emit_changed();
             log::info!("account-leaf migration complete — roster is now device-only (1.0.7 §1)");
+        }
+    }
+
+    /// 1.0.8 media recovery — run ONCE. A 1.0.7 build device-signed my posted media and, because a
+    /// blob is content-addressed + write-once, froze it so friends could never open it. The core fix
+    /// re-seals account-signed; this force-re-uploads my OWN media (only what I still hold the
+    /// plaintext for) to overwrite the stale frozen blob on every reachable destination. Sticky latch,
+    /// off the launch path. Mirrors iOS `MediaRecovery` / Android `runMediaRecoveryOnceIfNeeded`.
+    async fn maybe_reseal_own_media(self: &Arc<Self>) {
+        const MAX_ATTEMPTS: u32 = 10;
+        if self.prefs.lock().unwrap().media_resealed_v108 {
+            return;
+        }
+        // Enumerate my OWN posted media I STILL hold the plaintext for (the re-seal reads the original
+        // file); anything the storage sweep cleared is gone and must not block the latch.
+        let mut held: Vec<(String, String)> = vec![]; // (circle_id, ref)
+        let mut seen: HashSet<String> = HashSet::new();
+        for c in self.social.circles() {
+            for item in self.social.feed(c.id.clone(), now_ms(), None) {
+                if !item.is_me { continue; }
+                for r in item.media {
+                    if !LocalMedia::is_synthetic(&r) && self.media.has(&r) && seen.insert(r.clone()) {
+                        held.push((c.id.clone(), r));
+                    }
+                }
+                for cm in item.comments {
+                    if !cm.is_me { continue; }
+                    for r in cm.media {
+                        if !LocalMedia::is_synthetic(&r) && self.media.has(&r) && seen.insert(r.clone()) {
+                            held.push((c.id.clone(), r));
+                        }
+                    }
+                }
+            }
+        }
+        let mut done: HashSet<String> =
+            self.prefs.lock().unwrap().media_reseal_refs.iter().cloned().collect();
+        for (circle_id, r) in held.iter().filter(|(_, r)| !done.contains(r)) {
+            // A destination accepted the fresh blob → this ref is repaired.
+            if self.upload_media_inner(circle_id, r, true).await {
+                done.insert(r.clone());
+            }
+        }
+        let attempts = self.prefs.lock().unwrap().media_reseal_attempts + 1;
+        // Latch when every repairable ref is confirmed, or after enough tries that a still-failing ref
+        // is almost certainly un-repairable (its destination is gone / was never reachable).
+        let latched = held.iter().all(|(_, r)| done.contains(r)) || attempts >= MAX_ATTEMPTS;
+        {
+            let mut p = self.prefs.lock().unwrap();
+            p.media_reseal_refs = done.iter().cloned().collect();
+            p.media_reseal_attempts = attempts;
+            p.media_resealed_v108 = latched;
+            let _ = p.save(&self.paths);
+        }
+        if !held.is_empty() {
+            log::info!("media recovery: {}/{} authored blobs re-sealed + overwritten (attempt {attempts})", done.len(), held.len());
         }
     }
 
@@ -4322,7 +4379,19 @@ impl Engine {
     }
 
     async fn upload_media(self: &Arc<Self>, circle_id: &str, reference: &str) {
+        self.upload_media_inner(circle_id, reference, false).await;
+    }
+
+    /// `force` = the 1.0.8 media-recovery path: skip every "already held?" probe and the persisted
+    /// ledger, and OVERWRITE the blob on every reachable destination. A blob is content-addressed +
+    /// write-once, so a 1.0.7 build that device-signed it froze it forever; the only cure is to
+    /// re-seal (now account-signed, done by the core fix) and overwrite the stored copy.
+    ///
+    /// Returns whether some destination now holds the blob (a probe hit, or — under `force` — accepted
+    /// the freshly re-sealed overwrite). The recovery migration uses this to know a ref is repaired.
+    async fn upload_media_inner(self: &Arc<Self>, circle_id: &str, reference: &str, force: bool) -> bool {
         let key = Self::media_key(reference);
+        let mut landed = false; // a destination holds it (probe hit) or accepted it (upload)
 
         // ---- Probe phase: NO blob read. The media key is content-addressed (independent of the
         // sealed bytes), so every unconfirmed destination can be asked "do you already hold it?"
@@ -4330,49 +4399,66 @@ impl Engine {
         // AND re-uploaded on every 2-min backfill pass. Probe hits go into the persisted ledger;
         // only a destination that is REACHABLE and MISSING the blob justifies the read below, and
         // a relay that is unreachable or in its backoff window waits for a later pass.
+        // `force` bypasses the probe entirely — every reachable dest is an upload (overwrite).
         let mut s3_needs = false;
         if let Some(s3) = self.s3_client().await {
-            if !self.media_backed_up_has("s3", reference) {
+            if force {
+                s3_needs = true;
+            } else if !self.media_backed_up_has("s3", reference) {
                 match s3.get(&key).await {
-                    Ok(Some(_)) => self.mark_media_backed_up("s3", reference),
+                    Ok(Some(_)) => { self.mark_media_backed_up("s3", reference); landed = true; }
                     Ok(None) => s3_needs = true,
                     Err(_) => {} // bucket unreachable — don't read the blob on its behalf
                 }
+            } else {
+                landed = true; // ledger already confirms it here
             }
         }
         let mut http_uploads: Vec<(String, String, String)> = vec![]; // (node, base url, token)
         let mut dial_uploads: Vec<(String, Arc<RelayClient>)> = vec![];
         for node_hex in self.media_dests(circle_id) {
             if node_hex.starts_with("s3:") { continue; }
-            if self.media_backed_up_has(&node_hex, reference) { continue; }
+            if !force && self.media_backed_up_has(&node_hex, reference) { landed = true; continue; }
             // Relay HTTP interface — a reachable relay is authoritative (the iroh path serves the
             // SAME store): hit → ledger, 404 → upload over HTTP; only unreachable falls to the dial.
             // Bind out of the lock FIRST so the MutexGuard is dropped before any `.await` below.
             let http_iface = self.prefs.lock().unwrap().relay_http(&node_hex);
             if let Some((urls, token)) = http_iface {
-                let mut resolved = false;
-                for base in urls.iter().filter(|u| !self.http_url_bad(u)) {
-                    match self.http_get(base, &token, &key).await {
-                        Ok(Some(_)) => {
-                            self.mark_relay_ok(&node_hex);
-                            self.mark_media_backed_up(&node_hex, reference);
-                            resolved = true;
-                        }
-                        Ok(None) => {
-                            http_uploads.push((node_hex.clone(), base.clone(), token.clone()));
-                            resolved = true;
-                        }
-                        Err(()) => self.mark_http_url_bad(base),
+                if force {
+                    // Overwrite over the first good HTTP base without asking whether it's held.
+                    if let Some(base) = urls.iter().find(|u| !self.http_url_bad(u)) {
+                        http_uploads.push((node_hex.clone(), base.clone(), token.clone()));
+                        continue;
                     }
-                    if resolved { break; }
+                } else {
+                    let mut resolved = false;
+                    for base in urls.iter().filter(|u| !self.http_url_bad(u)) {
+                        match self.http_get(base, &token, &key).await {
+                            Ok(Some(_)) => {
+                                self.mark_relay_ok(&node_hex);
+                                self.mark_media_backed_up(&node_hex, reference);
+                                landed = true;
+                                resolved = true;
+                            }
+                            Ok(None) => {
+                                http_uploads.push((node_hex.clone(), base.clone(), token.clone()));
+                                resolved = true;
+                            }
+                            Err(()) => self.mark_http_url_bad(base),
+                        }
+                        if resolved { break; }
+                    }
+                    if resolved { continue; }
                 }
-                if resolved { continue; }
             }
             // iroh fallback — relay_client_for honors the backoff window (None = skip, no read).
             if let Some(client) = self.relay_client_for(&node_hex).await {
-                if client.has(key.clone()).await {
+                if force {
+                    dial_uploads.push((node_hex.clone(), client));
+                } else if client.has(key.clone()).await {
                     self.mark_relay_ok(&node_hex);
                     self.mark_media_backed_up(&node_hex, reference);
+                    landed = true;
                 } else {
                     dial_uploads.push((node_hex.clone(), client));
                 }
@@ -4380,11 +4466,11 @@ impl Engine {
         }
         if !s3_needs && http_uploads.is_empty() && dial_uploads.is_empty() {
             self.flush_media_backed_up();
-            return;
+            return landed;
         }
 
         // ---- Read the sealed blob, now known to be needed by at least one reachable destination.
-        let Some(blob) = self.media.raw_sealed(reference) else { return };
+        let Some(blob) = self.media.raw_sealed(reference) else { return landed };
         let chunked = blob.len() > MEDIA_CHUNK_BYTES;
         // S3/HTTP bucket FIRST — the DEFAULT media transport. Plain HTTPS traverses any NAT, whereas
         // the iroh blob ALPN (haven/blob/1) drops its outbound datagrams over a pure-relay cross-NAT
@@ -4403,7 +4489,7 @@ impl Engine {
                 } else {
                     s3.put(&key, &blob).await.is_ok()
                 };
-                if ok { self.mark_media_backed_up("s3", reference); }
+                if ok { self.mark_media_backed_up("s3", reference); landed = true; }
             }
         }
         // Then mirror to every relay that probed reachable-and-missing. Large blobs are sliced into
@@ -4427,6 +4513,7 @@ impl Engine {
             if ok {
                 self.mark_relay_ok(&node_hex);
                 self.mark_media_backed_up(&node_hex, reference);
+                landed = true;
             } else {
                 self.mark_http_url_bad(&base);
                 if let Some(client) = self.relay_client_for(&node_hex).await {
@@ -4452,11 +4539,13 @@ impl Engine {
                 Ok(()) => {
                     self.mark_relay_ok(&node_hex);
                     self.mark_media_backed_up(&node_hex, reference);
+                    landed = true;
                 }
                 Err(()) => self.relay_failed(&node_hex).await,
             }
         }
         self.flush_media_backed_up();
+        landed
     }
 
     async fn fetch_media_from_relay(self: &Arc<Self>, circle_id: &str, reference: &str) -> bool {

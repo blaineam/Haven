@@ -7901,6 +7901,14 @@ mod net_tests {
         let opened = bob.open_circle_media(cid.clone(), sealed);
         assert_eq!(opened.as_deref(), Some(&b"a sunset photo"[..]),
                    "a friend's media opens by account-sender resolution — no device roster required");
+
+        // 1.0.8 RECOVERY: the client re-seals the SAME plaintext and overwrites the frozen blob at its
+        // content-addressed key. The re-seal must still open for Bob (who still lacks Alice's roster) —
+        // proving the force-overwrite the recovery does replaces a bad blob with a good, openable one.
+        let resealed = alice.seal_circle_media(cid.clone(), b"a sunset photo".to_vec()).expect("re-seal");
+        let reopened = bob.open_circle_media(cid.clone(), resealed);
+        assert_eq!(reopened.as_deref(), Some(&b"a sunset photo"[..]),
+                   "the recovery re-seal of the same media opens for a friend lacking the device roster");
     }
 
     /// A member you remove stays removed after a state merge that still lists them — the multi-device

@@ -278,6 +278,20 @@ pub struct Prefs {
     /// require. Sticky — never re-run once true; a fresh device-only install never needs it.
     #[serde(default)]
     pub account_leaf_retired: bool,
+    /// One-time latch (1.0.8 media recovery): set once we've force-re-sealed + re-uploaded THIS
+    /// account's own posted media, overwriting blobs a 1.0.7 build device-signed and froze so a
+    /// friend could never open them. Sticky — a fresh 1.0.8+ install never posted a bad blob.
+    #[serde(default)]
+    pub media_resealed_v108: bool,
+    /// Refs already confirmed overwritten on ≥1 destination by the recovery (resumable — a content-
+    /// addressed blob is only repairable by the force-overwrite, which lands only on reachable dests,
+    /// so we retry across launches until every held ref is confirmed).
+    #[serde(default)]
+    pub media_reseal_refs: Vec<String>,
+    /// How many recovery passes have run — caps the retry so a user with no reachable destination
+    /// (nothing was ever uploaded, nothing to repair) still stops.
+    #[serde(default)]
+    pub media_reseal_attempts: u32,
 }
 
 impl Prefs {

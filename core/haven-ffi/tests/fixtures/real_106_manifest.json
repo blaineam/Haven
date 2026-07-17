@@ -1,0 +1,202 @@
+{
+  "circles": [
+    {
+      "id": "default",
+      "members": [
+        "5da4764673d1344152ff35f120da476ab0f014d7f81ae468f0fd9577e50c13fc",
+        "5c6ceb91df6dff955fc31fb01c3bcee6cb8c6e5887c60be68079ac0e171358ac"
+      ],
+      "name": "My Circle"
+    },
+    {
+      "id": "fam",
+      "members": [
+        "5c6ceb91df6dff955fc31fb01c3bcee6cb8c6e5887c60be68079ac0e171358ac",
+        "ea33f84c7937c8276eb69324b31dd357e4b6678b3c695164d3269413cea60056"
+      ],
+      "name": "Family"
+    },
+    {
+      "id": "work",
+      "members": [
+        "ea33f84c7937c8276eb69324b31dd357e4b6678b3c695164d3269413cea60056",
+        "791828b1ce86e5c1dcd97e3bf866bcfd2b9af3ed07ff047c3535d0acb9fb6339"
+      ],
+      "name": "Work"
+    },
+    {
+      "id": "dm:0ce5b6d16f01798a7f45ce2c6d40aed91cdf16e5d9ba50c018818adf03470542-5da4764673d1344152ff35f120da476ab0f014d7f81ae468f0fd9577e50c13fc",
+      "members": [
+        "5da4764673d1344152ff35f120da476ab0f014d7f81ae468f0fd9577e50c13fc"
+      ],
+      "name": "DM with Bob"
+    }
+  ],
+  "comments": [
+    {
+      "body": "c-default-1",
+      "circle": "default",
+      "media": [
+        "media/comment-img"
+      ],
+      "post_id": "73323076b85db314ff62d2e2612e1469"
+    }
+  ],
+  "device_roster": {
+    "account_hex": "0ce5b6d16f01798a7f45ce2c6d40aed91cdf16e5d9ba50c018818adf03470542",
+    "device_ids": [
+      "0ce5b6d16f01798a7f45ce2c6d40aed91cdf16e5d9ba50c018818adf03470542",
+      "149c8a3c37020c5cea1e0ecb4cd271094d8ebd88c7ab981f7d907ecedfbb471c"
+    ],
+    "roster_wire_len": 23388
+  },
+  "dm": {
+    "circle": "dm:0ce5b6d16f01798a7f45ce2c6d40aed91cdf16e5d9ba50c018818adf03470542-5da4764673d1344152ff35f120da476ab0f014d7f81ae468f0fd9577e50c13fc",
+    "members": [
+      "5da4764673d1344152ff35f120da476ab0f014d7f81ae468f0fd9577e50c13fc"
+    ],
+    "messages": [
+      {
+        "body": "dm-hello",
+        "id": "1e851adecf5b1f8db11917644038804d"
+      },
+      {
+        "body": "dm-how-are-you",
+        "id": "aabbdf2a713ec4e7e4ff1029cbdc6204"
+      },
+      {
+        "body": "dm-see-you-soon",
+        "id": "68123640aca87d4da47d74604b4d8526"
+      }
+    ]
+  },
+  "generator": "haven 1.0.6 (v1.0.6 tag, build 190) real HavenSocial FFI",
+  "me": {
+    "account_hex": "0ce5b6d16f01798a7f45ce2c6d40aed91cdf16e5d9ba50c018818adf03470542",
+    "account_seed": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "device_hex": "149c8a3c37020c5cea1e0ecb4cd271094d8ebd88c7ab981f7d907ecedfbb471c",
+    "device_seed": [
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91,
+      91
+    ]
+  },
+  "peers": {
+    "bob": "5da4764673d1344152ff35f120da476ab0f014d7f81ae468f0fd9577e50c13fc",
+    "carol": "5c6ceb91df6dff955fc31fb01c3bcee6cb8c6e5887c60be68079ac0e171358ac",
+    "dave": "ea33f84c7937c8276eb69324b31dd357e4b6678b3c695164d3269413cea60056",
+    "erin": "791828b1ce86e5c1dcd97e3bf866bcfd2b9af3ed07ff047c3535d0acb9fb6339"
+  },
+  "posts": [
+    {
+      "body": "p-default-1",
+      "circle": "default",
+      "id": "73323076b85db314ff62d2e2612e1469",
+      "media": [
+        "media/ref-abc"
+      ]
+    },
+    {
+      "body": "p-default-2",
+      "circle": "default",
+      "id": "08dd1c338526f3cfb87e53977b48f579",
+      "media": [
+        "media/photo-2"
+      ]
+    },
+    {
+      "body": "p-fam-1",
+      "circle": "fam",
+      "id": "d7e6ced7b305fd2c8280a7e840e16c2a",
+      "media": []
+    },
+    {
+      "body": "p-work-1",
+      "circle": "work",
+      "id": "8bb59e1818603c8b685f07c9d878d457",
+      "media": [
+        "media/doc-1"
+      ]
+    }
+  ],
+  "reactions": [
+    {
+      "circle": "default",
+      "emoji": "👍",
+      "post_id": "73323076b85db314ff62d2e2612e1469"
+    },
+    {
+      "circle": "default",
+      "emoji": "🎉",
+      "post_id": "73323076b85db314ff62d2e2612e1469"
+    },
+    {
+      "circle": "fam",
+      "emoji": "❤️",
+      "post_id": "d7e6ced7b305fd2c8280a7e840e16c2a"
+    }
+  ],
+  "state_bytes_len": 156208
+}

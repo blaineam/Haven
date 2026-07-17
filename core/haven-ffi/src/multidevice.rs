@@ -320,6 +320,21 @@ pub fn self_sync_slot_prefix(account_node_hex: String) -> String {
     haven_p2p::selfsync::slot_prefix(&account_node_hex)
 }
 
+/// Canonical mailbox slot for a rotated self-sync KEY GRANT sealed to one device (M1 revocation
+/// rotation) — `self/<account>/keygrant/<device>`. SINGLE SOURCE OF TRUTH: every client must derive the
+/// grant slot here so a rotated key crosses platforms; the grant blob comes from
+/// `seal_self_sync_key_epoch_grant` and is opened by the recipient via `open_self_sync_key_epoch_grant`.
+#[uniffi::export]
+pub fn self_sync_grant_slot_key(account_node_hex: String, device_node_hex: String) -> String {
+    haven_p2p::selfsync::grant_slot_key(&account_node_hex, &device_node_hex)
+}
+
+/// Canonical prefix to list all of an account's rotated-key-grant slots — `self/<account>/keygrant/`.
+#[uniffi::export]
+pub fn self_sync_grant_slot_prefix(account_node_hex: String) -> String {
+    haven_p2p::selfsync::grant_slot_prefix(&account_node_hex)
+}
+
 /// Open a blob produced by `seal_account_state` (fails on wrong account / tamper).
 #[uniffi::export]
 pub fn open_account_state(account_seed: Vec<u8>, sealed: Vec<u8>) -> Result<Arc<AccountStateHandle>, HavenError> {

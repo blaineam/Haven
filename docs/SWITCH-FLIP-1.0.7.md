@@ -181,6 +181,31 @@ seal_account_state_with_key_epoch(k, epoch, state)    // seal state under the ro
 
 The revoked device is simply **not** a grant recipient — it keeps only the stale key.
 
+### Grant delivery — ONE canonical slot (do not re-diverge)
+
+Each sealed grant is written to the recipient device's **canonical mailbox slot**, derived ONLY from core
+so it can never drift across platforms:
+
+```
+self_sync_grant_slot_key(account_node_hex, device_node_hex)  ==  self/<account>/keygrant/<device>
+self_sync_grant_slot_prefix(account_node_hex)                ==  self/<account>/keygrant/
+```
+
+- The grant **rides the same per-device self-sync mailbox transport as state** (`self/<account>/state/
+  <device>`), addressed per device — every client already prefixes mailbox keys with `haven/`, so the wire
+  key is `haven/self/<account>/keygrant/<device>`.
+- **Publish (primary):** for each still-authorized device bundle, `seal_self_sync_key_epoch_grant(...)` →
+  write the blob to `self_sync_grant_slot_key(account_hex, that_device_hex)` over every transport (all
+  relays + S3). Re-emit on every full-state push so an offline / late device converges (idempotent — a
+  device adopts only a strictly-newer epoch).
+- **Read (any device):** list `self_sync_grant_slot_prefix(account_hex)`, `open_self_sync_key_epoch_grant(...)`
+  the grant addressed to MY device (one sealed to another device fails to open), adopt if newer, then
+  read/seal account state under the adopted `(epoch, key)` via the dual-key path below.
+- **SINGLE SOURCE OF TRUTH:** all three clients (Apple `SelfSyncCoordinator`, Android `SelfSyncCoordinator`
+  + `SelfSyncKeyStore`, desktop `engine.rs`) derive this slot through the core fn. Never hardcode the string
+  and never invent a per-client slot (the old Android `haven/selfsync-grants/<account>` and Apple type-30
+  iroh frame were removed for exactly this reason — a rotated key must cross iPhone↔Android↔desktop).
+
 ### On the reader (every device, dual-key open)
 
 ```
@@ -241,7 +266,9 @@ stranded or loses data.
    rebroadcast the device-only roster — without it a migrated `{account, device}` roster is stranded at
    shadow (see §1).
 6. `set_circle_live_lane(true)` on `dm:` circles.
-7. On each revocation: `mint_self_sync_key` → `seal_self_sync_key_epoch_grant` to survivors →
-   `seal_account_state_with_key_epoch`; readers use `open_account_state_dual` (empty `seed_key` once
-   fully retired). Establish the self-sync base before the first diff.
+7. On each revocation: `mint_self_sync_key` → `seal_self_sync_key_epoch_grant` to survivors, each written
+   to `self_sync_grant_slot_key(account, device)` (canonical — never a per-client slot) →
+   `seal_account_state_with_key_epoch`; readers list `self_sync_grant_slot_prefix(account)`, open their own
+   grant, then use `open_account_state_dual` (empty `seed_key` once fully retired). Establish the self-sync
+   base before the first diff.
 8. Re-apply steps 3–6 (the non-persisted switches) on every launch.

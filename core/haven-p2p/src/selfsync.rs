@@ -353,6 +353,23 @@ pub fn slot_prefix(account_node_hex: &str) -> String {
     format!("self/{account_node_hex}/state/")
 }
 
+/// Canonical mailbox slot for a **rotated self-sync KEY GRANT** sealed to one device (seed-drop M1
+/// self-sync revocation rotation): `self/<account-node-hex>/keygrant/<device-node-hex>`. It rides the
+/// SAME self-sync mailbox transport as state (offline-resilient — a device that was off during the
+/// revocation picks up its grant on next sync), addressed per device so each opens only its own. This
+/// is the SINGLE SOURCE OF TRUTH for the slot key: every client (Swift/Kotlin/Rust) must derive it here
+/// so a rotated key crosses platforms (an iPhone primary → an Android sibling), never a hand-built
+/// string that can drift.
+pub fn grant_slot_key(account_node_hex: &str, device_node_hex: &str) -> String {
+    format!("self/{account_node_hex}/keygrant/{device_node_hex}")
+}
+
+/// Canonical prefix listing **all** of an account's rotated-key-grant slots:
+/// `self/<account-node-hex>/keygrant/`.
+pub fn grant_slot_prefix(account_node_hex: &str) -> String {
+    format!("self/{account_node_hex}/keygrant/")
+}
+
 fn put_lp(out: &mut Vec<u8>, b: &[u8]) {
     out.extend_from_slice(&(b.len() as u32).to_le_bytes());
     out.extend_from_slice(b);

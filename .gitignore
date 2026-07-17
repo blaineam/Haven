@@ -46,3 +46,8 @@ desktop/screenshots/
 # Local miniflare/wrangler state from `wrangler dev` — never a build input, and it has held
 # real KV rows (an F1 ledger entry). Untracked + unignored made it a `git add -A` landmine.
 push/.wrangler/
+
+# Security audit reports are PRIVATE — never track them in this public repo.
+docs/audits/
+docs/SECURITY-AUDIT-*.md
+**/SECURITY-AUDIT-*crypto*.md

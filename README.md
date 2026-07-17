@@ -94,7 +94,7 @@ nearby Bluetooth/Wi-Fi mesh daily. Done so far:
   circle stays on the existing key path (byte-identical to 1.0.6), and a device that falls behind
   reverts its circles to that legacy path within one sync — no one is ever stranded, and it only
   ever changes *which key* seals content, never *whether* content is encrypted. Its audit to date is
-  an **internal**, AI-driven adversarial code review — 0 critical / 0 high (2 mediums remediated) — a
+  an **internal**, AI-driven adversarial code review — 0 critical / 0 high — a
   strong first pass, **not** a formal external audit; an independent cryptographer's review is
   planned/ongoing. See [`docs/TREEKEM-DESIGN.md`](docs/TREEKEM-DESIGN.md).
 - **Own-device sync that converges** — a user's own iPhone/iPad/Mac share the account

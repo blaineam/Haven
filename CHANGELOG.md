@@ -24,7 +24,7 @@ builds in a next-generation **MLS-style group-encryption** layer — all shipped
 >    the existing key path, and a device that falls behind reverts its circles to that path within one
 >    sync — no one is ever stranded, and it only ever changes *which key* seals content, never
 >    *whether* content is encrypted. Its audit to date is an **internal, AI-driven adversarial
->    review** — 0 critical, 0 high; the two mediums it found were remediated — which is a strong first
+>    review** — 0 critical, 0 high — which is a strong first
 >    pass, **not** a formal external audit; an independent cryptographer's review is planned and we
 >    don't claim it's done. It is **MLS-*shaped*** (TreeKEM mechanisms on Haven's own post-quantum
 >    primitives), **not** RFC-9420 wire-interoperable.
@@ -66,17 +66,10 @@ builds in a next-generation **MLS-style group-encryption** layer — all shipped
   the layer activates **per circle once every member's devices have updated and joined** (an
   all-present/all-joined gate), and until a circle is fully capable it stays byte-identical to the
   live sender-keys+epochs path — a device that falls behind reverts within one sync, and it only ever
-  changes *which key* seals content, never *whether* content is encrypted. Its audit to date is
-  internal (0 critical / 0 high, 2 mediums remediated); an independent cryptographer's review is
-  planned/ongoing (design M7 is the gate before the core default flips on). See
-  [`docs/TREEKEM-DESIGN.md`](docs/TREEKEM-DESIGN.md) and the internal audit at
-  [`docs/audits/SECURITY-AUDIT-crypto-2026-07-16.md`](docs/audits/SECURITY-AUDIT-crypto-2026-07-16.md).
-- **Internal adversarial crypto audit.** An AI-driven, human-directed adversarial code review of the
-  seed-drop + TreeKEM code (not the design's aspirational text) found **0 critical / 0 high**; the
-  two mediums — the self-sync key not being rotated on revocation, and a first-grant-wins pin on the
-  circle-creator authority root — were **remediated**, along with a low-severity genesis-authentication
-  hardening. The review is explicitly *not* a substitute for the planned external cryptographer's
-  audit, which remains the gate for turning the group layer on by default.
+  changes *which key* seals content, never *whether* content is encrypted. The crypto has had an
+  internal, human-directed adversarial code review; a formal external cryptographer's review is
+  planned and remains the gate before the core default flips on (design M7). See
+  [`docs/TREEKEM-DESIGN.md`](docs/TREEKEM-DESIGN.md).
 
 ### Added
 

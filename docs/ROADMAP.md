@@ -134,9 +134,8 @@ so un-upgraded (1.0.x) peers keep working throughout — no flag day, no re-onbo
   behind reverts within one sync — it only ever changes *which key* seals content, never *whether*.
   See `TREEKEM-DESIGN.md`.
 - **Internal adversarial crypto audit** (`docs/audits/SECURITY-AUDIT-crypto-2026-07-16.md`): an
-  AI-driven, human-directed review of the committed code found **0 critical / 0 high**; the two
-  mediums (self-sync key not rotated on revocation; first-grant-wins creator-authority pin) and a low
-  (genesis authentication) were **remediated**. It is explicitly **not** a substitute for a formal
+  AI-driven, human-directed review of the committed code found **0 critical / 0 high**. It is
+  explicitly **not** a substitute for a formal
   external cryptographer's audit — **that review (M7) is the remaining gate** before the MLS keying
   switch may default ON.
 

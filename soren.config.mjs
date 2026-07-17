@@ -56,15 +56,39 @@ export default {
       description: 'macOS tests (HavenMac scheme)',
     },
 
-    // ── Android: JVM unit tests always; instrumented (connected) tests only when
-    //    an emulator is up (gracefully skipped otherwise). JAVA_HOME pinned to 17.
+    // ── Android: JVM unit tests always; instrumented (connected) tests boot the
+    //    `haven_phone` AVD on demand (reusing a running emulator when present),
+    //    poll for full boot, then run — gracefully skipped if it can't boot.
+    //    JAVA_HOME pinned to 17; ANDROID_HOME + platform-tools/emulator are put
+    //    on PATH by the runner (both are commonly unset in the shell). The
+    //    emulator is LEFT RUNNING after the run for faster reruns (stopEmulator).
     android: {
       type: 'gradle',
       cwd: 'android',
       unit: 'testDebugUnitTest',
       connected: 'connectedDebugAndroidTest',
       javaHome: '/opt/homebrew/opt/openjdk@17',
+      androidHome: '/opt/homebrew/share/android-commandlinetools',
+      avd: 'haven_phone',
+      // bootEmulator: true (default) — set false to only use an already-running one.
+      // stopEmulator: false (default) — leave the emulator up between runs.
       description: 'Android unit + (emulator) connected tests',
+    },
+
+    // ── Desktop acceptance VMs (UTM). These LAUNCH the VM and report it up; there
+    //    is no in-guest test agent wired yet, so success = "VM launched" (honestly
+    //    labelled). When a guest smoke agent exists, add a `guest: { host, user,
+    //    cmd }` block and the leg will ssh in and run it. See docs/QA.md. Driven by
+    //    UUID (two VMs can share a name). Missing UTM/VM ⇒ the leg SKIPS, not hangs.
+    'vm-linux': {
+      type: 'utm',
+      vm: '5B499FD3-0839-46A8-8D7A-35CCBEE35D31', // "haven-linux"
+      description: 'Launch the Linux desktop VM (haven-linux) — launch-only for now',
+    },
+    'vm-windows': {
+      type: 'utm',
+      vm: '3EEB5FD1-0FEA-404C-8C36-D90488168294', // "Windows"
+      description: 'Launch the Windows desktop VM — launch-only for now',
     },
 
     // ── Desktop (Tauri): the Rust side tests + a JS syntax gate on the web UI.

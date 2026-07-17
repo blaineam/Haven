@@ -12,11 +12,36 @@ tools repo at `_shared/soren/`, not in Haven; Haven plugs in via
 From the Haven repo root:
 
 ```sh
-node ../_shared/soren/soren.mjs doctor Haven      # probe toolchain + per-suite readiness
-node ../_shared/soren/soren.mjs run    Haven      # run every suite
-node ../_shared/soren/soren.mjs run    Haven core # just the core Rust suite
-node ../_shared/soren/soren.mjs migrate Haven     # the migration/regression harness only
+node ../_shared/soren/soren.mjs doctor Haven         # probe toolchain + per-suite readiness
+node ../_shared/soren/soren.mjs run    Haven         # run every suite
+node ../_shared/soren/soren.mjs run    Haven core    # just the core Rust suite
+node ../_shared/soren/soren.mjs run    Haven android # unit + (on-demand emulator) connected
+node ../_shared/soren/soren.mjs run    Haven vm-linux  # launch the Linux desktop VM (UTM)
+node ../_shared/soren/soren.mjs migrate Haven        # the migration/regression harness only
 ```
+
+### Local toolchain — what Soren resolves for you
+
+Soren no longer relies on your shell having the Android/VM tools on `PATH`; it
+resolves them itself (and `soren doctor Haven` will show each as ✓):
+
+- **JDK 17** — pinned to `/opt/homebrew/opt/openjdk@17` (macOS's `/usr/bin/java`
+  is a stub that reports *"Unable to locate a Java Runtime"* — Soren ignores it).
+- **Android SDK** — `ANDROID_HOME` defaults to
+  `/opt/homebrew/share/android-commandlinetools`; `adb` and `emulator` are taken
+  from there and put on the gradle run's `PATH`. Works even when `ANDROID_HOME`
+  is unset in your shell.
+- **Emulator** — the `android` suite reuses a running emulator if there is one,
+  otherwise boots the `haven_phone` AVD headless, waits for `sys.boot_completed`,
+  then runs `connectedDebugAndroidTest`. It **leaves the emulator running** for
+  faster reruns (set `stopEmulator: true` in the suite to shut it down).
+- **UTM** — `utmctl` at `/Applications/UTM.app/Contents/MacOS/utmctl`; the
+  `vm-*` suites drive VMs by UUID.
+- **iCloud conflict copies** — before every cargo / gradle / xcodebuild run,
+  Soren sweeps *every* `"<name> <N>.<ext>"` conflict copy (not just `" 2.*"`),
+  including `.rlib` in `target/` and `.dex` in `build/`, aside to `*.soren-dup`
+  (reversible — never a delete). This is the #1 build-reliability fix on this
+  iCloud-synced tree.
 
 `run`/`ci` exit non-zero on any failure. `ci` also writes `soren-junit.xml` +
 `soren-results.json`. If you've linked Soren onto your PATH (`cd _shared/soren &&
@@ -30,9 +55,11 @@ npm link`), it's just `soren run Haven`.
 | `migrate` | cargo | the `haven_ffi` package alone — the upgrade/migration regression harness | Rust toolchain |
 | `ios` | xcodebuild-test | the `Haven` scheme's tests (HavenUITests) on an iOS simulator | macOS + Xcode + a simulator |
 | `macos` | xcodebuild-test | the native `HavenMac` scheme, macOS destination | macOS + Xcode |
-| `android` | gradle | `testDebugUnitTest` always; `connectedDebugAndroidTest` only when an emulator is up (else skipped) | JDK 17, Android SDK/NDK, the Rust `.so` from `android/build-rust.sh` |
+| `android` | gradle | `testDebugUnitTest` always; `connectedDebugAndroidTest` after reusing/booting the `haven_phone` AVD (skipped, never hung, if it can't boot) | JDK 17, Android SDK/NDK, the Rust `.so` from `android/build-rust.sh` |
 | `desktop` | cargo | the Tauri Rust side (`desktop/src-tauri`) | Rust + (Linux) the WebKitGTK build deps |
 | `desktop-ui` | node-check | `desktop/ui/app.js` syntax gate | node |
+| `vm-linux` | utm | **launches** the `haven-linux` UTM VM and confirms it reaches `started` (reuses an already-running VM) | UTM + the VM present |
+| `vm-windows` | utm | **launches** the `Windows` UTM VM and confirms `started` | UTM + the VM present |
 
 `soren migrate Haven` runs `migrate` + `core` (both carry the migration harness).
 Locally verified: `soren run Haven core` → **182 passed, 0 failed**.
@@ -127,9 +154,21 @@ harness**, not a one-command script — documented here honestly.
 - `desktop` + `desktop-ui` Soren suites (in CI + locally).
 - Installer **build** verification (release.yml: `.msi`/NSIS `.exe`/`.msix`,
   `.deb`/`.rpm`/AppImage, Flatpak) — proves the bundles compile and package.
+- **VM launch** via the `vm-linux` / `vm-windows` Soren suites (UTM). `soren run
+  Haven vm-linux` runs `utmctl start` on the VM (by UUID), waits until it reports
+  `started`, and reports it up — reusing an already-running VM. If UTM or the VM
+  is missing, the leg **skips with a clear message; it never hangs.**
 - A local smoke suite: add a `cmd`-type Soren suite that runs
   `cargo tauri build` (or a headless launch) against `desktop/src-tauri` on the
   host OS, if you want a gate beyond `cargo test`.
+
+> **Honest status — in-guest VM tests are NOT wired yet.** The `vm-*` legs today
+> are **launch-only**: a green `vm-linux` means "the VM booted", *not* "Haven was
+> installed and exercised inside it". No guest test agent is set up. The runner
+> already supports it: add a `guest: { host, user, cmd }` block to the suite and
+> the leg will `ssh` into the guest, run `cmd` (a build/smoke/test), and gate the
+> leg's pass/fail on its exit code. Until that guest agent exists, the manual VM
+> checklist below is still the real GUI acceptance pass.
 
 **Manual VM steps (per rc, before promoting to `vX.Y.Z`)**
 1. **Windows 11 VM** (VMware Fusion/Workstation): download the rc's `desktop-windows`

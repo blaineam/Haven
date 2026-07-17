@@ -395,6 +395,10 @@ struct DMThreadView: View {
                     // older messages scroll UNDER it (and the tab bar) — same as the feed, no band.
                     .padding(.bottom, 64)
                 }
+                // A chat fills from the BOTTOM: a short thread sits just above the input (not floating
+                // at the top with dead space below), and new messages stay pinned to the bottom while
+                // scrolling up still reveals history.
+                .defaultScrollAnchor(.bottom)
                 .scrollDismissesKeyboard(.interactively)
                 .onChange(of: store.postTick) { scrollToBottom(proxy) }
                 .onChange(of: store.items.count) { scrollToBottom(proxy) }

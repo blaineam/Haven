@@ -32,7 +32,11 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 A private, end‑to‑end encrypted home for your closest people. No ads, no tracking, peer‑to‑peer — just your people.
 
 ## whats_new
-1.0.7 — the security & polish release. Nothing to do, nothing lost.
+1.0.8 — the security & polish release. Nothing to do, nothing lost.
+
+Fixed in 1.0.8
+• Removing someone from a circle now sticks, even when you use Haven on more than one of your own devices.
+• A friend's photos and videos load reliably again.
 
 Stronger multi-device security
 • A device you link no longer has to hold a copy of your account's master key. Each device runs on its own keys, so removing a lost or stolen device can now cut it off cryptographically — from your circle's content and from the settings/contacts that sync between your devices — not just hide it.

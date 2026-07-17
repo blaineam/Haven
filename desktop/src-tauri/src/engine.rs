@@ -332,6 +332,12 @@ impl Engine {
             crate::roster::DeviceRoster::device_name(),
             now_ms() / 1000,
         );
+        // Switch-Flip 1.0.7: turn the new crypto ON (seed-drop retirement + MLS keying). Both are
+        // GATED in-core — inert (byte-identical to 1.0.6) until a circle is fully capable — and NOT
+        // persisted, so they're set here after `register_device` and re-applied every launch in
+        // `reapply_crypto_switches` (start()). Docs: `docs/SWITCH-FLIP-1.0.7.md` §3/§4.
+        social.set_mls_keying(true);
+        social.set_seed_drop_retire(true);
         let dyn_state = DynState {
             seen_mailbox: std::fs::read_to_string(paths.root.join("mailbox-seen.txt"))
                 .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
@@ -401,6 +407,11 @@ impl Engine {
         if seedless.linked && !seedless.roster_wire.is_empty() {
             let _ = social.ingest_roster_wire(seedless.roster_wire.clone());
         }
+        // Switch-Flip 1.0.7 (seedless): the keying + retirement gates are computed fleet-wide, so a
+        // seedless device flips the same master switches (both gated in-core). It never performs a
+        // primary-only op — no `register_device`, `retire_account_leaf`, or roster re-sign.
+        social.set_mls_keying(true);
+        social.set_seed_drop_retire(true);
         let prefs = Prefs::load(&paths);
         let media = LocalMedia::new(paths.media_dir());
         let scheduled = crate::scheduled::ScheduledStore::load(&paths.scheduled_file());
@@ -704,6 +715,9 @@ impl Engine {
                 return;
             }
         }
+        // Switch-Flip 1.0.7 §§2-5: re-apply the non-persisted crypto switches every launch (master
+        // keying/retire + per-circle creator pin + DM live-lane). Cheap, gated in-core.
+        self.reapply_crypto_switches();
         let listener: Arc<dyn InboundListener> = Arc::new(NodeListener {
             engine: Arc::downgrade(self),
         });
@@ -726,12 +740,89 @@ impl Engine {
                 log::error!("node start failed: {e}");
             }
         }
+        // Switch-Flip 1.0.7 §1 migration: an existing multi-device upgrader sheds its legacy bare
+        // account leaf ONCE (gated + idempotent) so the roster reaches the device-only shape live
+        // keying + retirement require. No-op for a fresh device-only install or until fully capable.
+        self.maybe_migrate_retire_account_leaf().await;
         self.fire_due_scheduled(); // flush anything overdue from while the app was closed
         self.purge_stale_relays().await; // erase relays inactive AND unseen > 7 days (config else survives)
         self.maybe_weekly_media_sweep(); // orphaned media blobs (at most once a week; runs off-thread)
         self.enforce_local_limits(false); // #4 device-local age/size caps (throttled; no-op if both off)
         self.bump_activity(); // seed activity NOW so launch starts at tight cadence (idle=huge would else max-back-off)
         self.start_mailbox_loop();
+    }
+
+    // ---- Switch-Flip 1.0.7 crypto enablers (docs/SWITCH-FLIP-1.0.7.md) -------------------------
+
+    /// Re-apply the NON-PERSISTED 1.0.7 crypto switches — the master keying/retirement switches
+    /// (§3/§4), the per-circle creator pin (§2, for circles this device created), and the DM
+    /// live-lane mark (§5). All are gated in-core, so this is a cheap no-op for content until a
+    /// circle is fully capable. Called on every launch (start()) and after create/DM-open.
+    fn reapply_crypto_switches(self: &Arc<Self>) {
+        self.social.set_mls_keying(true);
+        // Retirement is a fleet-wide gate; a seedless device flips it too (it never runs a
+        // primary-only op). Both switches are inert until every member is affirmatively capable.
+        self.social.set_seed_drop_retire(true);
+        let my_hex = self.node_id_hex();
+        let created: Vec<String> = self.prefs.lock().unwrap().created_circles.clone();
+        for c in self.social.circles() {
+            if c.id.starts_with("dm:") {
+                self.pin_dm_authority(&c.id);
+            } else if created.iter().any(|x| x == &c.id) {
+                // §2: I am the authority root of the circles I created. The pin issues an
+                // account-signed self-grant that propagates to members on the control lane.
+                self.social.set_circle_creator(c.id.clone(), my_hex.clone());
+            }
+        }
+    }
+
+    /// §2 + §5 for a `dm:` circle: pin the creator DETERMINISTICALLY (both endpoints agree on the
+    /// lexicographically-smallest member node hex encoded in the id) so admin authority is consistent,
+    /// and mark it a LIVE LANE so — once keying-live — each message carries the per-message forward-
+    /// secrecy ratchet. A no-op on content while the master switch / capability gate is unmet.
+    fn pin_dm_authority(&self, circle_id: &str) {
+        self.social.set_circle_live_lane(circle_id.to_string(), true);
+        // "dm:<a>-<b>" (ids sorted at construction) → the first member is the deterministic creator.
+        if let Some(first) = circle_id.trim_start_matches("dm:").split('-').next() {
+            if first.len() == 64 {
+                self.social.set_circle_creator(circle_id.to_string(), first.to_string());
+            }
+        }
+    }
+
+    /// §1 migration — shed the legacy bare `{account}` roster leaf exactly ONCE for an existing
+    /// multi-device account, so the roster settles at the device-only shape live keying + retirement
+    /// require (without it a migrated `{account, device}` roster is stranded permanently at `shadow`).
+    /// Primary-only, gated + idempotent in-core: a no-op (returns false) until the fleet is fully
+    /// device-capable and the retire switch is on. New device-only installs skip it (roster not
+    /// enabled). Latched via a sticky prefs flag so it never churns once done.
+    async fn maybe_migrate_retire_account_leaf(self: &Arc<Self>) {
+        if self.seed.is_none() {
+            return; // seedless never mints/re-signs a roster (A1)
+        }
+        // Only an EXISTING multi-device account carries the legacy bare-account leaf. A fresh
+        // device-only install (roster never enabled) has nothing to retire.
+        if !self.roster.lock().unwrap().is_enabled() {
+            return;
+        }
+        if self.prefs.lock().unwrap().account_leaf_retired {
+            return; // already migrated (sticky)
+        }
+        // Gated in-core: false until retire switch ON + own account seed-drop-capable + device
+        // identity adopted. Safe to retry each launch; latch only once it actually succeeds.
+        if self.social.retire_account_leaf() {
+            {
+                let mut p = self.prefs.lock().unwrap();
+                p.account_leaf_retired = true;
+                let _ = p.save(&self.paths);
+            }
+            // Rebroadcast the higher-version, device-only roster wire so contacts drop my account
+            // leaf from their sealing set + tree (frame 27 to contacts + relays + the headless relay).
+            self.sync_with_contacts();
+            self.publish_device_roster().await;
+            self.emit_changed();
+            log::info!("account-leaf migration complete — roster is now device-only (1.0.7 §1)");
+        }
     }
 
     /// Base cadence stretched by how long the app has sat idle. Idle <3min = base; <15min = ×3; else ×6.
@@ -1013,6 +1104,12 @@ impl Engine {
         if let Some((list, creds)) = signed {
             self.social.set_my_device_roster(list, creds);
         }
+        // §1: a fresh resign rebuilds the roster from the device entries WITH the bare account leaf
+        // authorized. If this account already migrated to device-only, re-apply the retirement on top
+        // (higher-version, sticky) so a revoke/enroll re-sign can't flip us back to the shadow shape.
+        if self.prefs.lock().unwrap().account_leaf_retired {
+            let _ = self.social.retire_account_leaf();
+        }
         let _ = self.roster.lock().unwrap().save(&self.paths);
     }
 
@@ -1031,7 +1128,95 @@ impl Engine {
             return;
         }
         self.push_roster();
+        // §6: rotate the account-state self-sync key so the revoked device can no longer read/LWW-write
+        // our account state (gated exactly like retirement — a no-op while on the v0 seed-derived path).
+        self.rotate_self_sync_on_revocation();
         self.emit_changed();
+    }
+
+    /// §6 — on a device revocation, rotate the self-sync channel key IF the fleet is fully device-
+    /// capable (`self_sync_key_should_rotate`). Mints a fresh epoch key, persists it (0600), and
+    /// distributes an account-signed epoch-grant to every STILL-authorized device over the self-sync
+    /// mailbox. While the gate is unmet (mixed capability / retire OFF) this is a no-op and the channel
+    /// stays byte-identical to 1.0.6 (v0 seed-derived seal/open). Primary-only (holds the seed).
+    fn rotate_self_sync_on_revocation(self: &Arc<Self>) {
+        let Some(seed) = self.seed else { return };
+        // The gate mirrors the circle dual-seal retirement: retire switch ON (we set it every launch)
+        // AND every own device seed-drop-capable — proxied by `account_leaf_retired()`, which latches
+        // exactly when the fleet reaches the device-only shape.
+        let fully_capable = self.social.account_leaf_retired();
+        if !haven_ffi::multidevice::self_sync_key_should_rotate(true, fully_capable) {
+            return;
+        }
+        let mut rot = crate::selfsyncrot::SelfSyncRotation::load(&self.paths);
+        rot.rotate_to(haven_p2p::selfsync::mint_self_sync_key());
+        let _ = rot.save(&self.paths);
+        let epoch = rot.epoch;
+        let Some(key) = rot.key32() else { return };
+        // Seal the rotated key to every still-authorized device bundle and publish it over the self-
+        // sync mailbox (the revoked device is simply not a grant recipient → keeps only the stale key).
+        let survivors: Vec<Vec<u8>> = {
+            let r = self.roster.lock().unwrap();
+            let me = r.device_node_hex();
+            r.entries
+                .iter()
+                .filter(|(hex, e)| {
+                    !e.is_primary // the bare account leaf isn't a self-sync recipient
+                        && *hex != &me // this device already holds the key locally
+                        && !r.revoked.iter().any(|x| x == *hex)
+                })
+                .map(|(_, e)| e.bundle.clone())
+                .collect()
+        };
+        if survivors.is_empty() {
+            return;
+        }
+        let account_hex = self.node_id_hex();
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move {
+            me.distribute_self_sync_grants(&seed, &account_hex, epoch, &key, survivors).await;
+            // Re-publish our own slot under the rotated key straight away so authorized devices pick
+            // up the new epoch without waiting a full poll cycle.
+            me.poll_self_sync().await;
+        });
+    }
+
+    /// §6 — seal the rotated `(epoch, key)` to each still-authorized device bundle and put each grant
+    /// in the self-sync mailbox at `self/<account>/keygrant/<device>` (all configured relays / S3), so
+    /// a seedless survivor opens it on its next pass and adopts the rotated key. Account-signed, so a
+    /// device verifies provenance; sealed to its bundle, so only it can open its grant.
+    async fn distribute_self_sync_grants(
+        self: &Arc<Self>,
+        seed: &[u8; 32],
+        account_hex: &str,
+        epoch: u64,
+        key: &[u8; 32],
+        survivors: Vec<Vec<u8>>,
+    ) {
+        use haven_p2p::selfsync::grant_slot_key;
+        let transports = self.gather_self_sync_transports().await;
+        if transports.is_empty() {
+            return;
+        }
+        for bundle in survivors {
+            let dev_hex = wire::node_hex(&bundle);
+            if dev_hex.len() != 64 {
+                continue;
+            }
+            let Ok(env) = haven_ffi::multidevice::seal_self_sync_key_epoch_grant(
+                seed.to_vec(),
+                bundle,
+                epoch,
+                key.to_vec(),
+            ) else {
+                continue;
+            };
+            // Canonical grant slot via core so it can never drift across platforms.
+            let mailbox_key = format!("haven/{}", grant_slot_key(account_hex, &dev_hex));
+            for t in &transports {
+                self.self_sync_put(t, &mailbox_key, &env).await;
+            }
+        }
     }
 
     /// Step this device down from being the primary (e.g. the wrong device claimed the role).
@@ -1449,6 +1634,16 @@ impl Engine {
     pub fn create_circle(self: &Arc<Self>, name: String) -> String {
         let id = format!("circle-{}-{}", &self.node_id_hex().chars().take(8).collect::<String>(), now_ms());
         self.social.create_circle(id.clone(), name);
+        // §2: I created this circle → I am its authority root. Remember it (device-local) so the pin
+        // is re-applied every launch, and pin the creator now (issues the propagating self-grant).
+        {
+            let mut p = self.prefs.lock().unwrap();
+            if !p.created_circles.iter().any(|c| c == &id) {
+                p.created_circles.push(id.clone());
+                let _ = p.save(&self.paths);
+            }
+        }
+        self.social.set_circle_creator(id.clone(), self.node_id_hex());
         self.persist();
         self.emit_changed();
         id
@@ -1458,6 +1653,28 @@ impl Engine {
         self.social.rename_circle(id, name);
         self.persist();
         self.emit_changed();
+    }
+
+    /// §2 — delegate circle admin to a member (creator/admin only, requires my account key). The grant
+    /// is account-signed + versioned and propagates on the control lane; it's what lets that member
+    /// author an MLS Remove. Returns false if I'm not authorized to delegate. Re-pins the creator first
+    /// so the authority root is established even if this is the first authority action this launch.
+    pub fn grant_circle_admin(self: &Arc<Self>, circle_id: String, admin_hex: String) -> bool {
+        let created = self.prefs.lock().unwrap().created_circles.iter().any(|c| c == &circle_id);
+        if created {
+            self.social.set_circle_creator(circle_id.clone(), self.node_id_hex());
+        }
+        let ok = self.social.grant_circle_admin(circle_id, admin_hex);
+        if ok {
+            self.persist();
+            self.emit_changed();
+        }
+        ok
+    }
+
+    /// The current admin accounts (hex) of a circle — the creator + creator-delegated admins.
+    pub fn circle_admins(&self, circle_id: &str) -> Vec<String> {
+        self.social.circle_admins(circle_id.to_string())
     }
 
     pub fn leave_circle(self: &Arc<Self>, id: String) {
@@ -2173,6 +2390,7 @@ impl Engine {
         let id = self.dm_circle_id(&contact_id_hex);
         self.social.create_circle(id.clone(), contact_name);
         let _ = self.social.add_existing_to_circle(id.clone(), contact_id_hex.clone());
+        self.pin_dm_authority(&id); // §5 live-lane + §2 deterministic creator pin
         self.persist();
         self.send_hello(&id, &contact_id_hex);
         id
@@ -2190,6 +2408,7 @@ impl Engine {
         for (hex, _) in &members {
             let _ = self.social.add_existing_to_circle(id.clone(), hex.clone());
         }
+        self.pin_dm_authority(&id); // §5 live-lane + §2 deterministic creator pin
         self.persist();
         for (hex, _) in &members {
             self.send_hello(&id, hex);
@@ -2618,6 +2837,11 @@ impl Engine {
             }
         }
         let Ok(actual_verify) = self.social.bundle_verification_hex(hello.bundle.clone()) else { return };
+        // Switch-Flip 1.0.7 §0/§1: learn this peer's seed-drop + MLS capability from their signed
+        // profile card (verified in-core; a forged/absent marker reads as legacy 0). This is the
+        // affirmative signal every gate depends on — a circle stays legacy until ALL members are seen
+        // capable. Piggybacks on the hello we already consume, so no extra round-trip.
+        let _ = self.social.profile_seed_drop_version(hello.bundle.clone(), hello.signed_profile.clone());
         let name = self
             .social
             .verify_profile(hello.bundle.clone(), hello.signed_profile.clone())
@@ -2633,6 +2857,9 @@ impl Engine {
             return;
         }
         self.social.create_circle(hello.circle_id.clone(), hello.circle_name.clone());
+        if hello.circle_id.starts_with("dm:") {
+            self.pin_dm_authority(&hello.circle_id); // §5 live-lane + §2 deterministic creator pin
+        }
 
         let expected = self.dyn_state.lock().unwrap().initiated.get(&id_hex).cloned();
         if let Some(expected) = expected {
@@ -4682,6 +4909,97 @@ impl Engine {
 
     // ---- multi-device self-sync (D16, Phase 3 — port of iOS SelfSync.swift) -------------
 
+    /// §6 — resolve the account-state self-sync crypto parameters for THIS device this pass:
+    /// `(accepted, seed_key, seal_epoch)`.
+    /// * `accepted` — the rotated `(epoch → key)` map we currently honor (empty on the v0 path). A v1
+    ///   blob at any other epoch (a revoked device's stale write) is refused.
+    /// * `seed_key` — the v0 seed-derived key to accept legacy blobs during the transition window, or
+    ///   `None` once fully retired (which refuses legacy blobs and completes the revocation cut).
+    /// * `seal_epoch` — `Some((epoch, key))` to seal our own slot v1, or `None` for the v0 seal.
+    ///
+    /// Primary: derives the v0 key from the seed; loads the rotated state; drops the seed key once
+    /// `account_leaf_retired()` (the fully-capable proxy). Seedless: uses its granted key — the
+    /// v0-equivalent grant (epoch 0) opens legacy blobs, a rotated grant (epoch > 0) means it's in the
+    /// fully-retired regime and only its epoch is honored.
+    fn self_sync_crypto(
+        &self,
+    ) -> (
+        std::collections::BTreeMap<u64, [u8; 32]>,
+        Option<[u8; 32]>,
+        Option<(u64, [u8; 32])>,
+    ) {
+        use std::collections::BTreeMap;
+        match &self.seed {
+            Some(seed) => {
+                let v0 = haven_p2p::identity::Identity::from_seed(seed).self_sync_key();
+                let rot = crate::selfsyncrot::SelfSyncRotation::load(&self.paths);
+                match rot.key32() {
+                    Some(key) if rot.rotated() => {
+                        // Rotation only ever fires when fully device-capable, so this is normally true;
+                        // keep the seed key during the brief transition window, then drop it.
+                        let seed_key = if self.social.account_leaf_retired() { None } else { Some(v0) };
+                        (rot.accepted(), seed_key, Some((rot.epoch, key)))
+                    }
+                    _ => (BTreeMap::new(), Some(v0), None),
+                }
+            }
+            None => {
+                let s = self.seedless.lock().unwrap();
+                let epoch = s.self_sync_epoch;
+                match s.self_sync_key32() {
+                    Some(key) if epoch > 0 => {
+                        let mut accepted = BTreeMap::new();
+                        accepted.insert(epoch, key);
+                        (accepted, None, Some((epoch, key)))
+                    }
+                    Some(key) => (BTreeMap::new(), Some(key), None), // v0-equivalent grant
+                    None => (BTreeMap::new(), None, None),           // not yet granted
+                }
+            }
+        }
+    }
+
+    /// §6 (seedless survivor) — read the keygrant mailbox and adopt a NEWER rotated key/epoch the
+    /// primary sealed to this device after a revocation. Verifies the account signature + that the
+    /// grant was sealed to our device bundle; persists the higher epoch's key (guarded like a seed).
+    async fn adopt_rotated_self_sync_grant(self: &Arc<Self>) {
+        let device_seed = self.roster.lock().unwrap().device_seed.clone();
+        let account_bundle = self.account_bundle();
+        let cur_epoch = self.seedless.lock().unwrap().self_sync_epoch;
+        let account_hex = wire::node_hex(&account_bundle);
+        if account_hex.len() != 64 {
+            return;
+        }
+        let transports = self.gather_self_sync_transports().await;
+        if transports.is_empty() {
+            return;
+        }
+        let prefix = format!("haven/{}", haven_p2p::selfsync::grant_slot_prefix(&account_hex));
+        let mut best: Option<(u64, Vec<u8>)> = None;
+        for t in &transports {
+            for key in self.self_sync_list(t, &prefix).await {
+                let Some(env) = self.self_sync_fetch(t, &key).await else { continue };
+                if let Ok(grant) = haven_ffi::multidevice::open_self_sync_key_epoch_grant(
+                    device_seed.clone(),
+                    account_bundle.clone(),
+                    env,
+                ) {
+                    let newer = best.as_ref().map(|(e, _)| grant.epoch > *e).unwrap_or(true);
+                    if grant.epoch > cur_epoch && grant.key.len() == 32 && newer {
+                        best = Some((grant.epoch, grant.key));
+                    }
+                }
+            }
+        }
+        if let Some((epoch, key)) = best {
+            let mut s = self.seedless.lock().unwrap();
+            s.self_sync_epoch = epoch;
+            s.self_sync_key = key;
+            let _ = s.save(&self.paths);
+            log::info!("adopted rotated self-sync key at epoch {epoch} (§6 revocation rotation)");
+        }
+    }
+
     /// One full self-sync pass across the user's OWN devices: fold local changes into the base
     /// CRDT with fresh stamps, merge every peer slot from every transport, apply the converged
     /// result locally, persist, and re-publish our own sealed slot. Coalesces if already running.
@@ -4715,10 +5033,22 @@ impl Engine {
             return; // needs a relay OR an S3 bucket
         }
 
-        // The account-derived self-sync key: from the account seed on a primary, or the granted key on
-        // a seedless device (both are the same value account-wide, so a seedless device converges with
-        // its siblings). A seedless device that hasn't been granted the key yet can't self-sync.
-        let Some(self_key) = self.self_sync_key() else { return };
+        // §6: a seedless survivor first checks the keygrant mailbox — if the primary rotated the key
+        // on a revocation, adopt the new epoch/key before reading (else it opens nothing at the new
+        // epoch and silently falls off the channel).
+        if self.is_seedless() {
+            self.adopt_rotated_self_sync_grant().await;
+        }
+
+        // §6 dual-key crypto: `accepted` = the rotated epoch→key map we honor (a stale-epoch write from
+        // a revoked device is refused); `seed_key` = the v0 seed-derived key during the transition
+        // window, dropped to `None` once fully retired (completing the cut); `seal_epoch` = seal under
+        // the rotated key/epoch, or None for the v0 path. Byte-identical to 1.0.6 until the first
+        // rotation. A seedless device with no grant yet can't self-sync.
+        let (accepted, seed_key, seal_epoch) = self.self_sync_crypto();
+        if accepted.is_empty() && seed_key.is_none() {
+            return; // seedless, not yet granted a key
+        }
 
         // 1. Base = last converged state (or empty).
         let mut base = match std::fs::read(self.paths.selfsync_state_file()) {
@@ -4774,7 +5104,7 @@ impl Engine {
                     continue;
                 }
                 let Some(blob) = self.self_sync_fetch(t, &key).await else { continue };
-                if let Ok(peer) = AccountState::open(&self_key, &blob) {
+                if let Ok(peer) = AccountState::open_any(&blob, seed_key.as_ref(), &accepted) {
                     base.merge(&peer);
                 }
             }
@@ -4799,8 +5129,12 @@ impl Engine {
         }
         let _ = std::fs::write(self.paths.selfsync_state_file(), base.to_bytes());
 
-        // 5. Re-publish our own slot (sealed) to every relay/bucket for redundancy.
-        let sealed = base.seal(&self_key);
+        // 5. Re-publish our own slot (sealed) to every relay/bucket for redundancy. Seal under the
+        //    rotated key/epoch (v1) once rotated, else the v0 seed-derived key — byte-identical to today.
+        let sealed = match seal_epoch {
+            Some((epoch, key)) => base.seal_epoch(&key, epoch),
+            None => base.seal(&seed_key.expect("v0 path always has a seed key")),
+        };
         for t in &transports {
             self.self_sync_put(t, &own_key, &sealed).await;
         }

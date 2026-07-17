@@ -127,6 +127,10 @@ final class FeedStore: ObservableObject {
         }
         SelfSyncCoordinator.shared.reset()
         SharedStore.resetSeenMailbox()   // the new identity must not inherit the old ingestion cursor
+        // Switch-Flip: identity-scoped bookkeeping must not leak across identities — a stale
+        // "account leaf retired" flag would wrongly skip migration for a legacy multi-device account.
+        SwitchFlipMigration.clear()
+        CircleCreatorStore.clear()
         configure(seed: seed)
     }
 
@@ -206,6 +210,7 @@ final class FeedStore: ObservableObject {
         bumpActivity()   // seed activity NOW so launch starts at tight cadence (not instant max backoff)
         loadLastHeard()   // so "last seen" survives an app restart
         refreshCircles()     // also purges any contaminated DM membership (see refreshCircles)
+        applyCryptoSwitches(seedless: seedless)   // Switch-Flip 1.0.7: re-apply the non-persisted crypto switches
         refresh()
         recomputeUnreadDMs()   // one-time badge compute at startup (kept OFF the per-refresh hot path)
         seedDemoIfNeeded()   // HAVEN_DEMO=1 only — PII-free synthetic dataset for screenshots
@@ -311,6 +316,10 @@ final class FeedStore: ObservableObject {
         guard let social else { return }
         let id = UUID().uuidString
         social.createCircle(id: id, name: name)
+        // Switch-Flip §2: I am the creator (authority root). Record it so the pin is re-applied every
+        // launch, and pin it now so the propagating self-grant is authored immediately.
+        CircleCreatorStore.markCreated(id)
+        if AccountStore.storedSeed() != nil { _ = social.setCircleCreator(circleId: id, accountHex: social.myNodeHex()) }
         for m in memberIds { try? social.addExistingToCircle(circleId: id, nodeHex: m) }
         persist(); refreshCircles()
         activeCircleId = id
@@ -489,6 +498,7 @@ final class FeedStore: ObservableObject {
         let id = dmCircleId(with: idHex)
         guard let social else { return id }
         social.createCircle(id: id, name: name)
+        social.setCircleLiveLane(circleId: id, on: true)   // Switch-Flip §5: DM per-message forward secrecy
         try? social.addExistingToCircle(circleId: id, nodeHex: idHex)
         persist(); refreshCircles(); syncWithContacts()
         return id
@@ -508,6 +518,7 @@ final class FeedStore: ObservableObject {
         let id = groupDMCircleId(members: members)
         guard let social else { return id }
         social.createCircle(id: id, name: name)
+        social.setCircleLiveLane(circleId: id, on: true)   // Switch-Flip §5: DM per-message forward secrecy
         for hex in members where hex != myNodeHex { try? social.addExistingToCircle(circleId: id, nodeHex: hex) }
         persist(); refreshCircles(); syncWithContacts()
         return id
@@ -1871,10 +1882,103 @@ final class FeedStore: ObservableObject {
         DeviceRosterManager.shared.stepDown()
     }
 
-    /// Revoke a linked device (primary only). It stops being a recipient of future circle key commits.
+    /// Revoke a linked device (primary only). It stops being a recipient of future circle key commits,
+    /// and — Switch-Flip §6 — the account-state self-sync key is ROTATED so the revoked device (which
+    /// keeps its stale key) can neither read nor LWW-write my account state afterward.
     func revokeDevice(_ nodeHex: String) {
-        guard let seed = AccountStore.storedSeed() else { return }
-        DeviceRosterManager.shared.revoke(nodeHex, social: social, accountSeed: seed)
+        guard let seed = AccountStore.storedSeed(), let social else { return }
+        guard DeviceRosterManager.shared.revoke(nodeHex, social: social, accountSeed: seed) else { return }
+        rotateSelfSyncAfterRevocation(revokedHex: nodeHex, accountSeed: seed, social: social)
+    }
+
+    // MARK: - Switch-Flip 1.0.7 (docs/SWITCH-FLIP-1.0.7.md) — turn the new crypto ON, per-circle-gated.
+
+    /// Re-apply the NON-PERSISTED crypto switches every launch (§3/§4/§2/§5). Every switch is gated in
+    /// core — a circle stays byte-identical to 1.0.6 until its whole membership is capable — so this is
+    /// safe to run unconditionally. A `seedless` device sets keying + DM live-lanes but never the
+    /// primary-only ops (seed-drop retirement, account-leaf migration, self-sync rotation): the primary
+    /// that holds the account key owns those.
+    private func applyCryptoSwitches(seedless: Bool) {
+        guard let social else { return }
+        // §3 MLS keying master switch — every device (off→shadow→live handled by the all-joined gate).
+        social.setMlsKeying(on: true)
+        // §4 seed-drop retirement — PRIMARY only (a seedless device holds no bare account key to drop).
+        if !seedless { social.setSeedDropRetire(on: true) }
+        // §2 creator authority root + §5 DM live-ratchet lanes, re-marked for every current circle.
+        let myHex = social.myNodeHex()
+        for c in social.circles() {
+            // §5 mark dm: circles as per-message forward-secrecy lanes (consulted only once keying-live;
+            // a no-op for content while the master switch/gate is unmet, so feed circles stay epoch-keyed).
+            if c.id.hasPrefix("dm:") { social.setCircleLiveLane(circleId: c.id, on: true) }
+            // §2 pin the creator on circles I own — the PRIMARY issues the self-grant that propagates the
+            // pin on the control lane. The default "My Circle" is always mine. A seedless device can't
+            // sign the grant, so it leaves creator-pinning to the primary and learns it via that grant.
+            if !seedless, c.id == "default" || CircleCreatorStore.iCreated(c.id) {
+                _ = social.setCircleCreator(circleId: c.id, accountHex: myHex)
+            }
+        }
+        // §1 MIGRATION — shed the legacy bare account leaf once (see below).
+        if !seedless { migrateRetireAccountLeafIfNeeded() }
+    }
+
+    /// §1: retire the bare account leaf so the roster reaches the DEVICE-ONLY shape that live MLS keying
+    /// and account-key retirement require. Gated + idempotent in core (a no-op until the fleet is fully
+    /// device-capable), and guarded here by a one-time flag so a migrated roster isn't rebroadcast every
+    /// launch. Runs only on a seed-holding primary with multi-device enabled; a brand-new device-only
+    /// install technically never needs it, but the call is harmless there (it just marks the sticky flag).
+    private func migrateRetireAccountLeafIfNeeded() {
+        guard let social, !SwitchFlipMigration.accountLeafRetired else { return }
+        guard AccountStore.storedSeed() != nil, DeviceRosterManager.shared.isEnabled else { return }
+        if social.retireAccountLeaf() {
+            SwitchFlipMigration.accountLeafRetired = true
+            // Rebroadcast the now device-only roster wire to my own devices (and, via the normal circle /
+            // self-sync roster export, to friends) — higher-version-wins supersedes the legacy roster.
+            let wire = social.myDeviceRosterWire()
+            if !wire.isEmpty { sendToMyDevices(27, wire) }   // type-27 = signed device-roster announce
+            HavenLog.net("switch-flip: retired bare account leaf → device-only roster rebroadcast")
+        } else if social.accountLeafRetired() {
+            // Already retired on a prior launch / another device — record the flag so we stop retrying.
+            SwitchFlipMigration.accountLeafRetired = true
+        }
+    }
+
+    /// §6: on a device revocation, rotate the self-sync key. GATED exactly like retirement
+    /// (`self_sync_key_should_rotate`): a no-op (v0, byte-identical) until the switch is ON and every own
+    /// device is seed-drop-capable — which is precisely when the account leaf is retired (v0 authority
+    /// dropped fleet-wide). When it fires: mint a fresh key at the next epoch, re-grant it ONLY to
+    /// still-authorized devices, persist it locally (so seal/open switch to the v1 dual-key path), and
+    /// re-publish account state under the new key. The self-sync BASE content is untouched — rotation
+    /// changes only the sealing key, never diffs an empty/stale base into a tombstone (§7 ordering guard).
+    private func rotateSelfSyncAfterRevocation(revokedHex: String, accountSeed: Data, social: HavenSocial) {
+        let capable = social.accountLeafRetired()   // proxy for "all own devices seed-drop-capable"
+        guard selfSyncKeyShouldRotate(retireSwitchOn: SwitchFlipMigration.retireSwitchOn,
+                                      ownDevicesAllSeedDropCapable: capable) else { return }
+        let newEpoch = SelfSyncEpochStore.epoch + 1
+        let key = mintSelfSyncKey()
+        // Adopt the rotated key locally FIRST (so seal/open switch to v1), re-grant it ONLY to
+        // still-authorized DEVICE bundles — the revoked device is simply not a recipient and keeps only
+        // its stale key — then re-publish state sealed under it (the old v0 slot becomes unreadable to
+        // the revoked device — the cut). sync() folds local into the EXISTING base first (no tombstone).
+        SelfSyncEpochStore.save(epoch: newEpoch, key: key)
+        // §6: hand the rotated key to every still-authorized device via the canonical keygrant mailbox
+        // (SelfSyncCoordinator.publishEpochGrants), then re-publish state under it. Same per-device slot on
+        // iOS/desktop/Android, so a rotated key crosses platforms.
+        Task {
+            await SelfSyncCoordinator.shared.publishEpochGrants()
+            _ = await SelfSyncCoordinator.shared.sync(social: social)
+        }
+        HavenLog.net("switch-flip: rotated self-sync key → epoch \(newEpoch) after revoking \(revokedHex.prefix(10))")
+    }
+
+    /// §2: promote a circle member to admin (creator/admin only; account-key-signed, propagates on the
+    /// control lane). An admin can author `mls_remove_member`. The wiring point for a future "make admin"
+    /// affordance; returns whether the grant was authored (false when unauthorized / unknown circle).
+    @discardableResult
+    func promoteToCircleAdmin(_ memberHex: String, in circleId: String) -> Bool {
+        guard let social else { return false }
+        let ok = social.grantCircleAdmin(circleId: circleId, adminHex: memberHex)
+        if ok { persist() }
+        return ok
     }
 
     /// I hold the master seed → I can authorize. Issue the requesting device a credential, add it to my
@@ -2100,6 +2204,10 @@ final class FeedStore: ObservableObject {
     /// devices over both transports, so a freshly-linked device populates regardless of which is up.
     private func pushFullStateToMyDevices() {
         guard let social else { return }
+        // Switch-Flip §6: re-hand the rotated self-sync key to my devices via the canonical keygrant mailbox
+        // so a device that missed the revocation rotation (offline / enrolled afterward) can open the
+        // v1-sealed slot below.
+        Task { await SelfSyncCoordinator.shared.publishEpochGrants() }
         if let slot = SelfSyncCoordinator.shared.sealedLocalSlot(social: social) { sendToMyDevices(23, slot) }
         let myHex = social.myNodeHex()
         for circle in circles {

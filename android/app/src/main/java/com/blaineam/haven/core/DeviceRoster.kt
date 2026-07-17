@@ -124,8 +124,20 @@ object DeviceRosterManager {
         if (nodeHex == primaryHex) return false   // never revoke the master key
         entries.remove(nodeHex)
         revoked.add(nodeHex)
-        return resign(social, accountSeed)
+        val ok = resign(social, accountSeed)
+        // 1.0.7 self-sync key rotation (docs/SWITCH-FLIP-1.0.7.md §6): the roster version just bumped and a
+        // device was dropped — rotate the account-state self-sync key so the just-revoked device can no
+        // longer open our state or LWW-write a stale copy. Grants are sealed to the STILL-authorized device
+        // bundles only; the revoked device is simply not a recipient. Gated inside exactly like account-key
+        // retirement — a no-op until the fleet is fully seed-drop-capable (v0 channel stays byte-identical).
+        if (ok) runCatching { SelfSyncKeyStore.rotateForRevocation(social, accountSeed, activeLinkedBundles()) }
+        return ok
     }
+
+    /** Every currently-authorized LINKED device's public bundle (excludes the primary account key, which
+     *  minted the key, and any revoked device). The grant recipients for a self-sync key rotation (§6). */
+    fun activeLinkedBundles(): List<ByteArray> =
+        entries.filter { (hex, e) -> !e.isPrimary && !revoked.contains(hex) }.map { it.value.bundle }
 
     /** Step DOWN as primary: forget this device's roster entirely (both devices share the seed, so the
      *  WRONG one can claim primary and get stuck). Reversible — re-link to the real primary afterward. */

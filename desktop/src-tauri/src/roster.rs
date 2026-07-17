@@ -207,6 +207,13 @@ pub struct Seedless {
     pub account_bundle: Vec<u8>,
     /// The granted 32-byte self-sync key — decrypts all account state; store + guard like a seed.
     pub self_sync_key: Vec<u8>,
+    /// The key-EPOCH the granted `self_sync_key` belongs to (Switch-Flip 1.0.7 §6). 0 = the original
+    /// v0-equivalent grant (equals the account's seed-derived self-sync key). A non-zero value means
+    /// the primary rotated the channel on a revocation and re-granted this device the ROTATED key —
+    /// this device then seals/opens under `seal_account_state_with_key_epoch` / the v1 accepted-epoch
+    /// map, and a stale-epoch (revoked) write is refused.
+    #[serde(default)]
+    pub self_sync_epoch: u64,
     /// The primary-signed roster wire, VERBATIM (incl. `SeedDropCapability` trailer) — rebroadcast as-is,
     /// never re-encoded (A3: a re-encode would strip the primary's signature + capability trailer).
     pub roster_wire: Vec<u8>,

@@ -107,6 +107,18 @@ pub fn current_local(prefs: &Prefs, social: &HavenSocial) -> BTreeMap<String, Ve
     // Circles: name + member bundles + relay nodes, so another device can reconstruct each circle
     // and seal to every member. Encoded via the shared FFI encoder so the bytes are byte-identical
     // to iOS/Android (it base64's the RAW bundles, sorts members/relays, alphabetical-key JSON).
+    // Switch-Flip 1.0.7 §2: carry the circle CREATOR (authority root) along this AUTHENTICATED
+    // circle-sync record so another of my devices / a shared-circle peer can pin it. I only assert it
+    // for circles I OWN (the ones I created + the default "My Circle"); nil otherwise — the real
+    // creator's own export carries it, and absence never fabricates a creator.
+    let my_creator: Option<Vec<u8>> = {
+        let hex = social.my_node_hex();
+        if hex.len() == 64 {
+            (0..32).map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()).collect()
+        } else {
+            None
+        }
+    };
     for ci in social.circles() {
         // Skip DM pseudo-circles — they reconstruct from the contact pair, not from sync.
         if ci.id.starts_with("dm:") {
@@ -116,7 +128,12 @@ pub fn current_local(prefs: &Prefs, social: &HavenSocial) -> BTreeMap<String, Ve
         let mut relays: Vec<String> = prefs.relays.get(&ci.id).cloned().unwrap_or_default();
         relays.sort();
         relays.dedup();
-        let data = encode_circle_sync(ci.name.clone(), member_bundles, relays);
+        let creator = if prefs.created_circles.iter().any(|c| c == &ci.id) || ci.id == "default" {
+            my_creator.clone()
+        } else {
+            None
+        };
+        let data = encode_circle_sync(ci.name.clone(), member_bundles, relays, creator);
         if !data.is_empty() {
             m.insert(format!("circle:{}", ci.id), data);
         }
@@ -364,6 +381,14 @@ pub fn apply_local(
                 }
             }
         }
+        // Switch-Flip 1.0.7 §2: pin the CREATOR carried on this authenticated circle-sync record (the
+        // "learned out-of-band" path). set_circle_creator is DEFINITION-bound — it overrides any weakly
+        // TOFU'd creator and can't be dislodged by a later disagreeing admin grant.
+        if let Some(creator) = &cs.creator {
+            if creator.len() == 32 {
+                social.set_circle_creator(id.to_string(), hex::encode(creator));
+            }
+        }
         // Register every synced member bundle so this device can seal to them. ADDITIVE — we never
         // remove a member just because a peer's record doesn't list them — but we DO skip anyone we've
         // explicitly severed (anti-reinflation).
@@ -410,7 +435,8 @@ mod tests {
         // The desktop now defers to the shared FFI encoder for byte-parity with iOS/Android.
         // Raw bundle bytes (the encoder base64's them itself): 0xAA0001 -> "qgAB", 0x000102 -> "AAEC".
         let bundles = vec![vec![0xAAu8, 0x00, 0x01], vec![0x00u8, 0x01, 0x02]];
-        let bytes = encode_circle_sync("Home".into(), bundles.clone(), vec!["node1".into()]);
+        // No creator (legacy) → byte-identical to the pre-§2 encoding (skip-if-none).
+        let bytes = encode_circle_sync("Home".into(), bundles.clone(), vec!["node1".into()], None);
         let json = String::from_utf8(bytes.clone()).unwrap();
         // Alphabetical keys, sorted base64 members ("AAEC" < "qgAB"), matching iOS sortedKeys.
         assert_eq!(json, r#"{"members":["AAEC","qgAB"],"name":"Home","relays":["node1"]}"#);

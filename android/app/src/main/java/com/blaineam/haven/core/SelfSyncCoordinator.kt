@@ -12,12 +12,16 @@ import uniffi.haven_ffi.S3ConfigFfi
 import uniffi.haven_ffi.decodeCircleSync
 import uniffi.haven_ffi.encodeCircleSync
 import uniffi.haven_ffi.openAccountState
+import uniffi.haven_ffi.openAccountStateDual
 import uniffi.haven_ffi.openAccountStateWithKey
 import uniffi.haven_ffi.s3Get
 import uniffi.haven_ffi.s3List
 import uniffi.haven_ffi.s3Put
 import uniffi.haven_ffi.sealAccountState
 import uniffi.haven_ffi.sealAccountStateWithKey
+import uniffi.haven_ffi.sealAccountStateWithKeyEpoch
+import uniffi.haven_ffi.selfSyncGrantSlotKey
+import uniffi.haven_ffi.selfSyncGrantSlotPrefix
 import uniffi.haven_ffi.selfSyncSlotKey
 import uniffi.haven_ffi.selfSyncSlotPrefix
 import java.io.File
@@ -176,7 +180,12 @@ object SelfSyncCoordinator {
             for (ci in runCatching { social.circles() }.getOrDefault(emptyList())) {
                 val members = runCatching { social.circleMemberBundles(ci.id) }.getOrDefault(emptyList())
                 val relays = HavenNet.relaysForCircle(ci.id)
-                m["circle:${ci.id}"] = runCatching { encodeCircleSync(ci.name, members, relays) }.getOrNull()
+                // AUDIT M2 (§2): stamp the DEFINITION-bound creator so the authority root travels with the
+                // authenticated circle definition to my other devices. I only know it for circles I created
+                // (creator = my account id); peer-created circles carry null and learn the root out-of-band.
+                val creator: ByteArray? =
+                    if (HavenNet.selfSyncCreatedCircle(ci.id)) fromHex(HavenNet.accountNodeHex) else null
+                m["circle:${ci.id}"] = runCatching { encodeCircleSync(ci.name, members, relays, creator) }.getOrNull()
                     ?: continue
             }
             // Contact device ROSTERS — so a freshly-linked device learns which device ids to DIAL/seal for
@@ -309,6 +318,9 @@ object SelfSyncCoordinator {
                 runCatching { social.createCircle(id, cs.name) }   // no-op if it already exists
                 val cur = existing.firstOrNull { it.id == id }
                 if (cur != null && cur.name != cs.name) runCatching { social.renameCircle(id, cs.name) }
+                // Pin the authority-root creator carried on the authenticated circle definition (§2) — a
+                // sibling that created this circle stamped it, so this device learns the same root.
+                cs.creator?.let { runCatching { social.setCircleCreator(id, toHex(it)) } }
 
                 // STRICTLY ADDITIVE: register every synced member's bundle (no-op if already present).
                 // We do NOT remove members or leave circles based on a peer's absence — that is exactly
@@ -395,6 +407,30 @@ object SelfSyncCoordinator {
         StorageStore.s3Config(appContext)?.let { transports.add(S3Transport(it)) }
         if (transports.isEmpty()) return false   // nothing to sync over
 
+        // 1.0.7 self-sync key rotation (docs/SWITCH-FLIP-1.0.7.md §6). Before choosing the seal/open path,
+        // a non-minting device adopts the current rotated key from any grant addressed to it (published by
+        // the primary on the last revocation). Once the gate is met AND we hold a rotated key, the channel
+        // runs the v1 (epoch-keyed) path with an EMPTY seed key — v0 authority is retired (§6 "empty vec
+        // once v0 authority is retired"). Until a revocation mints a key, this stays v0 (byte-identical).
+        // Grants ride the SAME per-device self-sync mailbox as state, at the canonical slot
+        // `self/<account>/keygrant/<device>` (core `selfSyncGrantSlotKey`) — identical across iOS/desktop/
+        // Android so a rotated key crosses platforms. List the whole keygrant prefix, then open only the
+        // grant addressed to THIS device (a grant sealed to another device fails to open and is skipped).
+        val grantPrefix = "haven/" + selfSyncGrantSlotPrefix(accountHex)
+        run {
+            val deviceSeed = DeviceKeyStore.deviceAccount().secretSeed()
+            val accountBundle = HavenNet.accountBundle
+            val envelopes = ArrayList<ByteArray>()
+            for (t in transports) {
+                val keys = t.list(grantPrefix) ?: continue
+                for (key in keys) { t.get(key)?.let { envelopes.add(it) } }
+            }
+            if (envelopes.isNotEmpty()) SelfSyncKeyStore.adopt(deviceSeed, accountBundle, envelopes)
+        }
+        val rotation = SelfSyncKeyStore.rotationEngaged(social)
+        val rotKey = SelfSyncKeyStore.currentKey()
+        val rotEpoch = SelfSyncKeyStore.currentEpoch()
+
         // 1. Base = last converged state (or empty).
         val base: AccountStateHandle = run {
             val data = runCatching { if (baseFile.exists()) baseFile.readBytes() else null }.getOrNull()
@@ -440,7 +476,13 @@ object SelfSyncCoordinator {
                 if (key == ownKey) continue
                 val blob = t.get(key) ?: continue
                 val peer = runCatching {
-                    if (seedless) openAccountStateWithKey(selfSyncKey!!, blob) else openAccountState(seed, blob)
+                    when {
+                        // v1 rotatable path: honor only the current epoch's key; a stale-epoch (revoked
+                        // device's) write is refused. Empty seed key ⇒ legacy v0 blobs are refused too.
+                        rotation && rotKey != null -> openAccountStateDual(blob, rotEpoch, rotKey, ByteArray(0))
+                        seedless -> openAccountStateWithKey(selfSyncKey!!, blob)
+                        else -> openAccountState(seed, blob)
+                    }
                 }.getOrNull() ?: continue
                 base.merge(peer)
             }
@@ -459,9 +501,29 @@ object SelfSyncCoordinator {
 
         // 5. Re-publish our own slot (sealed) to every transport for redundancy.
         val sealed = runCatching {
-            if (seedless) sealAccountStateWithKey(selfSyncKey!!, base) else sealAccountState(seed, base)
+            when {
+                rotation && rotKey != null -> sealAccountStateWithKeyEpoch(rotKey, rotEpoch, base)
+                seedless -> sealAccountStateWithKey(selfSyncKey!!, base)
+                else -> sealAccountState(seed, base)
+            }
         }.getOrNull() ?: return changed
         for (t in transports) t.put(ownKey, sealed)
+
+        // 6. Publish any freshly-minted rotation grants (primary side, §6) so every still-authorized device
+        // learns the new key. Each grant goes to its recipient's canonical slot `self/<account>/keygrant/
+        // <device>` (core `selfSyncGrantSlotKey`) — the same per-device transport iOS/desktop use. Cleared
+        // once every grant is accepted by at least one transport (idempotent to re-publish).
+        val pending = SelfSyncKeyStore.pendingGrants()
+        if (pending.isNotEmpty()) {
+            var allOk = true
+            for ((devHex, blob) in pending) {
+                val slot = "haven/" + selfSyncGrantSlotKey(accountHex, devHex)
+                var ok = false
+                for (t in transports) if (t.put(slot, blob)) ok = true
+                if (!ok) allOk = false
+            }
+            if (allOk) SelfSyncKeyStore.clearPendingGrants()
+        }
         return changed
     }
 

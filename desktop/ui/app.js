@@ -1706,9 +1706,15 @@ async function manageCircleDialog(circle) {
   const isDefault = circle.id === "default";
   const nameInp = el("input", { value: circle.name });
   const contacts = await invoke("contacts").catch(() => []);
+  // Switch-Flip 1.0.7 §2: the circle's current admin set (creator + delegated admins), so we can
+  // label existing admins and only offer promotion to the rest.
+  const admins = new Set(
+    (await invoke("circle_admins", { circleId: circle.id }).catch(() => [])).map((h) => h.toLowerCase()),
+  );
   const memberList = el("div", { class: "col" });
   if (!contacts.length) memberList.append(el("div", { class: "muted small" }, "No contacts yet — connect a friend first."));
   for (const c of contacts) {
+    const isAdmin = admins.has((c.id_hex || "").toLowerCase());
     memberList.append(el("div", { class: "list-item" },
       el("div", { class: "avatar", style: "width:30px;height:30px;font-size:12px" }, initials(c.name)),
       el("div", { style: "flex:1" }, c.name),
@@ -1716,6 +1722,17 @@ async function manageCircleDialog(circle) {
         try { await invoke("add_to_circle", { circleId: circle.id, contactIdHex: c.id_hex }); e.target.textContent = "Added ✓"; e.target.disabled = true; toast(`Added ${c.name}`); }
         catch (err) { toast("Couldn't add: " + err); }
       } }, "Add"),
+      // §2: promote a member to admin (creator/admin only — the engine refuses otherwise). Admins can
+      // remove members from the encrypted group (MLS Remove), so this is a deliberate, per-member act.
+      isAdmin
+        ? el("span", { class: "muted small", title: "Circle admin", style: "align-self:center" }, "Admin ✓")
+        : el("button", { class: "btn small ghost", title: "Make this member an admin (can remove members)", onclick: async (e) => {
+            try {
+              const ok = await invoke("grant_circle_admin", { circleId: circle.id, adminHex: c.id_hex });
+              if (ok) { e.target.textContent = "Admin ✓"; e.target.disabled = true; toast(`${c.name} is now an admin`); }
+              else { toast("Only the circle's creator or an admin can promote members"); }
+            } catch (err) { toast("Couldn't promote: " + err); }
+          } }, "Make admin"),
       // Removing works for the DEFAULT circle ("My Circle") too: the engine writes the authoritative
       // removal tombstone AND purges them, so they can't auto-rejoin on their next handshake/self-sync.
       // (Previously hidden for default, which is why a removed member silently rejoined.)

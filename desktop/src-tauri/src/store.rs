@@ -266,6 +266,18 @@ pub struct Prefs {
     /// Mirrors iOS `SettingsStore.localMediaMaxGB`.
     #[serde(default)]
     pub local_media_max_gb: u32,
+    /// FEED circle ids this device CREATED (Switch-Flip 1.0.7 §2): the local user is the authority
+    /// root (creator) of these circles, so we re-pin `set_circle_creator(id, me)` on every launch and
+    /// the pin propagates to members via the account-signed self-grant on the control lane. Only
+    /// circles created here (never ones a friend invited us into) belong here. Device-local.
+    #[serde(default)]
+    pub created_circles: Vec<String>,
+    /// One-time migration latch (Switch-Flip 1.0.7 §1): set once `retire_account_leaf()` has
+    /// successfully shed this account's legacy bare `{account}` roster leaf, so an existing
+    /// multi-device upgrader reaches the device-only shape live MLS keying + seed-drop retirement
+    /// require. Sticky — never re-run once true; a fresh device-only install never needs it.
+    #[serde(default)]
+    pub account_leaf_retired: bool,
 }
 
 impl Prefs {

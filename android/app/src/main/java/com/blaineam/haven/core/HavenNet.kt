@@ -246,6 +246,7 @@ object HavenNet : InboundListener {
         DeviceCredentialStore.init(appContext)
         DeviceRosterManager.init(appContext)
         SelfSyncCoordinator.init(appContext)
+        SelfSyncKeyStore.init(appContext)   // 1.0.7 self-sync key rotation state (docs/SWITCH-FLIP-1.0.7.md §6)
         DmPins.init(appContext)
         DmRead.init(appContext)
         PinnedMediaStore.init(appContext)   // device-pin retention exemption (storage management)
@@ -291,7 +292,76 @@ object HavenNet : InboundListener {
         activeCircle.value = if (savedCircle == DEFAULT_CIRCLE ||
             runCatching { social.circles().any { it.id == savedCircle } }.getOrDefault(false)
         ) savedCircle else DEFAULT_CIRCLE
+        // 1.0.7 crypto switch-flip: turn ON the new keying now that the engine + device identity + roster
+        // are up (docs/SWITCH-FLIP-1.0.7.md). These switches are NOT persisted in the engine, so this runs
+        // on EVERY launch. Everything is gated in core — inert (byte-identical to 1.0.6) until a circle /
+        // the own-device fleet is fully capable.
+        applyCryptoSwitches()
         ready = true
+    }
+
+    /**
+     * Re-apply the (non-persisted) 1.0.7 crypto enablers — called from [init] on every launch since the
+     * engine is rebuilt each process. Mirrors docs/SWITCH-FLIP-1.0.7.md steps 2–6:
+     *  - §3/§4: MLS keying master switch + seed-drop account-key retirement.
+     *  - §2: re-pin the creator on every circle I created (the authority root; not persisted as a keying
+     *        decision — it rides the authenticated circle definition).
+     *  - §5: mark `dm:` circles as per-message live lanes.
+     *  - §1: one-time migration of an existing multi-device account to a device-only roster.
+     */
+    private fun applyCryptoSwitches() {
+        // §3 — MLS keying master switch (both device kinds; gated + all-joined inside core).
+        runCatching { social.setMlsKeying(true) }
+        // §4 — seed-drop account-key RETIREMENT. A seedless device never runs the primary-only content
+        // retirement switch, but every device mirrors the self-sync rotation intent (a reader-side op).
+        SelfSyncKeyStore.retireSwitchOn = true
+        if (!core.seedless) runCatching { social.setSeedDropRetire(true) }
+        // §2 + §5 — per-circle re-application.
+        val created = createdCircles()
+        for (c in runCatching { social.circles() }.getOrDefault(emptyList())) {
+            if (c.id.startsWith("dm:")) runCatching { social.setCircleLiveLane(c.id, true) }
+            if (!core.seedless && created.contains(c.id)) runCatching { social.setCircleCreator(c.id, nodeIdHex) }
+        }
+        // §1 — existing multi-device upgraders shed the legacy bare account leaf ONCE.
+        maybeRetireAccountLeaf()
+    }
+
+    /** SharedPreferences-backed set of circle ids THIS device created — the circles it may pin itself as
+     *  creator of on every launch (§2). Circles created by peers are learned out-of-band by core. */
+    private val cryptoPrefs get() = appContext.getSharedPreferences("haven.crypto", Context.MODE_PRIVATE)
+    private fun createdCircles(): Set<String> = cryptoPrefs.getStringSet("createdCircles", emptySet()) ?: emptySet()
+    /** Did THIS device create [id]? Used by self-sync to stamp the circle's authority-root creator (§2) so
+     *  it travels with the authenticated circle definition to my other devices. */
+    fun selfSyncCreatedCircle(id: String): Boolean = createdCircles().contains(id)
+    private fun markCreatedCircle(id: String) {
+        val next = HashSet(createdCircles()); next.add(id)
+        cryptoPrefs.edit().putStringSet("createdCircles", next).apply()
+    }
+
+    /**
+     * MIGRATION (§1) — an existing multi-device account carries a legacy `{account, device}` roster that
+     * is grow-only and cannot silently shrink to device-only, so live keying + account-key retirement
+     * would strand it at `shadow`. `retire_account_leaf()` mints a higher-version, account-signed roster
+     * with the sticky `account-leaf-retired` flag so the roster reaches the device-only shape live keying
+     * requires. Gated + idempotent in core (a no-op until the fleet is fully capable), guarded here by a
+     * one-time SharedPreferences flag. A fresh device-only install registers device-only from day one and
+     * skips this entirely. Absence never retires — this is a POSITIVE, versioned signal only.
+     */
+    private fun maybeRetireAccountLeaf() {
+        if (core.seedless) return                                   // primary-only op (holds the seed)
+        if (cryptoPrefs.getBoolean("accountLeafRetired", false)) return
+        if (!DeviceRosterManager.isEnabled()) return                // no legacy multi-device roster to shrink
+        // Already device-only (a prior launch retired it, or register_device emitted it) — record + done.
+        if (runCatching { social.accountLeafRetired() }.getOrDefault(false)) {
+            cryptoPrefs.edit().putBoolean("accountLeafRetired", true).apply(); return
+        }
+        // Gated + idempotent: returns false until the fleet is device-capable — retry on the next launch.
+        if (runCatching { social.retireAccountLeaf() }.getOrDefault(false)) {
+            cryptoPrefs.edit().putBoolean("accountLeafRetired", true).apply()
+            // Rebroadcast the device-only (higher-version) roster wire so peers learn the retirement. The
+            // sync loop reads myDeviceRosterWire() fresh each pass; also kick a relay publish once started.
+            scope.launch { runCatching { publishDeviceRoster() } }
+        }
     }
 
     /** Start the iroh node and begin syncing. Safe to call repeatedly. */
@@ -419,9 +489,24 @@ object HavenNet : InboundListener {
     fun createCircle(name: String): String {
         val id = "circle-${nodeIdHex.take(8)}-${System.nanoTime()}"
         runCatching { social.createCircle(id, name) }
+        // §2 — I created this circle, so pin myself as its creator (authority root). Remembered so it can
+        // be re-pinned on every launch (the pin is not persisted as a keying decision).
+        if (!core.seedless) { markCreatedCircle(id); runCatching { social.setCircleCreator(id, nodeIdHex) } }
         persist(); bumpCircles()
         setActiveCircle(id)
         return id
+    }
+
+    /**
+     * §2 — delegate circle admin to a member (creator/admin only; account-signed, higher-version-wins,
+     * propagates on the control lane). Admin authority is what gates [mlsRemoveMember]. Call this on an
+     * admin promotion. Returns whether the grant was authored (false if unauthorized / seedless).
+     */
+    fun promoteCircleAdmin(circleId: String, contactHex: String): Boolean {
+        if (core.seedless) return false                             // account-key holder only
+        val ok = runCatching { social.grantCircleAdmin(circleId, contactHex) }.getOrDefault(false)
+        if (ok) { persist(); scope.launch { runCatching { SelfSyncCoordinator.sync(social) } } }
+        return ok
     }
 
     fun renameCircle(id: String, name: String) {
@@ -607,6 +692,8 @@ object HavenNet : InboundListener {
         if (isRemovedFromCircle(hello.circleId, idHex)) return
         // A verified Hello forms the circle on our side if we don't have it yet (matches iOS).
         runCatching { social.createCircle(hello.circleId, hello.circleName) }
+        // §5 — a dm: circle formed inbound is a live lane too (re-applied on launch by applyCryptoSwitches).
+        if (hello.circleId.startsWith("dm:")) runCatching { social.setCircleLiveLane(hello.circleId, true) }
 
         val expected = initiated[idHex]
         if (expected != null) {
@@ -655,6 +742,7 @@ object HavenNet : InboundListener {
         val id = dmCircleId(contact.idHex)
         runCatching { social.createCircle(id, contact.name) }
         runCatching { social.addExistingToCircle(id, contact.idHex) }
+        runCatching { social.setCircleLiveLane(id, true) }   // §5 — dm: circle → per-message forward secrecy
         persist()
         sendHello(id, contact.idHex)
         return id
@@ -694,6 +782,7 @@ object HavenNet : InboundListener {
         val id = groupDMCircleId(contacts.map { it.idHex })
         val title = contacts.joinToString(", ") { it.name }
         runCatching { social.createCircle(id, title) }
+        runCatching { social.setCircleLiveLane(id, true) }   // §5 — group dm: circle → live lane
         for (c in contacts) runCatching { social.addExistingToCircle(id, c.idHex) }
         persist()
         for (c in contacts) sendHello(id, c.idHex)
@@ -944,10 +1033,13 @@ object HavenNet : InboundListener {
         runCatching { sendFrame(Wire.DEVICE_ENROLL, payload, nodeIdHex) }   // also the iroh path to my own devices
     }
 
-    /** Revoke a linked device (primary only) — it can decrypt nothing posted afterward. */
+    /** Revoke a linked device (primary only) — it can decrypt nothing posted afterward. Rotates the
+     *  self-sync key too (inside DeviceRosterManager.revoke, §6) so the revoked device also loses its
+     *  read/LWW-write access to our account-state channel; publish the rotated-key grants promptly. */
     fun revokeDevice(nodeHex: String) {
         if (core.seedless) return   // only the seed-holding primary revokes
         DeviceRosterManager.revoke(nodeHex, social, core.seed)
+        scope.launch { runCatching { SelfSyncCoordinator.sync(social) } }   // publish the rotated-key grants
     }
 
     /** Step this device down from being the primary (e.g. the wrong device claimed the role). */
@@ -3487,6 +3579,7 @@ object HavenNet : InboundListener {
 
     /** This device's account seed + node id (for sealing/slot keys). */
     val accountSeed: ByteArray get() = core.seed
+    val accountBundle: ByteArray get() = core.bundle   // account PUBLIC bundle — opens rotated-key grants (§6)
     val accountNodeHex: String get() = core.nodeIdHex
 
     /** Every distinct adopted relay across all circles (public mirror of [allRelays]). */

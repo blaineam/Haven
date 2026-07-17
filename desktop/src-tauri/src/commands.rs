@@ -259,6 +259,19 @@ pub fn remove_from_circle(engine: Eng, circle_id: String, contact_id_hex: String
     engine.remove_from_circle(circle_id, contact_id_hex);
 }
 
+/// Switch-Flip 1.0.7 §2: promote a member to circle admin (creator/admin only). Returns whether the
+/// grant was authored — false if this device isn't authorized to delegate.
+#[tauri::command]
+pub fn grant_circle_admin(engine: Eng, circle_id: String, admin_hex: String) -> bool {
+    engine.grant_circle_admin(circle_id, admin_hex)
+}
+
+/// The current admin accounts (node hex) of a circle — the creator plus creator-delegated admins.
+#[tauri::command]
+pub fn circle_admins(engine: Eng, circle_id: String) -> Vec<String> {
+    engine.circle_admins(&circle_id)
+}
+
 // ---- feed / authoring --------------------------------------------------------------------
 
 #[tauri::command]

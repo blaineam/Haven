@@ -224,6 +224,16 @@ final class DeviceRosterManager: ObservableObject {
         return ok
     }
 
+    /// Public bundles of every still-authorized DEVICE (never the primary/account leaf — Switch-Flip §6
+    /// grants target device keys), optionally excluding one node hex. Used to re-grant a rotated
+    /// self-sync key to survivors after a revocation.
+    func authorizedDeviceBundles(excluding excludeHex: String? = nil) -> [Data] {
+        entries.compactMap { (hex, e) in
+            if e.isPrimary || revoked.contains(hex) || hex == excludeHex { return nil }
+            return e.bundle
+        }
+    }
+
     private func rebuild() {
         let me = DeviceKeyStore.deviceNodeHex()
         devices = entries.map { (hex, e) in

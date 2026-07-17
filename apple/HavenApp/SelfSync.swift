@@ -50,8 +50,14 @@ final class SelfSyncCoordinator {
         SeedlessState.isEnabled ? (SelfSyncKeyStore.load() != nil) : (AccountStore.storedSeed() != nil)
     }
 
-    /// Seal account state — with the master seed (seeded) or the granted self-sync key (seedless).
+    /// Seal account state. Switch-Flip §6: once the self-sync key has ROTATED (a device revocation on a
+    /// fully-capable fleet), seal under the rotated key at its epoch (the v1 path) — the bare account
+    /// key / v0 grant is retired. Until then it is the byte-identical v0 path: the master seed (seeded)
+    /// or the granted self-sync key (seedless).
     private func sealState(_ state: AccountStateHandle) -> Data? {
+        if SelfSyncEpochStore.epoch > 0, let k = SelfSyncEpochStore.currentKey() {
+            return try? sealAccountStateWithKeyEpoch(selfSyncKey: k, epoch: SelfSyncEpochStore.epoch, state: state)
+        }
         if SeedlessState.isEnabled {
             guard let key = SelfSyncKeyStore.load() else { return nil }
             return try? sealAccountStateWithKey(selfSyncKey: key, state: state)
@@ -60,8 +66,15 @@ final class SelfSyncCoordinator {
         return try? sealAccountState(accountSeed: seed, state: state)
     }
 
-    /// Open a peer/self slot — with the master seed (seeded) or the granted self-sync key (seedless).
+    /// Open a peer/self slot. Switch-Flip §6: once rotated, dual-key open honoring ONLY the current
+    /// epoch with an EMPTY seed_key (v0 authority retired) — a revoked device's stale-epoch or legacy v0
+    /// write is refused (the revocation cut), and unreadable blobs are simply skipped by the caller (never
+    /// tombstoned). Until then it is the byte-identical v0 open: the master seed or the granted key.
     private func openState(_ blob: Data) -> AccountStateHandle? {
+        if SelfSyncEpochStore.epoch > 0, let k = SelfSyncEpochStore.currentKey() {
+            return try? openAccountStateDual(sealed: blob, currentEpoch: SelfSyncEpochStore.epoch,
+                                             currentKey: k, seedKey: Data())
+        }
         if SeedlessState.isEnabled {
             guard let key = SelfSyncKeyStore.load() else { return nil }
             return try? openAccountStateWithKey(selfSyncKey: key, sealed: blob)
@@ -147,12 +160,19 @@ final class SelfSyncCoordinator {
         // Circles: name + member bundles + relay nodes, so another device can reconstruct each
         // circle and seal to every member. (Additive in v1 — member/circle removal is a follow-up.)
         if let social = social {
+            // Switch-Flip §2: carry the circle CREATOR (authority root) along the authenticated
+            // circle-sync path so another of my devices / a shared-circle peer can pin it. I only
+            // assert it for circles I own (the ones I created + the default "My Circle"); nil otherwise
+            // (the real creator's own export carries it — absence never fabricates a creator).
+            let myCreator = DeviceRosterManager.hexToData(social.myNodeHex())
             for ci in social.circles() {
+                let creator = (CircleCreatorStore.iCreated(ci.id) || ci.id == "default") ? myCreator : nil
                 // Shared FFI encoder → byte-identical circle records across iOS/desktop/Android.
                 m["circle:\(ci.id)"] = encodeCircleSync(
                     name: ci.name,
                     memberBundles: social.circleMemberBundles(circleId: ci.id),
-                    relays: RelayMailboxStore.shared.relays(forCircle: ci.id))
+                    relays: RelayMailboxStore.shared.relays(forCircle: ci.id),
+                    creator: creator)
             }
             // Contact device ROSTERS — so a freshly-linked device (e.g. the Mac) learns which device ids to
             // DIAL/seal for each friend directly from a sibling that already knows them, instead of dialing
@@ -300,6 +320,13 @@ final class SelfSyncCoordinator {
                 if let cur = existing.first(where: { $0.id == id }), cur.name != rec.name {
                     social.renameCircle(id: id, name: rec.name)
                 }
+                // Switch-Flip §2: pin the CREATOR carried on the authenticated circle-sync record (the
+                // "learned out-of-band" path). set_circle_creator is DEFINITION-bound — it overrides any
+                // weakly-TOFU'd creator and can't be dislodged by a later disagreeing grant.
+                if let creator = rec.creator, creator.count == 32 {
+                    _ = social.setCircleCreator(circleId: id,
+                                                accountHex: creator.map { String(format: "%02x", $0) }.joined())
+                }
                 // STRICTLY ADDITIVE: register each synced member. We do NOT remove members or leave
                 // circles based on a peer's state. Absence-based removal caused catastrophic data loss:
                 // a freshly-restored device has an empty engine, so it looked like "every circle/member
@@ -346,6 +373,12 @@ final class SelfSyncCoordinator {
         guard !transports.isEmpty else { return false }   // needs a relay OR an S3 bucket
         inFlight = true
         defer { inFlight = false }
+
+        // Switch-Flip §6: before choosing the seal/open path, adopt any rotated key the primary sealed to
+        // this device on its last revocation (from the canonical keygrant mailbox). Once adopted, sealState/
+        // openState below run the v1 (epoch-keyed) path — a survivor that missed the rotation would otherwise
+        // open nothing at the new epoch and silently fall off the channel.
+        await adoptRotatedGrant(accountHex: accountHex, transports: transports)
 
         // 1. Base = last converged state (or empty).
         let base: AccountStateHandle
@@ -444,7 +477,12 @@ final class SelfSyncCoordinator {
     /// Erase this device's self-sync base. Used when adopting a DIFFERENT identity (restore/link) or on
     /// factory reset, so a freshly-restored device never diffs its empty engine against a STALE base and
     /// tombstones the account's circles/contacts — the bug that propagated and wiped the primary's posts.
-    func reset() { try? FileManager.default.removeItem(at: baseURL) }
+    /// Also drops any rotated self-sync key (§6): a different identity must start on the v0 path, never
+    /// carry a stale rotated key that no longer matches the account.
+    func reset() {
+        try? FileManager.default.removeItem(at: baseURL)
+        SelfSyncEpochStore.clear()
+    }
 
     /// This device's sealed self-sync slot, folding in local changes first — the payload to hand a
     /// peer device directly over the nearby mesh. No relay/S3 involved.
@@ -468,6 +506,64 @@ final class SelfSyncCoordinator {
         applyLocal(base, social: social)
         try? base.toBytes().write(to: baseURL, options: .atomic)
         return changed
+    }
+
+    // MARK: §6 rotated self-sync KEY GRANTS — the canonical cross-platform transport
+    //
+    // On a device revocation the primary mints a fresh self-sync key and hands it to every STILL-authorized
+    // device (never the revoked one). Each grant is sealed to ONE device and written to that device's
+    // canonical mailbox slot `self/<account>/keygrant/<device>` (core `selfSyncGrantSlotKey`) — the SAME
+    // per-device self-sync transport as state (`self/<account>/state/<device>`), so a rotated key crosses
+    // iOS/desktop/Android identically. This replaces the old bespoke type-30 iroh frame.
+
+    /// PRIMARY (seed-holder): seal the CURRENT rotated key to each still-authorized device and write each
+    /// grant to its per-device keygrant slot over every transport. Idempotent (a device adopts only a
+    /// strictly-newer epoch), so re-emitting on rotation AND on every full-state push lets an offline / late
+    /// device converge. No-op on the v0 path (epoch 0) or without the account seed (only the primary signs).
+    func publishEpochGrants() async {
+        guard let seed = AccountStore.storedSeed() else { return }
+        let epoch = SelfSyncEpochStore.epoch
+        guard epoch > 0, let key = SelfSyncEpochStore.currentKey() else { return }
+        let accountHex = AccountStore.currentNodeHex()
+        guard !accountHex.isEmpty else { return }
+        let transports = gatherTransports()
+        guard !transports.isEmpty else { return }
+        for bundle in DeviceRosterManager.shared.authorizedDeviceBundles() {
+            let devHex = bundle.prefix(32).map { String(format: "%02x", $0) }.joined()
+            guard devHex.count == 64,
+                  let grant = try? sealSelfSyncKeyEpochGrant(accountSeed: seed, deviceBundle: bundle,
+                                                             epoch: epoch, selfSyncKey: key) else { continue }
+            let slot = "haven/" + selfSyncGrantSlotKey(accountNodeHex: accountHex, deviceNodeHex: devHex)
+            for t in transports { _ = await tUpload(t, slot, grant) }
+        }
+    }
+
+    /// Any device: adopt the highest-epoch grant addressed to THIS device from the keygrant mailbox. A grant
+    /// sealed to another device fails to open and is skipped; only a strictly-newer epoch is adopted (replay-
+    /// safe). Runs at the top of each poll so a survivor switches to the rotated channel before reading state.
+    private func adoptRotatedGrant(accountHex: String, transports: [Transport]) async {
+        let accountBundle: Data
+        if SeedlessState.isEnabled {
+            guard let b = AccountPublicStore.load() else { return }
+            accountBundle = b
+        } else {
+            guard let seed = AccountStore.storedSeed(),
+                  let b = (try? Account.fromSeed(seed: seed))?.publicBundle() else { return }
+            accountBundle = b
+        }
+        let deviceSeed = DeviceKeyStore.deviceAccount().secretSeed()
+        let prefix = "haven/" + selfSyncGrantSlotPrefix(accountNodeHex: accountHex)
+        for t in transports {
+            for key in await tList(t, prefix) {
+                guard let blob = await tFetch(t, key),
+                      let grant = try? openSelfSyncKeyEpochGrant(deviceSeed: deviceSeed,
+                                                                 accountBundle: accountBundle, envelope: blob)
+                else { continue }
+                if SelfSyncEpochStore.adoptIfNewer(epoch: grant.epoch, key: grant.key) {
+                    HavenLog.net("switch-flip: adopted rotated self-sync key epoch \(grant.epoch)")
+                }
+            }
+        }
     }
 
     // MARK: transports (relay + S3 — self-sync works with either, or both)

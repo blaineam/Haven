@@ -15,6 +15,7 @@ mod roster;
 mod scheduled;
 mod secret;
 mod selfsync;
+mod selfsyncrot;
 mod store;
 mod wire;
 
@@ -378,6 +379,8 @@ pub fn run() {
             commands::sync_status,
             commands::video_sound_on,
             commands::set_video_sound,
+            commands::grant_circle_admin,
+            commands::circle_admins,
             commands::device_roster,
             commands::enable_device_roster,
             commands::request_device_enrollment,

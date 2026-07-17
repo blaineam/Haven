@@ -7,9 +7,10 @@
 //! `tests/fixtures/real_106_manifest.json` records EXACTLY what 1.0.6 created, so this test asserts
 //! exact survival — the absence-as-deletion guard against REAL upgrader data.
 //!
-//! It then drives the ENABLED 1.0.7 upgrade on those real bytes: flip the dark switches
-//! (seed-drop retirement + MLS keying), `retire_account_leaf`, and prove the migrated real account
-//! reaches LIVE MLS keying and that retirement cuts a device — WITHOUT losing any 1.0.6 content.
+//! It then drives the ENABLED 1.0.7 upgrade on those real bytes: flip the switches (seed-drop
+//! retirement + MLS keying), `retire_account_leaf`, and prove retirement cuts a device — WITHOUT
+//! losing any 1.0.6 content, and WITHOUT a legacy circle keying off the tree (it has no authority
+//! root, so removal stays on the KeyCommit path that already works).
 //!
 //! Run:
 //!     export PATH="$HOME/.cargo/bin:$PATH"
@@ -176,13 +177,16 @@ fn strs_to_seed(v: &Value) -> [u8; 32] {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════
 
 /// Drive the full ENABLED 1.0.7 upgrade on the REAL 1.0.6 state: turn on seed-drop retirement + MLS
-/// keying (must lose NOTHING), revive the migrated DM peer as a live capable device, `retire_account_leaf`
-/// (the existing-upgrader migration the whole release hinges on), and prove the migrated real DM circle
-/// reaches LIVE MLS keying — while every 1.0.6 post/comment/reaction/DM message is still present, new
-/// content round-trips, and retirement cryptographically cuts a bare-account-seed holder that read fine
-/// before it (a real revocation on real bytes).
+/// keying (must lose NOTHING), revive the migrated DM peer as a live capable device, and
+/// `retire_account_leaf` (the existing-upgrader migration the whole release hinges on) — while every
+/// 1.0.6 post/comment/reaction/DM message is still present, new content round-trips, and retirement
+/// cryptographically cuts a bare-account-seed holder that read fine before it (a real revocation on
+/// real bytes).
+///
+/// The migrated circle deliberately does NOT key off the tree: a legacy id binds no creator, so the
+/// circle has no authority root and removal must stay on the KeyCommit path (see the assertion below).
 #[test]
-fn real_106_state_reaches_live_mls_keying_and_retirement_cuts_a_device_losslessly() {
+fn real_106_state_migrates_losslessly_and_retirement_cuts_a_device() {
     let m = load_manifest();
     let me = account(1);
     assert!(me.use_device_identity(vec![91u8; 32]));
@@ -205,11 +209,17 @@ fn real_106_state_reaches_live_mls_keying_and_retirement_cuts_a_device_losslessl
     let dm_bodies_before = bodies(&me, &dm_id);
     assert!(dm_bodies_before.contains("dm-hello"), "the real DM thread is present pre-flip");
 
-    // ── FLIP EVERYTHING ON (global switches + pin creators on every migrated circle). ──
+    // ── FLIP EVERYTHING ON (global switches). ──
     me.set_seed_drop_retire(true);
     me.set_mls_keying(true);
+    // F1 — every id here is a REAL 1.0.6 migrated id read off the fixture: arbitrary legacy strings
+    // (`default`, `fam`, `dm:…`), not `c1…` ids minted against a creator account. None of them can bind
+    // a cryptographic creator, so `set_circle_creator` is a no-op returning false BY DESIGN — real
+    // upgraders' personal/legacy circles keep the legacy removal path. Creator authority is a removal
+    // concern, orthogonal to reaching LIVE, so the upgrade below proceeds with no creator pinned.
     for id in &all_circle_ids {
-        assert!(me.set_circle_creator(id.clone(), me_hex.clone()), "pin creator on {id}");
+        assert!(!me.set_circle_creator(id.clone(), me_hex.clone()),
+                "F1: the migrated legacy id {id} binds no creator");
     }
 
     // ── The flip must WIPE NOTHING — exact equality against the pre-flip baseline. ──
@@ -244,7 +254,8 @@ fn real_106_state_reaches_live_mls_keying_and_retirement_cuts_a_device_losslessl
     assert!(me.ingest_roster_wire(bob_wire), "me learns bob's device-only roster");
     me.profile_seed_drop_version(bob.my_bundle(), capability_card(&bob, "bob"));
     bob.profile_seed_drop_version(me.my_bundle(), capability_card(&me, "me"));
-    assert!(bob.set_circle_creator(dm_id.clone(), me_hex.clone()));
+    assert!(!bob.set_circle_creator(dm_id.clone(), me_hex.clone()),
+            "F1: the migrated legacy DM id binds no creator on the revived peer either");
     bob.set_seed_drop_retire(true);
     bob.set_mls_keying(true);
 
@@ -266,12 +277,17 @@ fn real_106_state_reaches_live_mls_keying_and_retirement_cuts_a_device_losslessl
     assert!(bob.ingest_roster_wire(me.my_device_roster_wire()),
             "bob adopts the higher-version retired roster and drops my account leaf");
 
-    // With the account leaf retired the migrated {account, device} roster reaches the device-only shape,
-    // the all-joined gate completes, and the REAL migrated DM circle flips to LIVE MLS keying.
+    // With the account leaf retired the migrated {account, device} roster reaches the device-only shape
+    // and the all-joined gate itself completes. The REAL migrated circle still does NOT key off the
+    // tree: its id is a legacy `dm:` id, which binds no creator, so the circle has no authority root —
+    // and without one a removed member's leaf could never be cut. It stays on the KeyCommit path, where
+    // removal rotates the epoch and cuts them off, exactly as this real 1.0.6 state already did. A
+    // legacy circle reaches live only by being carried onto a creator-bound successor, which is an
+    // explicit, member-confirmed act (see `a_legacy_circle_upgrades_only_by_a_followed_offer`).
     flip_and_join(&[&me, &bob], &dm_id);
-    assert_eq!(me.mls_keying_status(dm_id.clone()).state, "live",
-               "after retire_account_leaf the migrated real DM circle reaches LIVE MLS keying");
-    assert_eq!(bob.mls_keying_status(dm_id.clone()).state, "live", "the revived peer is live too");
+    assert_ne!(me.mls_keying_status(dm_id.clone()).state, "live",
+               "a real migrated legacy circle keeps the KeyCommit path — no authority root, so removal must keep working");
+    assert_ne!(bob.mls_keying_status(dm_id.clone()).state, "live", "same for the revived peer");
 
     // ── Content-preserving: the real 1.0.6 DM messages are still readable, and new content round-trips. ──
     sync_all(&[&me, &bob], &dm_id, 4);

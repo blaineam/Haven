@@ -15,7 +15,7 @@ use haven_p2p::crypto::{decapsulate, encapsulate_to, open, seal, Encapsulation};
 use haven_p2p::device::{
     admin_closure, circle_fully_mls_capable, circle_fully_seed_drop_capable, circle_id_binds_creator,
     mint_owned_circle_id, recipients_with_devices, recipients_with_devices_gated, AdminGrant,
-    ContactDevices, DeviceCredential, DeviceList, SeedDropCapability,
+    CircleUpgrade, ContactDevices, DeviceCredential, DeviceList, SeedDropCapability,
 };
 use haven_p2p::treekem;
 use haven_p2p::identity::{Identity, HavenId};
@@ -61,6 +61,21 @@ const TAG_MLS_PROPOSAL: u8 = 0x07; // a treekem::Proposal (reserved; unbundled p
 const TAG_MLS_JOIN: u8 = 0x08; // a signed join ack: "device D holds genesis G's Welcome" (the §7.2 gate)
 const TAG_ADMIN_GRANT: u8 = 0x09; // an account-signed device::AdminGrant riding the circle control lane
 const TAG_CIRCLE_UPGRADE: u8 = 0x0a; // a device::CircleUpgrade offer: legacy circle → creator-bound successor
+
+/// An upgrade offer awaiting the user's decision: "`from_hex` says this legacy circle's creator-bound
+/// successor is `new_circle_id`". The signature and the successor's binding to `from_hex` are already
+/// verified; what CANNOT be verified is that `from_hex` created the legacy circle, because legacy
+/// circles never recorded an owner. Show who is claiming it and let the user choose.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct CircleUpgradeOffer {
+    pub legacy_circle_id: String,
+    pub new_circle_id: String,
+    /// The account offering the upgrade — show this identity to the user before they accept.
+    pub from_hex: String,
+    pub name: String,
+    /// True when I authored this offer (my own circle) — no confirmation needed.
+    pub mine: bool,
+}
 
 /// Content-epoch namespace for MLS-keyed circles (M3, §4.5). When the keying flip is live, the
 /// circle's content seals under `MLS_EPOCH_BASE + tree_epoch` instead of a legacy sender-keys epoch.
@@ -1125,6 +1140,13 @@ struct Circle {
     /// `admin_closure` walks from the creator. Higher-version-wins per (admin_account); a forged/stale
     /// grant never reaches this vec (verified at ingest). Persisted (additive) and re-broadcast.
     admin_grants: Vec<Vec<u8>>,
+    /// Verified [`CircleUpgrade`] offers seen on THIS (legacy) circle's lane — "my creator-bound
+    /// successor is X". Each is signature-verified and successor-binding-checked at ingest, but is
+    /// deliberately NOT acted on: a legacy circle has no authority root, so nothing can prove the
+    /// offerer owned it. They are surfaced for the user to accept (`accept_circle_upgrade`), and more
+    /// than one competing offer is a legitimate state the UI must show rather than resolve. Persisted
+    /// (additive); an offer I authored also rides the bundle so members receive it.
+    upgrade_offers: Vec<Vec<u8>>,
     /// MLS M3: the live tree-derived content epoch (`MLS_EPOCH_BASE + tree_epoch`) when the keying flip
     /// is active for this circle (§4.5), else `None` (shadow or parked). Set by `mls_refresh_keying`,
     /// read by the author/re-seal paths so content seals under the tree key. NOT persisted — it is a
@@ -1192,6 +1214,7 @@ impl Circle {
             creator: None,
             creator_pinned: false,
             admin_grants: vec![],
+            upgrade_offers: vec![],
             mls_live_epoch: None,
             mls_ratchet: RatchetLanes::default(),
         }
@@ -2249,6 +2272,41 @@ fn mls_account_bundle(st: &NetState, idx: usize, acct: &[u8; 32]) -> Option<Have
 /// The current admin set for a circle (§4.3): the pinned creator plus every account reachable by a
 /// chain of VERIFIED admin grants (`admin_closure`). `None` when no creator is pinned — then no tree
 /// Remove is authorized by anyone (a circle with no established authority root can't cut members).
+/// Ingest a [`CircleUpgrade`] offer on a legacy circle's control lane: "my creator-bound successor to
+/// this circle is X". Verified here (the signer authored it; the successor id binds the signer; the
+/// signer is a member of this circle), then STORED AS AN OFFER ONLY — never acted on.
+///
+/// This is the load-bearing restraint. A legacy circle has no authority root, so no signature can
+/// prove the offerer created it; auto-following one would just re-introduce first-claim-wins with
+/// extra steps. Competing offers from different members are both legitimate records — the user picks
+/// via `accept_circle_upgrade`. Higher-version-wins per (legacy circle, offerer) so a re-offer
+/// supersedes rather than duplicating. Control lane ⇒ never touches content, returns `false`.
+fn receive_circle_upgrade(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool, HavenError> {
+    let Ok(up) = CircleUpgrade::from_bytes(body) else { return Ok(false) };
+    if up.legacy_circle_id != st.circles[idx].id.as_bytes() {
+        return Ok(false); // not an offer for this circle
+    }
+    // The offerer must be someone in this circle (me or a member) with a known, pinned bundle, and
+    // `verify` re-checks that the successor id actually binds them.
+    let Some(offerer) = mls_account_bundle(st, idx, &up.creator) else { return Ok(false) };
+    if up.verify(&offerer).is_err() {
+        return Ok(false);
+    }
+    let offers = &mut st.circles[idx].upgrade_offers;
+    for w in offers.iter_mut() {
+        if let Ok(existing) = CircleUpgrade::from_bytes(w) {
+            if existing.legacy_circle_id == up.legacy_circle_id && existing.creator == up.creator {
+                if up.version > existing.version {
+                    *w = up.to_bytes();
+                }
+                return Ok(false); // known offerer — superseded or stale, either way no content change
+            }
+        }
+    }
+    offers.push(up.to_bytes());
+    Ok(false)
+}
+
 fn circle_admin_set(st: &NetState, idx: usize) -> Option<std::collections::HashSet<[u8; 32]>> {
     let creator = st.circles[idx].creator?;
     // Creator/admin authority is honored only when the circle id cryptographically binds to the
@@ -3705,6 +3763,108 @@ impl HavenSocial {
         true
     }
 
+    /// Offer to carry a LEGACY circle onto a creator-bound successor, so it can gain an authority root
+    /// (and therefore authenticated eviction + tree keying, which a legacy id can never have).
+    ///
+    /// Mints an owned successor, creates it locally carrying the same name + members, pins me as its
+    /// creator, and stores an account-signed offer on the legacy circle's lane so members receive it.
+    /// Returns the successor id, or `None` if this circle is already owned / unknown / I hold no
+    /// account key. Members do NOT follow automatically — see `pending_circle_upgrades`.
+    pub fn upgrade_circle(&self, legacy_circle_id: String) -> Option<String> {
+        let mut st = self.state.lock().unwrap();
+        let idx = st.circles.iter().position(|c| c.id == legacy_circle_id)?;
+        let me = st.me().node_id_bytes();
+        // Already creator-bound ⇒ nothing to upgrade.
+        if circle_id_binds_creator(&legacy_circle_id, &me) {
+            return None;
+        }
+        let acct = st.me_secret.as_ref().map(|m| Identity::from_seed(&m.secret_seed()))?;
+        let name = st.circles[idx].name.clone();
+        let members = st.circles[idx].members.clone();
+        let new_id = mint_owned_circle_id(&me);
+        // Highest offer I've made for this circle before, so a re-offer supersedes.
+        let version = st.circles[idx]
+            .upgrade_offers
+            .iter()
+            .filter_map(|w| CircleUpgrade::from_bytes(w).ok())
+            .filter(|u| u.creator == me)
+            .map(|u| u.version)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let offer = CircleUpgrade::issue(&acct, legacy_circle_id.as_bytes(), new_id.as_bytes(), &name, version);
+        let wire = offer.to_bytes();
+        st.circles[idx].upgrade_offers.retain(|w| {
+            CircleUpgrade::from_bytes(w).map(|u| u.creator != me).unwrap_or(true)
+        });
+        st.circles[idx].upgrade_offers.push(wire);
+        // Stand the successor up locally, carrying membership over.
+        if !st.circles.iter().any(|c| c.id == new_id) {
+            let mut c = Circle::bare(new_id.clone(), name);
+            c.members = members;
+            c.creator = Some(me);
+            c.creator_pinned = true;
+            st.circles.push(c);
+        }
+        drop(st);
+        // Announce me as the successor's creator (issues the propagating self-grant).
+        let _ = self.set_circle_creator(new_id.clone(), self.my_node_hex());
+        Some(new_id)
+    }
+
+    /// Upgrade offers seen on `circle_id` that I haven't followed: "`from_hex` says this circle's
+    /// creator-bound successor is `new_circle_id`". Each is signature-verified and the successor is
+    /// proven to bind its offerer — but NOT that the offerer created this circle, which no signature
+    /// can establish. Surface these for the user to choose; more than one is a legitimate state.
+    pub fn pending_circle_upgrades(&self, circle_id: String) -> Vec<CircleUpgradeOffer> {
+        let st = self.state.lock().unwrap();
+        let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return vec![] };
+        st.circles[idx]
+            .upgrade_offers
+            .iter()
+            .filter_map(|w| CircleUpgrade::from_bytes(w).ok())
+            .filter(|u| !st.circles.iter().any(|c| c.id.as_bytes() == u.new_circle_id))
+            .map(|u| CircleUpgradeOffer {
+                legacy_circle_id: circle_id.clone(),
+                new_circle_id: String::from_utf8_lossy(&u.new_circle_id).to_string(),
+                from_hex: hex(&u.creator),
+                name: u.name.clone(),
+                mine: u.creator == st.me().node_id_bytes(),
+            })
+            .collect()
+    }
+
+    /// Follow an upgrade offer: stand up the successor locally, carrying this circle's members, and pin
+    /// the offerer as its (binding-verified) creator. This is the deliberate human step — the caller
+    /// MUST have shown the user who is claiming the circle. Returns false if the offer is unknown or
+    /// its successor doesn't bind the offerer.
+    pub fn accept_circle_upgrade(&self, circle_id: String, new_circle_id: String) -> bool {
+        let mut st = self.state.lock().unwrap();
+        let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return false };
+        let Some(up) = st.circles[idx]
+            .upgrade_offers
+            .iter()
+            .filter_map(|w| CircleUpgrade::from_bytes(w).ok())
+            .find(|u| u.new_circle_id == new_circle_id.as_bytes())
+        else {
+            return false;
+        };
+        // Re-check the binding at the point of action (never trust it was checked at ingest alone).
+        if !circle_id_binds_creator(&new_circle_id, &up.creator) {
+            return false;
+        }
+        let members = st.circles[idx].members.clone();
+        let creator_hex = hex(&up.creator);
+        if !st.circles.iter().any(|c| c.id == new_circle_id) {
+            let mut c = Circle::bare(new_circle_id.clone(), up.name.clone());
+            c.members = members;
+            st.circles.push(c);
+        }
+        drop(st);
+        // Pin the offerer as the successor's creator — binding-verified, so this is authenticated.
+        self.set_circle_creator(new_circle_id, creator_hex)
+    }
+
     /// Delegate circle admin to `admin_hex` (§4.3). Requires that I am currently an admin (the creator
     /// or a creator-delegated admin) AND hold my account key. The grant is account-signed, versioned
     /// (higher-wins), stored, and re-broadcast on the control lane. Returns false if unauthorized.
@@ -4592,6 +4752,16 @@ impl HavenSocial {
         let join_wire = keying_emit_join(&mut st, idx);
         let admin_wires: Vec<Vec<u8>> =
             st.circles[idx].admin_grants.iter().map(|g| tagged(TAG_ADMIN_GRANT, g)).collect();
+        // Upgrade offers ride the legacy circle's lane so its members see them. Only re-broadcast the
+        // ones I authored: relaying someone else's would lend it my circulation, and an offer is a
+        // claim to be judged, not a fact to spread.
+        let my_acct = st.me().node_id_bytes();
+        let upgrade_wires: Vec<Vec<u8>> = st.circles[idx]
+            .upgrade_offers
+            .iter()
+            .filter(|w| CircleUpgrade::from_bytes(w).map(|u| u.creator == my_acct).unwrap_or(false))
+            .map(|u| tagged(TAG_CIRCLE_UPGRADE, u))
+            .collect();
         // THE KEYING FLIP / PARK DECISION (§4.5/§7.3), recomputed every bundle from verified state.
         // `Some(content_epoch)` ⇒ the circle is flipped: content seals under the tree-derived key and
         // the legacy KeyCommit STOPS. `None` ⇒ shadow or parked ⇒ legacy KeyCommit + sender-keys epoch.
@@ -4699,6 +4869,9 @@ impl HavenSocial {
                 out.push(j.clone());
             }
             for w in &admin_wires {
+                out.push(w.clone());
+            }
+            for w in &upgrade_wires {
                 out.push(w.clone());
             }
         };
@@ -4837,6 +5010,7 @@ impl HavenSocial {
                 r
             }
             TAG_ADMIN_GRANT => receive_admin_grant(&mut st, idx, &envelope[1..]),
+            TAG_CIRCLE_UPGRADE => receive_circle_upgrade(&mut st, idx, &envelope[1..]),
             // Unbundled proposals (§4.2 roster path) are reserved for M4; a stray one is inert.
             TAG_MLS_PROPOSAL => Ok(false),
             TAG_DEVICE_ROSTER => {
@@ -7597,6 +7771,63 @@ mod net_tests {
         let g_wrong_root = AdminGrant::issue(&mallory, gid, mallory.public().node_id_bytes(), alice.public().node_id_bytes(), 5);
         assert!(matches!(feed_grant(&g_wrong_root), Ok(false)));
         assert!(!victim.circle_admins(cid.clone()).contains(&mallory_hex), "a foreign-root grant grants no authority");
+    }
+
+    /// A legacy circle gains an authority root only by being carried onto a creator-bound successor,
+    /// and only when the member deliberately follows the offer. The offer is never self-executing: a
+    /// second member can sign an equally-valid competing offer, and both are surfaced for the user —
+    /// so following one is a human decision, not a race the first claimer wins.
+    #[test]
+    fn a_legacy_circle_upgrades_only_by_a_followed_offer() {
+        let legacy = "fam".to_string();
+        let alice = HavenSocial::new([2u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([3u8; 32].to_vec()).unwrap();
+        let mallory = Identity::from_seed(&[9u8; 32]);
+        let alice_hex = alice.my_node_hex();
+
+        for s in [&alice, &bob] {
+            s.create_circle(legacy.clone(), "Family".into());
+        }
+        alice.add_contact_bundle(legacy.clone(), bob.my_bundle()).unwrap();
+        bob.add_contact_bundle(legacy.clone(), alice.my_bundle()).unwrap();
+        bob.add_contact_bundle(legacy.clone(), mallory.public().to_bytes()).unwrap();
+
+        // A legacy circle has no authority root — that's exactly why it needs upgrading.
+        assert!(alice.circle_admins(legacy.clone()).is_empty());
+        assert!(!alice.set_circle_creator(legacy.clone(), alice_hex.clone()), "can't pin a creator in place");
+
+        // Alice (who made the circle) offers a creator-bound successor.
+        let new_id = alice.upgrade_circle(legacy.clone()).expect("owner mints a successor");
+        assert!(new_id.starts_with("c1"), "the successor is creator-bound");
+        assert!(alice.circle_admins(new_id.clone()).contains(&alice_hex), "Alice roots the successor");
+        assert!(alice.upgrade_circle(new_id.clone()).is_none(), "an owned circle has nothing to upgrade");
+
+        // Bob receives it — and it does NOT take effect on its own.
+        let offer = alice.circles().iter().find(|c| c.id == legacy).map(|_| ()).map(|_| {
+            let st = alice.state.lock().unwrap();
+            let i = st.circles.iter().position(|c| c.id == legacy).unwrap();
+            st.circles[i].upgrade_offers[0].clone()
+        }).unwrap();
+        assert!(matches!(bob.receive(legacy.clone(), tagged(TAG_CIRCLE_UPGRADE, &offer)), Ok(false)));
+        assert!(!bob.circles().iter().any(|c| c.id == new_id), "an offer never joins me to anything");
+
+        // Mallory signs a competing, equally-valid offer for the same circle. Neither wins by arriving.
+        let mallory_id = mint_owned_circle_id(&mallory.public().node_id_bytes());
+        let hostile = CircleUpgrade::issue(&mallory, legacy.as_bytes(), mallory_id.as_bytes(), "Family", 1);
+        assert!(matches!(bob.receive(legacy.clone(), tagged(TAG_CIRCLE_UPGRADE, &hostile.to_bytes())), Ok(false)));
+        let pending = bob.pending_circle_upgrades(legacy.clone());
+        assert_eq!(pending.len(), 2, "BOTH claims are surfaced — the user decides, nothing auto-resolves");
+        assert!(pending.iter().any(|o| o.from_hex == alice_hex && o.new_circle_id == new_id));
+
+        // Bob follows Alice's — the successor stands up with Alice as its verified creator.
+        assert!(bob.accept_circle_upgrade(legacy.clone(), new_id.clone()));
+        assert!(bob.circles().iter().any(|c| c.id == new_id), "Bob joins the successor");
+        assert!(bob.circle_admins(new_id.clone()).contains(&alice_hex), "Alice is the successor's root for Bob");
+        // Mallory's successor grants her nothing over the circle Bob followed.
+        assert!(!bob.circle_admins(new_id.clone()).contains(&hex(&mallory.public().node_id_bytes())));
+        // The legacy circle is untouched — it keeps working on its existing path.
+        assert!(bob.circles().iter().any(|c| c.id == legacy));
+        assert!(bob.circle_admins(legacy.clone()).is_empty(), "the legacy circle still has no root");
     }
 
     /// Circle authority is bound to the circle id. On an OWNED circle a grant that names a false

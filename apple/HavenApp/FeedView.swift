@@ -328,6 +328,37 @@ final class FeedStore: ObservableObject {
         persist()
     }
 
+    // MARK: - Carrying an older circle onto one with a verified owner
+
+    /// Upgrade offers on `circleId` that I haven't followed — "so-and-so says this circle's replacement
+    /// is theirs". Verified as genuinely from the signer, but NOT as proof they made the circle; the
+    /// user decides. See `CircleUpgradeBanner`.
+    func pendingUpgrades(_ circleId: String) -> [CircleUpgradeOffer] {
+        social?.pendingCircleUpgrades(circleId: circleId) ?? []
+    }
+
+    /// Offer to upgrade a circle I made: mints its replacement, carries the members over, and puts the
+    /// signed offer on the old circle's lane. Returns the new circle's id.
+    @discardableResult
+    func offerCircleUpgrade(_ circleId: String) -> String? {
+        guard let new = social?.upgradeCircle(legacyCircleId: circleId) else { return nil }
+        CircleCreatorStore.markCreated(new)   // re-pin the owner on every launch, like any circle I made
+        persist(); refreshCircles()
+        activeCircleId = new
+        refresh()
+        return new
+    }
+
+    /// Follow someone's offer: stand up the replacement and pin them as its verified owner.
+    @discardableResult
+    func followCircleUpgrade(_ circleId: String, to newId: String) -> Bool {
+        guard social?.acceptCircleUpgrade(circleId: circleId, newCircleId: newId) == true else { return false }
+        persist(); refreshCircles()
+        activeCircleId = newId
+        refresh()
+        return true
+    }
+
     func createCircle(name: String, memberIds: [String] = []) {
         guard let social else { return }
         // Mint a creator-BOUND id: it commits to my account, so every member establishes this circle's
@@ -3316,6 +3347,7 @@ struct FeedView: View {
                     LazyVStack(spacing: 16) {
                         banner
                         if !connections.pending.isEmpty { pendingBanner }
+                        CircleUpgradeBanner(circleId: store.activeCircleId)
                         RelayNudgeBanner(circleId: store.activeCircleId)
                         storiesTray
                         if store.feedItems.isEmpty {

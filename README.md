@@ -52,7 +52,9 @@ S3-compatible bucket, or a direct peer-to-peer link.
 **1.0 is live on the App Store for iPhone, iPad, and Mac**
 (https://apps.apple.com/app/id6782147901 — **1.0.7** is the security + polish release:
 seedless device linking, the cryptographic-revocation machinery, storage management,
-and an MLS-style group layer that is enabled and rolls out per circle as everyone updates — see
+and an MLS-style group layer that is enabled for circles with a verified owner, i.e. the ones you
+make from 1.0.7 on (existing circles keep the encryption they already have unless their creator
+offers an upgrade and each member follows it) — see
 [`CHANGELOG.md`](CHANGELOG.md))
 and **Windows is live on the Microsoft Store**
 (https://apps.microsoft.com/store/detail/9NKTFH1MF4LM).
@@ -85,15 +87,23 @@ nearby Bluetooth/Wi-Fi mesh daily. Done so far:
   **activates per-circle** once every member's devices advertise capability (all-present-positive,
   never inferred from absence); until then a **dual-seal** coexistence path keeps un-upgraded peers
   fully working. See [`docs/SEED-DROP-DESIGN.md`](docs/SEED-DROP-DESIGN.md).
-- **MLS-style group encryption — TreeKEM on our own PQ primitives (1.0.7, enabled, staged).** A
+- **MLS-style group encryption — TreeKEM on our own PQ primitives (1.0.7, enabled for owner-verified circles).** A
   ratchet-tree group layer adding post-compromise security, a forward-secrecy deletion discipline,
   and per-message forward secrecy for DMs, reusing Haven's existing hybrid primitives. It is
   **MLS-*shaped*, not RFC-9420 wire-interoperable** (every ratified MLS ciphersuite is classical;
-  interop would regress the PQ posture). It is **enabled in 1.0.7**, activating **per circle once
-  every member's devices have updated and joined** (an all-present/all-joined gate); until then the
-  circle stays on the existing key path (byte-identical to 1.0.6), and a device that falls behind
-  reverts its circles to that legacy path within one sync — no one is ever stranded, and it only
-  ever changes *which key* seals content, never *whether* content is encrypted. Its audit to date is
+  interop would regress the PQ posture). It is **enabled in 1.0.7 for circles with a verified
+  owner** — circles created from 1.0.7 on, whose id is cryptographically bound to their creator.
+  **Circles you already have do not get it automatically:** they have no owner (nothing recorded who
+  created them), and an owner can't be added after the fact in a way other members could trust, so
+  they keep the encryption they already have — which still cuts off someone you remove. To carry an
+  older circle across, whoever made it **offers an upgrade** and **each member taps once to follow
+  it**; the app shows who's asking, because no signature can prove someone created a circle that
+  never recorded an owner — that's a judgement only a person can make. Even on an owned circle it
+  activates only **once every member's devices have updated and joined** (an all-present/all-joined
+  gate); until then the circle stays on the existing key path (byte-identical to 1.0.6), and a device
+  that falls behind reverts its circles to that legacy path within one sync — no one is ever
+  stranded, and it only ever changes *which key* seals content, never *whether* content is
+  encrypted. Its audit to date is
   an **internal**, AI-driven adversarial code review — 0 critical / 0 high — a
   strong first pass, **not** a formal external audit; an independent cryptographer's review is
   planned/ongoing. See [`docs/TREEKEM-DESIGN.md`](docs/TREEKEM-DESIGN.md).
@@ -192,7 +202,7 @@ noncommercial restriction is the difference). Contributions require a CLA/DCO.
 - [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) — what we defend against, and abuse resistance
 - [`docs/GROUP-KEYING.md`](docs/GROUP-KEYING.md) — epoch sender-keys: revocation + bounded forward secrecy (PQ-preserving)
 - [`docs/SEED-DROP-DESIGN.md`](docs/SEED-DROP-DESIGN.md) — per-device keys + seedless linking: cryptographic device revocation (1.0.7)
-- [`docs/TREEKEM-DESIGN.md`](docs/TREEKEM-DESIGN.md) — MLS-style TreeKEM on our own PQ primitives: PCS + forward secrecy (enabled in 1.0.7, staged per circle; internal audit, external review planned)
+- [`docs/TREEKEM-DESIGN.md`](docs/TREEKEM-DESIGN.md) — MLS-style TreeKEM on our own PQ primitives: PCS + forward secrecy (enabled in 1.0.7 for circles with a verified owner; older circles carry across only by invitation; internal audit, external review planned)
 - [`docs/LINK-SYSTEM.md`](docs/LINK-SYSTEM.md) — the reach-me link / QR design
 - [`docs/MULTI-DEVICE.md`](docs/MULTI-DEVICE.md) — per-device transport identity + own-device sync convergence; many-device account design ahead
 - [`docs/SCHEDULED-MESSAGES.md`](docs/SCHEDULED-MESSAGES.md) — "send later" without a server

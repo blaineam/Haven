@@ -288,8 +288,12 @@
         defeated a <b>lost or stolen</b> phone but only deterred a fully <b>compromised</b> one; the
         seed-drop re-key that closes that gap is <b>enabled in 1.0.7</b> and stages per circle as
         everyone updates. Per-message forward secrecy and post-compromise security come from Haven's MLS-style
-        group layer, which is <b>enabled in 1.0.7</b> and turns on per circle once everyone's devices
-        have updated — its audit so far is internal, with an independent cryptographer's review planned.
+        group layer, which is <b>enabled in 1.0.7 for circles with a verified owner</b> — the ones you
+        make from 1.0.7 on. Circles you already have have no owner, and one can't be added after the
+        fact in a way other members could trust, so they <b>don't switch over by themselves</b>: they
+        keep the encryption they already have, which still cuts off someone you remove. Their creator
+        can offer an upgrade for each member to follow. Even on an owned circle it turns on only once
+        everyone's devices have updated and joined — its audit so far is internal, with an independent cryptographer's review planned.
         We'd rather tell you than let you assume. The full, unflinching
         version is the <a class="inline" href="#threat">threat model ↗</a>.
       </div>

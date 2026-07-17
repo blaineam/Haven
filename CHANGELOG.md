@@ -10,23 +10,28 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [1.0.7] — 2026-07-16
 
 The security-and-polish release. It re-roots multi-device identity so a **linked device never has
-to hold your master seed**, lands the entire machinery for **cryptographic device revocation**, and
-builds in a next-generation **MLS-style group-encryption** layer — all shipped so they roll out
-**gradually and per-circle as everyone updates**, with nothing to do and nothing lost. Plus a real
-**storage-management** suite and a fixed metadata leak.
+to hold your master seed**, lands the entire machinery for **cryptographic device revocation** —
+both rolling out **gradually and per-circle as everyone updates**, with nothing to do and nothing
+lost — and builds in a next-generation **MLS-style group-encryption** layer for circles with a
+**verified owner** (every circle you make from now on). Plus a real **storage-management** suite and
+a fixed metadata leak.
 
 > **Two honesty notes up front, because this is a security product.**
 > 1. The new crypto activates **per circle, as every member's devices update** — a coexistence
 >    (dual-seal) path keeps un-upgraded peers fully working the entire time. It is not an instant,
 >    universal flip.
-> 2. The MLS-style group layer is **enabled in this release**, activating **per circle once every
->    member's devices have updated and joined** (an all-present gate); until then the circle stays on
->    the existing key path, and a device that falls behind reverts its circles to that path within one
->    sync — no one is ever stranded, and it only ever changes *which key* seals content, never
->    *whether* content is encrypted. Its audit to date is an **internal, AI-driven adversarial
->    review** — 0 critical, 0 high — which is a strong first
->    pass, **not** a formal external audit; an independent cryptographer's review is planned and we
->    don't claim it's done. It is **MLS-*shaped*** (TreeKEM mechanisms on Haven's own post-quantum
+> 2. The MLS-style group layer is **enabled in this release, but it does not switch your existing
+>    circles over by itself.** It applies to circles that have a **verified owner** — every circle you
+>    make from now on. Circles you already have don't have one (nothing recorded who created them back
+>    then), and an owner can't be added after the fact in a way anyone else could trust, so they keep
+>    the encryption they already have — which still cuts off someone you remove. To carry an older
+>    circle across, whoever made it offers an upgrade and **each member taps once to follow it**; we
+>    show who's asking, because that's a judgement only a person can make. Even on a circle with an
+>    owner it turns on only once everyone's devices have updated and joined, and it only ever changes
+>    *which key* seals content, never *whether* content is encrypted. Its audit to date is an
+>    **internal, AI-driven adversarial review** — 0 critical, 0 high — which is a strong first pass,
+>    **not** a formal external audit; an independent cryptographer's review is planned and we don't
+>    claim it's done. It is **MLS-*shaped*** (TreeKEM mechanisms on Haven's own post-quantum
 >    primitives), **not** RFC-9420 wire-interoperable.
 
 ### Security
@@ -53,7 +58,7 @@ builds in a next-generation **MLS-style group-encryption** layer — all shipped
   re-enter). **Rollout is per-circle:** the account-key seal is retired for a circle only once every
   member's devices affirmatively advertise capability (an all-present-positive signal, never inferred
   from absence), so until your circle finishes updating, revocation stays on the safe dual-seal path.
-- **MLS-style group encryption — TreeKEM on Haven's own PQ primitives (D16 Phase 5, enabled, staged).**
+- **MLS-style group encryption — TreeKEM on Haven's own PQ primitives (D16 Phase 5, enabled for owner-verified circles).**
   A ratchet-tree group layer — propose/commit/welcome, O(log n) path updates, a one-way epoch
   schedule — that adds **post-compromise security** (a device that refreshes its leaf heals a past
   key exfiltration within the weekly rotation, without anyone noticing the compromise), a real
@@ -62,11 +67,18 @@ builds in a next-generation **MLS-style group-encryption** layer — all shipped
   Ed25519+ML-DSA-65) and the shipped epoch/content path unchanged — the tree only changes how the
   32-byte epoch key is *agreed*. It is deliberately **not** RFC-9420 interoperable (every ratified
   MLS ciphersuite is classical; interop would regress the post-quantum posture that is the product's
-  headline). The core keying master switch **defaults off**, and the 1.0.7 clients **enable it**:
-  the layer activates **per circle once every member's devices have updated and joined** (an
-  all-present/all-joined gate), and until a circle is fully capable it stays byte-identical to the
-  live sender-keys+epochs path — a device that falls behind reverts within one sync, and it only ever
-  changes *which key* seals content, never *whether* content is encrypted. The crypto has had an
+  headline). The core keying master switch **defaults off**, and the 1.0.7 clients **enable it** —
+  but only for circles with a **verified owner**, i.e. circles created from 1.0.7 onward, whose id is
+  cryptographically bound to their creator. **Circles that already exist do not switch over by
+  themselves:** they have no owner (nothing recorded who created them), and an owner cannot be added
+  after the fact in a way other members could trust, so they keep the encryption they already have —
+  which still cuts off someone you remove. To carry an older circle across, whoever made it **offers
+  an upgrade** and **each member taps once to follow it**; the app shows who is asking, because no
+  signature can prove someone created a circle that never recorded an owner — that judgement is a
+  person's. Even on a circle *with* an owner the layer activates only **once every member's devices
+  have updated and joined** (an all-present/all-joined gate), and until then it stays byte-identical
+  to the live sender-keys+epochs path — a device that falls behind reverts within one sync, and it
+  only ever changes *which key* seals content, never *whether* content is encrypted. The crypto has had an
   internal, human-directed adversarial code review; a formal external cryptographer's review is
   planned and remains the gate before the core default flips on (design M7). See
   [`docs/TREEKEM-DESIGN.md`](docs/TREEKEM-DESIGN.md).

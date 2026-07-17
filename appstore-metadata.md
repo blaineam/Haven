@@ -32,7 +32,7 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 A private, end‑to‑end encrypted home for your closest people. No ads, no tracking, peer‑to‑peer — just your people.
 
 ## whats_new
-1.0.7 — the security & polish release. Everything below upgrades automatically, per circle, as everyone updates. Nothing to do, nothing lost.
+1.0.7 — the security & polish release. Nothing to do, nothing lost.
 
 Stronger multi-device security
 • A device you link no longer has to hold a copy of your account's master key. Each device runs on its own keys, so removing a lost or stolen device can now cut it off cryptographically — from your circle's content and from the settings/contacts that sync between your devices — not just hide it.
@@ -50,7 +50,7 @@ More polish
 • Story styling, including how photos and video are framed, now looks the same on every platform.
 • Closed a metadata/location leak on video and tightened privacy throughout.
 
-Under the hood, the next generation of Haven's group encryption — forward secrecy and post-compromise security on our own post-quantum cryptography — is enabled in this release and turns on for each circle once everyone's devices have updated. Until then a circle keeps working exactly as before, and it only ever changes which key seals your content, never whether it's encrypted. Our own adversarial audit found no critical or high issues; an independent cryptographer's review is planned.
+Under the hood, the next generation of Haven's group encryption arrives — stronger protection built on our own post-quantum encryption. It covers the circles you make from now on, once everyone in them has updated. Circles you already have keep the protection they have today, which still cuts off anyone you remove; to bring one across, whoever made it can offer an upgrade, and each member taps once to follow. Either way, it only ever changes which key seals your content, never whether it's encrypted. Our own adversarial audit found no critical or high issues; an independent cryptographer's review is planned.
 
 Native on iPhone, iPad, and Mac. No ads, no tracking, no servers holding your data — same private Haven.
 

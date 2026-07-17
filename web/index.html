@@ -391,8 +391,15 @@
       <div class="callout reveal" style="margin-top:18px">
         <b>Also shipping, out in the open:</b> the next generation of Haven's group encryption —
         forward secrecy and post-compromise security, on our <b>own post-quantum cryptography</b>
-        (MLS-style, not a classical off-the-shelf standard). It's <b>enabled in this release</b> and
-        turns on <b>per circle once everyone's devices have updated and joined</b> — until then a
+        (MLS-style, not a classical off-the-shelf standard). It's <b>enabled in this release for
+        circles with a verified owner</b> — every circle you make from now on, whose id is bound to
+        whoever created it. <b>Circles you already have don't switch over by themselves:</b> nothing
+        recorded who created them, and an owner can't be added afterwards in a way everyone else could
+        trust, so they keep the encryption they already have — which still cuts off someone you
+        remove. To carry an older circle across, whoever made it <b>offers an upgrade</b> and
+        <b>each member taps once to follow it</b>; we show you who's asking, because that's a
+        judgement only a person can make. Even on a circle with an owner it turns on only
+        <b>once everyone's devices have updated and joined</b> — until then a
         circle stays on the existing key path, and a device that falls behind reverts within one sync,
         so no one is ever stranded. It only ever changes <i>which key</i> seals your content, never
         <i>whether</i> it's encrypted. We ran our own adversarial audit first — no critical or high

@@ -8,7 +8,7 @@ marked **UNVERIFIED** rather than asserted.
 
 | Surface | State |
 |---|---|
-| **iOS + iPadOS** | **Live on the App Store.** **1.0.7** is the security + polish release — seed-drop (seedless linking + cryptographic-revocation machinery), storage management, MLS-style group layer enabled and staged per circle as everyone updates, stories parity, desktop video GPS strip |
+| **iOS + iPadOS** | **Live on the App Store.** **1.0.7** is the security + polish release — seed-drop (seedless linking + cryptographic-revocation machinery), storage management, MLS-style group layer enabled for circles with a verified owner (older circles upgrade only if their creator offers it and each member follows), stories parity, desktop video GPS strip |
 | **macOS** | **Live on the App Store** (native `HavenMac`, not Catalyst). 1.0.7 alongside iOS |
 | **Apple Watch** | Shipped, embedded in the iOS app (`com.blaineam.kith.watchkitapp`) |
 | **Android** | Signed AAB on the Play **internal** track (in review, closed testing not yet public). No longer on GitHub Releases (`PUBLISH_ANDROID_TO_GH=false`); interim build is the `haven-android-apk` CI artifact |
@@ -35,8 +35,9 @@ block some of what the docs promise. In priority order:
 *(The security-relevant Outstanding items from earlier this cycle have **shipped**: **seed-drop /
 cryptographic device revocation** (S2–S5 core) and the **MLS-style TreeKEM** group layer both landed
 in 1.0.7 — see Shipped below; **periodic epoch rotation** and the **video EXIF/GPS strip** shipped
-2026-07-15. The MLS-style keying layer is **enabled in 1.0.7** and stages itself per circle as
-everyone updates; an **independent cryptographer's review** remains **planned/ongoing** (the audit to
+2026-07-15. The MLS-style keying layer is **enabled in 1.0.7 for circles with a verified owner** —
+those created from 1.0.7 on; existing circles keep their current encryption unless their creator
+offers an upgrade each member follows. An **independent cryptographer's review** remains **planned/ongoing** (the audit to
 date is internal) — see Shipped → "Seed-drop + MLS".)*
 
 ### Outstanding — parity / correctness
@@ -92,9 +93,14 @@ pinning (≤6, self-syncing), DM-delete watermark, group-DM sender rows.
 > multi-recipient PKE (`core/haven-p2p/src/social.rs:14-16`) over sender-keys + epochs
 > (`GROUP-KEYING.md`); removal/block rotation gives **cryptographic revocation**, which is real and
 > tested. As of 1.0.7 an **MLS-style TreeKEM** layer (post-compromise security + per-message FS) is
-> **enabled and staged** — no `mls-rs` dependency; it is home-grown on Haven's own hybrid-PQ
-> primitives. It activates **per circle once every member's devices have updated and joined**; until a
-> circle is fully capable it stays byte-identical to the sender-keys+epochs path. Its audit to date is
+> **enabled for circles with a verified owner** — no `mls-rs` dependency; it is home-grown on Haven's
+> own hybrid-PQ primitives. It applies to circles created from 1.0.7 on, whose id is cryptographically
+> bound to their creator; **circles that already exist do not switch over by themselves** (they have no
+> owner, and one can't be added after the fact in a way other members could trust), so they keep the
+> encryption they already have — which still cuts off someone you remove. An older circle carries
+> across only when whoever made it **offers an upgrade** and **each member taps once to follow it**.
+> Even on an owned circle it activates only **once every member's devices have updated and joined**;
+> until a circle is fully capable it stays byte-identical to the sender-keys+epochs path. Its audit to date is
 > internal; an external cryptographer's review is planned/ongoing.
 > See "Seed-drop + MLS" above and `TREEKEM-DESIGN.md`.
 
@@ -108,8 +114,10 @@ now wired** (2026-07-15): the full-history sync bundle advances any circle past 
 `lib.rs:1131-1149`), so a churn-free circle still gets bounded forward secrecy. See `GROUP-KEYING.md`.
 
 ### ✅ Seed-drop + MLS — cryptographic device revocation & group ratcheting (1.0.7, D16 Phases 2 & 5)
-Two coordinated crypto landings, both **automatic and per-circle** with a dual-seal coexistence path
-so un-upgraded (1.0.x) peers keep working throughout — no flag day, no re-onboarding, nothing lost.
+Two coordinated crypto landings with a dual-seal coexistence path so un-upgraded (1.0.x) peers keep
+working throughout — no flag day, no re-onboarding, nothing lost. Seed-drop is **automatic and
+per-circle**; the MLS-style layer applies **only to circles with a verified owner** (created from
+1.0.7 on), with older circles carried across by invitation only.
 
 - **Seed-drop (S2–S5 core).** Day-to-day operation re-rooted on **per-device keys** with account-signed
   `DeviceCredential`s; content seals to authorized **device bundles**; the **self-sync key is granted**
@@ -121,15 +129,20 @@ so un-upgraded (1.0.x) peers keep working throughout — no flag day, no re-onbo
   circle** only on an all-present-positive capability signal (`retire_account_key`, default off until
   a circle is fully capable — the documented, gated coexistence contract). Seed concentrates on one
   primary (SE-wrapped) + SE-wrapped iCloud-Keychain escrow. See `SEED-DROP-DESIGN.md`.
-- **MLS-style TreeKEM (M0–M6 core, enabled & staged in 1.0.7).** A ratchet-tree group layer — propose/commit/
+- **MLS-style TreeKEM (M0–M6 core, enabled in 1.0.7 for owner-verified circles).** A ratchet-tree group layer — propose/commit/
   welcome, O(log n) path updates, a one-way epoch schedule, deterministic fork resolution without a
   delivery service — adding **post-compromise security**, a **forward-secrecy deletion discipline**,
   and **per-message FS for DMs**, all on the *same* hybrid primitives and the *same* content path (the
   tree only changes how the 32-byte epoch key is agreed). Leaves are devices; the leaf credential is
   seed-drop's `DeviceCredential`. It is **MLS-*shaped*, not RFC-9420 interoperable** (locked decision:
   interop means a classical ciphersuite, which regresses the PQ headline). The **keying master switch
-  (`set_mls_keying`) defaults OFF in the core library**, and the 1.0.7 clients **enable it**,
-  activating **per circle once every member's devices have updated and joined**; until a circle is
+  (`set_mls_keying`) defaults OFF in the core library**, and the 1.0.7 clients **enable it for circles
+  with a verified owner** — those created from 1.0.7 on. **Existing circles do not switch over by
+  themselves:** with no owner recorded, and no way to add one after the fact that other members could
+  trust, they keep the encryption they already have — which still cuts off someone you remove. Their
+  creator can **offer an upgrade** that **each member taps once to follow**; the app shows who's
+  asking, since that judgement is a person's. Even on an owned circle it activates only **once every
+  member's devices have updated and joined**; until a circle is
   fully capable the layer stays byte-identical to the sender-keys+epochs path, and a device that falls
   behind reverts within one sync — it only ever changes *which key* seals content, never *whether*.
   See `TREEKEM-DESIGN.md`.
@@ -168,7 +181,7 @@ export done; enrollment QR/verify flow + UI ship. **Phase 4b** live device-to-de
 waiting out their mailbox poll; strictly additive (the mailbox put is unchanged), core + iOS/macOS +
 Android. **Phase 2 seed-drop (S2–S5 core) and Phase 5 MLS-style TreeKEM both landed in 1.0.7** — see
 "Seed-drop + MLS" above. *(Phase 4b's personal forwarder: not started; live delivery is not wired on
-desktop yet. The MLS keying layer is enabled in 1.0.7 and stages per circle as everyone updates; an external crypto review remains planned/ongoing.)*
+desktop yet. The MLS keying layer is enabled in 1.0.7 for circles with a verified owner — the ones made from 1.0.7 on; older circles keep their existing encryption unless their creator offers an upgrade each member follows. An external crypto review remains planned/ongoing.)*
 
 ### ✅ Apple apps (M3)
 iOS/iPadOS + native macOS SwiftUI on the Rust core via a UniFFI XCFramework. **Live on the App
@@ -257,12 +270,14 @@ push.
 
 ## Not started
 
-- ~~**MLS hardening**~~ — **enabled in 1.0.7, staged per circle.** A home-grown **MLS-style TreeKEM** on
+- ~~**MLS hardening**~~ — **enabled in 1.0.7 for circles with a verified owner.** A home-grown **MLS-style TreeKEM** on
   Haven's own hybrid-PQ primitives (not `mls-rs`, not RFC-9420 interop — see `TREEKEM-DESIGN.md` §8
   for why owning the seams beat OpenMLS here) adds post-compromise security, a forward-secrecy
   deletion discipline, and per-message FS for DMs. The code has landed through M6; the **core keying
-  master switch defaults OFF**, and the 1.0.7 clients **enable it**, activating per circle once every
-  member's devices have updated and joined. An **independent cryptographer's review** (design M7)
+  master switch defaults OFF**, and the 1.0.7 clients **enable it** for circles created from 1.0.7 on,
+  whose id is cryptographically bound to their creator — activating once every member's devices have
+  updated and joined. Circles that already exist have no owner and **do not get it automatically**;
+  their creator can offer an upgrade for each member to follow. An **independent cryptographer's review** (design M7)
   remains **planned/ongoing** — the audit to date is internal, and that review is the gate before the
   core default flips ON. See Shipped → "Seed-drop + MLS".
 - **D16 Phase 4b**: the always-on personal store-and-forward node (ordered backlog cache). The live

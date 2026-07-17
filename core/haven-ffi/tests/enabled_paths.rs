@@ -39,7 +39,9 @@ use haven_ffi::multidevice::{
 };
 use haven_ffi::HavenSocial;
 
+use haven_p2p::device::mint_owned_circle_id;
 use haven_p2p::groupkey::EpochEnvelope;
+use haven_p2p::identity::Identity;
 
 // Wire tags (mirrors the private consts in `src/lib.rs`; stable on-wire routing bytes).
 const TAG_EPOCH_EVENT: u8 = 0x02; // an EpochEnvelope (event sealed under a circle epoch key)
@@ -79,6 +81,11 @@ fn acct_hex(seed: [u8; 32]) -> String {
     HavenSocial::new(seed.to_vec()).unwrap().my_node_hex()
 }
 
+/// The 32-byte account id for a seed — the creator id an OWNED circle id binds to (F1).
+fn acct_bytes(seed: [u8; 32]) -> [u8; 32] {
+    Identity::from_seed(&seed).public().node_id_bytes()
+}
+
 /// Build (but do not install) a DEVICE-ONLY roster wire for `s` (the running device is the only tree
 /// leaf — every leaf maps to a live, joining device, the topology the §7.2 all-joined gate needs).
 fn device_only_roster_wire(s: &HavenSocial, seed: [u8; 32]) -> (Vec<u8>, Vec<Vec<u8>>) {
@@ -96,22 +103,30 @@ fn install_device_only_roster(s: &HavenSocial, seed: [u8; 32]) -> (Vec<u8>, Vec<
     (list, creds)
 }
 
-/// A fully-MLS-capable fleet in the default circle: device identities, device-only rosters,
-/// cross-learned rosters + capability cards, and a pinned creator. Does NOT flip the keying switch
-/// (the caller decides). Public-API twin of the in-crate `mls_capable_fleet`.
-fn mls_capable_fleet(seeds: &[[u8; 32]], devs: &[[u8; 32]], creator_idx: usize) -> Vec<Arc<HavenSocial>> {
-    let cid = DEFAULT_CIRCLE;
+/// A fully-MLS-capable fleet in a creator-OWNED circle (F1: creator authority requires an owned `c1…`
+/// id bound to the creator): device identities, device-only rosters, cross-learned rosters + capability
+/// cards, and a pinned creator. Returns the fleet plus the owned circle id. Does NOT flip the keying
+/// switch (the caller decides). Public-API twin of the in-crate `mls_capable_fleet`.
+fn mls_capable_fleet(seeds: &[[u8; 32]], devs: &[[u8; 32]], creator_idx: usize) -> (Vec<Arc<HavenSocial>>, String) {
+    // F1 — creator authority now requires an OWNED circle id that cryptographically binds to the
+    // creator, so the shared fleet uses an id minted from the creator's account (not ownerless "default").
+    let cid = mint_owned_circle_id(&acct_bytes(seeds[creator_idx]));
     let insts: Vec<Arc<HavenSocial>> = seeds.iter().map(|s| HavenSocial::new(s.to_vec()).unwrap()).collect();
     let n = insts.len();
     for (i, d) in devs.iter().enumerate() {
         assert!(insts[i].use_device_identity(d.to_vec()), "device identity adopts");
+    }
+    // The owned `c1…` id names no auto-created circle, so register it on every instance before the
+    // contact/roster wiring binds members to it.
+    for s in &insts {
+        s.create_circle(cid.clone(), "fleet".into());
     }
     let bundles: Vec<Vec<u8>> = insts.iter().map(|s| s.my_bundle()).collect();
     let mut rosters = Vec::new();
     for i in 0..n {
         for j in 0..n {
             if i != j {
-                insts[i].add_contact_bundle(cid.into(), bundles[j].clone()).unwrap();
+                insts[i].add_contact_bundle(cid.clone(), bundles[j].clone()).unwrap();
             }
         }
         rosters.push(install_device_only_roster(&insts[i], seeds[i]));
@@ -127,9 +142,9 @@ fn mls_capable_fleet(seeds: &[[u8; 32]], devs: &[[u8; 32]], creator_idx: usize) 
     }
     let creator_hex = acct_hex(seeds[creator_idx]);
     for s in &insts {
-        assert!(s.set_circle_creator(cid.into(), creator_hex.clone()), "creator pins");
+        assert!(s.set_circle_creator(cid.clone(), creator_hex.clone()), "creator pins");
     }
-    insts
+    (insts, cid)
 }
 
 /// Flip MLS keying on the whole fleet and sync all-to-all until it goes live everywhere.
@@ -201,8 +216,17 @@ fn migration_all_switches_on_loses_nothing_and_retire_account_leaf_reaches_live(
     me.set_seed_drop_retire(true);
     me.set_mls_keying(true);
     let me_hex = me.my_node_hex();
-    assert!(me.set_circle_creator("default".into(), me_hex.clone()));
-    assert!(me.set_circle_creator("fam".into(), me_hex.clone()));
+    // F1 — both "default" and "fam" are LEGACY migrated ids loaded from the golden fixture. Neither
+    // cryptographically binds to a creator (they are arbitrary legacy strings, not `c1…` owned ids), so
+    // `set_circle_creator` is now a no-op returning false BY DESIGN — legacy circles keep the legacy
+    // removal path and have no cryptographic creator. There is no public API to re-mint an existing
+    // circle's fixture-bound content (post `p-fam-1`, member Carol) under an owned id, and the projection
+    // below pins the migrated set to exactly {default, fam}; so these stay legacy and the flip proceeds
+    // without a pinned creator (creator authority is a removal concern, orthogonal to reaching LIVE).
+    assert!(!me.set_circle_creator("default".into(), me_hex.clone()),
+            "F1: a legacy/ownerless id binds no creator (personal default)");
+    assert!(!me.set_circle_creator("fam".into(), me_hex.clone()),
+            "F1: a legacy migrated id binds no creator (keeps the legacy removal path)");
     me.set_circle_live_lane("fam".into(), true); // mark a lane; inert until the circle keys live
 
     // ── Projection AFTER the flip must EQUAL the baseline — nothing wiped by enabling the switches. ──
@@ -241,7 +265,8 @@ fn migration_all_switches_on_loses_nothing_and_retire_account_leaf_reaches_live(
     assert!(me.ingest_roster_wire(bob_wire));
     me.profile_seed_drop_version(bob.my_bundle(), capability_card(&bob, "bob"));
     bob.profile_seed_drop_version(me.my_bundle(), capability_card(&me, "me"));
-    assert!(bob.set_circle_creator("default".into(), me_hex.clone()));
+    assert!(!bob.set_circle_creator("default".into(), me_hex.clone()),
+            "F1: the legacy default id binds no creator on the revived peer either");
     bob.set_seed_drop_retire(true);
     bob.set_mls_keying(true);
 
@@ -366,8 +391,8 @@ fn retirement_on_keys_device_only_and_cuts_the_account_seed_holder() {
 /// NO KeyCommit, and posts round-trip with an identical converged tree hash across all members.
 #[test]
 fn mls_keying_on_flips_live_stops_keycommit_and_content_round_trips() {
-    let cid = DEFAULT_CIRCLE;
-    let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32], [3u8; 32]], &[[11u8; 32], [12u8; 32], [13u8; 32]], 0);
+    let (insts, cid) = mls_capable_fleet(&[[1u8; 32], [2u8; 32], [3u8; 32]], &[[11u8; 32], [12u8; 32], [13u8; 32]], 0);
+    let cid = cid.as_str();
     let (a, b, c) = (insts[0].clone(), insts[1].clone(), insts[2].clone());
 
     // SWITCH OFF: shadow only — a KeyCommit is emitted and content flows (the legacy path).
@@ -422,9 +447,9 @@ fn mls_keying_on_flips_live_stops_keycommit_and_content_round_trips() {
 /// member cannot author a Remove at all — authority is enforced.
 #[test]
 fn circle_removal_cuts_off_the_device_and_non_admin_removal_is_rejected() {
-    let cid = DEFAULT_CIRCLE;
     // A is the creator; B stays; C is removed.
-    let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32], [3u8; 32]], &[[11u8; 32], [12u8; 32], [13u8; 32]], 0);
+    let (insts, cid) = mls_capable_fleet(&[[1u8; 32], [2u8; 32], [3u8; 32]], &[[11u8; 32], [12u8; 32], [13u8; 32]], 0);
+    let cid = cid.as_str();
     let (a, b, c) = (insts[0].clone(), insts[1].clone(), insts[2].clone());
     flip_and_join(&insts, cid);
     assert_eq!(a.mls_keying_status(cid.into()).state, "live");
@@ -465,13 +490,13 @@ fn circle_removal_cuts_off_the_device_and_non_admin_removal_is_rejected() {
 /// an accepted Remove that cuts the target off — proving `grant_circle_admin` composes with removal.
 #[test]
 fn creator_delegated_admin_can_remove_after_grant() {
-    let cid = DEFAULT_CIRCLE;
     // A creator; B a plain member (to be delegated); C a bystander; D the removal target.
-    let insts = mls_capable_fleet(
+    let (insts, cid) = mls_capable_fleet(
         &[[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]],
         &[[11u8; 32], [12u8; 32], [13u8; 32], [14u8; 32]],
         0,
     );
+    let cid = cid.as_str();
     let (a, b, d) = (insts[0].clone(), insts[1].clone(), insts[3].clone());
     flip_and_join(&insts, cid);
     let b_acct = acct_hex([2u8; 32]);
@@ -584,9 +609,9 @@ fn self_sync_revocation_rotates_key_and_cuts_the_revoked_device() {
 /// here we prove the wire indices + the out-of-order open the mailbox contract needs.)
 #[test]
 fn dm_live_lane_ratchets_and_opens_out_of_order() {
-    let cid = DEFAULT_CIRCLE;
     // A 2-party circle = a DM. Flip it live (tree-keyed content).
-    let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
+    let (insts, cid) = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
+    let cid = cid.as_str();
     let (a, b) = (insts[0].clone(), insts[1].clone());
     flip_and_join(&insts, cid);
     assert_eq!(a.mls_keying_status(cid.into()).state, "live", "the pair is keying-live");
@@ -639,10 +664,10 @@ fn dm_live_lane_ratchets_and_opens_out_of_order() {
 /// mechanism explicitly and assert its publicly-observable forward-secrecy consequence.
 #[test]
 fn pcs_committer_update_heals_forward_and_frozen_epoch_is_useless() {
-    let cid = DEFAULT_CIRCLE;
     // A is the creator/committer; B stays; X is the "exfiltration stand-in" — a member whose only
     // secrets are the epoch-1 (pre-heal) material.
-    let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32], [3u8; 32]], &[[11u8; 32], [12u8; 32], [13u8; 32]], 0);
+    let (insts, cid) = mls_capable_fleet(&[[1u8; 32], [2u8; 32], [3u8; 32]], &[[11u8; 32], [12u8; 32], [13u8; 32]], 0);
+    let cid = cid.as_str();
     let (a, b, x) = (insts[0].clone(), insts[1].clone(), insts[2].clone());
     flip_and_join(&insts, cid);
     assert_eq!(a.mls_keying_status(cid.into()).epoch, 1, "the fleet is live at the genesis (compromised) epoch");
@@ -688,7 +713,6 @@ fn pcs_committer_update_heals_forward_and_frozen_epoch_is_useless() {
 /// alike. Then, when the straggler upgrades and joins, the same circle re-flips to live keying.
 #[test]
 fn mixed_version_circle_stays_legacy_until_fully_capable_then_reflips() {
-    let cid = DEFAULT_CIRCLE;
     // A + B are fully capable; L is a legacy account (no device key, no capability marker).
     let a = account(1);
     let b = account(2);
@@ -696,6 +720,14 @@ fn mixed_version_circle_stays_legacy_until_fully_capable_then_reflips() {
     let witness = account(2); // fresh account-only witness of the account key
     assert!(a.use_device_identity(vec![11u8; 32]));
     assert!(b.use_device_identity(vec![12u8; 32]));
+
+    // F1 — a user-created shared circle needs a creator-bound OWNED id (A is the creator). Register it
+    // on every participant (incl. the read-only witness) before the contact wiring binds members to it.
+    let cid_owned = mint_owned_circle_id(&acct_bytes([1u8; 32]));
+    let cid = cid_owned.as_str();
+    for s in [&a, &b, &l, &witness] {
+        s.create_circle(cid.into(), "mixed".into());
+    }
 
     for (i, j) in [(&a, &b), (&a, &l), (&b, &l), (&b, &a), (&l, &a), (&l, &b)] {
         i.add_contact_bundle(cid.into(), j.my_bundle()).unwrap();

@@ -13,9 +13,9 @@ use haven_net::blobstore::BlobClient;
 use std::path::PathBuf;
 use haven_p2p::crypto::{decapsulate, encapsulate_to, open, seal, Encapsulation};
 use haven_p2p::device::{
-    admin_closure, circle_fully_mls_capable, circle_fully_seed_drop_capable, recipients_with_devices,
-    recipients_with_devices_gated, AdminGrant, ContactDevices, DeviceCredential, DeviceList,
-    SeedDropCapability,
+    admin_closure, circle_fully_mls_capable, circle_fully_seed_drop_capable, circle_id_binds_creator,
+    mint_owned_circle_id, recipients_with_devices, recipients_with_devices_gated, AdminGrant,
+    ContactDevices, DeviceCredential, DeviceList, SeedDropCapability,
 };
 use haven_p2p::treekem;
 use haven_p2p::identity::{Identity, HavenId};
@@ -2250,6 +2250,13 @@ fn mls_account_bundle(st: &NetState, idx: usize, acct: &[u8; 32]) -> Option<Have
 /// Remove is authorized by anyone (a circle with no established authority root can't cut members).
 fn circle_admin_set(st: &NetState, idx: usize) -> Option<std::collections::HashSet<[u8; 32]>> {
     let creator = st.circles[idx].creator?;
+    // Creator/admin authority is honored only when the circle id cryptographically binds to the
+    // creator (an owned `c1…` id). A legacy/ownerless circle has no such binding and therefore
+    // confers no admin authority — those circles use the legacy (roster / block) removal path; the
+    // cryptographic-eviction path is available on owned circles, whose creator is fixed by the id.
+    if !circle_id_binds_creator(&st.circles[idx].id, &creator) {
+        return None;
+    }
     let gid = st.circles[idx].id.as_bytes().to_vec();
     let mut edges: Vec<([u8; 32], [u8; 32])> = Vec::new();
     for w in &st.circles[idx].admin_grants {
@@ -2289,8 +2296,16 @@ fn receive_admin_grant(st: &mut NetState, idx: usize, body: &[u8]) -> Result<boo
     //     fallback the audit permits) — but WITHOUT marking it definition-pinned, so a later authentic
     //     definition can still override it (see `set_circle_creator` / `merge_circle`). A grant never
     //     sets `creator_pinned`.
+    // A creator is learned from a grant only if the circle id cryptographically binds to it (an
+    // owned `c1…` id). A grant on a legacy/ownerless circle, or one whose claimed creator doesn't
+    // match the id commitment, never establishes a creator — the id is the source of authority.
     match st.circles[idx].creator {
-        None => st.circles[idx].creator = Some(g.creator),
+        None => {
+            if circle_id_binds_creator(&st.circles[idx].id, &g.creator) {
+                st.circles[idx].creator = Some(g.creator);
+                st.circles[idx].creator_pinned = true; // id-bound ⇒ authenticated
+            }
+        }
         Some(c) if c == g.creator => {}
         Some(_) => return Ok(false), // a grant for a different authority root is not ours
     }
@@ -3655,6 +3670,13 @@ impl HavenSocial {
         let mut st = self.state.lock().unwrap();
         let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return false };
         let Ok(creator) = decode_hex32(&account_hex) else { return false };
+        // The creator is authoritative only when the circle id cryptographically binds to it (an
+        // owned `c1…` id from `create_circle_owned`). On a legacy/ownerless circle the id binds no
+        // one, so this is a no-op returning false: those circles have no cryptographic creator and
+        // use the legacy removal path.
+        if !circle_id_binds_creator(&circle_id, &creator) {
+            return false;
+        }
         st.circles[idx].creator = Some(creator);
         st.circles[idx].creator_pinned = true;
         // Announce the creator to peers via a self-grant (creator→creator), signed by my account key,
@@ -3853,6 +3875,25 @@ impl HavenSocial {
         if !st.circles.iter().any(|c| c.id == id) {
             st.circles.push(Circle::bare(id, name));
         }
+    }
+
+    /// Create a circle you OWN — its id cryptographically binds to your account, so its creator is
+    /// fixed by the id and established by every member without relying on an unauthenticated claim.
+    /// Returns the new id. This is the path every user-created circle should take so its members share
+    /// a verifiable creator for eviction authority; `create_circle` (caller-chosen id) stays for the
+    /// default/dm/legacy circles that have no owner. Idempotent on the returned id.
+    pub fn create_circle_owned(&self, name: String) -> String {
+        let me = { self.state.lock().unwrap().me().node_id_bytes() };
+        let id = mint_owned_circle_id(&me);
+        {
+            let mut st = self.state.lock().unwrap();
+            if !st.circles.iter().any(|c| c.id == id) {
+                st.circles.push(Circle::bare(id.clone(), name));
+            }
+        }
+        // Pin + announce me as the (binding-verified) creator, issuing the propagating self-grant.
+        let _ = self.set_circle_creator(id.clone(), self.my_node_hex());
+        id
     }
 
     pub fn rename_circle(&self, id: String, name: String) {
@@ -7238,13 +7279,21 @@ mod net_tests {
 
     /// Build a fully-MLS-capable fleet (device-only rosters, cross-learned capability + rosters, a
     /// pinned creator). Does NOT flip the keying switch — the caller decides. Returns the instances.
-    fn mls_capable_fleet(seeds: &[[u8; 32]], devs: &[[u8; 32]], creator_idx: usize) -> Vec<Arc<HavenSocial>> {
-        let cid = DEFAULT_CIRCLE.to_string();
+    fn mls_capable_fleet(seeds: &[[u8; 32]], devs: &[[u8; 32]], creator_idx: usize) -> (Vec<Arc<HavenSocial>>, String) {
+        // AUDIT F1 — creator authority now requires an OWNED circle id that binds to the creator, so
+        // the shared fleet uses an id minted from the creator's account (not the ownerless "default").
+        let creator_acct = Identity::from_seed(&seeds[creator_idx]).public().node_id_bytes();
+        let cid = mint_owned_circle_id(&creator_acct);
         let insts: Vec<Arc<HavenSocial>> =
             seeds.iter().map(|s| HavenSocial::new(s.to_vec()).unwrap()).collect();
         let n = insts.len();
         for (i, d) in devs.iter().enumerate() {
             assert!(insts[i].use_device_identity(d.to_vec()));
+        }
+        // AUDIT F1 — the owned `c1…` id names no auto-created circle (unlike the legacy "default"),
+        // so register it on every instance before the contact/roster wiring binds members to it.
+        for s in &insts {
+            s.create_circle(cid.clone(), "fleet".into());
         }
         let bundles: Vec<Vec<u8>> = insts.iter().map(|s| s.my_bundle()).collect();
         let mut rosters = Vec::new();
@@ -7271,7 +7320,7 @@ mod net_tests {
         for s in &insts {
             assert!(s.set_circle_creator(cid.clone(), creator_hex.clone()));
         }
-        insts
+        (insts, cid)
     }
 
     /// Flip the keying switch on the whole fleet and sync all-to-all until it goes live everywhere.
@@ -7295,8 +7344,7 @@ mod net_tests {
     #[test]
     fn mls_keying_flips_when_all_joined_and_content_round_trips() {
         let _clk = clock_guard(); // §6.4 PCS cadence reads the global clock; hold it steady (see clock_guard)
-        let cid = DEFAULT_CIRCLE.to_string();
-        let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32], [3u8; 32]], &[[11u8; 32], [12u8; 32], [13u8; 32]], 0);
+        let (insts, cid) = mls_capable_fleet(&[[1u8; 32], [2u8; 32], [3u8; 32]], &[[11u8; 32], [12u8; 32], [13u8; 32]], 0);
         let (a, b, c) = (&insts[0], &insts[1], &insts[2]);
 
         // SWITCH OFF: shadow only. A KeyCommit is emitted and content flows (the legacy path).
@@ -7358,9 +7406,8 @@ mod net_tests {
     #[test]
     fn mls_m6_dm_ratchet_rides_the_lane_and_opens_out_of_order() {
         let _clk = clock_guard();
-        let cid = DEFAULT_CIRCLE.to_string();
         // A 2-party circle = a DM. Flip it live (tree-keyed content).
-        let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
+        let (insts, cid) = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
         let (a, b) = (&insts[0], &insts[1]);
         flip_and_join(&insts, &cid);
         assert_eq!(a.mls_keying_status(cid.clone()).state, "live", "the pair is keying-live");
@@ -7400,8 +7447,7 @@ mod net_tests {
     #[test]
     fn mls_m6_off_switch_dm_is_not_ratcheted() {
         let _clk = clock_guard();
-        let cid = DEFAULT_CIRCLE.to_string();
-        let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
+        let (insts, cid) = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
         let a = &insts[0];
         // Mark the lane, but never flip the keying switch → not live.
         a.set_circle_live_lane(cid.clone(), true);
@@ -7418,9 +7464,8 @@ mod net_tests {
     #[test]
     fn s5_mls_removed_device_cannot_derive_or_reenter() {
         let _clk = clock_guard(); // §6.4 PCS cadence reads the global clock; hold it steady (see clock_guard)
-        let cid = DEFAULT_CIRCLE.to_string();
         // A is the creator/admin; B stays; C is removed.
-        let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32], [3u8; 32]], &[[11u8; 32], [12u8; 32], [13u8; 32]], 0);
+        let (insts, cid) = mls_capable_fleet(&[[1u8; 32], [2u8; 32], [3u8; 32]], &[[11u8; 32], [12u8; 32], [13u8; 32]], 0);
         let (a, b, c) = (&insts[0], &insts[1], &insts[2]);
         flip_and_join(&insts, &cid);
         assert_eq!(a.mls_keying_status(cid.clone()).state, "live");
@@ -7456,9 +7501,8 @@ mod net_tests {
     #[test]
     fn mls_remove_authority_is_enforced_by_receivers() {
         let _clk = clock_guard(); // §6.4 PCS cadence reads the global clock; hold it steady (see clock_guard)
-        let cid = DEFAULT_CIRCLE.to_string();
         // A creator; B a plain member; C a plain member; D the removal target.
-        let insts = mls_capable_fleet(
+        let (insts, cid) = mls_capable_fleet(
             &[[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]],
             &[[11u8; 32], [12u8; 32], [13u8; 32], [14u8; 32]],
             0,
@@ -7501,9 +7545,10 @@ mod net_tests {
     /// definition creator is rejected; the legitimate creator's authority holds; delegation still works.
     #[test]
     fn m2_forged_creator_grant_rejected_when_creator_is_definition_pinned() {
-        let cid = DEFAULT_CIRCLE.to_string();
-        let victim = HavenSocial::new([1u8; 32].to_vec()).unwrap();
         let real = Identity::from_seed(&[2u8; 32]);
+        let cid = mint_owned_circle_id(&real.public().node_id_bytes()); // creator-bound id
+        let victim = HavenSocial::new([1u8; 32].to_vec()).unwrap();
+        victim.create_circle(cid.clone(), "grp".into());
         let mallory = Identity::from_seed(&[9u8; 32]);
         let alice = Identity::from_seed(&[3u8; 32]);
         let real_hex = hex(&real.public().node_id_bytes());
@@ -7544,35 +7589,43 @@ mod net_tests {
         assert!(!victim.circle_admins(cid.clone()).contains(&mallory_hex), "a foreign-root grant grants no authority");
     }
 
-    /// AUDIT M2 — a hostile grant that races in FIRST (TOFU) is un-wedged the moment the authenticated
-    /// definition creator is established, and thereafter the hostile grant is rejected. This is the exact
-    /// permanent-wedge the first-grant-wins pin enabled, now closed.
+    /// Circle authority is bound to the circle id. On an OWNED circle a grant that names a false
+    /// creator installs nothing (no first-grant-wins learning), and on a legacy/ownerless circle no
+    /// grant confers creator authority at all. Both foreclose an insider racing a self-signed grant to
+    /// become the authority root — for owned and legacy circles alike.
     #[test]
-    fn m2_definition_creator_unwedges_a_tofu_hostile_grant() {
-        let cid = DEFAULT_CIRCLE.to_string();
-        let victim = HavenSocial::new([1u8; 32].to_vec()).unwrap();
+    fn creator_binding_forecloses_a_false_authority_root() {
         let real = Identity::from_seed(&[2u8; 32]);
         let mallory = Identity::from_seed(&[9u8; 32]);
         let real_hex = hex(&real.public().node_id_bytes());
         let mallory_hex = hex(&mallory.public().node_id_bytes());
-        victim.add_contact_bundle(cid.clone(), real.public().to_bytes()).unwrap();
-        victim.add_contact_bundle(cid.clone(), mallory.public().to_bytes()).unwrap();
-        let gid = cid.as_bytes();
 
-        // Mallory's grant reaches the victim BEFORE it learns the real creator ⇒ it weakly TOFU-learns
-        // creator=Mallory (the pre-fix wedge). This is the permitted legacy fallback — but it is NOT pinned.
-        let forged = AdminGrant::issue(&mallory, gid, mallory.public().node_id_bytes(), mallory.public().node_id_bytes(), 1);
-        victim.receive(cid.clone(), tagged(TAG_ADMIN_GRANT, &forged.to_bytes())).unwrap();
-        assert!(victim.circle_admins(cid.clone()).contains(&mallory_hex), "TOFU (legacy fallback) learns Mallory");
+        // ── OWNED circle (id binds `real`): a raced hostile grant installs NO creator. ──
+        let owned = mint_owned_circle_id(&real.public().node_id_bytes());
+        let victim = HavenSocial::new([1u8; 32].to_vec()).unwrap();
+        victim.create_circle(owned.clone(), "grp".into());
+        victim.add_contact_bundle(owned.clone(), real.public().to_bytes()).unwrap();
+        victim.add_contact_bundle(owned.clone(), mallory.public().to_bytes()).unwrap();
+        // Mallory races a self-signed grant naming herself the root, before the victim learns anyone.
+        let forged = AdminGrant::issue(&mallory, owned.as_bytes(), mallory.public().node_id_bytes(), mallory.public().node_id_bytes(), 1);
+        assert!(matches!(victim.receive(owned.clone(), tagged(TAG_ADMIN_GRANT, &forged.to_bytes())), Ok(false)));
+        assert!(victim.circle_admins(owned.clone()).is_empty(), "a raced grant installs no creator on an owned circle");
+        // The real creator is established from the binding-verified definition, and is the only root.
+        assert!(victim.set_circle_creator(owned.clone(), real_hex.clone()));
+        assert!(victim.circle_admins(owned.clone()).contains(&real_hex));
+        assert!(!victim.circle_admins(owned.clone()).contains(&mallory_hex));
+        assert!(matches!(victim.receive(owned.clone(), tagged(TAG_ADMIN_GRANT, &forged.to_bytes())), Ok(false)));
+        assert!(!victim.circle_admins(owned.clone()).contains(&mallory_hex), "the bound creator cannot be dislodged");
 
-        // The authenticated definition creator is then established → it OVERRIDES the TOFU pin (un-wedge).
-        assert!(victim.set_circle_creator(cid.clone(), real_hex.clone()));
-        assert!(victim.circle_admins(cid.clone()).contains(&real_hex), "the definition creator takes over");
-        assert!(!victim.circle_admins(cid.clone()).contains(&mallory_hex), "Mallory's wedge is undone");
-
-        // And Mallory can no longer re-wedge: her grant now disagrees with the pinned creator → dropped.
-        assert!(matches!(victim.receive(cid.clone(), tagged(TAG_ADMIN_GRANT, &forged.to_bytes())), Ok(false)));
-        assert!(!victim.circle_admins(cid.clone()).contains(&mallory_hex), "the pinned creator cannot be dislodged");
+        // ── LEGACY/ownerless circle (arbitrary id): no creator authority can be established at all. ──
+        let legacy = "team".to_string();
+        let v2 = HavenSocial::new([5u8; 32].to_vec()).unwrap();
+        v2.create_circle(legacy.clone(), "team".into());
+        v2.add_contact_bundle(legacy.clone(), mallory.public().to_bytes()).unwrap();
+        assert!(!v2.set_circle_creator(legacy.clone(), mallory_hex.clone()), "no creator can be pinned on an ownerless circle");
+        let g = AdminGrant::issue(&mallory, legacy.as_bytes(), mallory.public().node_id_bytes(), mallory.public().node_id_bytes(), 1);
+        let _ = v2.receive(legacy.clone(), tagged(TAG_ADMIN_GRANT, &g.to_bytes()));
+        assert!(v2.circle_admins(legacy.clone()).is_empty(), "an ownerless circle grants no creator authority");
     }
 
     /// AUDIT L1 — a genesis commit NOT signed by the elected creator (or an admin) is rejected at ingest
@@ -7580,8 +7633,7 @@ mod net_tests {
     /// (which the fleet converged on through this same gate) are admitted.
     #[test]
     fn m1_low_unauthenticated_genesis_is_rejected() {
-        let cid = DEFAULT_CIRCLE.to_string();
-        let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32], [3u8; 32]], &[[11u8; 32], [12u8; 32], [13u8; 32]], 0);
+        let (insts, cid) = mls_capable_fleet(&[[1u8; 32], [2u8; 32], [3u8; 32]], &[[11u8; 32], [12u8; 32], [13u8; 32]], 0);
         // Converge the shadow tree — every instance accepts the elected creator's genesis (the gate admits it).
         for _ in 0..4 { for i in 0..3 { for j in 0..3 { if i != j { sync(&insts[i], &insts[j], &cid); } } } }
         let b = &insts[1];
@@ -7661,14 +7713,14 @@ mod net_tests {
     #[test]
     fn mls_legacy_join_parks_then_reflips() {
         let _clk = clock_guard(); // §6.4 PCS cadence reads the global clock; hold it steady (see clock_guard)
-        let cid = DEFAULT_CIRCLE.to_string();
-        let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
+        let (insts, cid) = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
         let (a, b) = (&insts[0], &insts[1]);
         flip_and_join(&insts, &cid);
         assert_eq!(a.mls_keying_status(cid.clone()).state, "live", "the pair flips live");
 
         // A LEGACY newcomer joins: an account with no device key / no `ml` marker.
         let legacy = HavenSocial::new([9u8; 32].to_vec()).unwrap();
+        legacy.create_circle(cid.clone(), "fleet".into()); // the owned id names no auto-created circle
         a.add_contact_bundle(cid.clone(), legacy.my_bundle()).unwrap();
         b.add_contact_bundle(cid.clone(), legacy.my_bundle()).unwrap();
         legacy.add_contact_bundle(cid.clone(), a.my_bundle()).unwrap();
@@ -7748,6 +7800,7 @@ mod net_tests {
         creator_seed: [u8; 32],
         cid: &str,
     ) {
+        newcomer.create_circle(cid.to_string(), "fleet".into()); // the owned id names no auto-created circle
         install_device_only_roster(newcomer, newcomer_seed);
         let mut all: Vec<&Arc<HavenSocial>> = fleet.iter().collect();
         all.push(newcomer);
@@ -7797,9 +7850,8 @@ mod net_tests {
     #[test]
     fn mls_mid_life_add_enters_at_live_epoch_and_reads_history() {
         let _clk = clock_guard(); // §6.4 PCS cadence reads the global clock; hold it steady (see clock_guard)
-        let cid = DEFAULT_CIRCLE.to_string();
         // A (creator) + B go live at the genesis epoch; A posts history BEFORE C exists.
-        let base = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
+        let (base, cid) = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
         let (a, b) = (base[0].clone(), base[1].clone());
         flip_and_join(&base, &cid);
         assert_eq!(a.mls_keying_status(cid.clone()).state, "live");
@@ -7844,10 +7896,9 @@ mod net_tests {
     #[test]
     fn mls_sleeper_reenters_via_welcome_after_ttl() {
         let _clk = clock_guard(); // §6.4 PCS cadence reads the global clock; hold it steady (see clock_guard)
-        let cid = DEFAULT_CIRCLE.to_string();
         // A(creator), B, C, D live at the genesis epoch. C is the sleeper; D is a throwaway removed
         // to advance the epoch while C is offline.
-        let insts = mls_capable_fleet(
+        let (insts, cid) = mls_capable_fleet(
             &[[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]],
             &[[11u8; 32], [12u8; 32], [13u8; 32], [14u8; 32]],
             0,
@@ -7891,8 +7942,7 @@ mod net_tests {
     #[test]
     fn mls_revoked_device_welcome_fails_closed() {
         let _clk = clock_guard(); // §6.4 PCS cadence reads the global clock; hold it steady (see clock_guard)
-        let cid = DEFAULT_CIRCLE.to_string();
-        let base = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
+        let (base, cid) = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
         let (a, b) = (base[0].clone(), base[1].clone());
         flip_and_join(&base, &cid);
 
@@ -7929,9 +7979,8 @@ mod net_tests {
     #[test]
     fn mls_roster_revocation_drives_authority_checked_remove() {
         let _clk = clock_guard(); // §6.4 PCS cadence reads the global clock; hold it steady (see clock_guard)
-        let cid = DEFAULT_CIRCLE.to_string();
         // A(creator), B, C all live. C will be revoked via its own roster (a lost-device scenario).
-        let insts = mls_capable_fleet(&[[1u8; 32], [2u8; 32], [3u8; 32]], &[[11u8; 32], [12u8; 32], [13u8; 32]], 0);
+        let (insts, cid) = mls_capable_fleet(&[[1u8; 32], [2u8; 32], [3u8; 32]], &[[11u8; 32], [12u8; 32], [13u8; 32]], 0);
         let (a, b, c) = (&insts[0], &insts[1], &insts[2]);
         flip_and_join(&insts, &cid);
         assert_eq!(a.mls_keying_status(cid.clone()).epoch, 1, "genesis epoch");
@@ -7988,8 +8037,7 @@ mod net_tests {
     /// open n+1 absent a fresh Update) is proven at the schedule level in `treekem.rs`.
     #[test]
     fn mls_pcs_cadence_heals_committer_leaf_on_the_rotate_chokepoint() {
-        let cid = DEFAULT_CIRCLE.to_string();
-        let insts = mls_capable_fleet(&[[71u8; 32], [72u8; 32]], &[[81u8; 32], [82u8; 32]], 0);
+        let (insts, cid) = mls_capable_fleet(&[[71u8; 32], [72u8; 32]], &[[81u8; 32], [82u8; 32]], 0);
         let (a, b) = (&insts[0], &insts[1]);
         flip_and_join(&insts, &cid);
         assert_eq!(a.mls_keying_status(cid.clone()).epoch, 1, "the pair is live at the genesis epoch");
@@ -8033,8 +8081,7 @@ mod net_tests {
     /// and re-entry needs a fresh, current-epoch Welcome.
     #[test]
     fn fs_bug_3_welcome_joiner_secret_retention_is_bounded() {
-        let cid = DEFAULT_CIRCLE.to_string();
-        let insts = mls_capable_fleet(&[[73u8; 32], [74u8; 32]], &[[83u8; 32], [84u8; 32]], 0);
+        let (insts, cid) = mls_capable_fleet(&[[73u8; 32], [74u8; 32]], &[[83u8; 32], [84u8; 32]], 0);
         let (a, b) = (&insts[0], &insts[1]);
         flip_and_join(&insts, &cid);
         let (e1, root1, _i1, js1) = mls_capture_state(a, &cid);

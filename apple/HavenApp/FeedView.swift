@@ -330,12 +330,12 @@ final class FeedStore: ObservableObject {
 
     func createCircle(name: String, memberIds: [String] = []) {
         guard let social else { return }
-        let id = UUID().uuidString
-        social.createCircle(id: id, name: name)
-        // Switch-Flip §2: I am the creator (authority root). Record it so the pin is re-applied every
-        // launch, and pin it now so the propagating self-grant is authored immediately.
+        // Mint a creator-BOUND id: it commits to my account, so every member establishes this circle's
+        // creator from the id itself rather than from a claim on the wire. This also pins + announces
+        // the creator (the propagating self-grant), so no separate setCircleCreator is needed here.
+        let id = social.createCircleOwned(name: name)
+        // Switch-Flip §2: record it so the pin is re-applied on every launch.
         CircleCreatorStore.markCreated(id)
-        if AccountStore.storedSeed() != nil { _ = social.setCircleCreator(circleId: id, accountHex: social.myNodeHex()) }
         for m in memberIds { try? social.addExistingToCircle(circleId: id, nodeHex: m) }
         persist(); refreshCircles()
         activeCircleId = id

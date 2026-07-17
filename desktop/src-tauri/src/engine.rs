@@ -1632,10 +1632,11 @@ impl Engine {
     }
 
     pub fn create_circle(self: &Arc<Self>, name: String) -> String {
-        let id = format!("circle-{}-{}", &self.node_id_hex().chars().take(8).collect::<String>(), now_ms());
-        self.social.create_circle(id.clone(), name);
-        // §2: I created this circle → I am its authority root. Remember it (device-local) so the pin
-        // is re-applied every launch, and pin the creator now (issues the propagating self-grant).
+        // Mint a creator-BOUND id: it commits to this account, so every member establishes the circle's
+        // creator from the id itself rather than from a claim on the wire. This also pins + announces
+        // the creator (the propagating self-grant), so no separate set_circle_creator is needed here.
+        let id = self.social.create_circle_owned(name);
+        // §2: remember it (device-local) so the pin is re-applied every launch.
         {
             let mut p = self.prefs.lock().unwrap();
             if !p.created_circles.iter().any(|c| c == &id) {
@@ -1643,7 +1644,6 @@ impl Engine {
                 let _ = p.save(&self.paths);
             }
         }
-        self.social.set_circle_creator(id.clone(), self.node_id_hex());
         self.persist();
         self.emit_changed();
         id

@@ -487,11 +487,12 @@ object HavenNet : InboundListener {
         runCatching { social.circles().firstOrNull { it.id == id }?.name }.getOrNull() ?: "My Circle"
 
     fun createCircle(name: String): String {
-        val id = "circle-${nodeIdHex.take(8)}-${System.nanoTime()}"
-        runCatching { social.createCircle(id, name) }
-        // §2 — I created this circle, so pin myself as its creator (authority root). Remembered so it can
-        // be re-pinned on every launch (the pin is not persisted as a keying decision).
-        if (!core.seedless) { markCreatedCircle(id); runCatching { social.setCircleCreator(id, nodeIdHex) } }
+        // Mint a creator-BOUND id: it commits to this account, so every member establishes the circle's
+        // creator from the id itself rather than from a claim on the wire. This also pins + announces
+        // the creator, so no separate setCircleCreator call is needed here.
+        val id = social.createCircleOwned(name)
+        // §2 — remembered so the pin is re-applied on every launch (it isn't persisted as a keying decision).
+        markCreatedCircle(id)
         persist(); bumpCircles()
         setActiveCircle(id)
         return id

@@ -773,6 +773,46 @@ pub fn recipients_with_devices_gated(
 /// Domain-separation tag for the bytes an account signs to issue a circle admin grant.
 const ADMIN_DOMAIN: &[u8] = b"haven-circle-admin-v1";
 
+/// Domain for the creator commitment embedded in an **owned** circle id.
+const CIRCLE_CREATOR_DOMAIN: &[u8] = b"haven-circle-creator-v1";
+/// Prefix that marks a circle id as **creator-bound** (owned). A legacy/ownerless circle id
+/// (`default`, `dm:…`, a bare UUID) never carries it, and is treated as having no cryptographic
+/// creator — its removal authority uses the legacy (roster/block) path.
+pub const OWNED_CIRCLE_PREFIX: &str = "c1";
+
+/// The 16-byte one-way commitment to a circle's creator: `blake3(DOMAIN ‖ creator)[..16]`.
+/// It reveals nothing about the creator, but a holder of a claimed creator can verify the binding.
+fn circle_creator_tag(creator: &[u8; 32]) -> [u8; 16] {
+    let mut h = blake3::Hasher::new();
+    h.update(CIRCLE_CREATOR_DOMAIN);
+    h.update(creator);
+    let mut tag = [0u8; 16];
+    tag.copy_from_slice(&h.finalize().as_bytes()[..16]);
+    tag
+}
+
+/// Mint a **creator-bound** circle id: `c1 ‖ base32( creator_tag(16) ‖ random(16) )`.
+/// The id cryptographically commits to `creator`, so a member establishes the circle's creator by
+/// verifying it against the id itself rather than accepting an unauthenticated claim. Only the
+/// account the id commits to can be its creator. The random tail keeps two circles the same account
+/// creates distinct.
+pub fn mint_owned_circle_id(creator: &[u8; 32]) -> String {
+    use rand::RngCore;
+    let mut raw = [0u8; 32];
+    raw[..16].copy_from_slice(&circle_creator_tag(creator));
+    rand::rngs::OsRng.fill_bytes(&mut raw[16..]);
+    format!("{OWNED_CIRCLE_PREFIX}{}", data_encoding::BASE32_NOPAD.encode(&raw))
+}
+
+/// Does `circle_id` cryptographically bind to `creator`? True only for an owned (`c1…`) id whose
+/// embedded tag equals `circle_creator_tag(creator)`. A legacy/ownerless id always returns false —
+/// callers must treat that as "no authenticated creator" (never as "trust the claim").
+pub fn circle_id_binds_creator(circle_id: &str, creator: &[u8; 32]) -> bool {
+    let Some(rest) = circle_id.strip_prefix(OWNED_CIRCLE_PREFIX) else { return false };
+    let Ok(raw) = data_encoding::BASE32_NOPAD.decode(rest.as_bytes()) else { return false };
+    raw.len() == 32 && raw[..16] == circle_creator_tag(creator)
+}
+
 /// A monotonic, account-signed **circle admin grant** (§4.3). "Grantor G delegates admin of circle
 /// C to account X at version V." Signed by the GRANTOR's account key so a relay can neither forge it
 /// nor strip it undetectably; a receiver only turns it into authority if the grantor is itself the

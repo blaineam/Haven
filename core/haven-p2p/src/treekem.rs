@@ -2273,6 +2273,20 @@ pub fn confirmation_mac(confirm_key: &[u8; 32], confirmed_transcript_hash: &[u8;
     *blake3::keyed_hash(confirm_key, confirmed_transcript_hash).as_bytes()
 }
 
+/// Constant-time equality for MAC/hash comparison: fixed-work, no early exit, so comparison time
+/// does not depend on how many bytes match.
+#[inline]
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 // ── Fork tie-break + chain rule (§5.1) ───────────────────────────────────────────────────
 
 /// blake3 of a commit's FULL signed bytes — the §5.1 ordering key and the
@@ -2660,7 +2674,7 @@ pub fn apply_commit(
         let ctx = epoch_context(group_id, commit.epoch, &th, &cth);
         let mut init = *prev_init_secret;
         let s = advance_epoch(&mut init, &mut commit_secret, &ctx);
-        if confirmation_mac(&s.confirm_key, &cth)[..] != commit.confirmation_mac[..] {
+        if !ct_eq(&confirmation_mac(&s.confirm_key, &cth), &commit.confirmation_mac) {
             return Err(CoreError::Crypto("treekem: confirmation MAC did not verify"));
         }
         schedule = Some(s);

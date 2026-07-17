@@ -32,14 +32,27 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 A private, end‑to‑end encrypted home for your closest people. No ads, no tracking, peer‑to‑peer — just your people.
 
 ## whats_new
-What's new:
-• Posts you author now reach your own other devices instantly — no waiting for the next sync
-• Voice and video calls are sealed and signed end-to-end, exactly like your posts and messages
-• Shared photos and videos are verified against a fingerprint of the original, so nothing can be swapped in transit
-• Relay and mailbox access is limited to your circle's members
-• A top-to-bottom security audit, with hardening throughout — same private, serverless Haven
+1.0.7 — the security & polish release. Everything below upgrades automatically, per circle, as everyone updates. Nothing to do, nothing lost.
 
-Native on iPhone, iPad, and Mac.
+Stronger multi-device security
+• A device you link no longer has to hold a copy of your account's master key. Each device runs on its own keys, so removing a lost or stolen device can now cut it off cryptographically — from your circle's content and from the settings/contacts that sync between your devices — not just hide it.
+• Your master key stays on one primary device plus your encrypted iCloud Keychain backup, instead of being copied to every device.
+• This protection turns on for each circle once everyone in it has updated; until then, older devices keep working normally.
+
+Manage your storage
+• A new media cleanup screen lists everything you've downloaded, sorted by size — select and delete to free space.
+• Deleting media keeps the post and leaves a placeholder you can re-download anytime, so nothing is really lost.
+• "Keep on this device" pins anything you never want swept away.
+• Set limits by age or size, on your device and on a relay you run — and auto-delete now really removes the media, not just the post.
+• Video is compressed on posting to save space and data.
+
+More polish
+• Story styling, including how photos and video are framed, now looks the same on every platform.
+• Closed a metadata/location leak on video and tightened privacy throughout.
+
+Under the hood we're also building the next generation of Haven's group encryption — forward secrecy and post-compromise security on our own post-quantum cryptography. It's included in this release but stays switched off until an independent cryptographer's review, and we'll turn it on only when that's done.
+
+Native on iPhone, iPad, and Mac. No ads, no tracking, no servers holding your data — same private Haven.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

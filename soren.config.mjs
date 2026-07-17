@@ -50,14 +50,16 @@ export default {
       description: 'iOS simulator tests (Haven scheme)',
     },
 
-    // ── macOS: the native HavenMac scheme, on the macOS destination (no sim boot).
+    // ── macOS: the native HavenMac scheme has no XCTest target (its logic is covered by the core
+    //    Rust suite), so the meaningful gate is that it compiles cleanly on the macOS destination.
     macos: {
       type: 'xcodebuild-test',
+      action: 'build',
       platform: 'macos',
       project: 'apple/Haven.xcodeproj',
       scheme: 'HavenMac',
       destination: 'platform=macOS',
-      description: 'macOS tests (HavenMac scheme)',
+      description: 'macOS build (HavenMac scheme)',
     },
 
     // ── Android: JVM unit tests always; instrumented (connected) tests boot the

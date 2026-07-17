@@ -34,6 +34,7 @@
       <a href="features/">Features</a>
       <a href="relay/">Relays</a>
       <a href="#privacy">Privacy</a>
+      <a href="#security">Security</a>
       <a href="docs/">Docs</a>
       <a href="https://github.com/blaineam/haven" rel="noopener">GitHub</a>
       <a href="#download" class="cta">Get Haven</a>
@@ -329,6 +330,75 @@
       <div class="callout reveal" style="margin-top:18px">
         <b>The promise:</b> never logged, never sold, never readable. For the full picture,
         read the <a class="inline" href="docs/">threat model and architecture docs</a>.
+      </div>
+    </div>
+  </section>
+
+  <!-- ── What's new in 1.0.7 / security story ── -->
+  <section class="section" id="security" style="padding-top:24px">
+    <div class="container">
+      <div class="center reveal">
+        <span class="eyebrow">New in 1.0.7 · Security &amp; polish</span>
+        <h2 style="font-size:clamp(26px,4.5vw,40px)">Harder to break into, <span class="h-grad">easier to tidy up.</span></h2>
+        <p class="lead">
+          The big security release. It quietly upgrades how your devices trust each other and how
+          your storage stays under control — <b>automatically, circle by circle, as everyone
+          updates</b>. Nothing to set up, nothing lost.
+        </p>
+      </div>
+
+      <div class="grid cols-2 reveal" style="margin-top:34px">
+        <div class="card">
+          <h3 style="font-size:20px;margin-bottom:8px">A stolen device can now be locked out for real</h3>
+          <ul class="points" style="margin-top:6px">
+            <li><span class="dot"></span><span>A device you link <b>no longer has to hold a copy of your master key</b> — each one runs on its own keys.</span></li>
+            <li><span class="dot"></span><span>So removing a lost or stolen device can <b>cut it off cryptographically</b> — from your circle's content <em>and</em> from the settings and contacts that sync between your devices — not just hide it.</span></li>
+            <li><span class="dot"></span><span>Your master key stays on <b>one primary device plus your encrypted iCloud&nbsp;Keychain backup</b>, instead of being copied everywhere.</span></li>
+            <li><span class="dot"></span><span>Everything is still <b>hybrid post-quantum</b> — built to resist tomorrow's quantum computers, today.</span></li>
+          </ul>
+          <details class="tech">
+            <summary><span class="tag-tech">How the rollout works, honestly</span><span class="chev">›</span></summary>
+            <div class="tbody">
+              <p>This turns on <b>per circle, once every member's devices have updated</b> — an
+                all-present signal, never guessed from silence. Until then a coexistence path keeps
+                un-upgraded devices working exactly as before, so no one is ever stranded and no old
+                message becomes unreadable.</p>
+              <p>One honest limit stays honest: this shrinks the key's footprint from <i>every</i>
+                device to a single primary you choose. A fully compromised <i>primary</i> is still a
+                full compromise — the fix for that is rolling a new identity, same as before.</p>
+            </div>
+          </details>
+        </div>
+        <div class="card">
+          <h3 style="font-size:20px;margin-bottom:8px">Storage that stays under control</h3>
+          <ul class="points" style="margin-top:6px">
+            <li><span class="dot"></span><span><b>See what's taking space</b> — a cleanup screen lists everything you've downloaded, sorted by size.</span></li>
+            <li><span class="dot"></span><span>Delete to free space, and the post stays with a <b>placeholder you can re-download anytime</b> — nothing is really lost.</span></li>
+            <li><span class="dot"></span><span><b>"Keep on this device"</b> pins anything you never want swept away.</span></li>
+            <li><span class="dot"></span><span>Set limits by <b>age or size</b>, on your device and on a relay you run — and auto-delete now <b>really removes the media</b>, not just the post.</span></li>
+          </ul>
+          <details class="tech">
+            <summary><span class="tag-tech">And a little more polish</span><span class="chev">›</span></summary>
+            <div class="tbody">
+              <p>Video is compressed on posting to save space and data. Story styling — including how
+                photos and video are framed — now looks the same on every platform. And we closed a
+                location-metadata leak on video, so nothing about where a clip was taken rides along.</p>
+            </div>
+          </details>
+        </div>
+      </div>
+
+      <div class="callout reveal" style="margin-top:18px">
+        <b>Also shipping, out in the open:</b> the next generation of Haven's group encryption —
+        forward secrecy and post-compromise security, on our <b>own post-quantum cryptography</b>
+        (MLS-style, not a classical off-the-shelf standard). It's <b>enabled in this release</b> and
+        turns on <b>per circle once everyone's devices have updated and joined</b> — until then a
+        circle stays on the existing key path, and a device that falls behind reverts within one sync,
+        so no one is ever stranded. It only ever changes <i>which key</i> seals your content, never
+        <i>whether</i> it's encrypted. We ran our own adversarial audit first — no critical or high
+        findings, two mediums fixed — but that's our homework, not an outside review; an independent
+        cryptographer's review is <b>planned</b>. Read the
+        <a class="inline" href="docs/">design docs</a>.
       </div>
     </div>
   </section>

@@ -30,8 +30,15 @@ S3-compatible bucket, or a direct peer-to-peer link.
   Peer connections use free, swappable, community/public relays only as a last-resort
   encrypted pipe. The app is a one-time $9.99 with no subscription.
 - **Quantum-safe by default.** Every content key is derived from a *hybrid* of
-  classical (X25519) and post-quantum (ML-KEM-768) key exchange, so stored
-  ciphertext is protected against "harvest-now, decrypt-later" attacks.
+  classical (X25519) and post-quantum (ML-KEM-768) key exchange, and every signature
+  is hybrid Ed25519 + ML-DSA-65 — so stored ciphertext is protected against
+  "harvest-now, decrypt-later" attacks.
+- **Seedless device linking (1.0.7).** A device you link no longer has to hold a copy
+  of your account master seed: it runs on **per-device keys** with an account-signed
+  credential, so revoking it can cut it off **cryptographically** — from circle content
+  *and* your account-state channel — not just advisorily. The seed concentrates on one
+  primary device plus your encrypted iCloud-Keychain escrow. This rolls out **per-circle,
+  automatically, as everyone updates** (see [Status](#status)).
 - **No PII.** An account is just a keypair generated on-device. You're reachable
   by a permanent link or QR — no phone, no email, ever.
 - **Local-first transport.** Traffic prefers Bluetooth, then local/peer-to-peer
@@ -43,7 +50,10 @@ S3-compatible bucket, or a direct peer-to-peer link.
 ## Status
 
 **1.0 is live on the App Store for iPhone, iPad, and Mac**
-(https://apps.apple.com/app/id6782147901 — 1.0.4 public, 1.0.5 in review)
+(https://apps.apple.com/app/id6782147901 — **1.0.7** is the security + polish release:
+seedless device linking, the cryptographic-revocation machinery, storage management,
+and an MLS-style group layer that is enabled and rolls out per circle as everyone updates — see
+[`CHANGELOG.md`](CHANGELOG.md))
 and **Windows is live on the Microsoft Store**
 (https://apps.microsoft.com/store/detail/9NKTFH1MF4LM).
 Android is on Google Play's **internal** track (closed testing, not yet public)
@@ -65,11 +75,28 @@ nearby Bluetooth/Wi-Fi mesh daily. Done so far:
   (a contact who never held your seed) rotates the epoch so they can't decrypt content
   posted after — this member removal is **cryptographic**, not advisory. The epoch also
   rotates on a **7-day periodic schedule** (driven by the sync bundle in core), so a quiet
-  circle still gets bounded forward secrecy. Note the honest limit: revoking one of your
-  **own** linked devices is **advisory, not cryptographic** — that device holds a copy of
-  the master seed, so revocation defeats a *lost/stolen* device, not a *compromised* one
-  (the cryptographic fix, seed-drop, is designed for 1.0.7, not yet shipped). See
-  [`docs/GROUP-KEYING.md`](docs/GROUP-KEYING.md) and [`docs/SECURITY.md`](docs/SECURITY.md).
+  circle still gets bounded forward secrecy. See [`docs/GROUP-KEYING.md`](docs/GROUP-KEYING.md)
+  and [`docs/SECURITY.md`](docs/SECURITY.md).
+- **Seed-drop — cryptographic device revocation (1.0.7, D16 Phase 2 · S2–S5 core).** Day-to-day
+  operation is re-rooted on **per-device keys** with account-signed credentials; a device linked
+  through the new **seedless** flow never receives the master seed, and revoking a device can
+  cut it off cryptographically — excluded from the next key commit *and* re-keyed out of the
+  account-state channel — with a seedless device unable to forge a roster to re-add itself. It
+  **activates per-circle** once every member's devices advertise capability (all-present-positive,
+  never inferred from absence); until then a **dual-seal** coexistence path keeps un-upgraded peers
+  fully working. See [`docs/SEED-DROP-DESIGN.md`](docs/SEED-DROP-DESIGN.md).
+- **MLS-style group encryption — TreeKEM on our own PQ primitives (1.0.7, enabled, staged).** A
+  ratchet-tree group layer adding post-compromise security, a forward-secrecy deletion discipline,
+  and per-message forward secrecy for DMs, reusing Haven's existing hybrid primitives. It is
+  **MLS-*shaped*, not RFC-9420 wire-interoperable** (every ratified MLS ciphersuite is classical;
+  interop would regress the PQ posture). It is **enabled in 1.0.7**, activating **per circle once
+  every member's devices have updated and joined** (an all-present/all-joined gate); until then the
+  circle stays on the existing key path (byte-identical to 1.0.6), and a device that falls behind
+  reverts its circles to that legacy path within one sync — no one is ever stranded, and it only
+  ever changes *which key* seals content, never *whether* content is encrypted. Its audit to date is
+  an **internal**, AI-driven adversarial code review — 0 critical / 0 high (2 mediums remediated) — a
+  strong first pass, **not** a formal external audit; an independent cryptographer's review is
+  planned/ongoing. See [`docs/TREEKEM-DESIGN.md`](docs/TREEKEM-DESIGN.md).
 - **Own-device sync that converges** — a user's own iPhone/iPad/Mac share the account
   identity but take **per-device transport identities**, and their divergent per-device
   epoch keys now deterministically converge (both devices adopt the numerically-larger
@@ -164,6 +191,8 @@ noncommercial restriction is the difference). Contributions require a CLA/DCO.
 - [`docs/SECURITY.md`](docs/SECURITY.md) — the security model in one place (crypto, what a relay can/can't do, deterrents)
 - [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) — what we defend against, and abuse resistance
 - [`docs/GROUP-KEYING.md`](docs/GROUP-KEYING.md) — epoch sender-keys: revocation + bounded forward secrecy (PQ-preserving)
+- [`docs/SEED-DROP-DESIGN.md`](docs/SEED-DROP-DESIGN.md) — per-device keys + seedless linking: cryptographic device revocation (1.0.7)
+- [`docs/TREEKEM-DESIGN.md`](docs/TREEKEM-DESIGN.md) — MLS-style TreeKEM on our own PQ primitives: PCS + forward secrecy (enabled in 1.0.7, staged per circle; internal audit, external review planned)
 - [`docs/LINK-SYSTEM.md`](docs/LINK-SYSTEM.md) — the reach-me link / QR design
 - [`docs/MULTI-DEVICE.md`](docs/MULTI-DEVICE.md) — per-device transport identity + own-device sync convergence; many-device account design ahead
 - [`docs/SCHEDULED-MESSAGES.md`](docs/SCHEDULED-MESSAGES.md) — "send later" without a server

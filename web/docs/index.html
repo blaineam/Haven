@@ -284,10 +284,13 @@
       <!-- Honest-limits callout -->
       <div class="callout reveal">
         <b>The honest limits, in one place:</b> a relay or a peer can see your <b>IP address</b> while it
-        moves your bytes (never logged, but use a VPN if that matters). Revoking a device defeats a
-        <b>lost or stolen</b> phone, not a fully <b>compromised</b> one, until the seed-drop re-key ships in
-        1.0.7. And Haven doesn't yet have per-message forward secrecy or post-compromise security — that
-        needs MLS, which isn't built yet. We'd rather tell you than let you assume. The full, unflinching
+        moves your bytes (never logged, but use a VPN if that matters). Historically, revoking a device
+        defeated a <b>lost or stolen</b> phone but only deterred a fully <b>compromised</b> one; the
+        seed-drop re-key that closes that gap is <b>enabled in 1.0.7</b> and stages per circle as
+        everyone updates. Per-message forward secrecy and post-compromise security come from Haven's MLS-style
+        group layer, which is <b>enabled in 1.0.7</b> and turns on per circle once everyone's devices
+        have updated — its audit so far is internal, with an independent cryptographer's review planned.
+        We'd rather tell you than let you assume. The full, unflinching
         version is the <a class="inline" href="#threat">threat model ↗</a>.
       </div>
     </div>

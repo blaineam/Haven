@@ -7,6 +7,113 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.0.7] — 2026-07-16
+
+The security-and-polish release. It re-roots multi-device identity so a **linked device never has
+to hold your master seed**, lands the entire machinery for **cryptographic device revocation**, and
+builds in a next-generation **MLS-style group-encryption** layer — all shipped so they roll out
+**gradually and per-circle as everyone updates**, with nothing to do and nothing lost. Plus a real
+**storage-management** suite and a fixed metadata leak.
+
+> **Two honesty notes up front, because this is a security product.**
+> 1. The new crypto activates **per circle, as every member's devices update** — a coexistence
+>    (dual-seal) path keeps un-upgraded peers fully working the entire time. It is not an instant,
+>    universal flip.
+> 2. The MLS-style group layer is **enabled in this release**, activating **per circle once every
+>    member's devices have updated and joined** (an all-present gate); until then the circle stays on
+>    the existing key path, and a device that falls behind reverts its circles to that path within one
+>    sync — no one is ever stranded, and it only ever changes *which key* seals content, never
+>    *whether* content is encrypted. Its audit to date is an **internal, AI-driven adversarial
+>    review** — 0 critical, 0 high; the two mediums it found were remediated — which is a strong first
+>    pass, **not** a formal external audit; an independent cryptographer's review is planned and we
+>    don't claim it's done. It is **MLS-*shaped*** (TreeKEM mechanisms on Haven's own post-quantum
+>    primitives), **not** RFC-9420 wire-interoperable.
+
+### Security
+
+- **Seedless device linking (seed-drop, D16 Phase 2 · S2–S5 core).** Historically every device you
+  linked held a *copy of your account master seed*, so revoking a device was a strong deterrent
+  against a **lost/stolen** phone but only advisory against a genuinely **compromised** one (the
+  seed it already held kept decrypting, and — because roster authority *was* the account key — a
+  seed-holder could re-sign a higher-version device list and re-add itself). This release re-roots
+  day-to-day operation on **per-device keys**: a device now authors and signs under its own keypair,
+  carries an account-signed `DeviceCredential`, and content seals to authorized **device bundles**.
+  A device enrolled through the new **seedless** flow holds *only* its device key + credential and
+  **never receives the master seed**; the seed concentrates on one primary device
+  (Secure-Enclave-wrapped) plus the existing SE-wrapped iCloud-Keychain escrow. Seedless-enrollment
+  onboarding UI ships on **iOS, macOS, Android, and desktop**. See
+  [`docs/SEED-DROP-DESIGN.md`](docs/SEED-DROP-DESIGN.md).
+- **Revocation becomes a cryptographic cut — content *and* the account-state channel.** With the
+  machinery above, revoking a device can now cut it off cryptographically: it is excluded from the
+  circle's next key commit (can't read anything posted after) **and** the self-sync key is re-keyed
+  on revocation, so a revoked device can no longer read or write your account-state stream
+  (profile / contacts / circles / settings). A seedless device also **cannot forge** a higher-version
+  roster to re-add itself, because roster authority is the account key it does not hold. Proven by
+  the `s5` core test (a revoked seedless device can neither decrypt post-revocation content nor
+  re-enter). **Rollout is per-circle:** the account-key seal is retired for a circle only once every
+  member's devices affirmatively advertise capability (an all-present-positive signal, never inferred
+  from absence), so until your circle finishes updating, revocation stays on the safe dual-seal path.
+- **MLS-style group encryption — TreeKEM on Haven's own PQ primitives (D16 Phase 5, enabled, staged).**
+  A ratchet-tree group layer — propose/commit/welcome, O(log n) path updates, a one-way epoch
+  schedule — that adds **post-compromise security** (a device that refreshes its leaf heals a past
+  key exfiltration within the weekly rotation, without anyone noticing the compromise), a real
+  **forward-secrecy deletion discipline**, and **per-message forward secrecy for DMs** (a sender
+  ratchet). It reuses Haven's existing hybrid primitives (X25519+ML-KEM-768 → AES-256-GCM,
+  Ed25519+ML-DSA-65) and the shipped epoch/content path unchanged — the tree only changes how the
+  32-byte epoch key is *agreed*. It is deliberately **not** RFC-9420 interoperable (every ratified
+  MLS ciphersuite is classical; interop would regress the post-quantum posture that is the product's
+  headline). The core keying master switch **defaults off**, and the 1.0.7 clients **enable it**:
+  the layer activates **per circle once every member's devices have updated and joined** (an
+  all-present/all-joined gate), and until a circle is fully capable it stays byte-identical to the
+  live sender-keys+epochs path — a device that falls behind reverts within one sync, and it only ever
+  changes *which key* seals content, never *whether* content is encrypted. Its audit to date is
+  internal (0 critical / 0 high, 2 mediums remediated); an independent cryptographer's review is
+  planned/ongoing (design M7 is the gate before the core default flips on). See
+  [`docs/TREEKEM-DESIGN.md`](docs/TREEKEM-DESIGN.md) and the internal audit at
+  [`docs/audits/SECURITY-AUDIT-crypto-2026-07-16.md`](docs/audits/SECURITY-AUDIT-crypto-2026-07-16.md).
+- **Internal adversarial crypto audit.** An AI-driven, human-directed adversarial code review of the
+  seed-drop + TreeKEM code (not the design's aspirational text) found **0 critical / 0 high**; the
+  two mediums — the self-sync key not being rotated on revocation, and a first-grant-wins pin on the
+  circle-creator authority root — were **remediated**, along with a low-severity genesis-authentication
+  hardening. The review is explicitly *not* a substitute for the planned external cryptographer's
+  audit, which remains the gate for turning the group layer on by default.
+
+### Added
+
+- **Storage management** (all clients). A media-cleanup screen lists everything you've downloaded,
+  **sortable by size**, with multi-select delete; deleting media **keeps the metadata** and leaves a
+  **re-downloadable placeholder**, so a freed photo/video comes back on demand and nothing about the
+  post is lost. A per-item **"keep on this device"** pin protects anything you never want auto-swept.
+- **Local + relay retention limits, that really delete.** You can cap on-device media by **age and/or
+  size**; auto-delete now **actually removes the media bytes** (with a real blob GC — purge-linked
+  deletion plus an orphan sweep — on iOS, Android, and desktop), not just hides the post. A relay
+  operator can likewise choose **time and/or size** retention (least-space-wins), and expired content
+  is genuinely deleted from the log, not merely masked.
+- **Video compression** on posting (Android transcode landed; the optimize-vs-lossless toggle carries
+  across), so clips cost less storage and bandwidth end-to-end.
+
+### Changed
+
+- **Stories: full cross-platform parity.** Story styling — including **media framing** — now travels
+  intact between platforms, and desktop authors styled captions, so a story looks the same to
+  everyone regardless of what they're on.
+- **Automatic, in-place migration.** Existing accounts, circles, history, and contact with
+  un-upgraded (1.0.x) peers are preserved throughout: devices keep reading older account-sealed
+  content (dual-open), capability is negotiated peer-to-peer, and every transition is additive and
+  gated on a positive signal — there is no flag day, no re-onboarding, and no new identity.
+
+### Fixed
+
+- **Metadata / GPS leak on video closed on the desktop export path** (the last platform where a video
+  could carry EXIF/GPS), matching the iOS and Android strips already in place. A fixed
+  plaintext-media-cache leak was also closed as part of the blob-GC work.
+
+### Platforms
+
+- **Windows is live on the [Microsoft Store](https://apps.microsoft.com/store/detail/9NKTFH1MF4LM)**
+  (x64 & Arm64), no longer distributed via GitHub Releases. Linux GUI + the `haven-relay` daemon
+  continue to ship free on GitHub Releases.
+
 ## [Unreleased] — 2026-07-14
 
 ### Added

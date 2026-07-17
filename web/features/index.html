@@ -339,11 +339,16 @@
                   or empty device can never tombstone content that already exists elsewhere.</p>
                 <p>Each device is authorized by a credential your long-term identity key signs into an
                   account device-list, so adding or revoking a device never changes who you are to your
-                  contacts. Today a linked device holds a copy of your account seed, so revoking one is a
-                  strong deterrent against a <em>lost or stolen</em> phone — but not yet a cryptographic
-                  guarantee against a fully <em>compromised</em> one. The design that makes revocation
-                  cryptographic (a per-device re-key, "seed-drop") is built out and planned for a coming
-                  release.</p>
+                  contacts. As of <b>1.0.7</b>, a device you link no longer has to hold a copy of your
+                  account seed — it runs on its own <b>per-device keys</b>, and a device added through
+                  the new <b>seedless</b> flow never receives the master seed at all. That lets Haven
+                  cut a revoked device off <b>cryptographically</b> — excluded from your circle's next
+                  encryption epoch <em>and</em> re-keyed out of the settings/contacts stream that syncs
+                  between your devices — with a seedless device unable to forge a new device-list to
+                  re-add itself. It turns on <b>per circle, once everyone's devices have updated</b>
+                  (older devices keep working the whole time). One honest limit remains: a fully
+                  compromised <em>primary</em> device is still a full compromise — the answer there is
+                  rolling a new identity. See the seed-drop design doc.</p>
               </div>
             </details>
           </div>

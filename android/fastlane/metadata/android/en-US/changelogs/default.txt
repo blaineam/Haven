@@ -1,6 +1,3 @@
-• Voice & video calls are now sealed and signed end-to-end, just like your posts and messages
-• Photos and videos verify against a fingerprint of the original, so a relay can never swap them
-• Relay and mailbox access is limited to your circle's members only
-• Groundwork for gracefully re-keying a lost or stolen device
-• Media fills the width of the feed; multi-photo posts swipe as a carousel
-• Private, end-to-end encrypted circles — no ads, no tracking
+• A linked device no longer holds a copy of your master key — each runs on its own keys, so removing a lost or stolen device can now cut it off cryptographically. Turns on per circle as everyone updates.
+• Storage cleanup: see downloads by size, delete to free space, keep a re-downloadable placeholder, pin favourites, set age/size limits that really delete.
+• Video is compressed on posting; story styling now matches across platforms; closed a video location-metadata leak.

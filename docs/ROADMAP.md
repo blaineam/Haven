@@ -1,6 +1,6 @@
 # Roadmap
 
-**Last verified against the code: 2026-07-15.** Every "shipped" claim below was checked against
+**Last verified against the code: 2026-07-16.** Every "shipped" claim below was checked against
 an implementation, not against another doc. Where a claim couldn't be verified either way it is
 marked **UNVERIFIED** rather than asserted.
 
@@ -8,8 +8,8 @@ marked **UNVERIFIED** rather than asserted.
 
 | Surface | State |
 |---|---|
-| **iOS + iPadOS** | **1.0.4 live on the App Store.** 1.0.5 (build 189) in review — feed blur backdrop + carousel, web post links, relay nudge, call fixes |
-| **macOS** | **1.0.4 live on the App Store** (native `HavenMac`, not Catalyst). 1.0.5 in review |
+| **iOS + iPadOS** | **Live on the App Store.** **1.0.7** is the security + polish release — seed-drop (seedless linking + cryptographic-revocation machinery), storage management, MLS-style group layer enabled and staged per circle as everyone updates, stories parity, desktop video GPS strip |
+| **macOS** | **Live on the App Store** (native `HavenMac`, not Catalyst). 1.0.7 alongside iOS |
 | **Apple Watch** | Shipped, embedded in the iOS app (`com.blaineam.kith.watchkitapp`) |
 | **Android** | Signed AAB on the Play **internal** track (in review, closed testing not yet public). No longer on GitHub Releases (`PUBLISH_ANDROID_TO_GH=false`); interim build is the `haven-android-apk` CI artifact |
 | **Windows** | Real `.msi` / NSIS `.exe` (x64 &amp; Arm64), **live on the [Microsoft Store](https://apps.microsoft.com/store/detail/9NKTFH1MF4LM)**. No longer on GitHub Releases (`PUBLISH_WINDOWS_TO_GH=false`); interim build is the `desktop-windows` CI artifact |
@@ -18,7 +18,7 @@ marked **UNVERIFIED** rather than asserted.
 | **Web** | Invite-landing / promo page only — the client was abandoned (M6) |
 | **tvOS** | Does not exist and is not planned |
 
-Version skew check: Apple `1.0.5`/`189` (`apple/project.yml:115-116`); desktop + Android ship
+Version skew check: Apple `1.0.7`/`206` (`apple/project.yml:115-116,185-186`); desktop + Android ship
 from tag `v0.1.0-beta.40`; core crates are all `0.0.1` and unversioned. That's intentional, not drift.
 
 ---
@@ -29,23 +29,15 @@ from tag `v0.1.0-beta.40`; core crates are all `0.0.1` and unversioned. That's i
 media, music, mesh calls, screen share, nearby, relay, notifications, multi-device, scheduled
 messages — is built and shipping on the Apple platforms, which is where v1 actually launches.
 
-**But there are real gaps, and two are security-relevant.** None of them block an Apple v1; they
-block *claiming parity*, and they block some of what the docs promise. In priority order:
+**But there are real gaps.** None of them block an Apple v1; they block *claiming parity*, and they
+block some of what the docs promise. In priority order:
 
-### Outstanding — security-relevant
-
-1. **Revocation is advisory, not adversary-proof.** A linked device holds a **copy of the account
-   master seed** (that's what `haven-seed:` move-to-device transfers), and the engine runs under that
-   copied seed rather than a per-device key. Revoking marks a device revoked; it does **not**
-   invalidate the seed it already holds. Since device lists merge higher-version-wins
-   (`core/haven-p2p/src/device.rs`), an attacker with the seed can sign a fresh higher-version list
-   and **re-add itself**. Revocation works against a *lost/stolen* device, not a *compromised* one.
-   → The finalizing "seed-drop" re-key is **designed and planned for 1.0.7** — see
-   [`SEED-DROP-DESIGN.md`](SEED-DROP-DESIGN.md) (D16 Phase 2); not yet built. Until it ships, the only
-   remedy against a genuinely compromised device is rolling a new identity. See `MULTI-DEVICE.md`.
-
-*(Two items that were security-relevant Outstanding earlier this cycle — **periodic epoch rotation**
-and the **video EXIF/GPS strip** — both shipped 2026-07-15; see Shipped below.)*
+*(The security-relevant Outstanding items from earlier this cycle have **shipped**: **seed-drop /
+cryptographic device revocation** (S2–S5 core) and the **MLS-style TreeKEM** group layer both landed
+in 1.0.7 — see Shipped below; **periodic epoch rotation** and the **video EXIF/GPS strip** shipped
+2026-07-15. The MLS-style keying layer is **enabled in 1.0.7** and stages itself per circle as
+everyone updates; an **independent cryptographer's review** remains **planned/ongoing** (the audit to
+date is internal) — see Shipped → "Seed-drop + MLS".)*
 
 ### Outstanding — parity / correctness
 
@@ -96,12 +88,15 @@ hybrid-signed, with a `build_feed` reducer enforcing author-authorized edit/unse
 approval + blocking; per-circle privacy (Spotlight + Face ID lock). Messages UX: recency sort,
 pinning (≤6, self-syncing), DM-delete watermark, group-DM sender rows.
 
-> **Not MLS.** This is multi-recipient PKE (`core/haven-p2p/src/social.rs:14-16`). There is no
-> `mls-rs` dependency and no MLS code in the tree — it appears only in comments about future work.
-> Consequence: **no per-message forward secrecy, no post-compromise security.** Group keying is
-> sender-keys + epochs (`GROUP-KEYING.md`); removal/block rotation gives **cryptographic
-> revocation**, which is real and tested. MLS hardening remains a future phase, gated on a
-> PQ-capable ciphersuite (D3).
+> **The live content path is sender-keys + epochs, not MLS.** For everyday content today this is
+> multi-recipient PKE (`core/haven-p2p/src/social.rs:14-16`) over sender-keys + epochs
+> (`GROUP-KEYING.md`); removal/block rotation gives **cryptographic revocation**, which is real and
+> tested. As of 1.0.7 an **MLS-style TreeKEM** layer (post-compromise security + per-message FS) is
+> **enabled and staged** — no `mls-rs` dependency; it is home-grown on Haven's own hybrid-PQ
+> primitives. It activates **per circle once every member's devices have updated and joined**; until a
+> circle is fully capable it stays byte-identical to the sender-keys+epochs path. Its audit to date is
+> internal; an external cryptographer's review is planned/ongoing.
+> See "Seed-drop + MLS" above and `TREEKEM-DESIGN.md`.
 
 ### ✅ Group keying (epochs)
 Epoch keys distributed via the hybrid KEM; removal/block/device-roster change rotates
@@ -111,6 +106,47 @@ current epoch, so earlier epochs stay unreadable without rotating anything. **Pe
 now wired** (2026-07-15): the full-history sync bundle advances any circle past the 7-day
 `ROTATE_INTERVAL_SECS` and re-seals history under the new epoch in the same batch (`maybe_rotate`,
 `lib.rs:1131-1149`), so a churn-free circle still gets bounded forward secrecy. See `GROUP-KEYING.md`.
+
+### ✅ Seed-drop + MLS — cryptographic device revocation & group ratcheting (1.0.7, D16 Phases 2 & 5)
+Two coordinated crypto landings, both **automatic and per-circle** with a dual-seal coexistence path
+so un-upgraded (1.0.x) peers keep working throughout — no flag day, no re-onboarding, nothing lost.
+
+- **Seed-drop (S2–S5 core).** Day-to-day operation re-rooted on **per-device keys** with account-signed
+  `DeviceCredential`s; content seals to authorized **device bundles**; the **self-sync key is granted**
+  to each device (sealed to its bundle) so a seedless device converges account state without the seed;
+  **seedless enrollment** for new links (a device that never receives the master seed) with onboarding
+  UI on iOS/macOS/Android/desktop; and the **cryptographic cut** — a revoked device is excluded from
+  the next key commit *and* re-keyed out of the account-state channel, and a seedless device **cannot
+  forge** a higher-version roster to re-enter (`s5` core test). The account-key seal retires **per
+  circle** only on an all-present-positive capability signal (`retire_account_key`, default off until
+  a circle is fully capable — the documented, gated coexistence contract). Seed concentrates on one
+  primary (SE-wrapped) + SE-wrapped iCloud-Keychain escrow. See `SEED-DROP-DESIGN.md`.
+- **MLS-style TreeKEM (M0–M6 core, enabled & staged in 1.0.7).** A ratchet-tree group layer — propose/commit/
+  welcome, O(log n) path updates, a one-way epoch schedule, deterministic fork resolution without a
+  delivery service — adding **post-compromise security**, a **forward-secrecy deletion discipline**,
+  and **per-message FS for DMs**, all on the *same* hybrid primitives and the *same* content path (the
+  tree only changes how the 32-byte epoch key is agreed). Leaves are devices; the leaf credential is
+  seed-drop's `DeviceCredential`. It is **MLS-*shaped*, not RFC-9420 interoperable** (locked decision:
+  interop means a classical ciphersuite, which regresses the PQ headline). The **keying master switch
+  (`set_mls_keying`) defaults OFF in the core library**, and the 1.0.7 clients **enable it**,
+  activating **per circle once every member's devices have updated and joined**; until a circle is
+  fully capable the layer stays byte-identical to the sender-keys+epochs path, and a device that falls
+  behind reverts within one sync — it only ever changes *which key* seals content, never *whether*.
+  See `TREEKEM-DESIGN.md`.
+- **Internal adversarial crypto audit** (`docs/audits/SECURITY-AUDIT-crypto-2026-07-16.md`): an
+  AI-driven, human-directed review of the committed code found **0 critical / 0 high**; the two
+  mediums (self-sync key not rotated on revocation; first-grant-wins creator-authority pin) and a low
+  (genesis authentication) were **remediated**. It is explicitly **not** a substitute for a formal
+  external cryptographer's audit — **that review (M7) is the remaining gate** before the MLS keying
+  switch may default ON.
+
+### ✅ Storage management (1.0.7)
+Media-cleanup screen (sort by size, multi-select delete, metadata kept + re-downloadable placeholder),
+per-item "keep on this device" pin, local retention limits (age and/or size) with **real blob GC**
+(purge-linked deletion + orphan sweep on iOS/Android/desktop), operator-chosen **relay retention**
+(time and/or size, least-space-wins) that genuinely deletes expired content, and video compression
+(Android transcode). The desktop **video EXIF/GPS strip** closed the last export path that leaked it,
+and a plaintext-media-cache leak was fixed in the same work.
 
 ### ✅ Security-audit hardening (2026-07)
 The two-round audit (`SECURITY-AUDIT-2026-07.md`) closed its findings: the HTTP relay now requires a
@@ -131,8 +167,9 @@ own-device event convergence (per-device transport ids + epoch-key convergence).
 export done; enrollment QR/verify flow + UI ship. **Phase 4b** live device-to-device delivery
 (`haven_net::livedelivery`) — an authored event goes straight to your other online devices instead of
 waiting out their mailbox poll; strictly additive (the mailbox put is unchanged), core + iOS/macOS +
-Android. *(Phase 2's remaining seed-drop: Outstanding #1. Phase 4b's personal forwarder + Phase 5 MLS
-hardening: not started; live delivery is not wired on desktop yet.)*
+Android. **Phase 2 seed-drop (S2–S5 core) and Phase 5 MLS-style TreeKEM both landed in 1.0.7** — see
+"Seed-drop + MLS" above. *(Phase 4b's personal forwarder: not started; live delivery is not wired on
+desktop yet. The MLS keying layer is enabled in 1.0.7 and stages per circle as everyone updates; an external crypto review remains planned/ongoing.)*
 
 ### ✅ Apple apps (M3)
 iOS/iPadOS + native macOS SwiftUI on the Rust core via a UniFFI XCFramework. **Live on the App
@@ -221,9 +258,14 @@ push.
 
 ## Not started
 
-- **MLS hardening** (`mls-rs` + a hybrid-PQ ciphersuite) — per-message forward secrecy and
-  post-compromise secrecy. Gated on a PQ ciphersuite (D3). This is the single largest outstanding
-  *cryptographic* item, and every doc above is now honest about not having it.
+- ~~**MLS hardening**~~ — **enabled in 1.0.7, staged per circle.** A home-grown **MLS-style TreeKEM** on
+  Haven's own hybrid-PQ primitives (not `mls-rs`, not RFC-9420 interop — see `TREEKEM-DESIGN.md` §8
+  for why owning the seams beat OpenMLS here) adds post-compromise security, a forward-secrecy
+  deletion discipline, and per-message FS for DMs. The code has landed through M6; the **core keying
+  master switch defaults OFF**, and the 1.0.7 clients **enable it**, activating per circle once every
+  member's devices have updated and joined. An **independent cryptographer's review** (design M7)
+  remains **planned/ongoing** — the audit to date is internal, and that review is the gate before the
+  core default flips ON. See Shipped → "Seed-drop + MLS".
 - **D16 Phase 4b**: the always-on personal store-and-forward node (ordered backlog cache). The live
   device-to-device half is **done** (`haven_net::livedelivery`, core + iOS/macOS + Android); what's
   left is the forwarder, plus wiring live delivery on desktop.

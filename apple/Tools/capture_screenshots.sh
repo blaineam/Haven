@@ -95,9 +95,13 @@ capture_sim() {
   local derived="/tmp/haven-shots-dd-$key"
   mkdir -p "$derived"
   echo "  Building $SCHEME…"
+  # MUST be SIGNED: an unsigned build has no data-protection keychain entitlement, so no identity
+  # persists, FeedStore builds no social engine, and DemoSeed's `let main = feed.demoEngine` guard
+  # returns early — every scene captures as an empty "No messages yet" shell.
   if ! xcodebuild -project "$PROJECT" -scheme "$SCHEME" \
       -destination "platform=iOS Simulator,id=$udid" -configuration Debug \
-      -derivedDataPath "$derived" CODE_SIGNING_ALLOWED=NO build \
+      -derivedDataPath "$derived" \
+      DEVELOPMENT_TEAM="${HAVEN_TEAM_ID:-8ZVSPZYSVF}" CODE_SIGN_STYLE=Automatic -allowProvisioningUpdates build \
       >"$derived/build.log" 2>&1; then
     echo "  build failed; tail of log:" >&2
     tail -40 "$derived/build.log" >&2
@@ -176,9 +180,12 @@ SWIFT
   local derived="/tmp/haven-shots-dd-mac"
   mkdir -p "$derived"
   echo "  Building HavenMac (native macOS)…"
+  # Signed for the same reason as the sim leg: no entitlement ⇒ no identity ⇒ no demo engine ⇒
+  # every scene captures empty.
   if ! xcodebuild -project "$PROJECT" -scheme HavenMac \
       -destination "platform=macOS" -configuration Debug \
-      -derivedDataPath "$derived" CODE_SIGNING_ALLOWED=NO build \
+      -derivedDataPath "$derived" \
+      DEVELOPMENT_TEAM="${HAVEN_TEAM_ID:-8ZVSPZYSVF}" CODE_SIGN_STYLE=Automatic -allowProvisioningUpdates build \
       >"$derived/mac-build.log" 2>&1; then
     echo "  mac build failed; tail of log:" >&2
     tail -40 "$derived/mac-build.log" >&2

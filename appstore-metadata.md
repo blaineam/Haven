@@ -50,7 +50,7 @@ More polish
 • Story styling, including how photos and video are framed, now looks the same on every platform.
 • Closed a metadata/location leak on video and tightened privacy throughout.
 
-Under the hood we're also building the next generation of Haven's group encryption — forward secrecy and post-compromise security on our own post-quantum cryptography. It's included in this release but stays switched off until an independent cryptographer's review, and we'll turn it on only when that's done.
+Under the hood, the next generation of Haven's group encryption — forward secrecy and post-compromise security on our own post-quantum cryptography — is enabled in this release and turns on for each circle once everyone's devices have updated. Until then a circle keeps working exactly as before, and it only ever changes which key seals your content, never whether it's encrypted. Our own adversarial audit found no critical or high issues; an independent cryptographer's review is planned.
 
 Native on iPhone, iPad, and Mac. No ads, no tracking, no servers holding your data — same private Haven.
 

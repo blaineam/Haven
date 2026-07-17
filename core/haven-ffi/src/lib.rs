@@ -1147,6 +1147,13 @@ struct Circle {
     /// than one competing offer is a legitimate state the UI must show rather than resolve. Persisted
     /// (additive); an offer I authored also rides the bundle so members receive it.
     upgrade_offers: Vec<Vec<u8>>,
+    /// The successor I FOLLOWED for this circle, if any — set only by my own `accept_circle_upgrade`.
+    /// An offer is hidden on this and nothing else. Inferring "followed" from the successor merely
+    /// existing with its creator pinned looked equivalent but wasn't: both of those are things a peer
+    /// can arrange (it can hand me a circle id to stand up, and a grant naming the real creator pins
+    /// it), which let a member permanently bury the offer they least want followed. Only my own act
+    /// counts. Persisted (additive) so a restart doesn't resurface an offer I already took.
+    followed_upgrade: Option<String>,
     /// MLS M3: the live tree-derived content epoch (`MLS_EPOCH_BASE + tree_epoch`) when the keying flip
     /// is active for this circle (§4.5), else `None` (shadow or parked). Set by `mls_refresh_keying`,
     /// read by the author/re-seal paths so content seals under the tree key. NOT persisted — it is a
@@ -1215,6 +1222,7 @@ impl Circle {
             creator_pinned: false,
             admin_grants: vec![],
             upgrade_offers: vec![],
+            followed_upgrade: None,
             mls_live_epoch: None,
             mls_ratchet: RatchetLanes::default(),
         }
@@ -3856,14 +3864,12 @@ impl HavenSocial {
             .upgrade_offers
             .iter()
             .filter_map(|w| CircleUpgrade::from_bytes(w).ok())
-            // Hide an offer only once I've actually FOLLOWED it — i.e. the successor exists AND it is
-            // pinned to that offerer. Filtering on mere existence let anyone who can get a circle id
-            // onto my device (a contact handshake carries one) pre-create it and silently bury a real
-            // offer, leaving me on the legacy path with the banner never shown again.
+            // Hide an offer ONLY on my own recorded accept. Anything inferred from the successor's
+            // presence or its pinned creator is arrangeable by a peer — it can hand me the id to stand
+            // up (that's how joining any circle works) and a grant naming the true creator pins it — so
+            // inferring would let a member bury the offer they least want me to follow, permanently.
             .filter(|u| {
-                !st.circles
-                    .iter()
-                    .any(|c| c.id.as_bytes() == u.new_circle_id && c.creator == Some(u.creator))
+                st.circles[idx].followed_upgrade.as_deref().map(str::as_bytes) != Some(&u.new_circle_id)
             })
             .map(|u| CircleUpgradeOffer {
                 legacy_circle_id: circle_id.clone(),
@@ -3906,6 +3912,8 @@ impl HavenSocial {
             c.members = members;
             st.circles.push(c);
         }
+        // Record MY act — this, and only this, hides the offer from now on.
+        st.circles[idx].followed_upgrade = Some(new_circle_id.clone());
         drop(st);
         // Pin the offerer as the successor's creator — binding-verified, so this is authenticated.
         self.set_circle_creator(new_circle_id, creator_hex)
@@ -7916,6 +7924,74 @@ mod net_tests {
         assert!(bob.upgrade_circle(owned.clone()).is_none(), "an owned circle can't be offered away");
         // Alice can't "upgrade" her own owned circle either — it already has what an upgrade grants.
         assert!(alice.upgrade_circle(owned.clone()).is_none());
+    }
+
+    /// The guard must hold in the window where the creator ISN'T known locally yet — a fresh member
+    /// hasn't learned the owner's bundle, so the admin-set check can't refuse on its own. What saves
+    /// it is that the circle id itself is owned, which is a local, immutable fact needing no bundle,
+    /// grant, or roster. (The sibling test pins the creator first, so it passes even with this guard
+    /// removed — it exercises the redundant half. This one fails without it.)
+    #[test]
+    fn an_owned_circle_is_unupgradable_even_before_its_creator_is_known() {
+        let alice = HavenSocial::new([2u8; 32].to_vec()).unwrap();
+        let dave = HavenSocial::new([4u8; 32].to_vec()).unwrap();
+        let mallory = Identity::from_seed(&[9u8; 32]);
+        let owned = alice.create_circle_owned("Owned".into());
+
+        // Dave holds the circle but has NOT learned Alice as its creator.
+        dave.create_circle(owned.clone(), "Owned".into());
+        dave.add_contact_bundle(owned.clone(), mallory.public().to_bytes()).unwrap();
+        assert!(dave.circle_admins(owned.clone()).is_empty(), "no creator known yet — the redundant half can't refuse");
+
+        let m_succ = mint_owned_circle_id(&mallory.public().node_id_bytes());
+        let hostile = CircleUpgrade::issue(&mallory, owned.as_bytes(), m_succ.as_bytes(), "Owned", 1);
+        assert!(matches!(dave.receive(owned.clone(), tagged(TAG_CIRCLE_UPGRADE, &hostile.to_bytes())), Ok(false)));
+        assert!(dave.pending_circle_upgrades(owned.clone()).is_empty(), "the owned id alone refuses it");
+        assert!(!dave.accept_circle_upgrade(owned.clone(), m_succ.clone()));
+        assert!(!dave.circles().iter().any(|c| c.id == m_succ), "Dave is never drawn onto her circle");
+    }
+
+    /// A member must not be able to bury the offer they least want followed. Hiding an offer keys on
+    /// MY recorded accept — never on the successor merely existing with a pinned creator, both of
+    /// which a peer can arrange (it hands me the id to stand up, then a grant naming the true creator
+    /// pins it), which would let the member facing eviction block the upgrade that enables it.
+    #[test]
+    fn a_member_cannot_bury_an_offer_by_pre_creating_its_successor() {
+        let legacy = "fam".to_string();
+        let alice = HavenSocial::new([2u8; 32].to_vec()).unwrap();
+        let dave = HavenSocial::new([4u8; 32].to_vec()).unwrap();
+        let mallory = Identity::from_seed(&[9u8; 32]);
+        let alice_hex = alice.my_node_hex();
+
+        for s in [&alice, &dave] { s.create_circle(legacy.clone(), "Family".into()); }
+        alice.add_contact_bundle(legacy.clone(), dave.my_bundle()).unwrap();
+        dave.add_contact_bundle(legacy.clone(), alice.my_bundle()).unwrap();
+        dave.add_contact_bundle(legacy.clone(), mallory.public().to_bytes()).unwrap();
+
+        let new_id = alice.upgrade_circle(legacy.clone()).expect("Alice offers");
+        let offer = {
+            let st = alice.state.lock().unwrap();
+            let i = st.circles.iter().position(|c| c.id == legacy).unwrap();
+            st.circles[i].upgrade_offers[0].clone()
+        };
+        assert!(matches!(dave.receive(legacy.clone(), tagged(TAG_CIRCLE_UPGRADE, &offer)), Ok(false)));
+        assert_eq!(dave.pending_circle_upgrades(legacy.clone()).len(), 1, "Alice's offer is shown");
+
+        // Mallory learns the successor id off the shared lane, gets Dave to stand it up (the ordinary
+        // way any circle is shared), then pins its true creator with a grant naming Alice.
+        dave.create_circle(new_id.clone(), "Family".into());
+        dave.add_contact_bundle(new_id.clone(), alice.my_bundle()).unwrap();
+        let alice_acct = Identity::from_seed(&[2u8; 32]).public().node_id_bytes();
+        let g = AdminGrant::issue(&mallory, new_id.as_bytes(), alice_acct, alice_acct, 1);
+        let _ = dave.receive(new_id.clone(), tagged(TAG_ADMIN_GRANT, &g.to_bytes()));
+
+        // Alice's offer must STILL be shown — Dave never followed it.
+        assert_eq!(dave.pending_circle_upgrades(legacy.clone()).len(), 1,
+                   "a peer arranging the successor's existence must not bury a real offer");
+        // And following it still works, after which it's hidden — because Dave acted.
+        assert!(dave.accept_circle_upgrade(legacy.clone(), new_id.clone()));
+        assert!(dave.circle_admins(new_id.clone()).contains(&alice_hex), "Alice roots the successor for Dave");
+        assert!(dave.pending_circle_upgrades(legacy.clone()).is_empty(), "hidden only once I followed it");
     }
 
     /// Offering twice hands back the SAME successor instead of stranding another orphan circle.

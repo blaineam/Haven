@@ -34,6 +34,9 @@ A private, end‑to‑end encrypted home for your closest people. No ads, no tra
 ## whats_new
 1.1.0 — a reliability & polish release. Nothing to set up, nothing lost.
 
+Stories & media reliably reach a relay
+• A story now finishes uploading to your circle's relay even if you lock your phone right after posting — so friends' stories stop occasionally showing "failed to load." Your own media posts show an up-arrow while uploading and a check once it's safely on a relay.
+
 Changes hold across your devices
 • Removing a circle member, deleting a contact, a circle, or a DM, and editing your profile or settings now hold on every one of your devices — resolved by whichever change you made most recently, so nothing you removed comes back and your profile picture no longer ping-pongs between two devices.
 

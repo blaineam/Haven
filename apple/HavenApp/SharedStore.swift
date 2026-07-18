@@ -1,5 +1,8 @@
 import Foundation
 import CryptoKit
+#if canImport(UIKit)
+import UIKit   // UIApplication.beginBackgroundTask for the media-upload drain (no-op path on macOS)
+#endif
 
 /// The "volunteer as tribute" shared circle store. A member who turns this on keeps a
 /// sealed copy of the circle's media in their own S3 bucket and re-serves it to anyone
@@ -44,23 +47,70 @@ final class SharedMailboxStore: ObservableObject {
 /// and the per-post backup sites used to spawn a Task PER media ref concurrently — each loading + sealing a
 /// full file (2× in RAM) — which ballooned memory to ~3.4GB and jetsam-killed iOS once a device held a lot
 /// of media. Process ONE at a time so peak memory is ~one media file, not the whole library.
+///
+/// Uploads a freshly-posted media blob to the circle's relay(s). Hardened to match `BackgroundUploader`
+/// (which handles the post ENVELOPE): the queue is PERSISTED, the drain holds a background-task
+/// assertion so it finishes after the app leaves the foreground, and a failed upload is RETRIED rather
+/// than dropped. Without all three, posting a story and immediately locking the phone (the whole point of
+/// a story) suspended the app mid-upload — the envelope reached the relay (viewers saw the story) but the
+/// BLOB never did, so it "failed to load from a relay". The in-memory queue was also lost on app kill, so
+/// only whatever happened to finish while foregrounded (the most recent items) ever landed.
 @MainActor
 final class MediaBackupQueue {
     static let shared = MediaBackupQueue()
-    private var pending: [(ref: String, cid: String)] = []
+    private struct Job: Codable, Equatable { let ref: String; let cid: String }
+    private let key = "haven.mediaBackupQueue"
+    private var pending: [Job]
     private var draining = false
+
+    private init() {
+        if let d = UserDefaults.standard.data(forKey: key), let list = try? JSONDecoder().decode([Job].self, from: d) {
+            pending = list
+        } else {
+            pending = []
+        }
+    }
+    private func save() {
+        if let d = try? JSONEncoder().encode(pending) { UserDefaults.standard.set(d, forKey: key) }
+    }
+
+    /// Whether a specific blob is still waiting to reach a relay (drives the post upload indicator).
+    func hasPending(_ ref: String) -> Bool { pending.contains { $0.ref == ref } }
+
     func enqueue(_ ref: String, circleId: String, social: HavenSocial) {
         if MediaStore.isSynthetic(ref) { return }   // geo: pins et al. carry no bytes — never relay-storable
-        if pending.contains(where: { $0.ref == ref && $0.cid == circleId }) { return }
-        pending.append((ref, circleId))
-        if pending.count > 10_000 { pending.removeFirst(pending.count - 10_000) }   // bound the queue itself
-        guard !draining else { return }
+        if !pending.contains(where: { $0.ref == ref && $0.cid == circleId }) {
+            pending.append(Job(ref: ref, cid: circleId))
+            if pending.count > 10_000 { pending.removeFirst(pending.count - 10_000) }   // bound the queue itself
+            save()
+        }
+        drain(social: social)
+    }
+
+    /// Kick a drain for anything persisted from a prior session — call on launch so media that was
+    /// mid-upload when the app was killed still reaches the relay.
+    func drainPersisted(social: HavenSocial) { drain(social: social) }
+
+    private func drain(social: HavenSocial) {
+        guard !draining, !pending.isEmpty else { return }
         draining = true
         Task { @MainActor in
-            while !pending.isEmpty {
-                let job = pending.removeFirst()
-                await SharedStore.backup(ref: job.ref, circleId: job.cid, social: social)
+            // Keep the upload alive after the app backgrounds (iOS suspends otherwise). No-op on macOS.
+            #if canImport(UIKit)
+            let bgId = UIApplication.shared.beginBackgroundTask(withName: "haven.media-backup")
+            defer { if bgId != .invalid { UIApplication.shared.endBackgroundTask(bgId) } }
+            #endif
+            // ONE pass (like BackgroundUploader): failures stay queued for the next enqueue / launch /
+            // 120s backfill, so a wholly-unreachable relay can't pin us in a tight retry-spin.
+            let work = pending
+            var stillPending: [Job] = []
+            for job in work {
+                let ok = await SharedStore.backup(ref: job.ref, circleId: job.cid, social: social)
+                if !ok { stillPending.append(job) }
             }
+            let newly = pending.count > work.count ? Array(pending.suffix(pending.count - work.count)) : []
+            pending = stillPending + newly
+            save()
             draining = false
         }
     }
@@ -78,6 +128,9 @@ enum MediaBackupLedger {
     private static let defaultsKey = "haven.media.backedUp"
     private static var set: Set<String> = Set(UserDefaults.standard.stringArray(forKey: defaultsKey) ?? [])
     static func has(_ dest: String, _ ref: String) -> Bool { set.contains("\(dest)|\(ref)") }
+    /// Confirmed on ANY destination (relay node or s3) — drives the post's "backed up to a relay" light,
+    /// which doesn't care WHICH relay holds it, only that at least one durably does.
+    static func hasAny(_ ref: String) -> Bool { set.contains { $0.hasSuffix("|\(ref)") } }
     static func mark(_ dest: String, _ ref: String) {
         guard set.insert("\(dest)|\(ref)").inserted else { return }
         if set.count > 20_000 { set = Set(set.suffix(20_000)) }

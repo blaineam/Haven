@@ -15,6 +15,12 @@ mixed-device accounts stay consistent.
 
 ### Fixed
 
+- **A story you post reliably reaches a relay — even if you lock your phone right after.** Posting sends
+  the post itself and its photo/video to the circle's relay on two separate paths; the media path wasn't
+  as durable as the post path, so backgrounding the app before the upload finished could leave the media
+  stranded — friends saw the story but its photo/video "failed to load." The media upload now survives
+  backgrounding and app restarts and retries until it's confirmed on a relay. Your own media posts now
+  show a small indicator: an up-arrow while it's uploading to a relay, a check once it's safely there.
 - **Changes you make on one device now hold on all of them.** Removing a circle member, deleting a
   contact, deleting a circle or DM, editing your profile, and changing your synced settings are now
   reconciled by *who changed it last* rather than *who synced last*. Previously an additive merge

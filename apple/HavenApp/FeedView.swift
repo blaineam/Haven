@@ -226,6 +226,7 @@ final class FeedStore: ObservableObject {
         reconcileRemovals()  // heal old-build damage: purge engine members that are still client-tombstoned
         applyCryptoSwitches(seedless: seedless)   // Switch-Flip 1.0.7: re-apply the non-persisted crypto switches
         refresh()
+        if let social { MediaBackupQueue.shared.drainPersisted(social: social) }   // finish uploads killed mid-flight
         recomputeUnreadDMs()   // one-time badge compute at startup (kept OFF the per-refresh hot path)
         seedDemoIfNeeded()   // HAVEN_DEMO=1 only — PII-free synthetic dataset for screenshots
         // Reclaim leaked produce/reassembly scratch every launch (an interrupted big-video export or a
@@ -4739,13 +4740,22 @@ private struct KillHorizontalScroller: NSViewRepresentable {
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .background(Color(.tertiarySystemFill), in: Capsule()).foregroundStyle(.secondary)
             }
-            // Sync state for your own posts, only when a shared store is in play (else
-            // posts deliver peer-to-peer and there's no "backed up" notion to show).
-            if item.isMe && !item.unsent && SharedStore.isVolunteering {
-                Image(systemName: feed.relayReachable ? "cloud.fill" : "cloud")
-                    .font(.caption2)
-                    .foregroundStyle(feed.relayReachable ? AnyShapeStyle(HavenTheme.pink) : AnyShapeStyle(Color.secondary))
-                    .help(feed.relayReachable ? "Backed up to your circle's store" : "Waiting to sync")
+            // Upload state for your OWN media posts, shown whenever the circle has a relay to back up to
+            // (any relay — not just an S3 mailbox this device volunteers, which the old gate required and
+            // so hid this for everyone on the default relay-HTTP path). Driven PER-MEDIA off the backup
+            // ledger: ✓ once every blob in the post is confirmed on at least one relay, ↑ while it's still
+            // uploading. This is the "did my story actually reach a relay?" signal — so the author knows to
+            // keep Haven open a moment until it lands, instead of assuming it's broken and bailing.
+            if item.isMe && !item.unsent, !item.media.isEmpty,
+               !(RelayMailboxStore.shared.relays(forCircle: feed.activeCircleId).isEmpty) {
+                TimelineView(.periodic(from: .now, by: 2.0)) { _ in
+                    let blobs = item.media.filter { !MediaStore.isSynthetic($0) }
+                    let backed = !blobs.isEmpty && blobs.allSatisfy { MediaBackupLedger.hasAny($0) }
+                    Image(systemName: backed ? "checkmark.icloud.fill" : "arrow.up.circle")
+                        .font(.caption2)
+                        .foregroundStyle(backed ? AnyShapeStyle(HavenTheme.pink) : AnyShapeStyle(Color.secondary))
+                        .help(backed ? "Backed up to a relay" : "Uploading to a relay…")
+                }
             }
             Spacer()
             if !item.unsent {

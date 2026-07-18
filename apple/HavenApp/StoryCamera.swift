@@ -77,6 +77,9 @@ final class CameraModel: NSObject, ObservableObject {
     let recorder = StoryVideoRecorder()
 
     @Published var isRecording = false
+    /// True from an auto-split stop until the segment is committed — keeps the progress bar's live slot
+    /// visible across the async finalize gap so it doesn't collapse/rewind then jump to the next segment.
+    @Published var finalizing = false
     @Published var position: AVCaptureDevice.Position = .back
     @Published var ready = false
     /// Seconds elapsed in the current recording (drives the capture progress bar + the cap).
@@ -242,6 +245,7 @@ final class CameraModel: NSObject, ObservableObject {
         onVideo = completion
         capSeconds = maxSeconds
         recordingSeconds = 0
+        finalizing = false   // the next segment is starting → drop the held-over slot from the last one
         // Orient each recorded frame upright like the preview. Record RAW (filterSpec = original): the
         // composer/export bakes the chosen look exactly as before, so it isn't double-applied.
         recorder.orientation = havenCameraOrientation(position: position)
@@ -260,9 +264,12 @@ final class CameraModel: NSObject, ObservableObject {
 
     func stopRecording() {
         recordTimer?.invalidate(); recordTimer = nil
-        recordingSeconds = 0            // reset the live counter so the next take's progress bar starts clean
-        guard recorder.isRecording else { isRecording = false; return }
+        guard recorder.isRecording else { isRecording = false; finalizing = false; return }
+        // Hold `recordingSeconds` (and mark finalizing) so the progress bar keeps showing this clip's slot
+        // through the async finalize gap — the completion (finishVideo) commits the segment + resets it,
+        // so the bar never briefly drops the just-recorded segment.
         isRecording = false
+        finalizing = true
         let cb = onVideo; onVideo = nil
         Task { [weak self] in
             guard let self else { return }
@@ -276,6 +283,7 @@ final class CameraModel: NSObject, ObservableObject {
     func resetRecordingState() {
         recordTimer?.invalidate(); recordTimer = nil
         recordingSeconds = 0
+        finalizing = false
         if recorder.isRecording { Task { _ = await recorder.finish() } }
         isRecording = false
     }
@@ -314,6 +322,9 @@ final class CameraModel: NSObject, ObservableObject {
     nonisolated(unsafe) private let videoDataOutput = AVCaptureVideoDataOutput()
 
     @Published var isRecording = false
+    /// True from an auto-split stop until the segment is committed — keeps the progress bar's live slot
+    /// visible across the async finalize gap so it doesn't collapse/rewind then jump to the next segment.
+    @Published var finalizing = false
     @Published var position: AVCaptureDevice.Position = .back
     @Published var ready = false
     @Published var recordingSeconds = 0.0
@@ -562,9 +573,11 @@ private struct CameraUnavailablePlaceholder: View {
 /// (split into 15s chunks at share); the whole session is capped at 90s combined.
 @MainActor
 final class StoryCaptureModel: ObservableObject {
-    nonisolated static let maxTotal = 120.0   // 2 min combined, hard cap
+    nonisolated static let maxTotal = 90.0    // 90s combined, hard cap (labeled in the camera)
     nonisolated static let chunk = 15.0       // each segment records at most 15s (auto-splits while holding)
     static let maxSegments = 8                // …and no more than 8 segments in one go, whichever comes first
+    /// The cap shown to the user, e.g. "1:30". Seconds under a minute show as "Ns".
+    static var maxLabel: String { let s = Int(maxTotal); return s < 60 ? "\(s)s" : String(format: "%d:%02d", s / 60, s % 60) }
 
     struct Segment: Identifiable { let id = UUID(); let ref: String; let duration: Double; let thumb: PlatformImage? }
     @Published var segments: [Segment] = []
@@ -614,6 +627,9 @@ struct StoryCameraView: View {
     private let minZoom = 0.5, maxZoom = 8.0
     private var isRec: Bool { dualMode ? dual.isRecording : cam.isRecording }
     private var recSecs: Double { dualMode ? dual.recordingSeconds : cam.recordingSeconds }
+    /// Show the live progress slot while recording OR while an auto-split segment is finalizing, so the bar
+    /// holds the just-recorded clip's slot steady until it becomes a committed segment (no drop-then-jump).
+    private var showLiveSlot: Bool { isRec || (!dualMode && cam.finalizing) }
 
     var body: some View {
         ZStack {
@@ -648,10 +664,10 @@ struct StoryCameraView: View {
                             .padding(10).background(.black.opacity(0.35), in: Circle())
                     }
                     Spacer()
-                    if capture.isFull {
-                        Text("Max length").font(.caption.weight(.semibold)).foregroundStyle(.white)
-                            .padding(.horizontal, 10).padding(.vertical, 6).background(.black.opacity(0.4), in: Capsule())
-                    }
+                    // Always label the story's max length; when it's reached, call it out.
+                    Text(capture.isFull ? "Max length · \(StoryCaptureModel.maxLabel)" : "\(StoryCaptureModel.maxLabel) max")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.white.opacity(capture.isFull ? 1 : 0.75))
+                        .padding(.horizontal, 10).padding(.vertical, 6).background(.black.opacity(0.4), in: Capsule())
                     Spacer()
                     HStack(spacing: 10) {
                         // Dual-camera (front + back PiP) toggle is DISABLED: the multi-cam preview
@@ -681,7 +697,11 @@ struct StoryCameraView: View {
                 .padding(.horizontal, 20).padding(.top, 4)
                 if dualMode { cornerPicker.padding(.top, 8) }
                 Spacer()
-                if !dualMode { zoomControls }
+                // Hide ALL zoom UI (slider + lens buttons) while filming AND across the auto-split finalize
+                // gap (recording || finalizing) — otherwise the controls flashed back between segments and
+                // the reflow made the progress bar appear to vanish. Zoom while recording is swipe-up on the
+                // shutter (see `shutter`). Shown only when idle (not long-holding).
+                if !dualMode && !isRec && !cam.finalizing { zoomControls }
                 if !dualMode && filterNameShown {
                     Text(liveFilter.title)
                         .font(.subheadline.weight(.bold)).foregroundStyle(.white)
@@ -732,7 +752,7 @@ struct StoryCameraView: View {
     private var captureProgress: some View {
         GeometryReader { geo in
             let spacing: CGFloat = 3
-            let slots = capture.segments.map { $0.duration } + (isRec ? [recSecs] : [])
+            let slots = capture.segments.map { $0.duration } + (showLiveSlot ? [recSecs] : [])
             let totalW = geo.size.width
             HStack(spacing: spacing) {
                 ForEach(Array(slots.enumerated()), id: \.offset) { _, dur in
@@ -746,7 +766,7 @@ struct StoryCameraView: View {
         }
         .frame(height: 3)
         .padding(.horizontal, 12).padding(.top, 8)
-        .opacity(capture.segments.isEmpty && !cam.isRecording ? 0 : 1)
+        .opacity(capture.segments.isEmpty && !cam.isRecording && !cam.finalizing ? 0 : 1)
     }
 
     /// Zoom UI for the single camera: a photo zoom slider (when not recording) + lens buttons.
@@ -907,6 +927,7 @@ struct StoryCameraView: View {
                 // A sub-0.3s fumble — but if the user is still holding with room left, resume the next
                 // segment so a brief hiccup doesn't abandon a continuous hold.
                 if pressing, !capture.isFull { cam.startRecording(maxSeconds: capture.nextClipCap) { u in finishVideo(u) } }
+                else { cam.finalizing = false; cam.recordingSeconds = 0 }
                 return
             }
             // Grab a poster from the recorded file NOW (one fast frame, off the slow transcode path) so the
@@ -915,11 +936,14 @@ struct StoryCameraView: View {
             let ref = await MediaStore.shared.addVideo(url: url)
             capture.add(ref: ref, duration: raw, thumb: poster ?? MediaStore.shared.item(ref)?.image)   // add clamps to 15s
             // Continuous hold auto-splits: if the finger is still down and a cap isn't hit, immediately
-            // record the next 15s segment. When a cap IS hit (2min or 8 segments), go review.
+            // record the next 15s segment (startRecording clears finalizing + resets the counter, so the
+            // committed segment replaces the held slot in ONE render — no drop). When a cap IS hit or the
+            // finger is up, clear the held slot cleanly (the segment is now committed).
             if pressing, !capture.isFull {
                 cam.startRecording(maxSeconds: capture.nextClipCap) { u in finishVideo(u) }
-            } else if capture.isFull {
-                showReview = true
+            } else {
+                cam.finalizing = false; cam.recordingSeconds = 0
+                if capture.isFull { showReview = true }
             }
         }
     }
@@ -963,10 +987,10 @@ struct StoryCameraView: View {
                     // post camera uses, so the two cameras' top rows are identical by construction.
                     CameraChromeButton(symbol: "xmark") { dismiss() }
                     Spacer()
-                    if capture.isFull {
-                        Text("Max length").font(.caption.weight(.semibold)).foregroundStyle(.white)
-                            .padding(.horizontal, 10).padding(.vertical, 6).background(.black.opacity(0.4), in: Capsule())
-                    }
+                    // Always label the story's max length; when it's reached, call it out.
+                    Text(capture.isFull ? "Max length · \(StoryCaptureModel.maxLabel)" : "\(StoryCaptureModel.maxLabel) max")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.white.opacity(capture.isFull ? 1 : 0.75))
+                        .padding(.horizontal, 10).padding(.vertical, 6).background(.black.opacity(0.4), in: Capsule())
                     Spacer()
                     if cam.ready {
                         HStack(spacing: 10) {

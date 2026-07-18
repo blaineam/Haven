@@ -77,6 +77,14 @@ object LocalMedia {
         // without an img_/vid_/aud_ prefix, so bare hashes were being dropped cross-platform.
         val ref = (if (isVideo) "vid_" else "img_") + sha256Hex(bytes)
         sealToFile(circleId, bytes, mediaFile(ref))   // large blobs seal file→file (off-heap) to avoid OOM
+        // Record the shape AT INGEST: reading an image header here is a few microseconds on bytes we
+        // already hold, and it means the feed can lay this item's card out at the correct height the
+        // very first time it draws — no 4:3 placeholder that later snaps and shifts the cards below it.
+        if (!isVideo) runCatching {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            recordPixelSize(ref, bounds.outWidth, bounds.outHeight)
+        }
         return ref
     }
 
@@ -229,6 +237,9 @@ object LocalMedia {
         return runCatching {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            // The header is already parsed — bank the TRUE dimensions (not the downsampled bitmap's,
+            // whose power-of-two sampling rounds the aspect) so the feed never has to ask again.
+            recordPixelSize(ref, bounds.outWidth, bounds.outHeight)
             var sample = 1
             while (max(bounds.outWidth, bounds.outHeight) / sample > reqDim) sample *= 2
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size,
@@ -246,6 +257,9 @@ object LocalMedia {
         val mmr = android.media.MediaMetadataRetriever()
         return runCatching {
             mmr.setDataSource(file.absolutePath)
+            // The retriever is already open on this clip, so its dimensions cost nothing extra here —
+            // and banking them means the clip's card is the right height before the poster ever draws.
+            mmrSize(mmr)?.let { (w, h) -> recordPixelSize(ref, w, h) }
             mmr.getFrameAtTime(0, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
         }.getOrNull().also { runCatching { mmr.release() } }
     }
@@ -261,9 +275,80 @@ object LocalMedia {
     }
 
     /** Memoized: a ref's pixel size never changes, and the image path costs a full decrypt to read
-     *  the header. Absent entries are cached as null too, so a missing ref isn't retried per scroll. */
+     *  the header. Absent entries are cached as null too, so a missing ref isn't retried per scroll.
+     *  Backed by [sizeMapFile] so the map SURVIVES relaunch — see [loadSizeMapIfNeeded]. */
     private val sizeCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Int>>()
     private val UNKNOWN_SIZE = 0 to 0   // a cached miss (ConcurrentHashMap can't hold a null value)
+
+    // ---- Persisted ref → pixel size -------------------------------------------------------------
+    // A feed card's HEIGHT comes from its media's aspect. Held only in memory, that aspect was unknown
+    // on the first composition after every launch, so each card laid out at the 4:3 fallback and then
+    // snapped to its real shape once the size resolved off-thread — shoving everything below it down
+    // the screen mid-scroll. The map is two integers per ref, so persisting it is nearly free and a
+    // given item settles on its true height exactly once, ever.
+
+    @Volatile private var sizeMapLoaded = false
+    private val sizeMapSavePending = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val sizeMapSaver = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
+        Thread(r, "haven-media-sizes").apply { isDaemon = true }
+    }
+
+    /** `<ref> <w> <h>` per line — a plain table rather than JSON, since that's all it ever holds. */
+    private fun sizeMapFile(): File = File(dir.parentFile, "media-sizes.txt")
+
+    @Synchronized
+    private fun loadSizeMapIfNeeded() {
+        if (sizeMapLoaded) return
+        sizeMapLoaded = true
+        runCatching {
+            val f = sizeMapFile()
+            if (!f.exists()) return@runCatching
+            f.forEachLine { line ->
+                val p = line.split(' ')
+                if (p.size == 3) {
+                    val w = p[1].toIntOrNull() ?: return@forEachLine
+                    val h = p[2].toIntOrNull() ?: return@forEachLine
+                    if (w > 0 && h > 0) sizeCache.putIfAbsent(p[0], w to h)
+                }
+            }
+        }
+    }
+
+    /** Remember a ref's pixel size in memory and (debounced) on disk. Called wherever real pixels pass
+     *  through — ingest, a decoded image, a video poster — so the feed knows the shape before it has to
+     *  draw the item. Silently ignores non-sizes so a bad probe can't poison the map. */
+    fun recordPixelSize(ref: String, w: Int, h: Int) {
+        if (w <= 0 || h <= 0) return
+        loadSizeMapIfNeeded()
+        val size = w to h
+        if (sizeCache.put(ref, size) == size) return   // unchanged → nothing new to persist
+        if (!sizeMapSavePending.compareAndSet(false, true)) return
+        runCatching {
+            sizeMapSaver.schedule({
+                sizeMapSavePending.set(false)
+                runCatching {
+                    val snapshot = sizeCache.entries
+                        .filter { it.value != UNKNOWN_SIZE }
+                        .joinToString("\n") { "${it.key} ${it.value.first} ${it.value.second}" }
+                    val tmp = File(sizeMapFile().parentFile, "media-sizes.tmp")
+                    tmp.writeText(snapshot)
+                    if (!tmp.renameTo(sizeMapFile())) { sizeMapFile().writeText(snapshot); tmp.delete() }
+                }
+            }, 1, java.util.concurrent.TimeUnit.SECONDS)
+        }.onFailure { sizeMapSavePending.set(false) }
+    }
+
+    /** The size we ALREADY know for [ref] — memory or the persisted map, never the filesystem. Safe to
+     *  call from a composition: a caller uses it to lay out at the right shape on the FIRST pass, and
+     *  falls back to [pixelSize] off-thread only when this misses. */
+    fun cachedPixelSize(ref: String): Pair<Int, Int>? {
+        loadSizeMapIfNeeded()
+        return sizeCache[ref]?.takeIf { it != UNKNOWN_SIZE }
+    }
+
+    /** [cachedPixelSize] as an aspect ratio (w/h). */
+    fun cachedAspect(ref: String): Float? =
+        cachedPixelSize(ref)?.let { (w, h) -> if (h > 0) w.toFloat() / h else null }
 
     /**
      * Pixel dimensions of a media ref, or null if unknown (bytes not here yet, oversized, or an
@@ -271,6 +356,7 @@ object LocalMedia {
      * Blocking — call it off the main thread.
      */
     fun pixelSize(circleId: String, ref: String): Pair<Int, Int>? {
+        loadSizeMapIfNeeded()   // a size banked on a previous run answers without touching the media
         sizeCache[ref]?.let { return if (it == UNKNOWN_SIZE) null else it }
         val size = if (isVideo(ref)) {
             val file = plainCacheFile(ref, "mp4")
@@ -289,7 +375,8 @@ object LocalMedia {
         // Memoize a MISS only when it can't later become a hit: an image whose bytes are already here
         // is undecodable for good, but a video is sizeless purely until it's decrypted to cache, and an
         // in-flight download hasn't landed yet — re-ask for those.
-        if (size != null || (!isVideo(ref) && has(ref))) sizeCache[ref] = size ?: UNKNOWN_SIZE
+        if (size != null) recordPixelSize(ref, size.first, size.second)   // memory + disk
+        else if (!isVideo(ref) && has(ref)) sizeCache[ref] = UNKNOWN_SIZE   // a miss, never persisted
         return size
     }
 
@@ -548,6 +635,9 @@ object LocalMedia {
             }
         }
         sizeCache.clear()
+        // The size map outlives an eviction on purpose, but "start over" wipes it with everything else —
+        // otherwise a fresh install would carry a table of refs that no longer exist here.
+        runCatching { sizeMapFile().delete() }
     }
 
     private fun sha256Hex(bytes: ByteArray): String =

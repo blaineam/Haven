@@ -648,6 +648,13 @@ fun FullScreenOverlay(onDismiss: () -> Unit, content: @Composable () -> Unit) {
             decorFitsSystemWindows = false,
         ),
     ) {
+        // Anything hosted here COVERS the feed (viewer, story camera, story player). A post's song was
+        // left playing underneath, competing with whatever the cover puts on screen — a video's own
+        // audio, a story's track, a viewfinder. Stop it on the way in; the cover owns the audio now.
+        androidx.compose.runtime.DisposableEffect(Unit) {
+            MusicPlayer.stop()
+            onDispose { }
+        }
         Box(Modifier.fillMaxSize().background(HavenTheme.background)) { content() }
     }
 }
@@ -950,12 +957,24 @@ fun LocationChip(ref: String) {
     }
 }
 
-/** A ref's aspect ratio (w/h), or null while it's still being read / unknowable. Resolved off the
- *  main thread; LocalMedia.pixelSize memoizes, so a scroll back doesn't re-decrypt. */
+/**
+ * A ref's aspect ratio (w/h), or null while it's still being read / unknowable.
+ *
+ * SEEDED from the persisted size map, so a card whose media has been seen before computes the right
+ * height on its FIRST layout pass. Starting at null meant every card laid out at [DEFAULT_ASPECT] and
+ * then jumped to its real shape once the size resolved off-thread — which shoves every card below it
+ * up or down the screen mid-scroll, once per item. Only a genuinely unknown ref pays the off-thread
+ * read (LocalMedia.pixelSize is blocking), and its answer is banked for good.
+ */
 @Composable
 private fun rememberAspect(circleId: String, ref: String): Float? {
-    var aspect by remember(ref, circleId) { mutableStateOf<Float?>(null) }
-    LaunchedEffect(ref, circleId) {
+    val seed = remember(ref) { LocalMedia.cachedAspect(ref) }
+    var aspect by remember(ref, circleId) { mutableStateOf(seed) }
+    // Re-ask on a feed bump WHILE still unknown: a video has no readable size until it's been decrypted
+    // to cache, so the one that lands mid-session settles then instead of staying at the fallback.
+    val fv = com.blaineam.haven.core.HavenNet.feedVersion.value
+    LaunchedEffect(ref, circleId, if (aspect == null) fv else 0) {
+        if (aspect != null) return@LaunchedEffect
         aspect = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             LocalMedia.pixelSize(circleId, ref)?.let { (w, h) -> if (h > 0) w.toFloat() / h else null }
         }

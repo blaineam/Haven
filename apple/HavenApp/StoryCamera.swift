@@ -2051,7 +2051,8 @@ struct LoopingVideo: NSViewRepresentable {
             guard filter != current, let asset, let queue else { return }
             current = filter
             queue.removeAllItems()   // clear the previous looper's enqueued items before re-looping
-            looper = AVPlayerLooper(player: queue, templateItem: Self.makeItem(asset: asset, filter: filter))
+            looper = AVPlayerLooper(player: queue,
+                                    templateItem: Self.makeItem(asset: asset, filter: filter, muted: currentMuted))
             queue.play()
         }
         /// Change the clip's audio. This REBUILDS the item, because muting here means handing the player a

@@ -29,6 +29,9 @@ class FilteredVideoView(context: Context) : GLSurfaceView(context) {
     private val renderer = VidRenderer()
     private var player: MediaPlayer? = null
     @Volatile private var file: File? = null
+    /** Silent by default: the clip only gets the speaker once the composer says nothing else wants it
+     *  (see [setMuted]). Two audio sources over one preview just interrupt each other. */
+    @Volatile private var muted = true
 
     init {
         setEGLContextClientVersion(2)
@@ -41,6 +44,14 @@ class FilteredVideoView(context: Context) : GLSurfaceView(context) {
 
     /** Swap the live filter; rebuilds the OES program on the GL thread. */
     fun setFilter(spec: FilterSpec) = queueEvent { renderer.setSpec(spec) }
+
+    /** Mute/unmute the clip's own audio live. The composer mutes it while a song is attached (the song
+     *  is what the viewer will hear) and restores it when the song is removed — without rebuilding the
+     *  player, so the clip keeps looping through the change instead of restarting. */
+    fun setMuted(m: Boolean) {
+        muted = m
+        runCatching { player?.setVolume(if (m) 0f else 1f, if (m) 0f else 1f) }
+    }
 
     fun release() {
         runCatching { player?.stop(); player?.release() }
@@ -75,7 +86,7 @@ class FilteredVideoView(context: Context) : GLSurfaceView(context) {
                     setSurface(Surface(st))
                     setDataSource(f.absolutePath)
                     isLooping = true
-                    setVolume(0f, 0f)
+                    setVolume(if (muted) 0f else 1f, if (muted) 0f else 1f)
                     setOnPreparedListener { it.start() }
                     prepareAsync()
                 }

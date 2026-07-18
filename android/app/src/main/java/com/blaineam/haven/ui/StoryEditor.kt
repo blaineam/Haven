@@ -32,6 +32,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material3.Icon
@@ -125,6 +127,12 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
     var sizeSp by remember { mutableStateOf(30f) }
     var filterIdx by remember { mutableStateOf(initialFilter.coerceIn(0, HavenFilter.all.size - 1)) }
     var showColors by remember { mutableStateOf(false) }
+    // Preview sound for the clip itself. A song and the clip's own audio can't share the preview, so
+    // attaching a song silences the clip (the song is what a viewer will hear anyway) and removing the
+    // song hands the clip its audio back — the toggle just says whether the author wants to hear it.
+    // Off by default, matching iOS and desktop: opening the editor should never suddenly blare. The
+    // clip was silent here before, so defaulting this on would have changed existing behaviour.
+    var previewSound by remember { mutableStateOf(false) }
     var boxSize by remember { mutableStateOf(IntSize.Zero) }
     var sharing by remember { mutableStateOf(false) }
     var shareLabel by remember { mutableStateOf("Share to story") }
@@ -169,7 +177,7 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
                 scaleX = mediaScale, scaleY = mediaScale,
                 translationX = mediaOffset.x, translationY = mediaOffset.y,
             )
-            if (isVideo) EditorVideo(ref, filter.spec, mediaMod)
+            if (isVideo) EditorVideo(ref, filter.spec, muted = music != null || !previewSound, mediaMod)
             else previewBmp?.let { Image(it.asImageBitmap(), "Story", mediaMod, contentScale = ContentScale.Crop) }
         }
 
@@ -201,6 +209,17 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
         Row(Modifier.align(Alignment.TopStart).statusBarsPadding().fillMaxWidth().padding(10.dp),
             verticalAlignment = Alignment.CenterVertically) {
             CtlButton({ onClose() }) { Icon(Icons.Filled.Close, "Close", tint = Color.White) }
+            // Preview sound — only meaningful for a clip with no song attached; once there IS a song the
+            // clip is silenced either way, so the control would be a lie.
+            if (isVideo && music == null) {
+                Spacer(Modifier.size(8.dp))
+                CtlButton({ previewSound = !previewSound }) {
+                    Icon(
+                        if (previewSound) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
+                        if (previewSound) "Mute preview" else "Unmute preview", tint = Color.White,
+                    )
+                }
+            }
             Spacer(Modifier.weight(1f))
             CtlButton({ showColors = !showColors }) {
                 Box(Modifier.size(22.dp).clip(CircleShape).background(capColor).border(1.5.dp, Color.White, CircleShape))
@@ -302,15 +321,16 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
     }
 }
 
-/** Live filter-applied, autoplaying, looping, chrome-free video preview. */
+/** Live filter-applied, autoplaying, looping, chrome-free video preview. [muted] silences the clip's
+ *  OWN audio without restarting it, so the loop survives a song being attached or removed. */
 @Composable
-private fun EditorVideo(ref: String, spec: FilterSpec, modifier: Modifier) {
+private fun EditorVideo(ref: String, spec: FilterSpec, muted: Boolean, modifier: Modifier) {
     val file = remember(ref) { LocalMedia.videoFile(DEFAULT_CIRCLE, ref) }
     if (file == null) { Box(modifier.background(Color.Black)); return }
     AndroidView(
         modifier = modifier,
-        factory = { ctx -> FilteredVideoView(ctx).also { it.play(file); it.setFilter(spec) } },
-        update = { it.setFilter(spec) },
+        factory = { ctx -> FilteredVideoView(ctx).also { it.setMuted(muted); it.play(file); it.setFilter(spec) } },
+        update = { it.setFilter(spec); it.setMuted(muted) },
         onRelease = { it.release() },
     )
 }

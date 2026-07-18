@@ -65,6 +65,12 @@ fun QrScannerScreen(onResult: (String) -> Unit, onCancel: () -> Unit) {
     }
     var done = remember0 { booleanArrayOf(false) }
 
+    // A viewfinder is up: a song preview must not start behind it, and one already playing stops.
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        MusicPlayer.beginCameraSession()
+        onDispose { MusicPlayer.endCameraSession() }
+    }
+
     // Without this, system back skips the scanner entirely and finishes the Activity — measured:
     // pressing back here dropped straight to the launcher. Connect is shown by AnimatedVisibility,
     // not a Dialog or a nav destination, so nothing else was ever going to catch it.

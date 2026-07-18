@@ -75,11 +75,25 @@ object MusicPlayer {
     var playingUrl by mutableStateOf<String?>(null)
         private set
 
+    /** How many viewfinders are currently on screen. A camera and a song preview both want the audio
+     *  route, and a recording that picks up the song playing beside it bakes it into the clip — so a
+     *  song must not start while any camera UI is up, and opening one stops what's playing. Counted
+     *  rather than a flag: a camera can be replaced by another (flip to the post camera) without the
+     *  first one's teardown clearing the second one's claim. */
+    private var cameraSessions = 0
+    val cameraOpen: Boolean get() = cameraSessions > 0
+
+    /** A viewfinder appeared: stop the song outright (not pause — nothing may resume it behind the
+     *  camera) and hold the block until [endCameraSession]. */
+    fun beginCameraSession() { cameraSessions++; stop() }
+    fun endCameraSession() { if (cameraSessions > 0) cameraSessions-- }
+
     fun toggle(url: String) {
         if (playingUrl == url) { stop(); return }
         stop()
         // Call audio priority: never start a song preview while a call is ringing/connecting/live.
         if (com.blaineam.haven.core.CallManager.callInProgress) return
+        if (cameraOpen) return   // a viewfinder owns the audio route while it's up
         runCatching {
             player = MediaPlayer().apply {
                 setDataSource(url)

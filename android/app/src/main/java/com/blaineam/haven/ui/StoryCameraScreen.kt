@@ -119,6 +119,24 @@ fun StoryCameraScreen(
             ).build(),
         )
     }
+    // The viewfinder owns the audio route while it's up: no song preview starts behind it, and one that
+    // was already playing stops. Registered AFTER the `draft` early-return above, so the claim lifts the
+    // moment the composer takes over — the composer's own song preview is deliberate and must be heard.
+    DisposableEffect(Unit) {
+        MusicPlayer.beginCameraSession()
+        onDispose { MusicPlayer.endCameraSession() }
+    }
+    // The capture session is bound to the ACTIVITY's lifecycle, so leaving this composition doesn't end
+    // it: opening the composer (or closing the screen) left the camera running behind it, still holding
+    // the audio route and the sensor. Unbind explicitly on the way out. Non-blocking — resolving the
+    // provider on the main thread would stall the transition.
+    DisposableEffect(Unit) {
+        onDispose {
+            val f = ProcessCameraProvider.getInstance(context)
+            f.addListener({ runCatching { f.get().unbindAll() } }, ContextCompat.getMainExecutor(context))
+        }
+    }
+
     val recordingRef = remember { arrayOfNulls<Recording>(1) }
     val maxDurationJob = remember { arrayOfNulls<kotlinx.coroutines.Job>(1) }
     val hasAudio = ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) ==

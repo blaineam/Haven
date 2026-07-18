@@ -68,6 +68,10 @@ function initials(name) {
 }
 
 function modal(node) {
+  // Anything presented over the feed silences what the feed was playing (iOS parity: a sheet or
+  // cover stops the post soundtrack behind it). Runs BEFORE the overlay's own content is inserted,
+  // so a story viewer's clip — created below — is untouched.
+  pauseFeedMedia();
   const root = $("#modal-root");
   const backdrop = el("div", { class: "modal-backdrop", onclick: (e) => { if (e.target === backdrop) root.replaceChildren(); } }, node);
   node.classList.add("modal", "plain");
@@ -81,6 +85,7 @@ const closeModal = () => $("#modal-root").replaceChildren();
  *  inline with a glass close circle, and the footer holds the one prominent action. Esc closes,
  *  same as the Mac's `.keyboardShortcut(.cancelAction)`. */
 function sheet(title, body, foot) {
+  pauseFeedMedia();   // same as modal(): a sheet covers the feed, so the feed goes quiet behind it
   const root = $("#modal-root");
   const card = el("div", { class: "modal" },
     el("div", { class: "modal-head" },
@@ -935,6 +940,9 @@ function buildComposer(onPost, placeholder = "Share something…", opts = {}) {
           el("div", { style: "flex:1;min-width:0" }, el("strong", {}, music.title), " — ", music.artist),
           el("span", { class: "x", style: "position:static;cursor:pointer", onclick: () => { music = null; drawMusic(); } }, "×"))
       : null);
+    // `music` is private to the composer, and the story preview has to follow it (an attached song is
+    // the story's soundtrack, so the clip mutes; removing it hands the clip its own audio back).
+    if (opts.onMusicChange) opts.onMusicChange(music);
   };
   const fileInput = el("input", { type: "file", accept: "image/*,video/*", style: "display:none", onchange: (e) => handleFiles(e.target.files, drawPreviews) });
 
@@ -1121,21 +1129,114 @@ function guardSensitive(node, ref) {
   return wrap;
 }
 
+// ---- Remembered media shapes ------------------------------------------------------------
+// A ref's pixel size, learned the first time its bytes decode and kept on disk afterwards. This is
+// the desktop half of the iOS "seed the card from a known width" fix (FeedView.swift's
+// lastKnownMediaWidth / MediaStore.pixelSize): a page whose aspect isn't known until `load` fires
+// lays out at a PLACEHOLDER shape first and then snaps to the real one, and that resize — once per
+// card, as each card scrolls in — is what makes the feed jump up and down under the cursor.
+// Knowing the shape before the bytes decode means the card is the right height on its FIRST layout.
+//
+// Tiny by construction ("w,h" per ref) and capped, so it can live in localStorage without growing
+// without bound; the cap evicts oldest-first, and a miss simply costs one settle like before.
+const MEDIA_SIZE_KEY = "haven.mediaSizes";
+const MEDIA_SIZE_CAP = 800;
+const mediaSizes = (() => {
+  try { return new Map(Object.entries(JSON.parse(localStorage.getItem(MEDIA_SIZE_KEY) || "{}"))); }
+  catch (_) { return new Map(); }
+})();
+let mediaSizeSaveTimer = null;
+function persistMediaSizes() {
+  // Coalesced: a feed render can learn a dozen shapes in a frame, and localStorage writes are sync.
+  if (mediaSizeSaveTimer) return;
+  mediaSizeSaveTimer = setTimeout(() => {
+    mediaSizeSaveTimer = null;
+    try {
+      while (mediaSizes.size > MEDIA_SIZE_CAP) mediaSizes.delete(mediaSizes.keys().next().value);
+      localStorage.setItem(MEDIA_SIZE_KEY, JSON.stringify(Object.fromEntries(mediaSizes)));
+    } catch (_) {}   // quota/private-mode: the in-memory map still works for this session
+  }, 1200);
+}
+/** The remembered aspect (w/h) for `ref`, or 0 when we've never seen it decode. */
+function knownAspect(ref) {
+  const v = mediaSizes.get(ref);
+  if (!v) return 0;
+  const [w, h] = String(v).split(",").map(Number);
+  return w > 0 && h > 0 ? w / h : 0;
+}
+function rememberMediaSize(ref, w, h) {
+  if (!(w > 0) || !(h > 0)) return;
+  const next = `${Math.round(w)},${Math.round(h)}`;
+  if (mediaSizes.get(ref) === next) return;
+  mediaSizes.delete(ref);        // re-insert so the cap evicts least-recently-learned first
+  mediaSizes.set(ref, next);
+  persistMediaSizes();
+}
+/** Reserve a bare (non-paged) tile's box before its bytes decode, so it doesn't lay out at zero
+ *  height and then shove everything below it down the instant the image lands.
+ *
+ *  Two mechanisms, because the two call sites size differently — passing the wrong one does nothing
+ *  useful and can resize the box, so the caller says which:
+ *   • "ratio" — the masonry grid, where CSS pins `width: 100%` and leaves height auto. `aspect-ratio`
+ *     is all that's needed, and even the fallback ratio beats a zero-height box.
+ *   • "intrinsic" — a chat bubble image, sized by its own pixels under a `max-width`. `aspect-ratio`
+ *     does nothing there (an auto-width box with no intrinsic size is still zero wide), so the
+ *     `width`/`height` ATTRIBUTES supply the missing intrinsic size and `max-width` scales it down
+ *     proportionally — the standard no-layout-shift recipe. Images only: a <video> already has a
+ *     default 300×150 intrinsic size, and overriding it here would resize bubbles rather than
+ *     stabilise them. Unknown size: nothing reserved, exactly as before.
+ *  Either way the real dimensions take over on load, and get remembered for next time. */
+function reserveAspect(node, ref, mode = "ratio", fallback = 4 / 3) {
+  if (node.tagName !== "IMG" && node.tagName !== "VIDEO") return node;
+  const isVid = node.tagName === "VIDEO";
+  const intrinsic = mode === "intrinsic";
+  if (intrinsic && isVid) return node;
+  const known = knownAspect(ref);
+  const apply = (w, h) => {
+    if (intrinsic) {
+      node.setAttribute("width", String(Math.round(w)));
+      node.setAttribute("height", String(Math.round(h)));
+      node.style.height = "auto";
+    } else {
+      node.style.aspectRatio = String(w / h);
+    }
+  };
+  const size = mediaSizes.get(ref);
+  if (size) {
+    const [w, h] = String(size).split(",").map(Number);
+    if (w > 0 && h > 0) apply(w, h);
+  } else if (!intrinsic) {
+    node.style.aspectRatio = String(known || fallback);
+  }
+  node.addEventListener(isVid ? "loadedmetadata" : "load", () => {
+    const w = isVid ? node.videoWidth : node.naturalWidth;
+    const h = isVid ? node.videoHeight : node.naturalHeight;
+    if (!w || !h) return;
+    rememberMediaSize(ref, w, h);
+    apply(w, h);
+  }, { once: true });
+  return node;
+}
+
 function mediaNode(ref, imgStyle) {
   // Videos start muted unless the global "play video sound" toggle is on (iOS parity); native controls
   // still let the user override per-video. data-video lets the toggle re-apply across all of them.
-  // While a call is ringing/connecting/live they render muted regardless (call audio priority).
-  if (ref.startsWith("v:")) return el("video", Object.assign({ "data-ref": ref, "data-video": "1", controls: "" }, state.videoSoundOn && !callAudioActive() ? {} : { muted: "" }));
+  // While a call is ringing/connecting/live — or while any capture UI is up — they render muted
+  // regardless (call/capture audio priority).
+  if (ref.startsWith("v:")) return el("video", Object.assign({ "data-ref": ref, "data-video": "1", controls: "" }, state.videoSoundOn && !callAudioActive() && !captureUIOpen() ? {} : { muted: "" }));
   if (ref.startsWith("a:")) return el("audio", { "data-ref": ref, controls: "", style: "width:100%;margin-top:6px;display:block" });
-  return el("img", Object.assign({ "data-ref": ref, loading: "lazy" }, imgStyle ? { style: imgStyle } : {}));
+  // decoding="async" keeps the decode off the thread that's scrolling: a data-URL image decodes
+  // synchronously by default, and a multi-photo post paid every one of those decodes in one frame.
+  return el("img", Object.assign({ "data-ref": ref, loading: "lazy", decoding: "async" }, imgStyle ? { style: imgStyle } : {}));
 }
 
 // ---- Media pages: the carousel + single-item pager --------------------------------------
 // Ports the iOS feed's page model (apple/HavenApp/FeedView.swift): each item is fitted WHOLE inside
 // a shared page shape, and a blurred, cropped copy of itself fills whatever the fit leaves over — so
 // a letterboxed portrait reads as an extension of its own content instead of a flat black gap.
-// Unlike iOS there's no MediaStore.pixelSize here: aspects aren't known until the bytes decode, so
-// pages report theirs on load and the shape settles once.
+// Aspects come from the remembered pixel sizes (see mediaSizes) when we have them, so a page is the
+// right shape on its FIRST layout pass; a ref we've never decoded still reports on load and settles
+// once, exactly as before.
 
 // One 9:16 clip must not squeeze a whole card into a narrow column, so a MIXED set's shared shape is
 // clamped; the items that don't fit it letterbox against their own backdrop instead.
@@ -1175,6 +1276,26 @@ function stillFrom(node) {
   } catch (_) {
     return isVid ? null : (node.src || null);   // no decoded frame yet — retry on a later trigger
   }
+}
+
+// Posters, remembered per ref for the session. The feed re-renders WHOLE on every `haven:changed`,
+// and without this each render re-ran the canvas draw for every photo and the whole seek-and-grab
+// dance for every video — the same work, over and over, on the thread that's scrolling. A cached
+// poster also means a video's backdrop is there on the first frame instead of after a seek.
+const posterCache = new Map();
+const POSTER_CACHE_CAP = 300;
+function posterFor(ref, node) {
+  const hit = posterCache.get(ref);
+  if (hit) return hit;
+  const still = stillFrom(node);
+  // Only keep a REAL downscaled still. stillFrom falls back to an <img>'s own src when it can't draw
+  // yet, and that's the full-size data URL — caching it would pin whole originals for the session.
+  // A 64px JPEG is a couple of KB, so the length check separates the two cleanly.
+  if (still && still.length <= 24000) {
+    posterCache.set(ref, still);
+    if (posterCache.size > POSTER_CACHE_CAP) posterCache.delete(posterCache.keys().next().value);
+  }
+  return still;
 }
 
 // Get a drawable frame out of a PAUSED video. Neither obvious event works: `loadeddata` promises
@@ -1232,7 +1353,10 @@ function buildMediaPages(refs, container, onAspects) {
     // .media-page is already position:relative + overflow:hidden — the cover goes straight in, over
     // both the fitted media and its backdrop (which is a blurred copy of the same flagged frame).
     guardSensitiveIn(page, node, ref);
-    return { ref, node, page, aspect: 0, poster: null, backdrop: null };
+    // Seeded from what we already know, so the page is the right shape BEFORE the bytes decode —
+    // no post-load resize, which is the feed's scroll jump. A ref we've never seen starts at 0 and
+    // settles on load exactly as it used to.
+    return { ref, node, page, aspect: knownAspect(ref), poster: posterCache.get(ref) || null, backdrop: null };
   });
   const sync = () => pages.forEach(applyBackdrop);
   for (const p of pages) {
@@ -1241,12 +1365,13 @@ function buildMediaPages(refs, container, onAspects) {
     p.node.addEventListener(isVid ? "loadedmetadata" : "load", () => {
       const w = isVid ? p.node.videoWidth : p.node.naturalWidth;
       const h = isVid ? p.node.videoHeight : p.node.naturalHeight;
-      if (w && h) { p.aspect = w / h; onAspects(pages.map((x) => x.aspect)); }
-      if (!isVid) p.poster = stillFrom(p.node);
+      if (w && h) { rememberMediaSize(p.ref, w, h); p.aspect = w / h; onAspects(pages.map((x) => x.aspect)); }
+      if (!isVid && !p.poster) p.poster = posterFor(p.ref, p.node);
       sync();
     }, { once: true });
-    if (isVid) onFirstFrame(p.node, () => {
-      if (!p.poster) p.poster = stillFrom(p.node);
+    // A remembered poster is already good — don't pay the seek dance again just to reproduce it.
+    if (isVid && !p.poster) onFirstFrame(p.node, () => {
+      if (!p.poster) p.poster = posterFor(p.ref, p.node);
       if (p.poster) sync();
       return !!p.poster;
     });
@@ -1259,7 +1384,8 @@ function buildMediaPages(refs, container, onAspects) {
 // page stays card-wide and the backdrop fills the sides: that's the portrait-photo case.
 function mediaSingle(ref, container) {
   const [p] = buildMediaPages([ref], container, ([a]) => { p.page.style.aspectRatio = String(a || 4 / 3); });
-  p.page.style.aspectRatio = String(4 / 3);
+  // The remembered shape when we have one, so this page never lays out at 4:3 and then snaps.
+  p.page.style.aspectRatio = String(p.aspect || 4 / 3);
   container.append(p.page);
 }
 
@@ -1273,7 +1399,10 @@ function mediaCarousel(refs, container) {
     const a = String(carouselAspect(aspects));
     for (const p of pages) p.page.style.aspectRatio = a;
   });
-  for (const p of pages) { p.page.style.aspectRatio = String(4 / 3); track.append(p.page); }
+  // Seed the shared shape from whatever we already remember about this set (carouselAspect ignores
+  // the zeros), so a fully-remembered carousel opens at its final height instead of settling into it.
+  const seeded = String(carouselAspect(pages.map((p) => p.aspect)));
+  for (const p of pages) { p.page.style.aspectRatio = seeded; track.append(p.page); }
   dots.firstChild.classList.add("on");
   track.addEventListener("scroll", () => {
     const i = Math.round(track.scrollLeft / Math.max(1, track.clientWidth));
@@ -1306,11 +1435,13 @@ function secretBubble(body, isMe) {
 function recordVoice(circleId) {
   return new Promise((resolve) => {
     let recorder, chunks = [], stream, timer, secs = 0, done = false;
+    // A voice note is a capture too — a post clip playing into the mic is the same problem.
+    const releaseCapture = beginCapture(() => finish(null));
     const timeEl = el("div", { style: "font-size:30px;text-align:center;margin:6px 0" }, "0:00");
     const status = el("div", { class: "muted small", style: "text-align:center" }, "Tap record to start");
     const recBtn = el("button", { class: "btn primary" }, "● Record");
     const stopBtn = el("button", { class: "btn danger", style: "display:none" }, "■ Stop & attach");
-    const finish = (ref) => { if (done) return; done = true; clearInterval(timer); if (stream) stream.getTracks().forEach((t) => t.stop()); $("#modal-root").replaceChildren(); resolve(ref); };
+    const finish = (ref) => { if (done) return; done = true; clearInterval(timer); if (stream) stream.getTracks().forEach((t) => t.stop()); releaseCapture(); $("#modal-root").replaceChildren(); resolve(ref); };
     recBtn.onclick = async () => {
       try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
       catch (e) { toast("Mic unavailable: " + e); return; }
@@ -1347,11 +1478,14 @@ const CAMERA_FILTERS = [
 function cameraDialog(circleId) {
   return new Promise((resolve) => {
     let stream, recorder, chunks = [], recording = false, done = false, filter = CAMERA_FILTERS[0], rafId, recStream;
+    // The camera owns the audio while it's up: feed clips stop now and stay muted until it closes.
+    // Dismissing with Escape / the backdrop routes back through finish(), so the tracks stop too.
+    const releaseCapture = beginCapture(() => finish(null));
     const video = el("video", { autoplay: "", muted: "", playsinline: "", style: "width:100%;border-radius:14px;background:#000;max-height:48vh" });
     const strip = el("div", { class: "row wrap", style: "gap:6px;margin-top:8px" });
     const setFilter = (f) => { filter = f; video.style.filter = f.css; [...strip.children].forEach((b) => b.classList.toggle("primary", b.textContent === f.name)); };
     CAMERA_FILTERS.forEach((f) => strip.append(el("button", { class: "btn small", onclick: () => setFilter(f) }, f.name)));
-    const finish = (out) => { if (done) return; done = true; if (rafId) cancelAnimationFrame(rafId); if (recStream) recStream.getTracks().forEach((t) => t.stop()); if (stream) stream.getTracks().forEach((t) => t.stop()); $("#modal-root").replaceChildren(); resolve(out); };
+    const finish = (out) => { if (done) return; done = true; if (rafId) cancelAnimationFrame(rafId); if (recStream) recStream.getTracks().forEach((t) => t.stop()); if (stream) stream.getTracks().forEach((t) => t.stop()); releaseCapture(); $("#modal-root").replaceChildren(); resolve(out); };
     const shoot = el("button", { class: "btn primary", onclick: async () => {
       const c = document.createElement("canvas"); c.width = video.videoWidth || 1280; c.height = video.videoHeight || 720;
       const ctx = c.getContext("2d"); ctx.filter = filter.css || "none"; ctx.drawImage(video, 0, 0, c.width, c.height);
@@ -1556,7 +1690,11 @@ function postCard(it, circleId, reports = []) {
   const media = el("div", { class: "post-media" + (carousel ? " carousel" : mediaCount > 1 ? " masonry" : mediaCount === 1 ? " single" : ""), style: "position:relative" });
   if (carousel) mediaCarousel(visualRefs, media);
   else if (mediaCount === 1) mediaSingle(visualRefs[0], media);
-  else for (const ref of visualRefs) media.append(guardSensitive(mediaNode(ref), ref));
+  // The masonry column tiles are width-driven with `height: auto`, so an un-decoded one lays out at
+  // ZERO height and then shoves the rest of the feed down as it lands. Reserve each tile's shape up
+  // front from the remembered pixel size (iOS parity: the grid gets its aspect from the persisted
+  // map rather than from a main-thread decode).
+  else for (const ref of visualRefs) media.append(guardSensitive(reserveAspect(mediaNode(ref), ref), ref));
   const audio = el("div", {});
   for (const ref of audioRefs) audio.append(mediaNode(ref));
   // Double-tap a photo to ❤️ it (Instagram-style), like the iOS gesture.
@@ -1980,11 +2118,19 @@ function addStoryDialog() {
   // The author's spec rides the wire format, so phones render the caption styled + positioned.
   // y starts in the lower third — where the old hardcoded desktop caption sat.
   const spec = { color: 0, font: 0, style: 1, x: 0.5, y: 0.85, size: 1 };
+  // Preview audio state. The clip is silent by default (a composer that blares the moment you attach
+  // something is worse than one you have to unmute), and an attached song wins over it either way:
+  // the song IS the story's soundtrack, so the clip's own track steps aside while one is attached and
+  // comes back the moment it's removed. iOS parity — StoryCamera's preview sound toggle.
+  let previewSound = false, previewMusic = null;
   const composer = buildComposer(async (body, music) => {
     const encoded = StoryCaptions.encode(body, spec);
     await invoke("post_story", { body: encoded, media: state.attachments[0] ? state.attachments[0].ref : null, music });
     closeModal();
-  }, "Caption your story…", { circleId: state.activeCircle });
+  }, "Caption your story…", {
+    circleId: state.activeCircle,
+    onMusicChange: (m) => { previewMusic = m; syncPreviewAudio(); },
+  });
   const ta = $("textarea", composer);
 
   // ── Live preview: a story frame rendered by the SAME overlay() the viewer uses, so what the
@@ -2001,13 +2147,36 @@ function addStoryDialog() {
     capLayer.replaceChildren(...(c ? [c] : []));
     hint.style.display = (ta.value.trim() || state.attachments.length) ? "none" : "";
   };
+  // The clip LOOPS while the composer is open (iOS: "the canvas clip keeps looping") and its audio is
+  // whatever syncPreviewAudio decides. Muted is also what lets autoplay start at all in both webviews.
+  const syncPreviewAudio = () => {
+    const v = $("video", mediaLayer);
+    const on = previewSound && !previewMusic;
+    if (v) {
+      v.muted = !on;
+      if (v.paused) v.play().catch(() => {});   // an unmute can pause it in a restrictive webview
+    }
+    if (soundBtn) {
+      const hasVideo = !!v;
+      soundBtn.style.display = hasVideo ? "" : "none";
+      soundBtn.textContent = previewMusic ? "🎵 Song plays" : on ? "🔊 Clip sound on" : "🔇 Clip sound off";
+      soundBtn.disabled = !!previewMusic;
+      soundBtn.title = previewMusic
+        ? "The attached song is this story's soundtrack — remove it to hear the clip"
+        : "Hear the clip while you caption it";
+      soundBtn.classList.toggle("primary", on);
+    }
+  };
+  const soundBtn = el("button", { class: "btn small ghost", style: "display:none",
+    onclick: () => { previewSound = !previewSound; syncPreviewAudio(); } }, "🔇 Clip sound off");
   const renderMedia = () => {
     const a = state.attachments[0];
     const fit = "position:absolute;inset:0;width:100%;height:100%;object-fit:cover";
     mediaLayer.replaceChildren(...(a && a.url
-      ? [a.isVideo ? el("video", { src: a.url, muted: "", autoplay: "", loop: "", style: fit })
+      ? [a.isVideo ? el("video", { src: a.url, muted: "", autoplay: "", loop: "", playsinline: "", style: fit })
                    : el("img", { src: a.url, style: fit })]
       : []));
+    syncPreviewAudio();   // a re-rendered clip starts muted — re-apply whatever the author chose
     renderCap();
   };
   ta.addEventListener("input", renderCap);
@@ -2054,6 +2223,7 @@ function addStoryDialog() {
     swatches,
     el("div", { class: "row", style: "gap:8px;align-items:center" },
       styleBtn, fontBtn, el("span", { class: "muted small" }, "Size"), sizeInp),
+    el("div", { class: "row wrap", style: "gap:6px" }, soundBtn),
     composer));
   renderMedia();
 }
@@ -2330,7 +2500,9 @@ async function renderThread(root, dm) {
     // A `geo:` ref renders as a map chip, not media (otherwise a broken tile in the bubble).
     const mediaEls = (m.media || []).map((r) => {
       const g = parseGeo(r);
-      return g ? geoChip(g) : guardSensitive(mediaNode(r, "max-width:240px;border-radius:12px;display:block"), r);
+      // Same reservation as the feed grid: a bubble that grows when its photo lands drags the whole
+      // thread down under the reader mid-scroll.
+      return g ? geoChip(g) : guardSensitive(reserveAspect(mediaNode(r, "max-width:240px;border-radius:12px;display:block"), r, "intrinsic"), r);
     });
 
     // An unsent message is a TOMBSTONE, not a hidden row — macOS renders "Message unsent" in
@@ -2569,9 +2741,11 @@ async function startScan() {
   const canvas = el("canvas", { style: "display:none" });
   const status = el("div", { class: "muted small" }, "Point your camera at a Haven QR code.");
   let stream, raf;
+  // The scanner is a live viewfinder — same rule as the camera: the feed goes quiet behind it.
+  const releaseCapture = beginCapture(() => stop());
   const close = modal(el("div", {}, el("h2", {}, "Scan QR"), video, status, canvas,
     el("div", { class: "row", style: "margin-top:10px;justify-content:flex-end" }, el("button", { class: "btn", onclick: () => stop() }, "Close"))));
-  const stop = () => { if (raf) cancelAnimationFrame(raf); if (stream) stream.getTracks().forEach((t) => t.stop()); close(); };
+  const stop = () => { if (raf) cancelAnimationFrame(raf); if (stream) stream.getTracks().forEach((t) => t.stop()); releaseCapture(); close(); };
   try {
     stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
     video.srcObject = stream;
@@ -3232,11 +3406,62 @@ function recentlyEnded(sid) {
 
 /** Call audio priority: true from the first ring/dial until teardown. */
 function callAudioActive() { return call.ringing || call.connecting || call.inCall; }
+
+// ---- Capture owns the audio ---------------------------------------------------------------
+// How many capture surfaces (in-app camera, voice recorder, QR scanner) are on screen. While ANY is
+// up, feed/DM media stays silent: a post's soundtrack playing behind a viewfinder is never wanted,
+// and on a machine with one shared input it lands straight in the recording. Counted rather than a
+// flag so a capture opened over another capture can't clear it early — the iOS `havenCameraUIOpen`
+// counter, same reasoning.
+let captureOpenCount = 0;
+function captureUIOpen() { return captureOpenCount > 0; }
+/** Bracket a capture surface. Returns the release fn, which every exit path calls (they all funnel
+ *  through one `finish`/`stop`).
+ *
+ *  `onDismiss` is the safety net for the paths that DON'T funnel there: Escape and a backdrop click
+ *  empty `#modal-root` directly, so a capture dialog can vanish without its own teardown ever
+ *  running. Left alone that strands the count above zero and the feed stays muted for the rest of
+ *  the session (and the camera light stays on) — so watch the root and tear down when it empties. */
+function beginCapture(onDismiss) {
+  captureOpenCount++;
+  pauseFeedMedia();       // stop what's already playing, not just what renders next
+  syncFeedVideoSound();
+  let released = false;
+  const mo = new MutationObserver(() => {
+    if (released || $("#modal-root").childElementCount) return;
+    if (onDismiss) onDismiss();   // runs the dialog's own teardown (stops the tracks), which releases
+    else release();
+  });
+  mo.observe($("#modal-root"), { childList: true });
+  function release() {
+    if (released) return;   // finish() can be reached twice (user close + recorder stop)
+    released = true;
+    mo.disconnect();        // before the caller clears #modal-root, or we'd re-enter through it
+    captureOpenCount = Math.max(0, captureOpenCount - 1);
+    syncFeedVideoSound();
+  }
+  return release;
+}
+
+/** Silence whatever the feed/thread is currently playing. Anything that COVERS the feed calls this:
+ *  a sheet or modal over a playing clip left its audio running behind the overlay, which is the
+ *  desktop shape of the iOS "sheets and covers stop the post song behind them" fix. Only pauses —
+ *  the element keeps its position, so dismissing the overlay leaves the clip where the user left it. */
+// Deliberately scoped to `[data-video]` / `[data-ref]` — the feed's and thread's own media. The story
+// composer's preview clip carries neither, so it is exempt: a preview the author asked for is not
+// something an overlay or a capture should silence (iOS says the same with havenStoryPreviewActive).
+function pauseFeedMedia() {
+  document.querySelectorAll("video[data-video], audio[data-ref]").forEach((m) => {
+    if (!m.paused) { try { m.pause(); } catch (_) {} }
+  });
+}
+
 /** Feed/DM <video> sound = the user's global toggle, overridden to MUTED while a call is
- *  ringing/connecting/live so post soundtracks never compete with call audio. Called on the
- *  global toggle, on every call state transition, and by mediaNode for newly-rendered videos. */
+ *  ringing/connecting/live, or while any capture UI is up, so post soundtracks never compete with
+ *  call audio or bleed into a recording. Called on the global toggle, on every call state
+ *  transition, when capture opens/closes, and by mediaNode for newly-rendered videos. */
 function syncFeedVideoSound() {
-  document.querySelectorAll("video[data-video]").forEach((v) => { v.muted = callAudioActive() || !state.videoSoundOn; });
+  document.querySelectorAll("video[data-video]").forEach((v) => { v.muted = callAudioActive() || captureUIOpen() || !state.videoSoundOn; });
 }
 
 const invitees = () => [...call.roster].filter((h) => h !== call.me).sort();

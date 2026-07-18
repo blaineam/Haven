@@ -54,12 +54,16 @@ struct StoryViewer: View {
             .offset(y: dragOffset)
         }
         .havenStatusBarHidden()
-        // Swipe down anywhere on the story to dismiss.
+        // Swipe DOWN to dismiss; swipe LEFT/RIGHT to skip whole users (Instagram-style — a horizontal
+        // swipe jumps past the rest of THIS person's stories to the next/previous person's first story).
         .simultaneousGesture(
             DragGesture(minimumDistance: 24)
                 .onChanged { v in if v.translation.height > 0 && abs(v.translation.height) > abs(v.translation.width) { dragOffset = v.translation.height } }
                 .onEnded { v in
-                    if v.translation.height > 130 { dismiss() }
+                    if abs(v.translation.width) > abs(v.translation.height), abs(v.translation.width) > 60 {
+                        withAnimation(.spring()) { dragOffset = 0 }
+                        if v.translation.width < 0 { skipToNextUser() } else { skipToPrevUser() }
+                    } else if v.translation.height > 130 { dismiss() }
                     else { withAnimation(.spring()) { dragOffset = 0 } }
                 }
         )
@@ -418,5 +422,37 @@ struct StoryViewer: View {
     private func prev() {
         progress = 0
         if index > 0 { index -= 1; loadCurrent() }
+    }
+
+    /// The author of the story at `i` (users are runs of same-author entries in the flat list).
+    private func author(_ i: Int) -> String { stories.indices.contains(i) ? stories[i].authorShort : "" }
+
+    /// Swipe-left: skip the rest of THIS person's stories and jump to the next person's FIRST story. Past
+    /// the last person, dismiss (Instagram-style).
+    private func skipToNextUser() {
+        let cur = author(index)
+        if let nextStart = stories.indices.first(where: { $0 > index && stories[$0].authorShort != cur }) {
+            progress = 0; index = nextStart; loadCurrent()
+        } else {
+            dismiss()
+        }
+    }
+    /// Swipe-right: jump to the PREVIOUS person's first story (or the start of the current person's run if
+    /// we're already partway into it).
+    private func skipToPrevUser() {
+        let cur = author(index)
+        // Start of the current person's run.
+        var runStart = index
+        while runStart > 0, stories[runStart - 1].authorShort == cur { runStart -= 1 }
+        if index > runStart {
+            progress = 0; index = runStart; loadCurrent()   // partway in → restart this person
+            return
+        }
+        // Already at this person's first story → go to the previous person's first story.
+        guard runStart > 0 else { return }
+        let prevAuthor = stories[runStart - 1].authorShort
+        var prevStart = runStart - 1
+        while prevStart > 0, stories[prevStart - 1].authorShort == prevAuthor { prevStart -= 1 }
+        progress = 0; index = prevStart; loadCurrent()
     }
 }

@@ -1237,8 +1237,12 @@ final class FeedStore: ObservableObject {
             let hiddenHere = raw.reduce(into: 0) { if hidden.contains($1.id) { $0 += 1 } }   // hidden IN THIS circle
             await MainActor.run {
                 guard let self, self.refreshGeneration == gen, self.activeCircleId == circleId else { return }
-                self.items = filtered
-                self.hiddenInActiveCircle = hiddenHere
+                // Only republish when the content ACTUALLY changed. A refresh triggered incidentally during
+                // a scroll (media backfill, a poster landing, a periodic tick) usually produces an identical
+                // list; assigning it anyway re-diffs the LazyVStack and nudged the scroll offset — the
+                // "position jumps around before settling" on fast flings.
+                if self.items != filtered { self.items = filtered }
+                if self.hiddenInActiveCircle != hiddenHere { self.hiddenInActiveCircle = hiddenHere }
                 self.sensitiveCache.removeAll()   // a refresh may have ingested new SensitiveFlag events
                 self.reportsCache.removeAll()     // …and new Report events
                 SpotlightIndex.reindexAll()       // no-op unless the user enabled Spotlight indexing

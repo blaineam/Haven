@@ -314,6 +314,12 @@ struct RootView: View {
         .sheet(item: $linkPresenter.presented) { presented in
             InAppBrowserView(url: presented.url)
         }
+        // An in-app post route (the story viewer's "View post" chip) can't reach `tab` itself — it asks
+        // for the switch here. Only ever set for a locked circle, so the lock screen can take over.
+        .onReceive(deepLinks.$requestedTab.compactMap { $0 }) { t in
+            tab = t
+            deepLinks.requestedTab = nil
+        }
         // Profile / specific-post deep links open as a sheet.
         .sheet(item: $deepLinks.route) { route in
             switch route {

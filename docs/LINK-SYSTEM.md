@@ -70,6 +70,48 @@ The delimiters are `p/` and `.`, matching the invite link's `<id>.<verify>`. Bot
 tokens are percent-encoded with `.` and `/` excluded from the allowed set, so the split
 is exact regardless of what an id contains.
 
+## Post links *inside* the app: sharing a post as a story
+
+Sharing a post **as a story** does not use a URL at all. A URL would be the wrong tool: it would have to
+be parsed, percent-decoded, and round-tripped through the OS just to move between two screens of the same
+app. Instead the story's own `body` carries a structured reference, `StoryEmbed`
+(`apple/HavenApp/StoryEmbed.swift`):
+
+```
+⁣haven-embed:v1|<circleId>|<postId>|<musicStartMs>⁣<visible caption>
+└ U+2063 ┘                                        └ U+2063 ┘
+```
+
+* **No engine or FFI change.** A story is already an ordinary post with `story: true`; the embed is a
+  body convention, so it rides the existing wire format and every platform can adopt it independently.
+* **U+2063 (INVISIBLE SEPARATOR)** wraps the token so it never renders, and delimits it exactly.
+* **It nests OUTSIDE `StoryCaptions`.** The composer emits a `StoryCaptions` body (`\u{1}spec\u{1}text`)
+  and the embed wraps that whole thing. So every read of a story body must call `StoryEmbed.strip(_:)`
+  *before* `StoryCaptions.decode(_:)` — `StoryCaptions` falls back to "the entire string is the caption"
+  on input it doesn't recognize, so skipping the strip renders the raw token on screen.
+* Tapping "View post" routes through the **same** internal route as a link
+  (`DeepLinkRouter.openPost(circleId:postId:)`), so there is one code path for "show me this post",
+  biometric-lock check included.
+
+### Why this doesn't leak anything
+
+Same rule as the web post link: **the ref is a pointer, not a capability.** It carries no key, and access
+is still decided entirely by circle membership in the core.
+
+The audiences also line up by construction. A story is published to the **active circle**
+(`FeedStore.post`), and "Share as story" is only offered on a post in that same circle — so everyone who
+can see the story is already in the circle that holds the post. There is no case where the embed widens
+who can read something.
+
+Two deliberate consequences:
+
+* **The chip is drawn from the token alone, with no pre-flight access check.** Checking first would make
+  the chip's presence a membership/existence oracle. The tap instead always lands somewhere honest.
+* **`PostLinkView` gives ONE failure message** — "Post unavailable" — for deleted, unsent, and
+  not-yours alike. Distinguishing them would answer "does this post exist?" for someone who shouldn't be
+  able to ask. It waits ~1.5s before saying so, because the story and its source post can sync in either
+  order.
+
 ## Hosting the association files
 
 Two static files make the phones open the app instead of the browser:

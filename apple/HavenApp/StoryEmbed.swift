@@ -43,4 +43,20 @@ enum StoryEmbed {
 
     /// Whether a story body carries an embed (cheap check for the renderer).
     static func isEmbed(_ body: String) -> Bool { decode(body).ref != nil }
+
+    /// The body with any embed token removed — i.e. what `StoryCaptions` should be handed.
+    ///
+    /// EVERY read of a story body has to go through this first. The two encodings nest, embed OUTSIDE
+    /// caption (`⁣token⁣` + `\u{1}spec\u{1}text`), and `StoryCaptions.decode` bails to "the whole string
+    /// is the caption" on anything it doesn't recognize — so skipping this step renders the raw
+    /// `haven-embed:v1|…` token on screen as if the author had typed it.
+    static func strip(_ body: String) -> String { decode(body).caption }
+}
+
+/// A "share this post as a story" composer session. The post ref is snapshotted when the menu item is
+/// tapped, so switching circles mid-compose can't retarget the embed at a different circle's post.
+struct StoryShareTarget: Identifiable {
+    let id = UUID()
+    let draft: StoryDraft
+    let embed: StoryEmbed.Ref
 }

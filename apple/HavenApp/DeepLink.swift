@@ -52,6 +52,10 @@ enum DeepLinkRoute: Identifiable {
 final class DeepLinkRouter: ObservableObject {
     static let shared = DeepLinkRouter()
     @Published var route: DeepLinkRoute?
+    /// A tab the root view should switch to. Only `openPost(circleId:postId:)` sets it — a URL arriving
+    /// from outside already has the root's `tab` binding in hand, but an in-app caller (the story
+    /// viewer's "View post" chip) does not, and a locked circle still has to reach its lock screen.
+    @Published var requestedTab: String?
 
     /// Resolve a `haven://u|p/…` URL *or* the web post link (`https://…/apps/haven/#p/<c>.<p>`).
     /// Returns true if it was a deep link we handled (so the caller doesn't also treat it as an
@@ -99,15 +103,27 @@ final class DeepLinkRouter: ObservableObject {
     }
 
     private func openPost(circleId: String, postId: String, tab: inout String) {
+        if let t = resolvePost(circleId: circleId, postId: postId) { tab = t }
+    }
+
+    /// Route to a post from INSIDE the app — today, the story viewer's "View post" chip. Identical rules
+    /// to a link arriving from outside, biometric lock included: an embedded ref is a pointer, never a
+    /// way around a circle's lock.
+    func openPost(circleId: String, postId: String) {
+        if let t = resolvePost(circleId: circleId, postId: postId) { requestedTab = t }
+    }
+
+    /// Shared body of both entry points. Returns a tab for the caller to switch to, if any.
+    private func resolvePost(circleId: String, postId: String) -> String? {
         if CircleSettingsStore.shared.biometricRequired(circleId),
            !BiometricGate.shared.unlocked.contains(circleId) {
             // Locked: route the user to the circle's lock screen rather than the post.
-            tab = "circle"
             FeedStore.shared.setActiveCircle(circleId)
             BiometricGate.shared.unlock(circleId)
-        } else {
-            route = .post(circleId: circleId, postId: postId)
+            return "circle"
         }
+        route = .post(circleId: circleId, postId: postId)
+        return nil
     }
 }
 
@@ -117,6 +133,11 @@ struct PostLinkView: View {
     let postId: String
     @ObservedObject private var store = FeedStore.shared
     @Environment(\.dismiss) private var dismiss
+
+    /// Gives the post a moment to arrive before we call it missing. A post opened from a story embed is
+    /// very often one this device hasn't reduced yet (the story and the post can land in either order),
+    /// and flashing "unavailable" at something that shows up 300ms later is the worst of both.
+    @State private var settled = false
 
     private var post: FeedItemFfi? {
         store.messages(in: circleId).first { $0.id == postId }
@@ -135,10 +156,19 @@ struct PostLinkView: View {
                                  onEdit: { _ in }, onUnsend: { })
                             .padding(16)
                     }
+                } else if settled {
+                    // Deliberately one message for every failure mode. Saying WHICH — deleted vs. not
+                    // your circle — would answer "does this post exist?" for someone who shouldn't be
+                    // able to ask. It reads the same whether the post is gone or was never yours.
+                    ContentUnavailableView("Post unavailable", systemImage: "doc.questionmark",
+                                           description: Text("It may have been unsent, or it isn't shared with you."))
                 } else {
-                    ContentUnavailableView("Post not found", systemImage: "doc.questionmark",
-                                           description: Text("It may have been unsent, or you're not in this circle."))
+                    ProgressView().controlSize(.large)
                 }
+            }
+            .task {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                settled = true
             }
             .navigationTitle("Post")
             .havenInlineNavTitle()

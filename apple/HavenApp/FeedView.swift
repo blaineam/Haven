@@ -4175,8 +4175,14 @@ struct PostCard: View {
     @State private var mediaWidth: CGFloat = lastKnownMediaWidth
     @State private var showHeart = false
     @State private var showReactionDetail = false
+    /// A "share this post as a story" composer session (nil = not sharing).
+    @State private var storyShare: StoryShareTarget?
 
     private var isActive: Bool { audio.centeredPostId == item.id }
+
+    /// The post's real media, minus synthetic refs (a `geo:` location pin has no bytes). A story needs
+    /// something to show, so this is what gates the "Share as story" action.
+    private var storyableMedia: [String] { realMedia.filter { !MediaStore.isSynthetic($0) } }
 
     /// Display name for the post's author — resolved from your contacts by node id.
     private var authorName: String {
@@ -4289,6 +4295,24 @@ struct PostCard: View {
         .sheet(isPresented: $showEdit) { EditPostSheet(item: item) }
         .sheet(isPresented: $showReport) { ReportSheet(item: item, authorName: authorName) }
         .havenFullScreenCover(item: $zoomTarget, wide: true) { t in MediaZoomViewer(refs: t.refs, index: t.index) }
+        // Share-as-story runs through the SAME composer as a camera story (filters, caption styling,
+        // music, reframing) — the only difference is that the published body carries the source post's
+        // ref, so the story deep-links back to it.
+        .havenFullScreenCover(item: $storyShare) { target in
+            StoryComposerView(draft: target.draft) { ref, caption, track in
+                Task { @MainActor in
+                    // A long video becomes up to 5 consecutive slides, as everywhere else. Every slide
+                    // carries the embed, so the link back works whichever one you're looking at.
+                    let parts = await MediaStore.shared.splitStoryVideo(ref)
+                    for r in parts {
+                        feed.postStory(media: [r],
+                                       caption: StoryEmbed.encode(target.embed, caption: caption),
+                                       music: track)
+                    }
+                    storyShare = nil
+                }
+            } onDone: { storyShare = nil }
+        }
         .alert("Edit comment", isPresented: Binding(get: { editCommentId != nil }, set: { if !$0 { editCommentId = nil } })) {
             TextField("Comment", text: $editCommentText)
             Button("Save") { if let id = editCommentId { feed.edit(id, editCommentText, media: editCommentMedia) }; editCommentId = nil }
@@ -4910,6 +4934,19 @@ private struct KillHorizontalScroller: NSViewRepresentable {
                         } label: {
                             Label(linkCopied ? "Copied" : "Copy link",
                                   systemImage: linkCopied ? "checkmark" : "doc.on.doc")
+                        }
+                        // Reshare the post as a 24h story that links back to it. Deliberately inside the
+                        // same guard as the link actions: a story goes to the ACTIVE circle (see
+                        // FeedStore.post), and this post is IN the active circle, so everyone who can see
+                        // the story can already open the post. That is the whole access story — the embed
+                        // carries no key, and we never widen the audience beyond the circle.
+                        if !storyableMedia.isEmpty {
+                            Button {
+                                storyShare = StoryShareTarget(
+                                    draft: StoryDraft(refs: storyableMedia),
+                                    embed: StoryEmbed.Ref(circleId: feed.activeCircleId,
+                                                          postId: item.id, musicStartMs: 0))
+                            } label: { Label("Share as story", systemImage: "circle.dashed.inset.filled") }
                         }
                     }
                     if item.isMe {

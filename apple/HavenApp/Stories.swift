@@ -103,7 +103,7 @@ struct StoryViewer: View {
         } else {
             GeometryReader { geo in
                 // The author's framing (zoom + reposition) travels in the caption spec.
-                let tf = StoryCaptions.decode(s.body).spec
+                let tf = StoryCaptions.decode(StoryEmbed.strip(s.body)).spec
                 ZStack {
                     // Blurred fill backdrop so off-ratio media (landscape, etc.) sits in the standard
                     // story frame instead of leaving plain black bands. The still covers photo + video.
@@ -197,8 +197,9 @@ struct StoryViewer: View {
                 Spacer()
                 if s.isMe {
                     Button {
-                        // Convert this story into a permanent (non-expiring) post.
-                        FeedStore.shared.post(StoryCaptions.decode(s.body).text,
+                        // Convert this story into a permanent (non-expiring) post. The embed token is
+                        // dropped: the new post is its own thing, not a pointer back at the original.
+                        FeedStore.shared.post(StoryCaptions.decode(StoryEmbed.strip(s.body)).text,
                                               media: s.media, music: s.music, retentionSecs: nil, story: false)
                         dismiss()
                     } label: {
@@ -237,6 +238,7 @@ struct StoryViewer: View {
             // Bottom controls sit over a fade-to-black scrim so the (white) song chip + reply
             // field stay legible even when the story image is near-white at the bottom.
             VStack(spacing: 0) {
+                embedChip(s)
                 if let m = s.music {
                     HStack(spacing: 8) {
                         Image(systemName: "music.note").font(.caption)
@@ -268,10 +270,50 @@ struct StoryViewer: View {
         }
     }
 
+    /// "View post" — shown when this story was shared FROM a post, and taps through to that post.
+    ///
+    /// The chip is drawn from the embed token alone; it deliberately does NOT check whether the post is
+    /// readable first. A pre-flight check would be a membership oracle — the chip's presence would tell
+    /// the viewer whether the author's post exists and whether they can see it. Instead the tap always
+    /// lands somewhere honest: `PostLinkView` renders the post if this device can decrypt it, and a
+    /// plain "Post unavailable" if it can't (deleted, unsent, or not your circle). In practice the two
+    /// audiences are the same set — a story goes to the circle its source post lives in — so this is the
+    /// deleted/unsent case, not the access case.
+    @ViewBuilder private func embedChip(_ s: FeedItemFfi) -> some View {
+        if let ref = StoryEmbed.decode(s.body).ref {
+            Button {
+                openEmbeddedPost(ref)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.up.forward.app.fill").font(.caption)
+                    Text("View post").font(.caption.weight(.semibold))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12).padding(.vertical, 7)
+                .havenGlass(in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .padding(.bottom, 8)
+        }
+    }
+
+    /// Leave the viewer, then route to the post. Order matters: the story viewer is a full-screen cover
+    /// and the deep-link destination is a SHEET on the root view, so raising it while the cover is still
+    /// up gets swallowed. Dismiss first, let the cover finish animating out, then route.
+    private func openEmbeddedPost(_ ref: StoryEmbed.Ref) {
+        player?.pause()
+        dismiss()
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            DeepLinkRouter.shared.openPost(circleId: ref.circleId, postId: ref.postId)
+        }
+    }
+
     /// The caption rendered where the author dragged it (position travels in the spec).
     @ViewBuilder private func positionedCaption(_ s: FeedItemFfi) -> some View {
-        if !s.body.isEmpty {
-            let decoded = StoryCaptions.decode(s.body)
+        let body = StoryEmbed.strip(s.body)
+        if !body.isEmpty {
+            let decoded = StoryCaptions.decode(body)
             GeometryReader { geo in
                 StyledCaption(text: decoded.text, spec: decoded.spec)
                     .padding(.horizontal, 12)

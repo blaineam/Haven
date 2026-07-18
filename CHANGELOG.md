@@ -9,6 +9,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Share a post as a story.** A post's ⋯ menu now offers "Share as story": it opens the usual story
+  composer (filters, caption, music, reframing) with the post's photos or videos already loaded, and the
+  story it publishes links back to the original. Anyone watching sees a "View post" chip that opens the
+  post right there in the app. The story goes to the same circle the post is in, so everyone who can see
+  the story can already open the post — and if it's since been unsent, the tap lands on a plain "Post
+  unavailable" card rather than doing nothing.
+
 ### Fixed
 
 - **Tall, narrow photos get their blurred backdrop again.** A post whose photo is much taller than it is

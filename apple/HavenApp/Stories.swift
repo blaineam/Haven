@@ -390,9 +390,11 @@ struct StoryViewer: View {
         if s.isMe {
             HavenAvatar(image: ProfileStore.shared.avatar, emoji: ProfileStore.shared.emoji, size: 30)
         } else {
+            // Use the SAME resolution as everywhere else in the app (their synced photo → emoji →
+            // initial) instead of a hand-rolled initial circle, which never showed the friend's real
+            // profile picture on their story screens.
             let name = ContactsStore.shared.name(forNodePrefix: s.authorShort) ?? friendName
-            Circle().fill(HavenTheme.brand).frame(width: 30, height: 30)
-                .overlay(Text(String(name.prefix(1))).font(.caption.bold()).foregroundStyle(.white))
+            PeerAvatar(nodeHex: s.authorShort, name: name, size: 30)
         }
     }
 

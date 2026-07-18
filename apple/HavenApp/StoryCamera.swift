@@ -1054,6 +1054,11 @@ struct StoryComposerView: View {
     @FocusState private var captionFocused: Bool
 
     var body: some View {
+      // Capture the REAL device safe-area insets at the root, before any child `.ignoresSafeArea()`
+      // collapses them. The controls layer re-applies these so it never lands under the notch / Dynamic
+      // Island / home indicator, while the media behind it still fills the screen edge-to-edge.
+      GeometryReader { proxy in
+        let safeInsets = proxy.safeAreaInsets
         ZStack {
             Color.black.ignoresSafeArea()
             media.ignoresSafeArea()
@@ -1139,7 +1144,14 @@ struct StoryComposerView: View {
                 if !editingCaption { shareBar }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)   // pin controls to the screen, never the media's size
-            .padding(.bottom, editingCaption ? kbHeight : 0)   // lift the style bar to the keyboard edge
+            // The media + black backdrop `.ignoresSafeArea()`, which expands THIS ZStack to the full
+            // screen — so the controls VStack (maxHeight .infinity) fills into the notch / Dynamic Island
+            // and the home-indicator strip, jamming the X button and Share bar into the unsafe regions.
+            // Re-inset the controls by the real device insets captured at the root (`safeInsets`) so they
+            // land back inside the visible area, while the media stays edge-to-edge behind them.
+            .padding(.top, safeInsets.top)   // topControls adds its own +8 below this
+            .padding(.bottom, editingCaption ? kbHeight : safeInsets.bottom + 8)
+            .padding(.horizontal, max(safeInsets.leading, safeInsets.trailing))   // landscape/side insets
             // Opt out of SwiftUI's automatic keyboard avoidance — otherwise it stacks on top of
             // our manual kbHeight lift and shoves the controls to the top of the screen.
             .ignoresSafeArea(.keyboard, edges: .bottom)
@@ -1151,6 +1163,9 @@ struct StoryComposerView: View {
         .sheet(isPresented: $showSongs) {
             SongPicker { t in track = t }
         }
+      }
+      // NB: no `.ignoresSafeArea()` on the GeometryReader itself — it must stay inset so `proxy.safeAreaInsets`
+      // reports the real device insets. The media/backdrop reach the screen edges via their own `.ignoresSafeArea()`.
     }
 
     private var media: some View {

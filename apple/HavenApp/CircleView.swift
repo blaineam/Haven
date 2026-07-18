@@ -317,6 +317,15 @@ struct CircleView: View {
             Label(isDefault ? "Remove from my circle" : "Remove from this circle",
                   systemImage: "person.badge.minus")
         }
+        // "Get this person out of everything" — pulls them from EVERY group circle at once (each removal
+        // is tombstoned so they can't rejoin), for when removing from one circle keeps leaving them in
+        // the others. DMs are left intact.
+        Button(role: .destructive) {
+            let n = store.removeFromAllCircles(c.idHex)
+            if isDefault || n > 0 { contacts.remove(c) }
+        } label: {
+            Label("Remove from all circles", systemImage: "person.2.slash")
+        }
         Button(role: .destructive) { store.blockConnection(c.idHex) } label: {
             Label("Block", systemImage: "hand.raised.fill")
         }

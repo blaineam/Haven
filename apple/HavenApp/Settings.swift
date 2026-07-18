@@ -12,12 +12,45 @@ final class SettingsStore: ObservableObject {
     static let shared = SettingsStore()
 
     /// Default for saving media YOU create in-app to Photos (per-circle overrides in CircleSettingsStore).
-    @Published var saveToPhotos: Bool { didSet { d.set(saveToPhotos, forKey: kSave) } }
+    @Published var saveToPhotos: Bool { didSet { d.set(saveToPhotos, forKey: kSave); stamp(kSave) } }
     /// Default for saving media OTHERS send you to Photos.
-    @Published var saveOthersToPhotos: Bool { didSet { d.set(saveOthersToPhotos, forKey: kSaveOthers) } }
-    @Published var autoOptimize: Bool { didSet { d.set(autoOptimize, forKey: kOpt) } }
+    @Published var saveOthersToPhotos: Bool { didSet { d.set(saveOthersToPhotos, forKey: kSaveOthers); stamp(kSaveOthers) } }
+    @Published var autoOptimize: Bool { didSet { d.set(autoOptimize, forKey: kOpt); stamp(kOpt) } }
     /// Auto-delete posts older than this many days (0 = keep forever).
-    @Published var retentionDays: Int { didSet { d.set(retentionDays, forKey: kRet) } }
+    @Published var retentionDays: Int { didSet { d.set(retentionDays, forKey: kRet); stamp(kRet) } }
+
+    /// LAST-WRITER-WINS timestamps for the SYNCED settings, so two of your devices resolve a settings
+    /// change by who changed it LAST rather than who synced last (the same ping-pong that hit profiles).
+    /// Stamped only on a real LOCAL change (an `applyingRemote` flag suppresses sync-applied writes).
+    private(set) var settingTs: [String: UInt64] = [:]
+    private var applyingRemote = false
+    private let kSettingTs = "haven.settingTs.v1"
+    private func stamp(_ key: String) {
+        guard !applyingRemote else { return }
+        settingTs[key] = UInt64(Date().timeIntervalSince1970 * 1000)
+        d.set(settingTs.mapValues { NSNumber(value: $0) }, forKey: kSettingTs)
+    }
+    func settingTimestamp(_ key: String) -> UInt64 { settingTs[key] ?? 0 }
+    /// Apply a REMOTE synced setting only if it was changed more recently than our local one (LWW).
+    @discardableResult func applyRemoteBool(_ key: String, _ value: Bool, ts: UInt64) -> Bool {
+        guard ts > settingTimestamp(key) else { return false }
+        applyingRemote = true
+        switch key { case kSave: saveToPhotos = value; case kSaveOthers: saveOthersToPhotos = value; case kOpt: autoOptimize = value; default: break }
+        applyingRemote = false
+        settingTs[key] = ts; d.set(settingTs.mapValues { NSNumber(value: $0) }, forKey: kSettingTs)
+        return true
+    }
+    @discardableResult func applyRemoteRetentionDays(_ value: Int, ts: UInt64) -> Bool {
+        guard ts > settingTimestamp(kRet) else { return false }
+        applyingRemote = true; retentionDays = value; applyingRemote = false
+        settingTs[kRet] = ts; d.set(settingTs.mapValues { NSNumber(value: $0) }, forKey: kSettingTs)
+        return true
+    }
+    // Public key accessors for the self-sync layer (keys are private).
+    var tsKeySave: String { kSave }
+    var tsKeySaveOthers: String { kSaveOthers }
+    var tsKeyOpt: String { kOpt }
+    var tsKeyRet: String { kRet }
     /// When auto-delete is on, keep MY OWN posts even after they'd age out for others (my archive).
     @Published var keepMyPosts: Bool { didSet { d.set(keepMyPosts, forKey: kKeepMine) } }
     /// Global mute — silences post music + video audio so you can browse quietly. DEVICE-LOCAL: it's
@@ -66,6 +99,7 @@ final class SettingsStore: ObservableObject {
         videoSoundOn = d.object(forKey: kVideoSound) as? Bool ?? false   // default muted; tap any video to unmute all
         localMediaMaxDays = d.object(forKey: kLocMaxDays) as? Int ?? 0    // default off (no age limit)
         localMediaMaxGB = d.object(forKey: kLocMaxGB) as? Int ?? 0        // default off (no size limit)
+        settingTs = (d.dictionary(forKey: kSettingTs) as? [String: NSNumber])?.mapValues { $0.uint64Value } ?? [:]
     }
 
     /// Viewer retention in seconds (nil = forever).

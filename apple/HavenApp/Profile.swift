@@ -10,14 +10,61 @@ final class ProfileStore: ObservableObject {
 
     // Demo seeding overwrites these in memory (PII-free synthetic profile) but must NEVER persist —
     // otherwise the demo "Riley Avery" profile lands in the real (shared-container) defaults.
-    @Published var displayName: String { didSet { if !DemoEnv.isDemo { defaults.set(displayName, forKey: nameKey) } } }
-    @Published var emoji: String { didSet { if !DemoEnv.isDemo { defaults.set(emoji, forKey: emojiKey) }; FeedStore.shared.rebroadcastProfile() } }
+    @Published var displayName: String { didSet { if !DemoEnv.isDemo { defaults.set(displayName, forKey: nameKey) }; stamp("name") } }
+    @Published var emoji: String { didSet { if !DemoEnv.isDemo { defaults.set(emoji, forKey: emojiKey) }; stamp("emoji"); FeedStore.shared.rebroadcastProfile() } }
     @Published var onboarded: Bool { didSet { defaults.set(onboarded, forKey: doneKey) } }
     /// A short bio + a link the user chooses to show — a little "business card" shared,
     /// signed and end-to-end, with the people they connect to.
-    @Published var bio: String { didSet { if !DemoEnv.isDemo { defaults.set(bio, forKey: bioKey) } } }
-    @Published var link: String { didSet { if !DemoEnv.isDemo { defaults.set(link, forKey: linkKey) } } }
+    @Published var bio: String { didSet { if !DemoEnv.isDemo { defaults.set(bio, forKey: bioKey) }; stamp("bio") } }
+    @Published var link: String { didSet { if !DemoEnv.isDemo { defaults.set(link, forKey: linkKey) }; stamp("link") } }
     @Published private(set) var avatar: PlatformImage?
+
+    /// LAST-WRITER-WINS timestamps per profile field ("name"/"emoji"/"bio"/"link"/"avatar"), so two of
+    /// your own devices don't overwrite each other's profile every sync (the endless ping-pong where
+    /// "non-empty always wins" = "whoever synced last wins"). Stamped ONLY on a real LOCAL edit — a
+    /// value applied FROM sync must not re-stamp (that's what kept the cycle going). Namespaced per identity.
+    private(set) var fieldTs: [String: UInt64] = [:]
+    private var applyingRemote = false
+    private var fieldTsKey: String { key("haven.profileFieldTs.v1") }
+    private func nowMs() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
+    private func stamp(_ field: String) {
+        guard !applyingRemote, !DemoEnv.isDemo else { return }
+        fieldTs[field] = nowMs()
+        defaults.set(fieldTs.mapValues { NSNumber(value: $0) }, forKey: fieldTsKey)
+    }
+    func fieldTimestamp(_ field: String) -> UInt64 { fieldTs[field] ?? 0 }
+    private func loadFieldTs() {
+        fieldTs = (defaults.dictionary(forKey: fieldTsKey) as? [String: NSNumber])?.mapValues { $0.uint64Value } ?? [:]
+    }
+
+    /// Apply a REMOTE profile field only if its timestamp is NEWER than our local edit (LWW). The write
+    /// goes through the normal setter (so the UI + card refresh) but is flagged so it isn't re-stamped.
+    /// Empty values are allowed to win when newer — a deliberate clear must propagate. Returns whether applied.
+    @discardableResult func applyRemote(_ field: String, string: String, ts: UInt64) -> Bool {
+        guard ts > fieldTimestamp(field) else { return false }
+        applyingRemote = true
+        switch field {
+        case "name":  if string != displayName { displayName = string }
+        case "emoji": if !string.isEmpty, string != emoji { emoji = string }   // never an empty emoji (has a default)
+        case "bio":   if string != bio { bio = string }
+        case "link":  if string != link { link = string }
+        default: break
+        }
+        applyingRemote = false
+        fieldTs[field] = ts
+        defaults.set(fieldTs.mapValues { NSNumber(value: $0) }, forKey: fieldTsKey)
+        return true
+    }
+    @discardableResult func applyRemoteAvatar(base64: String, ts: UInt64) -> Bool {
+        guard ts > fieldTimestamp("avatar") else { return false }
+        applyingRemote = true
+        if base64.isEmpty { setAvatar(nil) }
+        else if let data = Data(base64Encoded: base64), let img = PlatformImage(data: data) { setAvatar(img) }
+        applyingRemote = false
+        fieldTs["avatar"] = ts
+        defaults.set(fieldTs.mapValues { NSNumber(value: $0) }, forKey: fieldTsKey)
+        return true
+    }
 
     private let defaults = UserDefaults.standard
     /// Profile fields are namespaced per identity (by node-id hex) so each identity keeps its own
@@ -42,6 +89,7 @@ final class ProfileStore: ObservableObject {
         bio = d.string(forKey: k("haven.bio")) ?? ""
         link = d.string(forKey: k("haven.link")) ?? ""
         avatar = Self.loadAvatar(ns: ns0)
+        loadFieldTs()
 
         if ProcessInfo.processInfo.environment["HAVEN_SKIP_ONBOARDING"] == "1" {
             if displayName.isEmpty { displayName = "You" }
@@ -54,12 +102,15 @@ final class ProfileStore: ObservableObject {
     func reloadForCurrentIdentity() {
         ns = AccountStore.currentNodeHex()
         Self.migrateLegacyIfNeeded(ns: ns, d: defaults)
+        applyingRemote = true   // loading persisted values must NOT re-stamp them as fresh local edits
         displayName = defaults.string(forKey: nameKey) ?? ""
         bio = defaults.string(forKey: bioKey) ?? ""
         link = defaults.string(forKey: linkKey) ?? ""
         emoji = defaults.string(forKey: emojiKey) ?? "🌿"
         avatar = Self.loadAvatar(ns: ns)
+        applyingRemote = false
         avatarB64Cache = nil
+        loadFieldTs()
     }
 
     /// One-time: copy the pre-namespacing (global) profile into the CURRENT identity's namespace so
@@ -96,6 +147,7 @@ final class ProfileStore: ObservableObject {
 
     /// Set or clear the custom profile photo (emoji remains the fallback).
     func setAvatar(_ image: PlatformImage?) {
+        stamp("avatar")   // a user edit bumps the LWW timestamp (no-op when applying a remote value)
         avatar = image
         avatarB64Cache = nil   // re-encode lazily next time the card is built
         let url = Self.avatarURL(ns: ns)

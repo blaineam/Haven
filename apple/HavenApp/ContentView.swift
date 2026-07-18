@@ -34,16 +34,30 @@ struct YouView: View {
                         postsSection
                     }
                     .padding(20)
-                    // Pin the content to the viewport width. A vertical ScrollView proposes UNBOUNDED
-                    // width to its content, so an unconstrained Text (the bio) laid out on one line wider
-                    // than the screen — which made the whole content horizontally pannable (you could
-                    // swipe the profile sideways). Constraining width forces text to wrap and kills the
-                    // stray horizontal scroll. (The Circle feed didn't show it because its cards fill width.)
+                    // Pin the content lane to EXACTLY the viewport width. A vertical ScrollView proposes
+                    // UNBOUNDED width to its content, so any child that reports an intrinsic width wider
+                    // than the screen made the whole page horizontally pannable (you could swipe it
+                    // sideways / rubber-band left-right). `.frame(maxWidth: .infinity)` only *allows*
+                    // growth — it doesn't clamp — so an oversized child still overflowed. `containerRelativeFrame`
+                    // forces the container's width regardless of children's ideal sizes, so nothing can
+                    // overflow. (The Circle feed didn't show it because its cards already fill width.)
                     .frame(maxWidth: .infinity)
+                    // iOS-only: clamp the content lane to exactly the viewport width. On macOS this
+                    // combined with the surrounding NavigationSplitView into a layout cycle that hung the
+                    // whole app when opening the You tab — and the Mac window has a fixed width with no
+                    // touch rubber-banding, so it never had the sideways-pan problem to begin with.
+                    #if os(iOS)
+                    .containerRelativeFrame(.horizontal)
+                    #endif
                 }
                 // Match the Circle feed: any scroll dismisses the comment keyboard (interactively
                 // only dismissed on a deliberate keyboard drag, which felt stuck on the You tab).
                 .scrollDismissesKeyboard(.immediately)
+                // Belt-and-suspenders: never rubber-band horizontally when the content already fits the
+                // width (which, with the clamp above, is always). Kills the unpolished sideways bounce.
+                #if os(iOS)
+                .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+                #endif
             }
             // No big "You" header — the profile header below already identifies the tab. Keep a
             // slim inline bar so the settings gear stays in the toolbar.
@@ -148,15 +162,15 @@ struct YouView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 12) {
-                    ForEach(Array(feed.myStories.enumerated()), id: \.element.id) { idx, s in
+                    ForEach(Array(feed.myStories.enumerated()), id: \.element.id) { idx, _ in
                         Button { storyIndex = idx; showStories = true } label: {
                             ZStack {
                                 Circle().fill(LinearGradient(colors: [HavenTheme.violet, HavenTheme.pink, HavenTheme.amber],
                                                              startPoint: .topLeading, endPoint: .bottomTrailing))
                                     .frame(width: 64, height: 64)
-                                if let img = s.media.first.flatMap({ MediaStore.shared.item($0)?.image }) {
-                                    Image(platformImage: img).resizable().scaledToFill().frame(width: 56, height: 56).clipShape(Circle())
-                                }
+                                // The ring is an identity chip → show MY profile picture, not the story's
+                                // media (Instagram-style). The media is what you see when you open it.
+                                HavenAvatar(image: profile.avatar, emoji: profile.emoji, size: 56)
                             }
                         }
                         .buttonStyle(.plain)

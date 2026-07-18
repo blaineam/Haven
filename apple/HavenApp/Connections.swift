@@ -23,62 +23,90 @@ final class ConnectionsStore: ObservableObject {
     /// People we deliberately did NOT share past history with — they see new posts only.
     @Published private(set) var noHistory: Set<String> = []
 
-    /// People explicitly removed from a specific circle, keyed "<circleId>|<nodeHex>". Unlike a global
-    /// block, this only bans them from that one circle — and crucially it survives their handshakes, so
-    /// a removed member can't auto-rejoin the circle on their next Hello.
+    /// Circle-member removal state as LAST-WRITER-WINS: `removedAt[key]` is when the member was removed
+    /// from a circle, `readdedAt[key]` when they were deliberately re-added; a member is currently
+    /// removed iff their removal is NEWER than any re-add. Timestamps (ms) are the fix for the two ways
+    /// this broke: a fresh removal now always beats a stale "re-added elsewhere" record (so removals
+    /// sync + stick), and a fresh re-add beats an old removal (so a sibling's stale removal can't
+    /// re-sever a friend you just re-added). Keyed "<circleId>|<nodeHex>". Mirrors the relay-removal LWW.
+    private(set) var removedAt: [String: UInt64] = [:]
+    private(set) var readdedAt: [String: UInt64] = [:]
+    /// Derived: keys currently removed (removal newer than any re-add). Published for UI filters.
     @Published private(set) var circleRemovals: Set<String> = []
-    /// Removals we deliberately CLEARED (re-added the person). Kept — not deleted — so self-sync can
-    /// publish the clear as an explicit LWW write (removal:<key> = 0) that supersedes the stale
-    /// removal record on our other devices. Without this, a sibling's grow-only removal record
-    /// re-severed a re-added friend on every sync pass, forever.
-    private(set) var clearedCircleRemovals: Set<String> = []
 
     private let d = UserDefaults.standard
     private let blockedKey = "haven.blocked"
     private let noHistoryKey = "haven.noHistory"
-    private let circleRemovalsKey = "haven.circleRemovals"
-    private let clearedRemovalsKey = "haven.circleRemovals.cleared"
+    private let removedAtKey = "haven.circleRemovedAt.v2"
+    private let readdedAtKey = "haven.circleReaddedAt.v2"
+    // Legacy (pre-LWW) sets, read once to migrate.
+    private let legacyRemovalsKey = "haven.circleRemovals"
+    private let legacyClearedKey = "haven.circleRemovals.cleared"
     private func removalKey(_ circleId: String, _ idHex: String) -> String { "\(circleId)|\(idHex)" }
+    private func nowMs() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
 
     private init() {
         if let arr = d.array(forKey: blockedKey) as? [String] { blocked = Set(arr) }
         if let arr = d.array(forKey: noHistoryKey) as? [String] { noHistory = Set(arr) }
-        if let arr = d.array(forKey: circleRemovalsKey) as? [String] { circleRemovals = Set(arr) }
-        if let arr = d.array(forKey: clearedRemovalsKey) as? [String] { clearedCircleRemovals = Set(arr) }
+        removedAt = (d.dictionary(forKey: removedAtKey) as? [String: NSNumber])?.mapValues { $0.uint64Value } ?? [:]
+        readdedAt = (d.dictionary(forKey: readdedAtKey) as? [String: NSNumber])?.mapValues { $0.uint64Value } ?? [:]
+        // One-time migration from the legacy bare sets → LWW timestamps. Old removals/clears carry no
+        // time, so they land at ts=1 ("long ago") and any real, later action supersedes them.
+        if removedAt.isEmpty && readdedAt.isEmpty {
+            if let arr = d.array(forKey: legacyRemovalsKey) as? [String] { for k in arr { removedAt[k] = 1 } }
+            if let arr = d.array(forKey: legacyClearedKey) as? [String] { for k in arr { readdedAt[k] = 1 } }
+            if !removedAt.isEmpty || !readdedAt.isEmpty { persistRemovalState() }
+        }
+        recomputeRemovals()
+    }
+
+    private func persistRemovalState() {
+        d.set(removedAt.mapValues { NSNumber(value: $0) }, forKey: removedAtKey)
+        d.set(readdedAt.mapValues { NSNumber(value: $0) }, forKey: readdedAtKey)
+    }
+    private func recomputeRemovals() {
+        var s = Set<String>()
+        for (k, t) in removedAt where t > (readdedAt[k] ?? 0) { s.insert(k) }
+        circleRemovals = s
     }
 
     /// Factory-reset this store — clear in-memory + persisted state.
     func wipe() {
-        pending = []; blocked = []; noHistory = []; circleRemovals = []; clearedCircleRemovals = []
-        [blockedKey, noHistoryKey, circleRemovalsKey, clearedRemovalsKey].forEach { d.removeObject(forKey: $0) }
+        pending = []; blocked = []; noHistory = []; circleRemovals = []; removedAt = [:]; readdedAt = [:]
+        [blockedKey, noHistoryKey, removedAtKey, readdedAtKey, legacyRemovalsKey, legacyClearedKey].forEach { d.removeObject(forKey: $0) }
     }
 
-    /// Mark a member as removed from a circle (prevents handshake re-add).
+    /// Mark a member as removed from a circle NOW (LWW — supersedes any older re-add).
     func removeFromCircle(_ idHex: String, circleId: String) {
-        circleRemovals.insert(removalKey(circleId, idHex))
-        clearedCircleRemovals.remove(removalKey(circleId, idHex))
-        d.set(Array(circleRemovals), forKey: circleRemovalsKey)
-        d.set(Array(clearedCircleRemovals), forKey: clearedRemovalsKey)
+        removedAt[removalKey(circleId, idHex)] = nowMs()
+        persistRemovalState(); recomputeRemovals()
     }
-    /// Was this member explicitly removed from this circle?
+    /// Was this member explicitly removed from this circle? (removal newer than any re-add)
     func isRemovedFromCircle(_ idHex: String, circleId: String) -> Bool {
-        circleRemovals.contains(removalKey(circleId, idHex))
+        let k = removalKey(circleId, idHex)
+        return (removedAt[k] ?? 0) > (readdedAt[k] ?? 0)
     }
-    /// Every node hex explicitly removed from a given circle (for hiding their posts + not dialing them).
+    /// Every node hex currently removed from a given circle (for hiding their posts + not dialing them).
     func removedHexes(inCircle circleId: String) -> Set<String> {
         let prefix = circleId + "|"
         return Set(circleRemovals.filter { $0.hasPrefix(prefix) }.map { String($0.dropFirst(prefix.count)) })
     }
-    /// Re-allow a member into a circle (clears the removal) — e.g. when you deliberately re-add them.
-    /// The key moves to `clearedCircleRemovals` (even when THIS device holds no removal record — a
-    /// sibling device might) so the clear propagates via self-sync as an explicit newer write instead
-    /// of silently losing to a stale removal record.
+    /// Re-allow a member into a circle NOW (LWW — supersedes any older removal).
     func clearCircleRemoval(_ idHex: String, circleId: String) {
-        let key = removalKey(circleId, idHex)
-        circleRemovals.remove(key)
-        clearedCircleRemovals.insert(key)
-        d.set(Array(circleRemovals), forKey: circleRemovalsKey)
-        d.set(Array(clearedCircleRemovals), forKey: clearedRemovalsKey)
+        readdedAt[removalKey(circleId, idHex)] = nowMs()
+        persistRemovalState(); recomputeRemovals()
+    }
+
+    /// Apply a REMOTE removal/re-add timestamp (from self-sync), keeping the newer per key. Returns
+    /// whether this key's current verdict is "removed" after the merge (so the caller can sync the
+    /// engine tombstone accordingly).
+    @discardableResult func mergeRemovedAt(_ key: String, ms: UInt64) -> Bool {
+        if ms > (removedAt[key] ?? 0) { removedAt[key] = ms; persistRemovalState(); recomputeRemovals() }
+        return (removedAt[key] ?? 0) > (readdedAt[key] ?? 0)
+    }
+    @discardableResult func mergeReaddedAt(_ key: String, ms: UInt64) -> Bool {
+        if ms > (readdedAt[key] ?? 0) { readdedAt[key] = ms; persistRemovalState(); recomputeRemovals() }
+        return (removedAt[key] ?? 0) > (readdedAt[key] ?? 0)
     }
 
     func setNoHistory(_ idHex: String) {

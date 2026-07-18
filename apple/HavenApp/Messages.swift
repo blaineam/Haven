@@ -359,6 +359,11 @@ struct DMThreadView: View {
 
     struct ReactTarget: Identifiable { let id: String }
     @FocusState private var focused: Bool
+    /// Measured height of the floating composer — the ScrollView's bottom inset tracks it so the newest
+    /// bubble always rests just above the input, whatever the composer is showing (edit/disappear banner,
+    /// attachment row) and whichever thread. A fixed guess (76) was close enough for short 1:1 threads but
+    /// left the last message sitting too low behind the composer on longer group threads.
+    @State private var composerHeight: CGFloat = 76
 
     /// A GROUP DM has more than one OTHER participant — then each incoming message needs a sender name so
     /// the group knows who said what (a 1:1 DM doesn't).
@@ -391,21 +396,39 @@ struct DMThreadView: View {
                         }
                     }
                     .padding(16)
-                    // Clear the floating composer so the newest bubble sits just above the input;
-                    // older messages scroll UNDER it (and the tab bar) — same as the feed, no band.
-                    .padding(.bottom, 64)
                 }
-                // A chat fills from the BOTTOM: a short thread sits just above the input (not floating
-                // at the top with dead space below), and new messages stay pinned to the bottom while
-                // scrolling up still reveals history.
+                // A chat fills from the BOTTOM: a short thread sits just above the input, new messages stay
+                // pinned to the bottom, scrolling up still reveals history. A bottom CONTENT INSET the size
+                // of the floating composer keeps the newest bubble ABOVE the input at rest — an inset works
+                // regardless of how much history is loaded (unlike a scroll-to-anchor, which fails on a long
+                // LazyVStack because the anchor isn't rendered yet). The inset tracks the composer's MEASURED
+                // height (+ a small gap) so it's correct for every composer state and thread length.
+                .contentMargins(.bottom, composerHeight + 10, for: .scrollContent)
                 .defaultScrollAnchor(.bottom)
                 .scrollDismissesKeyboard(.interactively)
                 .onChange(of: store.postTick) { scrollToBottom(proxy) }
                 .onChange(of: store.items.count) { scrollToBottom(proxy) }
-                .onAppear { scrollToBottom(proxy) }
+                .onChange(of: composerHeight) { scrollToBottom(proxy, animated: false) }
+                // On open, `defaultScrollAnchor(.bottom)` gets short threads right, but a LONG (often group)
+                // thread's lazy content isn't measured yet, so it can rest too low behind the composer.
+                // Force the newest bubble into view once after the list settles — non-animated, twice, to
+                // catch late lazy layout.
+                .onAppear {
+                    scrollToBottom(proxy, animated: false)
+                    DispatchQueue.main.async { scrollToBottom(proxy, animated: false) }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { scrollToBottom(proxy, animated: false) }
+                }
             }
             // Floating input — no background slab; content scrolls beneath it (matches the feed).
-            VStack { Spacer(); composer }
+            // Measure its height so the ScrollView's bottom inset can track it exactly.
+            VStack { Spacer(); composer
+                .background(GeometryReader { geo in
+                    Color.clear.preference(key: DMComposerHeightKey.self, value: geo.size.height)
+                })
+            }
+            .onPreferenceChange(DMComposerHeightKey.self) { h in
+                if h > 0, abs(h - composerHeight) > 1 { composerHeight = h }
+            }
         }
         .havenInlineNavTitle()
         .toolbar {
@@ -692,11 +715,21 @@ struct DMThreadView: View {
         store.messages(in: circleId).sorted { $0.createdAt < $1.createdAt }
     }
 
-    private func scrollToBottom(_ proxy: ScrollViewProxy) {
-        if let last = ordered.last {
-            withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
-        }
+    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
+        // Keep the newest message pinned to the bottom on a new message / on open. The bottom content
+        // inset (above) keeps it clear of the composer; here we just ensure the latest bubble is in view.
+        // Non-animated on the initial settle so a long thread snaps into place without a visible jump.
+        guard let last = ordered.last else { return }
+        if animated { withAnimation { proxy.scrollTo(last.id, anchor: .bottom) } }
+        else { proxy.scrollTo(last.id, anchor: .bottom) }
     }
+}
+
+/// Reports the floating DM composer's measured height up to the thread view (drives the ScrollView's
+/// bottom inset so the newest bubble always rests just above the input).
+private struct DMComposerHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 /// A play/pause song chip for DM messages.

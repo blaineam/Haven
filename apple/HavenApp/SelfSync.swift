@@ -112,6 +112,14 @@ final class SelfSyncCoordinator {
         // the name/bio. Was missing, which is why the avatar showed on posts but not on the profile.
         let av = p.avatarBase64
         if !av.isEmpty { m["profile:avatar"] = Data(av.utf8) }
+        // LWW timestamps per profile field — so two of your devices resolve a profile edit by WHO EDITED
+        // LAST, not who synced last (the endless profile/avatar ping-pong). See ProfileStore.
+        do {
+            func le8(_ v: UInt64) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
+            for f in ["name", "emoji", "bio", "link", "avatar"] {
+                let ts = p.fieldTimestamp(f); if ts > 0 { m["profile-at:\(f)"] = le8(ts) }
+            }
+        }
         let s = SettingsStore.shared
         m["setting:saveToPhotos"] = Data([s.saveToPhotos ? 1 : 0])
         m["setting:saveOthersToPhotos"] = Data([s.saveOthersToPhotos ? 1 : 0])
@@ -122,6 +130,14 @@ final class SelfSyncCoordinator {
         // already started a song — audible playback, then an abrupt cut once sync applied the mute. Like
         // `videoSoundOn`, this preference belongs to the device you're holding.
         m["setting:retentionDays"] = withUnsafeBytes(of: Int32(s.retentionDays).littleEndian) { Data($0) }
+        // LWW timestamps for the synced settings — so two devices resolve a settings change by WHO CHANGED
+        // it last, not who synced last (the same ping-pong that hit profiles). See SettingsStore.
+        do {
+            func le8(_ v: UInt64) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
+            for k in [s.tsKeySave, s.tsKeySaveOthers, s.tsKeyOpt, s.tsKeyRet] {
+                let ts = s.settingTimestamp(k); if ts > 0 { m["setting-at:\(k)"] = le8(ts) }
+            }
+        }
         // Pinned DM conversations (ordered) sync across my devices, last-writer-wins. Only broadcast when
         // non-empty so a fresh device can't blank a sibling's pins (absence ≠ authoritative).
         let pins = DMPinStore.shared.pinned
@@ -135,13 +151,30 @@ final class SelfSyncCoordinator {
         for c in ContactsStore.shared.contacts {
             if let data = try? JSONEncoder().encode(c) { m["contact:\(c.idHex)"] = data }
         }
+        // Contact removals — LWW by timestamp (contacts are additive-only, so a delete needs an explicit
+        // newest-wins tombstone to stick fleet-wide). See ContactsStore.
+        do {
+            func le8(_ v: UInt64) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
+            for (hex, ms) in ContactsStore.shared.contactRemovedAt { m["contact-removed:\(hex)"] = le8(ms) }
+            for (hex, ms) in ContactsStore.shared.contactReaddedAt { m["contact-readd:\(hex)"] = le8(ms) }
+            // Whole-circle / DM deletions — LWW, so deleting a DM on one device deletes it on all of them
+            // instead of a sibling's `circle:` record re-creating it.
+            for (id, ms) in CircleDeletionStore.deletedAt { m["circle-deleted:\(id)"] = le8(ms) }
+            for (id, ms) in CircleDeletionStore.recreatedAt { m["circle-recreated:\(id)"] = le8(ms) }
+        }
         for hex in ConnectionsStore.shared.blocked { m["blocked:\(hex)"] = Data([1]) }
-        // Explicit circle severances — LWW per entry, never inferred from absence (NOT a dynamic
-        // prefix). Keyed removal:<circleId>|<hex>: value 1 = removed, value 0 = deliberately re-added.
-        // The 0 write is what lets a re-add actually stick fleet-wide — before it, the grow-only
-        // removal record re-severed a re-added friend on every sibling's sync pass, forever.
-        for key in ConnectionsStore.shared.circleRemovals { m["removal:\(key)"] = Data([1]) }
-        for key in ConnectionsStore.shared.clearedCircleRemovals { m["removal:\(key)"] = Data([0]) }
+        // Explicit circle severances — LWW by TIMESTAMP so a fresh removal beats a stale re-add and vice
+        // versa (the fix for "removals don't sync / re-adds get re-severed"). Two distinct keys carry
+        // their own ms timestamp, resolved newest-wins on apply. Also still emit the legacy `removal:`=1/0
+        // (derived from the current verdict) so a pre-LWW sibling keeps converging during the rollout —
+        // those carry no time, so a new build treats them as ts=1 and they never override a real write.
+        func le8(_ v: UInt64) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
+        for (key, ms) in ConnectionsStore.shared.removedAt { m["circle-removed:\(key)"] = le8(ms) }
+        for (key, ms) in ConnectionsStore.shared.readdedAt { m["circle-readd:\(key)"] = le8(ms) }
+        for key in ConnectionsStore.shared.circleRemovals { m["removal:\(key)"] = Data([1]) }   // legacy compat
+        for (key, ms) in ConnectionsStore.shared.readdedAt where ms > (ConnectionsStore.shared.removedAt[key] ?? 0) {
+            m["removal:\(key)"] = Data([0])   // legacy compat: currently re-added
+        }
         // Relay DELETIONS — LWW by the forget timestamp, so deleting a relay on one device drops it on
         // all of them (and stops a sibling re-announcing it). Value = the 8-byte forgotAt (ms). Without
         // this the deletion was device-local and a sibling kept the relay active + re-announcing it,
@@ -198,30 +231,57 @@ final class SelfSyncCoordinator {
     /// avoid feedback loops through the stores' didSet broadcasts).
     private func applyLocal(_ h: AccountStateHandle, social: HavenSocial?) {
         let p = ProfileStore.shared
-        // Never apply an EMPTY scalar over a non-empty local one (belt-and-suspenders against a blank
-        // overwrite — see currentLocal). Non-empty incoming values still win normally.
-        if let v = h.get(key: "profile:name"), let s = String(data: v, encoding: .utf8), !s.isEmpty, s != p.displayName {
-            HavenLog.sync("apply profile:name '\(p.displayName)' → '\(s)'"); p.displayName = s
+        // Profile fields are LAST-WRITER-WINS by per-field timestamp — a remote value is applied only if
+        // it was edited MORE RECENTLY than our local one. This ends the endless ping-pong where two
+        // devices each thought "my non-empty value wins" and overwrote each other every sync. A field
+        // WITHOUT a timestamp (an old build, or one never edited) reads as ts=0, so it never overrides a
+        // real local edit — but still seeds an empty local field.
+        func profTs(_ f: String) -> UInt64 {
+            guard let v = h.get(key: "profile-at:\(f)"), v.count == 8 else { return 0 }
+            return v.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self).littleEndian }
         }
-        if let v = h.get(key: "profile:emoji"), let s = String(data: v, encoding: .utf8), !s.isEmpty, s != p.emoji { p.emoji = s }
-        if let v = h.get(key: "profile:bio"), let s = String(data: v, encoding: .utf8), !s.isEmpty, s != p.bio {
-            HavenLog.sync("apply profile:bio (\(p.bio.count)→\(s.count) chars)"); p.bio = s
+        // Untimestamped legacy value → ts=1 (barely > 0) ONLY to SEED an empty local field; it must never
+        // overwrite a non-empty local (that would just swap two un-timestamped values once). A real local
+        // edit (ts=now) always wins over this.
+        if let v = h.get(key: "profile:name"), let s = String(data: v, encoding: .utf8) {
+            var ts = profTs("name"); if ts == 0, p.fieldTimestamp("name") == 0, p.displayName.isEmpty, !s.isEmpty { ts = 1 }
+            _ = p.applyRemote("name", string: s, ts: ts)
         }
-        if let v = h.get(key: "profile:link"), let s = String(data: v, encoding: .utf8), !s.isEmpty, s != p.link { p.link = s }
-        if let v = h.get(key: "profile:avatar"), let b64 = String(data: v, encoding: .utf8), b64 != p.avatarBase64,
-           let data = Data(base64Encoded: b64), let img = PlatformImage(data: data) {
-            p.setAvatar(img)
+        if let v = h.get(key: "profile:emoji"), let s = String(data: v, encoding: .utf8), !s.isEmpty {
+            let ts = profTs("emoji")   // emoji always has a default; only a timestamped remote overrides it
+            p.applyRemote("emoji", string: s, ts: ts)
+        }
+        if let v = h.get(key: "profile:bio"), let s = String(data: v, encoding: .utf8) {
+            var ts = profTs("bio"); if ts == 0, p.fieldTimestamp("bio") == 0, p.bio.isEmpty, !s.isEmpty { ts = 1 }
+            p.applyRemote("bio", string: s, ts: ts)
+        }
+        if let v = h.get(key: "profile:link"), let s = String(data: v, encoding: .utf8) {
+            var ts = profTs("link"); if ts == 0, p.fieldTimestamp("link") == 0, p.link.isEmpty, !s.isEmpty { ts = 1 }
+            p.applyRemote("link", string: s, ts: ts)
+        }
+        if let v = h.get(key: "profile:avatar"), let b64 = String(data: v, encoding: .utf8), b64 != p.avatarBase64 {
+            var ts = profTs("avatar"); if ts == 0, p.fieldTimestamp("avatar") == 0, p.avatarBase64.isEmpty, !b64.isEmpty { ts = 1 }
+            p.applyRemoteAvatar(base64: b64, ts: ts)
         }
 
         let s = SettingsStore.shared
-        if let b = boolValue(h, "setting:saveToPhotos"), b != s.saveToPhotos { s.saveToPhotos = b }
-        if let b = boolValue(h, "setting:saveOthersToPhotos"), b != s.saveOthersToPhotos { s.saveOthersToPhotos = b }
-        if let b = boolValue(h, "setting:autoOptimize"), b != s.autoOptimize { s.autoOptimize = b }
+        // Settings are LWW by per-key timestamp — same fix as profiles/removals. A remote value only wins
+        // if it was changed more recently than ours; an untimestamped legacy record (old peer) maps to ts=1
+        // so it seeds a never-touched device but can never overwrite a real local edit.
+        func settingTs(_ key: String) -> UInt64 {
+            if let v = h.get(key: "setting-at:\(key)"), v.count == 8 {
+                return v.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self).littleEndian }
+            }
+            return 1
+        }
+        if let b = boolValue(h, "setting:saveToPhotos") { s.applyRemoteBool(s.tsKeySave, b, ts: settingTs(s.tsKeySave)) }
+        if let b = boolValue(h, "setting:saveOthersToPhotos") { s.applyRemoteBool(s.tsKeySaveOthers, b, ts: settingTs(s.tsKeySaveOthers)) }
+        if let b = boolValue(h, "setting:autoOptimize") { s.applyRemoteBool(s.tsKeyOpt, b, ts: settingTs(s.tsKeyOpt)) }
         // `setting:silent` is deliberately NOT applied (see currentLocal): a stale value left in an old
         // base by a previous build must not reach in and mute/unmute this device long after the fact.
         if let v = h.get(key: "setting:retentionDays"), v.count == 4 {
             let n = Int(Int32(littleEndian: v.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }))
-            if n != s.retentionDays { s.retentionDays = n }
+            s.applyRemoteRetentionDays(n, ts: settingTs(s.tsKeyRet))
         }
         if let v = h.get(key: "setting:pinnedDMs"), let str = String(data: v, encoding: .utf8) {
             DMPinStore.shared.applySynced(str.split(separator: "\n").map(String.init))
@@ -234,13 +294,31 @@ final class SelfSyncCoordinator {
         // Roster reconciliation (set-like — enumerate the converged state via entries()).
         let live = h.entries()
 
-        // Contacts: upsert everything present; drop locals the converged state no longer has
-        // (a contact deleted on another device propagated as a tombstone).
+        let cs = ContactsStore.shared
+        // Contact removals — LWW by timestamp, applied BEFORE the upsert so a removed contact is
+        // tombstoned and `syncUpsert` refuses to resurrect them (contacts are otherwise additive-only,
+        // which is exactly why deletes never stuck on a multi-device account). Newest of removed-vs-readd
+        // wins; a fresh delete beats a stale re-add and a fresh re-add beats an old delete.
+        func le8u(_ d: Data) -> UInt64 { d.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self).littleEndian } }
+        var ctRemovedMs: [String: UInt64] = [:], ctReaddMs: [String: UInt64] = [:]
+        for e in live {
+            if e.key.hasPrefix("contact-removed:"), e.value.count == 8 {
+                ctRemovedMs[String(e.key.dropFirst("contact-removed:".count))] = le8u(e.value)
+            } else if e.key.hasPrefix("contact-readd:"), e.value.count == 8 {
+                ctReaddMs[String(e.key.dropFirst("contact-readd:".count))] = le8u(e.value)
+            }
+        }
+        for hex in Set(ctRemovedMs.keys).union(ctReaddMs.keys) where !hex.isEmpty {
+            let rem = ctRemovedMs[hex] ?? 0, readd = ctReaddMs[hex] ?? 0
+            if rem >= readd, rem > 0 { cs.mergeContactRemovedAt(hex, ms: rem) }
+            else if readd > 0 { cs.mergeContactReaddedAt(hex, ms: readd) }
+        }
+
+        // Contacts: upsert everyone present that isn't tombstone-removed (syncUpsert enforces the tombstone).
         var wantContacts: [String: Contact] = [:]
         for e in live where e.key.hasPrefix("contact:") {
             if let c = try? JSONDecoder().decode(Contact.self, from: e.value) { wantContacts[c.idHex] = c }
         }
-        let cs = ContactsStore.shared
         for c in wantContacts.values { cs.syncUpsert(c) }
         // ADDITIVE ONLY — do not remove contacts a peer happens not to have (see the circle note above:
         // a freshly-restored device's empty state must never delete the primary's contacts/posts).
@@ -254,25 +332,41 @@ final class SelfSyncCoordinator {
         for hex in wantBlocked.subtracting(conn.blocked) { conn.block(hex) }
         for hex in conn.blocked.subtracting(wantBlocked) { conn.unblock(hex) }
 
-        // Circle severances synced from another of my devices → apply them here too: record the removal
-        // and purge that member from the circle (so removing someone on my phone severs them on my Mac).
-        // Value 0 = the removal was deliberately CLEARED (re-added) on another device — un-ban locally
-        // and never re-sever; the member bundle comes back via the additive circle: record.
-        for e in live where e.key.hasPrefix("removal:") {
-            let key = String(e.key.dropFirst("removal:".count))   // "<circleId>|<hex>"
+        // Circle severances synced from my other devices — resolved by LAST-WRITER-WINS on timestamps, so
+        // a fresh removal beats a stale re-add and a fresh re-add beats an old removal. Gather both sides
+        // from the timestamped keys (plus legacy `removal:`=1/0 mapped to ts=1 so it loses to any real
+        // write), pick the newest per key, then apply — set/lift the engine tombstone to match. This is
+        // the fix for "removals don't sync to my other device" AND the older "a sibling re-severs a
+        // re-added friend": the newest human action always wins, never a stale record. (le8u defined above.)
+        var cRemovedMs: [String: UInt64] = [:]
+        var cReaddMs: [String: UInt64] = [:]
+        for e in live {
+            if e.key.hasPrefix("circle-removed:"), e.value.count == 8 {
+                let k = String(e.key.dropFirst("circle-removed:".count)); cRemovedMs[k] = max(cRemovedMs[k] ?? 0, le8u(e.value))
+            } else if e.key.hasPrefix("circle-readd:"), e.value.count == 8 {
+                let k = String(e.key.dropFirst("circle-readd:".count)); cReaddMs[k] = max(cReaddMs[k] ?? 0, le8u(e.value))
+            } else if e.key.hasPrefix("removal:"), e.value.count == 1 {   // legacy pre-LWW record → ts=1
+                let k = String(e.key.dropFirst("removal:".count))
+                if e.value.first == 1 { cRemovedMs[k] = max(cRemovedMs[k] ?? 0, 1) }
+                else { cReaddMs[k] = max(cReaddMs[k] ?? 0, 1) }
+            }
+        }
+        for key in Set(cRemovedMs.keys).union(cReaddMs.keys) {
             guard let bar = key.firstIndex(of: "|") else { continue }
             let circleId = String(key[key.startIndex..<bar])
             let hex = String(key[key.index(after: bar)...])
             guard !circleId.isEmpty, !hex.isEmpty else { continue }
-            if e.value.first == 0 {
-                if conn.isRemovedFromCircle(hex, circleId: circleId) {
-                    conn.clearCircleRemoval(hex, circleId: circleId)
+            let rem = cRemovedMs[key] ?? 0, readd = cReaddMs[key] ?? 0
+            if rem >= readd, rem > 0 {
+                if conn.mergeRemovedAt(key, ms: rem),
+                   social?.contactNodeIds(circleId: circleId).contains(hex) == true {
+                    social?.removeFromCircle(circleId: circleId, nodeHex: hex)   // purge + engine tombstone (present)
                 }
-                continue
+            } else if readd > 0 {
+                if !conn.mergeReaddedAt(key, ms: readd) {
+                    social?.clearCircleRemoval(circleId: circleId, nodeHex: hex)  // newest is a re-add → lift tombstone
+                }
             }
-            guard !conn.isRemovedFromCircle(hex, circleId: circleId) else { continue }
-            conn.removeFromCircle(hex, circleId: circleId)
-            social?.removeFromCircle(circleId: circleId, nodeHex: hex)
         }
 
         // Relay delete vs re-add, from any of my devices, resolved by LWW on the SEMANTIC timestamp
@@ -311,11 +405,37 @@ final class SelfSyncCoordinator {
 
         // Circles: reconstruct each synced circle — create it, register every member's bundle
         // (so this device can seal to them), and record its relay mailbox(es). Additive in v1.
+        // Whole-circle / DM deletions — LWW, applied BEFORE the circle: upsert. A deletion newer than any
+        // re-creation deletes the circle locally too (so deleting a DM on the phone deletes it on the Mac);
+        // the `circle:` loop then skips re-creating anything still tombstone-deleted.
+        var cdDeletedMs: [String: UInt64] = [:], cdRecreatedMs: [String: UInt64] = [:]
+        for e in live {
+            if e.key.hasPrefix("circle-deleted:"), e.value.count == 8 {
+                cdDeletedMs[String(e.key.dropFirst("circle-deleted:".count))] = le8u(e.value)
+            } else if e.key.hasPrefix("circle-recreated:"), e.value.count == 8 {
+                cdRecreatedMs[String(e.key.dropFirst("circle-recreated:".count))] = le8u(e.value)
+            }
+        }
+        for id in Set(cdDeletedMs.keys).union(cdRecreatedMs.keys) where !id.isEmpty {
+            let del = cdDeletedMs[id] ?? 0, rec = cdRecreatedMs[id] ?? 0
+            if del >= rec, del > 0 {
+                if CircleDeletionStore.mergeDeletedAt(id, ms: del),
+                   social?.circles().contains(where: { $0.id == id }) == true {
+                    social?.leaveCircle(id: id)
+                }
+            } else if rec > 0 {
+                CircleDeletionStore.mergeRecreatedAt(id, ms: rec)
+            }
+        }
+
         if let social = social {
             let existing = social.circles()
             for e in live where e.key.hasPrefix("circle:") {
                 let id = String(e.key.dropFirst("circle:".count))
                 guard let rec = decodeCircleSync(bytes: e.value) else { continue }
+                // Don't RESURRECT a circle/DM the user deleted (LWW): a sibling still listing it must not
+                // re-create it every sync. A newer re-creation (below via markRecreated) lifts this.
+                if CircleDeletionStore.isDeleted(id) { continue }
                 social.createCircle(id: id, name: rec.name)   // no-op if it already exists
                 if let cur = existing.first(where: { $0.id == id }), cur.name != rec.name {
                     social.renameCircle(id: id, name: rec.name)

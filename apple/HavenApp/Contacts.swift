@@ -43,17 +43,39 @@ final class ContactsStore: ObservableObject {
     @Published private(set) var contacts: [Contact] = []
     private let key = "haven.contacts"
 
+    /// LWW contact-removal tombstone. Contacts sync ADDITIVE-ONLY (so a freshly-restored device can't
+    /// wipe the account), which means a delete never stuck on a multi-device account — a sibling's
+    /// `contact:` record silently re-added them every sync. These timestamps make a removal a real,
+    /// newest-wins decision (a fresh delete beats a stale re-add and vice-versa). Mirrors circle removal.
+    private(set) var contactRemovedAt: [String: UInt64] = [:]
+    private(set) var contactReaddedAt: [String: UInt64] = [:]
+    private let removedAtKey = "haven.contacts.removedAt.v1"
+    private let readdedAtKey = "haven.contacts.readdedAt.v1"
+    private func nowMs() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
+    /// A contact currently removed (removal newer than any re-add) — must not be re-added by sync.
+    func isContactRemoved(_ hex: String) -> Bool { (contactRemovedAt[hex] ?? 0) > (contactReaddedAt[hex] ?? 0) }
+    private func persistContactTombstones() {
+        UserDefaults.standard.set(contactRemovedAt.mapValues { NSNumber(value: $0) }, forKey: removedAtKey)
+        UserDefaults.standard.set(contactReaddedAt.mapValues { NSNumber(value: $0) }, forKey: readdedAtKey)
+    }
+
     /// Factory-reset this store — clear in-memory + persisted contacts.
-    func wipe() { contacts = []; avatarCache.removeAll(); UserDefaults.standard.removeObject(forKey: key) }
+    func wipe() {
+        contacts = []; avatarCache.removeAll(); contactRemovedAt = [:]; contactReaddedAt = [:]
+        [key, removedAtKey, readdedAtKey].forEach { UserDefaults.standard.removeObject(forKey: $0) }
+    }
 
     init() {
         if let data = UserDefaults.standard.data(forKey: key),
            let list = try? JSONDecoder().decode([Contact].self, from: data) {
             contacts = list
         }
+        contactRemovedAt = (UserDefaults.standard.dictionary(forKey: removedAtKey) as? [String: NSNumber])?.mapValues { $0.uint64Value } ?? [:]
+        contactReaddedAt = (UserDefaults.standard.dictionary(forKey: readdedAtKey) as? [String: NSNumber])?.mapValues { $0.uint64Value } ?? [:]
     }
 
     func add(name: String, idHex: String, verificationHex: String? = nil) {
+        contactReaddedAt[idHex] = nowMs(); persistContactTombstones()   // explicit add lifts any removal (LWW)
         guard !contacts.contains(where: { $0.idHex == idHex }) else { return }
         contacts.append(Contact(name: name, idHex: idHex, verificationHex: verificationHex))
         save()
@@ -137,12 +159,14 @@ final class ContactsStore: ObservableObject {
 
     func remove(_ contact: Contact) {
         contacts.removeAll { $0.idHex == contact.idHex }
+        contactRemovedAt[contact.idHex] = nowMs(); persistContactTombstones()   // tombstone so sync can't re-add
         save()
     }
 
     /// Insert or replace a contact by node id — used by multi-device sync to apply a peer
     /// device's roster. No-op if an identical contact already exists (avoids churn/loops).
     func syncUpsert(_ contact: Contact) {
+        if isContactRemoved(contact.idHex) { return }   // a removed contact must not be resurrected by sync
         if let i = contacts.firstIndex(where: { $0.idHex == contact.idHex }) {
             guard contacts[i] != contact else { return }
             contacts[i] = contact
@@ -150,6 +174,20 @@ final class ContactsStore: ObservableObject {
             contacts.append(contact)
         }
         save()
+    }
+
+    /// Apply a REMOTE contact removal/re-add timestamp (self-sync LWW), keeping the newer per hex and
+    /// enforcing the verdict locally. Returns whether the contact is removed after the merge.
+    @discardableResult func mergeContactRemovedAt(_ hex: String, ms: UInt64) -> Bool {
+        if ms > (contactRemovedAt[hex] ?? 0) { contactRemovedAt[hex] = ms; persistContactTombstones() }
+        if isContactRemoved(hex), contacts.contains(where: { $0.idHex == hex }) {
+            contacts.removeAll { $0.idHex == hex }; save()
+        }
+        return isContactRemoved(hex)
+    }
+    @discardableResult func mergeContactReaddedAt(_ hex: String, ms: UInt64) -> Bool {
+        if ms > (contactReaddedAt[hex] ?? 0) { contactReaddedAt[hex] = ms; persistContactTombstones() }
+        return isContactRemoved(hex)
     }
 
     private func save() {

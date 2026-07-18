@@ -57,7 +57,19 @@ final class FeedStore: ObservableObject {
     @Published private(set) var lastHeard: [String: Date] = [:]
     /// The circles you belong to, and which one the feed is currently showing.
     @Published private(set) var circles: [CircleInfoFfi] = []
-    @Published var activeCircleId = "default"
+    /// Count of per-post-hidden items in the CURRENTLY SELECTED circle (the "Show hidden posts (N)"
+    /// menu is per-circle, not a global tally across every circle).
+    @Published private(set) var hiddenInActiveCircle = 0
+    @Published var activeCircleId = "default" {
+        didSet {
+            guard oldValue != activeCircleId else { return }
+            // Leaving a circle stops any audio it was playing — a post's song or a video's sound must
+            // not keep playing under the circle you just switched to. Covers every switch path (picker,
+            // deep link, create/upgrade) since it hangs off the property itself.
+            AudioCoordinator.shared.stop()
+            AudioCoordinator.shared.centeredPostId = nil
+        }
+    }
     static let shared = FeedStore()
 
     private var social: HavenSocial?
@@ -211,6 +223,7 @@ final class FeedStore: ObservableObject {
         bumpActivity()   // seed activity NOW so launch starts at tight cadence (not instant max backoff)
         loadLastHeard()   // so "last seen" survives an app restart
         refreshCircles()     // also purges any contaminated DM membership (see refreshCircles)
+        reconcileRemovals()  // heal old-build damage: purge engine members that are still client-tombstoned
         applyCryptoSwitches(seedless: seedless)   // Switch-Flip 1.0.7: re-apply the non-persisted crypto switches
         refresh()
         recomputeUnreadDMs()   // one-time badge compute at startup (kept OFF the per-refresh hot path)
@@ -290,7 +303,31 @@ final class FeedStore: ObservableObject {
 
     func refreshCircles() {
         purgeDMIntrudersRaw()           // clean DM membership every time we read circles
-        circles = social?.circles() ?? []
+        // A circle I've upgraded (or followed an upgrade off of) is SUPERSEDED — the owned successor
+        // carries its name + members + history. The earlier fix only hid it via the per-device
+        // `supersededCircleIds()`, which is NOT synced: my Mac (which didn't run the upgrade) kept showing
+        // the legacy circle, and additive circle-sync round-trips let it "return" and duplicate. Convert
+        // supersession into the SAME synced, LWW deletion tombstone used for deleting a circle — self-sync
+        // honors it on every device and can never resurrect it. This also HEALS circles already upgraded
+        // before this fix (they get tombstoned on the next read).
+        var changed = false
+        for legacy in social?.supersededCircleIds() ?? [] where !CircleDeletionStore.isDeleted(legacy) {
+            let succ = social?.circleSuccessor(circleId: legacy)   // capture BEFORE leaving (lookup needs the circle)
+            CircleDeletionStore.markDeleted(legacy)                 // LWW tombstone → syncs to all my devices
+            social?.leaveCircle(id: legacy)                        // drop the duplicate row from the engine
+            if activeCircleId == legacy, let succ { activeCircleId = succ }
+            changed = true
+        }
+        let all = social?.circles() ?? []
+        // Belt-and-suspenders: also filter any tombstoned circle that a sync race re-materialized before
+        // its own `circle-deleted:` record applied.
+        circles = all.filter { !CircleDeletionStore.isDeleted($0.id) }
+        // If I'm still sitting on a superseded/deleted circle (persisted active id, or a sibling's upgrade
+        // synced in), move to its successor, else fall back to the default circle rather than a blank feed.
+        if CircleDeletionStore.isDeleted(activeCircleId) {
+            activeCircleId = social?.circleSuccessor(circleId: activeCircleId) ?? "default"
+        }
+        if changed { persist() }   // leaveCircle mutated the engine; the tombstone must survive relaunch
     }
 
     /// Evict anyone who isn't one of a DM's two parties (full-id match). Operates directly
@@ -384,6 +421,7 @@ final class FeedStore: ObservableObject {
         // creator from the id itself rather than from a claim on the wire. This also pins + announces
         // the creator (the propagating self-grant), so no separate setCircleCreator is needed here.
         let id = social.createCircleOwned(name: name)
+        CircleDeletionStore.markRecreated(id)   // a freshly-created circle is not deleted (LWW)
         // Switch-Flip §2: record it so the pin is re-applied on every launch.
         CircleCreatorStore.markCreated(id)
         for m in memberIds { try? social.addExistingToCircle(circleId: id, nodeHex: m) }
@@ -393,10 +431,19 @@ final class FeedStore: ObservableObject {
         if !memberIds.isEmpty { syncWithContacts() }   // greet + back-fill to the new members
     }
 
+    /// Lift a member's removal both client-side (the guard set) and in the engine (the authoritative
+    /// tombstone) — a DELIBERATE re-add. The add paths refuse a tombstoned member, so this must run
+    /// first. Exposed so views outside the store (e.g. ConnectView) can un-ban before re-adding.
+    func clearCircleRemovalEverywhere(idHex: String, circleId: String) {
+        ConnectionsStore.shared.clearCircleRemoval(idHex, circleId: circleId)
+        social?.clearCircleRemoval(circleId: circleId, nodeHex: idHex)
+    }
+
     /// Add a known contact to the active circle, then sync so the circle forms on theirs.
     func addContactToActiveCircle(idHex: String) {
         guard let social else { return }
         ConnectionsStore.shared.clearCircleRemoval(idHex, circleId: activeCircleId)  // deliberate re-add un-bans them
+        social.clearCircleRemoval(circleId: activeCircleId, nodeHex: idHex)          // …and lift the engine tombstone
         try? social.addExistingToCircle(circleId: activeCircleId, nodeHex: idHex)
         persist(); refreshCircles()
         syncWithContacts()
@@ -415,6 +462,47 @@ final class FeedStore: ObservableObject {
         social.removeFromCircle(circleId: circleId, nodeHex: idHex)  // purges their events + rotates epoch
         ConnectionsStore.shared.removeFromCircle(idHex, circleId: circleId)  // authoritative tombstone: block re-add
         persist(); refreshCircles(); refresh()
+    }
+
+    /// Rip a member out of EVERY group circle at once — each removal is LWW-tombstoned so they can't
+    /// rejoin any of them. This is the "get this person out of everything" action for when removing them
+    /// from one circle keeps leaving them in the others. Leaves `dm:` threads alone (deleting a DM is a
+    /// separate, destructive choice). Returns how many circles they were pulled from.
+    @discardableResult
+    func removeFromAllCircles(_ idHex: String) -> Int {
+        guard let social else { return 0 }
+        var count = 0
+        for c in social.circles() where !c.id.hasPrefix("dm:") {
+            if social.contactNodeIds(circleId: c.id).contains(idHex) {
+                social.removeFromCircle(circleId: c.id, nodeHex: idHex)          // purge + engine tombstone + epoch rotate
+                ConnectionsStore.shared.removeFromCircle(idHex, circleId: c.id)  // LWW client tombstone (now())
+                count += 1
+            }
+        }
+        persist(); refreshCircles(); refresh()
+        return count
+    }
+
+    /// Self-heal old-build damage. A build BEFORE the authoritative-tombstone fix could re-add a member
+    /// you'd removed — the automatic add cleared the ENGINE tombstone while the CLIENT tombstone stayed
+    /// set. The result: the member is hidden in the UI (client filter) yet still lives in the engine's
+    /// member list, so posts/sealing/roster still treat them as present and it "never sticks". On launch,
+    /// purge any engine member that's still client-tombstoned — re-running the removal that was undone.
+    /// Idempotent; a no-op once the fleet is on the fixed build. Logs what it heals.
+    func reconcileRemovals() {
+        guard let social else { return }
+        var healed = 0
+        for key in ConnectionsStore.shared.circleRemovals {
+            guard let bar = key.firstIndex(of: "|") else { continue }
+            let circleId = String(key[key.startIndex..<bar])
+            let hex = String(key[key.index(after: bar)...])
+            guard !circleId.isEmpty, !hex.isEmpty else { continue }
+            if social.contactNodeIds(circleId: circleId).contains(hex) {
+                social.removeFromCircle(circleId: circleId, nodeHex: hex)   // purge + re-tombstone in the engine
+                healed += 1
+            }
+        }
+        if healed > 0 { persist(); refreshCircles(); refresh() }
     }
 
     /// Rename a circle (the default "My Circle" can be renamed too). Re-syncs so the new name
@@ -526,6 +614,7 @@ final class FeedStore: ObservableObject {
     /// Leave the active circle (you always keep the default one).
     func leaveActiveCircle() {
         guard activeCircleId != "default", let social else { return }
+        CircleDeletionStore.markDeleted(activeCircleId)   // LWW tombstone so a sibling can't re-create it
         social.leaveCircle(id: activeCircleId)
         persist(); refreshCircles()
         activeCircleId = "default"
@@ -563,6 +652,7 @@ final class FeedStore: ObservableObject {
     func startDM(with idHex: String, name: String) -> String {
         let id = dmCircleId(with: idHex)
         guard let social else { return id }
+        CircleDeletionStore.markRecreated(id)   // re-opening a DM lifts any prior deletion (LWW)
         social.createCircle(id: id, name: name)
         social.setCircleLiveLane(circleId: id, on: true)   // Switch-Flip §5: DM per-message forward secrecy
         try? social.addExistingToCircle(circleId: id, nodeHex: idHex)
@@ -583,6 +673,7 @@ final class FeedStore: ObservableObject {
     func startGroupDM(members: [String], name: String) -> String {
         let id = groupDMCircleId(members: members)
         guard let social else { return id }
+        CircleDeletionStore.markRecreated(id)   // re-opening lifts any prior deletion (LWW)
         social.createCircle(id: id, name: name)
         social.setCircleLiveLane(circleId: id, on: true)   // Switch-Flip §5: DM per-message forward secrecy
         for hex in members where hex != myNodeHex { try? social.addExistingToCircle(circleId: id, nodeHex: hex) }
@@ -623,6 +714,7 @@ final class FeedStore: ObservableObject {
         // hellos stay silently dropped (isRemovedFromCircle guard) and self-sync re-severs them
         // on every pass — the "removed a friend once, could never re-add them" bug.
         ConnectionsStore.shared.clearCircleRemoval(req.idHex, circleId: "default")
+        social.clearCircleRemoval(circleId: "default", nodeHex: req.idHex)   // lift the engine tombstone too
         let vhex = try? social.bundleVerificationHex(bundle: req.bundle)
         ContactsStore.shared.add(name: req.name, idHex: req.idHex, verificationHex: vhex)
         social.createCircle(id: "default", name: "Your circle")
@@ -712,8 +804,10 @@ final class FeedStore: ObservableObject {
     func deleteConversation(_ circleId: String) {
         guard let social, circleId.hasPrefix("dm:") else { return }
         clearDMBefore(circleId)   // watermark so re-syncing (or re-starting) this DM won't restore old messages
+        CircleDeletionStore.markDeleted(circleId)   // LWW tombstone so self-sync can't re-create it from a sibling
         social.leaveCircle(id: circleId)
         persist(); refreshCircles(); refresh()
+        HavenLog.sync("DELETE-DM \(circleId.prefix(24))")
     }
 
     /// Node ids in a circle for whom we hold keys (handshake complete).
@@ -1139,9 +1233,11 @@ final class FeedStore: ObservableObject {
                 // empty list = a genuine solo circle → hide everyone else (incl. re-synced removed)
                 return members.contains(where: { $0.hasPrefix(fi.authorShort) })
             }
+            let hiddenHere = raw.reduce(into: 0) { if hidden.contains($1.id) { $0 += 1 } }   // hidden IN THIS circle
             await MainActor.run {
                 guard let self, self.refreshGeneration == gen, self.activeCircleId == circleId else { return }
                 self.items = filtered
+                self.hiddenInActiveCircle = hiddenHere
                 self.sensitiveCache.removeAll()   // a refresh may have ingested new SensitiveFlag events
                 self.reportsCache.removeAll()     // …and new Report events
                 SpotlightIndex.reindexAll()       // no-op unless the user enabled Spotlight indexing
@@ -2705,6 +2801,10 @@ final class FeedStore: ObservableObject {
         return d
     }
 
+    // The circle each in-flight media ref was requested for — so when a peer delivers it we re-mirror
+    // the blob to THAT circle's relay (sealing under the right circle), making friends' media durable.
+    private var mediaReqCircle: [String: String] = [:]
+
     // MARK: - Media transfer  [3] request(ref) → [4] sealed media back
 
     /// Ask contacts for any media our feed references but we don't hold the bytes for.
@@ -2713,6 +2813,7 @@ final class FeedStore: ObservableObject {
     /// left, which is what large videos need (one dropped chunk otherwise hangs forever).
     func requestMedia(_ ref: String) {
         guard let social, !MediaStore.isSynthetic(ref), !MediaStore.shared.has(ref) else { return }
+        mediaReqCircle[ref] = activeCircleId   // remember the circle so a peer-delivered blob re-mirrors correctly
         let myHex = social.myNodeHex()
         var payload = Data(myHex.utf8); payload.append(Data(ref.utf8))
         for contact in ContactsStore.shared.contacts { sendIroh(3, payload, to: contact.idHex) }
@@ -2762,6 +2863,7 @@ final class FeedStore: ObservableObject {
             let stale = (mediaReqAt[ref].map { nowMs - $0 > 90_000 } ?? true)
             guard stale, budget > 0 else { continue }
             mediaReqAt[ref] = nowMs
+            mediaReqCircle[ref] = activeCircleId   // these refs come from the active circle's feed
             budget -= 1
             var payload = Data(myHex.utf8)          // 64-byte requester id
             payload.append(Data(ref.utf8))
@@ -2777,12 +2879,15 @@ final class FeedStore: ObservableObject {
             if hasMailbox {
                 Task { @MainActor in
                     if let data = await SharedStore.restore(ref: ref, circleIds: circleIds, social: social) {
+                        HavenLog.relay("MEDIA-FETCH ok ref=\(ref.prefix(10)) bytes=\(data.count) via=relay")
                         MediaStore.shared.store(ref, data); autoSaveReceived(ref); scheduleRefresh()
                     } else {
+                        HavenLog.relay("MEDIA-FETCH miss ref=\(ref.prefix(10)) — relay had none, asking peers")
                         directAsk()   // relay didn't have it (or unreachable) → ask a peer
                     }
                 }
             } else {
+                HavenLog.relay("MEDIA-FETCH ref=\(ref.prefix(10)) no-mailbox → peer-only")
                 directAsk()           // no mailbox in any circle → peer-to-peer is the only path
             }
         }
@@ -2996,8 +3101,13 @@ final class FeedStore: ObservableObject {
         autoSaveReceived(ref)
         incoming[ref] = nil
         scheduleRefresh()   // re-render so the media appears (coalesced — many chunks complete in bursts)
-        if SharedStore.isVolunteering, let social {
-            let circle = activeCircleId
+        // DURABILITY: this blob just arrived peer-to-peer, which means the relay didn't have it (or we'd
+        // have restored it from there). Re-mirror it to the circle's relay so it survives the author going
+        // offline or the relay evicting the author's copy — any online member repopulates it. Sealing uses
+        // the circle we requested it for. The backup ledger + probe make redundant re-mirrors a cheap no-op.
+        if let social {
+            let circle = mediaReqCircle[ref] ?? activeCircleId
+            mediaReqCircle[ref] = nil
             MediaBackupQueue.shared.enqueue(ref, circleId: circle, social: social)
         }
     }
@@ -3072,6 +3182,9 @@ final class FeedStore: ObservableObject {
         if circleId.hasPrefix("dm:") && !dmCircleAllows(circleId, idHex) { return }
         // A member you explicitly removed from this circle must NOT auto-rejoin on their handshake.
         if ConnectionsStore.shared.isRemovedFromCircle(idHex, circleId: circleId) { return }
+        // A circle/DM the user DELETED must not be re-created by a bare handshake (LWW) — respect the
+        // deletion. The user re-opens it explicitly (startDM/createCircle) if they want it back.
+        if circleId != "default", CircleDeletionStore.isDeleted(circleId) { return }
         // Ensure the circle exists on our side, then add the sender to it.
         let isNewCircle = circleId != "default" && !circles.contains { $0.id == circleId }
         social.createCircle(id: circleId, name: circleName)
@@ -3330,11 +3443,11 @@ struct FeedView: View {
                 }
             }
             Divider()
-            if !HiddenStore.shared.hidden.isEmpty {
+            if store.hiddenInActiveCircle > 0 || HiddenStore.shared.showHidden {
                 Button {
                     HiddenStore.shared.toggleShowHidden(); store.refresh()
                 } label: {
-                    Label(HiddenStore.shared.showHidden ? "Hide hidden posts" : "Show hidden posts (\(HiddenStore.shared.hidden.count))",
+                    Label(HiddenStore.shared.showHidden ? "Hide hidden posts" : "Show hidden posts (\(store.hiddenInActiveCircle))",
                           systemImage: HiddenStore.shared.showHidden ? "eye.slash" : "eye")
                 }
             }
@@ -3605,16 +3718,18 @@ struct FeedView: View {
     }
 
     private func storyThumb(_ s: FeedItemFfi) -> some View {
-        let img = s.media.first.flatMap { MediaStore.shared.item($0)?.image }
-        return ZStack {
+        // The ring identifies WHOSE story it is → show the sharer's profile picture (mine, or the
+        // friend's synced avatar), not the story media itself. Resolved the same way as avatars
+        // everywhere else so it stays in sync.
+        ZStack {
             Circle().fill(LinearGradient(colors: [HavenTheme.violet, HavenTheme.pink, HavenTheme.amber],
                                          startPoint: .topLeading, endPoint: .bottomTrailing))
                 .frame(width: 64, height: 64)
-            if let img {
-                Image(platformImage: img).resizable().scaledToFill().frame(width: 56, height: 56).clipShape(Circle())
+            if s.isMe {
+                HavenAvatar(image: ProfileStore.shared.avatar, emoji: ProfileStore.shared.emoji, size: 56)
             } else {
-                Circle().fill(Color(.secondarySystemBackground)).frame(width: 56, height: 56)
-                    .overlay(Image(systemName: "photo").foregroundStyle(.secondary))
+                PeerAvatar(nodeHex: s.authorShort,
+                           name: ContactsStore.shared.name(forNodePrefix: s.authorShort) ?? friendName, size: 56)
             }
         }
     }
@@ -4214,6 +4329,24 @@ struct PostCard: View {
         // backdrop can't bleed past the edge mid-swipe.
         .clipped()
         .scrollDisabled(carouselScrubbing)   // while scrubbing a video, don't let a swipe page the carousel
+        #if os(macOS)
+        // macOS: a horizontal ScrollView only pages on a trackpad two-finger swipe — a plain MOUSE has no
+        // horizontal scroll, so a click-drag paging gesture is the mouse equivalent. Simultaneous + onEnded
+        // + thresholds so it never steals a tap-to-zoom, a vertical scroll, or a video scrub.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 20)
+                .onEnded { value in
+                    guard !carouselScrubbing,
+                          abs(value.translation.width) > abs(value.translation.height),
+                          abs(value.translation.width) > 40 else { return }
+                    if value.translation.width < 0, currentPage < media.count - 1 {
+                        withAnimation(.easeOut(duration: 0.22)) { currentPage += 1 }
+                    } else if value.translation.width > 0, currentPage > 0 {
+                        withAnimation(.easeOut(duration: 0.22)) { currentPage -= 1 }
+                    }
+                }
+        )
+        #endif
         // Full-width pages (NOT .aspectRatio(_, .fit), which shrank the whole carousel to a centre column
         // on a wide window) — each page letterboxes inside against its own blurred backdrop.
         .frame(maxWidth: .infinity)
@@ -5037,8 +5170,14 @@ struct UserProfileView: View {
                             HStack(spacing: 10) {
                                 ZStack {
                                     Circle().fill(LinearGradient(colors: [HavenTheme.violet, HavenTheme.pink, HavenTheme.amber], startPoint: .topLeading, endPoint: .bottomTrailing)).frame(width: 58, height: 58)
-                                    if let img = userStories.last?.media.first.flatMap({ MediaStore.shared.item($0)?.image }) {
-                                        Image(platformImage: img).resizable().scaledToFill().frame(width: 50, height: 50).clipShape(Circle())
+                                    // This friend's profile picture, not their story media (identity chip).
+                                    if let s = userStories.last {
+                                        if s.isMe {
+                                            HavenAvatar(image: ProfileStore.shared.avatar, emoji: ProfileStore.shared.emoji, size: 50)
+                                        } else {
+                                            PeerAvatar(nodeHex: s.authorShort,
+                                                       name: ContactsStore.shared.name(forNodePrefix: s.authorShort) ?? name, size: 50)
+                                        }
                                     }
                                 }
                                 Text("\(userStories.count) active stor\(userStories.count == 1 ? "y" : "ies")").font(.subheadline).foregroundStyle(.secondary)
@@ -5227,15 +5366,14 @@ struct ProfileView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 12) {
-                    ForEach(Array(store.myStories.enumerated()), id: \.element.id) { idx, s in
+                    ForEach(Array(store.myStories.enumerated()), id: \.element.id) { idx, _ in
                         Button { storyIndex = idx; showStories = true } label: {
                             ZStack {
                                 Circle().fill(LinearGradient(colors: [HavenTheme.violet, HavenTheme.pink, HavenTheme.amber],
                                                              startPoint: .topLeading, endPoint: .bottomTrailing))
                                     .frame(width: 64, height: 64)
-                                if let img = s.media.first.flatMap({ MediaStore.shared.item($0)?.image }) {
-                                    Image(platformImage: img).resizable().scaledToFill().frame(width: 56, height: 56).clipShape(Circle())
-                                }
+                                // Identity chip → my profile picture, not the story media.
+                                HavenAvatar(image: ProfileStore.shared.avatar, emoji: ProfileStore.shared.emoji, size: 56)
                             }
                         }
                         .buttonStyle(.plain)

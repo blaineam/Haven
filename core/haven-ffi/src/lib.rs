@@ -3836,6 +3836,13 @@ impl HavenSocial {
         let acct = st.me_secret.as_ref().map(|m| Identity::from_seed(&m.secret_seed()))?;
         let name = st.circles[idx].name.clone();
         let members = st.circles[idx].members.clone();
+        // Carry my LOCAL view of the circle's history onto the successor so the upgraded circle isn't
+        // empty. These are already-opened events in my log; copying them makes the successor render the
+        // same feed I see today. Each member who follows carries their OWN decrypted view forward the
+        // same way — no re-broadcast of anyone else's posts, no key gymnastics. New posts land under the
+        // successor's (eventually tree-keyed) lane. `seen` rides along so re-sync can't double-add them.
+        let events = st.circles[idx].events.clone();
+        let seen = st.circles[idx].seen.clone();
         let new_id = mint_owned_circle_id(&me);
         // Highest offer I've made for this circle before, so a re-offer supersedes.
         let version = st.circles[idx]
@@ -3857,6 +3864,8 @@ impl HavenSocial {
         if !st.circles.iter().any(|c| c.id == new_id) {
             let mut c = Circle::bare(new_id.clone(), name);
             c.members = members;
+            c.events = events;
+            c.seen = seen;
             c.creator = Some(me);
             c.creator_pinned = true;
             st.circles.push(c);
@@ -3923,10 +3932,16 @@ impl HavenSocial {
             return false;
         }
         let members = st.circles[idx].members.clone();
+        // Carry my local history onto the successor so following an upgrade doesn't drop the feed to
+        // empty (see `upgrade_circle`). My own view only — every follower carries their own.
+        let events = st.circles[idx].events.clone();
+        let seen = st.circles[idx].seen.clone();
         let creator_hex = hex(&up.creator);
         if !st.circles.iter().any(|c| c.id == new_circle_id) {
             let mut c = Circle::bare(new_circle_id.clone(), up.name.clone());
             c.members = members;
+            c.events = events;
+            c.seen = seen;
             st.circles.push(c);
         }
         // Record MY act — this, and only this, hides the offer from now on.
@@ -3934,6 +3949,53 @@ impl HavenSocial {
         drop(st);
         // Pin the offerer as the successor's creator — binding-verified, so this is authenticated.
         self.set_circle_creator(new_circle_id, creator_hex)
+    }
+
+    /// Legacy circles I've COMMITTED to a successor for — so the app can collapse the duplicate out of
+    /// the circle picker and show only the upgraded (owned) circle in its place. A circle is superseded
+    /// for me when either I FOLLOWED someone's offer off it (`followed_upgrade`), or I AUTHORED an
+    /// upgrade for it and the successor now exists locally. Both mean "there's a newer circle carrying
+    /// this one's name + members + history that I'm now using" — the legacy id lingers only to keep
+    /// receiving/relaying the offer to stragglers, and should never appear as a second row to me.
+    pub fn superseded_circle_ids(&self) -> Vec<String> {
+        let st = self.state.lock().unwrap();
+        let me = st.me().node_id_bytes();
+        let mut out = vec![];
+        for c in &st.circles {
+            if c.followed_upgrade.is_some() {
+                out.push(c.id.clone());
+                continue;
+            }
+            let mine = c
+                .upgrade_offers
+                .iter()
+                .filter_map(|w| CircleUpgrade::from_bytes(w).ok())
+                .find(|u| u.creator == me);
+            if let Some(u) = mine {
+                if st.circles.iter().any(|x| x.id.as_bytes() == u.new_circle_id.as_slice()) {
+                    out.push(c.id.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// The owned successor a superseded legacy circle was migrated onto (mine or one I followed), so the
+    /// app can move a user sitting on a now-superseded circle straight to its replacement. `None` if the
+    /// circle isn't superseded for me. Mirror of [`superseded_circle_ids`].
+    pub fn circle_successor(&self, circle_id: String) -> Option<String> {
+        let st = self.state.lock().unwrap();
+        let me = st.me().node_id_bytes();
+        let c = st.circles.iter().find(|c| c.id == circle_id)?;
+        if let Some(f) = &c.followed_upgrade {
+            return Some(f.clone());
+        }
+        c.upgrade_offers
+            .iter()
+            .filter_map(|w| CircleUpgrade::from_bytes(w).ok())
+            .find(|u| u.creator == me)
+            .and_then(|u| String::from_utf8(u.new_circle_id).ok())
+            .filter(|id| st.circles.iter().any(|x| &x.id == id))
     }
 
     /// Delegate circle admin to `admin_hex` (§4.3). Requires that I am currently an admin (the creator
@@ -4352,9 +4414,14 @@ impl HavenSocial {
             .iter_mut()
             .find(|c| c.id == circle_id)
             .ok_or_else(|| HavenError::Invalid { msg: "unknown circle".into() })?;
-        // An explicit re-add clears any removal tombstone — the user (or a self-synced deliberate
-        // re-add) is putting them back on purpose, so they must stop being filtered out on merge.
-        circle.removed_members.retain(|m| m.node_id_bytes() != id.node_id_bytes());
+        // The removal tombstone is AUTHORITATIVE: an automatic path (a handshake in `handleHello`, a
+        // self-synced roster) must NEVER resurrect a member the user removed — that's exactly why
+        // removal "never stuck". Refuse to re-add a tombstoned member and leave the tombstone intact.
+        // Only an EXPLICIT re-add (which calls `clear_circle_removal` first) lifts it. This makes
+        // removal robust even if a client-side guard misses (hex case, an unsynced client tombstone).
+        if circle.removed_members.iter().any(|m| m.node_id_bytes() == id.node_id_bytes()) {
+            return Ok(node_hex);
+        }
         if !circle.members.iter().any(|c| c.node_id_bytes() == id.node_id_bytes()) {
             circle.members.push(id);
         }
@@ -4377,11 +4444,27 @@ impl HavenSocial {
             .iter_mut()
             .find(|c| c.id == circle_id)
             .ok_or_else(|| HavenError::Invalid { msg: "unknown circle".into() })?;
-        circle.removed_members.retain(|m| m.node_id_bytes() != bundle.node_id_bytes()); // explicit re-add clears the tombstone
+        // Authoritative tombstone (see add_contact_bundle): refuse to resurrect a removed member; only
+        // an explicit `clear_circle_removal` lifts it. The tombstone is left intact here.
+        if circle.removed_members.iter().any(|m| m.node_id_bytes() == bundle.node_id_bytes()) {
+            return Ok(());
+        }
         if !circle.members.iter().any(|m| m.node_id_bytes() == bundle.node_id_bytes()) {
             circle.members.push(bundle);
         }
         Ok(())
+    }
+
+    /// Lift a member's removal tombstone in a circle — the ENGINE side of an EXPLICIT re-add. The add
+    /// paths (`add_contact_bundle` / `add_existing_to_circle`) now REFUSE to resurrect a tombstoned
+    /// member, so a deliberate re-add must call this FIRST. Automatic paths (handshake, self-sync)
+    /// never call it, so a removed member can only return by the user's explicit action — which is why
+    /// removal now sticks across ticks. No-op if the circle or tombstone is absent.
+    pub fn clear_circle_removal(&self, circle_id: String, node_hex: String) {
+        let mut st = self.state.lock().unwrap();
+        if let Some(c) = st.circles.iter_mut().find(|c| c.id == circle_id) {
+            c.removed_members.retain(|m| hex(&m.node_id_bytes()) != node_hex);
+        }
     }
 
     /// Node ids of the members of a circle (who to broadcast that circle's posts to).
@@ -7938,9 +8021,24 @@ mod net_tests {
         // Carol, who was never removed, is unaffected.
         assert!(me.contact_node_ids("fam".into()).contains(&hex(&carol.public().node_id_bytes())));
 
-        // A deliberate re-add clears the tombstone, and then a merge does NOT re-strip him.
+        // THE TICK BUG: an AUTOMATIC re-add (a handshake in `handleHello`, or a peer's roster applied by
+        // self-sync — both land on `add_contact_bundle`) must NOT bring Bob back. The tombstone is
+        // authoritative in the engine, so the add is refused and Bob stays gone even without any
+        // client-side guard. This is the exact path that made "remove someone" not stick on each tick.
         me.add_contact_bundle("fam".into(), bob.public().to_bytes()).unwrap();
-        assert!(me.contact_node_ids("fam".into()).contains(&bob_hex), "explicit re-add brings Bob back");
+        assert!(!me.contact_node_ids("fam".into()).contains(&bob_hex),
+                "an automatic re-add must NOT resurrect a removed member");
+        // Same for the compose-from-existing-contacts path.
+        me.add_existing_to_circle("fam".into(), bob_hex.clone()).ok();
+        assert!(!me.contact_node_ids("fam".into()).contains(&bob_hex),
+                "add_existing_to_circle must also refuse a tombstoned member");
+
+        // Only an EXPLICIT re-add — which lifts the tombstone first — brings Bob back, and then a merge
+        // does NOT re-strip him.
+        me.clear_circle_removal("fam".into(), bob_hex.clone());
+        me.add_contact_bundle("fam".into(), bob.public().to_bytes()).unwrap();
+        assert!(me.contact_node_ids("fam".into()).contains(&bob_hex),
+                "explicit re-add (tombstone cleared) brings Bob back");
         let with_bob = me.export_state();
         me.import_state(with_bob);
         assert!(me.contact_node_ids("fam".into()).contains(&bob_hex), "re-added Bob survives a merge");

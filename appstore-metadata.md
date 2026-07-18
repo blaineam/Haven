@@ -29,7 +29,7 @@ Haven is a stronghold for the people you love. It's built so that no one — not
 private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,no ads,quantum
 
 ## promotional_text
-A private, end‑to‑end encrypted home for your closest people. No ads, no tracking, peer‑to‑peer — just your people.
+Launch sale — 50% off through September 30 ($4.99, then $9.99). Bring your friends, set up your Relays, and build your Communities early. A private, end‑to‑end encrypted home for your closest people. No ads, no tracking, peer‑to‑peer.
 
 ## whats_new
 1.1.0 — a reliability & polish release. Nothing to set up, nothing lost.
@@ -44,9 +44,15 @@ Circles & stories
 • Upgrading a circle no longer leaves a duplicate — the upgraded circle carries its history, and the old one collapses into it on every device (any duplicates from before this release tidy themselves up on the next launch).
 • Story headers and story rings now show profile pictures instead of a frame of the story's own media.
 
+Video stories, rebuilt
+• Recording is far more reliable — clips no longer cut off, and the shutter keeps working take after take.
+• Hold to record and it auto-splits into segments (up to 15s each); a story is up to 90 seconds. Tap for a photo, hold for video.
+• A landscape shot keeps its full wide frame in the review screen, with a grid of filters to choose from.
+
 Messages & feed
 • Direct messages open at the newest message, including long group threads.
-• Smoother feed scrolling — photos and a post's music no longer hitch a fast flick.
+• Swipe left or right in the story viewer to jump between people's stories.
+• Smoother, steadier feed — fast flicks no longer flash a half-loaded image or nudge your scroll position; images fade in cleanly.
 • Interface polish throughout, including the You tab and the story editor.
 
 Native on iPhone, iPad, and Mac. No ads, no tracking, no servers holding your data — same private Haven.

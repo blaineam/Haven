@@ -16,7 +16,7 @@ This supersedes the earlier quota'd-bucket model (see DECISIONS D15).
 | "You got media" notifications | APNs / Web Push | **$0** |
 
 **Result: the app is a one-time $9.99 with no subscription and no monthly operator
-cost, ever.**
+cost, ever.** _(Launch sale: 50% off at $4.99 through September 30, then $9.99.)_
 
 ## Why storage is free to the operator
 

@@ -28,7 +28,9 @@ S3-compatible bucket, or a direct peer-to-peer link.
   Media rides on a Haven relay you run (any official app, or the tiny `haven-relay` on a
   Pi/server) or your own S3-compatible bucket (S3/R2/B2) — nothing else, nothing of ours.
   Peer connections use free, swappable, community/public relays only as a last-resort
-  encrypted pipe. The app is a one-time $9.99 with no subscription.
+  encrypted pipe. The app is a one-time $9.99 with no subscription — and it's **50% off
+  ($4.99) through September 30** as a launch sale, so bring your friends and build your
+  circles early.
 - **Quantum-safe by default.** Every content key is derived from a *hybrid* of
   classical (X25519) and post-quantum (ML-KEM-768) key exchange, and every signature
   is hybrid Ed25519 + ML-DSA-65 — so stored ciphertext is protected against

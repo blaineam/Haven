@@ -39,6 +39,21 @@ mixed-device accounts stay consistent.
 - **Interface polish:** the You tab no longer slides sideways on a scroll, the story editor respects
   the notch and home-indicator areas, and the macOS You tab opens cleanly.
 
+### Camera & capture
+
+- **Story video capture, rebuilt.** Recording is far more reliable — clips no longer cut off after a
+  second, and the shutter keeps working take after take. A long hold **auto-splits** into segments (up to
+  15s each), a story caps at **90 seconds** (or 8 segments), and the first shutter action locks the mode
+  (tap = photo, hold = video). Recorded clips come out upright with sound, and the progress bar and zoom
+  controls behave cleanly across each segment.
+- **The camera preserves your framing.** A landscape shot keeps its **full wide frame** in the review
+  screen (previewed at its true aspect instead of being cropped into portrait), and the extra space shows
+  a full **grid of filters** to pick from.
+- **Swipe between people's stories.** In the story viewer, a horizontal swipe jumps to the next (or
+  previous) person's stories, instead of stepping through one story at a time.
+- **Smoother, steadier feed.** Fast flicks no longer flash a half-loaded image or nudge the scroll
+  position around — images fade in cleanly and the feed only redraws when something actually changed.
+
 ## [1.0.9] — 2026-07-17
 
 Everything in 1.0.7 (below), plus the fixes for bugs caught right after it was submitted —

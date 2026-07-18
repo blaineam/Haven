@@ -813,7 +813,15 @@ struct StoryCameraView: View {
                     .frame(width: 52, height: 52)
             }
             Spacer()
-            shutter
+            VStack(spacing: 6) {
+                shutter
+                // Subtext hint (reserved height, opacity-toggled so the shutter never shifts): only before
+                // the first capture and while idle, so a new user knows tap = photo, hold = video.
+                Text("Tap for photo · Hold for video")
+                    .font(.caption2).foregroundStyle(.white.opacity(0.85))
+                    .padding(.horizontal, 10).padding(.vertical, 3).background(.black.opacity(0.3), in: Capsule())
+                    .opacity(!isRec && !cam.finalizing && capture.segments.isEmpty ? 1 : 0)
+            }
             Spacer()
             // Review/Next: appears once at least one clip is captured.
             if !capture.segments.isEmpty {

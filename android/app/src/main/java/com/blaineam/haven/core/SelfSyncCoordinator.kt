@@ -134,16 +134,29 @@ object SelfSyncCoordinator {
     private fun currentLocal(social: HavenSocial?): Map<String, ByteArray> {
         val m = LinkedHashMap<String, ByteArray>()
         val p = ProfileStore.get(appContext)
-        m["profile:name"] = p.displayName.toByteArray(Charsets.UTF_8)
-        m["profile:emoji"] = p.emoji.toByteArray(Charsets.UTF_8)
-        m["profile:bio"] = p.bio.toByteArray(Charsets.UTF_8)
-        m["profile:link"] = p.link.toByteArray(Charsets.UTF_8)
+        // Only broadcast NON-EMPTY profile scalars — a fresh/empty device must never stamp a blank value
+        // that then wins last-writer-wins and REVERTS a sibling's real profile (absence is not
+        // authoritative). Mirrors iOS SelfSync.currentLocal.
+        if (p.displayName.isNotEmpty()) m["profile:name"] = p.displayName.toByteArray(Charsets.UTF_8)
+        if (p.emoji.isNotEmpty()) m["profile:emoji"] = p.emoji.toByteArray(Charsets.UTF_8)
+        if (p.bio.isNotEmpty()) m["profile:bio"] = p.bio.toByteArray(Charsets.UTF_8)
+        if (p.link.isNotEmpty()) m["profile:link"] = p.link.toByteArray(Charsets.UTF_8)
+        // LWW timestamps per profile field — so two of my devices resolve a profile edit by WHO EDITED
+        // LAST, not who synced last (the endless profile ping-pong). See ProfileStore.fieldTs.
+        for (f in listOf("name", "emoji", "bio", "link")) {
+            val ts = p.fieldTimestamp(f); if (ts > 0) m["profile-at:$f"] = int64LE(ts)
+        }
         // Settings live on ProfileStore on Android. Use iOS's exact key names where the concept
         // matches. (Android has no "silent" — skip it.)
         m["setting:saveToPhotos"] = byteArrayOf(if (p.saveMyPosts) 1 else 0)
         m["setting:saveOthersToPhotos"] = byteArrayOf(if (p.saveOthersPosts) 1 else 0)
         m["setting:autoOptimize"] = byteArrayOf(if (p.autoOptimize) 1 else 0)
         m["setting:retentionDays"] = int32LE(p.retentionDays)
+        // LWW timestamps for the synced settings — resolved by WHO CHANGED it last, not who synced last.
+        // The keys are the iOS storage-key strings so `setting-at:<key>` is byte-identical cross-platform.
+        for (k in listOf(ProfileStore.TS_SAVE, ProfileStore.TS_SAVE_OTHERS, ProfileStore.TS_OPT, ProfileStore.TS_RET)) {
+            val ts = p.settingTimestamp(k); if (ts > 0) m["setting-at:$k"] = int64LE(ts)
+        }
         // DM read watermarks — reading a thread on one device clears its badge on the others. JSON
         // map circleId → unix-ms (the iOS wire format), merged per-key MAX on apply (monotonic —
         // no device can un-read another). Never published empty (a fresh device changes nothing).
@@ -155,14 +168,26 @@ object SelfSyncCoordinator {
         for (hex in HavenNet.selfSyncBlockedSnapshot()) {
             m["blocked:$hex"] = byteArrayOf(1)
         }
-        // Explicit circle severances — LWW per entry: 1 = removed, 0 = deliberately re-added. The 0
-        // write is what lets a re-add stick fleet-wide (grow-only removals re-severed a re-added
-        // friend on every sibling sync pass). Never inferred from member absence.
-        for (entry in CircleRemovals.all()) {
-            m["removal:$entry"] = byteArrayOf(1)
-        }
-        for (entry in CircleRemovals.allCleared()) {
-            m["removal:$entry"] = byteArrayOf(0)
+        // Contact removals — LWW by timestamp (contacts sync additive-only, so a delete needs an explicit
+        // newest-wins tombstone to stick fleet-wide). 8-byte LE ms per hex. Mirrors iOS.
+        for ((hex, ms) in ContactRemovals.removedAtMap()) m["contact-removed:$hex"] = int64LE(ms)
+        for ((hex, ms) in ContactRemovals.readdedAtMap()) m["contact-readd:$hex"] = int64LE(ms)
+        // Whole-circle / DM deletions — LWW, so deleting a DM/circle on one device deletes it on all of
+        // them instead of a sibling's `circle:` record re-creating it. 8-byte LE ms per circle id.
+        for ((id, ms) in CircleDeletion.deletedAtMap()) m["circle-deleted:$id"] = int64LE(ms)
+        for ((id, ms) in CircleDeletion.recreatedAtMap()) m["circle-recreated:$id"] = int64LE(ms)
+        // Explicit circle severances — LWW by TIMESTAMP so a fresh removal beats a stale re-add and vice
+        // versa (the fix for "removals don't sync / re-adds get re-severed"). Two distinct keys carry
+        // their own 8-byte LE ms, resolved newest-wins on apply. Also still emit the legacy `removal:` =
+        // 1/0 (derived from the current verdict) so a pre-LWW sibling keeps converging during the rollout —
+        // those carry no time, so a new build treats them as ts=1 and they never override a real write.
+        val cRemovedAt = CircleRemovals.removedAtMap()
+        val cReaddedAt = CircleRemovals.readdedAtMap()
+        for ((entry, ms) in cRemovedAt) m["circle-removed:$entry"] = int64LE(ms)
+        for ((entry, ms) in cReaddedAt) m["circle-readd:$entry"] = int64LE(ms)
+        for (entry in cRemovedAt.keys + cReaddedAt.keys) {
+            val removed = (cRemovedAt[entry] ?: 0L) > (cReaddedAt[entry] ?: 0L)
+            m["removal:$entry"] = byteArrayOf(if (removed) 1 else 0)
         }
         // Relay DELETIONS — LWW by the forget timestamp, so deleting a relay on one device drops it on all
         // of them (and stops a sibling re-announcing it). Value = 8-byte LE forgotAt (ms). Without this the
@@ -178,6 +203,9 @@ object SelfSyncCoordinator {
         // identical across iOS/Android/desktop (member set is authoritative — see applyLocal).
         if (social != null) {
             for (ci in runCatching { social.circles() }.getOrDefault(emptyList())) {
+                // Don't re-broadcast a circle the user DELETED (LWW): its `circle-deleted:` record carries
+                // the deletion, and re-emitting the `circle:` row would fight it every sync.
+                if (CircleDeletion.isDeleted(ci.id)) continue
                 val members = runCatching { social.circleMemberBundles(ci.id) }.getOrDefault(emptyList())
                 val relays = HavenNet.relaysForCircle(ci.id)
                 // AUDIT M2 (§2): stamp the DEFINITION-bound creator so the authority root travels with the
@@ -212,19 +240,39 @@ object SelfSyncCoordinator {
      */
     private fun applyLocal(h: AccountStateHandle, social: HavenSocial?) {
         val p = ProfileStore.get(appContext)
-        strValue(h, "profile:name")?.let { if (it != p.displayName) { p.displayName = it; p.save() } }
-        strValue(h, "profile:emoji")?.let { if (it != p.emoji) { p.emoji = it; p.save() } }
-        strValue(h, "profile:bio")?.let { if (it != p.bio) { p.bio = it; p.save() } }
-        strValue(h, "profile:link")?.let { if (it != p.link) { p.link = it; p.save() } }
+        // Read an 8-byte LE ms timestamp for a key (0 if absent / malformed).
+        fun tsOf(key: String): Long = h.get(key)?.takeIf { it.size == 8 }?.let { int64LEValue(it) } ?: 0L
+        // Profile fields are LAST-WRITER-WINS by per-field timestamp — a remote value is applied only if it
+        // was edited MORE RECENTLY than our local one (ends the profile ping-pong). An untimestamped legacy
+        // value maps to ts=1 (barely > 0) ONLY to SEED an empty local field; it never overwrites a
+        // non-empty local. A real local edit (ts=now) always wins. Mirrors iOS SelfSync.applyLocal.
+        strValue(h, "profile:name")?.let { s ->
+            var ts = tsOf("profile-at:name")
+            if (ts == 0L && p.fieldTimestamp("name") == 0L && p.displayName.isEmpty() && s.isNotEmpty()) ts = 1L
+            p.applyRemoteField("name", s, ts)
+        }
+        strValue(h, "profile:emoji")?.let { s ->
+            if (s.isNotEmpty()) p.applyRemoteField("emoji", s, tsOf("profile-at:emoji")) // emoji has a default
+        }
+        strValue(h, "profile:bio")?.let { s ->
+            var ts = tsOf("profile-at:bio")
+            if (ts == 0L && p.fieldTimestamp("bio") == 0L && p.bio.isEmpty() && s.isNotEmpty()) ts = 1L
+            p.applyRemoteField("bio", s, ts)
+        }
+        strValue(h, "profile:link")?.let { s ->
+            var ts = tsOf("profile-at:link")
+            if (ts == 0L && p.fieldTimestamp("link") == 0L && p.link.isEmpty() && s.isNotEmpty()) ts = 1L
+            p.applyRemoteField("link", s, ts)
+        }
 
-        boolValue(h, "setting:saveToPhotos")?.let { if (it != p.saveMyPosts) p.saveMyPosts = it }
-        boolValue(h, "setting:saveOthersToPhotos")?.let { if (it != p.saveOthersPosts) p.saveOthersPosts = it }
-        boolValue(h, "setting:autoOptimize")?.let { if (it != p.autoOptimize) p.autoOptimize = it }
+        // Settings are LWW by per-key timestamp — same fix as profiles. An untimestamped legacy record (old
+        // peer) maps to ts=1 so it seeds a never-touched device but can never overwrite a real local edit.
+        fun settingTs(key: String): Long = tsOf("setting-at:$key").let { if (it == 0L) 1L else it }
+        boolValue(h, "setting:saveToPhotos")?.let { p.applyRemoteSettingBool(ProfileStore.TS_SAVE, it, settingTs(ProfileStore.TS_SAVE)) }
+        boolValue(h, "setting:saveOthersToPhotos")?.let { p.applyRemoteSettingBool(ProfileStore.TS_SAVE_OTHERS, it, settingTs(ProfileStore.TS_SAVE_OTHERS)) }
+        boolValue(h, "setting:autoOptimize")?.let { p.applyRemoteSettingBool(ProfileStore.TS_OPT, it, settingTs(ProfileStore.TS_OPT)) }
         h.get("setting:retentionDays")?.let { v ->
-            if (v.size == 4) {
-                val n = int32LEValue(v)
-                if (n != p.retentionDays) p.setRetention(n)
-            }
+            if (v.size == 4) p.applyRemoteRetention(int32LEValue(v), settingTs(ProfileStore.TS_RET))
         }
         // DM read watermarks from my other devices: per-key MAX merge (monotonic — always safe).
         // DmRead bumps its own version on change, so unread badges recompose by themselves.
@@ -244,8 +292,37 @@ object SelfSyncCoordinator {
             }
         }
 
-        // Contacts: upsert everything present; drop locals the converged state no longer has
-        // (a contact deleted on another device propagated as a tombstone).
+        // Contact removals — LWW by timestamp, applied BEFORE the upsert so a removed contact is
+        // tombstoned and the upsert refuses to resurrect them (contacts are otherwise additive-only, which
+        // is exactly why deletes never stuck on a multi-device account). Newest of removed-vs-readd wins.
+        run {
+            val removedMs = HashMap<String, Long>()
+            val readdMs = HashMap<String, Long>()
+            for (e in live) if (e.value.size == 8) {
+                when {
+                    e.key.startsWith("contact-removed:") -> {
+                        val hex = e.key.removePrefix("contact-removed:")
+                        if (hex.isNotEmpty()) removedMs[hex] = maxOf(removedMs[hex] ?: 0L, int64LEValue(e.value))
+                    }
+                    e.key.startsWith("contact-readd:") -> {
+                        val hex = e.key.removePrefix("contact-readd:")
+                        if (hex.isNotEmpty()) readdMs[hex] = maxOf(readdMs[hex] ?: 0L, int64LEValue(e.value))
+                    }
+                }
+            }
+            for (hex in removedMs.keys + readdMs.keys) {
+                val rem = removedMs[hex] ?: 0L
+                val readd = readdMs[hex] ?: 0L
+                if (rem >= readd && rem > 0L) {
+                    if (ContactRemovals.mergeRemovedAt(hex, rem)) HavenNet.selfSyncRemoveContact(hex)
+                } else if (readd > 0L) {
+                    ContactRemovals.mergeReaddedAt(hex, readd)
+                }
+            }
+        }
+
+        // Contacts: upsert everyone present that isn't tombstone-removed (selfSyncUpsertContact enforces
+        // the tombstone). ADDITIVE ONLY — never drop a contact a peer simply doesn't list.
         val wantContacts = HashMap<String, Contact>()
         for (e in live) if (e.key.startsWith("contact:")) {
             decodeContact(e.value)?.let { wantContacts[it.idHex] = it }
@@ -264,20 +341,49 @@ object SelfSyncCoordinator {
         for (hex in wantBlocked - haveBlocked) HavenNet.selfSyncSetBlocked(hex, true)
         for (hex in haveBlocked - wantBlocked) HavenNet.selfSyncSetBlocked(hex, false)
 
-        // Explicit circle severances synced from our other devices: value 1 → record locally so the
-        // member won't be re-added below + apply the removal to the circle here too. Value 0 → the
-        // removal was deliberately CLEARED (re-added) on another device: un-ban locally and never
-        // re-sever; the member bundle comes back via the additive circle: record.
-        for (e in live) if (e.key.startsWith("removal:")) {
-            val body = e.key.removePrefix("removal:")
-            val cid = body.substringBefore("|")
-            val hex = body.substringAfter("|", "")
-            if (cid.isNotEmpty() && hex.isNotEmpty()) {
-                if (e.value.firstOrNull()?.toInt() == 0) {
-                    if (CircleRemovals.contains(cid, hex)) CircleRemovals.remove(cid, hex)
-                } else {
-                    CircleRemovals.add(cid, hex)
-                    if (social != null) runCatching { social.removeFromCircle(cid, hex) }
+        // Circle severances synced from our other devices — resolved by LAST-WRITER-WINS on timestamps, so
+        // a fresh removal beats a stale re-add and a fresh re-add beats an old removal. Gather both sides
+        // from the timestamped keys (plus legacy `removal:` = 1/0 mapped to ts=1 so it loses to any real
+        // write), pick the newest per key, then apply. This is the fix for "removals don't sync to my other
+        // device" AND the older "a sibling re-severs a re-added friend". Mirrors iOS SelfSync.applyLocal.
+        run {
+            val removedMs = HashMap<String, Long>()
+            val readdMs = HashMap<String, Long>()
+            fun norm(entry: String): String {
+                val bar = entry.indexOf('|'); if (bar < 0) return entry
+                return entry.substring(0, bar) + "|" + entry.substring(bar + 1).lowercase()
+            }
+            for (e in live) {
+                when {
+                    e.key.startsWith("circle-removed:") && e.value.size == 8 -> {
+                        val k = norm(e.key.removePrefix("circle-removed:"))
+                        removedMs[k] = maxOf(removedMs[k] ?: 0L, int64LEValue(e.value))
+                    }
+                    e.key.startsWith("circle-readd:") && e.value.size == 8 -> {
+                        val k = norm(e.key.removePrefix("circle-readd:"))
+                        readdMs[k] = maxOf(readdMs[k] ?: 0L, int64LEValue(e.value))
+                    }
+                    e.key.startsWith("removal:") && e.value.size == 1 -> {   // legacy pre-LWW record → ts=1
+                        val k = norm(e.key.removePrefix("removal:"))
+                        if (e.value[0].toInt() == 1) removedMs[k] = maxOf(removedMs[k] ?: 0L, 1L)
+                        else readdMs[k] = maxOf(readdMs[k] ?: 0L, 1L)
+                    }
+                }
+            }
+            for (key in removedMs.keys + readdMs.keys) {
+                val bar = key.indexOf('|'); if (bar <= 0 || bar >= key.length - 1) continue
+                val cid = key.substring(0, bar)
+                val hex = key.substring(bar + 1)
+                val rem = removedMs[key] ?: 0L
+                val readd = readdMs[key] ?: 0L
+                if (rem >= readd && rem > 0L) {
+                    if (CircleRemovals.mergeRemovedAt(key, rem) && social != null) {
+                        runCatching { social.removeFromCircle(cid, hex) }   // purge + engine tombstone
+                    }
+                } else if (readd > 0L) {
+                    // Newest is a re-add: merge the client re-add ts. The engine tombstone is lifted ONLY by
+                    // an explicit LOCAL re-add; the member's bundle comes back via the additive circle: record.
+                    CircleRemovals.mergeReaddedAt(key, readd)
                 }
             }
         }
@@ -307,6 +413,38 @@ object SelfSyncCoordinator {
             else if (readd > 0L) HavenNet.applyRelayClearedForget(hex, readd)  // re-added, newer than any delete
         }
 
+        // Whole-circle / DM deletions — LWW, applied BEFORE the circle: upsert. A deletion newer than any
+        // re-creation deletes the circle locally too (so deleting a DM on one device deletes it on the
+        // others); the circle: loop below then skips re-creating anything still tombstone-deleted.
+        run {
+            val deletedMs = HashMap<String, Long>()
+            val recreatedMs = HashMap<String, Long>()
+            for (e in live) if (e.value.size == 8) {
+                when {
+                    e.key.startsWith("circle-deleted:") -> {
+                        val id = e.key.removePrefix("circle-deleted:")
+                        if (id.isNotEmpty()) deletedMs[id] = int64LEValue(e.value)
+                    }
+                    e.key.startsWith("circle-recreated:") -> {
+                        val id = e.key.removePrefix("circle-recreated:")
+                        if (id.isNotEmpty()) recreatedMs[id] = int64LEValue(e.value)
+                    }
+                }
+            }
+            for (id in deletedMs.keys + recreatedMs.keys) {
+                val del = deletedMs[id] ?: 0L
+                val rec = recreatedMs[id] ?: 0L
+                if (del >= rec && del > 0L) {
+                    if (CircleDeletion.mergeDeletedAt(id, del) &&
+                        social?.circles()?.any { it.id == id } == true) {
+                        runCatching { social.leaveCircle(id) }
+                    }
+                } else if (rec > 0L) {
+                    CircleDeletion.mergeRecreatedAt(id, rec)
+                }
+            }
+        }
+
         // Circles: reconcile each synced circle — create it + register every member's bundle so this
         // device can seal to them, and record its relay mailbox(es). ADDITIVE in v1 (no absence-based
         // leave/prune — see the strictly-additive note below).
@@ -314,6 +452,9 @@ object SelfSyncCoordinator {
             val existing = runCatching { social.circles() }.getOrDefault(emptyList())
             for (e in live) if (e.key.startsWith("circle:")) {
                 val id = e.key.removePrefix("circle:")
+                // Don't RESURRECT a circle/DM the user deleted (LWW): a sibling still listing it must not
+                // re-create it every sync. A newer re-creation (merged above) lifts this.
+                if (CircleDeletion.isDeleted(id)) continue
                 val cs = decodeCircleSync(e.value) ?: continue
                 runCatching { social.createCircle(id, cs.name) }   // no-op if it already exists
                 val cur = existing.firstOrNull { it.id == id }

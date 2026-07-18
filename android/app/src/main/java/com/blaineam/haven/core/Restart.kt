@@ -20,6 +20,8 @@ fun startOver(context: Context) {
     runCatching { CircleLock.reset() }
     runCatching { RelayNudge.reset() }
     runCatching { CircleRemovals.clear() }
+    runCatching { ContactRemovals.clear() }
+    runCatching { CircleDeletion.clear() }
     runCatching { Presign.reset() }
     runCatching { SelfSyncCoordinator.reset() }
     runCatching { DeviceKeyStore.clear() }

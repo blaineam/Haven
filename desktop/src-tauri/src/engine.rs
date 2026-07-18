@@ -619,6 +619,20 @@ impl Engine {
     pub fn set_profile(self: &Arc<Self>, profile: Profile) {
         {
             let mut p = self.prefs.lock().unwrap();
+            // Stamp each field the user actually CHANGED (LWW), so a remote sibling edit only overrides
+            // ours when it's newer. Mirrors iOS ProfileStore.stamp on each edited field.
+            if p.profile.name != profile.name {
+                p.stamp_profile_field("name");
+            }
+            if p.profile.emoji != profile.emoji {
+                p.stamp_profile_field("emoji");
+            }
+            if p.profile.bio != profile.bio {
+                p.stamp_profile_field("bio");
+            }
+            if p.profile.link != profile.link {
+                p.stamp_profile_field("link");
+            }
             p.profile = profile;
             let _ = p.save(&self.paths);
         }
@@ -748,6 +762,7 @@ impl Engine {
         // keying + retirement require. No-op for a fresh device-only install or until fully capable.
         self.maybe_migrate_retire_account_leaf().await;
         self.maybe_reseal_own_media().await; // 1.0.8: overwrite my media a 1.0.7 build froze (once)
+        self.reconcile_superseded_circles(); // collapse any upgraded/duplicated circle at launch (LWW tombstone)
         self.fire_due_scheduled(); // flush anything overdue from while the app was closed
         self.purge_stale_relays().await; // erase relays inactive AND unseen > 7 days (config else survives)
         self.maybe_weekly_media_sweep(); // orphaned media blobs (at most once a week; runs off-thread)
@@ -1131,6 +1146,9 @@ impl Engine {
 
     pub fn set_host_on_launch(self: &Arc<Self>, on: bool) {
         let mut p = self.prefs.lock().unwrap();
+        if p.host_on_launch != on {
+            p.stamp_setting("host_on_launch"); // LWW so two desktops don't ping-pong this toggle
+        }
         p.host_on_launch = on;
         let _ = p.save(&self.paths);
     }
@@ -1688,11 +1706,44 @@ impl Engine {
     // ---- circles ------------------------------------------------------------------------
 
     pub fn feed_circles(&self) -> Vec<haven_ffi::CircleInfoFfi> {
+        let p = self.prefs.lock().unwrap();
         self.social
             .circles()
             .into_iter()
-            .filter(|c| !c.id.starts_with("dm:"))
+            // Belt-and-suspenders: never surface a tombstone-deleted circle (a sync race can
+            // re-materialize one before its `circle-deleted:` record applies).
+            .filter(|c| !c.id.starts_with("dm:") && !p.is_circle_deleted(&c.id))
             .collect()
+    }
+
+    /// Collapse any SUPERSEDED legacy circle (one carried onto a creator-bound successor via
+    /// upgrade/follow) into a single row, and heal duplicates that already exist. Converts the engine's
+    /// per-device `superseded_circle_ids()` signal into the SAME synced, LWW deletion tombstone used for
+    /// deleting a circle — so self-sync honors it on every device and can never resurrect the legacy row.
+    /// Mirrors iOS FeedStore.refreshCircles. Runs on every self-sync pass (and once at startup).
+    pub fn reconcile_superseded_circles(self: &Arc<Self>) {
+        let superseded = self.social.superseded_circle_ids();
+        if superseded.is_empty() {
+            return;
+        }
+        let mut changed = false;
+        for legacy in superseded {
+            let already = self.prefs.lock().unwrap().is_circle_deleted(&legacy);
+            if already {
+                continue;
+            }
+            {
+                let mut p = self.prefs.lock().unwrap();
+                p.mark_circle_deleted(&legacy); // LWW tombstone → syncs to all my devices
+                let _ = p.save(&self.paths);
+            }
+            self.social.leave_circle(legacy.clone()); // drop the duplicate row from the engine
+            changed = true;
+        }
+        if changed {
+            self.persist();
+            self.emit_changed();
+        }
     }
 
     pub fn create_circle(self: &Arc<Self>, name: String) -> String {
@@ -1705,8 +1756,10 @@ impl Engine {
             let mut p = self.prefs.lock().unwrap();
             if !p.created_circles.iter().any(|c| c == &id) {
                 p.created_circles.push(id.clone());
-                let _ = p.save(&self.paths);
             }
+            // A freshly-created circle is NOT deleted (LWW) — lift any stale deletion for a reused id.
+            p.mark_circle_recreated(&id);
+            let _ = p.save(&self.paths);
         }
         self.persist();
         self.emit_changed();
@@ -1801,6 +1854,13 @@ impl Engine {
         if id == DEFAULT_CIRCLE {
             return;
         }
+        {
+            // LWW deletion tombstone so a sibling's `circle:` record can't re-create it every sync.
+            // Mirrors iOS CircleDeletionStore.markDeleted on delete.
+            let mut p = self.prefs.lock().unwrap();
+            p.mark_circle_deleted(&id);
+            let _ = p.save(&self.paths);
+        }
         self.social.leave_circle(id);
         self.persist();
         self.emit_changed();
@@ -1822,11 +1882,10 @@ impl Engine {
     pub fn remove_from_circle(self: &Arc<Self>, circle_id: String, contact_id_hex: String) {
         {
             let mut p = self.prefs.lock().unwrap();
+            // LWW severance: stamp the removal NOW so it beats any stale sibling re-add (and a later
+            // deliberate re-add beats this). Mirrors iOS ConnectionsStore.removeFromCircle.
             let entry = format!("{circle_id}|{}", contact_id_hex.to_lowercase());
-            p.circle_removals_cleared.retain(|e| e != &entry);
-            if !p.circle_removals.iter().any(|e| e == &entry) {
-                p.circle_removals.push(entry);
-            }
+            p.mark_circle_member_removed(&entry);
             let _ = p.save(&self.paths);
         }
         self.social.remove_from_circle(circle_id, contact_id_hex);
@@ -1836,23 +1895,25 @@ impl Engine {
     }
 
     /// Was this member explicitly removed from this circle? (Blocks their unsolicited handshake rejoin.)
+    /// LWW: removed iff the removal is newer than any re-add.
     fn is_removed_from_circle(&self, circle_id: &str, id_hex: &str) -> bool {
         let entry = format!("{circle_id}|{}", id_hex.to_lowercase());
-        self.prefs.lock().unwrap().circle_removals.iter().any(|e| e == &entry)
+        self.prefs.lock().unwrap().is_circle_member_removed(&entry)
     }
 
     /// Re-allow a member into a circle — ONLY on a deliberate re-add (approve / add / invite connect).
-    /// The entry moves to `circle_removals_cleared` (even when THIS device holds no removal — a
-    /// sibling might) so the clear propagates via self-sync as an explicit newer LWW write instead of
-    /// silently losing to a stale removal record.
+    /// Stamps the re-add NOW (LWW), so the clear propagates via self-sync as an explicit newer write
+    /// instead of silently losing to a stale removal record.
     fn clear_circle_removal(&self, circle_id: &str, id_hex: &str) {
         let entry = format!("{circle_id}|{}", id_hex.to_lowercase());
-        let mut p = self.prefs.lock().unwrap();
-        p.circle_removals.retain(|e| e != &entry);
-        if !p.circle_removals_cleared.iter().any(|e| e == &entry) {
-            p.circle_removals_cleared.push(entry);
+        {
+            let mut p = self.prefs.lock().unwrap();
+            p.mark_circle_member_readded(&entry);
+            let _ = p.save(&self.paths);
         }
-        let _ = p.save(&self.paths);
+        // Lift the ENGINE tombstone too — the add paths now REFUSE a tombstoned member, so a deliberate
+        // re-add must clear it in the engine or the member could never be added back.
+        self.social.clear_circle_removal(circle_id.to_string(), id_hex.to_lowercase());
     }
 
     // ---- feed / authoring ---------------------------------------------------------------
@@ -2697,6 +2758,9 @@ impl Engine {
         {
             let mut p = self.prefs.lock().unwrap();
             p.contacts.retain(|c| c.id_hex != id_hex);
+            // LWW contact tombstone so the removal sticks fleet-wide (a sibling's additive `contact:`
+            // record can't resurrect them). Mirrors iOS ContactsStore.remove.
+            p.mark_contact_removed(&id_hex);
             if !p.blocked.contains(&id_hex) {
                 p.blocked.push(id_hex.clone());
             }
@@ -2718,6 +2782,9 @@ impl Engine {
         let _ = self.social.add_contact_bundle(circle_id.to_string(), bundle.to_vec());
         {
             let mut p = self.prefs.lock().unwrap();
+            // A deliberate (re-)add lifts any contact tombstone (LWW), so a previously-removed person can
+            // be added back and a stale removal can't re-drop them. Mirrors iOS ContactsStore.add.
+            p.mark_contact_readded(id_hex);
             if !p.contacts.iter().any(|c| c.id_hex == id_hex) {
                 p.contacts.push(Contact {
                     id_hex: id_hex.to_string(),
@@ -5214,6 +5281,9 @@ impl Engine {
         let now = now_ms();
         let device = crate::selfsync::device_id(&self.paths);
         let stamp = Stamp::new(now, device);
+        // Collapse any superseded/upgraded circle into a synced LWW deletion tombstone BEFORE snapshotting
+        // local state, so the tombstone rides THIS pass's slot (mirrors iOS refreshCircles before export).
+        self.reconcile_superseded_circles();
         let local = {
             let prefs = self.prefs.lock().unwrap();
             crate::selfsync::current_local(&prefs, &self.social)

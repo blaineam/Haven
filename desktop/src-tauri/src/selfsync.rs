@@ -51,16 +51,42 @@ pub const DYNAMIC_PREFIXES: [&str; 3] = ["contact:", "blocked:", "circle:"];
 pub fn current_local(prefs: &Prefs, social: &HavenSocial) -> BTreeMap<String, Vec<u8>> {
     let mut m: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
-    // Profile (UTF-8 bytes).
-    m.insert("profile:name".into(), prefs.profile.name.clone().into_bytes());
-    m.insert("profile:emoji".into(), prefs.profile.emoji.clone().into_bytes());
-    m.insert("profile:bio".into(), prefs.profile.bio.clone().into_bytes());
-    m.insert("profile:link".into(), prefs.profile.link.clone().into_bytes());
+    // Profile (UTF-8 bytes). Only broadcast NON-EMPTY scalars: a fresh/empty device must never stamp a
+    // blank value that then wins last-writer-wins and REVERTS a sibling's real profile (absence is not
+    // authoritative). Mirrors iOS SelfSync.currentLocal.
+    if !prefs.profile.name.is_empty() {
+        m.insert("profile:name".into(), prefs.profile.name.clone().into_bytes());
+    }
+    if !prefs.profile.emoji.is_empty() {
+        m.insert("profile:emoji".into(), prefs.profile.emoji.clone().into_bytes());
+    }
+    if !prefs.profile.bio.is_empty() {
+        m.insert("profile:bio".into(), prefs.profile.bio.clone().into_bytes());
+    }
+    if !prefs.profile.link.is_empty() {
+        m.insert("profile:link".into(), prefs.profile.link.clone().into_bytes());
+    }
+    // LWW timestamps per profile field — so two of my devices resolve a profile edit by WHO EDITED LAST,
+    // not who synced last (the endless profile ping-pong). See store::Prefs::profile_field_ts.
+    for field in ["name", "emoji", "bio", "link"] {
+        let ts = prefs.profile_field_stamp(field);
+        if ts > 0 {
+            m.insert(format!("profile-at:{field}"), ts.to_le_bytes().to_vec());
+        }
+    }
 
     // Global settings. retention as u64 LE (None = 0 = keep all); host-on-launch as a 1-byte flag.
     let retention = prefs.retention_secs.unwrap_or(0);
     m.insert("setting:retention".into(), retention.to_le_bytes().to_vec());
     m.insert("setting:host_on_launch".into(), vec![if prefs.host_on_launch { 1 } else { 0 }]);
+    // LWW timestamps for the synced settings — so two devices resolve a settings change by WHO CHANGED it
+    // last, not who synced last (the same ping-pong that hit profiles). See store::Prefs::setting_ts.
+    for key in ["retention", "host_on_launch"] {
+        let ts = prefs.setting_stamp(key);
+        if ts > 0 {
+            m.insert(format!("setting-at:{key}"), ts.to_le_bytes().to_vec());
+        }
+    }
 
     // DM read watermarks — reading a thread on one device clears its badge on the others. JSON map
     // circleId → unix-ms (the iOS/Android wire format), merged per-key MAX on apply: monotonic, so
@@ -82,14 +108,40 @@ pub fn current_local(prefs: &Prefs, social: &HavenSocial) -> BTreeMap<String, Ve
         m.insert(format!("blocked:{hex}"), vec![1]);
     }
 
-    // Explicit circle severances — LWW per entry: 1 = removed, 0 = deliberately re-added. The 0
-    // write is what lets a re-add stick fleet-wide (grow-only removals re-severed a re-added
-    // friend on every sibling sync pass). Never inferred from member absence.
-    for entry in &prefs.circle_removals {
-        m.insert(format!("removal:{entry}"), vec![1]);
+    // Contact removals — LWW by timestamp (contacts sync additive-only, so a delete needs an explicit
+    // newest-wins tombstone to stick fleet-wide). 8-byte LE ms per hex. Mirrors iOS.
+    for (hex, ms) in &prefs.contact_removed_at {
+        m.insert(format!("contact-removed:{hex}"), ms.to_le_bytes().to_vec());
     }
-    for entry in &prefs.circle_removals_cleared {
-        m.insert(format!("removal:{entry}"), vec![0]);
+    for (hex, ms) in &prefs.contact_readded_at {
+        m.insert(format!("contact-readd:{hex}"), ms.to_le_bytes().to_vec());
+    }
+    // Whole-circle / DM deletions — LWW, so deleting a DM/circle on one device deletes it on all of them
+    // instead of a sibling's `circle:` record re-creating it. 8-byte LE ms per circle id. Mirrors iOS.
+    for (id, ms) in &prefs.circle_deleted_at {
+        m.insert(format!("circle-deleted:{id}"), ms.to_le_bytes().to_vec());
+    }
+    for (id, ms) in &prefs.circle_recreated_at {
+        m.insert(format!("circle-recreated:{id}"), ms.to_le_bytes().to_vec());
+    }
+
+    // Explicit circle severances — LWW by TIMESTAMP so a fresh removal beats a stale re-add and vice
+    // versa (the fix for "removals don't sync / re-adds get re-severed"). Two distinct keys carry their
+    // own 8-byte LE ms, resolved newest-wins on apply. Also still emit the legacy `removal:` = 1/0
+    // (derived from the current verdict) so a pre-LWW sibling keeps converging during the rollout — those
+    // carry no time, so a new build treats them as ts=1 and they never override a real write.
+    for (entry, ms) in &prefs.circle_removed_at {
+        m.insert(format!("circle-removed:{entry}"), ms.to_le_bytes().to_vec());
+    }
+    for (entry, ms) in &prefs.circle_readded_at {
+        m.insert(format!("circle-readd:{entry}"), ms.to_le_bytes().to_vec());
+    }
+    let mut removal_keys: std::collections::BTreeSet<&String> = prefs.circle_removed_at.keys().collect();
+    removal_keys.extend(prefs.circle_readded_at.keys());
+    for entry in removal_keys {
+        // legacy compat: 1 = currently removed, 0 = currently re-added (newest verdict).
+        let val = if prefs.is_circle_member_removed(entry) { 1u8 } else { 0u8 };
+        m.insert(format!("removal:{entry}"), vec![val]);
     }
 
     // Relay DELETIONS + RE-ADDS — LWW per relay across my own devices. Deleting a relay on one device
@@ -122,6 +174,11 @@ pub fn current_local(prefs: &Prefs, social: &HavenSocial) -> BTreeMap<String, Ve
     for ci in social.circles() {
         // Skip DM pseudo-circles — they reconstruct from the contact pair, not from sync.
         if ci.id.starts_with("dm:") {
+            continue;
+        }
+        // Don't re-broadcast a circle the user DELETED (LWW): its `circle-deleted:` record carries the
+        // deletion, and re-emitting the `circle:` row would fight it every sync.
+        if prefs.is_circle_deleted(&ci.id) {
             continue;
         }
         let member_bundles = social.circle_member_bundles(ci.id.clone());
@@ -180,41 +237,84 @@ pub fn apply_local(
         entries.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_slice())
     };
 
-    // Profile (UTF-8).
-    macro_rules! apply_str {
-        ($key:expr, $field:expr) => {
-            if let Some(v) = get($key) {
-                if let Ok(s) = std::str::from_utf8(v) {
-                    if s != $field {
-                        $field = s.to_string();
-                        changed = true;
-                    }
-                }
-            }
-        };
-    }
-    apply_str!("profile:name", prefs.profile.name);
-    apply_str!("profile:emoji", prefs.profile.emoji);
-    apply_str!("profile:bio", prefs.profile.bio);
-    apply_str!("profile:link", prefs.profile.link);
+    // Read an 8-byte LE ms timestamp for a key (0 if absent / malformed).
+    let ts_of = |key: &str| -> u64 {
+        get(key)
+            .filter(|v| v.len() == 8)
+            .map(|v| {
+                let mut a = [0u8; 8];
+                a.copy_from_slice(v);
+                u64::from_le_bytes(a)
+            })
+            .unwrap_or(0)
+    };
 
-    // Settings.
+    // Profile fields are LAST-WRITER-WINS by per-field timestamp — a remote value is applied only if it
+    // was edited MORE RECENTLY than our local one (ends the endless ping-pong where two devices each
+    // thought "my non-empty value wins"). An untimestamped legacy value maps to ts=1 (barely > 0) ONLY to
+    // SEED an empty local field; it never overwrites a non-empty local. A real local edit (ts=now) always
+    // wins over this. Mirrors iOS SelfSync.applyLocal.
+    for (field, local_val) in [
+        ("name", &prefs.profile.name.clone()),
+        ("emoji", &prefs.profile.emoji.clone()),
+        ("bio", &prefs.profile.bio.clone()),
+        ("link", &prefs.profile.link.clone()),
+    ] {
+        let Some(v) = get(&format!("profile:{field}")) else { continue };
+        let Ok(s) = std::str::from_utf8(v) else { continue };
+        // emoji always has a default, so an empty remote never applies (only a timestamped remote overrides).
+        if field == "emoji" && s.is_empty() {
+            continue;
+        }
+        let local_ts = prefs.profile_field_stamp(field);
+        let mut ts = ts_of(&format!("profile-at:{field}"));
+        if ts == 0 && local_ts == 0 && local_val.is_empty() && !s.is_empty() {
+            ts = 1; // seed an empty local field from a legacy (untimestamped) sibling
+        }
+        if ts > local_ts && s != local_val.as_str() {
+            match field {
+                "name" => prefs.profile.name = s.to_string(),
+                "emoji" => prefs.profile.emoji = s.to_string(),
+                "bio" => prefs.profile.bio = s.to_string(),
+                "link" => prefs.profile.link = s.to_string(),
+                _ => {}
+            }
+            prefs.profile_field_ts.insert(field.to_string(), ts);
+            changed = true;
+        }
+    }
+
+    // Settings are LWW by per-key timestamp — same fix as profiles. A remote value only wins if it was
+    // changed more recently than ours; an untimestamped legacy record (old peer) maps to ts=1 so it seeds
+    // a never-touched device but can never overwrite a real local edit. Mirrors iOS SelfSync.applyLocal.
+    let setting_ts_of = |key: &str| -> u64 {
+        let t = ts_of(&format!("setting-at:{key}"));
+        if t == 0 {
+            1
+        } else {
+            t
+        }
+    };
     if let Some(v) = get("setting:retention") {
         if v.len() == 8 {
             let mut a = [0u8; 8];
             a.copy_from_slice(v);
             let n = u64::from_le_bytes(a);
             let want = if n == 0 { None } else { Some(n) };
-            if want != prefs.retention_secs {
+            let ts = setting_ts_of("retention");
+            if ts > prefs.setting_stamp("retention") && want != prefs.retention_secs {
                 prefs.retention_secs = want;
+                prefs.setting_ts.insert("retention".into(), ts);
                 changed = true;
             }
         }
     }
     if let Some(v) = get("setting:host_on_launch") {
         if let Some(b) = bool_value(v) {
-            if b != prefs.host_on_launch {
+            let ts = setting_ts_of("host_on_launch");
+            if ts > prefs.setting_stamp("host_on_launch") && b != prefs.host_on_launch {
                 prefs.host_on_launch = b;
+                prefs.setting_ts.insert("host_on_launch".into(), ts);
                 changed = true;
             }
         }
@@ -231,8 +331,52 @@ pub fn apply_local(
         }
     }
 
-    // Contacts: upsert everything present; drop locals the converged state no longer has
-    // (a contact deleted on another device propagated as a tombstone).
+    // Contact removals — LWW by timestamp, applied BEFORE the upsert so a removed contact is tombstoned
+    // and the upsert refuses to resurrect them (contacts are otherwise additive-only, which is exactly
+    // why deletes never stuck on a multi-device account). Newest of removed-vs-readd wins per hex.
+    // Mirrors iOS SelfSync.applyLocal.
+    {
+        let mut removed_ms: BTreeMap<String, u64> = BTreeMap::new();
+        let mut readd_ms: BTreeMap<String, u64> = BTreeMap::new();
+        for (k, v) in entries {
+            if v.len() != 8 {
+                continue;
+            }
+            let mut a = [0u8; 8];
+            a.copy_from_slice(v);
+            let n = u64::from_le_bytes(a);
+            if let Some(hex) = k.strip_prefix("contact-removed:") {
+                if !hex.is_empty() {
+                    let e = removed_ms.entry(hex.to_string()).or_insert(0);
+                    *e = (*e).max(n);
+                }
+            } else if let Some(hex) = k.strip_prefix("contact-readd:") {
+                if !hex.is_empty() {
+                    let e = readd_ms.entry(hex.to_string()).or_insert(0);
+                    *e = (*e).max(n);
+                }
+            }
+        }
+        let mut hexes: std::collections::BTreeSet<String> = removed_ms.keys().cloned().collect();
+        hexes.extend(readd_ms.keys().cloned());
+        for hex in hexes {
+            let rem = removed_ms.get(&hex).copied().unwrap_or(0);
+            let readd = readd_ms.get(&hex).copied().unwrap_or(0);
+            if rem >= readd && rem > 0 {
+                if prefs.merge_contact_removed_at(&hex, rem) {
+                    let before = prefs.contacts.len();
+                    prefs.contacts.retain(|c| c.id_hex != hex);
+                    if prefs.contacts.len() != before {
+                        changed = true;
+                    }
+                }
+            } else if readd > 0 {
+                prefs.merge_contact_readded_at(&hex, readd);
+            }
+        }
+    }
+
+    // Contacts: upsert everyone present that isn't tombstone-removed.
     let mut want_contacts: BTreeMap<String, Contact> = BTreeMap::new();
     for (k, v) in entries {
         if let Some(_id) = k.strip_prefix("contact:") {
@@ -241,8 +385,11 @@ pub fn apply_local(
             }
         }
     }
-    // Upsert.
+    // Upsert (a removed contact must not be resurrected by sync).
     for c in want_contacts.values() {
+        if prefs.is_contact_removed(&c.id_hex) {
+            continue;
+        }
         match prefs.contacts.iter_mut().find(|x| x.id_hex == c.id_hex) {
             Some(existing) => {
                 if existing.name != c.name || existing.verify_hex != c.verify_hex {
@@ -292,29 +439,69 @@ pub fn apply_local(
         }
     }
 
-    // Explicit circle severances synced from our other devices: value 1 → record locally so the
-    // member isn't re-registered below + apply the removal to the circle here too. Value 0 → the
-    // removal was deliberately CLEARED (re-added) on another device: un-ban locally and never
-    // re-sever; the member bundle comes back via the additive circle: record.
-    for (k, v) in entries {
-        let Some(entry) = k.strip_prefix("removal:") else { continue };
-        if v.first() == Some(&0) {
-            if prefs.circle_removals.iter().any(|e| e == entry) {
-                prefs.circle_removals.retain(|e| e != entry);
-                if !prefs.circle_removals_cleared.iter().any(|e| e == entry) {
-                    prefs.circle_removals_cleared.push(entry.to_string());
+    // Circle severances synced from our other devices — resolved by LAST-WRITER-WINS on timestamps, so a
+    // fresh removal beats a stale re-add and a fresh re-add beats an old removal. Gather both sides from
+    // the timestamped keys (plus legacy `removal:` = 1/0 mapped to ts=1 so it loses to any real write),
+    // pick the newest per key, then apply — set/lift the removal to match. This is the fix for "removals
+    // don't sync to my other device" AND the older "a sibling re-severs a re-added friend": the newest
+    // human action always wins, never a stale record. Mirrors iOS SelfSync.applyLocal.
+    {
+        let mut removed_ms: BTreeMap<String, u64> = BTreeMap::new();
+        let mut readd_ms: BTreeMap<String, u64> = BTreeMap::new();
+        for (k, v) in entries {
+            if let Some(entry) = k.strip_prefix("circle-removed:") {
+                if v.len() == 8 {
+                    let mut a = [0u8; 8];
+                    a.copy_from_slice(v);
+                    let e = removed_ms.entry(entry.to_string()).or_insert(0);
+                    *e = (*e).max(u64::from_le_bytes(a));
                 }
-                changed = true;
+            } else if let Some(entry) = k.strip_prefix("circle-readd:") {
+                if v.len() == 8 {
+                    let mut a = [0u8; 8];
+                    a.copy_from_slice(v);
+                    let e = readd_ms.entry(entry.to_string()).or_insert(0);
+                    *e = (*e).max(u64::from_le_bytes(a));
+                }
+            } else if let Some(entry) = k.strip_prefix("removal:") {
+                // legacy pre-LWW record → ts=1 (loses to any real timestamped write).
+                if v.first() == Some(&1) {
+                    let e = removed_ms.entry(entry.to_string()).or_insert(0);
+                    *e = (*e).max(1);
+                } else if v.first() == Some(&0) {
+                    let e = readd_ms.entry(entry.to_string()).or_insert(0);
+                    *e = (*e).max(1);
+                }
             }
-            continue;
         }
-        if !prefs.circle_removals.iter().any(|e| e == entry) {
-            prefs.circle_removals.push(entry.to_string());
-            prefs.circle_removals_cleared.retain(|e| e != entry);
-            changed = true;
-        }
-        if let Some((cid, hex)) = entry.split_once('|') {
-            social.remove_from_circle(cid.to_string(), hex.to_string());
+        let mut keys: std::collections::BTreeSet<String> = removed_ms.keys().cloned().collect();
+        keys.extend(readd_ms.keys().cloned());
+        for entry in keys {
+            let (cid, hex) = match entry.split_once('|') {
+                Some((c, h)) if !c.is_empty() && !h.is_empty() => (c.to_string(), h.to_string()),
+                _ => continue,
+            };
+            let rem = removed_ms.get(&entry).copied().unwrap_or(0);
+            let readd = readd_ms.get(&entry).copied().unwrap_or(0);
+            if rem >= readd && rem > 0 {
+                // Newest verdict is REMOVED. Merge the removal ts + apply the engine tombstone.
+                let was = prefs.is_circle_member_removed(&entry);
+                if prefs.merge_circle_removed_at(&entry, rem) {
+                    social.remove_from_circle(cid, hex);
+                    if !was {
+                        changed = true;
+                    }
+                }
+            } else if readd > 0 {
+                // Newest verdict is RE-ADDED. Merge the re-add ts. Only the CLIENT guard is lifted here —
+                // NOT the engine tombstone (a deliberate LOCAL re-add clears that). The member's bundle
+                // comes back via the additive `circle:` record.
+                let was = prefs.is_circle_member_removed(&entry);
+                prefs.merge_circle_readded_at(&entry, readd);
+                if was && !prefs.is_circle_member_removed(&entry) {
+                    changed = true;
+                }
+            }
         }
     }
 
@@ -361,6 +548,50 @@ pub fn apply_local(
         }
     }
 
+    // Whole-circle / DM deletions — LWW, applied BEFORE the circle: upsert. A deletion newer than any
+    // re-creation deletes the circle locally too (so deleting a DM on one device deletes it on all of
+    // them); the `circle:` loop then skips re-creating anything still tombstone-deleted. Mirrors iOS.
+    {
+        let mut deleted_ms: BTreeMap<String, u64> = BTreeMap::new();
+        let mut recreated_ms: BTreeMap<String, u64> = BTreeMap::new();
+        for (k, v) in entries {
+            if v.len() != 8 {
+                continue;
+            }
+            let mut a = [0u8; 8];
+            a.copy_from_slice(v);
+            let n = u64::from_le_bytes(a);
+            if let Some(id) = k.strip_prefix("circle-deleted:") {
+                if !id.is_empty() {
+                    deleted_ms.insert(id.to_string(), n);
+                }
+            } else if let Some(id) = k.strip_prefix("circle-recreated:") {
+                if !id.is_empty() {
+                    recreated_ms.insert(id.to_string(), n);
+                }
+            }
+        }
+        let mut ids: std::collections::BTreeSet<String> = deleted_ms.keys().cloned().collect();
+        ids.extend(recreated_ms.keys().cloned());
+        for id in ids {
+            let del = deleted_ms.get(&id).copied().unwrap_or(0);
+            let rec = recreated_ms.get(&id).copied().unwrap_or(0);
+            if del >= rec && del > 0 {
+                let was = prefs.is_circle_deleted(&id);
+                if prefs.merge_circle_deleted_at(&id, del) {
+                    if social.circles().iter().any(|c| c.id == id) {
+                        social.leave_circle(id.clone());
+                        changed = true;
+                    } else if !was {
+                        changed = true;
+                    }
+                }
+            } else if rec > 0 {
+                prefs.merge_circle_recreated_at(&id, rec);
+            }
+        }
+    }
+
     // Circles: reconstruct each synced circle — create it + register every member's bundle so this
     // device can seal to them, and record its relay mailbox(es). STRICTLY ADDITIVE (no absence-based
     // member-prune or circle-leave — that wiped accounts on a freshly-restored device).
@@ -368,6 +599,11 @@ pub fn apply_local(
         social.circles().into_iter().map(|c| (c.id, c.name)).collect();
     for (k, v) in entries {
         let Some(id) = k.strip_prefix("circle:") else { continue };
+        // Don't RESURRECT a circle/DM the user deleted (LWW): a sibling still listing it must not
+        // re-create it every sync. A newer re-creation (merged above) lifts this.
+        if prefs.is_circle_deleted(id) {
+            continue;
+        }
         let Some(cs) = decode_circle_sync(v.clone()) else { continue };
         match existing.iter().find(|(cid, _)| cid == id) {
             None => {
@@ -391,19 +627,15 @@ pub fn apply_local(
         }
         // Register every synced member bundle so this device can seal to them. ADDITIVE — we never
         // remove a member just because a peer's record doesn't list them — but we DO skip anyone we've
-        // explicitly severed (anti-reinflation).
-        let prefix = format!("{id}|");
-        let removed_here: Vec<String> = prefs
-            .circle_removals
-            .iter()
-            .filter_map(|e| e.strip_prefix(&prefix).map(|h| h.to_string()))
-            .collect();
+        // explicitly severed (anti-reinflation), by the LWW removal verdict.
         for bundle in &cs.member_bundles {
             let node_hex = haven_p2p::identity::HavenId::from_bytes(bundle)
                 .ok()
                 .map(|hid| hex::encode(hid.node_id_bytes()))
                 .unwrap_or_default();
-            if !node_hex.is_empty() && removed_here.iter().any(|h| h == &node_hex) {
+            if !node_hex.is_empty()
+                && prefs.is_circle_member_removed(&format!("{id}|{}", node_hex.to_lowercase()))
+            {
                 continue; // severed — never re-add
             }
             let _ = social.add_contact_bundle(id.to_string(), bundle.clone());

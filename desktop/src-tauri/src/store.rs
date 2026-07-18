@@ -292,6 +292,41 @@ pub struct Prefs {
     /// (nothing was ever uploaded, nothing to repair) still stops.
     #[serde(default)]
     pub media_reseal_attempts: u32,
+    /// LWW circle-member removal timestamps (key "circleId|hex" -> unix ms). Source of truth for a
+    /// severance: a member is currently removed iff removed_at > readded_at. Replaces the grow-only
+    /// `circle_removals` / `circle_removals_cleared` verdict with newest-wins, so a fresh removal beats a
+    /// stale re-add and a fresh re-add beats an old removal (the fix for "removals don't stick / re-adds
+    /// get re-severed" across a multi-device account). Published as `circle-removed:` / `circle-readd:`
+    /// (8-byte LE ms), with the legacy `removal:` = 1/0 kept for older peers. Mirrors iOS ConnectionsStore.
+    #[serde(default)]
+    pub circle_removed_at: std::collections::HashMap<String, u64>,
+    #[serde(default)]
+    pub circle_readded_at: std::collections::HashMap<String, u64>,
+    /// LWW contact-removal timestamps (idHex -> unix ms). Contacts sync additive-only, so a delete needs
+    /// an explicit newest-wins tombstone to stick fleet-wide. Published as `contact-removed:` /
+    /// `contact-readd:`. Mirrors iOS ContactsStore.
+    #[serde(default)]
+    pub contact_removed_at: std::collections::HashMap<String, u64>,
+    #[serde(default)]
+    pub contact_readded_at: std::collections::HashMap<String, u64>,
+    /// LWW whole-circle / DM deletion timestamps (circleId -> unix ms). A circle is currently deleted iff
+    /// deleted_at > recreated_at; self-sync honors it so deleting a DM/circle on one device deletes it on
+    /// all of them instead of a sibling's `circle:` record resurrecting it. Published as `circle-deleted:`
+    /// / `circle-recreated:`. Mirrors iOS CircleDeletionStore.
+    #[serde(default)]
+    pub circle_deleted_at: std::collections::HashMap<String, u64>,
+    #[serde(default)]
+    pub circle_recreated_at: std::collections::HashMap<String, u64>,
+    /// LWW per-field profile-edit timestamps (field -> unix ms) for name/emoji/bio/link. A remote profile
+    /// value wins only if it was edited more recently than ours (ends the profile ping-pong where
+    /// "non-empty always wins" = "whoever synced last wins"). Published as `profile-at:<field>`. Mirrors
+    /// iOS ProfileStore.fieldTs.
+    #[serde(default)]
+    pub profile_field_ts: std::collections::HashMap<String, u64>,
+    /// LWW per-key synced-setting timestamps (setting key -> unix ms). Published as `setting-at:<key>`.
+    /// Mirrors iOS SettingsStore.settingTs.
+    #[serde(default)]
+    pub setting_ts: std::collections::HashMap<String, u64>,
 }
 
 impl Prefs {
@@ -332,7 +367,115 @@ impl Prefs {
             prefs.dm_read_seeded_at = Self::now_ms();
             let _ = prefs.save(paths);
         }
+        // One-time migration of the legacy grow-only circle-removal sets into LWW timestamps: old
+        // records carry no time, so they land at ts=1 ("long ago") and any real, later action supersedes
+        // them. Only when the timestamp maps are still empty (idempotent). Mirrors iOS ConnectionsStore.
+        if prefs.circle_removed_at.is_empty() && prefs.circle_readded_at.is_empty() {
+            for e in &prefs.circle_removals {
+                prefs.circle_removed_at.insert(e.clone(), 1);
+            }
+            for e in &prefs.circle_removals_cleared {
+                prefs.circle_readded_at.insert(e.clone(), 1);
+            }
+        }
         prefs
+    }
+
+    // ---- LWW circle-member removals (source of truth = the timestamp maps) -----------------------
+
+    /// A member is currently removed from a circle iff their removal is NEWER than any re-add.
+    pub fn is_circle_member_removed(&self, entry: &str) -> bool {
+        self.circle_removed_at.get(entry).copied().unwrap_or(0)
+            > self.circle_readded_at.get(entry).copied().unwrap_or(0)
+    }
+    /// Stamp a removal NOW (LWW — supersedes any older re-add).
+    pub fn mark_circle_member_removed(&mut self, entry: &str) {
+        self.circle_removed_at.insert(entry.to_string(), Self::now_ms());
+    }
+    /// Stamp a deliberate re-add NOW (LWW — supersedes any older removal).
+    pub fn mark_circle_member_readded(&mut self, entry: &str) {
+        self.circle_readded_at.insert(entry.to_string(), Self::now_ms());
+    }
+    /// Apply a REMOTE removal timestamp (self-sync LWW), keeping the newer. Returns the post-merge verdict.
+    pub fn merge_circle_removed_at(&mut self, entry: &str, ms: u64) -> bool {
+        if ms > self.circle_removed_at.get(entry).copied().unwrap_or(0) {
+            self.circle_removed_at.insert(entry.to_string(), ms);
+        }
+        self.is_circle_member_removed(entry)
+    }
+    /// Apply a REMOTE re-add timestamp (self-sync LWW), keeping the newer. Returns the post-merge verdict.
+    pub fn merge_circle_readded_at(&mut self, entry: &str, ms: u64) -> bool {
+        if ms > self.circle_readded_at.get(entry).copied().unwrap_or(0) {
+            self.circle_readded_at.insert(entry.to_string(), ms);
+        }
+        self.is_circle_member_removed(entry)
+    }
+
+    // ---- LWW contact removals -------------------------------------------------------------------
+
+    pub fn is_contact_removed(&self, hex: &str) -> bool {
+        self.contact_removed_at.get(hex).copied().unwrap_or(0)
+            > self.contact_readded_at.get(hex).copied().unwrap_or(0)
+    }
+    pub fn mark_contact_removed(&mut self, hex: &str) {
+        self.contact_removed_at.insert(hex.to_string(), Self::now_ms());
+    }
+    pub fn mark_contact_readded(&mut self, hex: &str) {
+        self.contact_readded_at.insert(hex.to_string(), Self::now_ms());
+    }
+    pub fn merge_contact_removed_at(&mut self, hex: &str, ms: u64) -> bool {
+        if ms > self.contact_removed_at.get(hex).copied().unwrap_or(0) {
+            self.contact_removed_at.insert(hex.to_string(), ms);
+        }
+        self.is_contact_removed(hex)
+    }
+    pub fn merge_contact_readded_at(&mut self, hex: &str, ms: u64) -> bool {
+        if ms > self.contact_readded_at.get(hex).copied().unwrap_or(0) {
+            self.contact_readded_at.insert(hex.to_string(), ms);
+        }
+        self.is_contact_removed(hex)
+    }
+
+    // ---- LWW whole-circle / DM deletions --------------------------------------------------------
+
+    pub fn is_circle_deleted(&self, id: &str) -> bool {
+        self.circle_deleted_at.get(id).copied().unwrap_or(0)
+            > self.circle_recreated_at.get(id).copied().unwrap_or(0)
+    }
+    pub fn mark_circle_deleted(&mut self, id: &str) {
+        self.circle_deleted_at.insert(id.to_string(), Self::now_ms());
+    }
+    pub fn mark_circle_recreated(&mut self, id: &str) {
+        self.circle_recreated_at.insert(id.to_string(), Self::now_ms());
+    }
+    pub fn merge_circle_deleted_at(&mut self, id: &str, ms: u64) -> bool {
+        if ms > self.circle_deleted_at.get(id).copied().unwrap_or(0) {
+            self.circle_deleted_at.insert(id.to_string(), ms);
+        }
+        self.is_circle_deleted(id)
+    }
+    pub fn merge_circle_recreated_at(&mut self, id: &str, ms: u64) -> bool {
+        if ms > self.circle_recreated_at.get(id).copied().unwrap_or(0) {
+            self.circle_recreated_at.insert(id.to_string(), ms);
+        }
+        self.is_circle_deleted(id)
+    }
+
+    // ---- LWW profile-field + setting edit stamps ------------------------------------------------
+
+    /// When a profile field was last edited LOCALLY (0 = never). Namespaced per field name.
+    pub fn profile_field_stamp(&self, field: &str) -> u64 {
+        self.profile_field_ts.get(field).copied().unwrap_or(0)
+    }
+    pub fn stamp_profile_field(&mut self, field: &str) {
+        self.profile_field_ts.insert(field.to_string(), Self::now_ms());
+    }
+    /// When a synced setting was last changed LOCALLY (0 = never). Namespaced per setting key.
+    pub fn setting_stamp(&self, key: &str) -> u64 {
+        self.setting_ts.get(key).copied().unwrap_or(0)
+    }
+    pub fn stamp_setting(&mut self, key: &str) {
+        self.setting_ts.insert(key.to_string(), Self::now_ms());
     }
 
     fn now_ms() -> u64 {

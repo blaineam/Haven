@@ -240,6 +240,8 @@ object HavenNet : InboundListener {
         Presign.init(appContext)
         CircleLock.init(appContext)
         CircleRemovals.init(appContext)
+        ContactRemovals.init(appContext)
+        CircleDeletion.init(appContext)
         // Engine runs on this device's UNIQUE identity (parity with iOS configure()); account id stays the
         // sealing/trust anchor + contact handle. Friends resolve it to our device node id via the roster.
         // newSeedless already baked the device identity in, so only the seeded path adopts it here.
@@ -323,6 +325,8 @@ object HavenNet : InboundListener {
             if (c.id.startsWith("dm:")) runCatching { social.setCircleLiveLane(c.id, true) }
             if (!core.seedless && created.contains(c.id)) runCatching { social.setCircleCreator(c.id, nodeIdHex) }
         }
+        // Collapse any upgraded/duplicated circle at launch into a single row (LWW deletion tombstone).
+        reconcileSupersededCircles()
         // §1 — existing multi-device upgraders shed the legacy bare account leaf ONCE.
         maybeRetireAccountLeaf()
         // 1.0.8 — overwrite media a 1.0.7 build device-signed + froze, so friends can open it (once).
@@ -532,9 +536,34 @@ object HavenNet : InboundListener {
     val activeCircle = mutableStateOf(DEFAULT_CIRCLE)
     var circlesVersion = mutableStateOf(0); private set
 
-    /** Non-DM circles, for the feed switcher. */
+    /** Non-DM circles, for the feed switcher. Filters any tombstone-deleted circle (belt-and-suspenders:
+     *  a sync race can re-materialize one before its `circle-deleted:` record applies). */
     fun feedCircles(): List<uniffi.haven_ffi.CircleInfoFfi> =
-        runCatching { social.circles().filter { !it.id.startsWith("dm:") } }.getOrDefault(emptyList())
+        runCatching {
+            social.circles().filter { !it.id.startsWith("dm:") && !CircleDeletion.isDeleted(it.id) }
+        }.getOrDefault(emptyList())
+
+    /**
+     * Collapse any SUPERSEDED legacy circle (one carried onto a creator-bound successor via upgrade or
+     * follow) into a single row, and heal duplicates that already exist. Converts the engine's per-device
+     * `supersededCircleIds()` signal into the SAME synced, LWW deletion tombstone used for deleting a
+     * circle — so self-sync honors it on every device and can never resurrect the legacy row. Mirrors iOS
+     * FeedStore.refreshCircles. Runs at launch, after an upgrade/follow, and on each self-sync apply.
+     */
+    fun reconcileSupersededCircles() {
+        val superseded = runCatching { social.supersededCircleIds() }.getOrDefault(emptyList())
+        if (superseded.isEmpty()) return
+        var changed = false
+        for (legacy in superseded) {
+            if (CircleDeletion.isDeleted(legacy)) continue
+            val successor = runCatching { social.circleSuccessor(legacy) }.getOrNull() // capture BEFORE leaving
+            CircleDeletion.markDeleted(legacy)               // LWW tombstone → syncs to all my devices
+            runCatching { social.leaveCircle(legacy) }       // drop the duplicate row from the engine
+            if (activeCircle.value == legacy) activeCircle.value = successor ?: DEFAULT_CIRCLE
+            changed = true
+        }
+        if (changed) { persist(); bumpCircles() }
+    }
 
     fun circleName(id: String): String =
         runCatching { social.circles().firstOrNull { it.id == id }?.name }.getOrNull() ?: "My Circle"
@@ -546,6 +575,7 @@ object HavenNet : InboundListener {
         val id = social.createCircleOwned(name)
         // §2 — remembered so the pin is re-applied on every launch (it isn't persisted as a keying decision).
         markCreatedCircle(id)
+        CircleDeletion.markRecreated(id)   // a freshly-created circle is not deleted (LWW)
         persist(); bumpCircles()
         setActiveCircle(id)
         return id
@@ -576,6 +606,8 @@ object HavenNet : InboundListener {
         val id = runCatching { social.upgradeCircle(circleId) }.getOrNull() ?: return null
         // §2 — remembered so the pin is re-applied on every launch, like any circle I made.
         markCreatedCircle(id)
+        CircleDeletion.markRecreated(id)          // the fresh successor is not deleted (LWW)
+        reconcileSupersededCircles()              // collapse the now-superseded legacy circle to one row
         persist(); bumpCircles()
         setActiveCircle(id)
         return id
@@ -587,6 +619,8 @@ object HavenNet : InboundListener {
     fun followCircleUpgrade(circleId: String, newCircleId: String): Boolean {
         val ok = runCatching { social.acceptCircleUpgrade(circleId, newCircleId) }.getOrDefault(false)
         if (!ok) return false
+        CircleDeletion.markRecreated(newCircleId)   // the fresh successor is not deleted (LWW)
+        reconcileSupersededCircles()                // collapse the now-superseded legacy circle to one row
         persist(); bumpCircles()
         setActiveCircle(newCircleId)
         return true
@@ -610,6 +644,7 @@ object HavenNet : InboundListener {
 
     fun leaveCircle(id: String) {
         if (id == DEFAULT_CIRCLE) return
+        CircleDeletion.markDeleted(id)   // LWW tombstone so a sibling's circle: record can't re-create it
         runCatching { social.leaveCircle(id) }
         if (activeCircle.value == id) activeCircle.value = DEFAULT_CIRCLE
         persist(); bumpCircles()
@@ -618,6 +653,7 @@ object HavenNet : InboundListener {
     /** Add an existing contact to a circle + greet them there so it forms on their side. */
     fun addToCircle(circleId: String, contactIdHex: String) {
         CircleRemovals.remove(circleId, contactIdHex)   // deliberate re-add un-bans them (parity with iOS)
+        runCatching { social.clearCircleRemoval(circleId, contactIdHex) }   // …and lift the engine tombstone
         runCatching { social.addExistingToCircle(circleId, contactIdHex) }
         persist(); bumpCircles()
         sendHello(circleId, contactIdHex)
@@ -835,6 +871,7 @@ object HavenNet : InboundListener {
     /** Open (or create) a DM with a known contact; returns the dm circle id. */
     fun startDm(contact: Contact): String {
         val id = dmCircleId(contact.idHex)
+        CircleDeletion.markRecreated(id)   // re-opening a DM lifts any prior deletion (LWW)
         runCatching { social.createCircle(id, contact.name) }
         runCatching { social.addExistingToCircle(id, contact.idHex) }
         runCatching { social.setCircleLiveLane(id, true) }   // §5 — dm: circle → per-message forward secrecy
@@ -876,6 +913,7 @@ object HavenNet : InboundListener {
         if (contacts.size == 1) return startDm(contacts[0])
         val id = groupDMCircleId(contacts.map { it.idHex })
         val title = contacts.joinToString(", ") { it.name }
+        CircleDeletion.markRecreated(id)   // re-opening a group DM lifts any prior deletion (LWW)
         runCatching { social.createCircle(id, title) }
         runCatching { social.setCircleLiveLane(id, true) }   // §5 — group dm: circle → live lane
         for (c in contacts) runCatching { social.addExistingToCircle(id, c.idHex) }
@@ -940,6 +978,7 @@ object HavenNet : InboundListener {
     fun deleteConversation(circleId: String) {
         if (!circleId.startsWith("dm:")) return
         clearDmBefore(circleId)
+        CircleDeletion.markDeleted(circleId)   // LWW tombstone so a sibling can't restore the deleted DM
         runCatching { social.leaveCircle(circleId) }
         if (activeCircle.value == circleId) activeCircle.value = DEFAULT_CIRCLE
         persist(); bumpCircles(); scope.launch(Dispatchers.Main) { feedVersion.value++ }
@@ -1023,6 +1062,7 @@ object HavenNet : InboundListener {
         // Scanning an invite is a DELIBERATE add: clear any old removal tombstone, or their hellos
         // stay dropped (handleHello guard) and self-sync re-severs them (re-add never sticks).
         CircleRemovals.remove(DEFAULT_CIRCLE, info.idHex)
+        runCatching { social.clearCircleRemoval(DEFAULT_CIRCLE, info.idHex) }   // lift the engine tombstone too
         // Store the invite's device-id hints BEFORE the hello, so the very first dial can reach
         // their device (their account id resolves to no node post-device-seed).
         recordDeviceHints(info.idHex, InviteHints.extract(trimmed))
@@ -1070,6 +1110,7 @@ object HavenNet : InboundListener {
         // Approving IS a deliberate re-add — clear any old removal tombstone or their hellos stay
         // dropped (handleHello guard) and self-sync re-severs them on every pass.
         CircleRemovals.remove(DEFAULT_CIRCLE, req.idHex)
+        runCatching { social.clearCircleRemoval(DEFAULT_CIRCLE, req.idHex) }   // lift the engine tombstone too
         acceptContact(DEFAULT_CIRCLE, req.bundle, req.idHex, req.name, req.verifyHex, helloBack = true)
         pending.removeAll { it.idHex == req.idHex }
     }
@@ -1083,6 +1124,7 @@ object HavenNet : InboundListener {
     fun block(idHex: String) {
         runCatching { social.blockMember(idHex) }
         contacts.removeAll { it.idHex == idHex }
+        ContactRemovals.markRemoved(idHex)   // LWW contact tombstone so the removal sticks fleet-wide
         pending.removeAll { it.idHex == idHex }
         if (blocked.none { it == idHex }) blocked.add(idHex)
         saveContacts(); saveBlocked(); persist()
@@ -1396,6 +1438,7 @@ object HavenNet : InboundListener {
         circleId: String, bundle: ByteArray, idHex: String, name: String, verifyHex: String, helloBack: Boolean,
     ) {
         runCatching { social.addContactBundle(circleId, bundle) }
+        ContactRemovals.markReadded(idHex)   // a deliberate (re-)add lifts any contact tombstone (LWW)
         scope.launch(Dispatchers.Main) {
             // Upsert: refresh the name/verify on re-add (a removed-then-readded contact must stop
             // resolving to "Someone" — iOS does the same via syncUpsert).
@@ -3783,8 +3826,10 @@ object HavenNet : InboundListener {
 
     // ---- Local store mutation for self-sync apply() --------------------------------------
 
-    /** Upsert a contact from a converged self-sync entry (no networking). */
+    /** Upsert a contact from a converged self-sync entry (no networking). A removed contact must not be
+     *  resurrected by sync (contacts sync additive-only — the tombstone is what makes a delete stick). */
     fun selfSyncUpsertContact(c: Contact) {
+        if (ContactRemovals.isRemoved(c.idHex)) return
         val idx = contacts.indexOfFirst { it.idHex == c.idHex }
         if (idx >= 0) {
             if (contacts[idx] != c) { contacts[idx] = c; saveContacts() }
@@ -3813,6 +3858,7 @@ object HavenNet : InboundListener {
 
     /** Persist the engine state + recompose the feed/circle UI after self-sync applied changes. */
     fun selfSyncDidApply() {
+        reconcileSupersededCircles()   // an upgrade synced from another device may have superseded a circle
         persist()
         scope.launch(Dispatchers.Main) { feedVersion.value++; circlesVersion.value++ }
     }

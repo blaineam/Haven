@@ -32,29 +32,19 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 A private, end‑to‑end encrypted home for your closest people. No ads, no tracking, peer‑to‑peer — just your people.
 
 ## whats_new
-1.0.9 — the security & polish release. Nothing to do, nothing lost.
+1.1.0 — a reliability & polish release. Nothing to set up, nothing lost.
 
-Fixed in 1.0.9
-• Removing someone from a circle now sticks, even when you use Haven on more than one of your own devices.
-• A friend's photos and videos load reliably again — including media that had been stuck and wouldn't open before. The next time each person opens Haven, their own affected photos and videos are quietly repaired for everyone in the circle.
+Changes hold across your devices
+• Removing a circle member, deleting a contact, a circle, or a DM, and editing your profile or settings now hold on every one of your devices — resolved by whichever change you made most recently, so nothing you removed comes back and your profile picture no longer ping-pongs between two devices.
 
-Stronger multi-device security
-• A device you link no longer has to hold a copy of your account's master key. Each device runs on its own keys, so removing a lost or stolen device can now cut it off cryptographically — from your circle's content and from the settings/contacts that sync between your devices — not just hide it.
-• Your master key stays on one primary device plus your encrypted iCloud Keychain backup, instead of being copied to every device.
-• This protection turns on for each circle once everyone in it has updated; until then, older devices keep working normally.
+Circles & stories
+• Upgrading a circle no longer leaves a duplicate — the upgraded circle carries its history, and the old one collapses into it on every device (any duplicates from before this release tidy themselves up on the next launch).
+• Story headers and story rings now show profile pictures instead of a frame of the story's own media.
 
-Manage your storage
-• A new media cleanup screen lists everything you've downloaded, sorted by size — select and delete to free space.
-• Deleting media keeps the post and leaves a placeholder you can re-download anytime, so nothing is really lost.
-• "Keep on this device" pins anything you never want swept away.
-• Set limits by age or size, on your device and on a relay you run — and auto-delete now really removes the media, not just the post.
-• Video is compressed on posting to save space and data.
-
-More polish
-• Story styling, including how photos and video are framed, now looks the same on every platform.
-• Closed a metadata/location leak on video and tightened privacy throughout.
-
-Under the hood, the next generation of Haven's group encryption arrives — stronger protection built on our own post-quantum encryption. It covers the circles you make from now on, once everyone in them has updated. Circles you already have keep the protection they have today, which still cuts off anyone you remove; to bring one across, whoever made it can offer an upgrade, and each member taps once to follow. Either way, it only ever changes which key seals your content, never whether it's encrypted. Our own adversarial audit found no critical or high issues; an independent cryptographer's review is planned.
+Messages & feed
+• Direct messages open at the newest message, including long group threads.
+• Smoother feed scrolling — photos and a post's music no longer hitch a fast flick.
+• Interface polish throughout, including the You tab and the story editor.
 
 Native on iPhone, iPad, and Mac. No ads, no tracking, no servers holding your data — same private Haven.
 

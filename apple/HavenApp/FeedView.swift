@@ -4601,14 +4601,54 @@ struct PostCard: View {
     /// difference between a still and a moving copy isn't visible anyway.
     @ViewBuilder private func blurredBackdrop(_ ref: String) -> some View {
         if let img = backdropSource(ref) {
-            Color.clear
-                .overlay { Image(platformImage: img).resizable().scaledToFill().blur(radius: 24, opaque: true) }
-                .clipped()
-                // Rasterize the blur ONCE instead of re-running it every scroll frame — a 24pt blur
-                // re-composited per frame is what made scrolling past a post chop.
-                .drawingGroup()
-                .allowsHitTesting(false)
+            // GeometryReader (not `Color.clear.overlay { … .scaledToFill() }`) so the fill size is
+            // COMPUTED and bounded — see `backdropFill`. `scaledToFill` let the layer size run away on a
+            // narrow source, and a runaway layer is exactly what made the backdrop vanish.
+            GeometryReader { g in
+                let fill = Self.backdropFill(source: img.size, container: g.size)
+                Image(platformImage: img)
+                    .resizable()
+                    .frame(width: fill.width, height: fill.height)
+                    .position(x: g.size.width / 2, y: g.size.height / 2)
+                    .blur(radius: 24, opaque: true)
+            }
+            .clipped()
+            // Rasterize the blur ONCE instead of re-running it every scroll frame — a 24pt blur
+            // re-composited per frame is what made scrolling past a post chop.
+            .drawingGroup()
+            .allowsHitTesting(false)
         }
+    }
+
+    /// How far past the container a uniform crop-to-fill may spill before we stretch instead.
+    private static let maxBackdropOverflow: CGFloat = 4
+
+    /// The size to draw the backdrop bitmap at so it covers `container`.
+    ///
+    /// Normally that's a uniform crop-to-fill, exactly what `scaledToFill` did. The reason this is
+    /// computed by hand is the NARROW case, where `scaledToFill` silently produced no backdrop at all:
+    ///
+    /// A 64px thumbnail caps the LARGER axis (ImageIO's `kCGImageSourceThumbnailMaxPixelSize`), so a
+    /// narrow source comes back with its minor axis rounded down to a few pixels — a 40×1600 sliver
+    /// becomes 2×64. Covering a card-sized page from a 2px-wide bitmap means magnifying it ~200×, and
+    /// the filtered layer that produces runs to tens of thousands of points. Past the renderer's max
+    /// texture size `.drawingGroup()` rasterizes to NOTHING — the post draws with no backdrop, which is
+    /// the "too narrow → no blur" report. It's aspect-dependent, so it hit only some posts.
+    ///
+    /// So past `maxBackdropOverflow` we stretch to the container instead of cropping to it. Behind a
+    /// 24pt blur a stretched copy is indistinguishable from a cropped one, and the layer is then exactly
+    /// the container's size — it can never explode and never degenerate, for ANY aspect ratio.
+    static func backdropFill(source: CGSize, container: CGSize) -> CGSize {
+        // `> 0` also rejects NaN, which a zero-byte or malformed decode can hand back.
+        guard source.width > 0, source.height > 0, container.width > 0, container.height > 0 else {
+            return container
+        }
+        let scale = max(container.width / source.width, container.height / source.height)
+        let filled = CGSize(width: source.width * scale, height: source.height * scale)
+        // `scale` is the max of the two ratios, so one axis lands exactly on the container and the other
+        // spills. This is that spill.
+        let overflow = max(filled.width / container.width, filled.height / container.height)
+        return overflow <= maxBackdropOverflow ? filled : container
     }
 
     /// The bitmap to blur. Falls back through sizes because the 64px thumb ALONE is not dependable: it
@@ -4620,8 +4660,17 @@ struct PostCard: View {
         // Cache PEEK only — the backdrop is a decorative blur, so it must never decode (a main-thread decode
         // here is the worst place to hitch a scroll, and it caused the flash). It shows once `FeedImage` has
         // decoded + cached the tile's own 1200px thumbnail; until then the base black/backdrop-less page is fine.
-        MediaStore.shared.cachedThumbnail(ref, maxDimension: 64)
-            ?? MediaStore.shared.cachedThumbnail(ref, maxDimension: 1200)
+        //
+        // The 64px thumb is preferred ONLY while it still has pixels to blur. A narrow source collapses its
+        // minor axis at that size (a 40×1600 sliver thumbs to 2×64), and a 2px-wide bitmap carries no color
+        // detail a 24pt blur can show — it bands. The 1200px thumb is the page's own bitmap, already resident,
+        // and holds its shape at any aspect, so it's the better source precisely in the narrow case.
+        if let small = MediaStore.shared.cachedThumbnail(ref, maxDimension: 64),
+           min(small.size.width, small.size.height) >= 8 {
+            return small
+        }
+        return MediaStore.shared.cachedThumbnail(ref, maxDimension: 1200)
+            ?? MediaStore.shared.cachedThumbnail(ref, maxDimension: 64)
     }
 
     /// The carousel's per-page backdrop: only pay for it when the page's media actually letterboxes

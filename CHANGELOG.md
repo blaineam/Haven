@@ -7,6 +7,17 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Tall, narrow photos get their blurred backdrop again.** A post whose photo is much taller than it is
+  wide sometimes drew against flat grey instead of the soft blurred copy of its own colors. The backdrop
+  was built from a 64-pixel thumbnail, and at that size a narrow photo shrinks to a sliver a couple of
+  pixels across — stretching that far enough to fill the card produced a layer too large for the graphics
+  system to draw, so it drew nothing at all. Narrow photos now use a larger source and a bounded fill, so
+  the backdrop renders at every shape. Ordinary photos are unchanged.
+
 ## [1.1.0] — 2026-07-17
 
 A reliability and polish release focused on multi-device sync and feed smoothness. Everything here

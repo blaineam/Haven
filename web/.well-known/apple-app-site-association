@@ -5,12 +5,12 @@
         "appIDs": ["8ZVSPZYSVF.com.blaineam.kith"],
         "components": [
           {
-            "/": "/apps/haven/*",
+            "/": "/apps/haven/open*",
             "#": "?*",
-            "comment": "Only a link that CARRIES A PAYLOAD in its fragment (https://wemiller.com/apps/haven/#i/… invites, #p/… posts, #u/… profiles) opens Haven. Requiring a non-empty fragment is what keeps ordinary browsing — the landing page, /relay/install.sh, anything else under /apps/haven/ — in the browser where it belongs; claiming the whole path meant every visit to the site launched the app. The payload stays in the fragment so it is matched on-device and never sent to this host."
+            "comment": "ONLY the dedicated deep-link landing page opens Haven. Everything else under /apps/haven/ — the marketing home page, /features/, /docs/, /relay/, the download section — is ordinary web content and stays in the browser. This used to claim /apps/haven/* with the same 'any non-empty fragment' rule, and the site is full of its OWN in-page anchors (#main on every page, plus #download, #privacy, #security, #pricing, #circles, #stories, #setup, …), so tapping any of them looked exactly like a payload and offered to open the app. Scoping by PATH also gives Android something it can match: App Links see only scheme/host/path, never a fragment, so the '#' rule below does nothing there and the manifest had claimed the whole subtree outright. The payload still rides in the fragment — '/open' is a constant, so this host never learns which post, circle, or invite. See docs/LINK-SYSTEM.md."
           },
           {
-            "/": "/apps/haven",
+            "/": "/apps/haven/open",
             "#": "?*",
             "comment": "Same, for the bare path without a trailing slash."
           }

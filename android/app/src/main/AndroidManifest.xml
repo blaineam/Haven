@@ -62,15 +62,23 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="haven" />
             </intent-filter>
-            <!-- The WEB links (https://wemiller.com/apps/haven/#…) — invites and post links, so a
+            <!-- The WEB links (https://wemiller.com/apps/haven/open/#…) — invites and post links, so a
                  tapped link lands in the app with no chooser. Verified against
                  web/.well-known/assetlinks.json on the domain. The payload stays in the fragment,
-                 which the browser never sends to the host — see docs/LINK-SYSTEM.md. -->
+                 which the browser never sends to the host — see docs/LINK-SYSTEM.md.
+
+                 The prefix is `/apps/haven/open`, NOT `/apps/haven`. Android App Links match on
+                 scheme/host/path ONLY — a fragment is never visible to the matcher — so the wider
+                 prefix claimed the entire website: the marketing home page, /features/, /docs/ and
+                 /relay/ all offered to open Haven, on every visit. (iOS could gate on "has a
+                 fragment" via the AASA, which is why this diverged; that gate misfired too, on the
+                 site's own #anchors.) A dedicated landing path is the only rule both platforms can
+                 express. Do NOT widen this back to /apps/haven. -->
             <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="https" android:host="wemiller.com" android:pathPrefix="/apps/haven" />
+                <data android:scheme="https" android:host="wemiller.com" android:pathPrefix="/apps/haven/open" />
             </intent-filter>
             <!-- Share a YouTube/web link (or any text) from another app into Haven. -->
             <intent-filter>

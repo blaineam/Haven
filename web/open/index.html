@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0b0b10" />
+<title>Open in Haven</title>
+<meta name="description" content="Open a Haven invite or shared post in the Haven app." />
+<!-- This page is a link handoff, not content. Keeping it out of search results also keeps it out of
+     the "why does this site keep opening the app?" path — nobody should ever arrive here by browsing. -->
+<meta name="robots" content="noindex, nofollow" />
+<link rel="canonical" href="https://wemiller.com/apps/haven/open/" />
+<link rel="stylesheet" href="../styles.css?v=4" />
+<noscript><style>.reveal{opacity:1;transform:none}</style></noscript>
+</head>
+<body>
+
+<!--
+  ════════════════════════════════════════════════════════════════════════════════════════════
+  THE DEEP-LINK LANDING PAGE — the ONLY path the apps claim.
+
+  `web/.well-known/apple-app-site-association` and the Android manifest both scope to
+  `/apps/haven/open`. Nothing else on this site opens the app.
+
+  Why this page exists at all, rather than the home page doing the job (it used to):
+
+    • iOS matched `/apps/haven/*` with "any non-empty fragment". This site is full of its OWN
+      in-page anchors — a `#main` skip link on every page, plus #download, #privacy, #security,
+      #pricing, #circles, #stories, #setup and more — so every one of those taps looked like a
+      payload and offered to open Haven, on pages that have nothing to do with app content.
+
+    • Android App Links can't match a fragment AT ALL — only scheme/host/path. So the fragment
+      gate that was supposed to save iOS didn't exist there, and the manifest's `/apps/haven`
+      prefix claimed the whole site outright: features, docs, relay, downloads, everything.
+
+  A dedicated path is the only rule both platforms can express.
+
+  ⚠️ THE PAYLOAD STILL RIDES IN THE #FRAGMENT — DO NOT MOVE IT INTO THE PATH. ⚠️
+  `/open` is a CONSTANT, so this host's logs learn only "some Haven link was opened" — never which
+  post, circle, or invite. A path form (`/apps/haven/open/p/<circle>/<post>`) would hand the host a
+  readership map: reader IP × circle × post. That map is exactly what Haven exists not to create.
+
+  A post link is a POINTER, not a key: it grants nothing. Only a device already in the circle can
+  decrypt the post; anyone else — including anyone who intercepts the link — gets "post not found".
+
+  NOTE: this page deliberately has NO nav and NO in-page anchors. Adding either would reintroduce
+  the exact bug this page was created to fix, because every fragment here is treated as a payload.
+  ════════════════════════════════════════════════════════════════════════════════════════════
+-->
+
+<main id="main">
+  <div class="container" id="invite-slot"></div>
+</main>
+
+<script>
+(function () {
+  // iOS + macOS are live on the App Store; keep in sync with DOWNLOADS in ../index.html.
+  var APP_STORE_URL = "https://apps.apple.com/app/id6782147901";
+  var GET_URL = "../features/";
+
+  var COPY = {
+    invite: {
+      icon: "👋",
+      title: "You've been invited to Haven",
+      blurb: "Open this invite in the Haven app to join the circle securely. Your acceptance is end-to-end encrypted.",
+      open: "Open in the Haven app",
+      missing: "Don't have Haven yet? Install it, then tap the invite link again."
+    },
+    post: {
+      icon: "🔗",
+      title: "Someone shared a post with you",
+      blurb: "Open it in the Haven app. The post is end-to-end encrypted — this link just points at it, so only your circle can read it.",
+      open: "Open the post in Haven",
+      missing: "Don't have Haven yet? Install it, then tap the link again."
+    },
+    none: {
+      icon: "🏡",
+      title: "Nothing to open",
+      blurb: "This page opens Haven invites and shared posts. It looks like you got here without one.",
+      open: "",
+      missing: ""
+    }
+  };
+
+  function detectLink() {
+    var h = location.hash.replace(/^#/, "");
+    // Post links first: "p/<circle>.<post>" also contains a dot, so the invite check below
+    // would otherwise swallow it.
+    if (h.indexOf("p/") === 0) {
+      var body = h.slice(2);
+      var d = body.indexOf(".");
+      if (d < 1) return null;
+      var circle = body.slice(0, d), post = body.slice(d + 1);
+      if (!circle || !post) return null;
+      // Tokens are percent-encoded by the app with "." and "/" excluded, so this re-split is
+      // exact. Hand the app the path form it has always understood.
+      return { kind: "post", appUrl: "haven://p/" + circle + "/" + post };
+    }
+    var dot = h.indexOf(".");
+    if (dot < 1) return null;
+    var id = h.slice(0, dot), verify = h.slice(dot + 1);
+    if (!id || !verify) return null;
+    return { kind: "invite", appUrl: "haven://invite#" + id + "." + verify };
+  }
+
+  function openInApp(link, statusEl) {
+    var left = false;
+    var onHide = function () { left = true; };
+    document.addEventListener("visibilitychange", onHide, { once: true });
+    setTimeout(function () {
+      document.removeEventListener("visibilitychange", onHide);
+      if (!left && statusEl) { statusEl.textContent = COPY[link.kind].missing; }
+    }, 1500);
+    window.location.href = link.appUrl;
+  }
+
+  function render() {
+    var slot = document.getElementById("invite-slot");
+    var link = detectLink();
+    // No payload → an honest "nothing here", NOT a redirect and NOT an app prompt. Someone who
+    // lands here bare (a stale bookmark, a truncated paste) gets an explanation and a way on.
+    var copy = link ? COPY[link.kind] : COPY.none;
+
+    var getBtn = APP_STORE_URL
+      ? '<a class="btn" href="' + APP_STORE_URL + '">Get Haven on the App Store</a>'
+      : '<a class="btn" href="' + GET_URL + '">Don\'t have Haven? Get it here</a>';
+
+    slot.innerHTML =
+      '<section class="section" style="padding-top:54px">' +
+        '<div class="card reveal in center" style="max-width:560px;margin:0 auto;padding:34px 26px">' +
+          '<div style="font-size:46px">' + copy.icon + '</div>' +
+          '<h2 style="font-size:26px;margin:10px 0 6px">' + copy.title + '</h2>' +
+          '<p class="muted" style="margin:6px auto 18px;max-width:40ch">' + copy.blurb + '</p>' +
+          (link ? '<button class="btn" id="open-app" style="width:100%">' + copy.open + '</button>'
+                     + '<div style="height:10px"></div>' : '') +
+          getBtn.replace('class="btn"', 'class="btn ghost" style="width:100%"') +
+          '<div style="height:10px"></div>' +
+          '<a class="btn ghost" href="../" style="width:100%">About Haven</a>' +
+          '<p id="invite-status" class="dim" style="font-size:13px;margin-top:14px;min-height:18px"></p>' +
+        '</div>' +
+      '</section>';
+
+    var btn = document.getElementById("open-app");
+    var status = document.getElementById("invite-status");
+    // Click-only. Nothing here ever navigates to haven:// on load — an automatic redirect is
+    // precisely the "why does this site keep launching the app?" behaviour being removed.
+    if (btn && link) { btn.addEventListener("click", function () { openInApp(link, status); }); }
+  }
+
+  render();
+  window.addEventListener("hashchange", render);
+})();
+</script>
+</body>
+</html>

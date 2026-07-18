@@ -20,6 +20,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **The website stops asking to open the Haven app.** Browsing wemiller.com/apps/haven — the home page,
+  Features, Docs, Relays, the download section — kept offering to launch the app, including from
+  ordinary in-page links like "Privacy" or "Download". Invite and post links now live on their own
+  page, and that page is the only one the app answers for; everything else stays in the browser where
+  it belongs. Links already shared still work: they open the page, which offers a button to continue
+  into the app rather than jumping there by itself.
 - **Tall, narrow photos get their blurred backdrop again.** A post whose photo is much taller than it is
   wide sometimes drew against flat grey instead of the soft blurred copy of its own colors. The backdrop
   was built from a 64-pixel thumbnail, and at that size a narrow photo shrinks to a sliver a couple of

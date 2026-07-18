@@ -3,9 +3,12 @@ import SwiftUI
 /// In-app deep links so people can share a pointer to a friend's profile or a specific post:
 ///   • `haven://u/<nodeIdHex>`            → open that person's profile
 ///   • `haven://p/<circleId>/<postId>`    → open a specific post (legacy; still accepted forever)
-///   • `https://wemiller.com/apps/haven/#p/<circleId>.<postId>` → the same post, shareable
+///   • `https://wemiller.com/apps/haven/open/#p/<circleId>.<postId>` → the same post, shareable
 ///     "online" — the static landing page bounces it into the app on iOS *and* Android, and
-///     shows a "get Haven" card to anyone without it.
+///     shows a "get Haven" card to anyone without it. `/open` is the DEDICATED landing path and
+///     the only one the apps claim; the rest of the site is marketing and stays in the browser
+///     (see `HavenSite` for why). Links in the older `/apps/haven/#…` shape are still parsed —
+///     matching is on the wider `sitePath` — they just no longer auto-launch the app.
 ///
 /// Like invite links (`haven://invite#<id>.<verify>` / `https://…/#<id>.<verify>`), the web post
 /// link keeps its payload in the URL **fragment**, and the same `.` delimiter.

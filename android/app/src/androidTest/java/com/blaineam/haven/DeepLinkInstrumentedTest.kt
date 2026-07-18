@@ -43,7 +43,10 @@ class DeepLinkInstrumentedTest {
         val url = DeepLink.postUrl("default", "abc123")!!
         // Everything before '#' is what wemiller.com's access log would get — it must not name the post.
         val sentToHost = url.substringBefore('#')
-        assertEquals("https://wemiller.com/apps/haven/", sentToHost)
+        // `/open` is a CONSTANT — it is the dedicated deep-link landing path (the only one the app
+        // claims as an App Link), not part of the payload. The host still learns only "a Haven link
+        // was opened", never which post or circle.
+        assertEquals("https://wemiller.com/apps/haven/open/", sentToHost)
         assertTrue("post id leaked outside the fragment: $url", !sentToHost.contains("abc123"))
     }
 

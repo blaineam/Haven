@@ -642,8 +642,24 @@ var DOWNLOADS = {
 };
 
 /* ──────────────────────────────────────────────────────────────────────────
-   Fragment handling — preserved from the original landing page, now covering
-   two payloads, both of which ride in the URL fragment:
+   Fragment handling — BACK-COMPAT ONLY.
+
+   New links are emitted at /apps/haven/open/ (see open/index.html), which is
+   now the only path the apps claim as a Universal Link / App Link. This page
+   is marketing and must never prompt to open the app: it is full of its own
+   in-page anchors (#privacy, #security, #download, #pricing, the #main skip
+   link), and while this page was claimed, every one of those taps looked
+   like a payload and offered to launch Haven.
+
+   The handler below stays because links in the OLD shape
+   (https://wemiller.com/apps/haven/#…) are already pasted into people's chat
+   histories and must keep working forever. They no longer auto-open the app —
+   they land here, show the card, and open Haven when the button is TAPPED.
+   One extra tap, and nothing silently launches.
+
+   ⚠️ Do not re-claim this path in the AASA or the Android manifest. ⚠️
+
+   Two payloads, both of which ride in the URL fragment:
 
      #<id>.<verify>          an invite       → haven://invite#<id>.<verify>
      #p/<circle>.<post>      a shared post   → haven://p/<circle>/<post>

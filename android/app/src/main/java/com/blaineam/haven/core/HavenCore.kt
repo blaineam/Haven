@@ -49,7 +49,7 @@ class HavenCore private constructor(
      *  seedless device (no [account]) the link is rebuilt from the account bundle bytes (same base32
      *  <id>.<verify> payload) so sharing your handle still works. */
     fun inviteUri(): String =
-        account?.havenLink("wemiller.com/apps/haven") ?: seedlessWebLink()
+        account?.havenLink("wemiller.com/apps/haven/open") ?: seedlessWebLink()
 
     /** Rebuild the `https://…/#<base32 id>.<base32 verify>` link for a seedless device from the stored
      *  account bundle, matching core `HavenLink::to_web` (base32-nopad of the raw id + verification). */
@@ -57,7 +57,7 @@ class HavenCore private constructor(
         val id = runCatching { seedlessIdBytes() }.getOrNull()
         val verify = runCatching { seedlessVerifyBytes() }.getOrNull()
         if (id == null || verify == null) return "https://wemiller.com/apps/haven"
-        return "https://wemiller.com/apps/haven/#${base32NoPad(id)}.${base32NoPad(verify)}"
+        return "https://wemiller.com/apps/haven/open/#${base32NoPad(id)}.${base32NoPad(verify)}"
     }
     private fun seedlessIdBytes(): ByteArray = hexToBytes(SeedlessStore.accountNodeHex())
     private fun seedlessVerifyBytes(): ByteArray = hexToBytes(SeedlessStore.accountVerifyHex())

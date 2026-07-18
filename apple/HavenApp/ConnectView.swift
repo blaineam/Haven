@@ -1,14 +1,34 @@
 import SwiftUI
 
-/// Where Haven's web links live. The static landing page at `wemiller.com/apps/haven/` resolves
-/// the URL fragment — `/#<id>.<verify>` for an invite, `/#p/<circle>.<post>` for a shared post —
-/// into an "open in Haven" page. Everything sensitive stays in the fragment, which the browser
-/// never sends to the host; see DeepLink.swift.
+/// Where Haven's web links live. The landing page resolves the URL fragment — `/#<id>.<verify>` for an
+/// invite, `/#p/<circle>.<post>` for a shared post — into an "open in Haven" page. Everything sensitive
+/// stays in the fragment, which the browser never sends to the host; see DeepLink.swift.
+///
+/// Note the split between EMITTING (`inviteDomain`) and MATCHING (`sitePath`).
+///
+/// Links are emitted under a dedicated `/open` page, and that page alone is what the apps claim as a
+/// Universal Link / App Link. The rest of the site — the marketing home page, /features/, /docs/,
+/// /relay/ — is ordinary web content and must stay in the browser. Claiming the whole `/apps/haven`
+/// subtree made every one of those pages offer to open Haven, which is what people were seeing:
+///
+///   • iOS matched on "any non-empty fragment", and the site is full of its OWN in-page anchors
+///     (`#main` on every page, `#download`, `#privacy`, `#circles`, …). Every anchor tap looked like
+///     a payload.
+///   • Android App Links cannot match a fragment AT ALL — only scheme/host/path — so the fragment
+///     gate that saved iOS did not exist there, and the whole subtree was claimed outright.
+///
+/// A distinct path is the only thing both platforms can agree on. The payload STAYS in the fragment;
+/// `/open` is a constant, so the host still never learns which post or circle — only that some Haven
+/// link was opened, which is what it already learned from the bare page load.
 enum HavenSite {
-    static let inviteDomain = "wemiller.com/apps/haven"
-    /// `inviteDomain` split for matching an incoming Universal Link.
-    static var host: String { String(inviteDomain.prefix { $0 != "/" }) }
-    static var path: String { String(inviteDomain.drop { $0 != "/" }) }
+    static let host = "wemiller.com"
+    /// MATCHING prefix. Deliberately the whole site path: every link form ever emitted — including the
+    /// pre-`/open` ones already pasted into people's chat histories — starts here, and those keep
+    /// resolving once the app has the URL. Only which links AUTO-OPEN the app got narrower.
+    static let sitePath = "/apps/haven"
+    /// EMITTING. The dedicated deep-link landing page, and the only path the apps claim.
+    static let inviteDomain = "\(host)\(sitePath)/open"
+    static var path: String { sitePath }
 }
 
 /// The guided "make a connection" flow: show your invite, or add a friend from

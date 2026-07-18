@@ -19,7 +19,17 @@ import android.net.Uri
  */
 object DeepLink {
     private const val HOST = "wemiller.com"
+
+    /** MATCHING prefix — every link form ever emitted starts here, including the pre-`/open` ones
+     *  already pasted into people's chat histories. Keep it wide: narrowing it would orphan them. */
     private const val PATH_PREFIX = "/apps/haven"
+
+    /** EMITTING path — the dedicated deep-link landing page, and the ONLY path this app claims as an
+     *  App Link (see AndroidManifest.xml). Android App Links match on scheme/host/path and CANNOT see
+     *  a fragment, so claiming the whole `/apps/haven` subtree meant every marketing and docs page
+     *  offered to open Haven. A constant sub-path is the fix; the payload stays in the fragment, so
+     *  the host still learns nothing about which post or circle. See docs/LINK-SYSTEM.md. */
+    private const val LINK_PATH = "$PATH_PREFIX/open"
 
     /** Fragment-safe token charset: unreserved characters *minus* `.` and `/`, so those two stay
      *  unambiguous as our delimiters no matter what an id carries. Must stay byte-identical to
@@ -41,7 +51,7 @@ object DeepLink {
      */
     fun postUrl(circleId: String, postId: String): String? {
         if (circleId.isEmpty() || postId.isEmpty()) return null
-        return "https://$HOST$PATH_PREFIX/#p/${encodeToken(circleId)}.${encodeToken(postId)}"
+        return "https://$HOST$LINK_PATH/#p/${encodeToken(circleId)}.${encodeToken(postId)}"
     }
 
     /** Not `Uri.encode` — its unreserved set keeps `.` literal, which would let a `dm:<a>-<b>`

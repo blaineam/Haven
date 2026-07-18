@@ -40,11 +40,16 @@ Sharing a post produces a **web** link, so it crosses the iOS/Android boundary a
 survives being pasted into any chat app:
 
 ```
-https://wemiller.com/apps/haven/#p/<circleId>.<postId>
-                    └─ static page ─┘  └─ never leaves the browser ─┘
+https://wemiller.com/apps/haven/open/#p/<circleId>.<postId>
+                    └─ landing page ──┘  └─ never leaves the browser ─┘
 
 haven://p/<circleId>/<postId>            (legacy / custom-scheme form — still accepted)
 ```
+
+`/open` is the **dedicated deep-link landing page** and the only path the apps claim — see
+"Which pages open the app" below. Links in the older `/apps/haven/#…` shape are still *parsed*
+(every platform matches on the wider `/apps/haven` prefix), so anything already shared keeps
+resolving; those just no longer auto-launch the app.
 
 Same rules as the identity link, for the same reasons:
 
@@ -111,6 +116,43 @@ Two deliberate consequences:
   not-yours alike. Distinguishing them would answer "does this post exist?" for someone who shouldn't be
   able to ask. It waits ~1.5s before saying so, because the story and its source post can sync in either
   order.
+
+## Which pages open the app
+
+**Exactly one: `/apps/haven/open/`.** Everything else on the site — the marketing home page,
+`/features/`, `/docs/`, `/relay/`, the download section — is ordinary web content and stays in the
+browser.
+
+This was not always true, and the bug it caused was very visible: the site *constantly* offered to
+open Haven, on pages with nothing to do with app content. Two independent causes, one per platform:
+
+| | What it matched | Why that misfired |
+|---|---|---|
+| **iOS / macOS** (AASA) | `/apps/haven/*` with `"#": "?*"` — *any* non-empty fragment | The site is full of its **own** in-page anchors: a `#main` skip link on every page, plus `#download`, `#privacy`, `#security`, `#pricing`, `#circles`, `#stories`, `#setup`… Every one of those looked exactly like a payload. |
+| **Android** (App Links) | `pathPrefix="/apps/haven"` | Android App Links match on **scheme/host/path only — a fragment is never visible to the matcher**. The `"#"` gate that was supposed to save iOS simply does not exist here, so the whole subtree was claimed outright. |
+
+A dedicated path is the only rule both platforms can express, so that is the fix:
+
+* `web/.well-known/apple-app-site-association` → `/apps/haven/open*` (fragment gate kept as
+  defense in depth).
+* `android/app/src/main/AndroidManifest.xml` → `pathPrefix="/apps/haven/open"`.
+* `web/open/index.html` → the landing page itself. It has **no nav and no in-page anchors**, by
+  design: on this path every fragment is treated as a payload, so adding an anchor would
+  reintroduce the bug. It also never navigates to `haven://` on load — only on an explicit tap.
+
+**The payload still rides in the fragment.** `/open` is a *constant*, so wemiller.com's logs learn
+only "some Haven link was opened" — which they already learned from the bare page load. They still
+never learn *which* post, circle, or invite. Do not be tempted to put the payload in the path now
+that there is a dedicated one; that would build the readership map this whole design avoids.
+
+`assetlinks.json` is unchanged and stays host-wide (`handle_all_urls`) — that file is Android's
+*ownership* proof for the domain, and path scoping is the manifest's job, not its.
+
+> **Emitting vs. matching.** Each platform keeps these separate: it **emits** `/apps/haven/open`
+> and **matches** the wider `/apps/haven` prefix. Narrowing the match too would orphan every link
+> already pasted into someone's chat history.
+> `apple/HavenApp/ConnectView.swift ▸ HavenSite`, `android/…/core/DeepLink.kt ▸ LINK_PATH`,
+> `desktop/ui/app.js ▸ HAVEN_SITE`.
 
 ## Hosting the association files
 

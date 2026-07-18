@@ -419,14 +419,18 @@ function connectionText(s) {
 //
 // The link is a pointer, not a capability: it carries no key. Only a device already in the circle can
 // decrypt the post — everyone else gets "not found" from the core, link or no link.
-const HAVEN_SITE = { host: "wemiller.com", path: "/apps/haven" };   // apple/HavenApp/ConnectView.swift ▸ HavenSite
+// `path` MATCHES (every link form ever emitted starts here, including pre-`/open` ones already pasted
+// into chat histories); `linkPath` is what we EMIT and the only path the mobile apps claim as a
+// Universal Link / App Link — the rest of the site is marketing and must stay in the browser.
+// See apple/HavenApp/ConnectView.swift ▸ HavenSite and docs/LINK-SYSTEM.md.
+const HAVEN_SITE = { host: "wemiller.com", path: "/apps/haven", linkPath: "/apps/haven/open" };
 
 const DeepLink = {
   /** The shareable link for a post — the ONE form we emit (the `haven://` shape stays read-only, so it
    *  can die out). Mirrors apple/HavenApp/DeepLink.swift ▸ postURL, and round-trips through `post()`
    *  below. Payload in the #fragment — read the banner above before touching this. */
   postLink(circleId, postId) {
-    return `https://${HAVEN_SITE.host}${HAVEN_SITE.path}/#p/${this._token(circleId)}.${this._token(postId)}`;
+    return `https://${HAVEN_SITE.host}${HAVEN_SITE.linkPath}/#p/${this._token(circleId)}.${this._token(postId)}`;
   },
   /** Percent-encode one fragment token with Apple's charset (DeepLink.swift ▸ fragmentToken):
    *  unreserved MINUS `.` and `/`, so our two delimiters stay unambiguous whatever an id contains — a

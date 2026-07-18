@@ -231,7 +231,7 @@ struct SingleImagePicker: View {
                 onPicked(img)
             }
             dismiss()
-        }
+        }.havenPausesPostAudio()
     }
 }
 #else
@@ -295,6 +295,7 @@ struct EditProfileSheet: View {
                 .buttonStyle(BrandButtonStyle())
                 .keyboardShortcut(.defaultAction)
         }
+        .havenPausesPostAudio()
         #else
         NavigationStack {
             ZStack {
@@ -305,6 +306,7 @@ struct EditProfileSheet: View {
             .havenInlineNavTitle()
             .toolbar { ToolbarItem(placement: .havenConfirmTrailing) { Button("Done") { commit(); dismiss() }.havenToolbarPill(tint: HavenTheme.pink) } }
         }
+        .havenPausesPostAudio()
         #endif
     }
 

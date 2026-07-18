@@ -19,6 +19,62 @@ func relativeTimeShort(_ ms: UInt64) -> String {
     }
 }
 
+/// Set while a capture session (story / post camera) owns the audio session. An AVCaptureSession
+/// configures the SHARED session for recording; having feed playback asynchronously stomp it back to
+/// `.playback` mid-startup makes the two fight and can wedge the camera. While this is true, playback
+/// never touches the session — the camera is the only owner.
+nonisolated(unsafe) var havenCaptureOwnsAudioSession = false
+
+/// How many camera surfaces are on screen right now (story camera, post camera, any viewfinder).
+/// While ANY is open the system music player stays silent: a post's song playing behind a viewfinder is
+/// never wanted, and it fights the capture session for the audio route. Counted rather than a Bool so a
+/// camera presented over another camera can't clear the flag early.
+nonisolated(unsafe) var havenCameraUIOpen = 0
+/// True while any camera UI is up — the single gate every playback entry point checks.
+var havenCameraIsOpen: Bool { havenCameraUIOpen > 0 || havenCaptureOwnsAudioSession }
+
+/// Set while the story composer is deliberately previewing its attached song. The composer plays through
+/// the SAME shared system music player the feed uses, so the "stop the post song behind this overlay"
+/// paths must not touch it: a sheet appearing over the composer (or the composer's own onAppear re-firing
+/// as the song picker dismissed) was calling stop() on the preview we had just started — which is why the
+/// song played through the dismiss animation and then went silent.
+nonisolated(unsafe) var havenStoryPreviewActive = false
+
+#if os(iOS)
+private let havenAudioSessionQueue = DispatchQueue(label: "haven.audioSession")
+
+/// Configure the shared audio session for muted-video-over-music playback exactly once, OFF the main
+/// thread. setCategory/setActive are synchronous and can stall the main thread for tens of ms; calling
+/// them from `playVisibleVideo` on every scroll was the video "stick then continue". Idempotent — it
+/// no-ops when the session is already playback + mixWithOthers (so a call that changed the category
+/// still gets it reconfigured next time a video plays).
+/// `force` = the caller definitively owns playback right now (the story editor, where capture is over).
+/// Without it the async re-check below could be beaten by the camera view re-claiming the session as the
+/// editor came up, and the whole configuration would silently no-op.
+/// `then` runs on the main queue once the session is actually configured. Anything that STARTS audio must
+/// use it: the configuration happens off-main, so starting a song on the line after the call began playback
+/// while the session was still non-mixing — the muted canvas clip then held the route exclusively and
+/// suppressed the song. (That's why the preview only worked on a second toggle: by then the first call's
+/// configuration had landed.) Always invoked, including on the early-outs, so callers can't stall.
+func ensureHavenPlaybackSession(force: Bool = false, then: (() -> Void)? = nil) {
+    func finish() { if let then { DispatchQueue.main.async(execute: then) } }
+    if !force, havenCaptureOwnsAudioSession { finish(); return }   // the camera owns the session — hands off
+    havenAudioSessionQueue.async {
+        if !force, havenCaptureOwnsAudioSession { finish(); return }   // the camera may have opened since
+        let s = AVAudioSession.sharedInstance()
+        if s.category != .playback || !s.categoryOptions.contains(.mixWithOthers) {
+            try? s.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+        }
+        // ALWAYS activate, even when the category already looked right. A capture session tearing down
+        // leaves the session INACTIVE while the category still reads playback+mixWithOthers — skipping
+        // activation there meant the next player to start grabbed the session in default (non-mixing)
+        // mode and interrupted whatever was already playing.
+        try? s.setActive(true)
+        finish()
+    }
+}
+#endif
+
 /// Reports each post card's on-screen vertical center so the feed can pick the one
 /// nearest the middle of the screen as the "active" (playing) post.
 struct PostCenterKey: PreferenceKey {
@@ -4051,6 +4107,15 @@ struct FeedView: View {
     }
 }
 
+/// The feed column's content width, remembered across cards. Every PostCard in a feed lays out at the
+/// SAME width, but each one is created as it scrolls into view with its own `@State` starting at zero —
+/// and a zero width made `pageHeight` fall back to `singleMediaMaxHeight`, so the card first rendered at
+/// full height and then snapped to its real aspect the instant the width preference landed. That resize,
+/// once per card, is what made the feed jump up and down during a scroll (for photos as much as videos).
+/// Seeding a new card from the last measured width lets it compute the correct height on its FIRST pass.
+/// Written and read only from SwiftUI layout on the main thread.
+nonisolated(unsafe) private var lastKnownMediaWidth: CGFloat = 0
+
 struct PostCard: View {
     let item: FeedItemFfi
     let friendName: String
@@ -4104,7 +4169,7 @@ struct PostCard: View {
     /// media's own aspect (the old `.aspectRatio(_, .fit)`) parked a tall clip in a narrow centre column
     /// with the card's grey either side on any wide window — the page must own the width, and the media
     /// letterboxes INSIDE it against its own blurred copy.
-    @State private var mediaWidth: CGFloat = 0
+    @State private var mediaWidth: CGFloat = lastKnownMediaWidth
     @State private var showHeart = false
     @State private var showReactionDetail = false
 
@@ -4128,7 +4193,12 @@ struct PostCard: View {
     private var isSingleVideoPost: Bool {
         item.media.count == 1 && (item.media.first.map(isVideo) ?? false)
     }
-    private func isVideo(_ ref: String) -> Bool { MediaStore.shared.item(ref)?.kind == .video }
+    /// Kind from the REF (a cheap string parse — refs encode img_/vid_/aud_), never `item(ref)`. `item(_:)`
+    /// decodes the bitmap / generates the video poster on the main thread on a cache miss, and this is
+    /// called per media ref all over layout and scrolling (mediaView, isSingleVideoPost, primaryVideoPlayer,
+    /// playVisibleVideo). On a carousel or photo-grid post that was several decodes per layout pass — the
+    /// same trap the masonry tile already documents.
+    private func isVideo(_ ref: String) -> Bool { MediaKind(ref: ref) == .video }
 
     private func react(_ e: String) { EmojiStore.shared.record(e); onReact(e) }
 
@@ -4278,7 +4348,10 @@ struct PostCard: View {
         .background(GeometryReader { g in
             Color.clear.preference(key: MediaWidthKey.self, value: g.size.width)
         })
-        .onPreferenceChange(MediaWidthKey.self) { w in if w > 0 { mediaWidth = w } }
+        .onPreferenceChange(MediaWidthKey.self) { w in
+            // Remember it for the NEXT card to be created, so it never has to lay out at zero width first.
+            if w > 0 { mediaWidth = w; lastKnownMediaWidth = w }
+        }
     }
 
     /// True when a media set all share (near-)equal aspect ratios — such a set keeps its exact shape
@@ -4398,15 +4471,33 @@ struct PostCard: View {
     }
 
     @ViewBuilder private func masonryTile(_ ref: String, height: CGFloat) -> some View {
-        // Use a downscaled thumbnail (≈3× the row height for retina), not the full-res image — rendering a
-        // 2560px bitmap in a 150px tile was the scroll lag. Full-res stays for the zoom viewer.
         // Use MediaKind(ref:) (a cheap string parse) for the play badge — NOT item(ref), which would
         // generate the video poster on the main thread as each tile scrolls into view (the scroll lag).
-        // thumbnail(_:) now produces video posters off-main and fills them in via a refresh.
-        if let img = MediaStore.shared.thumbnail(ref, maxDimension: height * 3) {
-            // Aspect width for the fixed row height, clamped so a panorama/portrait stays sane.
-            let aspect = min(2.4, max(0.6, img.size.width / max(img.size.height, 1)))
-            Image(platformImage: img).resizable().scaledToFill()
+        //
+        // The tile's WIDTH comes from the persisted pixel size (a dictionary lookup, no decode) and the
+        // bitmap decodes off-main via FeedImage. This used to call the synchronous thumbnail(_:), which
+        // decoded EVERY tile on the main thread in a single layout pass — on a 10+ photo post that was
+        // the scroll jitter. The evicted/not-yet-downloaded cases are checked first so the common path
+        // never has to decode anything just to decide what to draw.
+        if EvictedMediaStore.shared.contains(ref) {
+            // Deliberately evicted — a compact tap-to-download tile (not an endless spinner).
+            Button { FeedStore.shared.downloadEvicted(ref) } label: {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemFill))
+                    Image(systemName: FeedStore.shared.downloadingMedia.contains(ref) ? "arrow.down.circle" : "arrow.down.circle.fill")
+                        .font(.title2).foregroundStyle(HavenTheme.pink)
+                }
+                .frame(width: height * 1.2, height: height)
+            }
+            .buttonStyle(.plain)
+        } else if MediaStore.shared.hasLocalFile(ref) {
+            // Non-blocking aspect: a grid tile's aspect only sets its WIDTH inside a horizontal scroller,
+            // so it can safely fill in late rather than stalling layout on a header read per tile.
+            let known = MediaStore.shared.pixelSize(ref, allowSyncRead: false)
+            let aspect = min(2.4, max(0.6, known.map { $0.width / max($0.height, 1) } ?? 4.0 / 3.0))
+            FeedImage(ref: ref, maxDimension: height * 3, contentMode: .fill) {
+                RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.12))
+            }
                 .frame(width: height * aspect, height: height)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .overlay(alignment: .center) {
@@ -4422,17 +4513,6 @@ struct PostCard: View {
                     let media = realMedia
                     if let idx = media.firstIndex(of: ref) { zoomTarget = ZoomTarget(refs: media, index: idx) }
                 }
-        } else if EvictedMediaStore.shared.contains(ref) {
-            // Deliberately evicted — a compact tap-to-download tile (not an endless spinner).
-            Button { FeedStore.shared.downloadEvicted(ref) } label: {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemFill))
-                    Image(systemName: FeedStore.shared.downloadingMedia.contains(ref) ? "arrow.down.circle" : "arrow.down.circle.fill")
-                        .font(.title2).foregroundStyle(HavenTheme.pink)
-                }
-                .frame(width: height * 1.2, height: height)
-            }
-            .buttonStyle(.plain)
         } else {
             // Not downloaded yet — a compact loading tile keeps the gallery layout intact.
             ZStack {
@@ -4471,8 +4551,11 @@ struct PostCard: View {
     @ViewBuilder private func mediaPageContent(_ ref: String, containerAspect: CGFloat,
                                                inCarousel: Bool = false,
                                                onScrubbing: @escaping (Bool) -> Void = { _ in }) -> some View {
-        if let m = MediaStore.shared.item(ref) {
-            if m.kind == .video, let url = m.videoURL {
+        // Decide from the REF + a cheap file check, never `item(ref)`: that decodes the bitmap / generates
+        // the video poster ON THE MAIN THREAD on a cache miss, and this runs for every page of every media
+        // post — a 3-video carousel paid three decodes per layout pass, which is the carousel/grid jitter.
+        if MediaStore.shared.hasLocalFile(ref) {
+            if MediaKind(ref: ref) == .video, let url = MediaStore.shared.storagePath(for: ref) {
                 let player = playerFor(ref, url)
                 // The player owns its gestures: tap → mute, double-tap → heart,
                 // hold → pause, horizontal drag → scrub. Letterboxed, loops continuously.
@@ -4695,11 +4778,10 @@ private struct KillHorizontalScroller: NSViewRepresentable {
         // A post's music plays on the system music player; without mixing, that music takes the audio
         // session and INTERRUPTS the video's AVPlayer, so the (muted) video just froze. Mix so the video
         // plays alongside the music. Safe when the video is unmuted too (it simply mixes its own audio).
-        if let visibleRef, isVideo(visibleRef) {
-            let s = AVAudioSession.sharedInstance()
-            try? s.setCategory(.playback, mode: .default, options: [.mixWithOthers])
-            try? s.setActive(true)
-        }
+        // NB: setCategory/setActive are synchronous and can block the main thread for tens of ms — doing
+        // that every time a video scrolled to centre was the scroll "stick then continue". Configure the
+        // session once, off the main thread, and skip entirely when it's already set up.
+        if let visibleRef, isVideo(visibleRef) { ensureHavenPlaybackSession() }
         #endif
         for (ref, player) in players {
             if ref == visibleRef && isVideo(ref) {
@@ -5125,7 +5207,7 @@ struct PostCommentsSheet: View {
             .navigationTitle("Comments")
             .havenInlineNavTitle()
             .toolbar { ToolbarItem(placement: .havenConfirmLeading) { Button("Done") { dismiss() }.havenToolbarPill() } }
-        }
+        }.havenPausesPostAudio()
     }
 }
 
@@ -5275,6 +5357,7 @@ struct NewCircleView: View {
                 .keyboardShortcut(.defaultAction)
                 .disabled(trimmedName.isEmpty)
         }
+        .havenPausesPostAudio()
         #else
         NavigationStack {
             ZStack {
@@ -5298,6 +5381,7 @@ struct NewCircleView: View {
                 }
             }
         }
+        .havenPausesPostAudio()
         #endif
     }
 

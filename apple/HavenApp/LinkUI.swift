@@ -206,7 +206,7 @@ struct InAppBrowserView: View {
             .frame(minWidth: 820, idealWidth: 1040, minHeight: 600, idealHeight: 740)
             .tint(HavenTheme.pink)
             #endif
-        }
+        }.havenPausesPostAudio()
     }
 }
 

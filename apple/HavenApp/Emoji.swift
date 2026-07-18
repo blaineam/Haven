@@ -55,6 +55,7 @@ struct ReactionPicker: View {
         // The Mac sheet scaffold instead of a NavigationStack toolbar — its Done button landed on a
         // gray system band above the grid. The scaffold's glass close circle (and Esc) dismisses.
         HavenMacSheet("React") { grid }
+        .havenPausesPostAudio()
         #else
         NavigationStack {
             ScrollView { grid.padding() }
@@ -63,6 +64,7 @@ struct ReactionPicker: View {
             .toolbar { ToolbarItem(placement: .havenConfirmTrailing) { Button("Done") { dismiss() }.havenToolbarPill() } }
         }
         .presentationDetents([.medium, .large])
+        .havenPausesPostAudio()
         #endif
     }
 

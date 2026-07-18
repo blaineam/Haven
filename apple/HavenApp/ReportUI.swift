@@ -87,6 +87,7 @@ struct ReportSheet: View {
                 .opacity(reason == nil ? 0.5 : 1)
                 .keyboardShortcut(.defaultAction)
         }
+        .havenPausesPostAudio()
         #else
         NavigationStack {
             ZStack {
@@ -104,6 +105,7 @@ struct ReportSheet: View {
                 }
             }
         }
+        .havenPausesPostAudio()
         #endif
     }
 

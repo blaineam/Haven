@@ -170,6 +170,42 @@ final class AudioCoordinator: ObservableObject {
         videoPlayer?.pause()
     }
 
+    /// A sheet / cover opened over the feed: stop the post song playing behind it. Unlike
+    /// `silenceForCapture` this does NOT set the `backgrounded` gate, so a surface that has its own
+    /// audio (the story viewer, the composer's song preview) can still start playing once it's up.
+    func stopPostAudioForOverlay() {
+        // Never stomp a story composer preview: it drives the SAME system player, and this fires on the
+        // appear of anything covering the feed — including the composer's own content re-appearing as the
+        // song picker dismissed, which killed the song a beat after it started.
+        guard !havenStoryPreviewActive else { return }
+        pendingMusicStart?.cancel(); pendingMusicStart = nil
+        fadeTimer?.invalidate(); fadeTimer = nil
+        // MUTE the video, don't pause it. A sheet over the feed (a song picker, a viewer) should quiet
+        // what's behind it, not freeze it — pausing here left the post's video stopped dead behind the
+        // audio picker instead of playing on silently, which is what you expect to see while choosing.
+        videoPlayer?.volume = 0
+        videoUnmuted = false
+        activePostId = nil          // the feed re-activates its centered post on the way back
+        MusicPlayback.shared.stop()
+    }
+
+    /// A camera / viewfinder / sheet took over: STOP post audio outright instead of pausing it.
+    /// A merely *paused* system music player is resumed BY iOS when a capture session tears its audio
+    /// session down at the end of a recording — which is why the post's song came roaring back the
+    /// instant filming stopped. A full stop clears the queue, so there is nothing left to resume.
+    func silenceForCapture() {
+        // Same rule as above — a live composer preview owns the shared player. (The camera view's onAppear
+        // can re-fire while the composer is up, which would otherwise stop the preview outright.)
+        guard !havenStoryPreviewActive else { return }
+        backgrounded = true
+        pendingMusicStart?.cancel(); pendingMusicStart = nil
+        fadeTimer?.invalidate(); fadeTimer = nil
+        videoPlayer?.pause()
+        videoPlayer?.volume = 0
+        videoUnmuted = false
+        MusicPlayback.shared.stop()
+    }
+
     /// A call just started (outgoing dial or incoming ring): cut feed audio IMMEDIATELY so the
     /// ring/voice never competes with a post song or a video's soundtrack. Videos keep playing,
     /// muted. While `callActive` is true every raise-audio path above is also gated, so nothing
@@ -257,7 +293,7 @@ final class MusicPlayback {
     /// weren't enough: ducking for a video unmute leaves `silent` false, so the Task sailed past them.
     private func stillWanted(_ gen: Int, _ track: TrackRefFfi) -> Bool {
         gen == generation && current?.catalogId == track.catalogId
-            && appFrontmost && !SettingsStore.shared.silent && !callActive
+            && appFrontmost && !SettingsStore.shared.silent && !callActive && !havenCameraIsOpen
     }
 
     func play(_ track: TrackRefFfi) {
@@ -267,6 +303,7 @@ final class MusicPlayback {
         guard appFrontmost else { return }                   // background wake must stay silent
         guard !SettingsStore.shared.silent else { return }   // app is muted
         guard !callActive else { return }                    // call audio owns the stage
+        guard !havenCameraIsOpen else { return }             // a viewfinder is up — never play a post's song
         let ids = trackIds(track.catalogId)
         // macOS can only play catalog songs — a store id is required (no MPMediaItem library).
         guard let store = ids.store, !store.isEmpty else { return }
@@ -306,12 +343,13 @@ final class MusicPlayback {
         if player.state.playbackStatus == .playing { player.pause() }
     }
     func unduck() {
-        guard current != nil, appFrontmost, !callActive, !SettingsStore.shared.silent else { return }
+        guard current != nil, appFrontmost, !callActive, !SettingsStore.shared.silent,
+              !havenCameraIsOpen else { return }
         raise()
     }
     /// Resume the queued song if it's paused (e.g. a video had ducked it).
     func resume() {
-        guard current != nil, appFrontmost, !callActive, !SettingsStore.shared.silent,
+        guard current != nil, appFrontmost, !callActive, !SettingsStore.shared.silent, !havenCameraIsOpen,
               player.state.playbackStatus != .playing else { return }
         raise()
     }
@@ -358,11 +396,22 @@ final class MusicPlayback {
     /// here at the chokepoint so every entry point (feed, stories, DM song pill) is covered.
     private var callActive: Bool { CallManager.shared.callInProgress }
 
+    /// Bumped by everything that means "stop wanting audio" (duck/stop/a newer play). Queuing a track
+    /// resolves the library off-main, so there's a window where `duck()` sees nothing playing and no-ops
+    /// while a play is still in flight — that's how a song came back to life BEHIND the story camera after
+    /// the feed had been told to go quiet. An in-flight play captures this generation and re-checks it
+    /// after the hop; if it's been superseded, it bails instead of starting. (The macOS twin does the same.)
+    private var generation = 0
+    private func invalidate() { generation &+= 1 }
+
     func play(_ track: TrackRefFfi) {
+        invalidate()                                         // this play supersedes any earlier one
+        let gen = generation
         current = track
         guard appFrontmost else { return }                   // background wake must stay silent
         guard !SettingsStore.shared.silent else { return }   // app is muted
         guard !callActive else { return }                    // call audio owns the stage
+        guard !havenCameraIsOpen else { return }             // a viewfinder is up — never play a post's song
         let ids = trackIds(track.catalogId)
         guard ids.store != nil || ids.pid != nil else { return }
         // Playing through the system player needs media-library authorization.
@@ -370,30 +419,61 @@ final class MusicPlayback {
             MPMediaLibrary.requestAuthorization { _ in }
             authed = true
         }
-        if let pid = ids.pid, let item = librarySong(pid) {
-            // Exact local song — queue just this one item (no neighbors).
-            player.setQueue(with: MPMediaItemCollection(items: [item]))
-        } else if let store = ids.store {
-            // Catalog song (e.g. on a recipient's device) — queue by store id.
-            player.setQueue(with: [store])
-        } else {
-            return
-        }
-        player.play()
         // Stories can pick a section of the song (start offset encoded as "start:<ms>").
-        if track.artworkUrl.hasPrefix("start:"), let ms = Double(track.artworkUrl.dropFirst(6)), ms > 0 {
-            player.currentPlaybackTime = ms / 1000
+        let startSeconds: Double? = {
+            guard track.artworkUrl.hasPrefix("start:"), let ms = Double(track.artworkUrl.dropFirst(6)), ms > 0
+            else { return nil }
+            return ms / 1000
+        }()
+        let wanted = track
+        // Probe the local library OFF the main thread — MPMediaQuery.items scans the whole songs table
+        // synchronously, and doing it inline here (even behind the scroll debounce) was the residual "stick"
+        // when the feed settled on a music post. Only a Bool crosses back; the queue itself is handed to
+        // MediaPlayer as a query so IT loads the item on its own workers instead of us blocking main.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let hasLibraryItem = ids.pid.map { librarySongExists($0) } ?? false
+            DispatchQueue.main.async {
+                // Re-check we still want THIS track — the feed may have scrolled on, gone silent, been
+                // ducked for the camera, or a call may have started while we were off-main. `generation`
+                // is the authoritative test: duck()/stop() bump it even when nothing was playing yet.
+                guard gen == self.generation, self.current?.catalogId == wanted.catalogId, self.appFrontmost,
+                      !SettingsStore.shared.silent, !self.callActive else { return }
+                if hasLibraryItem, let pid = ids.pid {
+                    // Exact local song — hand the player a persistent-id query so it loads the item async.
+                    let q = MPMediaQuery.songs()
+                    q.addFilterPredicate(MPMediaPropertyPredicate(value: pid, forProperty: MPMediaItemPropertyPersistentID))
+                    self.player.setQueue(with: q)
+                } else if let store = ids.store {
+                    // Catalog song (e.g. on a recipient's device) — queue by store id.
+                    self.player.setQueue(with: [store])
+                } else {
+                    return
+                }
+                // setQueue prepares asynchronously — a play() issued immediately after it races that
+                // preparation and the FIRST one is dropped (later ones work because the player is already
+                // prepared). Wait for readiness so the first song of a session actually starts.
+                self.player.prepareToPlay { _ in
+                    DispatchQueue.main.async {
+                        guard gen == self.generation, self.current?.catalogId == wanted.catalogId,
+                              self.appFrontmost, !SettingsStore.shared.silent, !self.callActive,
+                              !havenCameraIsOpen else { return }
+                        self.player.play()
+                        if let startSeconds { self.player.currentPlaybackTime = startSeconds }
+                    }
+                }
+            }
         }
     }
     func duck() {
+        invalidate()   // kill any in-flight play() — pausing can't stop a song that hasn't started yet
         if player.playbackState == .playing { player.pause() }
     }
     func unduck() {
-        if current != nil, appFrontmost, !callActive, !SettingsStore.shared.silent { player.play() }
+        if current != nil, appFrontmost, !callActive, !SettingsStore.shared.silent, !havenCameraIsOpen { player.play() }
     }
     /// Resume the queued song if it's paused (e.g. a video had ducked it).
     func resume() {
-        guard current != nil, appFrontmost, !callActive, !SettingsStore.shared.silent,
+        guard current != nil, appFrontmost, !callActive, !SettingsStore.shared.silent, !havenCameraIsOpen,
               player.playbackState != .playing else { return }
         player.play()
     }
@@ -404,8 +484,12 @@ final class MusicPlayback {
         play(track)
     }
     func stop() {
+        invalidate()   // an in-flight play must not resurrect the song we just stopped
         current = nil
-        if player.playbackState == .playing { player.pause() }
+        // stop(), NOT pause(). The application music player is a SYSTEM-side agent: iOS resumes a merely
+        // paused one when another audio session (a capture session finishing a recording) deactivates.
+        // stop() ends playback and clears the queue, so there is nothing for the system to bring back.
+        player.stop()
     }
 }
 #endif

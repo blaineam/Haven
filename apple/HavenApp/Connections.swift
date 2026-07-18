@@ -202,7 +202,7 @@ struct ConnectionRequestsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Choose whether they can see what you've already shared, or only what you post from now on.")
-        }
+        }.havenPausesPostAudio()
     }
 
     #if !os(macOS)

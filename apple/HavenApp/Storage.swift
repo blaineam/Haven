@@ -495,7 +495,7 @@ struct RelaysView: View {
             TextField("Name", text: $renameText)
             Button("Save") { if let e = renaming { store.rename(e.hex, to: renameText) }; renaming = nil }
             Button("Cancel", role: .cancel) { renaming = nil }
-        }
+        }.havenPausesPostAudio()
     }
 
     @ViewBuilder private func relayRow(_ e: RelayEntry) -> some View {
@@ -655,7 +655,7 @@ struct AddRelaySheet: View {
                         .disabled(kind == .haven ? !havenValid : !s3Valid)
                 }
             }
-        }
+        }.havenPausesPostAudio()
     }
 
     private func add() {

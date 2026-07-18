@@ -68,12 +68,14 @@ final class DualCameraRecorder: NSObject, ObservableObject {
 
     func start() {
         guard Self.isSupported else { return }
+        havenCaptureOwnsAudioSession = true   // camera owns the audio route; post music stays silent
         AVCaptureDevice.requestAccess(for: .video) { _ in }
         AVCaptureDevice.requestAccess(for: .audio) { _ in }
         queue.async { [weak self] in self?.configure() }
     }
 
     func stop() {
+        havenCaptureOwnsAudioSession = false   // release the audio route back to playback
         queue.async { [weak self] in
             guard let self else { return }
             if self.session.isRunning { self.session.stopRunning() }

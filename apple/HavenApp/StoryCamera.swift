@@ -86,6 +86,9 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var recordingSeconds = 0.0
     /// Current zoom as a "× lens" factor relative to the wide camera (0.5 = ultra-wide).
     @Published var zoom = 1.0
+    /// The zoom range THIS camera can actually reach (the front camera's is much narrower than the back's).
+    @Published var minLensZoom = 0.5
+    @Published var maxLensZoom = 8.0
     /// The lens presets available on this device's back camera (e.g. [0.5, 1, 2]).
     @Published var lensPresets: [Double] = [1, 2]
 
@@ -98,6 +101,11 @@ final class CameraModel: NSObject, ObservableObject {
     nonisolated(unsafe) private var capSeconds = StoryCaptureModel.maxTotal
 
     func start() {
+        // Claim the shared audio session for capture BEFORE configuring it. Feed playback configures the
+        // same session asynchronously; letting it stomp the category while the capture session is starting
+        // makes the two fight and can hang the camera. Tied to the session (not view appearance) because a
+        // full-screen editor cover doesn't fire the camera view's onDisappear.
+        havenCaptureOwnsAudioSession = true
         AVCaptureDevice.requestAccess(for: .video) { _ in }
         AVCaptureDevice.requestAccess(for: .audio) { _ in }
         frameTap.recorder = recorder   // the tap writes live frames + routes audio to the recorder while recording
@@ -123,6 +131,7 @@ final class CameraModel: NSObject, ObservableObject {
     }
 
     func stop() {
+        havenCaptureOwnsAudioSession = false   // capture done — playback may configure the session again
         queue.async { [weak self] in
             guard let self else { return }
             if self.movieOutput.isRecording { self.movieOutput.stopRecording() }
@@ -181,14 +190,24 @@ final class CameraModel: NSObject, ObservableObject {
     /// The lens-button presets for the current camera: 0.5× if an ultra-wide exists, then 1×/2×
     /// (and 3× when the optics allow). The front camera has no lenses.
     @MainActor private func refreshLensPresets(position: AVCaptureDevice.Position) {
-        guard position == .back else { lensPresets = []; zoom = 1.0; return }
+        // The usable zoom range differs per camera — the FRONT camera tops out far below the back's 8×.
+        // Publishing it lets the swipe-to-zoom map over what this camera can actually do instead of a
+        // fixed 0.5–8 span, which is what made a small drift on the selfie camera slam to full zoom.
+        let maxZ = min(device?.maxAvailableVideoZoomFactor ?? 1, 8)
+        guard position == .back else {
+            lensPresets = []; zoom = 1.0
+            minLensZoom = 1.0                    // no ultra-wide on the front camera
+            maxLensZoom = max(1.0, maxZ)
+            return
+        }
         var presets: [Double] = []
         if hasUltraWide(position) { presets.append(0.5) }
         presets.append(1)
-        let maxZ = device?.maxAvailableVideoZoomFactor ?? 1
         if maxZ >= 2 { presets.append(2) }
         if maxZ >= 3 { presets.append(3) }
         lensPresets = presets
+        minLensZoom = hasUltraWide(position) ? 0.5 : 1.0
+        maxLensZoom = max(1.0, maxZ)
         zoom = usingUltraWide ? 0.5 : 1.0
     }
 
@@ -212,7 +231,12 @@ final class CameraModel: NSObject, ObservableObject {
             try? dev.lockForConfiguration()
             dev.videoZoomFactor = clamped
             dev.unlockForConfiguration()
-            Task { @MainActor in self.zoom = factor }
+            // Publish what the device ACTUALLY applied, not what was asked for. The front camera's max
+            // zoom is far lower than the back's, so requests were being clamped by the hardware while
+            // `zoom` recorded the (much larger) requested value — the swipe then had to travel all the
+            // way back down through that phantom range before the picture visibly zoomed out again.
+            let applied = self.usingUltraWide ? clamped * 0.5 : clamped
+            Task { @MainActor in self.zoom = applied }
         }
     }
 
@@ -367,6 +391,7 @@ final class CameraModel: NSObject, ObservableObject {
     }
 
     func stop() {
+        havenCaptureOwnsAudioSession = false   // capture done — playback may configure the session again
         queue.async { [weak self] in
             guard let self else { return }
             if self.movieOutput.isRecording { self.movieOutput.stopRecording() }
@@ -617,7 +642,10 @@ struct StoryCameraView: View {
     @State private var dualMode = false
     @State private var pipCorner: PiPCorner = .bottomRight
     @State private var pinchBaseZoom = 1.0     // zoom at the start of a pinch
-    @State private var recordStartZoom = 1.0   // zoom when a hold-to-record drag began
+    @State private var recordStartZoom = 1.0   // zoom when the zoom-slide began
+    /// Finger position when the zoom slide began (set once recording is actually live), so the slide is
+    /// measured from THERE rather than from touch-down.
+    @State private var zoomDragAnchor: CGFloat?
     // Live filter applied to the camera feed, carried into the composer as the default look.
     @State private var liveFilter: HavenFilter = .original
     @State private var liveThumb: PlatformImage?
@@ -723,8 +751,19 @@ struct StoryCameraView: View {
         }
         .havenStatusBarHidden()
         .portraitLocked()
-        .onAppear { cam.start(); cam.resetRecordingState() }
-        .onDisappear { cam.stop(); dual.stop() }
+        .onAppear {
+            // Silence the feed BEFORE the capture session starts. Opening the camera while a post's song
+            // was still being queued let that song land and start playing behind the camera. (cam.start()
+            // claims the audio session for capture so playback can't re-point it mid-startup.)
+            havenCameraUIOpen += 1                      // hard-blocks post music for as long as this is up
+            AudioCoordinator.shared.silenceForCapture() // full stop, so ending a recording can't resume it
+            cam.start(); cam.resetRecordingState()
+        }
+        .onDisappear {
+            cam.stop(); dual.stop()
+            havenCameraUIOpen = max(0, havenCameraUIOpen - 1)
+            AudioCoordinator.shared.appBecameActive()   // hand the audio stage back to the feed
+        }
         .sheet(isPresented: $showLibrary) {
             MediaPicker { refs in
                 if let ref = refs.first { draft = StoryDraft(mediaRef: ref) }
@@ -856,6 +895,7 @@ struct StoryCameraView: View {
                     if !pressing && !capture.isFull {
                         pressing = true
                         recordStartZoom = cam.zoom
+                        zoomDragAnchor = nil   // re-anchored when recording actually starts
                         // Hold ≳0.25s → start video; a quick release before that is a photo (single-camera
                         // only — dual-camera is hold-to-record video). 0.25s (was 0.35) makes the hold-to-
                         // record feel responsive without turning a quick photo tap into a stray clip.
@@ -870,13 +910,26 @@ struct StoryCameraView: View {
                     }
                     // Swipe up/down while hold-recording → zoom (single camera). Up = zoom in.
                     if isRec && !dualMode {
-                        let span = maxZoom - minZoom
-                        let target = recordStartZoom + (-v.translation.height / 260.0) * span
-                        cam.setZoom(min(maxZoom, max(minZoom, target)))
+                        // Anchor to where the finger was when RECORDING began, not where it first touched
+                        // down. Recording starts ~0.25s into the press, and translation accumulates from
+                        // touch-down — so any drift during that hold was applied as an instant zoom the
+                        // moment recording started, without the user ever swiping.
+                        if zoomDragAnchor == nil {
+                            zoomDragAnchor = v.translation.height
+                            recordStartZoom = cam.zoom      // zoom as it stands at the START of the slide
+                        }
+                        let moved = v.translation.height - (zoomDragAnchor ?? 0)
+                        // Small dead zone so a shaky hold never nudges the zoom at all.
+                        if abs(moved) > 8 {
+                            let lo = cam.minLensZoom, hi = cam.maxLensZoom
+                            let target = recordStartZoom + (-moved / 260.0) * (hi - lo)
+                            cam.setZoom(min(hi, max(lo, target)))
+                        }
                     }
                 }
                 .onEnded { _ in
                     pressing = false
+                    zoomDragAnchor = nil   // next hold re-anchors from wherever the zoom now sits
                     // A VIDEO hold (startedVideo): stop the current clip; the auto-split gap may have
                     // isRec momentarily false, so gate on startedVideo — NOT isRec — so a release during
                     // that gap doesn't fall through and snap a stray PHOTO. A quick tap (never started
@@ -1023,8 +1076,19 @@ struct StoryCameraView: View {
             }
         }
         .portraitLocked()
-        .onAppear { cam.start(); cam.resetRecordingState() }
-        .onDisappear { cam.stop() }
+        .onAppear {
+            // Silence the feed BEFORE the capture session starts. Opening the camera while a post's song
+            // was still being queued let that song land and start playing behind the camera. (cam.start()
+            // claims the audio session for capture so playback can't re-point it mid-startup.)
+            havenCameraUIOpen += 1                      // hard-blocks post music for as long as this is up
+            AudioCoordinator.shared.silenceForCapture() // full stop, so ending a recording can't resume it
+            cam.start(); cam.resetRecordingState()
+        }
+        .onDisappear {
+            cam.stop()
+            havenCameraUIOpen = max(0, havenCameraUIOpen - 1)
+            AudioCoordinator.shared.appBecameActive()   // hand the audio stage back to the feed
+        }
         .havenFullScreenCover(isPresented: $showReview) {
             StoryReviewView(capture: capture,
                             onCaptureMore: { showReview = false },
@@ -1161,6 +1225,9 @@ struct StoryComposerView: View {
     @State private var captionSpec = StoryCaptions.Spec()
     @State private var musicStartMs = 0.0
     @State private var songPreviewing = false
+    /// Preview sound: hear the story as it will actually play — the attached song if there is one, and
+    /// otherwise the clip's own audio. Off by default so opening the editor never blares unexpectedly.
+    @State private var previewSoundOn = false
     /// The "usable section" the story actually plays: for a VIDEO story, the video's own length (so the
     /// song preview loops the SAME window that ships and shares the video's loop period); for a photo, the
     /// story's default slide length. Clamped to a sane preview range.
@@ -1280,9 +1347,43 @@ struct StoryComposerView: View {
         .havenStatusBarHidden()
         .portraitLocked()
         .modifier(KeyboardHeightObserver(kbHeight: $kbHeight))
-        .sheet(isPresented: $showSongs) {
+        // Start the preview only once the picker is FULLY dismissed. SongPicker drives the very same
+        // system music player, and picking a song calls stop() on it moments before handing the track
+        // back. That stop() is an IPC whose effect lands asynchronously — starting here from the track
+        // change meant our play() ran first and the older stop() landed on top of it, which is exactly
+        // the "music starts during the dismiss animation, then goes silent" behaviour.
+        .sheet(isPresented: $showSongs, onDismiss: { startPreviewForCurrentTrack() }) {
             SongPicker { t in track = t }
         }
+        #if os(iOS)
+        // Whatever post was playing on the screen we opened over must go quiet: the editor's own sound
+        // toggle is about THIS story, and hearing a feed post through the composer is just wrong.
+        .onAppear {
+            AudioCoordinator.shared.pauseForBackground()
+            // Capture is over by the time we're editing, so release the session claim the camera took —
+            // otherwise playback can't set mixWithOthers and previewing a song INTERRUPTS (and freezes)
+            // the canvas clip. Post music stays blocked regardless: that's the camera-open COUNTER's job.
+            havenCaptureOwnsAudioSession = false
+            // force: capture is over, and the camera view can re-run its onAppear as this cover settles —
+            // without forcing, that race let the camera re-claim the session and skip this entirely.
+            ensureHavenPlaybackSession(force: true)   // playback + mixWithOthers, so song and clip coexist
+        }
+        // Picking (or clearing) a song while preview sound is on has to re-point what you hear: the new
+        // song starts, and clearing one hands the canvas back to the clip's own audio.
+        // Removing the song hands the canvas back its own audio — the START case is driven by the
+        // picker's onDismiss above, so it can't race the picker's stop().
+        .onChange(of: track?.catalogId) { _, newId in
+            guard previewSoundOn, newId == nil, songPreviewing else { return }
+            stopSongPreview()
+        }
+        // Never leave a song playing behind the editor (dismiss, post, or share), and hand the feed back
+        // the audio stage on the way out.
+        .onDisappear {
+            stopSongPreview()
+            havenStoryPreviewActive = false   // belt-and-braces: never leave the feed's audio gated
+            AudioCoordinator.shared.appBecameActive()
+        }
+        #endif
         .task { await loadSectionLen() }   // size the song's usable section to the video's own length
       }
       // NB: no `.ignoresSafeArea()` on the GeometryReader itself — it must stay inset so `proxy.safeAreaInsets`
@@ -1290,9 +1391,12 @@ struct StoryComposerView: View {
     }
 
     private var media: some View {
+        // A song REPLACES the clip's own audio in the real story, so the preview mirrors that: with a track
+        // attached the video stays muted and you hear the song; with no track you hear the clip itself.
         StoryMediaCanvas(mediaRef: draft.mediaRef,
                          scale: captionSpec.mediaScale, offX: captionSpec.mediaOffX, offY: captionSpec.mediaOffY,
-                         filter: filter)
+                         filter: filter,
+                         muted: !previewSoundOn || track != nil)
     }
 
     /// While editing the caption, the top bar is just a Done button — the styling lives in the
@@ -1331,8 +1435,49 @@ struct StoryComposerView: View {
             controlButton(nil, system: track == nil ? "music.note" : "music.note.list") {
                 showSongs = true
             }
+            // Preview sound — the only way to actually hear the story before posting it.
+            controlButton(nil, system: previewSoundOn ? "speaker.wave.2.fill" : "speaker.slash.fill") {
+                togglePreviewSound()
+            }
+            .overlay(alignment: .topTrailing) {
+                if previewSoundOn {
+                    Circle().fill(HavenTheme.pink).frame(width: 10, height: 10).offset(x: 2, y: -2)
+                }
+            }
         }
         .padding(.horizontal, 20).padding(.top, 8)
+    }
+
+    /// Turn story preview sound on/off. With a song attached this drives the song preview (looping the exact
+    /// section that ships); with no song it simply unmutes the clip's own audio in the canvas.
+    /// Start (or restart) the song preview for whatever track is attached. Called once the song picker has
+    /// fully dismissed, so the picker's own stop() on the shared system player has already landed.
+    private func startPreviewForCurrentTrack() {
+        #if os(iOS)
+        guard previewSoundOn, let t = track else { return }
+        if songPreviewing { stopSongPreview() }
+        ensureHavenPlaybackSession(force: true) { toggleSongPreview(t) }
+        #endif
+    }
+
+    private func togglePreviewSound() {
+        previewSoundOn.toggle()
+        #if os(iOS)
+        if previewSoundOn {
+            // Mix with others so starting the song can't INTERRUPT the looping clip underneath it (an
+            // interruption pauses the AVQueuePlayer, which is what stopped the preview from looping).
+            // NB: deliberately does NOT touch the app's global mute — that would start the FEED post's
+            // audio playing behind the editor. This toggle owns THIS story's sound, nothing else.
+            // Start the song only AFTER the session is actually mixing — configuration runs off-main, so
+            // starting it on the next line began playback under a non-mixing session and the muted canvas
+            // clip suppressed it. That ordering is why this only worked on a second toggle.
+            ensureHavenPlaybackSession(force: true) {
+                if let t = track, !songPreviewing { toggleSongPreview(t) }
+            }
+        } else if songPreviewing {
+            stopSongPreview()
+        }
+        #endif
     }
 
     /// Live filter chooser under the preview. Uses the preview frame (photo / video poster) as
@@ -1421,21 +1566,45 @@ struct StoryComposerView: View {
         let ids = trackIds(t.catalogId)
         if let pid = ids.pid, let item = librarySong(pid) { player.setQueue(with: MPMediaItemCollection(items: [item])) }
         else if let store = ids.store { player.setQueue(with: [store]) }
-        player.play()
-        player.currentPlaybackTime = musicStartMs / 1000
+        // setQueue prepares ASYNCHRONOUSLY. Calling play() on the next line races that preparation and the
+        // very first play is simply dropped — which is why the first song picked after launch never started
+        // while every later one did (by then the player was already prepared). Wait for readiness instead.
+        let startAt = musicStartMs / 1000
         songPreviewing = true
-        // Loop JUST the usable section: when playback runs past the section end, seek back to the start,
-        // so the preview repeats the exact window that ships (and shares the video's loop period).
+        havenStoryPreviewActive = true   // this preview now owns the shared system player
+        player.prepareToPlay { _ in
+            DispatchQueue.main.async {
+                player.play()
+                if startAt > 0 { player.currentPlaybackTime = startAt }
+                startSectionLoop()   // only once playback is genuinely underway — see below
+            }
+        }
+    }
+
+    /// Loop JUST the usable section: when playback runs past the section end, seek back to the start, so the
+    /// preview repeats the exact window that ships (and shares the video's loop period).
+    ///
+    /// Started only AFTER playback begins, and it no-ops unless the player is actually playing. It used to
+    /// start the instant the song was queued — while `setQueue`/`prepareToPlay` were still settling — where
+    /// `currentPlaybackTime` reports stale or out-of-range values. The timer read those as "past the end",
+    /// seeked back to the start every 0.2s, and stalled the song a beat after it began: the "plays the first
+    /// second then goes quiet" bug. A second pick worked because the player was warm by then.
+    private func startSectionLoop() {
+        let player = MPMusicPlayerController.applicationMusicPlayer
         previewLoopTimer?.invalidate()
         previewLoopTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
-            let end = (musicStartMs + sectionLenMs) / 1000
-            if player.currentPlaybackTime >= end || player.currentPlaybackTime < (musicStartMs / 1000) - 0.5 {
-                player.currentPlaybackTime = musicStartMs / 1000
+            guard player.playbackState == .playing, sectionLenMs > 0 else { return }
+            let now = player.currentPlaybackTime
+            guard now.isFinite, now >= 0 else { return }   // ignore nonsense during a queue change
+            let start = musicStartMs / 1000
+            if now >= start + sectionLenMs / 1000 || now < start - 0.5 {
+                player.currentPlaybackTime = start
             }
         }
     }
     private func stopSongPreview() {
         previewLoopTimer?.invalidate(); previewLoopTimer = nil
+        havenStoryPreviewActive = false   // release the shared player before stopping it
         if songPreviewing { MPMusicPlayerController.applicationMusicPlayer.stop() }
         songPreviewing = false
     }
@@ -1459,7 +1628,7 @@ struct StoryComposerView: View {
 #else
     // MediaPlayer (MPMusicPlayerController) is unavailable on native macOS — no-op previews.
     private func toggleSongPreview(_ t: TrackRefFfi) {}
-    private func stopSongPreview() { songPreviewing = false }
+    private func stopSongPreview() { havenStoryPreviewActive = false; songPreviewing = false }
     private func seekPreview() {}
     private func loadSectionLen() async {}
 #endif
@@ -1628,13 +1797,25 @@ struct LoopingVideo: UIViewRepresentable {
     let url: URL
     var fill: Bool = true   // false → fit (letterbox), e.g. show a landscape clip in full
     var filter: HavenFilter = .original
+    /// Muted by default — every incidental preview (feed backdrop, review canvas) stays silent. The story
+    /// editor passes `false` when the viewer turns preview sound on, so they can actually HEAR the clip.
+    var muted: Bool = true
     func makeUIView(context: Context) -> PlayerView {
         let v = PlayerView()
-        v.load(url, fill: fill, filter: filter)
+        v.load(url, fill: fill, filter: filter, muted: muted)
         return v
     }
     func updateUIView(_ uiView: PlayerView, context: Context) {
         uiView.update(filter: filter)
+        uiView.update(muted: muted)
+        uiView.ensurePlaying()
+    }
+
+    /// Tear the old player down PROMPTLY when the view is replaced (e.g. `.id(muted)` swapping in an
+    /// audio-free build). Waiting for dealloc left a player that still owned an audio track holding the
+    /// session for a moment — long enough to silence the song that was starting alongside it.
+    static func dismantleUIView(_ uiView: PlayerView, coordinator: ()) {
+        uiView.stop()
     }
 
     final class PlayerView: UIView {
@@ -1643,23 +1824,98 @@ struct LoopingVideo: UIViewRepresentable {
         private var queue: AVQueuePlayer?
         private var asset: AVURLAsset?
         private var current: HavenFilter = .original
+        /// Whether the loop is currently built video-only. Flipping this rebuilds the item (see makeItem).
+        private var currentMuted = true
+        /// Interruption observer token. Stored so it can be removed — a closure observer is retained by
+        /// NotificationCenter until then, which would keep this view (and its decode buffers) alive.
+        private var interruptionToken: NSObjectProtocol?
+        /// Keeps the preview loop running no matter what stole the audio session.
+        private var keepAliveTimer: Timer?
         var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
 
-        func load(_ url: URL, fill: Bool, filter: HavenFilter) {
+        deinit {
+            if let interruptionToken { NotificationCenter.default.removeObserver(interruptionToken) }
+            keepAliveTimer?.invalidate()
+        }
+
+        /// This canvas is a MUTED preview loop that should always be playing — there is no state in which
+        /// a frozen frame is correct. An audio-session interruption (the system music player starting a
+        /// song) pauses the AVQueuePlayer even though it makes no sound, and the matching `.ended`
+        /// notification never arrives while that music keeps playing — so the clip stayed stuck. Rather
+        /// than depend on notifications that may never come, just re-assert playback periodically.
+        private func startKeepAlive() {
+            keepAliveTimer?.invalidate()
+            let t = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.ensurePlaying() }
+            }
+            RunLoop.main.add(t, forMode: .common)   // keep ticking while a sheet/scroll is tracking
+            keepAliveTimer = t
+        }
+
+        /// Resume the loop after an audio-session interruption ENDS. Previewing a song in the picker runs
+        /// the system music player, which interrupts our session and pauses this queue; the canvas then
+        /// sat frozen because nothing re-rendered the view to nudge it. Recovering here means the clip
+        /// keeps looping (silently) behind the picker, which is what you expect while choosing a track.
+        private func observeInterruptions() {
+            guard interruptionToken == nil else { return }
+            interruptionToken = NotificationCenter.default.addObserver(
+                forName: AVAudioSession.interruptionNotification, object: nil, queue: .main
+            ) { [weak self] note in
+                guard let self else { return }
+                let raw = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) ?? 0
+                guard AVAudioSession.InterruptionType(rawValue: raw) == .ended else { return }
+                MainActor.assumeIsolated { self.ensurePlaying() }
+            }
+        }
+
+        func load(_ url: URL, fill: Bool, filter: HavenFilter, muted: Bool) {
             let asset = AVURLAsset(url: url)
             self.asset = asset
             current = filter
-            let item = Self.makeItem(asset: asset, filter: filter)
+            currentMuted = muted
+            let item = Self.makeItem(asset: asset, filter: filter, muted: muted)
             // The queue MUST start empty: AVPlayerLooper enqueues copies of the templateItem itself.
             // Passing the same item to AVQueuePlayer(playerItem:) AND as the template makes the looper
             // re-insert an item already owned by the player → -[AVPlayer _insertItem:afterItem:] throws
             // (SIGABRT). Apple's documented pattern is an empty AVQueuePlayer().
             let queue = AVQueuePlayer()
-            queue.isMuted = true
+            queue.isMuted = muted
             looper = AVPlayerLooper(player: queue, templateItem: item)
             playerLayer.player = queue
             playerLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
             self.queue = queue
+            queue.play()
+            observeInterruptions()
+            startKeepAlive()
+        }
+
+        /// Change the clip's audio. This REBUILDS the item, because muting here means handing the player a
+        /// video-only composition (see makeItem) rather than just silencing it — a player that still owns an
+        /// audio track keeps fighting the music player for the session even at zero volume.
+        func update(muted: Bool) {
+            guard let queue, let asset, currentMuted != muted else { return }
+            currentMuted = muted
+            queue.isMuted = muted
+            queue.removeAllItems()
+            looper = AVPlayerLooper(player: queue, templateItem: Self.makeItem(asset: asset, filter: current, muted: muted))
+            queue.play()
+        }
+
+        /// Release the player (and its hold on the audio session) immediately.
+        func stop() {
+            keepAliveTimer?.invalidate(); keepAliveTimer = nil
+            queue?.pause()
+            queue?.removeAllItems()
+            playerLayer.player = nil
+            looper = nil
+            queue = nil
+        }
+
+        /// Nudge the loop back into playing. An audio-session interruption — notably the system music
+        /// player starting a song for the preview — PAUSES the AVQueuePlayer, and a paused queue never
+        /// advances to the looper's next item, so the clip stopped looping and froze on a frame.
+        func ensurePlaying() {
+            guard let queue, queue.timeControlStatus != .playing else { return }
             queue.play()
         }
 
@@ -1667,22 +1923,46 @@ struct LoopingVideo: UIViewRepresentable {
         func update(filter: HavenFilter) {
             guard filter != current, let asset, let queue else { return }
             current = filter
-            let item = Self.makeItem(asset: asset, filter: filter)
+            let item = Self.makeItem(asset: asset, filter: filter, muted: currentMuted)
             queue.removeAllItems()   // clear the previous looper's enqueued items before re-looping
             looper = AVPlayerLooper(player: queue, templateItem: item)
             queue.play()
         }
 
-        private static func makeItem(asset: AVURLAsset, filter: HavenFilter) -> AVPlayerItem {
-            let item = AVPlayerItem(asset: asset)
+        /// Build the loop's template item. When MUTED, the player is handed a VIDEO-ONLY composition —
+        /// no audio track at all. That matters far more than `isMuted`: a player that still owns an audio
+        /// track joins the audio session, so the music player's start interrupts (pauses) it, our keep-alive
+        /// resumes it, and resuming interrupts the song right back — the two ping-ponged about half a second
+        /// apart, which is exactly the "plays for a moment then self-pauses" behaviour. With no audio track
+        /// the preview can neither be interrupted by the song nor interrupt it, so both simply run.
+        private static func makeItem(asset: AVURLAsset, filter: HavenFilter, muted: Bool) -> AVPlayerItem {
+            let source: AVAsset = muted ? (videoOnly(asset) ?? asset) : asset
+            let item = AVPlayerItem(asset: source)
             guard filter != .original else { return item }
             let spec = filter.spec
-            item.videoComposition = AVMutableVideoComposition(asset: asset) { request in
+            // NB: built from `source`, not `asset` — when muted that's the video-only composition, and a
+            // video composition must describe the asset the item was actually created from.
+            item.videoComposition = AVMutableVideoComposition(asset: source) { request in
                 let src = request.sourceImage.clampedToExtent()
                 let out = FilterEngine.apply(spec, to: src).cropped(to: request.sourceImage.extent)
                 request.finish(with: out, context: nil)
             }
             return item
+        }
+
+        /// A copy of the asset carrying ONLY its video track, so the resulting player never touches audio.
+        private static func videoOnly(_ asset: AVURLAsset) -> AVAsset? {
+            let comp = AVMutableComposition()
+            guard let vTrack = asset.tracks(withMediaType: .video).first,
+                  let cTrack = comp.addMutableTrack(withMediaType: .video,
+                                                    preferredTrackID: kCMPersistentTrackID_Invalid)
+            else { return nil }
+            do {
+                try cTrack.insertTimeRange(CMTimeRange(start: .zero, duration: asset.duration),
+                                           of: vTrack, at: .zero)
+            } catch { return nil }
+            cTrack.preferredTransform = vTrack.preferredTransform
+            return comp
         }
     }
 }
@@ -1694,13 +1974,17 @@ struct LoopingVideo: NSViewRepresentable {
     let url: URL
     var fill: Bool = true   // false → fit (letterbox)
     var filter: HavenFilter = .original
+    /// Muted by default; the story editor passes `false` when preview sound is on. See the iOS twin.
+    var muted: Bool = true
     func makeNSView(context: Context) -> PlayerNSView {
         let v = PlayerNSView()
-        v.load(url, fill: fill, filter: filter)
+        v.load(url, fill: fill, filter: filter, muted: muted)
         return v
     }
     func updateNSView(_ nsView: PlayerNSView, context: Context) {
         nsView.update(filter: filter)
+        nsView.update(muted: muted)
+        nsView.ensurePlaying()
     }
 
     static func dismantleNSView(_ nsView: PlayerNSView, coordinator: ()) {
@@ -1713,20 +1997,23 @@ struct LoopingVideo: NSViewRepresentable {
         private var playerLayer: AVPlayerLayer?
         private var asset: AVURLAsset?
         private var current: HavenFilter = .original
+        /// Whether the loop is currently built video-only. Flipping this rebuilds the item (see makeItem).
+        private var currentMuted = true
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
             wantsLayer = true
             layer?.backgroundColor = NSColor.black.cgColor
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-        func load(_ url: URL, fill: Bool, filter: HavenFilter) {
+        func load(_ url: URL, fill: Bool, filter: HavenFilter, muted: Bool) {
             let asset = AVURLAsset(url: url)
             self.asset = asset
             current = filter
-            let item = Self.makeItem(asset: asset, filter: filter)
+            currentMuted = muted
+            let item = Self.makeItem(asset: asset, filter: filter, muted: muted)
             // Empty queue — the looper enqueues copies of templateItem (see the iOS load() above).
             let q = AVQueuePlayer()
-            q.isMuted = true
+            q.isMuted = muted
             looper = AVPlayerLooper(player: q, templateItem: item)
             let pl = AVPlayerLayer(player: q)
             pl.videoGravity = fill ? .resizeAspectFill : .resizeAspect
@@ -1743,16 +2030,56 @@ struct LoopingVideo: NSViewRepresentable {
             looper = AVPlayerLooper(player: queue, templateItem: Self.makeItem(asset: asset, filter: filter))
             queue.play()
         }
-        private static func makeItem(asset: AVURLAsset, filter: HavenFilter) -> AVPlayerItem {
-            let item = AVPlayerItem(asset: asset)
+        /// Change the clip's audio. This REBUILDS the item, because muting here means handing the player a
+        /// video-only composition (see makeItem) rather than just silencing it — a player that still owns an
+        /// audio track keeps fighting the music player for the session even at zero volume.
+        func update(muted: Bool) {
+            guard let queue, let asset, currentMuted != muted else { return }
+            currentMuted = muted
+            queue.isMuted = muted
+            queue.removeAllItems()
+            looper = AVPlayerLooper(player: queue, templateItem: Self.makeItem(asset: asset, filter: current, muted: muted))
+            queue.play()
+        }
+        /// Nudge the loop back into playing after an interruption paused the queue (see the iOS twin).
+        func ensurePlaying() {
+            guard let queue, queue.timeControlStatus != .playing else { return }
+            queue.play()
+        }
+        /// Build the loop's template item. When MUTED, the player is handed a VIDEO-ONLY composition —
+        /// no audio track at all. That matters far more than `isMuted`: a player that still owns an audio
+        /// track joins the audio session, so the music player's start interrupts (pauses) it, our keep-alive
+        /// resumes it, and resuming interrupts the song right back — the two ping-ponged about half a second
+        /// apart, which is exactly the "plays for a moment then self-pauses" behaviour. With no audio track
+        /// the preview can neither be interrupted by the song nor interrupt it, so both simply run.
+        private static func makeItem(asset: AVURLAsset, filter: HavenFilter, muted: Bool) -> AVPlayerItem {
+            let source: AVAsset = muted ? (videoOnly(asset) ?? asset) : asset
+            let item = AVPlayerItem(asset: source)
             guard filter != .original else { return item }
             let spec = filter.spec
-            item.videoComposition = AVMutableVideoComposition(asset: asset) { request in
+            // NB: built from `source`, not `asset` — when muted that's the video-only composition, and a
+            // video composition must describe the asset the item was actually created from.
+            item.videoComposition = AVMutableVideoComposition(asset: source) { request in
                 let src = request.sourceImage.clampedToExtent()
                 let out = FilterEngine.apply(spec, to: src).cropped(to: request.sourceImage.extent)
                 request.finish(with: out, context: nil)
             }
             return item
+        }
+
+        /// A copy of the asset carrying ONLY its video track, so the resulting player never touches audio.
+        private static func videoOnly(_ asset: AVURLAsset) -> AVAsset? {
+            let comp = AVMutableComposition()
+            guard let vTrack = asset.tracks(withMediaType: .video).first,
+                  let cTrack = comp.addMutableTrack(withMediaType: .video,
+                                                    preferredTrackID: kCMPersistentTrackID_Invalid)
+            else { return nil }
+            do {
+                try cTrack.insertTimeRange(CMTimeRange(start: .zero, duration: asset.duration),
+                                           of: vTrack, at: .zero)
+            } catch { return nil }
+            cTrack.preferredTransform = vTrack.preferredTransform
+            return comp
         }
         func stop() {
             queue?.pause()
@@ -1784,6 +2111,9 @@ struct StoryMediaCanvas: View {
     /// Aspect-FILL (crop to full-bleed) for a portrait STORY canvas; aspect-FIT (letterbox) for the POST
     /// camera review, so a landscape shot shows its whole frame instead of being cropped into portrait.
     var fill: Bool = true
+    /// Silent by default (a canvas is usually an incidental preview). The story editor unmutes it when the
+    /// author turns preview sound on, so they can hear the clip's own audio before posting.
+    var muted: Bool = true
 
     /// The (optionally filtered) preview still for this ref.
     private func preview(_ img: PlatformImage) -> PlatformImage {
@@ -1815,7 +2145,13 @@ struct StoryMediaCanvas: View {
                         if m.kind == .video, let url = m.videoURL {
                             // Video previews WITH the chosen filter (same FilterEngine pipeline,
                             // applied per-frame), matching the live camera and the baked export.
-                            LoopingVideo(url: url, fill: fill, filter: filter)
+                            // `.id(muted)` rebuilds the player SYNCHRONOUSLY as part of the same update
+                            // that flipped the mute. Picking a song changes `muted` and starts the song at
+                            // once; without this the clip's audio-track teardown raced the song's start and
+                            // the clip — still holding the audio session — silenced it. A second pick
+                            // worked because by then the clip was already audio-free.
+                            LoopingVideo(url: url, fill: fill, filter: filter, muted: muted)
+                                .id(muted)
                         } else if let img = still {
                             Image(platformImage: img).resizable()
                                 .aspectRatio(contentMode: fill ? .fill : .fit)

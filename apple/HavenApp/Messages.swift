@@ -267,6 +267,7 @@ struct DMContactPicker: View {
                 .opacity(selected.isEmpty ? 0.5 : 1)
                 .keyboardShortcut(.defaultAction)
         }
+        .havenPausesPostAudio()
         #else
         NavigationStack {
             ZStack {
@@ -297,6 +298,7 @@ struct DMContactPicker: View {
                 }
             }
         }
+        .havenPausesPostAudio()
         #endif
     }
 

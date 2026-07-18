@@ -222,8 +222,17 @@ struct CameraCaptureRepresentable: View {
                 .padding(.bottom, 28)
             }
         }
-        .onAppear { engine.start() }
-        .onDisappear { engine.stop() }
+        // A viewfinder is up → hard-block post music (and stop whatever was playing behind us).
+        .onAppear {
+            havenCameraUIOpen += 1
+            AudioCoordinator.shared.silenceForCapture() // full stop, so ending a recording can't resume it
+            engine.start()
+        }
+        .onDisappear {
+            engine.stop()
+            havenCameraUIOpen = max(0, havenCameraUIOpen - 1)
+            AudioCoordinator.shared.appBecameActive()
+        }
     }
 
     private func capture() {
@@ -267,6 +276,7 @@ final class MacCameraEngine: NSObject, ObservableObject {
     nonisolated(unsafe) private var onVideo: ((URL?) -> Void)?
 
     func start() {
+        havenCaptureOwnsAudioSession = true   // camera owns the audio route; post music stays silent
         AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
             guard granted, let self else { return }
             // The mic is needed for sound on recorded video; failure just yields a silent clip.
@@ -300,6 +310,7 @@ final class MacCameraEngine: NSObject, ObservableObject {
     }
 
     func stop() {
+        havenCaptureOwnsAudioSession = false   // release the audio route back to playback
         queue.async { [weak self] in self?.teardownSession() }
     }
 

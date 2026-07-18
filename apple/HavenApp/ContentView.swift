@@ -518,7 +518,7 @@ struct IdentityBackupView: View {
             Button("Keep my data", role: .cancel) {}
         } message: {
             Text("Last chance — this permanently destroys everything in Haven on this device and cannot be undone.")
-        }
+        }.havenPausesPostAudio()
     }
 
     private func reload() { identities = accountStore.roster() }

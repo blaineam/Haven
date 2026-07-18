@@ -166,10 +166,17 @@ struct HavenApp: App {
             switch phase {
             case .active:
                 AudioCoordinator.shared.appBecameActive()   // allow playback again now we're foreground
+                #if os(iOS)
+                // Re-read the ring/silent switch: it may well have been flipped while we were away.
+                SilentSwitch.startMonitoring()
+                #endif
                 // Back to the foreground — if we're sitting on a locked circle, prompt at once.
                 let cid = FeedStore.shared.activeCircleId
                 if BiometricGate.shared.isLocked(cid) { BiometricGate.shared.unlock(cid) }
             case .background:
+                #if os(iOS)
+                SilentSwitch.stopMonitoring()   // no reason to keep probing off-screen
+                #endif
                 // Only true backgrounding pauses + blocks audio. (.inactive is too twitchy on macOS — it
                 // fires whenever the window loses key focus, which was stopping music in normal use. macOS
                 // app-switch is handled by NSApplication.didResignActive in AudioCoordinator instead.)
@@ -203,12 +210,12 @@ struct HavenApp: App {
                 }
                 #endif
                 #if os(iOS)
-                // Seed the post-audio autoplay default from the hardware silent switch on open:
-                // silenced → start muted (no autoplay until the user taps unmute); ringer on →
-                // autoplay until they mute. The user's in-app tap overrides for the session.
-                SilentSwitch.detectSilenced { silenced in
-                    if SettingsStore.shared.silent != silenced { SettingsStore.shared.silent = silenced }
-                }
+                // Track the hardware silent switch for as long as we're on screen: silenced → muted
+                // (no autoplay until the user taps unmute); ringer on → autoplay until they mute.
+                // Probing only at launch meant flipping the switch did nothing until the app was
+                // force-quit; monitoring applies it within a couple of seconds. Changes are
+                // edge-triggered, so an explicit in-app tap still wins until the switch actually moves.
+                SilentSwitch.startMonitoring()
                 #endif
                 // Screenshot/offline harness: never raise the system notification prompt or
                 // touch the push relay — it would photobomb the captures and needs the network.
@@ -356,9 +363,19 @@ struct RootView: View {
                 tab = old                               // …and don't actually leave the current tab
                 return
             }
-            if t == "circle" {
-                feedStore.markCircleSeen()
-                AudioCoordinator.shared.ensureMusicPlaying()    // back on the feed → resume the centered post's song
+            // Both the circle feed AND the profile ("You"/friend) feed are scrollable post feeds that
+            // auto-play the centered post's music + video. Entering either re-enables autoplay (clears the
+            // "backgrounded" gate that pauseForBackground set) so returning from a non-feed tab doesn't
+            // leave music dead; a tab with no post feed (Messages) still silences it.
+            if t == "circle" || t == "you" {
+                AudioCoordinator.shared.appBecameActive()        // foreground feed tab → autoplay allowed
+                if t == "circle" {
+                    feedStore.markCircleSeen()
+                    // The circle post is already centered (no onChange fires), so resume its song directly.
+                    AudioCoordinator.shared.ensureMusicPlaying()
+                }
+                // The profile ("you") feed re-lays-out on appear, so its own centre detection starts the
+                // right post's music — resuming here would briefly play the previous circle song instead.
             } else {
                 AudioCoordinator.shared.pauseForBackground()    // left the feed → silence post music + video
             }

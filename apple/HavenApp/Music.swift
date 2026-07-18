@@ -19,6 +19,17 @@ func trackIds(_ catalogId: String) -> (store: String?, pid: UInt64?) {
     q.addFilterPredicate(MPMediaPropertyPredicate(value: pid, forProperty: MPMediaItemPropertyPersistentID))
     return q.items?.first
 }
+
+/// Whether a local-library song with this persistent id exists — WITHOUT touching the main thread or
+/// returning a non-Sendable `MPMediaItem`. `MPMediaQuery.items` scans the whole songs table synchronously;
+/// running it inline on the main actor was the residual scroll hitch when the feed settled on a music post,
+/// so the feed probes existence off-main (only a Bool crosses back) and lets MediaPlayer load the queue.
+/// `MPMediaQuery` is safe to run off the main thread.
+nonisolated func librarySongExists(_ pid: UInt64) -> Bool {
+    let q = MPMediaQuery.songs()
+    q.addFilterPredicate(MPMediaPropertyPredicate(value: pid, forProperty: MPMediaItemPropertyPersistentID))
+    return q.items?.isEmpty == false
+}
 #else
 /// Native macOS has no `MPMediaQuery`; the on-device library isn't reachable. Catalog tracks
 /// (MusicKit) still play. Returns nil so library-only playback paths fall through.
@@ -104,6 +115,7 @@ struct SongPicker: View {
         // A macOS sheet sizes to content; the song list collapsed to a sliver. Give it a real frame.
         .frame(minWidth: 460, idealWidth: 540, minHeight: 560, idealHeight: 660)
         #endif
+        .havenPausesPostAudio()
     }
 
     // MARK: - Library (iOS/Catalyst only)

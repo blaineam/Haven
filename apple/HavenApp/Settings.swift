@@ -330,5 +330,8 @@ struct SettingsView: View {
         }
         .navigationTitle("Settings")
         .havenInlineNavTitle()
+        // Settings covers the feed — the post song behind it must stop. Applied on the DESTINATION
+        // rather than at each presentation site so it holds wherever this is opened from.
+        .havenPausesPostAudio()
     }
 }

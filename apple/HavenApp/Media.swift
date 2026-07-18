@@ -261,6 +261,11 @@ final class MediaStore: ObservableObject {
     private func cacheGet(_ ref: String) -> MediaItem? { cache.object(forKey: ref as NSString)?.item }
     private func cachePut(_ ref: String, _ item: MediaItem) {
         cache.setObject(Boxed(item), forKey: ref as NSString, cost: Self.decodedCost(item))
+        // Persist the shape as soon as we have pixels (a photo, or a video's poster frame). The NSCache
+        // evicts under pressure, but the feed still needs this ref's aspect to lay its card out at the
+        // right height on the FIRST pass — otherwise the card resizes when the poster reloads and shoves
+        // everything below it down the screen.
+        if let s = item.image?.size, s.width > 0, s.height > 0 { recordPixelSize(ref, s) }
     }
     private func cacheRemove(_ ref: String) { cache.removeObject(forKey: ref as NSString) }
     /// Approximate decoded RAM footprint (≈4 bytes/pixel) so NSCache's cost accounting keeps total
@@ -1019,6 +1024,13 @@ final class MediaStore: ObservableObject {
     /// Final on-disk path for a ref (sender reads chunks from here).
     func storagePath(for ref: String) -> URL? { fileURL(ref) }
 
+    /// Are this ref's bytes on disk? A cheap `stat` — used by the photo grid to decide between the image
+    /// tile and the still-downloading tile WITHOUT decoding anything, which is what layout used to do.
+    func hasLocalFile(_ ref: String) -> Bool {
+        guard let url = fileURL(ref) else { return false }
+        return FileManager.default.fileExists(atPath: url.path)
+    }
+
     /// A fresh empty temp file for reassembling an incoming chunked transfer.
     func makeTempFile() -> URL {
         let u = dir.appendingPathComponent("incoming_\(UUID().uuidString).part")
@@ -1057,6 +1069,61 @@ final class MediaStore: ObservableObject {
     /// Video refs whose poster is currently being generated off-main — so scroll doesn't kick off a second
     /// generation for the same tile on every frame. Touched only on the main thread.
     private var posterInFlight = Set<String>()
+    /// Refs whose display size is currently being read off-main. Main thread only.
+    private var sizeProbeInFlight = Set<String>()
+
+    /// Read an image's pixel size from its header OFF the main thread and record it. ImageIO only parses
+    /// the header (no decode), but it's still file I/O — doing it inline for every tile of a photo grid,
+    /// on every layout pass, is what made those posts stutter.
+    private func probeImageSize(_ ref: String, _ url: URL) {
+        guard !sizeProbeInFlight.contains(ref) else { return }
+        sizeProbeInFlight.insert(ref)
+        Task.detached(priority: .utility) {
+            var found: CGSize?
+            if let src = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+               let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+               let w = props[kCGImagePropertyPixelWidth] as? CGFloat,
+               let h = props[kCGImagePropertyPixelHeight] as? CGFloat, w > 0, h > 0 {
+                let o = (props[kCGImagePropertyOrientation] as? Int) ?? 1
+                found = (5...8).contains(o) ? CGSize(width: h, height: w) : CGSize(width: w, height: h)
+            }
+            let size = found
+            await MainActor.run {
+                MediaStore.shared.sizeProbeInFlight.remove(ref)
+                if let size {
+                    MediaStore.shared.recordPixelSize(ref, size)
+                    FeedStore.shared.scheduleRefresh()
+                }
+            }
+        }
+    }
+
+    /// Read a video's DISPLAY size (natural size through its preferred transform, so a portrait clip reports
+    /// tall) off the main thread and record it. Much cheaper than generating a poster, so the feed can commit
+    /// to the correct card height early; the result is persisted, so a given video only ever settles once.
+    private func probeVideoSize(_ ref: String, _ url: URL) {
+        guard !sizeProbeInFlight.contains(ref) else { return }
+        sizeProbeInFlight.insert(ref)
+        Task.detached(priority: .utility) {
+            var found: CGSize?
+            let asset = AVURLAsset(url: url)
+            if let track = try? await asset.loadTracks(withMediaType: .video).first,
+               let natural = try? await track.load(.naturalSize),
+               let transform = try? await track.load(.preferredTransform) {
+                let r = natural.applying(transform)
+                let s = CGSize(width: abs(r.width), height: abs(r.height))
+                if s.width > 0, s.height > 0 { found = s }
+            }
+            let size = found
+            await MainActor.run {
+                MediaStore.shared.sizeProbeInFlight.remove(ref)
+                if let size {
+                    MediaStore.shared.recordPixelSize(ref, size)
+                    FeedStore.shared.scheduleRefresh()   // re-render at the now-known aspect
+                }
+            }
+        }
+    }
     private let thumbCache: NSCache<NSString, Boxed> = {
         let c = NSCache<NSString, Boxed>()
         c.totalCostLimit = 48 * 1024 * 1024   // ~48 MB of decoded thumbnails, then evict LRU
@@ -1140,9 +1207,55 @@ final class MediaStore: ObservableObject {
     /// images; videos use the (cached, off-main) poster if present, else a sane default. Used for feed
     /// aspect ratios during scroll, where decoding the full image only to read `.size` was a main-thread hitch.
     private var sizeCache: [String: CGSize] = [:]
-    func pixelSize(_ ref: String) -> CGSize? {
+    private var sizeCacheLoaded = false
+    private var sizeCacheSavePending = false
+    /// Where the ref→pixel-size map is persisted. Knowing a video's shape BEFORE its poster is (re)generated
+    /// is what keeps the feed from resizing a card mid-scroll.
+    nonisolated static var sizeMapURL: URL { storageDir.appendingPathComponent("media-sizes.json") }
+
+    /// Load the persisted size map once. Without this, a video whose poster had been evicted from the
+    /// NSCache (or any video after a relaunch) reported NO size, so the feed laid its card out at the 4:3
+    /// fallback and then snapped to the real aspect the moment the poster finished decoding — the cards
+    /// below it visibly jumped. The map is tiny (two numbers per ref) and survives eviction + relaunch.
+    private func loadSizeCacheIfNeeded() {
+        guard !sizeCacheLoaded else { return }
+        sizeCacheLoaded = true
+        guard let data = try? Data(contentsOf: Self.sizeMapURL),
+              let raw = try? JSONDecoder().decode([String: [CGFloat]].self, from: data) else { return }
+        for (ref, wh) in raw where wh.count == 2 && wh[0] > 0 && wh[1] > 0 {
+            if sizeCache[ref] == nil { sizeCache[ref] = CGSize(width: wh[0], height: wh[1]) }
+        }
+    }
+
+    /// Remember a ref's pixel size (in-memory + on disk, debounced).
+    func recordPixelSize(_ ref: String, _ size: CGSize) {
+        guard size.width > 0, size.height > 0 else { return }
+        loadSizeCacheIfNeeded()
+        guard sizeCache[ref] != size else { return }
+        sizeCache[ref] = size
+        guard !sizeCacheSavePending else { return }
+        sizeCacheSavePending = true
+        let snapshot = sizeCache.mapValues { [$0.width, $0.height] }
+        let url = Self.sizeMapURL
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) {
+            if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: url, options: .atomic) }
+            Task { @MainActor in MediaStore.shared.sizeCacheSavePending = false }
+        }
+    }
+
+    /// `allowSyncRead: false` = never touch the filesystem on the caller's thread. A cache miss then
+    /// returns nil (the caller uses a fallback aspect) and the real size is probed off-main and recorded.
+    /// The photo GRID uses this: reading 10+ image headers inline, once per layout pass, was the jitter on
+    /// big multi-photo posts. A grid tile's aspect only affects its width inside a horizontal scroller, so
+    /// filling it in late costs nothing — unlike a single-media post, whose aspect sets the card's height.
+    func pixelSize(_ ref: String, allowSyncRead: Bool = true) -> CGSize? {
+        loadSizeCacheIfNeeded()
         if let s = sizeCache[ref] { return s }
         guard let kind = MediaKind(ref: ref), let url = fileURL(ref) else { return nil }
+        if !allowSyncRead {
+            if kind == .image { probeImageSize(ref, url) } else { probeVideoSize(ref, url) }
+            return nil
+        }
         if kind == .image,
            let src = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
            let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
@@ -1155,10 +1268,16 @@ final class MediaStore: ObservableObject {
             // photos report 1, so this is a no-op for them.)
             let orientation = (props[kCGImagePropertyOrientation] as? Int) ?? 1
             let s = (5...8).contains(orientation) ? CGSize(width: h, height: w) : CGSize(width: w, height: h)
-            sizeCache[ref] = s; return s
+            recordPixelSize(ref, s); return s
         }
-        if kind == .video, let poster = cacheGet(ref)?.image, poster.size.width > 0 {
-            sizeCache[ref] = poster.size; return poster.size
+        if kind == .video {
+            if let poster = cacheGet(ref)?.image, poster.size.width > 0 {
+                recordPixelSize(ref, poster.size); return poster.size
+            }
+            // No poster yet (never viewed on this device). Reading the track's natural size is far cheaper
+            // than generating a poster, so probe it off-main and record it — the card settles on its true
+            // height as early as possible instead of sitting at the 4:3 fallback until poster decode lands.
+            probeVideoSize(ref, url)
         }
         return nil
     }

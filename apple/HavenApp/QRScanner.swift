@@ -167,6 +167,7 @@ final class ScannerNSView: NSView {
 
     func start(coordinator: QRScannerView.Coordinator) {
         coordinator.view = self
+        havenCameraUIOpen += 1   // a viewfinder is up — post music stays silent behind it
         AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
             guard granted, let self else { return }
             self.sessionQueue.async { self.configure(coordinator: coordinator) }
@@ -205,6 +206,7 @@ final class ScannerNSView: NSView {
     }
 
     func stop() {
+        havenCameraUIOpen = max(0, havenCameraUIOpen - 1)
         sessionQueue.async { [session] in
             if session.isRunning { session.stopRunning() }
             session.beginConfiguration()

@@ -205,7 +205,7 @@ struct FilePicker: View {
                         dismiss()
                     }
                 }
-            }
+            }.havenPausesPostAudio()
     }
 }
 

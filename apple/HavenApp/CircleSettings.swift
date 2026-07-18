@@ -218,6 +218,9 @@ struct CircleSettingsView: View {
 
     var body: some View {
         platformBody
+            // Settings covers the feed — the post song behind it must stop. Applied on the DESTINATION
+            // rather than at each presentation site so it holds wherever this is opened from.
+            .havenPausesPostAudio()
             .onAppear { name = store.circles.first { $0.id == circleId }?.name ?? "" }
             .onDisappear { store.renameCircle(circleId, to: name) }   // persist a rename made without hitting return
     }

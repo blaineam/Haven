@@ -126,6 +126,7 @@ struct RelayWalkthroughSheet: View {
                 .keyboardShortcut(.defaultAction)
         }
         .sheet(isPresented: $showAdd) { AddRelaySheet() }
+        .havenPausesPostAudio()
         #else
         NavigationStack {
             ZStack {
@@ -139,6 +140,7 @@ struct RelayWalkthroughSheet: View {
             }
         }
         .sheet(isPresented: $showAdd) { AddRelaySheet() }
+        .havenPausesPostAudio()
         #endif
     }
 

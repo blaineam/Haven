@@ -146,6 +146,6 @@ struct SchedulePicker: View {
                         .disabled(date <= Date())
                 }
             }
-        }
+        }.havenPausesPostAudio()
     }
 }

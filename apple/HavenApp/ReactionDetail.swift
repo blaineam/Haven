@@ -13,6 +13,7 @@ struct ReactionDetailView: View {
     var body: some View {
         #if os(macOS)
         HavenMacSheet("Who reacted") { rosterColumn } footer: { EmptyView() }
+        .havenPausesPostAudio()
         #else
         NavigationStack {
             ZStack {
@@ -45,6 +46,7 @@ struct ReactionDetailView: View {
             .havenInlineNavTitle()
             .toolbar { ToolbarItem(placement: .havenConfirmTrailing) { Button("Done") { dismiss() }.havenToolbarPill() } }
         }
+        .havenPausesPostAudio()
         #endif
     }
 

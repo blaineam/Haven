@@ -33,6 +33,46 @@ enum SharedLocation {
 }
 
 /// Renders a `geo:` ref as a static map with a pin; tap "Open in Maps" to launch Apple Maps.
+/// Renders a map region as a cached still image via `MKMapSnapshotter`, off the main thread. Scrolling a
+/// feed past several live `Map` views is expensive (each is a real MKMapView doing tile work); a snapshot
+/// is just a bitmap. Cached by coordinate so scrolling back is instant and never re-renders.
+private struct MapSnapshotView: View {
+    let coord: CLLocationCoordinate2D
+
+    @State private var image: PlatformImage?
+    private static let cache = NSCache<NSString, PlatformImage>()
+    private var key: String { String(format: "%.5f,%.5f", coord.latitude, coord.longitude) }
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(platformImage: image).resizable().scaledToFill()
+            } else {
+                Rectangle().fill(Color.secondary.opacity(0.15))   // reserves the frame while it renders
+            }
+            Image(systemName: "mappin.circle.fill")
+                .font(.title2).foregroundStyle(HavenTheme.pink)
+                .shadow(color: .black.opacity(0.35), radius: 2)
+        }
+        .task(id: key) { await load() }
+    }
+
+    private func load() async {
+        let k = key as NSString
+        if let cached = Self.cache.object(forKey: k) { image = cached; return }
+        let opts = MKMapSnapshotter.Options()
+        opts.region = MKCoordinateRegion(center: coord, latitudinalMeters: 700, longitudinalMeters: 700)
+        opts.size = CGSize(width: 600, height: 400)
+        let snapshotter = MKMapSnapshotter(options: opts)
+        let snap: MKMapSnapshotter.Snapshot? = await withCheckedContinuation { cont in
+            snapshotter.start(with: .global(qos: .userInitiated)) { s, _ in cont.resume(returning: s) }
+        }
+        guard let snap else { return }
+        Self.cache.setObject(snap.image, forKey: k)
+        image = snap.image
+    }
+}
+
 struct LocationMapView: View {
     let lat: Double
     let lon: Double
@@ -42,11 +82,11 @@ struct LocationMapView: View {
     private var title: String { label.isEmpty ? "Pinned location" : label }
 
     var body: some View {
-        Map(initialPosition: .region(MKCoordinateRegion(
-            center: coord, latitudinalMeters: 700, longitudinalMeters: 700)),
-            interactionModes: []) {       // static preview — no pan/zoom in the feed
-            Marker(title, coordinate: coord).tint(HavenTheme.pink)
-        }
+        // A STATIC snapshot image, not a live Map. A `Map` spins up a full MKMapView per post — tile
+        // rendering plus network fetches running while you scroll past it, which showed up as jitter on
+        // location posts. The feed only ever showed a non-interactive preview, so render it once and
+        // cache the image. (The interactive map is still one tap away via "Open in Maps".)
+        MapSnapshotView(coord: coord)
         // macOS: even with interactionModes:[] the Map's NSView eats scroll-wheel events, so the feed
         // couldn't scroll while the cursor was over a map. Ignore hits on the map itself (the "Open in
         // Maps" button is a separate overlay below, so it stays clickable) → scroll passes to the feed.
@@ -131,6 +171,6 @@ struct LocationPicker: View {
                 }
             }
             .onAppear { mgr.requestWhenInUseAuthorization() }
-        }
+        }.havenPausesPostAudio()
     }
 }

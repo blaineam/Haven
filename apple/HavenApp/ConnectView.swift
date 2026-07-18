@@ -45,6 +45,7 @@ struct ConnectView: View {
         }
         .sheet(isPresented: $showScanner) { scannerSheet }
         .onAppear { seedIncomingLink() }
+        .havenPausesPostAudio()
         #else
         NavigationStack {
             ZStack {
@@ -63,6 +64,7 @@ struct ConnectView: View {
             .sheet(isPresented: $showScanner) { scannerSheet }
             .onAppear { seedIncomingLink() }
         }
+        .havenPausesPostAudio()
         #endif
     }
 

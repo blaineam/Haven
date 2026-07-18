@@ -34,6 +34,51 @@ enum SilentSwitch {
         return (try? d.write(to: url)) == nil ? nil : url
     }
 
+    // MARK: - Continuous monitoring
+
+    /// How often the switch is re-probed while the app is in the foreground. Flipping the physical switch
+    /// takes effect within this window rather than requiring the app to be force-quit and relaunched.
+    private static let pollSeconds = 2.0
+
+    @MainActor private static var timer: Timer?
+    @MainActor private static var probing = false
+    /// The last switch position we observed. Changes are applied EDGE-triggered: flipping the physical
+    /// switch takes effect immediately, but a poll that merely re-reads an UNCHANGED position must never
+    /// stomp an explicit in-app mute/unmute tap (tapping unmute while the phone is on silent has to stick).
+    @MainActor private static var lastSilenced: Bool?
+
+    /// Begin (or restart) foreground monitoring. Safe to call repeatedly — it replaces any existing timer.
+    @MainActor static func startMonitoring() {
+        stopMonitoring()
+        poll()
+        let t = Timer.scheduledTimer(withTimeInterval: pollSeconds, repeats: true) { _ in
+            MainActor.assumeIsolated { poll() }   // scheduled on the main run loop, so this is genuine
+        }
+        RunLoop.main.add(t, forMode: .common)   // keep probing while a scroll is tracking
+        timer = t
+    }
+
+    /// Stop monitoring (backgrounded) — no reason to keep playing probe sounds off-screen.
+    @MainActor static func stopMonitoring() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    @MainActor private static func poll() {
+        // Never probe over a call: call audio owns the session and a system sound has no business there.
+        guard !probing, !CallManager.shared.callInProgress else { return }
+        probing = true
+        detectSilenced { silenced in
+            // detectSilenced always completes on the main queue, so this is genuinely isolated.
+            MainActor.assumeIsolated {
+                probing = false
+                defer { lastSilenced = silenced }
+                guard lastSilenced != silenced else { return }   // unchanged → leave the user's own tap alone
+                if SettingsStore.shared.silent != silenced { SettingsStore.shared.silent = silenced }
+            }
+        }
+    }
+
     /// Calls back (on the main queue) with `true` if the device appears to be silenced. Always
     /// calls back — `false` if the probe can't run (so the default is "audible / autoplay").
     static func detectSilenced(_ completion: @escaping (Bool) -> Void) {

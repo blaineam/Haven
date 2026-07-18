@@ -78,7 +78,7 @@ struct AudioRecorderView: View {
             }
             .padding(40)
         }
-        .presentationDetents([.medium])
+        .presentationDetents([.medium]).havenPausesPostAudio()
     }
 }
 

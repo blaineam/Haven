@@ -282,13 +282,23 @@ extension View {
         #endif
     }
 
+    /// Stop the feed's post song for as long as this view is presented. Anything that covers the feed —
+    /// a picker, a viewer, a composer, a viewfinder — should silence the music playing behind it; hearing
+    /// a post's soundtrack under a sheet is never wanted. Applied centrally by `havenFullScreenCover`.
+    /// Deliberately does not gate future playback, so a surface with its OWN audio still works.
+    func havenPausesPostAudio() -> some View {
+        self.onAppear { AudioCoordinator.shared.stopPostAudioForOverlay() }
+    }
+
     /// `.fullScreenCover` on iOS; falls back to `.sheet` on macOS (no full-screen cover there).
     @ViewBuilder
     func havenFullScreenCover<Content: View>(isPresented: Binding<Bool>,
                                              onDismiss: (() -> Void)? = nil,
                                              @ViewBuilder content: @escaping () -> Content) -> some View {
         #if os(iOS)
-        self.fullScreenCover(isPresented: isPresented, onDismiss: onDismiss, content: content)
+        self.fullScreenCover(isPresented: isPresented, onDismiss: onDismiss) {
+            content().havenPausesPostAudio()
+        }
         #else
         // A macOS sheet sizes to its content; iOS full-screen content carries no size, so it would
         // collapse to a useless sliver. Give it a roomy default frame so every sheet is usable.
@@ -305,7 +315,9 @@ extension View {
                                                                  onDismiss: (() -> Void)? = nil,
                                                                  @ViewBuilder content: @escaping (Item) -> Content) -> some View {
         #if os(iOS)
-        self.fullScreenCover(item: item, onDismiss: onDismiss, content: content)
+        self.fullScreenCover(item: item, onDismiss: onDismiss) { it in
+            content(it).havenPausesPostAudio()
+        }
         #else
         // Pickers/forms get a phone-ish frame; the MEDIA VIEWER (wide:true) gets a roomy landscape frame so
         // wide photos/videos aren't crammed into a narrow portrait sliver on macOS.

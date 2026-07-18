@@ -386,7 +386,7 @@ struct RestoreIdentityView: View {
         }
         .navigationTitle("Restore")
         .havenInlineNavTitle()
-        .onAppear { reloadBackups() }
+        .onAppear { reloadBackups() }.havenPausesPostAudio()
     }
 
     /// The backed-up identities available to restore (everything in the recovery archive except the one

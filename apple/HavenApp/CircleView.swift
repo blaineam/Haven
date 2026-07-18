@@ -33,6 +33,8 @@ struct CircleView: View {
 
     var body: some View {
         platformBody
+            // Membership covers the feed — stop the post song playing behind it.
+            .havenPausesPostAudio()
             .sheet(isPresented: $showInvite) { ConnectView(account: account, contacts: contacts).macSheetFrame() }
             .alert("Nickname", isPresented: Binding(get: { nicknameTarget != nil }, set: { if !$0 { nicknameTarget = nil } })) {
                 TextField("Nickname", text: $nicknameDraft)

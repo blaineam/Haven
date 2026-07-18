@@ -39,7 +39,7 @@ struct EditPostSheet: View {
             #endif
         }
         .sheet(isPresented: $showMedia) { MediaPicker { refs in media.append(contentsOf: refs) }.macSheetFrame() }
-        .sheet(isPresented: $showSongs) { SongPicker { t in track = t }.macSheetFrame() }
+        .sheet(isPresented: $showSongs) { SongPicker { t in track = t }.macSheetFrame() }.havenPausesPostAudio()
     }
 
     private var isEmpty: Bool { text.trimmingCharacters(in: .whitespaces).isEmpty && media.isEmpty }

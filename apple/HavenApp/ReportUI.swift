@@ -15,7 +15,10 @@ import SwiftUI
 enum ModerationLedger {
     @MainActor
     static func report(subject: String, reason: String) {
-        guard !subject.isEmpty, let url = URL(string: PushManager.relay + "/flag") else { return }
+        // The moderation ledger lives on the same worker as push, so it inherits the same
+        // configurability — and the same "not configured = don't send" rule.
+        guard !subject.isEmpty, PushManager.pushEnabled,
+              let url = URL(string: PushManager.relay + "/flag") else { return }
         // Signed with the identity key (audit F1): the Terms attach real consequences to a ledger row,
         // so an unsigned POST must not be able to plant one. The signature binds subject + action +
         // category, so a captured flag can't be re-aimed at someone else. Unsigned = we don't send.

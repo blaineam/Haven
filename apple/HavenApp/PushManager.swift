@@ -19,7 +19,44 @@ import PushKit
 @MainActor
 final class PushManager: NSObject, ObservableObject {
     static let shared = PushManager()
-    static let relay = "https://haven-push.blaineams3.workers.dev"
+
+    /// The push relay this install talks to.
+    ///
+    /// This used to be a compile-time constant, which meant the project could only ever have ONE
+    /// push relay, forever, and pointing at a different one required shipping three app updates.
+    /// That is a single point of failure attached to one person's Cloudflare account — see
+    /// `docs/SUCCESSION.md`. It is now an override with the current worker as the default, so a
+    /// successor operator (or a self-hoster) can redirect an already-installed app.
+    ///
+    /// Empty string is a MEANINGFUL value: "no push relay". Everything degrades to mailbox polling
+    /// — foreground sync plus best-effort `BGAppRefresh` — rather than breaking. See
+    /// `docs/NOTIFICATIONS-FALLBACK.md` for exactly what that does and does not deliver.
+    static let relayOverrideKey = "HavenPushRelayURL"
+
+    static var relay: String {
+        // `object(forKey:)`, not `string(forKey:)`, so an explicitly-set empty string ("disable
+        // push entirely") is distinguishable from "never configured" and is honoured.
+        guard let v = UserDefaults.standard.object(forKey: relayOverrideKey) as? String else {
+            return defaultRelay
+        }
+        return v
+    }
+
+    /// The relay used when nothing has been configured. Still ours, still the fast path.
+    static let defaultRelay = "https://haven-push.blaineams3.workers.dev"
+
+    /// Point this install at a different push relay, or pass `""` to turn push off entirely and
+    /// rely on polling. `nil` restores the default.
+    static func setRelay(_ url: String?) {
+        guard let url else {
+            UserDefaults.standard.removeObject(forKey: relayOverrideKey)
+            return
+        }
+        UserDefaults.standard.set(url, forKey: relayOverrideKey)
+    }
+
+    /// Whether push is configured at all. When false the app must not imply push-speed delivery.
+    static var pushEnabled: Bool { !relay.isEmpty }
 
     /// Ask for permission + register for remote notifications (call at launch).
     func start() {
@@ -128,7 +165,9 @@ final class PushManager: NSObject, ObservableObject {
     }
 
     private func post(_ path: String, _ body: [String: Any]) {
-        guard let url = URL(string: Self.relay + path) else { return }
+        // No relay configured = push deliberately off. Fail silently and let polling carry it;
+        // `URL(string: "/register")` would otherwise be a relative URL and a confusing failure.
+        guard Self.pushEnabled, let url = URL(string: Self.relay + path) else { return }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")

@@ -97,6 +97,7 @@ export default {
             body: JSON.stringify({ e: ciphertext || "" }),
           });
           if (res.ok) anyOk = true;
+          else await logApns("call/voip", res, t.token);
           if (res.status !== 410) survivors.push(t);   // drop tokens APNs says are dead
         }
         if (survivors.length !== voip.length) {
@@ -136,6 +137,7 @@ export default {
               body: JSON.stringify(payload),
             });
             if (res.ok) anyOk = true;
+            else await logApns("call/alert-fallback", res, t.token);
           }
         }
         // Uniform response whether or not the node is registered (audit F6): a distinguishable
@@ -229,6 +231,7 @@ export default {
             body: bodyFor(t.platform),
           });
           if (res.ok) anyOk = true;
+          else await logApns(`notify/${t.platform || "ios"}`, res, t.token);
           if (res.status !== 410) survivors.push(t);   // drop tokens APNs says are dead
         }
         if (survivors.length !== tokens.length) {
@@ -345,6 +348,18 @@ async function rateLimited(env, request, bucket, limit = 60) {
   const n = parseInt((await env.TOKENS.get(key)) || "0", 10) + 1;
   await env.TOKENS.put(key, String(n), { expirationTtl: 60 });
   return n > limit;
+}
+
+// ---- APNs failure reporting ----
+// Every send site checked `res.ok` and then threw the answer away, so a push that APNs refused was
+// indistinguishable from one it delivered — from the worker, from the device, from anywhere. APNs
+// puts the actual cause in a JSON `reason` (BadDeviceToken, ExpiredProviderToken, TopicDisallowed,
+// InvalidProviderToken …), which is exactly the thing needed to tell "this one token is stale" apart
+// from "no push has worked for anyone since the credentials changed". `wrangler tail` surfaces it.
+async function logApns(where, res, token) {
+  let reason = "";
+  try { reason = ((await res.clone().json()) || {}).reason || ""; } catch { /* body not JSON */ }
+  console.error(`APNS FAIL ${where} status=${res.status} reason=${reason || "?"} token=${String(token).slice(0, 12)}…`);
 }
 
 // ---- APNs provider JWT (ES256), cached ~50 min ----

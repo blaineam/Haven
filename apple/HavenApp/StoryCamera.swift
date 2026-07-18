@@ -769,9 +769,26 @@ struct StoryCameraView: View {
                 if let ref = refs.first { draft = StoryDraft(mediaRef: ref) }
             }
         }
+        // Fully STOP capture while the review/editor is up, and restart it on "capture more". A running
+        // AVCaptureSession holds the shared audio session in PlayAndRecord (non-mixing) and keeps
+        // re-asserting it, which INTERRUPTS the composer's song preview the moment it starts — measured
+        // on-device: `preview.play cat=PlayAndRecord mix=false cameraOpen=true`, then playback state 3
+        // (.interrupted). It also kept the camera device (and its indicator) live behind a full-screen
+        // cover for no reason.
+        // Stop only — never auto-restart on showReview going false. "Next" sets showReview = false and
+        // presents the COMPOSER 0.35s later, so restarting there put the camera (and its PlayAndRecord
+        // hold on the audio route) straight back while the composer was opening. Restart is explicit:
+        // "capture more", or the composer closing back to the viewfinder.
+        .onChange(of: showReview) { _, shown in
+            if shown { cam.stop(); dual.stop() }
+        }
+        .onChange(of: draft?.id) { _, id in
+            if id != nil { cam.stop(); dual.stop() }                       // composer up → release capture
+            else if !showReview { cam.start(); cam.resetRecordingState() } // back to the viewfinder
+        }
         .havenFullScreenCover(isPresented: $showReview) {
             StoryReviewView(capture: capture,
-                            onCaptureMore: { showReview = false },
+                            onCaptureMore: { showReview = false; cam.start(); cam.resetRecordingState() },
                             onNext: {
                                 showReview = false
                                 let refs = capture.segments.map(\.ref)
@@ -1089,9 +1106,19 @@ struct StoryCameraView: View {
             havenCameraUIOpen = max(0, havenCameraUIOpen - 1)
             AudioCoordinator.shared.appBecameActive()   // hand the audio stage back to the feed
         }
+        // See the twin above: a live capture session pins the audio session to PlayAndRecord (non-mixing)
+        // and interrupts the composer's song preview. Stop only — "Next" clears showReview 0.35s BEFORE
+        // the composer appears, so restarting there would put capture back exactly when it must be gone.
+        .onChange(of: showReview) { _, shown in
+            if shown { cam.stop() }
+        }
+        .onChange(of: draft?.id) { _, id in
+            if id != nil { cam.stop() }
+            else if !showReview { cam.start(); cam.resetRecordingState() }
+        }
         .havenFullScreenCover(isPresented: $showReview) {
             StoryReviewView(capture: capture,
-                            onCaptureMore: { showReview = false },
+                            onCaptureMore: { showReview = false; cam.start(); cam.resetRecordingState() },
                             onNext: {
                                 showReview = false
                                 let refs = capture.segments.map(\.ref)
@@ -1241,11 +1268,10 @@ struct StoryComposerView: View {
     @FocusState private var captionFocused: Bool
 
     var body: some View {
-      // Capture the REAL device safe-area insets at the root, before any child `.ignoresSafeArea()`
-      // collapses them. The controls layer re-applies these so it never lands under the notch / Dynamic
-      // Island / home indicator, while the media behind it still fills the screen edge-to-edge.
-      GeometryReader { proxy in
-        let safeInsets = proxy.safeAreaInsets
+      // The media + black backdrop opt out of the safe area so they fill the screen edge to edge; the
+      // controls layer does not, so SwiftUI insets it correctly on its own. (It used to also re-apply the
+      // device insets by hand, which double-inset every control.)
+      GeometryReader { _ in
         ZStack {
             Color.black.ignoresSafeArea()
             media.ignoresSafeArea()
@@ -1331,14 +1357,12 @@ struct StoryComposerView: View {
                 if !editingCaption { shareBar }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)   // pin controls to the screen, never the media's size
-            // The media + black backdrop `.ignoresSafeArea()`, which expands THIS ZStack to the full
-            // screen — so the controls VStack (maxHeight .infinity) fills into the notch / Dynamic Island
-            // and the home-indicator strip, jamming the X button and Share bar into the unsafe regions.
-            // Re-inset the controls by the real device insets captured at the root (`safeInsets`) so they
-            // land back inside the visible area, while the media stays edge-to-edge behind them.
-            .padding(.top, safeInsets.top)   // topControls adds its own +8 below this
-            .padding(.bottom, editingCaption ? kbHeight : safeInsets.bottom + 8)
-            .padding(.horizontal, max(safeInsets.leading, safeInsets.trailing))   // landscape/side insets
+            // Only the media + black backdrop `.ignoresSafeArea()`; this controls VStack does NOT, so
+            // SwiftUI already lays it out inside the safe area. Re-adding the device insets here applied
+            // them a SECOND time — a full inset of dead space above the top buttons and below the Share
+            // bar, eating usable canvas. Just the small aesthetic gap (topControls adds its own +8), plus
+            // the manual keyboard lift while editing.
+            .padding(.bottom, editingCaption ? kbHeight : 8)
             // Opt out of SwiftUI's automatic keyboard avoidance — otherwise it stacks on top of
             // our manual kbHeight lift and shoves the controls to the top of the screen.
             .ignoresSafeArea(.keyboard, edges: .bottom)

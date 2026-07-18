@@ -210,6 +210,8 @@ struct HavenApp: App {
                 }
                 #endif
                 #if os(iOS)
+                // TEMPORARY: a launch marker, so the diagnostic log channel can be verified end to end
+                // before anyone is asked to reproduce anything.
                 // Track the hardware silent switch for as long as we're on screen: silenced → muted
                 // (no autoplay until the user taps unmute); ringer on → autoplay until they mute.
                 // Probing only at launch meant flipping the switch did nothing until the app was

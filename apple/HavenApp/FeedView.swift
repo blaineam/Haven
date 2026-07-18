@@ -63,6 +63,9 @@ func ensureHavenPlaybackSession(force: Bool = false, then: (() -> Void)? = nil) 
         if !force, havenCaptureOwnsAudioSession { finish(); return }   // the camera may have opened since
         let s = AVAudioSession.sharedInstance()
         if s.category != .playback || !s.categoryOptions.contains(.mixWithOthers) {
+            // NB: this THROWS while a capture session is live — the category then silently stays
+            // PlayAndRecord (non-mixing) and interrupts anything we start. Capture is stopped before the
+            // composer opens precisely so this call can succeed.
             try? s.setCategory(.playback, mode: .default, options: [.mixWithOthers])
         }
         // ALWAYS activate, even when the category already looked right. A capture session tearing down

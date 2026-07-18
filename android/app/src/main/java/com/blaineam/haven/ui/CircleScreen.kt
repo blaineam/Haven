@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddReaction
 import androidx.compose.material.icons.filled.ArrowCircleUp
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
@@ -1671,6 +1672,27 @@ fun PostCard(
                 relativeTime(item.createdAt) + if (item.edited) " · edited" else "",
                 color = HavenTheme.textSecondary, fontSize = 12.sp,
             )
+            // Upload state for your OWN media posts, shown whenever the circle has a relay to back up
+            // to: ↑ while the blob is still uploading, ✓ once every blob is confirmed on at least one
+            // relay. This is the "did my story actually reach a relay?" signal — so the author keeps
+            // Haven open a moment until it lands instead of assuming it broke. Mirrors the iOS indicator.
+            run {
+                val blobs = item.media.filter { !com.blaineam.haven.core.LocalMedia.isSynthetic(it) }
+                if (item.isMe && !item.unsent && blobs.isNotEmpty() && HavenNet.circleHasRelay(circleId)) {
+                    var tick by remember(item.id) { mutableStateOf(0) }
+                    val backed = remember(tick, item.id) { blobs.all { HavenNet.isMediaBackedUpAny(it) } }
+                    LaunchedEffect(item.id, backed) {
+                        while (!backed) { kotlinx.coroutines.delay(2000); tick++ }
+                    }
+                    Icon(
+                        if (backed) androidx.compose.material.icons.Icons.Filled.CheckCircle
+                        else androidx.compose.material.icons.Icons.Filled.ArrowCircleUp,
+                        if (backed) "Backed up to a relay" else "Uploading to a relay…",
+                        tint = if (backed) HavenTheme.pink else HavenTheme.textSecondary,
+                        modifier = Modifier.padding(start = 6.dp).size(16.dp),
+                    )
+                }
+            }
             Box {
                 Icon(androidx.compose.material.icons.Icons.Filled.MoreVert, "More",
                     tint = HavenTheme.textSecondary,

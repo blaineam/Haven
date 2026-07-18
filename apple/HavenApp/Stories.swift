@@ -162,6 +162,19 @@ struct StoryViewer: View {
                 if s.isMe {
                     sharerAvatar(s)
                     Text("Your story").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                    // Same relay-backup signal as a feed post: while viewing your OWN story, show whether
+                    // its photo/video has reached a relay yet (↑ uploading, ✓ backed up) — so "did my story
+                    // actually sync?" has a visible answer instead of a guess.
+                    if !s.media.isEmpty,
+                       !RelayMailboxStore.shared.relays(forCircle: FeedStore.shared.activeCircleId).isEmpty {
+                        TimelineView(.periodic(from: .now, by: 2.0)) { _ in
+                            let blobs = s.media.filter { !MediaStore.isSynthetic($0) }
+                            let backed = !blobs.isEmpty && blobs.allSatisfy { MediaBackupLedger.hasAny($0) }
+                            Image(systemName: backed ? "checkmark.icloud.fill" : "arrow.up.circle")
+                                .font(.caption2).foregroundStyle(.white.opacity(backed ? 0.9 : 0.7))
+                                .help(backed ? "Backed up to a relay" : "Uploading to a relay…")
+                        }
+                    }
                 } else {
                     let name = ContactsStore.shared.name(forNodePrefix: s.authorShort) ?? friendName
                     Button {

@@ -752,6 +752,16 @@ impl Engine {
                 self.send_seedless_enroll_request();
                 self.poll_mailbox().await;
                 self.request_missing_media();
+                // Launch-time media drain: finish uploading any of MY media a relay never received —
+                // e.g. a story posted the instant before the app last closed, whose blob upload was cut
+                // off mid-flight. The set of what still needs uploading is re-derived from the feed and
+                // the confirmed-on-relay ledger is persisted (media-backed-up.txt, reloaded in
+                // Engine::new), so this just re-attempts every not-yet-confirmed ref NOW instead of
+                // waiting for the first ~10s sync tick — an unfinished upload can't sit stranded. Fully
+                // idempotent (confirmed refs are skipped before any read). Mirrors iOS
+                // MediaBackupQueue.drainPersisted / Android drainPersistedBackups.
+                self.backfill_media_to_relays().await;
+                self.dyn_state.lock().unwrap().last_media_backfill_ms = now_ms();
             }
             Err(e) => {
                 log::error!("node start failed: {e}");

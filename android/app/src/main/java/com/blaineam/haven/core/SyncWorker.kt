@@ -19,6 +19,10 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         runCatching {
             HavenNet.init(applicationContext)
             HavenNet.pollMailbox()
+            // Retry any of MY media whose blob never reached a relay (e.g. a story posted just before the
+            // app was killed, its upload cut off mid-flight). The pending queue is persisted, so this
+            // background pass can finish it even when the app isn't in the foreground.
+            HavenNet.drainPersistedBackups()
         }
         return Result.success()
     }

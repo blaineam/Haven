@@ -450,6 +450,7 @@ object HavenNet : InboundListener {
                 syncWithContacts()
                 pollMailbox()
                 requestMissingMedia()   // back-fill media for posts already in the feed
+                drainPersistedBackups() // finish any of MY media uploads killed mid-flight last session
             } catch (e: Throwable) {
                 Log.e(TAG, "node start failed", e)
             }
@@ -2727,7 +2728,14 @@ object HavenNet : InboundListener {
                 // Process ONE blob at a time — peak memory ≈ a single media file, not the library.
                 runCatching {
                     when (job) {
-                        is MediaJob.Backup -> uploadMedia(job.circleId, job.ref, job.force)
+                        is MediaJob.Backup -> {
+                            // Retry-until-confirmed: only DROP the durable pending entry once the blob has
+                            // actually landed on a relay. A failed pass leaves it persisted, so the next
+                            // start / background sync / 2-min backfill retries it — the media reaches a
+                            // relay even if the app was killed the instant after the post was made.
+                            val landed = uploadMedia(job.circleId, job.ref, job.force)
+                            if (landed && !job.force) clearPendingBackup(job.ref, job.circleId)
+                        }
                         is MediaJob.Restore -> {
                             if (fetchMediaFromRelay(job.circleId, job.ref)) {
                                 withContext(Dispatchers.Main) { feedVersion.value++ }
@@ -2747,6 +2755,14 @@ object HavenNet : InboundListener {
      *  [force] = the 1.0.8 recovery overwrite (bypass the "already held?" probe + ledger). */
     private fun enqueueBackup(circleId: String, ref: String, force: Boolean = false) {
         if (LocalMedia.isSynthetic(ref)) return   // geo: pins et al. carry no bytes — never relay-storable
+        // Record the job DURABLY before the in-memory Channel enqueue, so a story's blob still reaches a
+        // relay even if the app is killed the instant after posting. The Channel (mediaQueue) is
+        // in-memory only; without this persisted list, a backup enqueued but not yet drained was lost on
+        // app kill and — since posting a story and immediately locking the phone is the whole point of a
+        // story — the envelope reached the relay (viewers saw the story) but the blob never did. The
+        // recovery-overwrite path (force) isn't persisted here: it has its own sticky latch
+        // (mediaResealRefs) and must not resurrect across launches once done.
+        if (!force) addPendingBackup(ref, circleId)
         val job = MediaJob.Backup(ref, circleId, force)
         if (!offerMediaJob(jobKey(job))) return
         ensureMediaQueueDraining()
@@ -2772,6 +2788,74 @@ object HavenNet : InboundListener {
         }
         true
     }
+
+    // ---- Durable media-backup queue -------------------------------------------------------------
+    // The in-memory Channel (mediaQueue) above serializes uploads for the OOM guard, but it does NOT
+    // survive the process. This set persists the "still needs to reach a relay" jobs to
+    // SharedPreferences so a blob mid-upload when the app was killed is retried on the next start /
+    // background sync, and a failed upload is retried rather than dropped (a job is cleared ONLY once
+    // uploadMedia confirms it landed on a relay). Keyed "ref|cid". Mirrors iOS SharedStore.
+    // MediaBackupQueue (persisted queue + drainPersisted + retry-until-confirmed).
+    private val pendingBackups = LinkedHashSet<String>()
+    private var pendingBackupsLoaded = false
+    private val pendingBackupsLock = Any()
+    private fun pbKey(ref: String, cid: String) = "$ref|$cid"
+    private fun pendingBackupPrefs() = appContext.getSharedPreferences("haven.mediabackup.queue", Context.MODE_PRIVATE)
+    private fun ensurePendingBackups() {
+        if (pendingBackupsLoaded) return
+        synchronized(pendingBackupsLock) {
+            if (pendingBackupsLoaded) return
+            runCatching { pendingBackups.addAll(pendingBackupPrefs().getStringSet("pending", emptySet()) ?: emptySet()) }
+            pendingBackupsLoaded = true
+        }
+    }
+    private fun savePendingBackupsLocked() {
+        runCatching { pendingBackupPrefs().edit().putStringSet("pending", HashSet(pendingBackups)).apply() }
+    }
+    private fun addPendingBackup(ref: String, cid: String) {
+        ensurePendingBackups()
+        synchronized(pendingBackupsLock) {
+            if (pendingBackups.add(pbKey(ref, cid))) {
+                while (pendingBackups.size > 10_000) { val it = pendingBackups.iterator(); it.next(); it.remove() }
+                savePendingBackupsLocked()
+            }
+        }
+    }
+    private fun clearPendingBackup(ref: String, cid: String) {
+        ensurePendingBackups()
+        synchronized(pendingBackupsLock) {
+            if (pendingBackups.remove(pbKey(ref, cid))) savePendingBackupsLocked()
+        }
+    }
+
+    /** Whether a specific blob is still waiting to reach a relay — drives the per-post upload indicator. */
+    fun hasPendingBackup(ref: String): Boolean {
+        ensurePendingBackups()
+        return synchronized(pendingBackupsLock) { pendingBackups.any { it.substringBeforeLast('|') == ref } }
+    }
+
+    /** Re-enqueue every backup persisted from a prior session — called on start and from the background
+     *  SyncWorker so media that was mid-upload when the app was killed still reaches a relay. Idempotent:
+     *  offerMediaJob de-dups, and uploadMedia skips anything the ledger already confirms. */
+    fun drainPersistedBackups() {
+        ensurePendingBackups()
+        val jobs = synchronized(pendingBackupsLock) { pendingBackups.toList() }
+        for (k in jobs) {
+            val ref = k.substringBeforeLast('|'); val cid = k.substringAfterLast('|')
+            if (ref.isNotEmpty() && cid.isNotEmpty()) enqueueBackup(cid, ref)
+        }
+    }
+
+    /** True once a blob is confirmed on at least one relay/S3 destination (any dest — the post
+     *  indicator only cares THAT it durably landed, not where). Public accessor over the backup ledger,
+     *  mirroring iOS MediaBackupLedger.hasAny. */
+    fun isMediaBackedUpAny(ref: String): Boolean {
+        ensureLedger()
+        return backedUp.any { it.substringAfterLast('|') == ref }
+    }
+
+    /** Whether a circle has any relay (or S3) to back media up to — the gate for showing the indicator. */
+    fun circleHasRelay(circleId: String): Boolean = mediaRelaysFor(circleId).isNotEmpty()
 
     // ---- Media GC (purge-linked deletion + orphan sweep) -------------------------------------
     // `feed()` only HIDES expired posts; `purgeExpired` really drops the events and returns their

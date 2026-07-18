@@ -34,10 +34,27 @@ mixed-device accounts stay consistent.
   the story's own media.
 - **Direct messages open at the newest message** — including long group threads, which previously
   opened scrolled too far down.
-- **Smoother feed scrolling.** Photos and a post's music no longer hitch a fast flick: image
-  thumbnails decode off the main thread, and a post's song only starts once you settle on it.
-- **Interface polish:** the You tab no longer slides sideways on a scroll, the story editor respects
-  the notch and home-indicator areas, and the macOS You tab opens cleanly.
+- **Smoother feed scrolling.** The feed no longer jumps around as you scroll. Every card now knows its
+  size before its photo or video loads, so nothing resizes underneath you: media dimensions are
+  remembered between launches, and posts with a big photo grid, a video carousel, or a shared location
+  no longer do heavy work while you're scrolling past them (a location post draws a cached map image
+  instead of a live map). A post's song also starts only once you settle on it.
+- **Interface polish:** the You tab no longer slides sideways on a scroll, and the macOS You tab opens
+  cleanly. The story editor's controls sit properly against the screen edges — they were inset twice,
+  leaving a band of wasted space above the top buttons and below the Share button.
+
+### Sound
+
+- **Music plays on profile feeds too.** Scrolling your You tab or a friend's profile now plays the
+  centred post's song, and coming back to a circle no longer leaves the feed silent.
+- **A camera never plays a post's music.** Opening any camera stops post audio outright rather than
+  pausing it — previously it could come back by itself the moment a recording ended. Sheets and
+  full-screen views that cover the feed (settings, circle membership, pickers) quieten it too.
+- **The ring/silent switch is respected while the app is open**, not only at launch — flipping it now
+  takes effect within a couple of seconds. Your own in-app mute still wins until the switch actually moves.
+- **The story editor can play your story's sound.** A speaker button previews the story as it will
+  actually play: the attached song, or the clip's own audio when there's no song. The clip keeps
+  looping either way, and the preview no longer cuts out a moment after it starts.
 
 ### Camera & capture
 

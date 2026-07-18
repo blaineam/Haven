@@ -8,8 +8,8 @@ marked **UNVERIFIED** rather than asserted.
 
 | Surface | State |
 |---|---|
-| **iOS + iPadOS** | **Live on the App Store.** **1.0.7** is the security + polish release — seed-drop (seedless linking + cryptographic-revocation machinery), storage management, MLS-style group layer enabled for circles with a verified owner (older circles upgrade only if their creator offers it and each member follows), stories parity, desktop video GPS strip |
-| **macOS** | **Live on the App Store** (native `HavenMac`, not Catalyst). 1.0.7 alongside iOS |
+| **iOS + iPadOS** | **Live on the App Store.** **1.1.0** is a reliability + polish release — per-entity last-writer-wins across your devices, durable story/media upload, rebuilt story video capture, steadier feed scrolling, story-sound preview. Builds on **1.0.7**, the security release — seed-drop (seedless linking + cryptographic-revocation machinery), storage management, MLS-style group layer enabled for circles with a verified owner (older circles upgrade only if their creator offers it and each member follows), stories parity, desktop video GPS strip |
+| **macOS** | **Live on the App Store** (native `HavenMac`, not Catalyst). 1.1.0 alongside iOS |
 | **Apple Watch** | Shipped, embedded in the iOS app (`com.blaineam.kith.watchkitapp`) |
 | **Android** | Signed AAB on the Play **internal** track (in review, closed testing not yet public). No longer on GitHub Releases (`PUBLISH_ANDROID_TO_GH=false`); interim build is the `haven-android-apk` CI artifact |
 | **Windows** | Real `.msi` / NSIS `.exe` (x64 &amp; Arm64), **live on the [Microsoft Store](https://apps.microsoft.com/store/detail/9NKTFH1MF4LM)**. No longer on GitHub Releases (`PUBLISH_WINDOWS_TO_GH=false`); interim build is the `desktop-windows` CI artifact |
@@ -18,8 +18,9 @@ marked **UNVERIFIED** rather than asserted.
 | **Web** | Invite-landing / promo page only — the client was abandoned (M6) |
 | **tvOS** | Does not exist and is not planned |
 
-Version skew check: Apple `1.0.7`/`206` (`apple/project.yml:115-116,185-186`); desktop + Android ship
-from tag `v0.1.0-beta.40`; core crates are all `0.0.1` and unversioned. That's intentional, not drift.
+Version skew check: Apple `1.1.0` (`apple/project.yml`); desktop `1.1.0` (`desktop/src-tauri/tauri.conf.json`);
+Android takes its versionName from the release tag; core crates are all `0.0.1` and unversioned. That's
+intentional, not drift.
 
 ---
 

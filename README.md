@@ -51,8 +51,10 @@ S3-compatible bucket, or a direct peer-to-peer link.
 
 ## Status
 
-**1.0 is live on the App Store for iPhone, iPad, and Mac**
-(https://apps.apple.com/app/id6782147901 — **1.0.7** is the security + polish release:
+**1.1 is live on the App Store for iPhone, iPad, and Mac**
+(https://apps.apple.com/app/id6782147901 — **1.1.0** is a reliability + polish release: multi-device
+changes reconciled by who changed them last, durable story/media uploads, a rebuilt story video
+camera, a much steadier feed, and story-sound previewing. It builds on **1.0.7**, the security release:
 seedless device linking, the cryptographic-revocation machinery, storage management,
 and an MLS-style group layer that is enabled for circles with a verified owner, i.e. the ones you
 make from 1.0.7 on (existing circles keep the encryption they already have unless their creator

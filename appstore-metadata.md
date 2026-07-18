@@ -52,8 +52,14 @@ Video stories, rebuilt
 Messages & feed
 • Direct messages open at the newest message, including long group threads.
 • Swipe left or right in the story viewer to jump between people's stories.
-• Smoother, steadier feed — fast flicks no longer flash a half-loaded image or nudge your scroll position; images fade in cleanly.
+• A much steadier feed — cards no longer resize or jump as photos and videos load, and posts with a photo grid, a video carousel, or a shared location scroll smoothly.
 • Interface polish throughout, including the You tab and the story editor.
+
+Sound
+• Music now plays on your You tab and friends' profiles as you scroll, not just in a circle.
+• Opening any camera reliably silences post music, and sheets that cover the feed quieten it too.
+• The ring/silent switch is respected while you're using the app, not only at launch.
+• A speaker button in the story editor previews your story's sound — the song you attached, or the clip's own audio.
 
 Native on iPhone, iPad, and Mac. No ads, no tracking, no servers holding your data — same private Haven.
 

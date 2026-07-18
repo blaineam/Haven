@@ -1057,6 +1057,9 @@ final class MediaStore: ObservableObject {
     /// Video refs whose poster is currently being generated off-main — so scroll doesn't kick off a second
     /// generation for the same tile on every frame. Touched only on the main thread.
     private var posterInFlight = Set<String>()
+    /// Image-thumbnail decodes currently running off the main thread (keyed by "<ref>@<bucket>"), so a
+    /// fast scroll doesn't kick a second decode for a tile that's already decoding. Touched only on main.
+    private var thumbInFlight = Set<String>()
     private let thumbCache: NSCache<NSString, Boxed> = {
         let c = NSCache<NSString, Boxed>()
         c.totalCostLimit = 48 * 1024 * 1024   // ~48 MB of decoded thumbnails, then evict LRU
@@ -1069,9 +1072,27 @@ final class MediaStore: ObservableObject {
         let kind = MediaKind(ref: ref)
         let t: PlatformImage?
         if kind == .image, let url = fileURL(ref), FileManager.default.fileExists(atPath: url.path) {
-            // Decode a DOWNSAMPLED bitmap straight from the file via ImageIO — never materialize the full
-            // 2560px image in memory (that spike OOM-jetsammed iOS on launch).
-            t = Self.downsampled(at: url, maxPixel: maxDimension)
+            // Decode the DOWNSAMPLED bitmap OFF the main thread (same as video posters below). Doing it
+            // synchronously here was the feed-scroll hitch: a fast flick brings several new tiles on screen
+            // at once and each ran a 1200px ImageIO decode inline on the main thread — the scroll froze,
+            // then jumped to catch up with the fling's momentum. Return nil now (the tile shows its loading
+            // placeholder for a frame) and nudge a refresh once the bitmap is cached. Never materialize the
+            // full 2560px image in memory (that spike OOM-jetsammed iOS on launch) — ImageIO downsamples.
+            if !thumbInFlight.contains(key as String) {
+                thumbInFlight.insert(key as String)
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    guard let self else { return }
+                    let img = Self.downsampled(at: url, maxPixel: maxDimension)
+                    DispatchQueue.main.async {
+                        self.thumbInFlight.remove(key as String)
+                        guard let img else { return }
+                        let mi = MediaItem(id: ref, kind: .image, image: img, videoURL: nil)
+                        self.thumbCache.setObject(Boxed(mi), forKey: key, cost: Self.decodedCost(mi))
+                        FeedStore.shared.scheduleRefresh()   // re-render so the now-cached thumbnail shows
+                    }
+                }
+            }
+            return nil
         } else if kind == .video, let url = fileURL(ref), FileManager.default.fileExists(atPath: url.path) {
             // Video poster generation (AVAssetImageGenerator) is EXPENSIVE and was running on the main thread
             // the first time each video tile scrolled into view — that's the scroll choppiness. If it's

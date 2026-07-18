@@ -4477,9 +4477,11 @@ struct PostCard: View {
                                    inCarousel: inCarousel,
                                    onScrubbing: onScrubbing)
                     .background { pageBackdrop(ref, containerAspect: containerAspect) }
-            } else if let img = MediaStore.shared.thumbnail(ref, maxDimension: 1200) ?? m.image {
+            } else if let img = MediaStore.shared.thumbnail(ref, maxDimension: 1200) {
                 // A ~1200px thumbnail (not the 2560px original) keeps the single-image post crisp at the
                 // feed's ≤480pt frame without re-sampling a giant bitmap every scroll frame. Zoom uses full-res.
+                // No `?? m.image` fallback: thumbnail() now decodes off-main and returns nil until ready, so
+                // falling back to the full-res synchronous decode would reintroduce the exact scroll hitch.
                 Image(platformImage: img).resizable().scaledToFit()      // show the whole image (no crop)
                     // Take the WHOLE page so the backdrop fills the letterbox, not just the fitted image.
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -4527,9 +4529,11 @@ struct PostCard: View {
     /// The 1200px thumb is already resident — it's what the page itself draws — so the fallback is
     /// free in the case that matters. Blurring a bigger bitmap costs nothing extra once rasterized.
     private func backdropSource(_ ref: String) -> PlatformImage? {
+        // Thumbnails only — both decode off-main now. NO `item(ref)?.image` fallback: the backdrop is a
+        // decorative blur, so a full-res synchronous decode for it would be the worst possible place to
+        // pay a main-thread hitch during a scroll. It fills in a frame later with the tile.
         MediaStore.shared.thumbnail(ref, maxDimension: 64)
             ?? MediaStore.shared.thumbnail(ref, maxDimension: 1200)
-            ?? MediaStore.shared.item(ref)?.image
     }
 
     /// The carousel's per-page backdrop: only pay for it when the page's media actually letterboxes

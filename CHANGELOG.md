@@ -7,6 +7,32 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.1.0] — 2026-07-17
+
+A reliability and polish release focused on multi-device sync and feed smoothness. Everything here
+lands on **every** platform — iOS, macOS, Android, Windows, and Linux — sharing one wire format so
+mixed-device accounts stay consistent.
+
+### Fixed
+
+- **Changes you make on one device now hold on all of them.** Removing a circle member, deleting a
+  contact, deleting a circle or DM, editing your profile, and changing your synced settings are now
+  reconciled by *who changed it last* rather than *who synced last*. Previously an additive merge
+  could re-introduce something you'd removed, and two devices with different profile pictures could
+  overwrite each other in a loop — both are fixed, across iOS, macOS, Android, Windows, and Linux.
+- **Upgrading a circle no longer leaves a duplicate.** The upgraded circle carries its history, and
+  the older circle collapses into it on every one of your devices instead of lingering as a second
+  row (any duplicates from before this release heal themselves on the next launch).
+- **Story screens and story rings show profile pictures.** A friend's story now shows their real
+  profile photo in the header, and every story ring shows the sharer's avatar rather than a frame of
+  the story's own media.
+- **Direct messages open at the newest message** — including long group threads, which previously
+  opened scrolled too far down.
+- **Smoother feed scrolling.** Photos and a post's music no longer hitch a fast flick: image
+  thumbnails decode off the main thread, and a post's song only starts once you settle on it.
+- **Interface polish:** the You tab no longer slides sideways on a scroll, the story editor respects
+  the notch and home-indicator areas, and the macOS You tab opens cleanly.
+
 ## [1.0.9] — 2026-07-17
 
 Everything in 1.0.7 (below), plus the fixes for bugs caught right after it was submitted —

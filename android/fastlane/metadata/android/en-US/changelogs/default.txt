@@ -1,5 +1,6 @@
-1.0.9 — fixes on top of 1.0.7:
-• Removing someone from a circle now sticks, even across your own multiple devices.
-• A friend's photos and videos load reliably again — including media that had been stuck and wouldn't open before. The next time each person opens Haven, their own affected media is quietly repaired for everyone in the circle.
-
-Plus everything in 1.0.7: a linked device no longer holds a copy of your master key (removing a lost/stolen device cuts it off for good); storage cleanup with size-sorted downloads, placeholders, pins and age/size limits; compressed video on posting; matching story styling; and a closed video location-metadata leak.
+1.1.0 — reliability and polish:
+• Stories and media reliably reach a relay, even if you lock your phone right after posting.
+• Changes hold across all your devices — removals, deletions, and profile or settings edits.
+• A much steadier feed: cards no longer jump around as photos and videos load.
+• Music now plays on profile feeds too, and cameras and sheets reliably silence it.
+• Story editor can preview your story's sound before you post it.

@@ -323,6 +323,7 @@ jobs:
 
       # ── Upload the AAB + assign it to the resolved track (staged rollout when set) ────────────
       - name: Publish AAB to Google Play (${{ steps.cfg.outputs.track }} track)
+        id: playpublish
         if: steps.play.outputs.submit == 'true'
         # Non-fatal: the APK + AAB are already published to the GitHub Release above. A Play-side gate
         # (e.g. the one-time "advertising ID" App Content declaration not yet set) shouldn't red-X the
@@ -339,6 +340,15 @@ jobs:
           # Empty string is falsy to the action, so a non-staged release simply omits it.
           userFraction: ${{ steps.cfg.outputs.user_fraction }}
           whatsNewDirectory: ${{ env.whatsnew }}
+
+      # `continue-on-error` above deliberately keeps a Play-side gate from red-X'ing the release — but a
+      # failure there was also INVISIBLE in the job list. A release-notes overflow (Play caps them at 500
+      # chars) silently rolled the whole edit back, so nothing reached Play while the step still read as
+      # green. Keep the policy, but say so loudly.
+      - name: Flag a Play publish that did not land
+        if: steps.play.outputs.submit == 'true' && steps.playpublish.outcome == 'failure'
+        run: |
+          echo "::warning title=Play publish did not land::The AAB was NOT published to Play. Check the publish step's log — a common cause is release notes over Play's 500-character limit, which rolls the edit back."
 
       # ── Sync the FULL store listing (title, short/long description, feature graphic, screenshots)
       #    from android/fastlane/metadata via `fastlane supply`. r0adkll can't do this; supply reads

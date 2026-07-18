@@ -456,15 +456,21 @@ struct CaptureReviewView: View {
                 // The preview (first ref). Photos preview the live look; videos play unfiltered
                 // (the poster shows the look) and get the filter baked on export.
                 if let ref = refs.first {
-                    StoryMediaCanvas(mediaRef: ref, filter: filter)
+                    // A POST can be any aspect — preview the shot at ITS OWN aspect (EXIF-correct), FIT, so a
+                    // landscape capture shows its full wide frame and stays SHORT, freeing the space below.
+                    let aspect = thumbnail.map { CGFloat($0.size.width / max($0.size.height, 1)) } ?? (3.0 / 4.0)
+                    StoryMediaCanvas(mediaRef: ref, filter: filter, fill: false)
+                        .aspectRatio(aspect, contentMode: .fit)   // sizes to the shot: landscape → short, portrait → tall
+                        .frame(maxWidth: .infinity, maxHeight: 480) // cap portrait; a landscape shot ends up much shorter
                         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                         .padding(.horizontal, 12).padding(.vertical, 10)
                 } else {
                     Spacer()
                 }
 
+                // The freed vertical space (esp. on a landscape shot) shows a full filter GRID, not a row.
                 if let thumb = thumbnail {
-                    FilterStrip(thumbnail: thumb, selection: $filter)
+                    FilterGrid(thumbnail: thumb, selection: $filter)
                 }
 
                 Button { use() } label: {

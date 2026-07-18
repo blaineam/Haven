@@ -658,16 +658,17 @@ struct StoryCameraView: View {
 
             VStack {
                 captureProgress   // segmented bars (story-viewer style) + live recording fill
-                HStack {
+                ZStack {
+                    // TRUE-centered against the full width (not between the unequal-width side buttons, which
+                    // pushed it off-center) — the label is its own centered layer; the buttons sit on the edges.
+                    Text(capture.isFull ? "Max length · \(StoryCaptureModel.maxLabel)" : "\(StoryCaptureModel.maxLabel) max")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.white.opacity(capture.isFull ? 1 : 0.75))
+                        .padding(.horizontal, 10).padding(.vertical, 6).background(.black.opacity(0.4), in: Capsule())
+                    HStack {
                     Button { dismiss() } label: {
                         Image(systemName: "xmark").font(.title2.weight(.semibold)).foregroundStyle(.white)
                             .padding(10).background(.black.opacity(0.35), in: Circle())
                     }
-                    Spacer()
-                    // Always label the story's max length; when it's reached, call it out.
-                    Text(capture.isFull ? "Max length · \(StoryCaptureModel.maxLabel)" : "\(StoryCaptureModel.maxLabel) max")
-                        .font(.caption.weight(.semibold)).foregroundStyle(.white.opacity(capture.isFull ? 1 : 0.75))
-                        .padding(.horizontal, 10).padding(.vertical, 6).background(.black.opacity(0.4), in: Capsule())
                     Spacer()
                     HStack(spacing: 10) {
                         // Dual-camera (front + back PiP) toggle is DISABLED: the multi-cam preview
@@ -692,6 +693,7 @@ struct StoryCameraView: View {
                                     .foregroundStyle(.white).padding(10).background(.black.opacity(0.35), in: Circle())
                             }
                         }
+                    }
                     }
                 }
                 .padding(.horizontal, 20).padding(.top, 4)
@@ -1779,6 +1781,9 @@ struct StoryMediaCanvas: View {
     /// Live preview-only filter, applied to both stills and video frames here for instant
     /// feedback; it is baked into the actual media bytes at share time. Defaults to `.original`.
     var filter: HavenFilter = .original
+    /// Aspect-FILL (crop to full-bleed) for a portrait STORY canvas; aspect-FIT (letterbox) for the POST
+    /// camera review, so a landscape shot shows its whole frame instead of being cropped into portrait.
+    var fill: Bool = true
 
     /// The (optionally filtered) preview still for this ref.
     private func preview(_ img: PlatformImage) -> PlatformImage {
@@ -1810,9 +1815,10 @@ struct StoryMediaCanvas: View {
                         if m.kind == .video, let url = m.videoURL {
                             // Video previews WITH the chosen filter (same FilterEngine pipeline,
                             // applied per-frame), matching the live camera and the baked export.
-                            LoopingVideo(url: url, fill: true, filter: filter)
+                            LoopingVideo(url: url, fill: fill, filter: filter)
                         } else if let img = still {
-                            Image(platformImage: img).resizable().scaledToFill()
+                            Image(platformImage: img).resizable()
+                                .aspectRatio(contentMode: fill ? .fill : .fit)
                                 .frame(width: geo.size.width, height: geo.size.height)
                         }
                     }

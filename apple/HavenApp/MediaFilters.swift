@@ -190,6 +190,36 @@ enum FilterEngine {
 }
 
 /// A horizontal filter chooser with live thumbnails — drop it under a captured photo.
+/// Grid variant of `FilterStrip` for the review screen. When a shot is previewed aspect-FIT (a landscape
+/// capture is short + letterboxed), the freed vertical space is better used by a scrollable tile grid than
+/// a single swipeable row — you see every look at once.
+struct FilterGrid: View {
+    let thumbnail: PlatformImage
+    @Binding var selection: HavenFilter
+    private let columns = [GridItem(.adaptive(minimum: 76), spacing: 12)]
+
+    var body: some View {
+        ScrollView {
+            LazyVGrid(columns: columns, spacing: 12) {
+                ForEach(HavenFilter.allCases) { f in
+                    VStack(spacing: 6) {
+                        Image(platformImage: FilterEngine.apply(f, to: thumbnail))
+                            .resizable().scaledToFill()
+                            .frame(width: 68, height: 68)
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(selection == f ? HavenTheme.pink : .clear, lineWidth: 2.5))
+                        Text(f.title).font(.caption2).lineLimit(1)
+                            .foregroundStyle(selection == f ? HavenTheme.pink : .secondary)
+                    }
+                    .onTapGesture { withAnimation(HavenTheme.smooth) { selection = f } }
+                }
+            }
+            .padding(.horizontal, 16).padding(.vertical, 8)
+        }
+    }
+}
+
 struct FilterStrip: View {
     let thumbnail: PlatformImage
     @Binding var selection: HavenFilter

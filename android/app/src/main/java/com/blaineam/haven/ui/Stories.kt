@@ -10,6 +10,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -99,21 +100,15 @@ fun StoriesTray(groups: List<StoryGroup>, onAddStory: () -> Unit, onOpen: (Int) 
                         .background(HavenTheme.brandHorizontal).clickable { onOpen(idx) },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Box(
-                        Modifier.size(56.dp).clip(CircleShape).background(HavenTheme.card),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        val first = g.items.firstOrNull()
-                        val mediaId = first?.media?.firstOrNull()
-                        if (mediaId != null) {
-                            MediaImage(DEFAULT_CIRCLE, mediaId, Modifier.size(56.dp).clip(CircleShape))
-                        } else {
-                            androidx.compose.material3.Text(
-                                if (g.isMe) "You" else g.authorShort.take(2),
-                                color = HavenTheme.textPrimary, fontSize = 13.sp,
-                            )
-                        }
-                    }
+                    // The feed ring is an IDENTITY chip → show the sharer's profile picture (mine, or the
+                    // friend's synced avatar), not the story media. The media is what you see when you open
+                    // it; the "Your stories" gallery (You tab) is the one that shows per-story content
+                    // thumbnails. (iOS parity: FeedView.storyThumb.)
+                    HavenAvatar(
+                        g.authorShort,
+                        if (g.isMe) "You" else com.blaineam.haven.core.HavenNet.displayName(g.authorShort),
+                        56.dp, isMe = g.isMe,
+                    )
                 }
                 Spacer(Modifier.height(4.dp))
                 androidx.compose.material3.Text(
@@ -159,6 +154,16 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
         if (itemIdx > 0) itemIdx--
         else if (groupIdx > 0) { groupIdx--; itemIdx = 0 }
     }
+    // Instagram-style whole-user skips (a horizontal swipe, vs a tap that advances one story).
+    // Left → the next person's first story (dismiss past the last person).
+    fun skipToNextUser() {
+        if (groupIdx + 1 < groups.size) { groupIdx++; itemIdx = 0 } else onClose()
+    }
+    // Right → restart this person if we're partway in, otherwise the previous person's first story.
+    fun skipToPrevUser() {
+        if (itemIdx > 0) itemIdx = 0
+        else if (groupIdx > 0) { groupIdx--; itemIdx = 0 }
+    }
 
     // Auto-advance every 5s (paused while replying).
     LaunchedEffect(groupIdx, itemIdx, replying) {
@@ -173,6 +178,16 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
                 detectTapGestures(
                     onTap = { o -> if (!replying) { if (o.x > size.width / 2) advance() else back() } },
                     onLongPress = { onClose() },
+                )
+            }
+            // A horizontal SWIPE skips WHOLE users (Instagram-style), matching iOS Stories.swift
+            // skipToNextUser/skipToPrevUser. Tap still advances one story at a time (above).
+            .pointerInput(groupIdx, itemIdx) {
+                var dx = 0f
+                detectHorizontalDragGestures(
+                    onDragStart = { dx = 0f },
+                    onHorizontalDrag = { _, amount -> dx += amount },
+                    onDragEnd = { if (dx <= -60f) skipToNextUser() else if (dx >= 60f) skipToPrevUser() },
                 )
             },
     ) {

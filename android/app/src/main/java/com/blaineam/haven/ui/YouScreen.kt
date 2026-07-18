@@ -34,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -69,9 +70,24 @@ fun YouScreen(onAddFriend: () -> Unit) {
     // Stories expire on their own, so this section simply disappears when the last one ages out.
     val myStories = mine.filter { it.story }.sortedBy { it.createdAt }
 
+    // A profile post's video AUTO-PLAYS when it's centered, exactly like the main feed
+    // (iOS UserProfileView center-detection parity). This screen is a plain vertical Column (not a
+    // LazyColumn), so each post reports its window-space center and the one nearest the fixed
+    // viewport center becomes the single active (playing) post.
+    val postCenters = remember { androidx.compose.runtime.mutableStateMapOf<String, Float>() }
+    var viewportCenterY by remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
+    val centeredPost by remember {
+        androidx.compose.runtime.derivedStateOf {
+            postCenters.entries.minByOrNull { kotlin.math.abs(it.value - viewportCenterY) }?.key
+        }
+    }
+
     HavenBackground {
         Column(
             Modifier
+                .onGloballyPositioned {
+                    viewportCenterY = it.localToWindow(androidx.compose.ui.geometry.Offset.Zero).y + it.size.height / 2f
+                }
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
                 .padding(20.dp),
@@ -164,7 +180,11 @@ fun YouScreen(onAddFriend: () -> Unit) {
                     modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(10.dp))
                 myPosts.forEach { post ->
-                    PostCard(post)
+                    Box(Modifier.fillMaxWidth().onGloballyPositioned {
+                        postCenters[post.id] = it.localToWindow(androidx.compose.ui.geometry.Offset.Zero).y + it.size.height / 2f
+                    }) {
+                        PostCard(post, videoActive = post.id == centeredPost)
+                    }
                     Spacer(Modifier.height(12.dp))
                 }
             }

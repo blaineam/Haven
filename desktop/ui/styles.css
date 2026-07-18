@@ -379,10 +379,19 @@ input:focus, textarea:focus, select:focus {
   display: flex; align-items: center; justify-content: center; font-size: 22px; color: var(--muted);
 }
 .story-ring .ring img { width: 100%; height: 100%; object-fit: cover; }
+/* The feed rings are IDENTITY chips (initials / the sharer's emoji or avatar), not content covers. */
+.story-ring.cover .ring > div { font-weight: 700; color: var(--text); }
 .story-ring .nm {
   font-size: 11px; color: var(--muted); max-width: 64px; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; margin: 0 auto;
 }
+
+/* ---- Story viewer: per-person progress segments (Instagram/Apple-style) ---- */
+.story-progress { display: flex; gap: 4px; margin-bottom: 8px; }
+.story-progress .seg {
+  flex: 1; height: 3px; border-radius: 2px; background: rgba(128,128,128,.35);
+}
+.story-progress .seg.on { background: var(--pink); }
 
 /* ---- Post card ---- */
 .post-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }

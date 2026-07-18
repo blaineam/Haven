@@ -83,6 +83,9 @@ import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
 
 private const val TAG = "StoryCamera"
+/** Hard ceiling on a single story clip — matches iOS's 90s total story-video budget. Android records
+ *  one continuous clip (no per-segment auto-split yet), so this is enforced as one max duration. */
+private const val MAX_STORY_VIDEO_MS = 90_000L
 private data class StoryDraft(val ref: String, val isVideo: Boolean, val filterIdx: Int = 0)
 
 /** In-app story camera: TAP = photo, HOLD = video (release to stop), flip. Then the editor. */
@@ -117,6 +120,7 @@ fun StoryCameraScreen(
         )
     }
     val recordingRef = remember { arrayOfNulls<Recording>(1) }
+    val maxDurationJob = remember { arrayOfNulls<kotlinx.coroutines.Job>(1) }
     val hasAudio = ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) ==
         android.content.pm.PackageManager.PERMISSION_GRANTED
 
@@ -157,6 +161,7 @@ fun StoryCameraScreen(
         recordingRef[0] = rec.start(ContextCompat.getMainExecutor(context)) { ev ->
             if (ev is VideoRecordEvent.Finalize) {
                 isRecording = false; recordingRef[0] = null
+                maxDurationJob[0]?.cancel(); maxDurationJob[0] = null
                 // ERROR_NO_VALID_DATA(8) just means the tap was too brief — treat as "hold longer".
                 val ok = !ev.hasError() || ev.error == VideoRecordEvent.Finalize.ERROR_NO_VALID_DATA
                 if (ev.hasError()) Log.e(TAG, "record finalize error ${ev.error}", ev.cause)
@@ -178,9 +183,12 @@ fun StoryCameraScreen(
                 }
             }
         }
+        // Stop at the 90s ceiling even if the finger is still held (iOS's total budget parity). Stop the
+        // recording directly (the Finalize handler above clears this job) — a local fun can't forward-ref.
+        maxDurationJob[0] = scope.launch { delay(MAX_STORY_VIDEO_MS); runCatching { recordingRef[0]?.stop() } }
     }
 
-    fun stopVideo() { runCatching { recordingRef[0]?.stop() } }
+    fun stopVideo() { maxDurationJob[0]?.cancel(); maxDurationJob[0] = null; runCatching { recordingRef[0]?.stop() } }
 
     // Live filter-applied GL preview (the camera frame is rendered through the same grading shader).
     val glView = remember { FilteredCameraView(context) }

@@ -161,7 +161,18 @@ fun CircleScreen(onAddFriend: () -> Unit) {
     val storyGroups = remember(items) { groupStories(items) }
     // Stories live in the tray, not the list. Unsent posts are gone too — a "Message unsent" tombstone
     // in the feed is clutter, not information (PostCard still renders it for a deep link / comment sheet).
-    val posts = remember(items) { items.filter { !it.story && !it.unsent } }
+    val computedPosts = remember(items) { items.filter { !it.story && !it.unsent } }
+    // Only hand the LazyColumn a NEW list instance when the posts ACTUALLY changed. An incidental
+    // feedVersion bump during a scroll (media backfill, a poster landing, a periodic tick) usually
+    // recomputes an identical list; passing a fresh-but-equal instance re-diffs the LazyColumn and
+    // nudges the scroll offset — the "position jumps around before settling" on fast flings.
+    // (iOS FeedStore.refresh() `if items != filtered` guard.) The holder is a plain remembered array,
+    // not snapshot state, so reusing the prior instance here has no recomposition side effect.
+    val postsHolder = remember { arrayOfNulls<List<FeedItemFfi>>(1) }
+    val posts = run {
+        val last = postsHolder[0]
+        if (last != null && last == computedPosts) last else { postsHolder[0] = computedPosts; computedPosts }
+    }
     // Reports filed by ANY member — the circle's shared moderation signal, grouped per post.
     val reportsByTarget = remember(version, active) { HavenNet.reports(active) }
     var viewingStory by remember { mutableStateOf<Int?>(null) }

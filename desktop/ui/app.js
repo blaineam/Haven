@@ -673,11 +673,13 @@ async function renderFeed() {
     }, icon(state.videoSoundOn ? "speaker" : "speaker.slash")),
   );
 
-  const items = (await invoke("feed", { circleId: state.activeCircle }))
+  const raw = await invoke("feed", { circleId: state.activeCircle });
+  const items = raw
     // An unsent post is dropped from the LIST — a row of "This post was unsent" is clutter, not
     // content. postCard still renders the tombstone for a post reached directly (comments open).
     .filter((i) => !i.story && !i.unsent)
     .filter((i) => Hidden.showHidden || !Hidden.has(i.id));   // personal per-post hide (reversible)
+  const storyItems = raw.filter((i) => i.story && !i.unsent);   // the tray's source (grouped by author)
   // Media any member flagged sensitive — must land before the cards build, since each tile decides
   // its own cover as it's created.
   await loadSensitive(state.activeCircle);
@@ -686,15 +688,45 @@ async function renderFeed() {
   for (const r of await invoke("reports", { circleId: state.activeCircle }).catch(() => []))
     (reportsByTarget[r.target] ||= []).push(r);
 
+  // Banner sources — fetched here (once) so they can fold into the change-signature below, then handed
+  // straight to the banner builders so a real rebuild doesn't fetch them a second time.
+  const pending = await invoke("pending").catch(() => []);
+  const upgradeOffers = await invoke("pending_circle_upgrades", { circleId: state.activeCircle }).catch(() => []);
+  const theirUpgrades = upgradeOffers.filter((o) => !o.mine);
+  const canOfferUpgrade = theirUpgrades.length ? false
+    : await invoke("can_offer_circle_upgrade", { circleId: state.activeCircle }).catch(() => false);
+
+  // Feed render stability — the port of FeedView.swift ▸ refresh()'s guard. A refresh fired incidentally
+  // during a scroll (a background sync's haven:changed, media backfill, a poster landing) usually
+  // rebuilds an IDENTICAL feed; replacing the DOM anyway re-lays-out the list, nudges the scroll offset
+  // (the "position jumps around before settling" on a fast fling) and restarts every video. So we hash
+  // what actually drives the feed and leave the DOM untouched when nothing changed.
+  const sig = JSON.stringify({
+    c: state.activeCircle, name: state.activeCircleName,
+    hidden: Hidden.showHidden, snd: state.videoSoundOn, status: connectionText(state.status),
+    member: (active || {}).member_count || 0,
+    pending: pending.length,
+    upgrades: theirUpgrades.map((o) => o.new_circle_id).join(",") + "|" + (canOfferUpgrade ? 1 : 0),
+    sens: [...state.sensitive].sort().join(","),
+    items: items.map((i) => [i.id, i.body, (i.media || []).join("|"), i.unsent ? 1 : 0, i.edited ? 1 : 0,
+      (i.reactions || []).map((r) => r.emoji + r.count + (r.mine ? "1" : "0")).join(","),
+      (i.comments || []).map((c) => (c.author_name || "") + c.created_at + (c.body || "")).join("~"),
+      i.music ? i.music.title + "·" + i.music.artist : "",
+      (reportsByTarget[i.id] || []).length]),
+    stories: storyItems.map((s) => [s.id, s.author_name, (s.media || []).join("|"), s.created_at]),
+  });
+  if (state.feedSig === sig && !state.focusPost && root.querySelector(".feed-list")) return;
+  state.feedSig = sig;
+
   const list = el("div", { class: "feed-list" });
   list.append(banner);
-  const pend = await pendingBanner();
+  const pend = await pendingBanner(pending);
   if (pend) list.append(pend);
-  const upgrade = await circleUpgradeBanner(state.activeCircle);
+  const upgrade = await circleUpgradeBanner(state.activeCircle, upgradeOffers, canOfferUpgrade);
   if (upgrade) list.append(upgrade);
   const nudge = await relayNudgeBanner(state.activeCircle, (active || {}).member_count || 0);
   if (nudge) list.append(nudge);
-  list.append(await storiesTray());
+  list.append(await storiesTray(storyItems));
   if (!items.length) {
     list.append(el("div", { class: "empty" },
       el("span", { class: "big" }, icon("sparkles", "empty-ic")),
@@ -721,8 +753,8 @@ async function renderFeed() {
 
 /** Pending connection requests — macOS `pendingBanner`: a brand-gradient card at the top of the
  *  feed that opens the Connect sheet. This is Connect's discovery path now that it isn't a tab. */
-async function pendingBanner() {
-  const pending = await invoke("pending").catch(() => []);
+async function pendingBanner(prefetched) {
+  const pending = prefetched || await invoke("pending").catch(() => []);
   if (!pending.length) return null;
   return el("div", { class: "nudge-banner", style: "cursor:pointer", onclick: () => connectSheet() },
     el("div", { class: "nudge-body" },
@@ -749,8 +781,8 @@ async function pendingBanner() {
  *  never had an owner to record. So we name who is asking and let the user choose. If two people both
  *  claim it, BOTH are rendered; the app picks neither. Returns null when there's nothing to say, so
  *  the call site is one line (mirrors relayNudgeBanner). */
-async function circleUpgradeBanner(circleId) {
-  const offers = await invoke("pending_circle_upgrades", { circleId }).catch(() => []);
+async function circleUpgradeBanner(circleId, prefetchedOffers, prefetchedCanOffer) {
+  const offers = prefetchedOffers || await invoke("pending_circle_upgrades", { circleId }).catch(() => []);
   // Offers from OTHER people — mine need no confirmation (I made the offer).
   const theirs = offers.filter((o) => !o.mine);
   if (theirs.length) {
@@ -758,7 +790,9 @@ async function circleUpgradeBanner(circleId) {
     for (const o of theirs) wrap.append(followUpgradeCard(circleId, o));
     return wrap;
   }
-  if (!(await invoke("can_offer_circle_upgrade", { circleId }).catch(() => false))) return null;
+  const canOffer = prefetchedCanOffer !== undefined ? prefetchedCanOffer
+    : await invoke("can_offer_circle_upgrade", { circleId }).catch(() => false);
+  if (!canOffer) return null;
   return el("div", { class: "nudge-banner" },
     el("div", { class: "nudge-body", style: "cursor:default" },
       el("span", { class: "nudge-icon" }, icon("lock.shield.fill")),
@@ -801,33 +835,59 @@ function followUpgradeCard(circleId, o) {
 }
 
 /** STORIES — the tray at the TOP OF THE FEED, never a tab. Port of FeedView.swift ▸ storiesTray:
- *  a gradient-STROKED "Add" ring with a pink camera, then one gradient-filled cover circle per
- *  author with their name beneath. */
-async function storiesTray() {
+ *  a gradient-STROKED "Add" ring with a pink camera, then one gradient-filled circle per author with
+ *  their name beneath. Each ring is an IDENTITY chip → it shows the sharer's PROFILE PICTURE, not the
+ *  story's content (the content is what you see when you open it). Matches ContentView.swift /
+ *  FeedView.swift, where feed rings carry the peer avatar while the "Your stories" GALLERY carries per
+ *  story content thumbnails. Desktop peers broadcast no avatar, so a friend's identity chip is their
+ *  initials disc — exactly what postCard shows for the same author. */
+async function storiesTray(prefetched) {
   const tray = el("div", { class: "story-tray" });
   tray.append(el("button", { class: "story-ring add", title: "Add to your story", onclick: addStoryDialog },
     el("div", { class: "ring" }, el("div", {}, icon("camera.fill"))),
     el("div", { class: "nm" }, "Add")));
-  const stories = (await invoke("feed", { circleId: state.activeCircle }).catch(() => []))
-    .filter((i) => i.story && !i.unsent);
-  // One circle per AUTHOR, newest cover — macOS groups by author (`groupedStories`) rather than
-  // showing the same person once per slide.
-  const byAuthor = new Map();
-  for (const s of stories) {
-    const k = s.author_name || "?";
-    const g = byAuthor.get(k);
-    if (!g || Number(s.created_at) > Number(g.created_at)) byAuthor.set(k, s);
-  }
-  for (const [name, it] of byAuthor) {
-    const inner = el("div", {});
-    const cover = (it.media || []).find((r) => !r.startsWith("geo:") && !r.startsWith("a:"));
-    if (cover) inner.append(el("img", { "data-ref": cover }));
-    else inner.append(icon("photo", "story-ph"));
-    tray.append(el("button", { class: "story-ring cover", onclick: () => viewStory(it) },
-      el("div", { class: "ring" }, inner),
+  const stories = (prefetched || await invoke("feed", { circleId: state.activeCircle }).catch(() => []))
+    .filter((i) => i.story && !i.unsent)
+    .map((s) => ({ ...s, _circle: state.activeCircle }));
+  // The flat, author-grouped list the viewer pages through (macOS `groupedStoriesFlat`); each ring
+  // opens straight at that person's first story, then a tap walks their run and on into the next.
+  const { flat, starts } = groupStoriesFlat(stories);
+  const me = state.profile && state.profile.name !== undefined ? state.profile
+    : await invoke("get_profile").catch(() => ({}));
+  // One ring per AUTHOR (first-seen order in the flat list).
+  const seen = new Set();
+  for (const it of flat) {
+    const name = it.author_name || "?";
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const disc = el("div", {});
+    if (it.is_me && me && me.avatar) disc.append(el("img", { src: me.avatar }));
+    else if (it.is_me && me && me.emoji) disc.textContent = me.emoji;
+    else disc.textContent = initials(name);   // identity chip — matches the author's postCard avatar
+    tray.append(el("button", { class: "story-ring cover", onclick: () => viewStories(flat, starts.get(name) || 0) },
+      el("div", { class: "ring" }, disc),
       el("div", { class: "nm" }, it.is_me ? "You" : name.split(" ")[0])));
   }
   return tray;
+}
+
+/** Group stories the way the viewer pages through them — the port of FeedStore.groupedStoriesFlat:
+ *  group by author, each author's stories oldest→newest, authors ordered by whoever posted most
+ *  recently. Returns the flat list plus `starts` (author → the flat index of their first story) so a
+ *  tray ring can open straight at that person. */
+function groupStoriesFlat(stories) {
+  const groups = new Map();
+  for (const s of stories) {
+    const k = s.author_name || "?";
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(s);
+  }
+  const ordered = [...groups.entries()]
+    .map(([author, items]) => ({ author, items: items.slice().sort((a, b) => Number(a.created_at) - Number(b.created_at)) }))
+    .sort((a, b) => Number(b.items[b.items.length - 1].created_at) - Number(a.items[a.items.length - 1].created_at));
+  const flat = [], starts = new Map();
+  for (const g of ordered) { starts.set(g.author, flat.length); for (const it of g.items) flat.push(it); }
+  return { flat, starts };
 }
 
 /** The composer — a floating glass PILL, not a card at the top. Port of FeedView.swift ▸
@@ -1931,7 +1991,7 @@ function addStoryDialog() {
   //    author sees is exactly what ships. Drag anywhere on it to place the caption.
   const mediaLayer = el("div", { style: "position:absolute;inset:0" });
   // container-type on an inset:0 overlay, not the frame itself — same Chromium `contain: size`
-  // trap viewStory documents.
+  // trap storyContentNode documents.
   const capLayer = el("div", { style: "position:absolute;inset:0;container-type:size;pointer-events:none" });
   const hint = el("div", { style: "position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.5);font-size:12px;pointer-events:none" }, "Preview");
   const frame = el("div", { style: "position:relative;width:min(200px,55vw);aspect-ratio:9/16;margin:0 auto;border-radius:12px;overflow:hidden;background:#000;cursor:grab;touch-action:none" },
@@ -1998,13 +2058,21 @@ function addStoryDialog() {
   renderMedia();
 }
 
-function viewStory(it) {
+/** The rendered CONTENT of a single story — framed media (author zoom/pan preserved), the styled
+ *  caption overlay, and a location chip — as a centered column. Shared by the story viewer so paging
+ *  between stories only has to swap this node. Story videos autoplay muted (honouring the global sound
+ *  toggle) and carry NO native controls, so a tap lands on the pager instead of the scrubber. */
+function storyContentNode(it) {
   const inner = el("div", { class: "col", style: "align-items:center" });
   const storyRef = (it.media || []).find((r) => !r.startsWith("geo:") && !r.startsWith("a:"));
   const cap = StoryCaptions.overlay(it.body);
   const tf = StoryCaptions.decode(it.body).spec;
   if (storyRef) {
-    const m = storyRef.startsWith("v:") ? el("video", { "data-ref": storyRef, controls: "", autoplay: "", style: "max-width:100%;border-radius:12px;display:block" }) : el("img", { "data-ref": storyRef, style: "max-width:100%;border-radius:12px;display:block" });
+    const m = storyRef.startsWith("v:")
+      ? el("video", Object.assign({ "data-ref": storyRef, "data-video": "1", autoplay: "", loop: "", playsinline: "",
+          style: "max-width:100%;max-height:78vh;border-radius:12px;display:block" },
+          state.videoSoundOn && !callAudioActive() ? {} : { muted: "" }))
+      : el("img", { "data-ref": storyRef, style: "max-width:100%;max-height:78vh;border-radius:12px;display:block" });
     // The caption's cqh units size it against the MEDIA, like the phones do — but `container-type:
     // size` applies `contain: size`, which tells the box to lay out as if it had NO contents. On the
     // wrapper itself that is fatal: an auto-sized inline-block collapses to 0x0, taking the image
@@ -2033,9 +2101,96 @@ function viewStory(it) {
   }
   const storyGeo = (it.media || []).map(parseGeo).find(Boolean);
   if (storyGeo) inner.append(geoChip(storyGeo));
-  const m = el("div", {}, el("h2", {}, it.author_name + "'s story"), inner);
-  modal(m);
-  hydrateMedia(m, "default");
+  return inner;
+}
+
+/** The story viewer — pages through a FLAT, author-grouped list (groupStoriesFlat). A CLICK advances
+ *  one story (the left third steps back); ArrowDown/ArrowUp/Space do the same. A horizontal SWIPE —
+ *  or the Left/Right arrow keys, the desktop equivalent — skips WHOLE users: past the rest of THIS
+ *  person's stories to the next person's first (dismiss past the last), or back to the previous
+ *  person. Port of iOS Stories.swift skipToNextUser / skipToPrevUser (users = runs of the same author
+ *  in the flat list). A single item just shows that story. */
+function viewStories(list, startIndex = 0) {
+  const stories = (list || []).filter((it) =>
+    (it.media || []).some((r) => !r.startsWith("geo:") && !r.startsWith("a:")) || StoryCaptions.decode(it.body).text);
+  if (!stories.length) return;
+  let index = Math.max(0, Math.min(startIndex, stories.length - 1));
+  const author = (i) => (stories[i] && stories[i].author_name) || "";
+
+  const title = el("h2", { style: "margin:6px 0 0" });
+  const bars = el("div", { class: "story-progress" });
+  const slot = el("div", { class: "col", style: "align-items:center;min-width:min(88vw,420px)" });
+  const hint = el("div", { class: "muted small", style: "text-align:center;margin-top:8px" },
+    "Tap to advance · ← → skip person · swipe to skip");
+  const card = el("div", { style: "min-width:min(88vw,420px)" }, bars, title, slot, hint);
+  const close = modal(card);
+
+  const cleanup = () => { window.removeEventListener("keydown", onKey, true); mo.disconnect(); };
+  const done = () => { close(); cleanup(); };
+
+  const show = () => {
+    const it = stories[index];
+    title.textContent = (it.is_me ? "You" : it.author_name) + "'s story";
+    // One progress segment per story in THIS person's run, filled through the current one.
+    let runStart = index; while (runStart > 0 && author(runStart - 1) === author(index)) runStart--;
+    let runEnd = index; while (runEnd < stories.length - 1 && author(runEnd + 1) === author(index)) runEnd++;
+    bars.replaceChildren(...Array.from({ length: runEnd - runStart + 1 }, (_, k) =>
+      el("span", { class: "seg" + (runStart + k <= index ? " on" : "") })));
+    slot.replaceChildren(storyContentNode(it));
+    hydrateMedia(slot, it._circle || state.activeCircle || "default");
+  };
+
+  const nextStory = () => { if (index < stories.length - 1) { index++; show(); } else done(); };
+  const prevStory = () => { if (index > 0) { index--; show(); } };
+  // Swipe-left / ArrowRight: skip the rest of THIS person's run → the next person's first story (past
+  // the last person, dismiss).
+  const nextUser = () => {
+    const cur = author(index);
+    let j = index + 1; while (j < stories.length && author(j) === cur) j++;
+    if (j < stories.length) { index = j; show(); } else done();
+  };
+  // Swipe-right / ArrowLeft: back to the start of this person's run if we're partway in, else the
+  // previous person's first story.
+  const prevUser = () => {
+    const cur = author(index);
+    let runStart = index; while (runStart > 0 && author(runStart - 1) === cur) runStart--;
+    if (index > runStart) { index = runStart; show(); return; }
+    if (runStart === 0) return;
+    const prevAuthor = author(runStart - 1);
+    let ps = runStart - 1; while (ps > 0 && author(ps - 1) === prevAuthor) ps--;
+    index = ps; show();
+  };
+
+  const onKey = (e) => {
+    if (!card.isConnected) return;
+    if (e.key === "ArrowRight") { e.preventDefault(); nextUser(); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); prevUser(); }
+    else if (e.key === "ArrowDown" || e.key === " ") { e.preventDefault(); nextStory(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); prevStory(); }
+  };
+  window.addEventListener("keydown", onKey, true);
+
+  // Pointer: a tap advances a story (left third steps back); a horizontal DRAG skips whole users
+  // (drag left → next person, drag right → previous), and a downward drag dismisses — mirroring the
+  // phones' gestures.
+  let sx = 0, sy = 0, dragging = false;
+  slot.addEventListener("pointerdown", (e) => { dragging = true; sx = e.clientX; sy = e.clientY; });
+  slot.addEventListener("pointerup", (e) => {
+    if (!dragging) return; dragging = false;
+    const dx = e.clientX - sx, dy = e.clientY - sy;
+    if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 60) { dx < 0 ? nextUser() : prevUser(); return; }
+    if (dy > 90 && Math.abs(dy) > Math.abs(dx)) { done(); return; }
+    if (Math.abs(dx) < 10 && Math.abs(dy) < 10) {
+      const r = slot.getBoundingClientRect();
+      (e.clientX - r.left) < r.width * 0.33 ? prevStory() : nextStory();
+    }
+  });
+
+  // Global Escape / a backdrop click empties #modal-root — tear our listeners down when that happens.
+  const mo = new MutationObserver(() => { if (!card.isConnected) cleanup(); });
+  mo.observe($("#modal-root"), { childList: true, subtree: true });
+
+  show();
 }
 
 // ---- Messages --------------------------------------------------------------------------
@@ -2583,14 +2738,18 @@ async function renderYou() {
 
   const body = el("div", { class: "feed-list" }, head);
   if (myStories.length) {
+    // A GALLERY of your own stories (not an identity ring) → each tile shows its OWN content
+    // thumbnail (matching a profile page), and opens the viewer at that story. macOS ContentView ▸
+    // YouView.
+    const gallery = myStories.map((s) => ({ ...s, _circle: s._circle }));
     const tray = el("div", { class: "story-tray" });
-    for (const s of myStories) {
+    gallery.forEach((s, idx) => {
       const inner = el("div", {});
       const cover = (s.media || []).find((r) => !r.startsWith("geo:") && !r.startsWith("a:"));
       if (cover) inner.append(el("img", { "data-ref": cover }));
       else inner.append(icon("photo", "story-ph"));
-      tray.append(el("button", { class: "story-ring cover", onclick: () => viewStory(s) }, el("div", { class: "ring" }, inner)));
-    }
+      tray.append(el("button", { class: "story-ring cover", onclick: () => viewStories(gallery, idx) }, el("div", { class: "ring" }, inner)));
+    });
     body.append(el("div", { class: "card" }, el("div", { class: "section-label" }, "Your stories"), tray));
   }
   if (!myPosts.length) {

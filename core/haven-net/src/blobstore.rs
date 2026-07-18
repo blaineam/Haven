@@ -1007,6 +1007,17 @@ pub(crate) fn blob_forbidden(auth: &Arc<Mutex<RelayAuth>>, peer: &str, verb: u8,
     if verb == VERB_PUT && key.starts_with(DEVROSTER_PREFIX) && key.len() > DEVROSTER_PREFIX.len() {
         return false;
     }
+    // A discovery record (`haven/disc/<node-hex>`) is self-authenticating for exactly the same
+    // reason, and open for the same reason: a node no relay has heard of must be able to say where
+    // it is, or it can never be found. Writes are re-verified by `verify_discovery_put` before any
+    // bytes are stored; reads carry only routing hints the node published about ITSELF, which is
+    // strictly less exposure than today's n0 DNS (where anyone on the internet may resolve any node
+    // id). `discovery_node` matches ONE exact node key — never a prefix — so LIST/TOUCH/AGES fall
+    // through to the membership + broad-prefix gates below and a relay cannot be enumerated for the
+    // social graph.
+    if matches!(verb, VERB_PUT | VERB_GET | VERB_HAS) && crate::discovery::discovery_node(key).is_some() {
+        return false;
+    }
     // Everything below requires the caller to be a member of SOME circle this relay serves. This
     // is the check that was entirely absent on the HTTP transport, and it is what a shared bearer
     // token can never establish: the token says "someone gave me a secret", not "I am Alice".
@@ -1124,6 +1135,17 @@ pub(crate) async fn handle_request(
             } else {
                 None
             };
+
+            // Same obligation for discovery records: `blob_forbidden` lets an unknown node PUT one,
+            // so the record's SELF-signature is the only trust. Verify (with rollback defense) on
+            // THIS transport too — a relay must never be a weaker boundary on iroh than on HTTP.
+            if let Some(node) = crate::discovery::discovery_node(&key) {
+                if crate::discovery::verify_discovery_put(&root, node, &body).is_none() {
+                    let _ = send.write_all(b"ERR forbidden").await;
+                    let _ = send.finish();
+                    return Ok(());
+                }
+            }
 
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).ok();

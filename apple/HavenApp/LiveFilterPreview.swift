@@ -28,12 +28,16 @@ import AppKit
 /// for the Metal view to render, and periodically emits a small thumbnail for the filter strip
 /// swatches. Orientation + front-camera mirroring are handled on the capture *connection* by the
 /// owner, so the `CIImage` here is already upright and correctly mirrored.
-final class LiveFrameTap: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
+final class LiveFrameTap: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private var _latest: CIImage?
     private var frameCount = 0
     /// Called on the main queue ~once a second with a downscaled still for the `FilterStrip`.
     var onThumbnail: ((PlatformImage) -> Void)?
+    /// Set while the story camera is recording: the SAME live frames that feed the preview are written to
+    /// this recorder (video) and its audio output is routed here too — one video path, no movie-file output
+    /// to conflict. `nil` when not recording. Owned by the camera; only read here.
+    var recorder: StoryVideoRecorder?
 
     /// A lightweight CPU context just for the (small, infrequent) thumbnail stills.
     private static let thumbContext = CIContext(options: [.useSoftwareRenderer: false])
@@ -43,9 +47,19 @@ final class LiveFrameTap: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
+        // AUDIO output shares this delegate signature — route it straight to the recorder (no image buffer).
+        if let fmt = CMSampleBufferGetFormatDescription(sampleBuffer),
+           CMFormatDescriptionGetMediaType(fmt) == kCMMediaType_Audio {
+            recorder?.appendAudio(sampleBuffer)
+            return
+        }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let image = CIImage(cvPixelBuffer: pixelBuffer)
         lock.lock(); _latest = image; lock.unlock()
+        // Record the SAME live frame (the recorder orients + writes it) — one video path, no movie output.
+        if let recorder, recorder.isRecording {
+            recorder.appendVideo(image, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+        }
 
         // Refresh the filter-strip thumbnail a few times a second (every ~8 frames at 30fps) so the
         // swatches feel close to the live feed, without paying to render 11 filtered thumbnails on

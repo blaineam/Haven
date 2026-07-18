@@ -882,7 +882,7 @@ final class MediaStore: ObservableObject {
 
     /// Downscale so the longest side is at most `maxDimension` (keeps aspect ratio).
     /// Cross-platform via `PlatformImage.downscaled` (Platform.swift).
-    static func downscale(_ image: PlatformImage, maxDimension: CGFloat) -> PlatformImage {
+    nonisolated static func downscale(_ image: PlatformImage, maxDimension: CGFloat) -> PlatformImage {
         image.downscaled(maxDimension: maxDimension)
     }
 
@@ -1057,9 +1057,6 @@ final class MediaStore: ObservableObject {
     /// Video refs whose poster is currently being generated off-main — so scroll doesn't kick off a second
     /// generation for the same tile on every frame. Touched only on the main thread.
     private var posterInFlight = Set<String>()
-    /// Image-thumbnail decodes currently running off the main thread (keyed by "<ref>@<bucket>"), so a
-    /// fast scroll doesn't kick a second decode for a tile that's already decoding. Touched only on main.
-    private var thumbInFlight = Set<String>()
     private let thumbCache: NSCache<NSString, Boxed> = {
         let c = NSCache<NSString, Boxed>()
         c.totalCostLimit = 48 * 1024 * 1024   // ~48 MB of decoded thumbnails, then evict LRU
@@ -1072,27 +1069,12 @@ final class MediaStore: ObservableObject {
         let kind = MediaKind(ref: ref)
         let t: PlatformImage?
         if kind == .image, let url = fileURL(ref), FileManager.default.fileExists(atPath: url.path) {
-            // Decode the DOWNSAMPLED bitmap OFF the main thread (same as video posters below). Doing it
-            // synchronously here was the feed-scroll hitch: a fast flick brings several new tiles on screen
-            // at once and each ran a 1200px ImageIO decode inline on the main thread — the scroll froze,
-            // then jumped to catch up with the fling's momentum. Return nil now (the tile shows its loading
-            // placeholder for a frame) and nudge a refresh once the bitmap is cached. Never materialize the
-            // full 2560px image in memory (that spike OOM-jetsammed iOS on launch) — ImageIO downsamples.
-            if !thumbInFlight.contains(key as String) {
-                thumbInFlight.insert(key as String)
-                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                    guard let self else { return }
-                    let img = Self.downsampled(at: url, maxPixel: maxDimension)
-                    DispatchQueue.main.async {
-                        self.thumbInFlight.remove(key as String)
-                        guard let img else { return }
-                        let mi = MediaItem(id: ref, kind: .image, image: img, videoURL: nil)
-                        self.thumbCache.setObject(Boxed(mi), forKey: key, cost: Self.decodedCost(mi))
-                        FeedStore.shared.scheduleRefresh()   // re-render so the now-cached thumbnail shows
-                    }
-                }
-            }
-            return nil
+            // Decode a DOWNSAMPLED bitmap straight from the file (ImageIO never materializes the full 2560px
+            // image — that spike OOM-jetsammed iOS on launch). SYNCHRONOUS here — this path is for NON-scroll
+            // callers (comment chips, share). The feed's scroll hot path uses `FeedImage` (self-loading,
+            // off-main), which is what keeps a fast flick from decoding on the main thread WITHOUT the
+            // per-decode `scheduleRefresh` that rebuilt the whole feed and flashed already-shown media.
+            t = Self.downsampled(at: url, maxPixel: maxDimension)
         } else if kind == .video, let url = fileURL(ref), FileManager.default.fileExists(atPath: url.path) {
             // Video poster generation (AVAssetImageGenerator) is EXPENSIVE and was running on the main thread
             // the first time each video tile scrolled into view — that's the scroll choppiness. If it's
@@ -1126,6 +1108,34 @@ final class MediaStore: ObservableObject {
         return thumb
     }
 
+    /// Cache-only peek — no decode, no side effects. Lets a self-loading image show INSTANTLY when the
+    /// thumbnail is already resident (no placeholder flash on media you've already seen).
+    func cachedThumbnail(_ ref: String, maxDimension: CGFloat) -> PlatformImage? {
+        thumbCache.object(forKey: "\(ref)@\(Int(maxDimension.rounded()))" as NSString)?.item.image
+    }
+
+    /// Decode a downsampled thumbnail OFF the main thread and cache it, WITHOUT nudging any global feed
+    /// refresh. `FeedImage` awaits this and swaps the result into JUST itself — so a fast scroll never
+    /// decodes on the main thread AND a finished decode never re-renders (or flashes) the rest of the feed.
+    func thumbnailAsync(_ ref: String, maxDimension: CGFloat) async -> PlatformImage? {
+        if let cached = cachedThumbnail(ref, maxDimension: maxDimension) { return cached }
+        guard let url = fileURL(ref), FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let isVideo = (MediaKind(ref: ref) == .video)
+        let img: PlatformImage? = await Task.detached(priority: .userInitiated) {
+            if isVideo {
+                guard let poster = Self.poster(for: url) else { return nil }
+                return max(poster.size.width, poster.size.height) <= maxDimension ? poster
+                                                                                   : Self.downscale(poster, maxDimension: maxDimension)
+            }
+            return Self.downsampled(at: url, maxPixel: maxDimension)
+        }.value
+        if let img {
+            let mi = MediaItem(id: ref, kind: isVideo ? .video : .image, image: img, videoURL: isVideo ? url : nil)
+            thumbCache.setObject(Boxed(mi), forKey: "\(ref)@\(Int(maxDimension.rounded()))" as NSString, cost: Self.decodedCost(mi))
+        }
+        return img
+    }
+
     /// Pixel dimensions of a media ref WITHOUT decoding the full bitmap — ImageIO reads just the header for
     /// images; videos use the (cached, off-main) poster if present, else a sane default. Used for feed
     /// aspect ratios during scroll, where decoding the full image only to read `.size` was a main-thread hitch.
@@ -1155,7 +1165,7 @@ final class MediaStore: ObservableObject {
 
     /// Decode a downsampled image directly from a file via ImageIO — peak memory is the THUMBNAIL size,
     /// not the full bitmap. This is the memory-safe way to make feed thumbnails.
-    static func downsampled(at url: URL, maxPixel: CGFloat) -> PlatformImage? {
+    nonisolated static func downsampled(at url: URL, maxPixel: CGFloat) -> PlatformImage? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -1544,5 +1554,44 @@ struct MediaCleanupView: View {
         selection.removeAll()
         working = false
         await reload()
+    }
+}
+
+/// A self-loading feed thumbnail. Shows the cached bitmap instantly if it's resident, otherwise decodes it
+/// OFF the main thread (`thumbnailAsync`) and swaps it into JUST this view — never a global feed refresh.
+/// That's what lets a fast scroll neither hitch (no main-thread decode) NOR flash (a finished decode
+/// re-renders only this cell, not the whole feed + every blurred backdrop). `.task(id: ref)` reloads it
+/// correctly when a lazy cell is reused for a different post.
+struct FeedImage<Placeholder: View>: View {
+    let ref: String
+    var maxDimension: CGFloat = 1200
+    var contentMode: ContentMode = .fit
+    @ViewBuilder var placeholder: () -> Placeholder
+    @State private var img: PlatformImage?
+    @State private var loadedRef: String?
+    @State private var shown = false   // drives an OPACITY-only fade (never a layout animation)
+
+    var body: some View {
+        Group {
+            if let img, loadedRef == ref {
+                // Fade via opacity ONLY — an `.animation(value:)`/`.transition` on a view being inserted
+                // into a scrolling LazyVStack bleeds into the cell's LAYOUT and jitters the scroll position.
+                // A plain opacity state animated in `onAppear` fades the image without touching layout.
+                Image(platformImage: img).resizable().aspectRatio(contentMode: contentMode)
+                    .opacity(shown ? 1 : 0)
+                    .onAppear { withAnimation(.easeOut(duration: 0.22)) { shown = true } }
+            } else {
+                placeholder()
+            }
+        }
+        .task(id: ref) {
+            shown = false
+            if let cached = MediaStore.shared.cachedThumbnail(ref, maxDimension: maxDimension) {
+                img = cached; loadedRef = ref; shown = true; return   // already resident → no fade needed
+            }
+            img = nil; loadedRef = nil
+            let decoded = await MediaStore.shared.thumbnailAsync(ref, maxDimension: maxDimension)
+            if !Task.isCancelled { img = decoded; loadedRef = ref }
+        }
     }
 }

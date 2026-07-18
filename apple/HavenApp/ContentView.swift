@@ -162,15 +162,19 @@ struct YouView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 12) {
-                    ForEach(Array(feed.myStories.enumerated()), id: \.element.id) { idx, _ in
+                    ForEach(Array(feed.myStories.enumerated()), id: \.element.id) { idx, s in
                         Button { storyIndex = idx; showStories = true } label: {
                             ZStack {
                                 Circle().fill(LinearGradient(colors: [HavenTheme.violet, HavenTheme.pink, HavenTheme.amber],
                                                              startPoint: .topLeading, endPoint: .bottomTrailing))
                                     .frame(width: 64, height: 64)
-                                // The ring is an identity chip → show MY profile picture, not the story's
-                                // media (Instagram-style). The media is what you see when you open it.
-                                HavenAvatar(image: profile.avatar, emoji: profile.emoji, size: 56)
+                                // This is a GALLERY of your own stories (not a single identity ring) → each
+                                // shows its OWN content thumbnail, matching a user's profile page. Loaded via
+                                // FeedImage (off-main, flash-free).
+                                if let ref = s.media.first {
+                                    FeedImage(ref: ref, maxDimension: 160, contentMode: .fill) { Color.clear }
+                                        .frame(width: 56, height: 56).clipShape(Circle())
+                                }
                             }
                         }
                         .buttonStyle(.plain)

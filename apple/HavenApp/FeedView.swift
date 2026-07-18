@@ -4478,17 +4478,14 @@ struct PostCard: View {
                                    inCarousel: inCarousel,
                                    onScrubbing: onScrubbing)
                     .background { pageBackdrop(ref, containerAspect: containerAspect) }
-            } else if let img = MediaStore.shared.thumbnail(ref, maxDimension: 1200) {
-                // A ~1200px thumbnail (not the 2560px original) keeps the single-image post crisp at the
-                // feed's ≤480pt frame without re-sampling a giant bitmap every scroll frame. Zoom uses full-res.
-                // No `?? m.image` fallback: thumbnail() now decodes off-main and returns nil until ready, so
-                // falling back to the full-res synchronous decode would reintroduce the exact scroll hitch.
-                Image(platformImage: img).resizable().scaledToFit()      // show the whole image (no crop)
-                    // Take the WHOLE page so the backdrop fills the letterbox, not just the fitted image.
+            } else {
+                // Non-video → a ~1200px thumbnail (not the 2560px original) via the self-loading `FeedImage`:
+                // it decodes OFF the main thread and swaps into only itself, so a fast flick never hitches on
+                // a main-thread decode AND a finished decode never triggers a feed-wide refresh (the flash of
+                // already-shown media + re-rasterized blurs). Zoom uses full-res. Shows the whole image (fit).
+                FeedImage(ref: ref, maxDimension: 1200, contentMode: .fit) { mediaLoadingPlaceholder(ref) }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background { pageBackdrop(ref, containerAspect: containerAspect) }
-            } else {
-                mediaLoadingPlaceholder(ref)
             }
         } else {
             // Referenced but not here yet — it's still coming from the sender / mailbox.
@@ -4530,11 +4527,11 @@ struct PostCard: View {
     /// The 1200px thumb is already resident — it's what the page itself draws — so the fallback is
     /// free in the case that matters. Blurring a bigger bitmap costs nothing extra once rasterized.
     private func backdropSource(_ ref: String) -> PlatformImage? {
-        // Thumbnails only — both decode off-main now. NO `item(ref)?.image` fallback: the backdrop is a
-        // decorative blur, so a full-res synchronous decode for it would be the worst possible place to
-        // pay a main-thread hitch during a scroll. It fills in a frame later with the tile.
-        MediaStore.shared.thumbnail(ref, maxDimension: 64)
-            ?? MediaStore.shared.thumbnail(ref, maxDimension: 1200)
+        // Cache PEEK only — the backdrop is a decorative blur, so it must never decode (a main-thread decode
+        // here is the worst place to hitch a scroll, and it caused the flash). It shows once `FeedImage` has
+        // decoded + cached the tile's own 1200px thumbnail; until then the base black/backdrop-less page is fine.
+        MediaStore.shared.cachedThumbnail(ref, maxDimension: 64)
+            ?? MediaStore.shared.cachedThumbnail(ref, maxDimension: 1200)
     }
 
     /// The carousel's per-page backdrop: only pay for it when the page's media actually letterboxes
@@ -5215,10 +5212,22 @@ struct UserProfileView: View {
                                 onEdit: { _ in },
                                 onUnsend: { }
                             )
+                            // Report center position so a profile post's video AUTO-PLAYS when centered,
+                            // exactly like the main feed (the profile list was missing this, so videos here
+                            // only ever played on a manual scrub).
+                            .background(GeometryReader { geo in
+                                Color.clear.preference(key: PostCenterKey.self, value: [item.id: geo.frame(in: .global).midY])
+                            })
                         }
                     }
                 }
                 .padding(16)
+            }
+            .onPreferenceChange(PostCenterKey.self) { centers in
+                // The profile post nearest the vertical center becomes active → its video plays + loops.
+                let target = PlatformScreen.bounds.midY
+                let nearest = centers.min { abs($0.value - target) < abs($1.value - target) }
+                AudioCoordinator.shared.center(nearest?.key)
             }
         }
         .navigationTitle(resolvedName)
@@ -5380,14 +5389,18 @@ struct ProfileView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 12) {
-                    ForEach(Array(store.myStories.enumerated()), id: \.element.id) { idx, _ in
+                    ForEach(Array(store.myStories.enumerated()), id: \.element.id) { idx, s in
                         Button { storyIndex = idx; showStories = true } label: {
                             ZStack {
                                 Circle().fill(LinearGradient(colors: [HavenTheme.violet, HavenTheme.pink, HavenTheme.amber],
                                                              startPoint: .topLeading, endPoint: .bottomTrailing))
                                     .frame(width: 64, height: 64)
-                                // Identity chip → my profile picture, not the story media.
-                                HavenAvatar(image: ProfileStore.shared.avatar, emoji: ProfileStore.shared.emoji, size: 56)
+                                // Gallery of your own stories → each shows its OWN content thumbnail (matches
+                                // the You tab). Off-main, flash-free via FeedImage.
+                                if let ref = s.media.first {
+                                    FeedImage(ref: ref, maxDimension: 160, contentMode: .fill) { Color.clear }
+                                        .frame(width: 56, height: 56).clipShape(Circle())
+                                }
                             }
                         }
                         .buttonStyle(.plain)

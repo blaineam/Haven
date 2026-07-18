@@ -61,6 +61,8 @@ final class CameraModel: NSObject, ObservableObject {
     // stays main-isolated.
     nonisolated(unsafe) let session = AVCaptureSession()
     nonisolated(unsafe) private let photoOutput = AVCapturePhotoOutput()
+    // Retained but NO LONGER ADDED to the session on iOS (see StoryVideoRecorder) — kept only so the shared
+    // stop()/configurePreviewConnection references compile; its connection is nil, so those calls no-op.
     nonisolated(unsafe) private let movieOutput = AVCaptureMovieFileOutput()
     private let queue = DispatchQueue(label: "haven.camera")
     // Live filtered preview: frames are tapped here and rendered through FilterEngine by the
@@ -68,6 +70,11 @@ final class CameraModel: NSObject, ObservableObject {
     // preview connection is always 90° (portrait), mirrored on the front camera.
     let frameTap = LiveFrameTap()   // @unchecked Sendable
     nonisolated(unsafe) private let videoDataOutput = AVCaptureVideoDataOutput()
+    // Video is recorded from the SAME live frame stream via AVAssetWriter (StoryVideoRecorder) instead of a
+    // second AVCaptureMovieFileOutput — running a movie file output alongside the preview data output is
+    // what iOS truncated ("records only ~0-1s"). Audio feeds the recorder from this data output.
+    nonisolated(unsafe) private let audioDataOutput = AVCaptureAudioDataOutput()
+    let recorder = StoryVideoRecorder()
 
     @Published var isRecording = false
     @Published var position: AVCaptureDevice.Position = .back
@@ -90,16 +97,20 @@ final class CameraModel: NSObject, ObservableObject {
     func start() {
         AVCaptureDevice.requestAccess(for: .video) { _ in }
         AVCaptureDevice.requestAccess(for: .audio) { _ in }
+        frameTap.recorder = recorder   // the tap writes live frames + routes audio to the recorder while recording
         queue.async { [weak self] in
             guard let self else { return }
             self.session.beginConfiguration()
             self.session.sessionPreset = .high
             self.configureInputs(position: .back)
             if self.session.canAddOutput(self.photoOutput) { self.session.addOutput(self.photoOutput) }
-            if self.session.canAddOutput(self.movieOutput) { self.session.addOutput(self.movieOutput) }
             if self.session.canAddOutput(self.videoDataOutput) {
                 self.videoDataOutput.wireLivePreview(tap: self.frameTap, queue: self.queue)
                 self.session.addOutput(self.videoDataOutput)
+            }
+            if self.session.canAddOutput(self.audioDataOutput) {
+                self.audioDataOutput.setSampleBufferDelegate(self.frameTap, queue: self.queue)
+                self.session.addOutput(self.audioDataOutput)
             }
             self.session.commitConfiguration()
             self.configurePreviewConnection()
@@ -224,20 +235,19 @@ final class CameraModel: NSObject, ObservableObject {
         }
     }
 
-    /// Start recording a clip. `maxSeconds` caps THIS clip (the remaining room under the 90s
-    /// story limit); recording auto-stops when it's reached.
+    /// Start recording a clip via the AVAssetWriter recorder (fed from the live frame stream — no movie
+    /// file output to conflict). `maxSeconds` caps THIS clip; recording auto-stops when it's reached.
     func startRecording(maxSeconds: Double = StoryCaptureModel.maxTotal, _ completion: @escaping (URL) -> Void) {
-        guard !movieOutput.isRecording, maxSeconds > 0.3 else { return }
+        guard !recorder.isRecording, maxSeconds > 0.3 else { return }
         onVideo = completion
         capSeconds = maxSeconds
         recordingSeconds = 0
+        // Orient each recorded frame upright like the preview. Record RAW (filterSpec = original): the
+        // composer/export bakes the chosen look exactly as before, so it isn't double-applied.
+        recorder.orientation = havenCameraOrientation(position: position)
+        recorder.filterSpec = HavenFilter.original.spec
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("story_\(UUID().uuidString).mov")
-        // Mirror the front camera so it matches the preview.
-        if let conn = movieOutput.connection(with: .video), conn.isVideoMirroringSupported {
-            conn.automaticallyAdjustsVideoMirroring = false
-            conn.isVideoMirrored = (position == .front)
-        }
-        movieOutput.startRecording(to: url, recordingDelegate: self)
+        recorder.begin(to: url)
         isRecording = true
         recordTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -250,8 +260,23 @@ final class CameraModel: NSObject, ObservableObject {
 
     func stopRecording() {
         recordTimer?.invalidate(); recordTimer = nil
-        guard movieOutput.isRecording else { return }
-        movieOutput.stopRecording()
+        recordingSeconds = 0            // reset the live counter so the next take's progress bar starts clean
+        guard recorder.isRecording else { isRecording = false; return }
+        isRecording = false
+        let cb = onVideo; onVideo = nil
+        Task { [weak self] in
+            guard let self else { return }
+            let url = await self.recorder.finish()
+            if let url, let cb { await MainActor.run { cb(url) } }
+        }
+    }
+
+    /// Clear any stuck recording state left by an aborted take. Called on the camera's onAppear so
+    /// re-entering always starts from a clean slate.
+    func resetRecordingState() {
+        recordTimer?.invalidate(); recordTimer = nil
+        recordingSeconds = 0
+        if recorder.isRecording { Task { _ = await recorder.finish() } }
         isRecording = false
     }
 }
@@ -433,8 +458,18 @@ final class CameraModel: NSObject, ObservableObject {
 
     func stopRecording() {
         recordTimer?.invalidate(); recordTimer = nil
+        recordingSeconds = 0            // reset the live counter so the next take's progress bar starts clean
         guard movieOutput.isRecording else { return }
         movieOutput.stopRecording()
+        isRecording = false
+    }
+
+    /// Clear any stuck recording state left by an aborted take (app backgrounded mid-record, a delegate
+    /// that never fired). Called on the camera's onAppear so re-entering always starts from a clean slate.
+    func resetRecordingState() {
+        recordTimer?.invalidate(); recordTimer = nil
+        recordingSeconds = 0
+        if movieOutput.isRecording { movieOutput.stopRecording() }
         isRecording = false
     }
 }
@@ -660,7 +695,7 @@ struct StoryCameraView: View {
         }
         .havenStatusBarHidden()
         .portraitLocked()
-        .onAppear { cam.start() }
+        .onAppear { cam.start(); cam.resetRecordingState() }
         .onDisappear { cam.stop(); dual.stop() }
         .sheet(isPresented: $showLibrary) {
             MediaPicker { refs in
@@ -785,9 +820,10 @@ struct StoryCameraView: View {
                     if !pressing && !capture.isFull {
                         pressing = true
                         recordStartZoom = cam.zoom
-                        // Hold ≳0.35s → start video; a quick release before that is a photo
-                        // (single-camera only — dual-camera is hold-to-record video).
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        // Hold ≳0.25s → start video; a quick release before that is a photo (single-camera
+                        // only — dual-camera is hold-to-record video). 0.25s (was 0.35) makes the hold-to-
+                        // record feel responsive without turning a quick photo tap into a stray clip.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                             guard pressing, !isRec else { return }
                             if dualMode { dual.corner = pipCorner; dual.startRecording(maxSeconds: capture.remaining) { url in finishVideo(url) } }
                             else { cam.startRecording(maxSeconds: capture.remaining) { url in finishVideo(url) } }
@@ -843,10 +879,18 @@ struct StoryCameraView: View {
     private func finishVideo(_ url: URL) {
         // A captured clip becomes a pending segment; stay in the camera to add more (or review).
         Task { @MainActor in
-            let secs = (try? await AVURLAsset(url: url).load(.duration).seconds) ?? 0.1
+            // Duration from the ORIGINAL recorded file (finalized in the recording delegate). A fumbled
+            // hold that barely started yields a sub-0.3s clip — SKIP it rather than add a 0-second black
+            // segment that also poisons `remaining` and dead-locks the shutter (the "won't record" bug).
+            let raw = (try? await AVURLAsset(url: url).load(.duration).seconds) ?? 0
+            guard raw.isFinite, raw >= 0.3 else { return }
+            // Grab a poster from the recorded file NOW (one fast frame, off the slow transcode path) so the
+            // segment thumbnail is never a black placeholder while the final blob re-encodes.
+            let poster = await Task.detached { MediaStore.poster(for: url) }.value
             let ref = await MediaStore.shared.addVideo(url: url)
-            let thumb = MediaStore.shared.item(ref)?.image
-            capture.add(ref: ref, duration: secs.isFinite ? secs : 0.1, thumb: thumb)
+            // Clamp so a long take can't push the total past the 90s cap (belt for isFull).
+            let dur = min(raw, max(0.3, capture.remaining))
+            capture.add(ref: ref, duration: dur, thumb: poster ?? MediaStore.shared.item(ref)?.image)
             if capture.isFull { showReview = true }
         }
     }
@@ -916,7 +960,7 @@ struct StoryCameraView: View {
             }
         }
         .portraitLocked()
-        .onAppear { cam.start() }
+        .onAppear { cam.start(); cam.resetRecordingState() }
         .onDisappear { cam.stop() }
         .havenFullScreenCover(isPresented: $showReview) {
             StoryReviewView(capture: capture,
@@ -994,10 +1038,18 @@ struct StoryCameraView: View {
     }
     private func finishVideo(_ url: URL) {
         Task { @MainActor in
-            let secs = (try? await AVURLAsset(url: url).load(.duration).seconds) ?? 0.1
+            // Duration from the ORIGINAL recorded file (finalized in the recording delegate). A fumbled
+            // hold that barely started yields a sub-0.3s clip — SKIP it rather than add a 0-second black
+            // segment that also poisons `remaining` and dead-locks the shutter (the "won't record" bug).
+            let raw = (try? await AVURLAsset(url: url).load(.duration).seconds) ?? 0
+            guard raw.isFinite, raw >= 0.3 else { return }
+            // Grab a poster from the recorded file NOW (one fast frame, off the slow transcode path) so the
+            // segment thumbnail is never a black placeholder while the final blob re-encodes.
+            let poster = await Task.detached { MediaStore.poster(for: url) }.value
             let ref = await MediaStore.shared.addVideo(url: url)
-            let thumb = MediaStore.shared.item(ref)?.image
-            capture.add(ref: ref, duration: secs.isFinite ? secs : 0.1, thumb: thumb)
+            // Clamp so a long take can't push the total past the 90s cap (belt for isFull).
+            let dur = min(raw, max(0.3, capture.remaining))
+            capture.add(ref: ref, duration: dur, thumb: poster ?? MediaStore.shared.item(ref)?.image)
             if capture.isFull { showReview = true }
         }
     }
@@ -1046,6 +1098,11 @@ struct StoryComposerView: View {
     @State private var captionSpec = StoryCaptions.Spec()
     @State private var musicStartMs = 0.0
     @State private var songPreviewing = false
+    /// The "usable section" the story actually plays: for a VIDEO story, the video's own length (so the
+    /// song preview loops the SAME window that ships and shares the video's loop period); for a photo, the
+    /// story's default slide length. Clamped to a sane preview range.
+    @State private var sectionLenMs: Double = 15_000
+    @State private var previewLoopTimer: Timer?
     @State private var kbHeight: CGFloat = 0   // live keyboard height (the editor ignores the safe area)
     // Accumulators so pinch/drag continue from the current framing each gesture.
     @State private var mediaBaseScale: CGFloat = 1
@@ -1163,6 +1220,7 @@ struct StoryComposerView: View {
         .sheet(isPresented: $showSongs) {
             SongPicker { t in track = t }
         }
+        .task { await loadSectionLen() }   // size the song's usable section to the video's own length
       }
       // NB: no `.ignoresSafeArea()` on the GeometryReader itself — it must stay inset so `proxy.safeAreaInsets`
       // reports the real device insets. The media/backdrop reach the screen edges via their own `.ignoresSafeArea()`.
@@ -1267,16 +1325,18 @@ struct StoryComposerView: View {
         }
     }
 
-    /// A clean HUD to scrub + preview which 15s of the song plays with the story.
+    /// A clean HUD to scrub + preview WHICH part of the song plays with the story. The window equals the
+    /// story's usable section (the video's length), and the preview loops just that window so you hear
+    /// exactly what ships, on repeat, matching the video's loop.
     private func musicSectionSlider(_ t: TrackRefFfi) -> some View {
-        let maxStart = Double(max(1, Int(t.durationMs) - 15_000))
+        let maxStart = Double(max(1, Int(t.durationMs) - Int(sectionLenMs)))
         return HStack(spacing: 12) {
             Button { toggleSongPreview(t) } label: {
                 Image(systemName: songPreviewing ? "pause.circle.fill" : "play.circle.fill")
                     .font(.title).foregroundStyle(.white)
             }
             VStack(alignment: .leading, spacing: 4) {
-                Text("15s clip from \(fmtTime(musicStartMs))")
+                Text("\(Int((sectionLenMs / 1000).rounded()))s clip from \(fmtTime(musicStartMs))")
                     .font(.caption.weight(.semibold)).foregroundStyle(.white)
                 Slider(value: $musicStartMs, in: 0...maxStart) { editing in
                     if !editing && songPreviewing { seekPreview() }
@@ -1301,19 +1361,44 @@ struct StoryComposerView: View {
         player.play()
         player.currentPlaybackTime = musicStartMs / 1000
         songPreviewing = true
+        // Loop JUST the usable section: when playback runs past the section end, seek back to the start,
+        // so the preview repeats the exact window that ships (and shares the video's loop period).
+        previewLoopTimer?.invalidate()
+        previewLoopTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
+            let end = (musicStartMs + sectionLenMs) / 1000
+            if player.currentPlaybackTime >= end || player.currentPlaybackTime < (musicStartMs / 1000) - 0.5 {
+                player.currentPlaybackTime = musicStartMs / 1000
+            }
+        }
     }
     private func stopSongPreview() {
+        previewLoopTimer?.invalidate(); previewLoopTimer = nil
         if songPreviewing { MPMusicPlayerController.applicationMusicPlayer.stop() }
         songPreviewing = false
     }
     private func seekPreview() {
         MPMusicPlayerController.applicationMusicPlayer.currentPlaybackTime = musicStartMs / 1000
     }
+    /// Size the song's usable section to the STORY's own length: a video story's section is the video's
+    /// duration (so the loop matches the clip that ships), clamped to a 3–15s preview range; a photo keeps
+    /// the 15s default. Runs off-main to read the asset, then updates on the main actor.
+    private func loadSectionLen() async {
+        guard let m = MediaStore.shared.item(draft.mediaRef), m.kind == .video, let url = m.videoURL else { return }
+        let secs = (try? await AVURLAsset(url: url).load(.duration).seconds) ?? 0
+        guard secs.isFinite, secs > 0 else { return }
+        let clamped = min(15.0, max(3.0, secs))
+        await MainActor.run {
+            sectionLenMs = clamped * 1000
+            // Keep the chosen start valid for the new (possibly larger) window.
+            musicStartMs = min(musicStartMs, Double(max(1, Int(track?.durationMs ?? 0) - Int(sectionLenMs))))
+        }
+    }
 #else
     // MediaPlayer (MPMusicPlayerController) is unavailable on native macOS — no-op previews.
     private func toggleSongPreview(_ t: TrackRefFfi) {}
     private func stopSongPreview() { songPreviewing = false }
     private func seekPreview() {}
+    private func loadSectionLen() async {}
 #endif
     private func fmtTime(_ ms: Double) -> String {
         let s = Int(ms / 1000); return String(format: "%d:%02d", s / 60, s % 60)

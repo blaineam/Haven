@@ -54,6 +54,11 @@ final class AudioCoordinator: ObservableObject {
     private var videoPlayer: AVPlayer?
     private var activeTrack: TrackRefFfi?   // the active post's song, so unmute can (re)start it
     private var fadeTimer: Timer?
+    /// A scroll-driven song start deferred until the feed settles on this post. Queuing a system-music
+    /// track runs a synchronous MPMediaQuery + setQueue on the MAIN thread; doing that for every music
+    /// post that flew past center during a fast flick was the last scroll stutter (video was already
+    /// smooth). Cancelled the moment the active post changes, so a flick starts NO music at all.
+    private var pendingMusicStart: DispatchWorkItem?
     /// True while the app is backgrounded. Blocks AUTO playback — the system music player keeps playing
     /// even when the app is in the background, so a background feed refresh re-running syncPlayback was
     /// kicking the post song on out of nowhere. Cleared when the app is active again.
@@ -64,7 +69,10 @@ final class AudioCoordinator: ObservableObject {
 
     /// Begin a post's audio. If a song is attached it plays (video muted). Otherwise the
     /// author's `muteVideo` choice decides: off → the video plays its own audio; on → silent.
-    func start(postId: String, track: TrackRefFfi?, video: AVPlayer?, muteVideo: Bool = false) {
+    /// `immediateMusic` = a deliberate tap (mute/speaker toggle), which must queue the song NOW so the
+    /// toggle acts on it. Scroll-driven activation leaves it false so the song start is DEBOUNCED until
+    /// the feed settles — that's what keeps a fast flick past music posts smooth.
+    func start(postId: String, track: TrackRefFfi?, video: AVPlayer?, muteVideo: Bool = false, immediateMusic: Bool = false) {
         if activePostId == postId { return }
         stop()
         activePostId = postId
@@ -79,7 +87,20 @@ final class AudioCoordinator: ObservableObject {
         video?.volume = playVideoAudio ? 1 : 0
         // Never auto-start the song while backgrounded (the system music player would play it audibly even
         // though the app isn't on screen). It resumes via ensureMusicPlaying when we're foreground again.
-        if let track, !backgrounded { MusicPlayback.shared.play(track) }
+        guard let track, !backgrounded else { return }
+        if immediateMusic {
+            MusicPlayback.shared.play(track)
+            return
+        }
+        // Scroll: defer the (main-thread-blocking) queue+play until this post stays active ~0.3s. A flick
+        // cancels each pending start via stop() before it fires, so no music work runs mid-scroll.
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.activePostId == postId else { return }
+            self.pendingMusicStart = nil
+            MusicPlayback.shared.play(track)
+        }
+        pendingMusicStart = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     /// Tap-to-toggle a music-only post's sound (pause/resume the song).
@@ -133,6 +154,7 @@ final class AudioCoordinator: ObservableObject {
     }
 
     func stop() {
+        pendingMusicStart?.cancel(); pendingMusicStart = nil   // drop a deferred scroll start that never settled
         fadeTimer?.invalidate(); fadeTimer = nil
         videoPlayer?.volume = 0
         videoPlayer = nil

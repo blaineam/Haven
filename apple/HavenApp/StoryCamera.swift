@@ -562,18 +562,23 @@ private struct CameraUnavailablePlaceholder: View {
 /// (split into 15s chunks at share); the whole session is capped at 90s combined.
 @MainActor
 final class StoryCaptureModel: ObservableObject {
-    nonisolated static let maxTotal = 90.0   // 1.5 min combined
-    static let chunk = 15.0      // each story chunk
+    nonisolated static let maxTotal = 120.0   // 2 min combined, hard cap
+    nonisolated static let chunk = 15.0       // each segment records at most 15s (auto-splits while holding)
+    static let maxSegments = 8                // …and no more than 8 segments in one go, whichever comes first
 
     struct Segment: Identifiable { let id = UUID(); let ref: String; let duration: Double; let thumb: PlatformImage? }
     @Published var segments: [Segment] = []
 
     var total: Double { segments.reduce(0) { $0 + $1.duration } }
     var remaining: Double { max(0, Self.maxTotal - total) }
-    var isFull: Bool { remaining < 0.5 }
+    /// Full when EITHER limit is hit: the 2-minute total, or 8 segments. A short segment counts against the
+    /// 8 but barely against the 2 minutes — so the segment cap is usually the binding one.
+    var isFull: Bool { remaining < 0.5 || segments.count >= Self.maxSegments }
+    /// Room left for the NEXT clip — the 15s segment cap, clamped to whatever's left of the 2-minute total.
+    var nextClipCap: Double { min(Self.chunk, remaining) }
 
     func add(ref: String, duration: Double, thumb: PlatformImage?) {
-        segments.append(Segment(ref: ref, duration: min(max(duration, 0.1), Self.maxTotal), thumb: thumb))
+        segments.append(Segment(ref: ref, duration: min(max(duration, 0.1), Self.chunk), thumb: thumb))
     }
     func remove(_ id: UUID) { segments.removeAll { $0.id == id } }
     func clear() { segments.removeAll() }
@@ -592,6 +597,7 @@ struct StoryCameraView: View {
     @StateObject private var dual = DualCameraRecorder()
     @StateObject private var capture = StoryCaptureModel()
     @State private var pressing = false
+    @State private var startedVideo = false   // this press became a video hold (auto-splits into 15s segments)
     @State private var showLibrary = false
     @State private var showReview = false
     @State private var draft: StoryDraft?
@@ -824,9 +830,12 @@ struct StoryCameraView: View {
                         // only — dual-camera is hold-to-record video). 0.25s (was 0.35) makes the hold-to-
                         // record feel responsive without turning a quick photo tap into a stray clip.
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                            guard pressing, !isRec else { return }
-                            if dualMode { dual.corner = pipCorner; dual.startRecording(maxSeconds: capture.remaining) { url in finishVideo(url) } }
-                            else { cam.startRecording(maxSeconds: capture.remaining) { url in finishVideo(url) } }
+                            guard pressing, !isRec, !capture.isFull else { return }
+                            startedVideo = true   // this press is a VIDEO hold → release stops, never a photo
+                            // Each clip records at most 15s (nextClipCap); if the user keeps holding past
+                            // that, finishVideo auto-starts the next segment — so a long hold auto-splits.
+                            if dualMode { dual.corner = pipCorner; dual.startRecording(maxSeconds: capture.nextClipCap) { url in finishVideo(url) } }
+                            else { cam.startRecording(maxSeconds: capture.nextClipCap) { url in finishVideo(url) } }
                         }
                     }
                     // Swipe up/down while hold-recording → zoom (single camera). Up = zoom in.
@@ -838,8 +847,19 @@ struct StoryCameraView: View {
                 }
                 .onEnded { _ in
                     pressing = false
-                    if isRec { dualMode ? dual.stopRecording() : cam.stopRecording() }
-                    else if !dualMode && !capture.isFull { cam.capturePhoto { img in finishPhoto(img) } }
+                    // A VIDEO hold (startedVideo): stop the current clip; the auto-split gap may have
+                    // isRec momentarily false, so gate on startedVideo — NOT isRec — so a release during
+                    // that gap doesn't fall through and snap a stray PHOTO. A quick tap (never started
+                    // video) takes a photo.
+                    if startedVideo {
+                        if isRec { dualMode ? dual.stopRecording() : cam.stopRecording() }
+                        startedVideo = false
+                    } else if !dualMode && !capture.isFull && capture.segments.isEmpty {
+                        // Instagram-style: the FIRST shutter action locks the mode. A tap taken before any
+                        // video is a photo story; once video segments exist the story is video-only, so a
+                        // stray tap is ignored (no photo, no jarring jump to the editor mid-capture).
+                        cam.capturePhoto { img in finishPhoto(img) }
+                    }
                 }
         )
     }
@@ -883,15 +903,24 @@ struct StoryCameraView: View {
             // hold that barely started yields a sub-0.3s clip — SKIP it rather than add a 0-second black
             // segment that also poisons `remaining` and dead-locks the shutter (the "won't record" bug).
             let raw = (try? await AVURLAsset(url: url).load(.duration).seconds) ?? 0
-            guard raw.isFinite, raw >= 0.3 else { return }
+            guard raw.isFinite, raw >= 0.3 else {
+                // A sub-0.3s fumble — but if the user is still holding with room left, resume the next
+                // segment so a brief hiccup doesn't abandon a continuous hold.
+                if pressing, !capture.isFull { cam.startRecording(maxSeconds: capture.nextClipCap) { u in finishVideo(u) } }
+                return
+            }
             // Grab a poster from the recorded file NOW (one fast frame, off the slow transcode path) so the
             // segment thumbnail is never a black placeholder while the final blob re-encodes.
             let poster = await Task.detached { MediaStore.poster(for: url) }.value
             let ref = await MediaStore.shared.addVideo(url: url)
-            // Clamp so a long take can't push the total past the 90s cap (belt for isFull).
-            let dur = min(raw, max(0.3, capture.remaining))
-            capture.add(ref: ref, duration: dur, thumb: poster ?? MediaStore.shared.item(ref)?.image)
-            if capture.isFull { showReview = true }
+            capture.add(ref: ref, duration: raw, thumb: poster ?? MediaStore.shared.item(ref)?.image)   // add clamps to 15s
+            // Continuous hold auto-splits: if the finger is still down and a cap isn't hit, immediately
+            // record the next 15s segment. When a cap IS hit (2min or 8 segments), go review.
+            if pressing, !capture.isFull {
+                cam.startRecording(maxSeconds: capture.nextClipCap) { u in finishVideo(u) }
+            } else if capture.isFull {
+                showReview = true
+            }
         }
     }
 }

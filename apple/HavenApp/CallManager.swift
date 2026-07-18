@@ -190,10 +190,19 @@ final class CallManager: NSObject, ObservableObject {
     /// Start (or join) a call. Pass the full set of OTHER participant hexes. A 1:1 DM call is just
     /// `others = [partnerHex]`. `name` is the group / DM-partner display name shown in the UI.
     func startCall(participants others: [String], name: String, sessionId: String? = nil) {
-        guard !active else { return }
+        // A swallowed tap is INVISIBLE in the UI — the button just does nothing — which reads as
+        // "I have to press call several times". Say so, and say what state swallowed it: `active` is
+        // only cleared by teardown(), so a call that ended without one strands every later attempt.
+        guard !active else {
+            HavenLog.call("startCall IGNORED — a call is already active (connecting=\(connecting) inCall=\(inCall) ringing=\(ringing) session=\(self.sessionId.prefix(8)))")
+            return
+        }
         // Never dial blocked people (defense in depth — circle calls also pre-filter removed members).
         let invitees = others.filter { !$0.isEmpty && $0 != myHex && !ConnectionsStore.shared.isBlocked($0) }
-        guard !invitees.isEmpty else { return }
+        guard !invitees.isEmpty else {
+            HavenLog.call("startCall IGNORED — no dialable invitees from \(others.count) participant(s)")
+            return
+        }
         self.sessionId = sessionId ?? UUID().uuidString
         self.roster = Set(invitees).union([myHex])
         self.peerName = name; connecting = true; isCaller = true; active = true
@@ -218,6 +227,9 @@ final class CallManager: NSObject, ObservableObject {
     /// Fired by CXStartCallAction: send the group invite to everyone + ONE push each, then keep
     /// retransmitting the iroh invite until somebody answers.
     private func beginOutgoing() {
+        // The ONLY place a call push is sent. If this never logs, the callee was never rung — no
+        // amount of looking at the worker or APNs will explain it, because nothing was ever sent.
+        HavenLog.call("beginOutgoing — \(invitees().count) invitee(s), callKit=\(useCallKit) session=\(sessionId.prefix(8))")
         CallTones.shared.startRingback()   // gentle dialing loop until the first peer connects
         sendInvites()
         for p in invitees() { FeedStore.shared.pushCallInvite(to: p, callerName: myName) }

@@ -127,13 +127,30 @@ final class PushManager: NSObject, ObservableObject {
         return ["ts": ts, "sig": sig.base64EncodedString()]
     }
 
+    /// Every push-worker call reports its outcome. This was fire-and-forget: a rejected registration
+    /// (401 from `verifyReg`) or a `/call` that never rang looked identical to success from the device,
+    /// so "calls don't ring" was undiagnosable from the client side. The body is logged only for a
+    /// FAILING status — it carries no secret (tokens are already the thing being registered), and on
+    /// success there's nothing to say.
     private func post(_ path: String, _ body: [String: Any]) {
         guard let url = URL(string: Self.relay + path) else { return }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        URLSession.shared.dataTask(with: req).resume()
+        URLSession.shared.dataTask(with: req) { data, resp, err in
+            if let err {
+                HavenLog.call("push \(path) FAILED to send: \(err.localizedDescription)")
+                return
+            }
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                HavenLog.call("push \(path) ok")
+            } else {
+                let reply = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                HavenLog.call("push \(path) HTTP \(code): \(reply.prefix(200))")
+            }
+        }.resume()
     }
 }
 

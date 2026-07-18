@@ -2774,11 +2774,17 @@ final class FeedStore: ObservableObject {
     /// isn't foregrounded). A sealed "Incoming call" banner the NSE decrypts. (True ring-from-
     /// killed needs a VoIP push — a follow-on.)
     func pushCallInvite(to nodeHex: String, callerName: String) {
-        guard let social else { return }
+        guard let social else {
+            HavenLog.call("pushCallInvite SKIPPED for \(nodeHex.prefix(8)) — no social handle yet")
+            return
+        }
         // Seal {caller name, caller node id} to the callee. Their PushKit handler decrypts it and
         // shows the system incoming-call screen via CallKit (ring-from-killed). Worker stays blind.
         let json = (try? JSONSerialization.data(withJSONObject: ["t": callerName, "h": myNodeHex])) ?? Data()
         let sealed = try? social.sealSignedNotification(recipientNodeHex: nodeHex, data: json)
+        // A nil seal still rings (the callee falls back to "Someone"), but it means the recipient
+        // bundle didn't resolve — worth knowing, since that same lookup gates the call frames.
+        if sealed == nil { HavenLog.call("pushCallInvite: seal FAILED for \(nodeHex.prefix(8)) — ringing unnamed") }
         PushManager.shared.callPush(to: nodeHex, ciphertext: sealed?.base64EncodedString())
     }
 

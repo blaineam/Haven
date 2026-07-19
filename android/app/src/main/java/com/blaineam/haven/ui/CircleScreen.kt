@@ -1832,10 +1832,11 @@ fun PostCard(
                             postMenu = false
                         },
                     )
-                    // Reply to the AUTHOR privately, the same move a story reply makes: open (or
-                    // reuse) the DM with them and carry the post's media so they know which post you
-                    // mean. Never on your own post — that would DM yourself — and only when the
-                    // author resolves to a contact, since you can't DM someone you don't hold.
+                    // Reply to the AUTHOR privately: open (or reuse) the DM with them and STAGE a
+                    // draft referencing this post, unsent — referencing a post is the start of a
+                    // message, not one, so the link goes in the composer and the words stay yours.
+                    // Never on your own post — that would DM yourself — and only when the author
+                    // resolves to a contact, since you can't DM someone you don't hold.
                     if (!item.isMe) {
                         val authorHex = remember(item.authorShort, HavenNet.feedVersion.value) {
                             HavenNet.idHexFor(item.authorShort)
@@ -1846,9 +1847,11 @@ fun PostCard(
                                 text = { Text("Message $authorName", color = HavenTheme.textPrimary) },
                                 onClick = {
                                     postMenu = false
-                                    val refs = item.media.filter { !com.blaineam.haven.core.LocalMedia.isSynthetic(it) }
-                                    HavenNet.messageAuthor(item.authorShort, refs)
-                                        ?.let { HavenNet.setActiveCircle(it) }
+                                    // Staging sets DmDrafts.openThread, which RootScreen watches to
+                                    // switch to the Messages tab and MessagesScreen to open the
+                                    // thread. NOT setActiveCircle — that points the CIRCLE selector
+                                    // at a dm: id and lands you in the feed layout, not the chat.
+                                    HavenNet.messageAuthor(item.authorShort, circleId, item.id)
                                 },
                             )
                         }
@@ -1881,8 +1884,13 @@ fun PostCard(
         }
         if (item.body.isNotBlank()) {
             Spacer(Modifier.height(10.dp))
-            LinkedText(item.body, color = HavenTheme.textPrimary, fontSize = 15.sp)
-            LinkPreviewCard(item.body, Modifier.padding(top = 10.dp))
+            // The preview card below already names the destination, so the previewed url is dropped
+            // from the copy rather than repeated next to it — a shared post link is long enough to
+            // swamp the sentence around it. Only the FIRST url: a second link gets no card of its
+            // own, so stripping it would lose it. A post that was only a link becomes just its card.
+            val shown = remember(item.body) { bodyWithoutPreviewedUrl(item.body) }
+            if (shown.isNotBlank()) LinkedText(shown, color = HavenTheme.textPrimary, fontSize = 15.sp)
+            LinkPreviewCard(item.body, Modifier.padding(top = if (shown.isNotBlank()) 10.dp else 0.dp))
         }
 
         // Location pins render as a tap-to-open-Maps chip; photos/videos as a gallery.

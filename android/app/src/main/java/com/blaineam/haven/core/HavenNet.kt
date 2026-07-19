@@ -263,6 +263,7 @@ object HavenNet : InboundListener {
         DmPins.init(appContext)
         DmRead.init(appContext)
         PinnedMediaStore.init(appContext)   // device-pin retention exemption (storage management)
+        KeptStoriesStore.init(appContext)   // stories held on my profile past the 24h window
         EvictedMediaStore.init(appContext)  // deliberately-removed refs (no auto-refetch)
         MediaWantedStore.init(appContext)   // refs whose author we asked to put back (frames 31/32)
         MediaLimits.init(appContext)        // local age/size caps
@@ -1199,30 +1200,24 @@ object HavenNet : InboundListener {
     }
 
     /**
-     * DM a post's author about that post — the same move [replyToStory] makes, from the post's ⋯ menu.
+     * DM a post's author ABOUT that post, from the post's ⋯ menu — opens (or reuses) the DM and
+     * STAGES a draft referencing the post. Sends nothing.
      *
-     * Carries the post's MEDIA and not its body: echoing someone's own words back at them reads as a
-     * quote they didn't write, while the media is the unambiguous "this post". Returns the DM circle
-     * id immediately so the caller can switch to it; the media is re-sealed and sent in the
-     * background, because a blob is decrypted and re-encrypted whole and that is not a main-thread
-     * amount of work for a video.
+     * It used to re-seal the post's media into the DM circle and send it immediately, which
+     * published a message the user had not written yet. Referencing a post is the start of a
+     * message, not one. The reference is the post's LINK: a draft that re-seals a whole video into
+     * the DM does that work before the user has decided to send anything, and the link opens the
+     * real post — media and all — for anyone already in the circle. (The link is a pointer, not a
+     * capability; see [DeepLink].)
      *
-     * Media can't simply be forwarded by reference: every blob is sealed under the circle it was
-     * posted to, so a ref carried into a DM would be undecryptable there. It is re-stored under the
-     * DM's key, exactly as a story reply does.
+     * Returns the DM circle id, or null if the author isn't a contact we hold. The caller routes to
+     * the Messages surface — NOT [setActiveCircle], which points the CIRCLE selector at a `dm:` id
+     * and drops the user into the feed layout instead of the conversation.
      */
-    fun messageAuthor(authorShort: String, mediaRefs: List<String>): String? {
+    fun messageAuthor(authorShort: String, circleId: String, postId: String): String? {
         val contact = contacts.firstOrNull { it.idHex.startsWith(authorShort) } ?: return null
         val dmCircle = startDm(contact)
-        if (mediaRefs.isEmpty()) return dmCircle
-        scope.launch(Dispatchers.IO) {
-            val media = mediaRefs.mapNotNull { ref ->
-                LocalMedia.loadAnyCircle(ref)?.let {
-                    LocalMedia.store(dmCircle, it, isVideo = LocalMedia.isVideo(ref))
-                }
-            }
-            if (media.isNotEmpty()) withContext(Dispatchers.Main) { sendDm(dmCircle, "", media) }
-        }
+        DeepLink.postUrl(circleId, postId)?.let { DmDrafts.stage(dmCircle, it) }
         return dmCircle
     }
 

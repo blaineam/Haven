@@ -98,6 +98,19 @@ pub fn current_local(prefs: &Prefs, social: &HavenSocial) -> BTreeMap<String, Ve
         }
     }
 
+    // Stories kept to my profile. Carries its OWN per-entry timestamps and tombstones INSIDE the
+    // payload, so it merges rather than last-writer-wins: keeping story A on my phone and story B
+    // here must end with BOTH kept, and un-keeping must not be undone by a sibling's stale copy.
+    // Only published when non-empty so a fresh device can't blank a sibling's collection.
+    if !prefs.kept_stories.is_empty() || !prefs.kept_stories_removed.is_empty() {
+        if let Ok(data) = serde_json::to_vec(&crate::store::KeptStoriesWire {
+            kept: prefs.kept_stories.clone(),
+            removed: prefs.kept_stories_removed.clone(),
+        }) {
+            m.insert("setting:keptStories".into(), data);
+        }
+    }
+
     // Roster: contacts (full card, deterministic serde) + blocked list (marker).
     for c in &prefs.contacts {
         if let Ok(data) = serde_json::to_vec(c) {
@@ -328,6 +341,15 @@ pub fn apply_local(
                     changed = true;
                 }
             }
+        }
+    }
+
+    // Kept stories: per-entry LWW with tombstones, resolved inside the merge (which also pins the
+    // media of newly-arrived entries, or a story kept on a sibling would sync in and then be
+    // reclaimed by this device's cleanup sweeps).
+    if let Some(v) = get("setting:keptStories") {
+        if prefs.merge_kept_stories(v) {
+            changed = true;
         }
     }
 

@@ -2402,8 +2402,53 @@ function viewStories(list, startIndex = 0) {
   const slot = el("div", { class: "col", style: "align-items:center;min-width:min(88vw,420px)" });
   const hint = el("div", { class: "muted small", style: "text-align:center;margin-top:8px" },
     "Tap to advance · ← → skip person · swipe to skip");
-  const card = el("div", { style: "min-width:min(88vw,420px)" }, bars, title, slot, hint);
+  // KEEP — a TOGGLE that holds this story on MY PROFILE past the 24h window. It does NOT re-publish
+  // it: turning a story into a permanent post puts it back in the circle feed as a new thing
+  // everyone sees again, and wanting to hold on to something yourself is a different act from
+  // sharing it twice. A kept story still leaves everyone's story row on schedule.
+  //
+  // Deliberately a SIBLING of `slot`, not a child: `slot` carries the pointerdown/pointerup drag
+  // handlers, and a drag recogniser on an ancestor of a button swallows the button's click — the
+  // control lights up on press and then does nothing. Nothing interactive belongs inside the
+  // gesture layer.
+  const keepBtn = el("button", { class: "chip", style: "display:none" });
+  let keptIds = new Set();
+  const paintKeep = () => {
+    const it = stories[index];
+    if (!it || !it.is_me) { keepBtn.style.display = "none"; return; }
+    const on = keptIds.has(it.id);
+    keepBtn.style.display = "";
+    keepBtn.classList.toggle("tint-pink", on);
+    // Label AND tint change: a control that looks identical whether or not it is on reads as a dead
+    // button, which is exactly the complaint this replaced.
+    // Label AND tint, no glyph: this icon set has no bookmark, and a missing glyph would render as
+    // an empty box next to the word — worse than the word alone.
+    keepBtn.replaceChildren(on ? "Kept" : "Keep");
+    keepBtn.title = on ? "Kept on your profile" : "Keep on your profile";
+  };
+  keepBtn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const it = stories[index];
+    if (!it || !it.is_me) return;
+    const entry = {
+      id: it.id, body: it.body || "", media: it.media || [],
+      createdAt: Number(it.created_at) || 0,
+      musicCatalogId: it.music ? it.music.catalog_id : null,
+      musicTitle: it.music ? it.music.title : null,
+      musicArtist: it.music ? it.music.artist : null,
+      musicArtworkUrl: it.music ? it.music.artwork_url : null,
+      musicDurationMs: it.music ? Number(it.music.duration_ms) || 0 : null,
+    };
+    const on = await invoke("toggle_kept_story", { entry }).catch(() => null);
+    if (on === null) { toast("Couldn't update Keep."); return; }
+    if (on) keptIds.add(it.id); else keptIds.delete(it.id);
+    paintKeep();
+  });
+  const actions = el("div", { class: "row", style: "justify-content:center;margin-top:8px" }, keepBtn);
+  const card = el("div", { style: "min-width:min(88vw,420px)" }, bars, title, slot, actions, hint);
   const close = modal(card);
+  // Which of these are already kept — one call for the whole session, refreshed locally on toggle.
+  invoke("kept_stories").then((ks) => { keptIds = new Set((ks || []).map((k) => k.id)); paintKeep(); }).catch(() => {});
 
   const cleanup = () => { window.removeEventListener("keydown", onKey, true); mo.disconnect(); };
   const done = () => { close(); cleanup(); };
@@ -2418,6 +2463,7 @@ function viewStories(list, startIndex = 0) {
       el("span", { class: "seg" + (runStart + k <= index ? " on" : "") })));
     slot.replaceChildren(storyContentNode(it));
     hydrateMedia(slot, it._circle || state.activeCircle || "default");
+    paintKeep();   // the pill belongs to the story on screen, not to the viewer
   };
 
   const nextStory = () => { if (index < stories.length - 1) { index++; show(); } else done(); };
@@ -3052,8 +3098,35 @@ async function renderYou() {
     }
   }
   mine.sort((a, b) => Number(b.created_at) - Number(a.created_at));
-  const myStories = mine.filter((i) => i.story);
   const myPosts = mine.filter((i) => !i.story);
+  // My stories for MY PROFILE: the live ones, PLUS any I chose to keep whose event has since been
+  // purged. Kept stories are revived HERE and here only — the circle's story tray reads the live
+  // feed, so a kept story still leaves everyone else's stories when its 24 hours are up. That is the
+  // whole point of keeping one rather than re-posting it.
+  //
+  // While a story is still live the LIVE item wins, comments and reactions and all; the kept
+  // snapshot is strictly the after.
+  const liveStories = mine.filter((i) => i.story);
+  const liveIds = new Set(liveStories.map((i) => i.id));
+  const kept = await invoke("kept_stories").catch(() => []);
+  const revived = kept.filter((k) => !liveIds.has(k.id) && (k.media || []).length).map((k) => ({
+    id: k.id,
+    author_name: "You",
+    is_me: true,
+    created_at: k.createdAt,
+    body: k.body || "",
+    media: k.media || [],
+    music: k.musicCatalogId
+      ? { catalog_id: k.musicCatalogId, title: k.musicTitle || "", artist: k.musicArtist || "",
+          artwork_url: k.musicArtworkUrl || "", duration_ms: k.musicDurationMs || 0 }
+      : null,
+    edited: false, unsent: false, story: true, mute_video: false,
+    comments: [], reactions: [], poll: null,
+    // A revived snapshot has no event left, so its media resolves against the default circle keys.
+    _circle: "default",
+  }));
+  const myStories = liveStories.concat(revived)
+    .sort((a, b) => Number(b.created_at) - Number(a.created_at));
 
   const body = el("div", { class: "feed-list" }, head);
   if (myStories.length) {

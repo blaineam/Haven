@@ -2183,6 +2183,72 @@ impl Engine {
         let _ = p.save(&self.paths);
     }
 
+    // ---- Kept stories (held on my profile past the 24h window) ---------------------------
+
+    /// Every kept story, newest first.
+    pub fn kept_stories(&self) -> Vec<crate::store::KeptStory> {
+        let mut v = self.prefs.lock().unwrap().kept_stories.clone();
+        v.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        v
+    }
+
+    pub fn is_story_kept(&self, id: &str) -> bool {
+        self.prefs.lock().unwrap().kept_stories.iter().any(|k| k.id == id)
+    }
+
+    /// Keep a story: snapshot it and PIN its media, so the blobs survive the cleanup sweeps that
+    /// would otherwise reclaim them once the event is gone. Without the pin a kept story becomes a
+    /// row of "no longer available" placeholders — kept in name only.
+    pub fn keep_story(self: &Arc<Self>, entry: crate::store::KeptStory) {
+        let media = {
+            let mut p = self.prefs.lock().unwrap();
+            if p.kept_stories.iter().any(|k| k.id == entry.id) {
+                return;
+            }
+            let media = entry.media.clone();
+            let mut e = entry;
+            e.kept_at = Some(now_ms());
+            p.kept_stories_removed.remove(&e.id); // re-keeping clears the tombstone
+            p.kept_stories.push(e);
+            let _ = p.save(&self.paths);
+            media
+        };
+        self.pin_media(media);
+    }
+
+    /// Stop keeping it — and release the pin, so the blobs are eligible for cleanup again.
+    pub fn unkeep_story(self: &Arc<Self>, id: &str) {
+        let release = {
+            let mut p = self.prefs.lock().unwrap();
+            let Some(i) = p.kept_stories.iter().position(|k| k.id == id) else { return };
+            let media = p.kept_stories.remove(i).media;
+            p.kept_stories_removed.insert(id.to_string(), now_ms());
+            p.trim_kept_tombstones();
+            // Only release blobs no OTHER kept story still needs (a story shared twice shares refs).
+            let still_needed: std::collections::HashSet<&String> =
+                p.kept_stories.iter().flat_map(|k| k.media.iter()).collect();
+            let release: Vec<String> =
+                media.into_iter().filter(|r| !still_needed.contains(r)).collect();
+            let _ = p.save(&self.paths);
+            release
+        };
+        self.unpin_media(release);
+    }
+
+    /// The `setting:keptStories` payload, or None when there is nothing at all to say — never
+    /// published empty, so a fresh device can't blank a sibling's collection.
+    pub fn kept_stories_payload(&self) -> Option<Vec<u8>> {
+        let p = self.prefs.lock().unwrap();
+        if p.kept_stories.is_empty() && p.kept_stories_removed.is_empty() {
+            return None;
+        }
+        serde_json::to_vec(&crate::store::KeptStoriesWire {
+            kept: p.kept_stories.clone(),
+            removed: p.kept_stories_removed.clone(),
+        })
+        .ok()
+    }
+
     /// Un-pin refs (matches on the exact ref stored).
     pub fn unpin_media(self: &Arc<Self>, refs: Vec<String>) {
         let mut p = self.prefs.lock().unwrap();

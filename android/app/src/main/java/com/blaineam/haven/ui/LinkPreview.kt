@@ -33,12 +33,22 @@ import java.net.URL
 private data class OgPreview(val title: String, val desc: String, val domain: String, val image: ImageBitmap?)
 
 private val ogCache = HashMap<String, OgPreview?>()
-private val firstUrl = Regex("""https?://[^\s]+""")
 
-/** A tappable Open Graph preview card for the first link in [text] (title + thumbnail + domain). */
+/**
+ * A tappable Open Graph preview card for the first link in [text] (title + thumbnail + domain).
+ *
+ * The card ALWAYS renders once there is a url — Open Graph metadata only upgrades it. It used to
+ * disappear entirely when the fetch failed or the page carried no tags, which was harmless while
+ * the body still showed the raw link, but the body now STRIPS the previewed url (see
+ * [bodyWithoutPreviewedUrl]); a card that can vanish would take the only copy of the link with it,
+ * and a link-only post would render blank. So the title falls back to the domain and then to the
+ * url itself, matching iOS `LinkPreviewCard.displayTitle`.
+ *
+ * Uses the shared [URL_REGEX] so the url it previews is byte-identical to the one the body strips.
+ */
 @Composable
 fun LinkPreviewCard(text: String, modifier: Modifier = Modifier) {
-    val url = remember(text) { firstUrl.find(text)?.value } ?: return
+    val url = remember(text) { firstUrl(text) } ?: return
     val context = LocalContext.current
     var preview by remember(url) { mutableStateOf(ogCache[url]) }
 
@@ -49,7 +59,8 @@ fun LinkPreviewCard(text: String, modifier: Modifier = Modifier) {
         preview = p
     }
 
-    val p = preview ?: return
+    val host = remember(url) { runCatching { URL(url).host.removePrefix("www.") }.getOrDefault("") }
+    val p = preview ?: OgPreview(title = "", desc = "", domain = host, image = null)
     Column(
         modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(HavenTheme.background)
             .clickable { openInApp(context, url) },
@@ -59,12 +70,12 @@ fun LinkPreviewCard(text: String, modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxWidth().height(160.dp))
         }
         Column(Modifier.padding(12.dp)) {
-            Text(p.title.ifBlank { p.domain }, color = HavenTheme.textPrimary,
+            Text(p.title.ifBlank { p.domain.ifBlank { url } }, color = HavenTheme.textPrimary,
                 fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 2)
             if (p.desc.isNotBlank()) {
                 Text(p.desc, color = HavenTheme.textSecondary, fontSize = 12.sp, maxLines = 2)
             }
-            Text(p.domain, color = HavenTheme.pink, fontSize = 11.sp)
+            if (p.domain.isNotBlank()) Text(p.domain, color = HavenTheme.pink, fontSize = 11.sp)
         }
     }
 }

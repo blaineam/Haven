@@ -30,6 +30,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.Icon
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -123,17 +124,28 @@ fun StoriesTray(groups: List<StoryGroup>, onAddStory: () -> Unit, onOpen: (Int) 
 }
 
 /** Full-screen story viewer: progress bars, tap right/left to advance, auto-advance. */
-/** A small translucent pill button for the story header (Keep / Delete). */
+/** A small translucent pill button for the story header (Keep / Delete).
+ *
+ *  [tint] colours the label so a toggle's state is legible at a glance — a control that looks
+ *  identical whether or not it is on reads as a dead button, which is exactly the complaint Keep
+ *  drew. Wrapped in [minimumInteractiveComponentSize] so the tappable area is the platform minimum
+ *  rather than the drawn glyph: these sit over a full-screen gesture surface, and a hit region that
+ *  collapses to the text is how a control ends up showing its press effect and doing nothing. */
 @Composable
-private fun StoryActionChip(label: String, onClick: () -> Unit) {
-    androidx.compose.material3.Text(
-        // Story chrome sits on the story media — always white.
-        label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-        modifier = Modifier.clip(androidx.compose.foundation.shape.RoundedCornerShape(50))
-            .background(Color.White.copy(alpha = 0.22f))
-            .clickable { onClick() }
-            .padding(horizontal = 12.dp, vertical = 5.dp),
-    )
+private fun StoryActionChip(label: String, tint: Color = Color.White, onClick: () -> Unit) {
+    Box(
+        Modifier.minimumInteractiveComponentSize(),
+        contentAlignment = Alignment.Center,
+    ) {
+        androidx.compose.material3.Text(
+            // Story chrome sits on the story media — always white unless a toggle tints it.
+            label, color = tint, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.clip(androidx.compose.foundation.shape.RoundedCornerShape(50))
+                .background(Color.White.copy(alpha = 0.22f))
+                .clickable { onClick() }
+                .padding(horizontal = 12.dp, vertical = 5.dp),
+        )
+    }
 }
 
 @Composable
@@ -167,32 +179,54 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
         else if (groupIdx > 0) { groupIdx--; itemIdx = 0 }
     }
 
-    // Auto-advance every 5s (paused while replying).
-    LaunchedEffect(groupIdx, itemIdx, replying) {
-        if (replying) return@LaunchedEffect
+    // HOLD to pause, release to resume. Press-and-hold used to CLOSE the viewer, which is neither
+    // what the phones' story viewers do nor what anyone expects from holding a story.
+    var heldPaused by remember { mutableStateOf(false) }
+
+    // Auto-advance every 5s (paused while replying, or while held).
+    LaunchedEffect(groupIdx, itemIdx, replying, heldPaused) {
+        if (replying || heldPaused) return@LaunchedEffect
         delay(5000)
         advance()
     }
 
-    Box(
-        Modifier.fillMaxSize().background(Color.Black)
-            .pointerInput(groupIdx, itemIdx) {
-                detectTapGestures(
-                    onTap = { o -> if (!replying) { if (o.x > size.width / 2) advance() else back() } },
-                    onLongPress = { onClose() },
-                )
-            }
-            // A horizontal SWIPE skips WHOLE users (Instagram-style), matching iOS Stories.swift
-            // skipToNextUser/skipToPrevUser. Tap still advances one story at a time (above).
-            .pointerInput(groupIdx, itemIdx) {
-                var dx = 0f
-                detectHorizontalDragGestures(
-                    onDragStart = { dx = 0f },
-                    onHorizontalDrag = { _, amount -> dx += amount },
-                    onDragEnd = { if (dx <= -60f) skipToNextUser() else if (dx >= 60f) skipToPrevUser() },
-                )
-            },
-    ) {
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        // The navigation gestures live on THIS layer — the media, drawn beneath the controls — not on
+        // the root Box that is an ancestor of every control.
+        //
+        // A drag recognizer on an ancestor of a button delays and then CANCELS the button's action:
+        // the control highlights on touch-down and then does nothing, which is exactly how Keep and
+        // Delete failed. Compose hit-tests child-first, so a perfectly clean tap on a chip was
+        // consumed by the chip — but any few-px movement during the press was claimed by the
+        // ancestor's horizontal-drag detector, which cancelled the chip's click. With the gestures
+        // scoped to the media layer the controls have no gesture-bearing ancestor at all.
+        Box(
+            Modifier.fillMaxSize()
+                .pointerInput(groupIdx, itemIdx, replying) {
+                    detectTapGestures(
+                        onTap = { o -> if (!replying) { if (o.x > size.width / 2) advance() else back() } },
+                        // Hold-to-pause. `tryAwaitRelease` returns false when the press is CANCELLED
+                        // (another gesture won the sequence) rather than throwing past the reset, so
+                        // the pause always resolves — a paused-forever story was the failure mode on
+                        // the Apple side when the release lived in a competing gesture's onEnded.
+                        onPress = {
+                            heldPaused = true
+                            tryAwaitRelease()
+                            heldPaused = false
+                        },
+                    )
+                }
+                // A horizontal SWIPE skips WHOLE users (Instagram-style), matching iOS Stories.swift
+                // skipToNextUser/skipToPrevUser. Tap still advances one story at a time (above).
+                .pointerInput(groupIdx, itemIdx) {
+                    var dx = 0f
+                    detectHorizontalDragGestures(
+                        onDragStart = { dx = 0f },
+                        onHorizontalDrag = { _, amount -> dx += amount },
+                        onDragEnd = { if (dx <= -60f) skipToNextUser() else if (dx >= 60f) skipToPrevUser() },
+                    )
+                },
+        ) {
         // Decoded once: the spec carries the caption style AND the author's media framing.
         val decoded = StoryCaptions.decode(item.body)
         val mediaId = item.media.firstOrNull()
@@ -276,6 +310,8 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
                     .padding(horizontal = if (isHl) 10.dp else 24.dp, vertical = if (isHl) 3.dp else 0.dp),
             )
         }
+        }   // ← end of the MEDIA layer. Everything below is chrome/controls, deliberately OUTSIDE it
+            //   so no control has a gesture-bearing ancestor (see the note on the media layer).
         // Progress bars (one per story in this group).
         Row(
             Modifier.fillMaxWidth().padding(top = 14.dp, start = 10.dp, end = 10.dp),
@@ -312,20 +348,40 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             if (group.isMe) {
-                // Keep: turn this disappearing story into a permanent post (iOS parity).
-                StoryActionChip("Keep") {
-                    val text = StoryCaptions.decode(item.body).text
-                    com.blaineam.haven.core.HavenNet.post(
-                        com.blaineam.haven.core.DEFAULT_CIRCLE, text, item.media, item.music, null)
-                    onClose()
+                // KEEP is a TOGGLE that holds this story on MY PROFILE past the 24h window — it does
+                // NOT re-publish it. It used to create a permanent post, which put the story back in
+                // the circle feed as a new thing everyone saw again; wanting to hold on to something
+                // yourself is a different act from sharing it twice. A kept story still leaves
+                // everyone's story row on schedule — only profile surfaces revive the snapshot.
+                //
+                // Reading `version` here is what makes the chip recompose the instant it's toggled;
+                // without it the label would never change and a working toggle would read as a dead
+                // button, which is precisely the complaint this replaced.
+                @Suppress("UNUSED_EXPRESSION") com.blaineam.haven.core.KeptStoriesStore.version.intValue
+                val isKept = com.blaineam.haven.core.KeptStoriesStore.isKept(item.id)
+                StoryActionChip(
+                    if (isKept) "Kept" else "Keep",
+                    tint = if (isKept) HavenTheme.pink else Color.White,
+                ) {
+                    com.blaineam.haven.core.KeptStoriesStore.toggle(
+                        id = item.id,
+                        body = item.body,
+                        media = item.media,
+                        createdAt = item.createdAt.toLong(),
+                        music = item.music,
+                    )
                 }
                 // Delete: unsend my own story everywhere it was shared.
                 StoryActionChip("Delete") { confirmDelete = true }
             }
-            androidx.compose.material3.Text(
-                "✕", color = Color.White, fontSize = 22.sp,
-                modifier = Modifier.clickable { onClose() },
-            )
+            // The close glyph needs a real hit target: a bare 22sp Text with .clickable is tappable
+            // only across the drawn glyph, far under the platform minimum, so most taps missed it.
+            Box(
+                Modifier.minimumInteractiveComponentSize().clip(CircleShape).clickable { onClose() },
+                contentAlignment = Alignment.Center,
+            ) {
+                androidx.compose.material3.Text("✕", color = Color.White, fontSize = 22.sp)
+            }
         }
         if (confirmDelete) {
             androidx.compose.material3.AlertDialog(

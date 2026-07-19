@@ -664,6 +664,31 @@ pub fn media_pinned_count(engine: Eng) -> usize {
     engine.pinned_count()
 }
 
+// ---- Kept stories (held on my profile past the 24h story window) ------------------------
+
+/// Every story I chose to keep, newest first. The "You" view unions these with the LIVE feed so a
+/// kept story reappears once its event has been purged; the circle story tray does NOT read this, so
+/// a kept story still leaves everyone's story row on schedule.
+#[tauri::command]
+pub fn kept_stories(engine: Eng) -> Vec<crate::store::KeptStory> {
+    engine.kept_stories()
+}
+
+/// Toggle Keep for one story. Keeping snapshots the content and PINS its media (or the cleanup
+/// sweeps reclaim the blobs once the event is gone and it becomes a row of placeholders); un-keeping
+/// writes a tombstone so a sibling doesn't quietly re-add it, and releases the pin. Returns the new
+/// state so the caller can re-label the control without a round trip.
+#[tauri::command]
+pub fn toggle_kept_story(engine: Eng, entry: crate::store::KeptStory) -> bool {
+    if engine.is_story_kept(&entry.id) {
+        engine.unkeep_story(&entry.id);
+        false
+    } else {
+        engine.keep_story(entry);
+        true
+    }
+}
+
 // ---- #3 evicted placeholder + on-demand download ----------------------------------------
 
 /// If this ref was deliberately evicted, its last-known bytes (drives the "Download N" placeholder);

@@ -51,3 +51,4 @@ push/.wrangler/
 docs/audits/
 docs/SECURITY-AUDIT-*.md
 **/SECURITY-AUDIT-*crypto*.md
+core/.claude/

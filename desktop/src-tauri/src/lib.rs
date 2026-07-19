@@ -456,6 +456,8 @@ pub fn run() {
             commands::media_request_when_available,
             commands::media_is_wanted,
             commands::message_author,
+            commands::kept_stories,
+            commands::toggle_kept_story,
             commands::get_relay_media_limits,
             commands::set_relay_media_limits,
             commands::get_media_limits,

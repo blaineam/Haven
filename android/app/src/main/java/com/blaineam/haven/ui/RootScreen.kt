@@ -111,6 +111,13 @@ private fun MainScaffold() {
         }
     }
 
+    // A DM draft staged from another surface ("Message the author" on a post) → go to the Messages
+    // tab, where MessagesScreen consumes the signal and opens the thread with the draft waiting in
+    // the composer. Only the TAB switch happens here; consuming is MessagesScreen's job, so this
+    // can't race it away before that screen is composed.
+    val stagedDm by com.blaineam.haven.core.DmDrafts.openThread
+    LaunchedEffect(stagedDm) { if (stagedDm != null) tab = Tab.Messages }
+
     // Bring the transport up once we're past onboarding; re-sync on resume. In demo mode the
     // RootScreen LaunchedEffect already did init/seed, and `haven_no_net` keeps the node offline.
     LaunchedEffect(Unit) {

@@ -161,6 +161,11 @@ object SelfSyncCoordinator {
         // map circleId → unix-ms (the iOS wire format), merged per-key MAX on apply (monotonic —
         // no device can un-read another). Never published empty (a fresh device changes nothing).
         DmRead.toJsonBytes()?.let { m["setting:dmLastRead"] = it }
+        // Stories I kept to my profile. Carries its OWN per-entry timestamps and tombstones inside
+        // the payload, so it merges rather than last-writer-wins: keeping story A on my phone and
+        // story B on my tablet must end with BOTH kept, and un-keeping must not be undone by a
+        // sibling's stale copy. Never published empty (a fresh device can't blank a sibling's set).
+        KeptStoriesStore.toJsonBytes()?.let { m["setting:keptStories"] = it }
         // Roster: contacts (full card) + blocked list.
         for (c in HavenNet.selfSyncContactsSnapshot()) {
             m["contact:${c.idHex}"] = encodeContact(c)
@@ -277,6 +282,11 @@ object SelfSyncCoordinator {
         // DM read watermarks from my other devices: per-key MAX merge (monotonic — always safe).
         // DmRead bumps its own version on change, so unread badges recompose by themselves.
         h.get("setting:dmLastRead")?.let { DmRead.applySyncedJson(it) }
+        // Kept stories: per-entry LWW with tombstones, resolved inside the store (it bumps its own
+        // version, so the profile surface and the Keep pill recompose by themselves). Newly-arrived
+        // entries pin their media on arrival, so a story kept on another device survives THIS
+        // device's cleanup sweeps too — otherwise it would sync in and then be reclaimed.
+        h.get("setting:keptStories")?.let { KeptStoriesStore.applySyncedJson(it) }
 
         // Roster reconciliation (set-like — enumerate the converged state via entries()).
         val live = h.entries()

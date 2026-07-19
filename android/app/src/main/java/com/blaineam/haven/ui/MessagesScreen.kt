@@ -91,6 +91,19 @@ fun MessagesScreen() {
     }
     var openThread by remember { mutableStateOf<Pair<String, Contact>?>(null) }
 
+    // Somewhere else in the app staged a DM draft (today: "Message the author" on a post) — open
+    // that thread here, exactly as picking it from the list would. RootScreen has already switched
+    // to this tab; the composer picks the staged text up in DmThread. iOS parity (MessagesView's
+    // onReceive of DMDraftStore.openThread).
+    val pendingThread by com.blaineam.haven.core.DmDrafts.openThread
+    androidx.compose.runtime.LaunchedEffect(pendingThread) {
+        com.blaineam.haven.core.DmDrafts.consumeOpenThread()?.let { cid ->
+            val others = HavenNet.dmMemberHexes(cid).filter { !it.equals(HavenNet.nodeIdHex, true) }
+            HavenNet.contacts.firstOrNull { c -> others.any { it.equals(c.idHex, true) } }
+                ?.let { openThread = cid to it }
+        }
+    }
+
     val thread = openThread
     if (thread == null) {
         ThreadList(onOpen = { cid, partner -> openThread = cid to partner })
@@ -360,6 +373,13 @@ private fun NewMessagePicker(onDismiss: () -> Unit, onStart: (List<Contact>) -> 
 fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     var draft by remember { mutableStateOf("") }
+    // A draft staged elsewhere ("Message the author" on a post) lands in the composer, UNSENT.
+    // Appended rather than assigned, so re-entering a thread can't discard something half-typed.
+    androidx.compose.runtime.LaunchedEffect(circleId) {
+        com.blaineam.haven.core.DmDrafts.takeDraft(circleId)?.let { staged ->
+            draft = if (draft.isBlank()) staged else "$draft\n$staged"
+        }
+    }
     var pendingPhoto by remember { mutableStateOf<String?>(null) }
     var pendingMusic by remember { mutableStateOf<uniffi.haven_ffi.TrackRefFfi?>(null) }
     var showMusicDialog by remember { mutableStateOf(false) }

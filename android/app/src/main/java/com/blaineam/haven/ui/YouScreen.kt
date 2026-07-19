@@ -67,8 +67,42 @@ fun YouScreen(onAddFriend: () -> Unit) {
         }.getOrDefault(emptyList())
     }
     val myPosts = mine.filter { !it.story }
-    // Stories expire on their own, so this section simply disappears when the last one ages out.
-    val myStories = mine.filter { it.story }.sortedBy { it.createdAt }
+    // My stories for MY PROFILE: the live ones, PLUS any I chose to keep whose event has since
+    // expired. Kept stories are revived here and here only — the circle's story tray reads the live
+    // feed (groupStories), so a kept story still leaves everyone else's stories when its 24 hours
+    // are up. That is the whole point of keeping one rather than re-posting it.
+    //
+    // While a story is still live the LIVE item wins, comments and reactions and all; the kept
+    // snapshot is strictly the after.
+    val keptVersion by com.blaineam.haven.core.KeptStoriesStore.version
+    val myStories = remember(feedVersion, keptVersion, mine) {
+        val live = mine.filter { it.story }
+        val liveIds = live.map { it.id }.toHashSet()
+        // Every item in `mine` is mine, so any of them carries my own author handle — a revived
+        // snapshot has no event left to read it from.
+        val myAuthorShort = mine.firstOrNull()?.authorShort ?: ""
+        val revived = com.blaineam.haven.core.KeptStoriesStore.all()
+            .filter { it.id !in liveIds && it.media.isNotEmpty() }
+            .map { k ->
+                uniffi.haven_ffi.FeedItemFfi(
+                    id = k.id,
+                    authorShort = myAuthorShort,
+                    isMe = true,
+                    createdAt = k.createdAt.toULong(),
+                    body = k.body,
+                    media = k.media,
+                    music = k.music(),
+                    edited = false,
+                    unsent = false,
+                    story = true,
+                    muteVideo = false,
+                    comments = emptyList(),
+                    reactions = emptyList(),
+                    poll = null,
+                )
+            }
+        (live + revived).sortedBy { it.createdAt }
+    }
 
     // A profile post's video AUTO-PLAYS when it's centered, exactly like the main feed
     // (iOS UserProfileView center-detection parity). This screen is a plain vertical Column (not a

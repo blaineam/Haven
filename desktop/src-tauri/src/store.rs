@@ -147,6 +147,51 @@ pub struct S3Public {
     pub prefix: String,
 }
 
+/// One kept story — a snapshot of a story held on the author's own profile past the 24h window.
+///
+/// Music is FLATTENED rather than holding the FFI track type: that is generated binding glue, not a
+/// storage format, and pinning a persisted format to it would break on the next regeneration.
+///
+/// Field names are camelCase to match iOS `KeptStoriesStore.Kept` — this struct's JSON IS the
+/// cross-platform self-sync wire, so the names must not drift. Optionals are skipped when absent,
+/// matching Swift's JSONEncoder, so a record written here round-trips through a phone unchanged.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KeptStory {
+    /// The original event id, so a story is kept at most once.
+    pub id: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub media: Vec<String>,
+    #[serde(default)]
+    pub created_at: u64,
+    /// When it was kept — the LWW clock for merging this entry against a sibling's tombstone.
+    /// Optional so records written before syncing existed still decode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub music_catalog_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub music_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub music_artist: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub music_artwork_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub music_duration_ms: Option<u64>,
+}
+
+/// The `setting:keptStories` self-sync payload: the collection PLUS its tombstones, so the merge is
+/// per-entry rather than a wholesale collection swap. Mirrors iOS `KeptStoriesStore.Wire`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct KeptStoriesWire {
+    #[serde(default)]
+    pub kept: Vec<KeptStory>,
+    #[serde(default)]
+    pub removed: std::collections::HashMap<String, u64>,
+}
+
 /// Everything that lives in `prefs.json` (mirrors the Android SharedPreferences set).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Prefs {
@@ -248,6 +293,27 @@ pub struct Prefs {
     /// on-disk storage_name into the sweep keep-sets. Mirrors iOS `PinnedMediaStore`.
     #[serde(default)]
     pub pinned_media: Vec<String>,
+    /// Stories the user chose to KEEP — held on their own profile after the 24h story window closes.
+    ///
+    /// A story is an ordinary post with a 24h retention, so the event itself is purged on schedule
+    /// everywhere, for everyone. Keeping one therefore can't mean "stop it expiring": it means
+    /// holding our OWN snapshot of it, which is why this stores the story's content rather than a
+    /// reference to an event that is about to stop existing. Keep does NOT re-publish — a kept story
+    /// still leaves everyone's story row on schedule; only profile surfaces revive the snapshot.
+    ///
+    /// Keeping also PINS the media (see `pinned_media`), or the cleanup sweeps reclaim the blobs once
+    /// the event is gone and a kept story becomes a row of "no longer available" placeholders.
+    ///
+    /// SYNCED per ENTRY with tombstones (`kept_stories_removed`), NOT last-writer-wins: keeping story
+    /// A on the phone and story B here must end with BOTH kept. Mirrors iOS `KeptStoriesStore`; the
+    /// JSON field names below are that type's wire format and must not drift from it.
+    #[serde(default)]
+    pub kept_stories: Vec<KeptStory>,
+    /// Un-kept story ids and WHEN. Absence is NOT removal — a lesson this codebase already paid for
+    /// once, when additive-only self-sync silently resurrected deleted things. Without a tombstone a
+    /// sibling's stale copy would quietly re-add every story the user un-kept. Bounded on write.
+    #[serde(default)]
+    pub kept_stories_removed: std::collections::HashMap<String, u64>,
     /// DEVICE-LOCAL "deliberately evicted, do-not-auto-refetch" set (#3/#4): refs whose LOCAL blob was
     /// removed on purpose (cleanup screen selection of a still-referenced item, or the age/size limit
     /// sweep) while the EVENT still lives. The missing-media sweep must NOT auto-refetch these (that
@@ -358,6 +424,86 @@ pub struct Prefs {
 }
 
 impl Prefs {
+    /// BOUND the kept-story tombstones: they only need to outlive a sibling being offline, not
+    /// forever. Trimmed to the newest 250 once past 500.
+    pub fn trim_kept_tombstones(&mut self) {
+        if self.kept_stories_removed.len() <= 500 {
+            return;
+        }
+        let mut all: Vec<(String, u64)> = self.kept_stories_removed.drain().collect();
+        all.sort_by(|a, b| b.1.cmp(&a.1));
+        self.kept_stories_removed = all.into_iter().take(250).collect();
+    }
+
+    /// Merge a sibling's kept stories. Per ENTRY, not wholesale: keeping story A on the phone and
+    /// story B here must end with BOTH kept, which a last-writer-wins collection swap would not do.
+    ///
+    /// An entry applies unless a NEWER tombstone exists for it; a tombstone applies unless the local
+    /// copy was kept more recently — so re-keeping something later still wins in BOTH directions.
+    ///
+    /// Newly-arrived entries PIN their media here, so a story kept on another device survives THIS
+    /// device's cleanup sweeps — otherwise it would sync in and then be silently reclaimed, leaving
+    /// a row of "no longer available" placeholders. Dropped entries release only the blobs no other
+    /// kept story still needs (a story shared twice can share refs).
+    ///
+    /// Lives on `Prefs` rather than the engine because `selfsync::apply_local` holds only `&mut
+    /// Prefs`, and pinning is itself just a `Prefs` field.
+    pub fn merge_kept_stories(&mut self, data: &[u8]) -> bool {
+        let Ok(wire) = serde_json::from_slice::<KeptStoriesWire>(data) else { return false };
+        let mut changed = false;
+        for (id, ts) in wire.removed {
+            if self.kept_stories_removed.get(&id).copied().unwrap_or(0) < ts {
+                self.kept_stories_removed.insert(id, ts);
+                changed = true;
+            }
+        }
+        let mut to_pin: Vec<String> = Vec::new();
+        for entry in wire.kept {
+            let entry_at = entry.kept_at.unwrap_or(entry.created_at);
+            // Un-kept more recently than it was kept — the tombstone wins.
+            if self.kept_stories_removed.get(&entry.id).copied().unwrap_or(0) > entry_at {
+                continue;
+            }
+            match self.kept_stories.iter().position(|k| k.id == entry.id) {
+                Some(i) => {
+                    if self.kept_stories[i].kept_at.unwrap_or(0) < entry_at {
+                        self.kept_stories[i] = entry;
+                        changed = true;
+                    }
+                }
+                None => {
+                    to_pin.extend(entry.media.iter().cloned());
+                    self.kept_stories.push(entry);
+                    changed = true;
+                }
+            }
+        }
+        // Apply tombstones newer than our own copy.
+        let mut dropped: Vec<String> = Vec::new();
+        for (id, ts) in self.kept_stories_removed.clone() {
+            if let Some(i) = self.kept_stories.iter().position(|k| k.id == id) {
+                if self.kept_stories[i].kept_at.unwrap_or(0) < ts {
+                    dropped.extend(self.kept_stories.remove(i).media);
+                    changed = true;
+                }
+            }
+        }
+        let still_needed: std::collections::HashSet<String> =
+            self.kept_stories.iter().flat_map(|k| k.media.iter().cloned()).collect();
+        for r in to_pin {
+            if !self.pinned_media.contains(&r) {
+                self.pinned_media.push(r);
+            }
+        }
+        for r in dropped {
+            if !still_needed.contains(&r) {
+                self.pinned_media.retain(|p| *p != r);
+            }
+        }
+        self.trim_kept_tombstones();
+        changed
+    }
+
     /// Generous but finite. An unbounded default is how a helpful relay quietly fills a disk, and
     /// whoever volunteers a machine is the least likely to go looking for a setting first.
     pub const DEFAULT_MEDIA_MAX_AGE_DAYS: u32 = 30;
@@ -976,6 +1122,100 @@ pub fn write_state(paths: &Paths, data: &[u8]) -> Result<()> {
 /// Remove a file, ignoring "not found".
 pub fn remove_if_exists(p: &Path) {
     let _ = fs::remove_file(p);
+}
+
+#[cfg(test)]
+mod kept_story_tests {
+    use super::*;
+
+    fn entry(id: &str, kept_at: u64) -> KeptStory {
+        KeptStory {
+            id: id.into(),
+            body: String::new(),
+            media: vec![format!("m:{id}")],
+            created_at: 1,
+            kept_at: Some(kept_at),
+            music_catalog_id: None,
+            music_title: None,
+            music_artist: None,
+            music_artwork_url: None,
+            music_duration_ms: None,
+        }
+    }
+
+    fn wire(kept: Vec<KeptStory>, removed: &[(&str, u64)]) -> Vec<u8> {
+        serde_json::to_vec(&KeptStoriesWire {
+            kept,
+            removed: removed.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+        })
+        .unwrap()
+    }
+
+    /// The whole reason this is not a last-writer-wins collection: keeping story A on one device and
+    /// story B on another must converge to BOTH kept, not to whichever synced last.
+    #[test]
+    fn keeping_different_stories_on_two_devices_keeps_both() {
+        let mut p = Prefs::default();
+        p.kept_stories.push(entry("A", 100));
+        assert!(p.merge_kept_stories(&wire(vec![entry("B", 200)], &[])));
+        let mut ids: Vec<&str> = p.kept_stories.iter().map(|k| k.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["A", "B"]);
+    }
+
+    /// Un-keeping must PROPAGATE, not be silently undone by a sibling's stale copy — absence is not
+    /// removal, which is why the tombstone exists at all.
+    #[test]
+    fn a_newer_tombstone_beats_a_siblings_stale_entry() {
+        let mut p = Prefs::default();
+        p.merge_kept_stories(&wire(vec![], &[("A", 300)]));
+        // The sibling still holds A, kept BEFORE we un-kept it.
+        p.merge_kept_stories(&wire(vec![entry("A", 200)], &[]));
+        assert!(p.kept_stories.is_empty(), "a stale entry re-added an un-kept story");
+    }
+
+    /// ...and the converse: re-keeping something later still wins, in both directions.
+    #[test]
+    fn re_keeping_later_beats_an_older_tombstone() {
+        let mut p = Prefs::default();
+        p.merge_kept_stories(&wire(vec![], &[("A", 100)]));
+        p.merge_kept_stories(&wire(vec![entry("A", 500)], &[]));
+        assert_eq!(p.kept_stories.len(), 1);
+        assert_eq!(p.kept_stories[0].id, "A");
+    }
+
+    /// A synced-in entry must PIN its media, or this device's cleanup sweeps reclaim the blobs and
+    /// the kept story becomes a row of "no longer available" placeholders — kept in name only.
+    #[test]
+    fn a_synced_entry_pins_its_media() {
+        let mut p = Prefs::default();
+        p.merge_kept_stories(&wire(vec![entry("A", 100)], &[]));
+        assert!(p.pinned_media.contains(&"m:A".to_string()));
+    }
+
+    /// Tombstones are BOUNDED — they only need to outlive a sibling being offline, not forever.
+    #[test]
+    fn tombstones_are_trimmed_past_the_cap() {
+        let mut p = Prefs::default();
+        for i in 0..600u64 {
+            p.kept_stories_removed.insert(format!("s{i}"), i);
+        }
+        p.trim_kept_tombstones();
+        assert_eq!(p.kept_stories_removed.len(), 250);
+        // The NEWEST are the ones retained.
+        assert!(p.kept_stories_removed.contains_key("s599"));
+        assert!(!p.kept_stories_removed.contains_key("s0"));
+    }
+
+    /// The JSON is the cross-platform self-sync wire — the field names must stay camelCase and
+    /// absent optionals must stay ABSENT, or a record written here won't round-trip through a phone.
+    #[test]
+    fn wire_field_names_match_the_apple_encoding() {
+        let s = serde_json::to_string(&entry("A", 7)).unwrap();
+        assert!(s.contains("\"createdAt\""), "{s}");
+        assert!(s.contains("\"keptAt\""), "{s}");
+        assert!(!s.contains("musicCatalogId"), "absent optionals must be omitted: {s}");
+    }
 }
 
 #[cfg(test)]

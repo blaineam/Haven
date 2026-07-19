@@ -516,6 +516,7 @@ final class CallManager: NSObject, ObservableObject {
     private func reallyAccept() {
         ringTimeoutTimer?.invalidate(); ringTimeoutTimer = nil
         ringing = false; stopInAppRinging(); inCall = true
+        notifyOwnDevicesHandled()   // stop my OTHER devices ringing before they can join and take the audio
         for p in invitees() { sendAccept(to: p) }
         startMesh()
     }
@@ -524,6 +525,49 @@ final class CallManager: NSObject, ObservableObject {
         var f = Data(myHex.utf8)
         CallManager.lpAppend(&f, Data(sessionId.utf8))
         FeedStore.shared.sendCallFrame(11, f, to: peer)
+    }
+
+    /// Tell my OTHER devices this ringing call was handled here (answered or declined), so they stop
+    /// ringing and never join.
+    ///
+    /// Every device of mine rings — that part is right. Nothing told the losers to stand down, so the
+    /// one I didn't answer on kept its session live, completed signalling when the offer arrived, and
+    /// joined the mesh: "I answered on my iPhone and my Mac took the audio", then the reverse when I
+    /// touched the Mac. Two devices in one call also explains one of them sounding choppy — they were
+    /// competing, not degraded.
+    ///
+    /// Sealed PER DEVICE rather than to my account, so a seedless device (which holds no account key)
+    /// can open it too.
+    private func notifyOwnDevicesHandled() {
+        guard !sessionId.isEmpty else { return }
+        var f = Data(myHex.utf8)
+        CallManager.lpAppend(&f, Data(sessionId.utf8))
+        let others = FeedStore.shared.myOtherDeviceHexes()
+        guard !others.isEmpty else { return }
+        HavenLog.call("call \(sessionId.prefix(8)) handled here — standing down \(others.count) other device(s) of mine")
+        for dev in others { FeedStore.shared.sendCallFrame(30, f, to: dev) }
+    }
+
+    /// Another of MY devices answered or declined this call: stop ringing and tear down.
+    ///
+    /// Deliberately narrow. It only silences a call this device is still RINGING — never one already
+    /// answered here (`inCall`), so a late-arriving frame can't hang up a conversation in progress —
+    /// and only when the sender is my own account, which the frame's signature proves before dispatch.
+    func handleHandledElsewhere(_ payload: Data) {
+        guard payload.count > 64 else { return }
+        let from = String(data: payload.prefix(64), encoding: .utf8) ?? ""
+        guard from.count == 64, from == myHex else { return }   // only MY account may silence my ring
+        let body = payload.subdata(in: (payload.startIndex + 64)..<payload.endIndex)
+        var off = 0
+        guard let sidData = CallManager.lpRead(body, &off) else { return }
+        let sid = String(data: sidData, encoding: .utf8) ?? ""
+        guard active, !inCall, sid == sessionId else {
+            HavenLog.call("handled-elsewhere for \(sid.prefix(8)) ignored (active=\(active) inCall=\(inCall) mine=\(sessionId.prefix(8)))")
+            return
+        }
+        HavenLog.call("call \(sid.prefix(8)) was handled on another of my devices — standing down")
+        endedSessions[sid] = Date()   // a retransmitted invite must not re-ring us
+        teardown()
     }
 
     /// Caller side: a callee accepted → stop re-inviting, bring up media + dial that peer.
@@ -1151,6 +1195,9 @@ final class CallManager: NSObject, ObservableObject {
 
     /// Fired by CXEndCallAction (system UI or our button): send hangup to ALL participants + tear down.
     private func reallyEnd() {
+        // Declining counts as handling it: silence my other devices too, or they keep ringing after
+        // I've dismissed the call here.
+        if ringing && !inCall { notifyOwnDevicesHandled() }
         for p in invitees() {
             var f = Data(myHex.utf8)
             CallManager.lpAppend(&f, Data(sessionId.utf8))

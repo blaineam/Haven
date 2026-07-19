@@ -537,14 +537,31 @@ enum SharedStore {
     /// haven-net `verify_devroster`). The key is permission-free, so this write is allowed BEFORE
     /// authorization (it's the bootstrap). Idempotent + cheap; call on the sync timer so a restarted
     /// relay re-learns our devices promptly.
-    static func publishDeviceRoster(social: HavenSocial) async {
+    /// Relays that already hold this exact roster, and when we confirmed it. A roster is ~30 KB (each
+    /// device credential carries a hybrid PQ signature), and this ran on the sync tick against every
+    /// relay — tens of KB every couple of minutes, per relay, forever, whether or not anything had
+    /// changed. That is what was timing out (`relay put timed out` / ConnectionLost) and starving the
+    /// rest of sync. Content is what matters, so key on the wire's hash: an unchanged roster is
+    /// re-sent only after `ROSTER_REPUBLISH` as liveness, and any CHANGE republishes immediately.
+    private static var rosterPublished: [String: (hash: Int, at: Date)] = [:]
+    private static let rosterRepublish: TimeInterval = 1800   // 30 min
+
+    static func publishDeviceRoster(social: HavenSocial, force: Bool = false) async {
         guard let r = social.exportOwnRoster().first else { HavenLog.sync("devroster SKIP — no own roster yet"); return }
         let key = "haven/devroster/\(r.accountHex)"
         let wire = r.wire
+        let wireHash = wire.hashValue
         HavenLog.sync("devroster publish acct=\(r.accountHex.prefix(8)) size=\(wire.count) → \(RelayMailboxStore.shared.allRelays().count) relays")
+        var skipped = 0
         for node in RelayMailboxStore.shared.allRelays() where !node.hasPrefix("s3:") {
             if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
                 _ = RelayHost.shared.localPut(key, wire); continue
+            }
+            // Already holds these exact bytes and confirmed recently → nothing to say.
+            if !force, let seen = rosterPublished[node], seen.hash == wireHash,
+               Date().timeIntervalSince(seen.at) < rosterRepublish {
+                skipped += 1
+                continue
             }
             // Plain-HTTP interface first (the cross-NAT path), else the iroh dial.
             if let http = RelayMailboxStore.shared.httpInterface(node) {
@@ -552,6 +569,7 @@ enum SharedStore {
                 for base in http.urls where !httpUrlBad(base) {
                     if await httpPut(base, http.token, key, wire) {
                         RelayMailboxStore.shared.markSeen(node)
+                        rosterPublished[node] = (wireHash, Date())
                         HavenLog.sync("devroster http-put OK relay=\(node.prefix(8))")
                         done = true; break
                     }
@@ -566,11 +584,15 @@ enum SharedStore {
             do {
                 try await c.put(key: key, data: wire)
                 RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
+                rosterPublished[node] = (wireHash, Date())
                 HavenLog.sync("devroster blob-put OK relay=\(node.prefix(8)) — relay should now authorize our device")
             } catch {
                 HavenLog.sync("devroster blob-put FAIL relay=\(node.prefix(8)): \(error.localizedDescription)")
                 await adoptNewerOwnRosterAndRetry(node: node, key: key, sent: wire, social: social, error: error)
             }
+        }
+        if skipped > 0 {
+            HavenLog.sync("devroster: \(skipped) relay(s) already hold this exact roster — not re-sending \(wire.count) B each")
         }
     }
 
@@ -752,7 +774,9 @@ enum SharedStore {
         HavenLog.relay("re-publishing device roster after refusal from [\(nodes)]")
         lastHeal = Date()
         rosterNeeded.removeAll()
-        await publishDeviceRoster(social: social)
+        // force: a refusal means the relay does NOT have a usable roster from us, so the
+        // "already holds these bytes" skip must not suppress the very publish that fixes it.
+        await publishDeviceRoster(social: social, force: true)
         return true
     }
 

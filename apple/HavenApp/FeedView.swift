@@ -2026,7 +2026,9 @@ final class FeedStore: ObservableObject {
         // runs identically for direct and frame-9-relayed frames — authentication is the signature,
         // not the transport id the relay path lacks. Only after this do we have a PROVEN sender hex to
         // block-check and to hand (as unchanged plaintext) to CallManager.
-        let callFrameTypes: Set<UInt8> = [10, 11, 12, 16, 17, 18, 21, 22]
+        // 30 (handled-elsewhere) rides the same sealed+signed path: it can silence a ringing device,
+        // so it must be no more forgeable than an invite or a hangup.
+        let callFrameTypes: Set<UInt8> = [10, 11, 12, 16, 17, 18, 21, 22, 30]
         if callFrameTypes.contains(type) {
             // Every rejection below is silent by design — a forged frame shouldn't announce itself.
             // But that also means a LEGITIMATE frame dropped by one of these guards is invisible, and
@@ -2106,6 +2108,7 @@ final class FeedStore: ObservableObject {
         case 27: handleDeviceRosterAnnounce(payload)            // a friend's signed device roster (device-id auth/dial)
         case 28: handleSeedlessEnrollRequest(payload)           // S4: a new seedless device asks my primary to enroll it
         case 29: handleSeedlessEnrollGrant(payload)             // S4: the primary granted my new device its seedless identity
+        case 30: CallManager.shared.handleHandledElsewhere(payload)  // another of MY devices took/declined this call
         default: break
         }
     }
@@ -2774,6 +2777,18 @@ final class FeedStore: ObservableObject {
     /// fails (no engine, or the recipient isn't a known member we can seal to) we send NOTHING —
     /// there is deliberately no plaintext fallback, so a relay can't force a downgrade to the old
     /// spoofable/rewritable form.
+    /// My OWN other devices' node ids (excluding this one and my account id) — who to tell when a
+    /// ringing call has been handled here. Empty until their roster is known, which is the honest
+    /// answer: with no roster there is no way to address them.
+    func myOtherDeviceHexes() -> [String] {
+        guard let social else { return [] }
+        let mine = social.myDeviceNodeHex().lowercased()
+        let account = social.myNodeHex().lowercased()
+        return social.deviceNodeIdsFor(accountHex: account)
+            .map { $0.lowercased() }
+            .filter { $0 != mine && $0 != account }
+    }
+
     func sendCallFrame(_ type: UInt8, _ payload: Data, to nodeHex: String) {
         // `seal_media` can only seal to a recipient it can RESOLVE to a bundle: our own account, a
         // circle member, or a known device bundle. If none match it throws and this guard drops the
@@ -3280,6 +3295,21 @@ final class FeedStore: ObservableObject {
             // caches the primary's signed card — carried on this self-hello — and rebroadcasts it verbatim.
             if SeedlessState.isEnabled, !profileBlob.isEmpty { social.setCachedProfile(blob: profileBlob) }
             if let slot = SelfSyncCoordinator.shared.sealedLocalSlot(social: social) { nearbyBroadcast(23, slot) }
+            return
+        }
+        // A hello carrying a DEVICE bundle of an account we ALREADY know is not a new person. A linked
+        // (seedless) device signs with its own key and carries its own bundle, so without this it lands
+        // as a SECOND contact for someone we're already connected to: a connection request from an
+        // identity we're already connected to, which — once accepted — shows as "Someone" and is never
+        // online, because a contact record built from a device id names no account to route to.
+        //
+        // The device→account mapping comes from their ACCOUNT-SIGNED roster (`verify_devroster`), so a
+        // stranger cannot claim to be somebody's device; an unknown device id maps to nothing and still
+        // takes the normal approval path below.
+        if let account = social.accountForDevice(deviceHex: idHex)?.lowercased(),
+           account != idHex.lowercased() {
+            recordDeviceHints(accountHex: account, deviceIds: [idHex])
+            HavenLog.sync("hello from \(idHex.prefix(8)) is a DEVICE of known account \(account.prefix(8)) — recorded as their device, not a new contact")
             return
         }
         // Blocked people get dropped entirely — no add, no re-add.

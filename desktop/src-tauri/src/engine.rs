@@ -104,6 +104,15 @@ struct DynState {
     /// the current session's bandwidth, and a restart re-serving once is fine.
     media_served_at: HashMap<String, u64>,
     media_serving: HashSet<String>,
+    /// Chunk serves currently streaming, keyed `ref|requester`.
+    ///
+    /// A serve is slow by construction, so the requester re-asks while it waits — and that second
+    /// request happily started ANOTHER full serve of the same file. Three or four pile up, compete for
+    /// the same link, and none finishes, so the media never arrives and the requester asks again,
+    /// indefinitely. (iOS hit exactly this — one video re-requested 16 times in 20 minutes — and fixed
+    /// it in c67226c.) During a transfer, doing NOTHING is the correct response: the bytes are already
+    /// on their way, and if they stop, the resume request asks for the holes.
+    chunk_serving: HashSet<String>,
     internet_active: bool,
     relay_active: bool,
     started: bool,
@@ -5466,7 +5475,7 @@ impl Engine {
         }
         let Some(bytes) = self.media.load_any_circle(&self.social, &reference) else { return };
         // Frame 3 means "send everything" and always has — see `wire::MEDIA_RESUME_REQ`.
-        self.send_media_chunks(&reference, &bytes, &requester, None).await;
+        self.serve_chunks_once(&reference, &requester, &bytes, None).await;
     }
 
     /// Frame 33 — a RESUME request carrying a bitmap of what the requester already holds, so the
@@ -5500,7 +5509,65 @@ impl Engine {
             total,
             &req.requester_hex[..8]
         );
-        self.send_media_chunks(&req.reference, &bytes, &req.requester_hex, Some(&missing)).await;
+        self.serve_chunks_once(&req.reference, &req.requester_hex, &bytes, Some(&missing)).await;
+    }
+
+    /// Run the ONE serve for this (ref, requester), or do nothing if one is already streaming.
+    /// See [`DynState::chunk_serving`] for why doing nothing is the correct answer mid-transfer.
+    async fn serve_chunks_once(
+        self: &Arc<Self>,
+        reference: &str,
+        requester_hex: &str,
+        bytes: &[u8],
+        missing: Option<&HashSet<u32>>,
+    ) {
+        let key = format!("{reference}|{requester_hex}");
+        {
+            let mut st = self.dyn_state.lock().unwrap();
+            if !st.chunk_serving.insert(key.clone()) {
+                log::debug!(
+                    "media serve {}: already streaming to {}, ignoring",
+                    &reference[..reference.len().min(12)],
+                    &requester_hex[..requester_hex.len().min(8)]
+                );
+                return;
+            }
+        }
+        self.send_media_chunks(reference, bytes, requester_hex, missing).await;
+        // Cleared however the serve ends — a seal failure returns early mid-file, and leaving the key
+        // behind would lock this pair out of ever being served again this session.
+        self.dyn_state.lock().unwrap().chunk_serving.remove(&key);
+    }
+
+    /// Send a frame and WAIT for it, rather than spawning a task that outlives the caller.
+    ///
+    /// [`Self::send_frame`] spawns per target, which is right for one-off frames and very wrong for a
+    /// serve loop: a 200 MB video is ~6,400 chunks, each spawning a task per device holding its own
+    /// 32 KB frame clone. Nothing awaited them, so the loop finished in milliseconds and left tens of
+    /// thousands of queued sends holding the whole file in memory — an unbounded backlog that gets
+    /// worse the slower the link is.
+    ///
+    /// Awaiting makes the serve loop self-pacing: it cannot outrun the transport, memory stays at one
+    /// chunk, and the rate follows the actual link instead of a fixed sleep (which would be slower
+    /// than necessary on a fast link and still unbounded on a slow one).
+    async fn send_frame_awaited(self: &Arc<Self>, t: u8, payload: &[u8], to_node_hex: &str) {
+        let node = self.node.lock().unwrap().clone();
+        let Some(node) = node else { return };
+        let frame = wire::frame(t, payload);
+        let mut targets = self.social.device_node_ids_for(to_node_hex.to_string());
+        if targets.is_empty() {
+            targets.push(to_node_hex.to_string());
+        }
+        for h in self.device_hints_for(to_node_hex) {
+            if !targets.iter().any(|t| t.eq_ignore_ascii_case(&h)) {
+                targets.push(h);
+            }
+        }
+        for to in targets {
+            if let Err(e) = node.send_to_node(to.clone(), frame.clone()).await {
+                log::debug!("send type={t} to {} failed: {e}", &to.chars().take(8).collect::<String>());
+            }
+        }
     }
 
     /// Stream a media file to the requester as individually-sealed 32 KB chunks.
@@ -5540,7 +5607,8 @@ impl Engine {
                     Err(_) => return,
                 }
             };
-            self.send_frame(wire::MEDIA_CHUNK, &wire::chunk_frame(ref_bytes, index, total, &sealed), requester_hex);
+            self.send_frame_awaited(wire::MEDIA_CHUNK, &wire::chunk_frame(ref_bytes, index, total, &sealed), requester_hex)
+                .await;
         }
     }
 

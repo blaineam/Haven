@@ -2270,7 +2270,10 @@ object HavenNet : InboundListener {
             if (!LocalMedia.has(ref)) continue
             pushedNearby.add(ref)
             if (!shouldServeNearby(ref)) continue
-            scope.launch { sendMediaChunks(ref, LocalMedia.loadAnyCircle(ref) ?: return@launch, me) }
+            // Guarded like the request-driven serves: this runs off a TICK, so without it a slow push
+            // that hasn't finished by the next pass gets a second copy of itself started on top.
+            val bytes = LocalMedia.loadAnyCircle(ref) ?: continue
+            serveOnce(ref, me) { sendMediaChunks(ref, bytes, me) }
             budget--
         }
         if (pushedNearby.size > 5000) pushedNearby.clear()
@@ -4152,7 +4155,33 @@ object HavenNet : InboundListener {
         // hundreds of times and flooded the send queue so nothing drained. One serve per ref per 25s.
         if (!shouldServeNearby(ref)) return
         val bytes = LocalMedia.loadAnyCircle(ref) ?: return
-        scope.launch { sendMediaChunks(ref, bytes, requester) }
+        serveOnce(ref, requester) { sendMediaChunks(ref, bytes, requester) }
+    }
+
+    /**
+     * Serves currently streaming, keyed `ref|requester`.
+     *
+     * A serve is slow by construction, so the requester re-asks while it waits — and without this that
+     * second request happily started ANOTHER full serve of the same file. Three or four pile up,
+     * compete for the same link, and none of them finishes, so the media never arrives and the
+     * requester asks again. Forever. (iOS hit exactly this: one video re-requested 16 times in 20
+     * minutes; fixed there in c67226c.) During a transfer, doing nothing IS the correct response —
+     * the bytes are already on their way, and if they stop, the resume request picks up the holes.
+     */
+    private val servingNow = HashSet<String>()
+
+    /** Run [body] as the one serve for this (ref, requester), or drop it if one is already running. */
+    private fun serveOnce(ref: String, requesterHex: String, body: suspend () -> Unit) {
+        val key = "$ref|$requesterHex"
+        synchronized(servingNow) {
+            if (!servingNow.add(key)) {
+                Log.i("MediaSync", "serve ref=${ref.take(12)} — already streaming to ${requesterHex.take(8)}, ignoring")
+                return
+            }
+        }
+        scope.launch {
+            try { body() } finally { synchronized(servingNow) { servingNow.remove(key) } }
+        }
     }
 
     /**
@@ -4181,8 +4210,14 @@ object HavenNet : InboundListener {
             if (missing != null && index !in missing) { offset = end; index++; continue }
             val chunk = bytes.copyOfRange(offset, end)
             val sealed = if (isOwn) sealOwnMedia(chunk) else runCatching { social.sealMedia(requesterHex, chunk) }.getOrNull()
-            if (sealed == null) return
-            sendFrame(Wire.MEDIA_CHUNK, chunkFrame(refBytes, index, total, sealed), requesterHex)
+            if (sealed == null) {
+                // A failed seal abandons the transfer MID-FILE, leaving the requester with a partial
+                // set it can't complete on its own — say which chunk rather than stopping silently.
+                // (With resume that partial is no longer a dead end: it re-asks for exactly the holes.)
+                Log.w("MediaSync", "serve ref=${ref.take(12)} → ${requesterHex.take(8)}: seal FAILED at chunk $index; transfer abandoned")
+                return
+            }
+            sendFrameAwait(Wire.MEDIA_CHUNK, chunkFrame(refBytes, index, total, sealed), requesterHex)
             offset = end; index++
         }
     }
@@ -4292,7 +4327,7 @@ object HavenNet : InboundListener {
         } else null
         if (missing != null && missing.isEmpty()) return   // they have it all; the last chunk is in flight
         Log.i("MediaSync", "resume ref=${req.ref.take(12)} from=${req.requesterHex.take(8)}: ${missing?.size ?: total}/$total chunks still needed")
-        scope.launch { sendMediaChunks(req.ref, bytes, req.requesterHex, missing) }
+        serveOnce(req.ref, req.requesterHex) { sendMediaChunks(req.ref, bytes, req.requesterHex, missing) }
     }
 
     /**
@@ -4345,6 +4380,30 @@ object HavenNet : InboundListener {
             }
             Log.i("MediaSync", "resume restored ref=${r.ref.take(12)}: ${got.size}/${r.total} chunks already on disk")
         }
+    }
+
+    /**
+     * Send a frame and WAIT for it, instead of firing a coroutine that outlives the caller.
+     *
+     * [sendFrame] launches per call, which is right for one-off frames and very wrong for a serve
+     * loop: a 200 MB video is ~6,400 chunks, each launching a coroutine holding its own 32 KB frame
+     * copy, for every device on the roster. Nothing awaited them, so the loop ran to completion in
+     * milliseconds and left tens of thousands of queued sends holding the entire file in memory —
+     * an unbounded backlog that gets worse the slower the link is.
+     *
+     * Awaiting each send makes the serve loop self-pacing: it cannot outrun the transport, memory
+     * stays at one chunk, and the rate matches the actual link rather than a fixed sleep (which would
+     * be both slower than necessary on a fast link and still unbounded on a slow one).
+     */
+    private suspend fun sendFrameAwait(type: Int, payload: ByteArray, toNodeHex: String) {
+        val n = node ?: return
+        val frame = Wire.frame(type, payload)
+        val targets = LinkedHashSet(
+            runCatching { social.deviceNodeIdsFor(toNodeHex) }
+                .getOrNull()?.takeIf { it.isNotEmpty() } ?: listOf(toNodeHex)
+        )
+        targets.addAll(deviceHintsFor(toNodeHex))
+        for (t in targets) runCatching { n.sendToNode(t, frame) }
     }
 
     private fun sendFrame(type: Int, payload: ByteArray, toNodeHex: String) {

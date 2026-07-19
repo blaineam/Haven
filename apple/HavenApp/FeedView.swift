@@ -2853,20 +2853,45 @@ final class FeedStore: ObservableObject {
             HavenLog.sync("media-wanted \(ref.prefix(10)) from \(from.prefix(8)) — I don't hold it either")
             return
         }
+        // BOUNDED. Re-uploading a whole blob is expensive and TRIGGERED BY SOMEONE ELSE, so an
+        // unbounded version lets any circle member spend my upload bandwidth by asking repeatedly,
+        // and lets concurrent asks for one ref each start their own upload. Not the sync-tick shape
+        // of the roster leak, but the same class: an attacker-triggered unbounded network operation.
+        //
+        // A repeat ask inside the cooldown is ANSWERED from the earlier upload rather than ignored —
+        // cheaper and also honest, since the blob really is back on the relay.
+        if mediaWantedInFlight.contains(ref) {
+            HavenLog.sync("media-wanted \(ref.prefix(10)): already uploading — \(from.prefix(8)) will get the reply")
+            return
+        }
+        if let at = mediaWantedServedAt[ref], Date().timeIntervalSince(at) < 600 {
+            HavenLog.sync("media-wanted \(ref.prefix(10)): served recently — answering \(from.prefix(8)) without re-uploading")
+            sendMediaAvailable(ref: ref, circleId: circleId, postId: postId, to: from)
+            return
+        }
         HavenLog.sync("media-wanted \(ref.prefix(10)) from \(from.prefix(8)) — re-uploading to a shared relay")
+        mediaWantedInFlight.insert(ref)
         Task { @MainActor in
+            defer { self.mediaWantedInFlight.remove(ref) }
             let ok = await SharedStore.backup(ref: ref, circleId: circleId, social: social, force: true)
             guard ok else {
                 HavenLog.sync("media-wanted \(ref.prefix(10)): re-upload failed — they'll re-ask")
                 return
             }
-            var f = Data(self.myNodeHex.utf8)
-            self.lpAppend(&f, Data(ref.utf8))
-            self.lpAppend(&f, Data(circleId.utf8))
-            self.lpAppend(&f, Data(postId.utf8))
-            self.sendCallFrame(32, f, to: from)
+            self.mediaWantedServedAt[ref] = Date()
+            if self.mediaWantedServedAt.count > 500 { self.mediaWantedServedAt.removeAll() }
+            self.sendMediaAvailable(ref: ref, circleId: circleId, postId: postId, to: from)
             HavenLog.sync("media-wanted \(ref.prefix(10)): back on a relay, told \(from.prefix(8))")
         }
+    }
+
+    /// Refs currently being re-uploaded, and when each was last served — see the bounding note above.
+    private func sendMediaAvailable(ref: String, circleId: String, postId: String, to peer: String) {
+        var f = Data(myNodeHex.utf8)
+        lpAppend(&f, Data(ref.utf8))
+        lpAppend(&f, Data(circleId.utf8))
+        lpAppend(&f, Data(postId.utf8))
+        sendCallFrame(32, f, to: peer)
     }
 
     /// Requester side: media I asked about is back. Notify with a deep link straight to the post.
@@ -3560,6 +3585,12 @@ final class FeedStore: ObservableObject {
     /// pass every time regardless of whether the previous one had finished — and each pass makes
     /// network calls with 60s timeouts, so they overlapped and accumulated without bound.
     private var rosterPullInFlight = false
+
+    /// Media re-uploads someone else asked for: what's in flight, and when each ref was last served.
+    /// Both bound an operation a PEER triggers — without them a circle member can spend my upload
+    /// bandwidth at will, and concurrent asks for one ref each start their own upload.
+    private var mediaWantedInFlight: Set<String> = []
+    private var mediaWantedServedAt: [String: Date] = [:]
 
     /// The newest inbound item already counted toward each circle's badge.
     ///

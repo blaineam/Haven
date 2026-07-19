@@ -117,34 +117,46 @@ manual run, `apple/project.yml`'s `MARKETING_VERSION`).
 
 ## Microsoft Store (Windows → `.github/workflows/release.yml`, `desktop` job)
 
-### What CI automates (on every `v*` tag, once the secrets exist)
+### What CI automates (on every `v*` tag)
 
-CI packages an **MSIX** from the Tauri build and submits it with the **Microsoft Store Developer CLI**
-(`msstore`):
+CI packages an **MSIX** from the Tauri build and attaches it to the **GitHub Release**. That is all
+it does for the Store — **submission is manual** (see below).
 
-```
-msstore reconfigure --tenantId … --clientId … --clientSecret … --sellerId …
-msstore publish "<Haven-x.y.z.msix>" --appId <StoreId> --verbose
-```
+The Store re-signs the package on ingestion, so **no paid code-signing certificate is needed** — the
+one-time developer fee (~$19 individual) is the only cost, and Store apps install with no SmartScreen
+warning.
 
-`msstore publish` opens a **new submission** containing the package and **commits** it → the Store
-runs **certification automatically**, and once cert passes the update goes **live**. The Store
-re-signs the package, so **no paid code-signing certificate is needed** — the one-time developer
-fee (~$19 individual) is the only cost, and Store apps install with no SmartScreen warning. The
-submit step is **non-fatal**, so a Store hiccup never blocks the Linux/relay GitHub Release.
+### Submitting the update (MANUAL — do this by hand in Partner Center)
 
-### What `msstore` genuinely will NOT do (be clear-eyed about this)
+`msstore publish` is **not run in CI**, because it only supports **free** products over GitHub
+Actions and **Haven is a paid listing** — the command exits non-zero and does nothing. It was
+previously wired with `continue-on-error: true`, which reported a **green** job while submitting
+nothing; a release once went to review believing the Store was done when it wasn't. So the step now
+just prints a `::notice` reminder, and a human finishes it:
 
-- **It does not set listing text/screenshots per-field.** `msstore publish` has *no* flag for
-  description, screenshots, features, or age rating. Those are whatever you set in Partner Center on
-  the first submission, and every package update **carries them forward unchanged.** That's why the
-  listing content lives in Partner Center for Windows (unlike Android, where the repo drives it).
+1. **Partner Center** → Haven → **Packages** → upload the `Haven-<ver>.msixbundle` from that tag's
+   GitHub Release.
+2. **Store listings (en-US)** → paste this version's **What's new**. **Clear the field first**, then
+   paste and **Save** — Partner Center only re-validates on an *actual* change, so an identical
+   re-paste is a no-op that can leave the section stuck **"Incomplete"** with no error shown.
+3. **Submit for certification.**
+
+Re-enable CI automation **only** once Microsoft ships paid-product support for `msstore publish` in
+Actions (they've said "in a future release"). At that point, restore the submit step from git
+history and drop its `continue-on-error` so a genuine failure goes **red** instead of false-green.
+
+### Why `msstore publish` isn't wired (be clear-eyed about this)
+
 - **Paid products aren't supported through GitHub Actions *yet*.** Per Microsoft's own docs, "app
   update operations through GitHub Actions is currently supported for **free products only**. Paid
-  products will be supported in a future release." If Haven's Store listing is paid, the `msstore
-  publish` step may no-op until Microsoft ships that support — which is exactly why the step is
-  `continue-on-error`. Watch the step's log; when it starts succeeding, Windows is fully automated.
-- **The app must already be live** before the CLI can push an update, and Partner Center allows only
+  products will be supported in a future release." Haven is paid, so the command **exits non-zero
+  and does nothing** — this is why submission is manual today, not a config we can fix.
+- **Even when it works, it does not set listing text/screenshots per-field.** `msstore publish` has
+  *no* flag for description, screenshots, features, or age rating. Those are whatever you set in
+  Partner Center, and every package update **carries them forward unchanged** — which is why the
+  What's-new text still has to be pasted by hand each release (Android, by contrast, drives listing
+  text from the repo).
+- **The app must already be live** before an update can be pushed, and Partner Center allows only
   **one open submission at a time.**
 
 ### Editing the Microsoft Store listing (optional, advanced, deliberately not wired)

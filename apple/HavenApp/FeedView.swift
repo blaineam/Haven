@@ -407,7 +407,15 @@ final class FeedStore: ObservableObject {
     }
 
     var activeCircleName: String {
-        circles.first { $0.id == activeCircleId }?.name ?? "My Circle"
+        displayName(forCircle: activeCircleId)
+    }
+
+    /// What to SHOW a circle as: my own private nickname if I've set one, else its real name. The
+    /// real name is what travels on the wire and what everyone else sees — renaming it for myself
+    /// must never rename it for them, so the nickname is resolved only at display time.
+    func displayName(forCircle id: String) -> String {
+        let real = circles.first { $0.id == id }?.name ?? "My Circle"
+        return CircleSettingsStore.shared.displayName(id, real: real)
     }
 
     func setActiveCircle(_ id: String) {
@@ -5045,6 +5053,20 @@ private struct KillHorizontalScroller: NSViewRepresentable {
                                                           postId: item.id, musicStartMs: 0))
                             } label: { Label("Share as story", systemImage: "circle.dashed.inset.filled") }
                         }
+                    }
+                    // Reply to the AUTHOR privately, the same move a story reply makes: open (or
+                    // reuse) the DM with them and carry the post's media so they know which post
+                    // you mean. Never available on your own post — that would DM yourself.
+                    if !item.isMe, let authorHex = ContactsStore.shared.idHex(forNodePrefix: item.authorShort) {
+                        Button {
+                            let dm = feed.startDM(with: authorHex, name: authorName)
+                            // Media only: the post's TEXT is theirs and echoing it back reads as a
+                            // quote they didn't write. The media is the unambiguous "this post".
+                            if !realMedia.isEmpty {
+                                feed.sendMessage(to: dm, "", media: realMedia, music: nil)
+                            }
+                            feed.setActiveCircle(dm)
+                        } label: { Label("Message \(authorName)", systemImage: "bubble.left") }
                     }
                     if item.isMe {
                         Button { showEdit = true } label: { Label("Edit", systemImage: "pencil") }

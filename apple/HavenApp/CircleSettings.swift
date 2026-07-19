@@ -17,6 +17,10 @@ final class CircleSettingsStore: ObservableObject {
     @Published private var saveOthers: [String: Bool]
     @Published private var optimize: [String: Bool]
     @Published private var retention: [String: Int]
+    /// What *I* call this circle. Purely local, exactly like a contact nickname: it never leaves this
+    /// account, so renaming a circle can't rename it for everyone else in it. The circle's real name
+    /// stays authoritative on the wire — this only changes what I see.
+    @Published private var nickname: [String: String]
 
     private let d = UserDefaults.standard
     private let kSpot = "haven.circle.spotlight"
@@ -25,6 +29,7 @@ final class CircleSettingsStore: ObservableObject {
     private let kSaveOthers = "haven.circle.saveOthers"
     private let kOptimize = "haven.circle.optimize"
     private let kRetention = "haven.circle.retention"
+    private let kNickname = "haven.circle.nickname"
 
     private init() {
         spotlight = (d.dictionary(forKey: kSpot) as? [String: Bool]) ?? [:]
@@ -33,12 +38,34 @@ final class CircleSettingsStore: ObservableObject {
         saveOthers = (d.dictionary(forKey: kSaveOthers) as? [String: Bool]) ?? [:]
         optimize = (d.dictionary(forKey: kOptimize) as? [String: Bool]) ?? [:]
         retention = (d.dictionary(forKey: kRetention) as? [String: Int]) ?? [:]
+        nickname = (d.dictionary(forKey: kNickname) as? [String: String]) ?? [:]
     }
 
     /// Factory-reset this store — clear all per-circle settings + unlocks (in-memory + persisted).
     func wipe() {
         spotlight = [:]; biometric = [:]; saveOwn = [:]; saveOthers = [:]; optimize = [:]; retention = [:]
-        [kSpot, kBio, kSaveOwn, kSaveOthers, kOptimize, kRetention].forEach { d.removeObject(forKey: $0) }
+        nickname = [:]
+        [kSpot, kBio, kSaveOwn, kSaveOthers, kOptimize, kRetention, kNickname].forEach { d.removeObject(forKey: $0) }
+    }
+
+    // MARK: My own name for a circle (local only — never sent, never synced to members)
+
+    /// What I call this circle, if I've renamed it. `nil` = use the circle's real name.
+    func nickname(_ c: String) -> String? {
+        guard let n = nickname[c]?.trimmingCharacters(in: .whitespacesAndNewlines), !n.isEmpty else { return nil }
+        return n
+    }
+
+    /// The name to SHOW for a circle: my nickname if I set one, else its real name. Every display
+    /// site should go through this so a renamed circle doesn't revert wherever one was missed.
+    func displayName(_ c: String, real: String) -> String { nickname(c) ?? real }
+
+    /// Set (or clear, with an empty string) my own name for a circle.
+    func setNickname(_ v: String, for c: String) {
+        let trimmed = v.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { nickname.removeValue(forKey: c) } else { nickname[c] = trimmed }
+        d.set(nickname, forKey: kNickname)
+        objectWillChange.send()
     }
 
     // MARK: Media settings (per circle, falling back to the global default)
@@ -212,6 +239,9 @@ struct CircleSettingsView: View {
     @ObservedObject private var circleSettings = CircleSettingsStore.shared
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
+    /// My PRIVATE name for this circle. Separate from `name`, which renames it for everyone —
+    /// this one never leaves the device, exactly like a contact nickname.
+    @State private var nick = ""
     @State private var showRelays = false   // macOS only — "Manage relays" is a NavigationLink on iOS
 
     private var isDefault: Bool { circleId == "default" }
@@ -221,8 +251,14 @@ struct CircleSettingsView: View {
             // Settings covers the feed — the post song behind it must stop. Applied on the DESTINATION
             // rather than at each presentation site so it holds wherever this is opened from.
             .havenPausesPostAudio()
-            .onAppear { name = store.circles.first { $0.id == circleId }?.name ?? "" }
-            .onDisappear { store.renameCircle(circleId, to: name) }   // persist a rename made without hitting return
+            .onAppear {
+                name = store.circles.first { $0.id == circleId }?.name ?? ""
+                nick = circleSettings.nickname(circleId) ?? ""
+            }
+            .onDisappear {
+                store.renameCircle(circleId, to: name)   // persist a rename made without hitting return
+                circleSettings.setNickname(nick, for: circleId)
+            }
     }
 
     @ViewBuilder private var platformBody: some View {
@@ -249,6 +285,15 @@ struct CircleSettingsView: View {
                     Text("Name")
                 } footer: {
                     Text("What this circle is called for you and everyone in it.")
+                }
+
+                Section {
+                    TextField("Your name for this circle", text: $nick)
+                        .onSubmit { circleSettings.setNickname(nick, for: circleId) }
+                } header: {
+                    Text("Your name")
+                } footer: {
+                    Text("Only you see this. It never reaches anyone else in the circle, and it doesn't change the circle's name for them. Leave it empty to use the circle's own name.")
                 }
 
                 Section {
@@ -348,6 +393,14 @@ struct CircleSettingsView: View {
                     .onSubmit { store.renameCircle(circleId, to: name) }
                     .havenPillField()
                 footnote("What this circle is called for you and everyone in it.")
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                sectionHeader("Your name")
+                TextField("Your name for this circle", text: $nick)
+                    .onSubmit { circleSettings.setNickname(nick, for: circleId) }
+                    .havenPillField()
+                footnote("Only you see this. It never reaches anyone else in the circle, and it doesn't change the circle's name for them. Leave it empty to use the circle's own name.")
             }
 
             VStack(alignment: .leading, spacing: 8) {

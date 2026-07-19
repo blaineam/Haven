@@ -176,6 +176,10 @@ private final class NotificationTapRouter: NSObject, UNUserNotificationCenterDel
             SharedInbox.append(env: env)
             Task { @MainActor in FeedStore.shared.ingestPushInbox() }
         }
+        // And sync REGARDLESS of whether the event rode along: the worker drops `ev` whenever the
+        // payload would exceed APNs' 4KB, so "no inline event" is the normal case for anything large,
+        // not an anomaly. Without this the banner was the only trace such a message ever left.
+        Task { @MainActor in FeedStore.shared.syncBecauseOfPush() }
         completionHandler([.banner, .sound])
     }
 }

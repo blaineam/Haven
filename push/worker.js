@@ -223,7 +223,17 @@ export default {
                 e: ciphertext,
               };
           // Inline the sealed event only if the whole payload stays under APNs' 4KB limit.
-          if (event && JSON.stringify(payload).length + event.length < 3900) payload.ev = event;
+          //
+          // When it does NOT fit, the recipient gets a banner announcing a message whose bytes are
+          // nowhere in the payload — so delivery falls back entirely to p2p or the mailbox, and a
+          // device that was asleep at that moment sees a notification for something it never receives.
+          // The apps now treat any push as "go fetch" for exactly this reason. This drop used to be
+          // silent, which made the resulting non-delivery look random rather than size-dependent —
+          // count it so the pattern is visible in the logs.
+          if (event) {
+            if (JSON.stringify(payload).length + event.length < 3900) payload.ev = event;
+            else console.log(`notify: ev dropped, ${event.length}B event exceeds the APNs payload budget`);
+          }
           return JSON.stringify(payload);
         };
 

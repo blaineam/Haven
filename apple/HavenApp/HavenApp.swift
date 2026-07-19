@@ -118,6 +118,9 @@ final class HavenAppDelegate: NSObject, NSApplicationDelegate {
             // so a stashed envelope sat here until the next launch while its banner was already up.
             Task { @MainActor in FeedStore.shared.ingestPushInbox() }
         }
+        // Sync even when no event rode along — the worker drops `ev` over ~3900 bytes, so a large
+        // message arrives as a banner and nothing else unless we go and fetch it.
+        Task { @MainActor in FeedStore.shared.syncBecauseOfPush() }
         if userInfo["remint"] != nil {
             Task { @MainActor in PresignStore.shared.remintAllOwned() }
         }

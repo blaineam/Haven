@@ -1919,6 +1919,26 @@ final class FeedStore: ObservableObject {
     /// Force the next poll to run self-sync even if inside the throttle window (device link, foreground).
     func forceSelfSyncNextPoll() { lastSelfSyncMs = 0 }
 
+    private var lastPushPollMs: UInt64 = 0
+    /// A push landed — go and FETCH, rather than trusting it to have carried the event.
+    ///
+    /// The push worker inlines the sealed event (`ev`) only if the whole APNs payload stays under
+    /// ~3900 bytes, and silently drops it when it doesn't. So a large event produces a banner with no
+    /// content attached, nothing for the NSE to stash, and — until now — nothing that made the app go
+    /// look for it either: the notification was the ONLY signal that something existed, and it carried
+    /// no way to get it. The result was a banner for a message that never appeared, not even after a
+    /// relaunch, because there was never anything queued to ingest.
+    ///
+    /// Treat every push as "something is waiting" and pull the mailbox. Throttled to once per 10s so a
+    /// burst of notifications can't turn into a burst of LIST+FETCH round-trips — a peer sending twenty
+    /// messages must not cost twenty mailbox sweeps.
+    func syncBecauseOfPush() {
+        let nowMs = now()
+        guard nowMs - lastPushPollMs > 10_000 else { return }
+        lastPushPollMs = nowMs
+        pollMailboxNow()
+    }
+
     func pollMailboxNow() {
         guard social != nil else { return }
         // Multi-device self-sync (profile, pins, contacts, read watermarks, circles) syncs the user's

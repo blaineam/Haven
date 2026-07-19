@@ -1641,11 +1641,17 @@ object HavenNet : InboundListener {
             if (entry != null && entry.httpToken.isNotEmpty()) {
                 var done = false
                 for (base in httpUrlsFor(entry)) {
-                    if (relayHttpPut(base, entry.httpToken, key, wire)) {
+                    val r = relayHttpPut(base, entry.httpToken, key, wire)
+                    if (r.isSuccess) {
                         markRelaySeen(nodeHex); rosterPublished[nodeHex] = wireHash to System.currentTimeMillis()
                         done = true; break
                     }
-                    markHttpUrlBad(base)
+                    // The devroster key is permission-FREE, so a refusal here is the relay rejecting our
+                    // SIGNATURE, not our membership — noteRefused would only schedule a heal that repeats
+                    // this very publish. Still never back the URL off: this is the one write that
+                    // authorizes all the others, and sealing it for two minutes is how a device stays
+                    // unauthorized (and unable to upload) far longer than it needs to.
+                    if (r.exceptionOrNull() !is RelayForbidden) markHttpUrlBad(base)
                 }
                 if (done) continue
             }
@@ -3475,9 +3481,17 @@ object HavenNet : InboundListener {
         return true
     }
 
-    private fun relayHttpPut(base: String, token: String, key: String, body: ByteArray): Boolean = runCatching {
+    /**
+     * PUT one key. success = stored; failure([RelayForbidden]) = the relay is up and will take this
+     * write the moment it knows this device; any other failure = unreachable. The same three-way split
+     * [relayHttpGet] needs, for the mirror-image reason: a device that has never been authorized cannot
+     * upload at all, and a 403 read as an outage backs off the very relay the write needs — so the blob
+     * never lands, and the damage surfaces much later as a fetch that genuinely 404s. A real absence,
+     * manufactured by a permissions problem. iOS SharedStore.httpPut parity.
+     */
+    private fun relayHttpPut(base: String, token: String, key: String, body: ByteArray): Result<Unit> = runCatching {
         // Digest over the EXACT bytes written below — `body` is streamed verbatim, unmodified.
-        val auth = httpAuth(token, "PUT", key, body) ?: return@runCatching false
+        val auth = httpAuth(token, "PUT", key, body) ?: throw java.io.IOException("no device key to sign PUT")
         val c = (java.net.URL(httpKeyUrl(base, key)).openConnection() as java.net.HttpURLConnection).apply {
             requestMethod = "PUT"; doOutput = true; connectTimeout = 4000; readTimeout = 120000
             setRequestProperty("Authorization", auth)
@@ -3486,29 +3500,39 @@ object HavenNet : InboundListener {
         }
         try {
             c.outputStream.use { it.write(body) }
-            c.responseCode in 200..299
+            val code = c.responseCode
+            when {
+                code in 200..299 -> Unit
+                code == 401 || code == 403 -> throw RelayForbidden()
+                else -> throw java.io.IOException("relay PUT HTTP $code")
+            }
         } finally { c.disconnect() }
-    }.getOrDefault(false)
+    }
 
-    /** PUT one media blob (chunked wire format) to a relay's HTTP interface. True if it landed. */
-    private fun httpUploadMedia(e: RelayEntry, ref: String, key: String, blob: ByteArray, chunked: Boolean): Boolean {
+    /** PUT one media blob (chunked wire format) to a relay's HTTP interface. Three-way — see [relayHttpPut]. */
+    private fun httpUploadMedia(e: RelayEntry, ref: String, key: String, blob: ByteArray, chunked: Boolean): Result<Unit> {
+        var last: Result<Unit> = Result.failure(java.io.IOException("relay has no usable HTTP interface"))
         for (base in httpUrlsFor(e)) {
-            val ok = if (chunked) {
+            val r = if (chunked) {
                 val sizes = ArrayList<Int>()
-                var all = true
+                var acc: Result<Unit> = Result.success(Unit)
                 for ((i, range) in chunkOffsets(blob.size).withIndex()) {
                     val (from, to) = range
-                    if (!relayHttpPut(base, e.httpToken, mediaChunkKey(ref, i), blob.copyOfRange(from, to))) { all = false; break }
+                    acc = relayHttpPut(base, e.httpToken, mediaChunkKey(ref, i), blob.copyOfRange(from, to))
+                    if (acc.isFailure) break
                     sizes.add(to - from)
                 }
-                all && relayHttpPut(base, e.httpToken, key, makeManifest(sizes))
+                if (acc.isFailure) acc else relayHttpPut(base, e.httpToken, key, makeManifest(sizes))
             } else {
                 relayHttpPut(base, e.httpToken, key, blob)
             }
-            if (ok) return true
-            markHttpUrlBad(base)
+            if (r.isSuccess) return r
+            last = r
+            // Reachable and healthy — it just doesn't know us. Backing off here would strand our media
+            // on a relay that would happily store it once authorized.
+            if (r.exceptionOrNull() !is RelayForbidden) markHttpUrlBad(base)
         }
-        return false
+        return last
     }
 
     /** Mirror a sealed media blob to EVERY circle relay (HTTP first — see mediaRelaysFor). */
@@ -3545,6 +3569,16 @@ object HavenNet : InboundListener {
      * re-seal (now account-signed, done by the core fix) and overwrite the stored copy.
      */
     suspend fun uploadMedia(circleId: String, ref: String, force: Boolean = false): Boolean {
+        if (uploadMediaOnce(circleId, ref, force)) return true
+        // Nothing took the blob and at least one relay REFUSED it rather than being down: publish our
+        // roster to the refusers and try once more, exactly as the Restore job does for the read side. A
+        // device that has never been authorized anywhere otherwise never gets its FIRST blob up — and
+        // because that upload failure is invisible, the damage surfaces much later as a fetch that
+        // genuinely 404s, an absence manufactured entirely by a permissions problem.
+        return healForbiddenRelays() && uploadMediaOnce(circleId, ref, force)
+    }
+
+    private suspend fun uploadMediaOnce(circleId: String, ref: String, force: Boolean = false): Boolean {
         // Skip entirely if every destination already has this blob (before the expensive rawSealed read).
         val dests = mediaRelaysFor(circleId)
         if (!force && dests.isNotEmpty() && dests.all { isBackedUp(it, ref) }) return true
@@ -3646,9 +3680,17 @@ object HavenNet : InboundListener {
         // Relay HTTP interface — the DEFAULT cross-NAT path. Success = done for this relay
         // (the iroh path serves the same store); a mid-upload failure falls back to the iroh put.
         for ((nodeHex, entry) in uploadHttp) {
-            if (httpUploadMedia(entry, ref, key, blob, chunked)) {
+            val r = httpUploadMedia(entry, ref, key, blob, chunked)
+            if (r.isSuccess) {
                 markRelaySeen(nodeHex); markBackedUp(nodeHex, ref); landed = true
                 android.util.Log.i("MediaSync", "HTTP uploaded ref=$ref to ${nodeHex.take(8)}")
+                continue
+            }
+            if (r.exceptionOrNull() is RelayForbidden) {
+                // The iroh dial goes through the SAME membership gate, so falling back to it only
+                // repeats the refusal. Record it and let the heal + retry in [uploadMedia] publish
+                // our roster first, so the retry is allowed.
+                noteRefused(nodeHex, "media upload ${ref.take(10)}")
                 continue
             }
             relayClientFor(nodeHex)?.let { uploadDial.add(nodeHex to it) }

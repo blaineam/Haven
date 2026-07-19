@@ -351,6 +351,17 @@ enum SharedStore {
     /// the freshly re-sealed overwrite). The recovery migration uses this to know a ref is repaired.
     @discardableResult
     static func backup(ref: String, circleId: String, social: HavenSocial, force: Bool = false) async -> Bool {
+        if await backupOnce(ref: ref, circleId: circleId, social: social, force: force) { return true }
+        // Nothing took the blob and at least one relay REFUSED it rather than being down: publish our
+        // roster to the refusers and try once more, exactly as `restore` does for the read side. A
+        // device that has never been authorized anywhere otherwise never gets its FIRST blob up — and
+        // because that upload failure is invisible, the damage surfaces much later as a fetch that
+        // genuinely 404s, an absence manufactured entirely by a permissions problem.
+        guard await healForbiddenRelays(social: social) else { return false }
+        return await backupOnce(ref: ref, circleId: circleId, social: social, force: force)
+    }
+
+    private static func backupOnce(ref: String, circleId: String, social: HavenSocial, force: Bool = false) async -> Bool {
         // Skip entirely if this blob is already confirmed on EVERY destination — before the expensive
         // file read + seal. Content-addressed keys never change, so a confirmed upload is permanent.
         // This is what stops the periodic backfill from re-sending media the relay already has.
@@ -489,11 +500,18 @@ enum SharedStore {
             case .http(let base, let token):
                 do {
                     try await putMediaFile(ref: ref, sealedURL: sealedURL, size: sealedSize) { k, d in
-                        guard await httpPut(base, token, k, d) else { throw URLError(.cannotConnectToHost) }
+                        if case .failure(let e) = await httpPut(base, token, k, d) { throw e }
                     }
                     RelayMailboxStore.shared.markSeen(node)
                     HavenLog.sync("backup http-put OK ref=\(ref) relay=\(node.prefix(8))")
                     MediaBackupLedger.mark(node, ref); landed = true
+                } catch is RelayForbidden {
+                    // Reachable and healthy — it just doesn't know this device yet. Neither remedy below
+                    // applies: backing the URL off strands the blob on a relay that would store it, and
+                    // the blob dial goes through the SAME membership gate, so it only repeats the
+                    // refusal. Record it and let the heal + retry in `backup` publish our roster first.
+                    noteRefused(node, "media upload \(ref.prefix(10))")
+                    HavenLog.sync("backup http-put REFUSED ref=\(ref) relay=\(node.prefix(8)) — not an outage; roster publish pending")
                 } catch {
                     markHttpUrlBad(base)
                     HavenLog.sync("backup http-put FAIL ref=\(ref) relay=\(node.prefix(8)): \(error.localizedDescription) — trying blob dial")
@@ -567,13 +585,23 @@ enum SharedStore {
             if let http = RelayMailboxStore.shared.httpInterface(node) {
                 var done = false
                 for base in http.urls where !httpUrlBad(base) {
-                    if await httpPut(base, http.token, key, wire) {
+                    switch await httpPut(base, http.token, key, wire) {
+                    case .success:
                         RelayMailboxStore.shared.markSeen(node)
                         rosterPublished[node] = (wireHash, Date())
                         HavenLog.sync("devroster http-put OK relay=\(node.prefix(8))")
-                        done = true; break
+                        done = true
+                    case .failure(is RelayForbidden):
+                        // The devroster key is permission-FREE, so a refusal here is the relay rejecting
+                        // our SIGNATURE, not our membership — `noteRefused` would only schedule a heal
+                        // that repeats this very publish. Still never back the URL off: this is the one
+                        // write that authorizes all the others, and sealing it for two minutes is how a
+                        // device stays unauthorized (and unable to upload) far longer than it needs to.
+                        HavenLog.sync("devroster http-put REFUSED relay=\(node.prefix(8)) — signature rejected, trying dial")
+                    case .failure:
+                        markHttpUrlBad(base)
                     }
-                    markHttpUrlBad(base)
+                    if done { break }
                 }
                 if done { continue }
             }
@@ -838,18 +866,28 @@ enum SharedStore {
         } catch { return .failure(error) }
     }
 
-    private static func httpPut(_ base: String, _ token: String, _ key: String, _ body: Data) async -> Bool {
-        guard let url = httpKeyURL(base, key) else { return false }
+    /// PUT one key. `.success` = stored; `.failure(RelayForbidden)` = the relay is up and would take
+    /// this write the moment it knows our device; any other `.failure` = unreachable. The same
+    /// three-way split `httpGet` needs, for the mirror-image reason: a device that has never been
+    /// authorized cannot upload at all, and a 403 read as an outage backs off the very relay the write
+    /// needs — so the blob never lands, and the damage surfaces much later as a fetch that genuinely
+    /// 404s. A real absence, manufactured by a permissions problem.
+    private static func httpPut(_ base: String, _ token: String, _ key: String, _ body: Data) async -> Result<Void, Error> {
+        guard let url = httpKeyURL(base, key) else { return .failure(URLError(.badURL)) }
         // Digest over the EXACT bytes that go on the wire — `upload(for:from:)` sends `body` verbatim.
-        guard let auth = httpAuth(token, "PUT", key, body) else { return false }
+        guard let auth = httpAuth(token, "PUT", key, body) else { return .failure(URLError(.userAuthenticationRequired)) }
         var req = URLRequest(url: url, timeoutInterval: 120)
         req.httpMethod = "PUT"
         req.setValue(auth, forHTTPHeaderField: "Authorization")
         req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         do {
             let (_, resp) = try await URLSession.shared.upload(for: req, from: body)
-            return (200...299).contains((resp as? HTTPURLResponse)?.statusCode ?? 0)
-        } catch { return false }
+            switch (resp as? HTTPURLResponse)?.statusCode ?? 0 {
+            case 200...299: return .success(())
+            case 401, 403: return .failure(RelayForbidden())
+            default: return .failure(URLError(.badServerResponse))
+            }
+        } catch { return .failure(error) }
     }
 
     /// Fetch a media blob from the circle's mailbox and open it for whichever circle it belongs to.

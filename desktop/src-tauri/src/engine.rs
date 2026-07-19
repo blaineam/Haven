@@ -928,8 +928,14 @@ impl Engine {
         let todo: Vec<(String, String)> =
             held.iter().filter(|(_, r)| !done.contains(r)).cloned().collect();
         for (circle_id, r) in &todo {
-            // A destination accepted the fresh blob → this ref is repaired.
-            if self.upload_media_inner(circle_id, r, true).await {
+            // A destination accepted the fresh blob → this ref is repaired. Heal + retry on a refusal
+            // exactly as `upload_media` does: this migration latches after MAX_ATTEMPTS, so a ref that
+            // is merely awaiting authorization would otherwise burn its attempts and be written off as
+            // un-repairable while every relay was healthy the whole time.
+            if self.upload_media_inner(circle_id, r, true).await
+                || (self.heal_forbidden_relays().await
+                    && self.upload_media_inner(circle_id, r, true).await)
+            {
                 done.insert(r.clone());
             }
         }
@@ -3648,13 +3654,24 @@ impl Engine {
             if let Some((urls, token)) = http_iface {
                 let mut done = false;
                 for base in urls.iter().filter(|u| !self.http_url_bad(u)) {
-                    if self.http_put(base, &token, &key, wire.clone()).await {
-                        self.mark_relay_ok(&node_hex);
-                        self.roster_published.lock().unwrap().insert(node_hex.clone(), (wire_hash, now_ms()));
-                        done = true;
-                        break;
+                    match self.http_put(base, &token, &key, wire.clone()).await {
+                        Ok(()) => {
+                            self.mark_relay_ok(&node_hex);
+                            self.roster_published.lock().unwrap().insert(node_hex.clone(), (wire_hash, now_ms()));
+                            done = true;
+                            break;
+                        }
+                        // The devroster key is permission-FREE, so a refusal here is the relay rejecting
+                        // our SIGNATURE, not our membership — `note_refused` would only schedule a heal
+                        // that repeats this very publish. Still never back the URL off: this is the one
+                        // write that authorizes all the others, and sealing it for two minutes is how a
+                        // device stays unauthorized (and unable to upload) far longer than it needs to.
+                        Err(RelayErr::Forbidden) => log::info!(
+                            "devroster http-put REFUSED relay={} — signature rejected, trying dial",
+                            &node_hex.chars().take(8).collect::<String>()
+                        ),
+                        Err(RelayErr::Unreachable) => self.mark_http_url_bad(base),
                     }
-                    self.mark_http_url_bad(base);
                 }
                 if done {
                     continue;
@@ -4759,22 +4776,43 @@ impl Engine {
         self.publish_device_roster_inner(true).await;
         true
     }
-    async fn http_put(&self, base: &str, token: &str, key: &str, body: Vec<u8>) -> bool {
+    /// PUT one key. `Ok` = stored; `Err(Forbidden)` = the relay is up and will take this write the
+    /// moment it knows our device; `Err(Unreachable)` = a genuine transport failure. The same
+    /// three-way split `http_get` needs, for the mirror-image reason: a device that has never been
+    /// authorized cannot upload at all, and a 403 read as an outage backs off the very relay the write
+    /// needs — so the blob never lands, and the damage surfaces much later as a fetch that genuinely
+    /// 404s. A real absence, manufactured by a permissions problem.
+    async fn http_put(&self, base: &str, token: &str, key: &str, body: Vec<u8>) -> Result<(), RelayErr> {
         // Digest over the EXACT bytes sent — `.body(body)` puts this buffer on the wire verbatim.
-        let Some(auth) = self.http_auth(token, "PUT", key, &body) else { return false };
-        self.http
+        let auth = self.http_auth(token, "PUT", key, &body).ok_or(RelayErr::Unreachable)?;
+        let resp = self
+            .http
             .put(Self::http_key_url(base, key))
             .header("authorization", auth)
             .header("content-type", "application/octet-stream")
             .body(body)
             .send()
             .await
-            .map(|r| r.status().is_success())
-            .unwrap_or(false)
+            .map_err(|_| RelayErr::Unreachable)?;
+        match resp.status().as_u16() {
+            200..=299 => Ok(()),
+            401 | 403 => Err(RelayErr::Forbidden),
+            _ => Err(RelayErr::Unreachable),
+        }
     }
 
     async fn upload_media(self: &Arc<Self>, circle_id: &str, reference: &str) {
-        self.upload_media_inner(circle_id, reference, false).await;
+        if self.upload_media_inner(circle_id, reference, false).await {
+            return;
+        }
+        // Nothing took the blob and at least one relay REFUSED it rather than being down: publish our
+        // roster to the refusers and try once more, exactly as `fetch_media_healing` does for the read
+        // side. A device that has never been authorized anywhere otherwise never gets its FIRST blob up
+        // — and because that upload failure is invisible, the damage surfaces much later as a fetch
+        // that genuinely 404s, an absence manufactured entirely by a permissions problem.
+        if self.heal_forbidden_relays().await {
+            self.upload_media_inner(circle_id, reference, false).await;
+        }
     }
 
     /// `force` = the 1.0.8 media-recovery path: skip every "already held?" probe and the persisted
@@ -4894,28 +4932,41 @@ impl Engine {
         // 8 MB chunks under "<key>.p/<i>" with a manifest at <key> so a GET never exceeds MAX_BLOB.
         // An HTTP interface that dies mid-upload falls back to the iroh dial (same store).
         for (node_hex, base, token) in http_uploads {
-            let ok = if chunked {
+            let res = if chunked {
                 let mut sizes = Vec::new();
-                let mut all = true;
+                let mut acc = Ok(());
                 for (i, slice) in blob.chunks(MEDIA_CHUNK_BYTES).enumerate() {
-                    if !self.http_put(&base, &token, &Self::media_chunk_key(reference, i), slice.to_vec()).await {
-                        all = false;
+                    acc = self.http_put(&base, &token, &Self::media_chunk_key(reference, i), slice.to_vec()).await;
+                    if acc.is_err() {
                         break;
                     }
                     sizes.push(slice.len());
                 }
-                all && self.http_put(&base, &token, &key, Self::make_manifest(&sizes)).await
+                match acc {
+                    Ok(()) => self.http_put(&base, &token, &key, Self::make_manifest(&sizes)).await,
+                    Err(e) => Err(e),
+                }
             } else {
                 self.http_put(&base, &token, &key, blob.clone()).await
             };
-            if ok {
-                self.mark_relay_ok(&node_hex);
-                self.mark_media_backed_up(&node_hex, reference);
-                landed = true;
-            } else {
-                self.mark_http_url_bad(&base);
-                if let Some(client) = self.relay_client_for(&node_hex).await {
-                    dial_uploads.push((node_hex, client));
+            match res {
+                Ok(()) => {
+                    self.mark_relay_ok(&node_hex);
+                    self.mark_media_backed_up(&node_hex, reference);
+                    landed = true;
+                }
+                // Reachable and healthy — it just doesn't know this device yet. Neither remedy below
+                // applies: backing the URL off strands the blob on a relay that would store it, and the
+                // iroh dial goes through the SAME membership gate, so it only repeats the refusal.
+                // Record it and let the heal + retry in `upload_media` publish our roster first.
+                Err(RelayErr::Forbidden) => {
+                    self.note_refused(&node_hex, &format!("media upload {}", &reference.chars().take(10).collect::<String>()));
+                }
+                Err(RelayErr::Unreachable) => {
+                    self.mark_http_url_bad(&base);
+                    if let Some(client) = self.relay_client_for(&node_hex).await {
+                        dial_uploads.push((node_hex, client));
+                    }
                 }
             }
         }

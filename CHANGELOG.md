@@ -11,6 +11,24 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **Big videos and photos pick up where they left off.** A large item could take a minute or more to
+  arrive, and anything that interrupted it — locking your phone, a lift, a dropped signal, closing the
+  app — threw away every byte and started again from the beginning. That is why large media often
+  seemed to never load: it wasn't failing once, it was restarting forever, and a video that needed
+  longer to arrive than you usually leave the app open could never finish at all. A part-finished
+  download now survives being interrupted and even survives closing the app, and when it picks back up
+  it asks only for the pieces it is still missing. An item that stopped one piece short now finishes in
+  a moment instead of downloading all over again. Half-finished downloads that nothing has fed for a
+  day clean themselves up, and a part-finished item is never mistaken for a complete one.
+
+- **Android and desktop no longer load a whole video into memory to receive it.** Both used to hold
+  every piece of an incoming item in memory until it was complete, which took several times the item's
+  own size — so both refused anything past a fraction of available memory, on Android by silently
+  discarding it. On a phone with little memory to spare, large videos weren't slow, they were quietly
+  impossible, and nothing said so. Pieces are now written straight to storage as they arrive, so
+  receiving a 500 MB video takes no more memory than a small photo and the size limits are gone
+  entirely rather than merely raised. iPhone and Mac already worked this way.
+
 - **A story's song now plays on Android, and is named on desktop.** Attaching a song to a story only
   ever did anything on iPhone — everywhere else the story played in silence with nothing on screen to
   say a song was ever part of it. On Android the song now plays while you watch, the clip goes quiet

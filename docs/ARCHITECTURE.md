@@ -42,7 +42,7 @@ encrypted bytes. The transport is interchangeable; the crypto is transport-blind
 | `transport` (`haven-net`) | iroh QUIC `Node` (listen/dial, sealed payloads); mesh-relay frames; S3-over-iroh tunnel | ✅ implemented + tested |
 | `groups` (MLS) | Harden the epoch-key layer to `mls-rs` with a hybrid-PQ ciphersuite (per-message forward secrecy / efficient membership) | ⏳ planned |
 | `discovery` | Resolve a node id to a live address (iroh n0 today; signed DHT records later) | 🟡 iroh discovery in use |
-| `blobs` | Content-addressed (BLAKE3) chunked media transfer (32 KB sealed chunks peer-to-peer; 8 MB chunks over the relay/S3 mailbox) | ✅ implemented |
+| `blobs` | Content-addressed (BLAKE3) chunked media transfer (32 KB sealed chunks peer-to-peer; 8 MB chunks over the relay/S3 mailbox). Reassembly is positional and on-disk on all three clients, and RESUMABLE across restarts: frame 33 re-requests carry a bitmap of the chunks already held, so an interrupted transfer sends only the holes (frame 3 remains "send everything"). | ✅ implemented |
 | FFI | UniFFI → Swift (Apple) + Kotlin (Android) | ✅ implemented |
 
 ## How a photo gets from A to B (target flow)

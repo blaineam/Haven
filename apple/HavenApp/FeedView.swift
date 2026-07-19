@@ -1446,7 +1446,28 @@ final class FeedStore: ObservableObject {
 
     /// The current user's own posts — their personal archive.
     var myPosts: [FeedItemFfi] { items.filter { $0.isMe && !$0.story && !$0.unsent } }
-    var myStories: [FeedItemFfi] { items.filter { $0.isMe && $0.story && !$0.unsent && !$0.media.isEmpty } }
+    /// My stories for MY PROFILE: the live ones, plus any I chose to keep whose event has since
+    /// expired. Kept stories appear here and here only — the circle's story row reads the live feed,
+    /// so a kept story still leaves everyone else's stories when its 24 hours are up, which is the
+    /// whole point of keeping it rather than re-posting it.
+    var myStories: [FeedItemFfi] {
+        let live = items.filter { $0.isMe && $0.story && !$0.unsent && !$0.media.isEmpty }
+        let liveIds = Set(live.map(\.id))
+        // Only the kept ones the feed no longer has — while a story is still live it IS the live item
+        // (comments, reactions and all); the snapshot is a fallback for after it's purged.
+        let revived: [FeedItemFfi] = KeptStoriesStore.shared.kept
+            .filter { !liveIds.contains($0.id) && !$0.media.isEmpty }
+            .map { k in
+                let music: TrackRefFfi? = k.musicCatalogId.map {
+                    TrackRefFfi(catalogId: $0, title: k.musicTitle ?? "", artist: k.musicArtist ?? "",
+                                artworkUrl: k.musicArtworkUrl ?? "", durationMs: k.musicDurationMs ?? 0)
+                }
+                return FeedItemFfi(id: k.id, authorShort: myNodeHex, isMe: true, createdAt: k.createdAt,
+                                   body: k.body, media: k.media, music: music, edited: false, unsent: false,
+                                   story: true, muteVideo: false, comments: [], reactions: [], poll: nil)
+            }
+        return (live + revived).sorted { $0.createdAt > $1.createdAt }
+    }
 
     // MARK: - Authoring (seal locally, then broadcast to contacts)
 

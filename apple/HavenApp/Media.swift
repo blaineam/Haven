@@ -1363,6 +1363,81 @@ final class MediaStore: ObservableObject {
 /// It is NOT synced to other devices and NOT hoisted anywhere in the feed — purely a local retention
 /// exemption. Refs are stored verbatim; callers union each ref's on-disk stems into the sweep keep-set.
 @MainActor
+/// Stories you chose to KEEP — held on your profile after the 24h story window closes.
+///
+/// A story is an ordinary post with a 24h retention, so the event itself is purged on schedule
+/// everywhere, for everyone. Keeping one therefore can't mean "stop it expiring": it means holding
+/// your OWN snapshot of it, which is why this stores the story's content rather than a reference to
+/// an event that is about to stop existing.
+///
+/// Keep deliberately does NOT re-publish. It used to turn the story into a permanent post, which put
+/// it in the circle feed as a new thing everyone saw again — a different act from wanting to hold on
+/// to it yourself. A kept story stays yours, on your profile, and still leaves the circle's story row
+/// when its 24 hours are up.
+final class KeptStoriesStore: ObservableObject {
+    static let shared = KeptStoriesStore()
+
+    struct Kept: Codable, Identifiable, Equatable {
+        let id: String            // the original event id, so a story is kept at most once
+        let body: String
+        let media: [String]
+        let createdAt: UInt64
+        // Flattened rather than holding a TrackRefFfi: that's generated FFI glue, not a storage type,
+        // and pinning a persisted format to it would break on the next binding regeneration.
+        let musicCatalogId: String?
+        let musicTitle: String?
+        let musicArtist: String?
+        let musicArtworkUrl: String?
+        let musicDurationMs: UInt64?
+    }
+
+    @Published private(set) var kept: [Kept]
+    private let d = UserDefaults.standard
+    private let key = "haven.stories.kept"
+
+    private init() {
+        if let data = d.data(forKey: key), let list = try? JSONDecoder().decode([Kept].self, from: data) {
+            kept = list
+        } else {
+            kept = []
+        }
+    }
+
+    func isKept(_ id: String) -> Bool { kept.contains { $0.id == id } }
+
+    /// Keep a story: snapshot it and PIN its media, so the blobs survive the cleanup sweeps that
+    /// would otherwise reclaim them once the event is gone. Without the pin, a kept story would
+    /// become a row of "no longer available" placeholders — kept in name only.
+    func keep(id: String, body: String, media: [String], createdAt: UInt64, music: TrackRefFfi?) {
+        guard !isKept(id) else { return }
+        kept.append(Kept(id: id, body: body, media: media, createdAt: createdAt,
+                         musicCatalogId: music?.catalogId, musicTitle: music?.title,
+                         musicArtist: music?.artist, musicArtworkUrl: music?.artworkUrl,
+                         musicDurationMs: music?.durationMs))
+        PinnedMediaStore.shared.pin(media)
+        save()
+    }
+
+    /// Stop keeping it — and release the pin, so the blobs are eligible for cleanup again.
+    func unkeep(_ id: String) {
+        guard let i = kept.firstIndex(where: { $0.id == id }) else { return }
+        let media = kept[i].media
+        kept.remove(at: i)
+        // Only unpin blobs no OTHER kept story still needs (a story shared twice can share refs).
+        let stillNeeded = Set(kept.flatMap(\.media))
+        PinnedMediaStore.shared.unpin(media.filter { !stillNeeded.contains($0) })
+        save()
+    }
+
+    func toggle(id: String, body: String, media: [String], createdAt: UInt64, music: TrackRefFfi?) {
+        if isKept(id) { unkeep(id) } else { keep(id: id, body: body, media: media, createdAt: createdAt, music: music) }
+    }
+
+    private func save() {
+        if let data = try? JSONEncoder().encode(kept) { d.set(data, forKey: key) }
+    }
+}
+
 final class PinnedMediaStore: ObservableObject {
     static let shared = PinnedMediaStore()
     @Published private(set) var refs: Set<String>

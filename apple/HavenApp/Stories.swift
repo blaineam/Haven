@@ -32,6 +32,8 @@ struct StoryViewer: View {
     let stories: [FeedItemFfi]
     @State var index: Int
     let friendName: String
+    /// Observed so the Keep pill re-renders the moment it's toggled.
+    @ObservedObject private var kept = KeptStoriesStore.shared
     @Environment(\.dismiss) private var dismiss
     @State private var progress = 0.0
     @State private var player: AVPlayer?
@@ -219,21 +221,33 @@ struct StoryViewer: View {
                 Text(relativeTimeShort(s.createdAt)).font(.caption2).foregroundStyle(.white.opacity(0.7))
                 Spacer()
                 if s.isMe {
+                    // KEEP is a toggle that holds this story on MY PROFILE past the 24h window — it
+                    // does not re-publish it. It used to create a permanent post, which put the story
+                    // back in the circle feed as a new thing everyone saw again; wanting to hold on to
+                    // something yourself is a different act from sharing it twice. A kept story still
+                    // leaves everyone's story row on schedule.
+                    let isKept = kept.isKept(s.id)
                     Button {
-                        // Convert this story into a permanent (non-expiring) post. The embed token is
-                        // dropped: the new post is its own thing, not a pointer back at the original.
-                        FeedStore.shared.post(StoryCaptions.decode(StoryEmbed.strip(s.body)).text,
-                                              media: s.media, music: s.music, retentionSecs: nil, story: false)
-                        dismiss()
+                        kept.toggle(id: s.id,
+                                    body: s.body,
+                                    media: s.media,
+                                    createdAt: s.createdAt,
+                                    music: s.music)
                     } label: {
-                        Label("Keep", systemImage: "bookmark.fill")
-                            .font(.caption.weight(.semibold)).foregroundStyle(.white)
+                        // Filled + "Kept" when it is; outline + "Keep" when it isn't — the state has to
+                        // be readable at a glance, since the button previously looked identical either
+                        // way and read as doing nothing at all.
+                        Label(isKept ? "Kept" : "Keep", systemImage: isKept ? "bookmark.fill" : "bookmark")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(isKept ? HavenTheme.pink : .white)
                             .padding(.horizontal, 10).padding(.vertical, 5)
                             // Real glass, not a hand-rolled white scrim — and .plain so macOS
                             // paints no bezel behind the pill.
                             .havenGlass(in: Capsule())
                     }
                     .buttonStyle(.plain)
+                    .animation(.easeInOut(duration: 0.15), value: isKept)
+                    .accessibilityLabel(isKept ? "Kept on your profile" : "Keep on your profile")
                     // Unsend (delete) your own story — removes it everywhere it was shared.
                     Button {
                         paused = true; player?.pause(); confirmDeleteStory = true

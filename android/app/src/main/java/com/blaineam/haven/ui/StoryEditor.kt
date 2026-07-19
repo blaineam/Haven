@@ -41,6 +41,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -122,6 +123,15 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
     var caption by remember { mutableStateOf("") }
     var music by remember { mutableStateOf<uniffi.haven_ffi.TrackRefFfi?>(null) }
     var pickSong by remember { mutableStateOf(false) }
+    // Bumped whenever the attached SONG changes, to restart the clip from frame one so the two
+    // preview from the top together. A song picked while the loop is already several seconds in
+    // otherwise previews against an arbitrary moment of the clip, and the pairing the author
+    // approves is not the one that ships.
+    //
+    // (Apple also bumps this when the song's START POSITION is scrubbed. Neither Android nor the
+    // shared wire has a track start-offset at all — TrackRefFfi carries no such field — so there is
+    // nothing here to scrub yet. When that lands, bump this from the scrubber too.)
+    var musicRestartToken by remember { mutableIntStateOf(0) }
     var capOffset by remember { mutableStateOf(Offset.Zero) }
     var colorIdx by remember { mutableStateOf(0) }
     var styleIdx by remember { mutableStateOf(0) }
@@ -178,7 +188,10 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
     }
 
     if (pickSong) {
-        MusicSearchSheet(onPick = { music = it; pickSong = false }, onDismiss = { pickSong = false })
+        MusicSearchSheet(
+            onPick = { music = it; musicRestartToken++; pickSong = false },
+            onDismiss = { pickSong = false },
+        )
         return
     }
 
@@ -200,7 +213,8 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
                 rotationZ = mediaRotation,
                 translationX = mediaOffset.x, translationY = mediaOffset.y,
             )
-            if (isVideo) EditorVideo(ref, filter.spec, muted = music != null || !previewSound, mediaMod)
+            if (isVideo) EditorVideo(ref, filter.spec, muted = music != null || !previewSound, mediaMod,
+                                     restartToken = musicRestartToken)
             else previewBmp?.let { Image(it.asImageBitmap(), "Story", mediaMod, contentScale = ContentScale.Crop) }
         }
 
@@ -345,15 +359,28 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
 }
 
 /** Live filter-applied, autoplaying, looping, chrome-free video preview. [muted] silences the clip's
- *  OWN audio without restarting it, so the loop survives a song being attached or removed. */
+ *  OWN audio without restarting it, so the loop survives a song being attached or removed.
+ *
+ *  [restartToken] is bumped by the editor whenever the attached SONG changes, to restart the clip
+ *  from frame one so the two preview from the top TOGETHER — a song picked while the loop is four
+ *  seconds in otherwise previews against an arbitrary moment of the clip, and the pairing the author
+ *  approves is not the one that ships. Every other caller leaves it at zero and never restarts. */
 @Composable
-private fun EditorVideo(ref: String, spec: FilterSpec, muted: Boolean, modifier: Modifier) {
+private fun EditorVideo(
+    ref: String, spec: FilterSpec, muted: Boolean, modifier: Modifier, restartToken: Int = 0,
+) {
     val file = remember(ref) { LocalMedia.videoFile(DEFAULT_CIRCLE, ref) }
     if (file == null) { Box(modifier.background(Color.Black)); return }
+    // Last token acted on, so a recomposition for ANY other reason (a filter change, a caption
+    // edit) cannot re-seek the clip out from under the author.
+    val lastToken = remember(ref) { intArrayOf(0) }
     AndroidView(
         modifier = modifier,
         factory = { ctx -> FilteredVideoView(ctx).also { it.setMuted(muted); it.play(file); it.setFilter(spec) } },
-        update = { it.setFilter(spec); it.setMuted(muted) },
+        update = { v ->
+            v.setFilter(spec); v.setMuted(muted)
+            if (restartToken != lastToken[0]) { lastToken[0] = restartToken; v.restart() }
+        },
         onRelease = { it.release() },
     )
 }

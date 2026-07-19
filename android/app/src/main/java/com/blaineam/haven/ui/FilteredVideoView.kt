@@ -53,6 +53,17 @@ class FilteredVideoView(context: Context) : GLSurfaceView(context) {
         runCatching { player?.setVolume(if (m) 0f else 1f, if (m) 0f else 1f) }
     }
 
+    /** Jump the loop back to its FIRST FRAME, so it re-runs in step with a song that just changed.
+     *
+     *  A song picked while the loop is already several seconds in previews against an arbitrary
+     *  moment of the clip — so the pairing the author approves is not the one that ships. Restarting
+     *  both together is what makes the preview honest. Distinct from [setMuted], which deliberately
+     *  does NOT restart: attaching a song both mutes AND restarts, but removing one should only
+     *  unmute. */
+    fun restart() {
+        runCatching { player?.seekTo(0); player?.start() }
+    }
+
     fun release() {
         runCatching { player?.stop(); player?.release() }
         player = null

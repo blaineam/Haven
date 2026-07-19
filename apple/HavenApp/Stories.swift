@@ -56,16 +56,31 @@ struct StoryViewer: View {
     var body: some View {
         ZStack {
             Color.black.opacity(1 - min(0.6, dragOffset / 500)).ignoresSafeArea()
+            // MEDIA + navigation layer. The press-and-hold gesture is attached HERE, not to the whole
+            // screen: a DragGesture(minimumDistance: 0) on a parent swallows the taps of Buttons
+            // beneath it, so holding it at the top level meant Keep / delete / close never fired —
+            // the tap fell through to the prev/next zones and the story just advanced. Scoping it to
+            // the media area keeps hold-to-pause working everywhere it should while leaving the
+            // overlay's controls genuinely tappable.
             Group {
                 if stories.indices.contains(index) {
                     content(stories[index]).ignoresSafeArea()
                 }
-                // Prev/next tap zones — kept BELOW the overlay so the header's tappable
-                // name/avatar + buttons receive their taps first.
+                // Prev/next tap zones — below the overlay, so the header's controls see taps first.
                 HStack(spacing: 0) {
                     Color.clear.contentShape(Rectangle()).onTapGesture { prev() }
                     Color.clear.contentShape(Rectangle()).onTapGesture { next() }
                 }
+            }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in if !heldPaused { heldPaused = true; player?.pause() } }
+                    .onEnded { _ in if heldPaused { heldPaused = false; player?.play() } }
+            )
+            .offset(y: dragOffset)
+
+            // CONTROLS layer, above the gesture layer so its buttons receive their own taps.
+            Group {
                 if stories.indices.contains(index) {
                     positionedCaption(stories[index])
                     overlay(stories[index])
@@ -87,13 +102,7 @@ struct StoryViewer: View {
                     else { withAnimation(.spring()) { dragOffset = 0 } }
                 }
         )
-        // Press-and-hold anywhere to pause the timer + the video (Instagram-style); release resumes.
-        // A quick tap still navigates via the prev/next zones (the brief pause is imperceptible).
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in if !heldPaused { heldPaused = true; player?.pause() } }
-                .onEnded { _ in if heldPaused { heldPaused = false; player?.play() } }
-        )
+        // (Press-and-hold to pause now lives on the media layer above — see the note there.)
         .onAppear { loadCurrent() }
         .onDisappear { teardown() }
         // A call starting MID-story mutes the clip's own audio immediately (call audio priority);

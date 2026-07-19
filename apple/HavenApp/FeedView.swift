@@ -288,9 +288,12 @@ final class FeedStore: ObservableObject {
         if let social { MediaBackupQueue.shared.drainPersisted(social: social) }   // finish uploads killed mid-flight
         recomputeUnreadDMs()   // one-time badge compute at startup (kept OFF the per-refresh hot path)
         seedDemoIfNeeded()   // HAVEN_DEMO=1 only — PII-free synthetic dataset for screenshots
+        restoreReassemblies()   // pick half-finished media transfers back up instead of restarting them
         // Reclaim leaked produce/reassembly scratch every launch (an interrupted big-video export or a
         // failed reassembly leaves mint_/incoming_ behind — invisible to Manage media, but counted in
-        // storage). Off-main, and only touches scratch untouched for an hour.
+        // storage). Off-main, and only touches scratch untouched for an hour. Partials belonging to a
+        // live reassembly are spared (see sweepStaleScratch) — restoring them first is what makes
+        // resume real: without it this sweep deleted the 99%-complete file every launch.
         Task.detached(priority: .utility) {
             let f = MediaStore.sweepStaleScratch()
             if f.files > 0 { HavenLog.sync("media scratch sweep: freed \(f.bytes)B across \(f.files) files") }
@@ -2168,9 +2171,11 @@ final class FeedStore: ObservableObject {
             }
             HavenLog.call("call frame type=\(type) accepted from \(signerAccount.prefix(8))")
             payload = plaintext
-        } else if [3, 13, 15].contains(type) {
-            // Remaining sender-prefixed frames (media req + call audio/video placeholders): drop if
-            // blocked (audit F4). These are not call SIGNALING and keep the plaintext-prefix check.
+        } else if [3, 13, 15, 33].contains(type) {
+            // Remaining sender-prefixed frames (media req + resume req + call audio/video
+            // placeholders): drop if blocked (audit F4). These are not call SIGNALING and keep the
+            // plaintext-prefix check. 33 sits here rather than in the sealed set above because it asks
+            // for a SUBSET of what frame 3 already asks for in the clear — see handleMediaResumeRequest.
             let head = String(data: payload.prefix(64), encoding: .utf8) ?? ""
             if head.count == 64, ConnectionsStore.shared.isBlocked(head) { return }
         }
@@ -2203,6 +2208,7 @@ final class FeedStore: ObservableObject {
         case 30: CallManager.shared.handleHandledElsewhere(payload)  // another of MY devices took/declined this call
         case 31: handleMediaWanted(payload)                          // someone wants media I authored, that a relay swept
         case 32: handleMediaAvailable(payload)                       // media I asked about is back on a relay
+        case 33: handleMediaResumeRequest(payload)                   // re-request carrying a bitmap of what they already have
         default: break
         }
     }
@@ -3162,8 +3168,7 @@ final class FeedStore: ObservableObject {
         mediaReqCircle[ref] = activeCircleId   // remember the circle so a peer-delivered blob re-mirrors correctly
         let myHex = social.myNodeHex()
         var payload = Data(myHex.utf8); payload.append(Data(ref.utf8))
-        for contact in ContactsStore.shared.contacts { sendIroh(3, payload, to: contact.idHex) }
-        nearbyBroadcast(3, payload)
+        askForMedia(ref: ref, myHex: myHex, plain: payload)   // resumes from a partial when we have one
         let circleIds = circles.map { $0.id }
         Task { @MainActor in   // also pull from the circle's shared store if one exists
             if let data = await SharedStore.restore(ref: ref, circleIds: circleIds, social: social) {
@@ -3213,10 +3218,7 @@ final class FeedStore: ObservableObject {
             budget -= 1
             var payload = Data(myHex.utf8)          // 64-byte requester id
             payload.append(Data(ref.utf8))
-            let directAsk = {
-                self.nearbyBroadcast(3, payload)
-                for contact in ContactsStore.shared.contacts { self.sendIroh(3, payload, to: contact.idHex) }
-            }
+            let directAsk = { self.askForMedia(ref: ref, myHex: myHex, plain: payload) }
             // RELAY-FIRST: pull the stored copy from the circle's mailbox (own hosted store → relay
             // HTTP :8674 → S3 → iroh blob, in that order inside restore). Only if there is NO mailbox,
             // or the stored copy can't be fetched, fall back to asking an online author/peer directly.
@@ -3273,6 +3275,92 @@ final class FeedStore: ObservableObject {
                     sendMediaChunks(ref: ref, fileURL: url, to: requesterHex)
                 }
             }
+        }
+    }
+
+    /// Frame 33 — a RESUME request: `[requesterHex 64][u16 refLen][ref][u32 total][bitmap]`.
+    ///
+    /// Frame 3 is deliberately left exactly as it was for a first request — the ref is its unlengthed
+    /// remainder, so there is nowhere to put a resume hint without breaking every existing parser, and
+    /// a first request has no bitmap to send anyway. This is the re-request that carries one, so the
+    /// serve can skip everything the requester already holds. An un-upgraded peer simply ignores it
+    /// and the requester falls back to frame 3, so nothing regresses.
+    ///
+    /// Carries strictly LESS authority than frame 3 (it asks for a subset of the same bytes), so it
+    /// gets frame 3's treatment — plaintext with the blocked-sender check — rather than the sealed
+    /// call-frame path. Sealing it would buy nothing while making it fail wherever its own fallback
+    /// still works.
+    private func handleMediaResumeRequest(_ payload: Data) {
+        guard let (requesterHex, ref, claimed, theirs) = ReassemblyStore.decodeResume(payload) else { return }
+        guard let url = MediaStore.shared.storagePath(for: ref),
+              FileManager.default.fileExists(atPath: url.path) else { return }
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        let total = max(1, (size + Self.mediaChunkSize - 1) / Self.mediaChunkSize)
+        // A total that disagrees with ours means their partial was built against different bytes —
+        // their bitmap indexes something else, so honouring it would leave permanent holes. Send the
+        // whole file and let the content-address check at adopt() sort out which copy is real.
+        let missing = Set(0..<total).subtracting(total == claimed ? theirs : [])
+        guard !missing.isEmpty else { return }   // they have it all; the last chunk is presumably in flight
+        HavenLog.net("media RESUME ref=\(ref.prefix(12)) from=\(requesterHex.prefix(8)): \(missing.count)/\(total) chunks still needed")
+        if servingNow.contains("\(ref)|\(requesterHex)") {
+            HavenLog.net("media RESUME ref=\(ref.prefix(12)) — already streaming to \(requesterHex.prefix(8)), ignoring")
+        } else if shouldServeNearby(ref) {
+            sendMediaChunks(ref: ref, fileURL: url, to: requesterHex, missing: missing)
+        }
+    }
+
+    /// Rebuild in-memory reassembly state from disk at launch, so a transfer that was 99% done when
+    /// the app died continues instead of starting over.
+    @MainActor private func restoreReassemblies() {
+        for r in ReassemblyStore.shared.restore() {
+            let url = MediaStore.storageDir.appendingPathComponent(r.part)
+            // Already adopted while we were away (relay restore, another device) — drop the scratch.
+            guard !MediaStore.shared.has(r.ref) else {
+                try? FileManager.default.removeItem(at: url)
+                ReassemblyStore.shared.clear(r.ref)
+                continue
+            }
+            let got = ReassemblyStore.indices(r.got, total: r.total)
+            incoming[r.ref] = IncomingMedia(tempURL: url, total: r.total, got: got)
+            HavenLog.net("media RESUME restored ref=\(r.ref.prefix(12)): \(got.count)/\(r.total) chunks already on disk")
+        }
+    }
+
+    /// The ask for a ref we hold a partial of: frame 33 with our bitmap, else the plain frame 3.
+    ///
+    /// Returns nil when there's nothing to resume, so callers keep their existing frame-3 path
+    /// byte-for-byte — the common case stays compatible with every peer in the field.
+    @MainActor private func resumeAsk(ref: String, myHex: String) -> Data? {
+        guard let entry = incoming[ref], !entry.got.isEmpty, entry.total > 0 else { return nil }
+        return ReassemblyStore.encodeResume(myHex: myHex, ref: ref, total: entry.total, got: entry.got)
+    }
+
+    /// Refs with a resume ask outstanding, so a burst of requests can't spawn a fallback task each.
+    private var resumeFallbackPending: Set<String> = []
+
+    /// Ask for the missing chunks, falling back to a full frame-3 request if nothing comes back.
+    ///
+    /// An un-upgraded peer drops frame 33 on the floor and says nothing, so silence is the only signal
+    /// we get. One bounded task per ref (never more — a peer re-requesting can't pile these up), and
+    /// it does nothing at all if chunks did start arriving.
+    @MainActor private func askForMedia(ref: String, myHex: String, plain: Data) {
+        guard let resume = resumeAsk(ref: ref, myHex: myHex) else {
+            nearbyBroadcast(3, plain)
+            for contact in ContactsStore.shared.contacts { sendIroh(3, plain, to: contact.idHex) }
+            return
+        }
+        nearbyBroadcast(33, resume)
+        for contact in ContactsStore.shared.contacts { sendIroh(33, resume, to: contact.idHex) }
+        guard resumeFallbackPending.insert(ref).inserted else { return }
+        let before = incoming[ref]?.got.count ?? 0
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            guard let self else { return }
+            self.resumeFallbackPending.remove(ref)
+            guard !MediaStore.shared.has(ref), (self.incoming[ref]?.got.count ?? 0) == before else { return }
+            HavenLog.net("media RESUME ref=\(ref.prefix(12)): no answer to frame 33 — falling back to a full request")
+            self.nearbyBroadcast(3, plain)
+            for contact in ContactsStore.shared.contacts { self.sendIroh(3, plain, to: contact.idHex) }
         }
     }
 
@@ -3341,7 +3429,12 @@ final class FeedStore: ObservableObject {
 
     /// Stream a media file to the requester as individually-sealed chunks — low memory,
     /// large-file friendly. Chunk N's plaintext goes at offset N*chunkSize on reassembly.
-    private func sendMediaChunks(ref: String, fileURL url: URL, to requesterHex: String) {
+    ///
+    /// `missing` (from a resume request, frame 33) restricts the stream to the chunks the requester
+    /// says it still needs. Skipping is free — no seal, no send, no pacing sleep — so a transfer that
+    /// died on its last chunk costs one chunk to finish rather than the whole file again. `nil` sends
+    /// everything, which is what a first request (frame 3) always means.
+    private func sendMediaChunks(ref: String, fileURL url: URL, to requesterHex: String, missing: Set<Int>? = nil) {
         guard let social, let handle = try? FileHandle(forReadingFrom: url) else { return }
         // Marked for the whole stream and cleared when it ends (however it ends) — see `servingNow`.
         let serveKey = "\(ref)|\(requesterHex)"
@@ -3362,13 +3455,13 @@ final class FeedStore: ObservableObject {
                     try? handle.close()
                     Task { @MainActor in self?.servingNow.remove(serveKey) }
                 }
-                var index = 0
-                while true {
+                for index in 0..<total {
+                    if let missing, !missing.contains(index) { continue }   // requester already has it
+                    try? handle.seek(toOffset: UInt64(index) * UInt64(chunkSize))
                     let chunk = handle.readData(ofLength: chunkSize)
                     if chunk.isEmpty { break }
                     guard let sealed = try? AES.GCM.seal(chunk, using: ownKey).combined else { break }
                     nearby?.broadcast(Data([5]) + Self.chunkFrame(refData: refData, index: index, total: total, sealed: sealed))
-                    index += 1
                     Thread.sleep(forTimeInterval: 0.030)   // pace so we don't outrun a slow link → unbounded send backlog
                     // Stop early if the send backlog is already high — the rest re-pushes next tick.
                     if (nearby?.sendBacklogHigh ?? false) { break }
@@ -3383,12 +3476,14 @@ final class FeedStore: ObservableObject {
                 try? handle.close()
                 self.servingNow.remove(serveKey)
             }
-            var index = 0
-            while true {
+            for index in 0..<total {
+                if let missing, !missing.contains(index) { continue }   // requester already has it
+                try? handle.seek(toOffset: UInt64(index) * UInt64(chunkSize))
                 let chunk = handle.readData(ofLength: chunkSize)
                 if chunk.isEmpty { break }
                 // A failed seal abandons the transfer MID-FILE, leaving the requester with a partial
-                // set it can never complete — say so rather than stopping silently.
+                // set it can never complete — say so rather than stopping silently. (With resume, that
+                // partial is no longer a dead end: the requester re-asks for exactly what's missing.)
                 guard let sealed = try? social.sealMedia(recipientNodeHex: requesterHex, data: chunk) else {
                     HavenLog.net("media serve ref=\(ref.prefix(12)) → \(requesterHex.prefix(8)): seal FAILED at chunk \(index); transfer abandoned")
                     break
@@ -3396,7 +3491,6 @@ final class FeedStore: ObservableObject {
                 let out = Data([5]) + Self.chunkFrame(refData: refData, index: index, total: total, sealed: sealed)
                 nearby?.broadcast(out)
                 if let node { Task.detached { try? await node.sendToNode(nodeIdHex: requesterHex, payload: out) } }
-                index += 1
                 try? await Task.sleep(nanoseconds: 12_000_000)
             }
         }
@@ -3430,9 +3524,16 @@ final class FeedStore: ObservableObject {
         // Reassembly entry (temp file) is created on the main actor; the heavy decrypt + disk write run on a
         // dedicated SERIAL queue (serial = no concurrent writes to the same temp file), so thousands of
         // chunks never block the UI. Only the cheap bookkeeping returns to main.
+        let fresh = incoming[ref] == nil
         let entry = incoming[ref] ?? IncomingMedia(tempURL: MediaStore.shared.makeTempFile(), total: total, got: [])
         incoming[ref] = entry
         let tempURL = entry.tempURL
+        // Register the reassembly the moment it starts, so even a transfer interrupted seconds in has
+        // a durable home to resume into (and so the launch sweep knows to spare its partial).
+        if fresh {
+            ReassemblyStore.shared.note(ref: ref, part: tempURL.lastPathComponent,
+                                        total: entry.total, got: entry.got, force: true)
+        }
         let chunkSize = Self.mediaChunkSize
         let ownKey = Self.ownMediaKey()
         // Receive backpressure: if the decrypt+write queue is already backed up, DROP this chunk — the
@@ -3479,8 +3580,18 @@ final class FeedStore: ObservableObject {
         guard var entry = incoming[ref] else { return }
         entry.got.insert(index)
         incoming[ref] = entry
-        guard entry.got.count >= entry.total else { return }
+        guard entry.got.count >= entry.total else {
+            // Checkpoint the progress (debounced inside the store) so an interruption resumes here
+            // rather than at chunk 0. Recorded only AFTER the bytes are on disk — see ReassemblyStore.
+            ReassemblyStore.shared.note(ref: ref, part: entry.tempURL.lastPathComponent,
+                                        total: entry.total, got: entry.got)
+            return
+        }
+        // Whether adopt succeeds or rejects the bytes on a digest mismatch, this reassembly is over:
+        // on rejection it has already discarded the temp file, so leaving the record behind would
+        // resurrect a bitmap whose bytes are gone and stall the ref forever.
         MediaStore.shared.adopt(ref, from: entry.tempURL)
+        ReassemblyStore.shared.clear(ref)
         SyncMetrics.shared.nbMediaIn += 1
         autoSaveReceived(ref)
         incoming[ref] = nil

@@ -632,11 +632,19 @@ final class MediaStore: ObservableObject {
             includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
             options: [.skipsHiddenFiles]) else { return (0, 0) }
         let cutoff = Date().addingTimeInterval(-grace)
+        // Partials belonging to a RESUMABLE transfer are spared: they are 99%-complete downloads
+        // waiting for the rest, not leaked scratch. Deleting them was the second half of why large
+        // media never arrived — the transfer survived the relaunch in principle, and then this sweep
+        // threw the bytes away. Spared until abandoned (no progress in `ReassemblyStore.expiry`),
+        // after which they expire here so they can't accumulate either.
+        let live = ReassemblyStore.liveParts()
+        let abandoned = Date().timeIntervalSince1970 - ReassemblyStore.expiry
         var bytes: Int64 = 0
         var files = 0
         for url in items {
             let name = url.lastPathComponent
             guard name.hasPrefix("mint_") || name.hasPrefix("incoming_") else { continue }
+            if let progressed = live[name], progressed > abandoned { continue }   // live reassembly
             let vals = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
             if let m = vals?.contentModificationDate, m > cutoff { continue }   // still being written
             bytes += Int64(vals?.fileSize ?? 0)

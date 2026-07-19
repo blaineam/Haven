@@ -301,6 +301,9 @@ const state = {
   inviteUri: "",
   inviteLink: "",
   profile: {},
+  // An UNSENT draft staged for a thread we're about to open ("Message the author" on a post):
+  // { id, text }, consumed once by renderThread's composer and then cleared.
+  pendingDraft: null,
   activeCircle: "default",
   activeDm: null,
   attachments: [], // {ref, url, isVideo}
@@ -1998,16 +2001,25 @@ function postMenu(anchor, it, circleId) {
     // Hide any post from my own feed (reversible via the circle menu's "Show hidden posts").
     { label: isHidden ? "Unhide" : "Hide", icon: isHidden ? "eye" : "eye.slash",
       on: () => { isHidden ? Hidden.unhide(it.id) : Hidden.hide(it.id); renderFeed(); } },
-    // Reply to the AUTHOR privately, the same move a story reply makes: open (or reuse) the DM with
-    // them and carry the post's MEDIA so they know which post you mean — not the body, since echoing
-    // someone's own words back reads as a quote they didn't write. Never on your own post (that
-    // would DM yourself), and only when the author resolves to a contact.
+    // Reply to the AUTHOR privately: open (or reuse) the DM with them and STAGE an unsent draft
+    // naming the post, with the thread open and the cursor waiting.
+    //
+    // It used to SEND the post's media into the conversation immediately — publishing something the
+    // user had not written yet — and set `state.activeCircle` (the CIRCLE selector) to a `dm:` id,
+    // which dropped them into the feed layout against a DM rather than opening the thread. It now
+    // sends nothing, and staged text is the post's LINK, not its media: re-sealing a whole video
+    // into the DM circle before anyone has decided to send anything is work that shouldn't happen,
+    // and the link opens the real post (with its media) for anyone already in the circle.
     it.is_me || !author ? null : {
       label: `Message ${author.name}`, icon: "bubble.left",
       on: async () => {
-        const dm = await invoke("message_author", { authorShort: it.author_short, media: keepRefs }).catch(() => null);
-        if (!dm) { toast("Couldn't open the message"); return; }
-        state.activeCircle = dm;
+        const t = await invoke("message_author",
+          { authorShort: it.author_short, circleId, postId: it.id }).catch(() => null);
+        if (!t || !t.dm) { toast("Couldn't open the message"); return; }
+        // Consumed once by renderThread's composer — appended there, never assigned, so re-entering
+        // a thread cannot discard something half-typed.
+        if (t.draft) state.pendingDraft = { id: t.dm, text: t.draft };
+        state.activeDm = { id: t.dm, name: t.name || author.name };
         switchView("messages");
       },
     },
@@ -2158,12 +2170,23 @@ const StoryCaptions = {
   lightIdx: [0, 9, 10, 11],   // white/cyan/yellow/mint → dark highlight text
   encode(caption, spec) {
     const t = (caption || "").trim();
-    if (!t) return "";
+    const num = (v, d) => (Number.isFinite(v) ? v : d);
+    const scale = num(spec.mediaScale, 1), offX = num(spec.mediaOffX, 0);
+    const offY = num(spec.mediaOffY, 0), rot = num(spec.mediaRotation, 0);
+    // A reframed story is worth encoding even with NO caption — the framing IS authorship, and bailing
+    // on empty text would silently throw away a zoom-out the author deliberately chose. Mirrors
+    // StoryCaption.swift's `hasMediaTransform` guard and StoryCaptions.kt's `hasTransform`.
+    if (!t && scale === 1 && offX === 0 && offY === 0 && rot === 0) return "";
     const f = (n, d) => Number(n).toFixed(d);
     return "\u0001" + [spec.color, spec.font, spec.style, f(spec.x, 3), f(spec.y, 3), f(spec.size, 3),
-                        // Desktop authors no media transform (there is no zoom/rotate gesture here),
-                        // so these ride as the identity. mediaRotation is the APPENDED 10th field.
-                        "1.000", "0.0000", "0.0000", "0.0000"].join(",") + "\u0001" + t;
+                        // Field WIDTHS are load-bearing, not cosmetic: Android and Apple both format
+                        // this tail as "%.3f,%.3f,%.3f,%.3f,%.4f,%.4f,%.4f" (x,y,size,mediaScale at 3
+                        // decimals, then the three at 4), so an untouched composer still emits the
+                        // byte-identical identity tail it always did. mediaRotation is RADIANS (iOS
+                        // authors it from a RotationGesture) and is the APPENDED 10th field — a client
+                        // that only knows the 9-field form reads what it understands instead of
+                        // failing the whole decode.
+                        f(scale, 3), f(offX, 4), f(offY, 4), f(rot, 4)].join(",") + "\u0001" + t;
   },
   decode(body) {
     const def = { color: 0, font: 0, style: 1, x: 0.5, y: 0.5, size: 1, mediaScale: 1, mediaOffX: 0, mediaOffY: 0, mediaRotation: 0 };
@@ -2214,7 +2237,15 @@ function addStoryDialog() {
   state.attachments = [];
   // The author's spec rides the wire format, so phones render the caption styled + positioned.
   // y starts in the lower third — where the old hardcoded desktop caption sat.
-  const spec = { color: 0, font: 0, style: 1, x: 0.5, y: 0.85, size: 1 };
+  // mediaScale/mediaOffX/mediaOffY are NORMALIZED to the frame (offset ÷ frame size) and mediaRotation
+  // is RADIANS, exactly as the phones author them — see StoryEditor.kt:454-475. They start at the
+  // identity so an author who never touches a gesture encodes byte-for-byte what desktop always has.
+  const spec = { color: 0, font: 0, style: 1, x: 0.5, y: 0.85, size: 1,
+                 mediaScale: 1, mediaOffX: 0, mediaOffY: 0, mediaRotation: 0 };
+  // Rotation is kept in DEGREES here because that is the unit the 90° snap is expressed in (Android
+  // does the same and converts once at the wire boundary); spec.mediaRotation stays the radian
+  // source of truth for encode + preview.
+  let mediaRotDeg = 0;
   // Preview audio state. The clip is silent by default (a composer that blares the moment you attach
   // something is worse than one you have to unmute), and an attached song wins over it either way:
   // the song IS the story's soundtrack, so the clip's own track steps aside while one is attached and
@@ -2266,13 +2297,38 @@ function addStoryDialog() {
   };
   const soundBtn = el("button", { class: "btn small ghost", style: "display:none",
     onclick: () => { previewSound = !previewSound; syncPreviewAudio(); } }, "🔇 Clip sound off");
+  let resetBtn = null;   // assigned below; applyMediaTransform only ever runs after that
+  // The composer is the ONLY place the author sees their framing, so it applies the transform with the
+  // same code path the viewer does (storyContentNode) — scale, THEN rotate, THEN translate. CSS applies
+  // the LEFTMOST function outermost, which is why this reads reversed. If these two ever drift, a story
+  // ships looking like something the author never composed.
+  const applyMediaTransform = () => {
+    const m = $("[data-story-media]", mediaLayer);
+    if (m) m.style.transform =
+      `translate(${spec.mediaOffX * 100}%, ${spec.mediaOffY * 100}%) `
+      + `rotate(${mediaRotDeg}deg) scale(${spec.mediaScale})`;
+    // Zoomed OUT below 1 the media deliberately stops short of filling the frame; the blurred backdrop
+    // means the gap reads as composition rather than as black bars (bug). Same call the viewer makes.
+    const bg = $("[data-story-bg]", mediaLayer);
+    if (bg) bg.style.display = spec.mediaScale < 1 ? "" : "none";
+    if (resetBtn) resetBtn.style.display =
+      (spec.mediaScale !== 1 || spec.mediaOffX !== 0 || spec.mediaOffY !== 0 || mediaRotDeg !== 0) ? "" : "none";
+  };
   const renderMedia = () => {
     const a = state.attachments[0];
     const fit = "position:absolute;inset:0;width:100%;height:100%;object-fit:cover";
-    mediaLayer.replaceChildren(...(a && a.url
-      ? [a.isVideo ? el("video", { src: a.url, muted: "", autoplay: "", loop: "", playsinline: "", style: fit })
-                   : el("img", { src: a.url, style: fit })]
-      : []));
+    const kids = [];
+    if (a && a.url) {
+      // Photos only: a <video> backdrop would be a second decode of the same clip for a background
+      // nobody looks at directly — the viewer skips it for the same reason.
+      if (!a.isVideo) kids.push(el("img", { src: a.url, "data-story-bg": "1", "aria-hidden": "true",
+        style: fit + ";display:none;filter:blur(28px);opacity:0.6;transform:scale(1.1);pointer-events:none" }));
+      kids.push(a.isVideo
+        ? el("video", { src: a.url, "data-story-media": "1", muted: "", autoplay: "", loop: "", playsinline: "", style: fit })
+        : el("img", { src: a.url, "data-story-media": "1", style: fit }));
+    }
+    mediaLayer.replaceChildren(...kids);
+    applyMediaTransform();   // a re-rendered element loses its inline transform — re-apply the framing
     syncPreviewAudio();   // a re-rendered clip starts muted — re-apply whatever the author chose
     renderCap();
   };
@@ -2286,8 +2342,63 @@ function addStoryDialog() {
     spec.y = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
     renderCap();
   };
-  frame.addEventListener("pointerdown", (e) => { frame.setPointerCapture(e.pointerId); placeCap(e); });
-  frame.addEventListener("pointermove", (e) => { if (e.buttons & 1) placeCap(e); });
+  // ── Who owns which gesture on the frame ───────────────────────────────────────────────────────
+  // The frame is one surface with two things to move, so the split is by MODIFIER, and the plain
+  // verbs stay exactly where they already were:
+  //   plain drag            → place the CAPTION   (unchanged — the documented affordance, no regression)
+  //   Alt/Option drag       → PAN the media
+  //   wheel                 → ZOOM   (trackpad pinch arrives as wheel + ctrlKey, so it lands here too)
+  //   shift + wheel         → ROTATE
+  // Everything the author can click (colors, style, size, reset) lives OUTSIDE this element on
+  // purpose: a gesture handler on an ancestor swallows a control's own action.
+  // No attachment means there is nothing to reframe — without this an author could zoom an empty
+  // frame and ship a transform against media that does not exist.
+  const hasMedia = () => !!(state.attachments[0] && state.attachments[0].url);
+  const MEDIA_DRAG = (e) => e.altKey && hasMedia();
+  let panFrom = null;
+  frame.addEventListener("pointerdown", (e) => {
+    frame.setPointerCapture(e.pointerId);
+    if (MEDIA_DRAG(e)) { panFrom = { x: e.clientX, y: e.clientY }; return; }
+    panFrom = null; placeCap(e);
+  });
+  frame.addEventListener("pointermove", (e) => {
+    if (!(e.buttons & 1)) return;
+    if (panFrom) {
+      // Normalized to the frame, matching StoryEditor.kt:470-471 (offset px ÷ box size) — a pan
+      // authored on a 200px desktop preview has to mean the same thing on a 1179px phone.
+      const r = frame.getBoundingClientRect();
+      spec.mediaOffX += (e.clientX - panFrom.x) / r.width;
+      spec.mediaOffY += (e.clientY - panFrom.y) / r.height;
+      panFrom = { x: e.clientX, y: e.clientY };
+      applyMediaTransform();
+      return;
+    }
+    placeCap(e);
+  });
+  frame.addEventListener("pointerup", () => { panFrom = null; });
+  frame.addEventListener("pointercancel", () => { panFrom = null; });
+  frame.addEventListener("wheel", (e) => {
+    if (!hasMedia()) return;   // let the sheet scroll normally when there is nothing to zoom
+    e.preventDefault();   // otherwise the sheet scrolls out from under the gesture
+    // Trackpad momentum and a mouse notch land wildly different deltas here, so clamp the per-event
+    // travel: without it one flick can slam straight into a clamp and the gesture feels broken.
+    const d = Math.max(-60, Math.min(60, e.deltaY || e.deltaX || 0));
+    if (!d) return;
+    if (e.shiftKey) {
+      const next = mediaRotDeg + d * 0.3;
+      // Snap to level within a couple of degrees of a right angle, so "straight" is reachable
+      // deliberately rather than by luck — StoryEditor.kt:153-157, same 2.5° tolerance.
+      const off = ((next % 90) + 90) % 90;
+      mediaRotDeg = (off < 2.5 || off > 87.5) ? Math.round(next / 90) * 90 : next;
+      spec.mediaRotation = (mediaRotDeg * Math.PI) / 180;   // wire field is RADIANS
+    } else {
+      // Floor 0.25, not 1 — the whole point. Clamping at 1 would mean the media could only ever be
+      // zoomed IN, so a tall or wide photo could never be pulled back to show WHOLE inside a
+      // portrait story. Ceiling 5. Same range as StoryEditor.kt:151.
+      spec.mediaScale = Math.min(5, Math.max(0.25, spec.mediaScale * Math.exp(-d * 0.0025)));
+    }
+    applyMediaTransform();
+  }, { passive: false });
 
   // ── Styling controls — the wire palette/typography tables, index-for-index. ──
   const swatches = el("div", { class: "row wrap", style: "gap:6px;justify-content:center" });
@@ -2312,15 +2423,25 @@ function addStoryDialog() {
   syncFont();
   const sizeInp = el("input", { type: "range", min: "0.5", max: "2", step: "0.05", value: String(spec.size),
     style: "flex:1;min-width:70px", oninput: () => { spec.size = parseFloat(sizeInp.value) || 1; renderCap(); } });
+  // Only shown once the author has actually reframed something — an escape hatch back to the identity
+  // (which is also the only way to get back to encoding the exact legacy bytes). Lives outside `frame`
+  // so the frame's gesture handlers can't swallow its click.
+  resetBtn = el("button", { class: "btn small ghost", style: "display:none", title: "Undo zoom, pan and rotation",
+    onclick: () => {
+      spec.mediaScale = 1; spec.mediaOffX = 0; spec.mediaOffY = 0; spec.mediaRotation = 0; mediaRotDeg = 0;
+      applyMediaTransform();
+    } }, "↺ Reset framing");
 
   sheet("New story", el("div", { class: "col" },
     el("div", { class: "muted small" }, "Add a photo or video with the + button. Stories disappear after 24 hours."),
     frame,
-    el("div", { class: "muted small", style: "text-align:center" }, "Drag the preview to place the caption"),
+    // Spelled out because none of these are guessable: the modifiers ARE the discoverability.
+    el("div", { class: "muted small", style: "text-align:center" },
+      "Drag to place the caption · scroll or pinch to zoom · shift-scroll to rotate · ⌥-drag to move the photo"),
     swatches,
     el("div", { class: "row", style: "gap:8px;align-items:center" },
       styleBtn, fontBtn, el("span", { class: "muted small" }, "Size"), sizeInp),
-    el("div", { class: "row wrap", style: "gap:6px" }, soundBtn),
+    el("div", { class: "row wrap", style: "gap:6px" }, soundBtn, resetBtn),
     composer));
   renderMedia();
 }
@@ -2719,6 +2840,14 @@ async function renderThread(root, dm) {
   const input = el("textarea", { class: "composer-field glass", placeholder: "Message…", rows: 1 });
   const autoGrow = () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 132) + "px"; };
   input.addEventListener("input", autoGrow);
+  // A draft staged elsewhere ("Message the author" on a post) lands here, UNSENT. Appended rather
+  // than assigned, so re-entering a thread can't discard something half-typed, and consumed once.
+  if (state.pendingDraft && state.pendingDraft.id === dm.id) {
+    const staged = state.pendingDraft.text;
+    state.pendingDraft = null;
+    input.value = input.value ? `${input.value}\n${staged}` : staged;
+    setTimeout(() => { autoGrow(); input.focus(); }, 0);
+  }
   const editBar = el("div", { class: "edit-bar", style: "display:none" });
   const beginEdit = (m) => {
     editingId = m.id;

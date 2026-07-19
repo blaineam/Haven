@@ -728,8 +728,13 @@ pub fn media_is_wanted(engine: Eng, reference: String) -> bool {
 /// "Message <author>" from a post's ⋯ menu: open (or reuse) the DM with them and carry the post's
 /// media. Returns the DM circle id, or `None` when the author isn't a contact.
 #[tauri::command]
-pub fn message_author(engine: Eng, author_short: String, media: Vec<String>) -> Option<String> {
-    engine.message_author(author_short, media)
+pub fn message_author(
+    engine: Eng,
+    author_short: String,
+    circle_id: String,
+    post_id: String,
+) -> Option<crate::engine::MessageAuthorTarget> {
+    engine.message_author(author_short, circle_id, post_id)
 }
 
 // ---- #4 local media limits (age/size caps) ----------------------------------------------

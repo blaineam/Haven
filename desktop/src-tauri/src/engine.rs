@@ -2813,31 +2813,29 @@ impl Engine {
     /// posted to, so a ref carried into a DM would be undecryptable there. It's re-sealed under the
     /// DM's key, off the caller's thread — a blob is decrypted and re-encrypted whole, which is not
     /// an amount of work to do on the UI's round trip for a video.
-    pub fn message_author(self: &Arc<Self>, author_short: String, media: Vec<String>) -> Option<String> {
+    /// Open (or reuse) the DM with a post's author and return the thread id plus an UNSENT draft
+    /// referencing the post.
+    ///
+    /// It used to SEND the post's media into the new conversation immediately — publishing something
+    /// the user had not written yet, and re-sealing whole videos into the DM circle before they had
+    /// decided to send anything at all. Now it sends nothing: the caller opens the thread with the
+    /// draft waiting in the composer, so the message is still the user's to write.
+    ///
+    /// The reference is the post's LINK, not its media. The link opens the real post — with its
+    /// media — for anyone already in the circle, and costs nothing to stage.
+    pub fn message_author(
+        self: &Arc<Self>,
+        author_short: String,
+        circle_id: String,
+        post_id: String,
+    ) -> Option<MessageAuthorTarget> {
         let (hex, name) = {
             let p = self.prefs.lock().unwrap();
             let c = p.contacts.iter().find(|c| c.id_hex.starts_with(&author_short))?;
             (c.id_hex.clone(), c.name.clone())
         };
-        let dm = self.start_dm(hex, name);
-        if media.is_empty() {
-            return Some(dm);
-        }
-        let me = self.clone();
-        let dm_id = dm.clone();
-        tauri::async_runtime::spawn(async move {
-            let refs: Vec<String> = media
-                .iter()
-                .filter_map(|r| {
-                    let bytes = me.media.load_any_circle(&me.social, r)?;
-                    Some(me.media.store(&me.social, &dm_id, &bytes, r.starts_with("v:")))
-                })
-                .collect();
-            if !refs.is_empty() {
-                me.send_dm(dm_id, String::new(), refs, None);
-            }
-        });
-        Some(dm)
+        let dm = self.start_dm(hex, name.clone());
+        Some(MessageAuthorTarget { dm, name, draft: wire::post_url(&circle_id, &post_id).unwrap_or_default() })
     }
 
     /// A DM's read watermark: its `dm_last_read` entry, else the first-run seed (so pre-feature
@@ -6556,4 +6554,14 @@ mod round_trip_tests {
         assert_eq!((index, total), (0, 1));
         assert_eq!(bob.open_media(chunk[off..].to_vec()), Some(blob), "bob reassembles + decrypts the media");
     }
+}
+
+/// Where "Message the author" should take the user, and what should be WAITING there — the thread id,
+/// the contact's name for the header, and an UNSENT draft naming the post. Nothing is sent.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageAuthorTarget {
+    pub dm: String,
+    pub name: String,
+    pub draft: String,
 }

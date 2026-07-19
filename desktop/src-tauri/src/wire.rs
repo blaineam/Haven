@@ -265,3 +265,76 @@ mod tests {
         assert_eq!(e.envelope, env);
     }
 }
+
+// ---- Deep links -------------------------------------------------------------------------
+
+/// Fragment-safe token charset: unreserved characters *minus* `.` and `/`, so those two stay
+/// unambiguous as our delimiters no matter what an id carries. Must stay byte-identical to
+/// `fragmentToken` in `apple/HavenApp/DeepLink.swift` and `encodeToken` in Android's `DeepLink.kt` —
+/// a link one platform emits has to split the same way on the others.
+const TOKEN_SAFE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_~";
+
+fn encode_token(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        if *b < 0x80 && TOKEN_SAFE.contains(b) {
+            out.push(*b as char);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
+}
+
+/// The link a post's share sheet hands out — web-routed so it crosses to iOS/Android and survives
+/// being pasted anywhere.
+///
+/// ⚠️ THE PAYLOAD GOES AFTER THE `#` ON PURPOSE — DO NOT "TIDY" IT INTO A PATH. ⚠️
+/// A browser never sends `#…` to the server, so wemiller.com's logs (and every CDN/proxy between)
+/// see only `/apps/haven/open/` — never WHICH post. A path form would hand the host a readership
+/// map: reader IP × circle × post. That map is exactly what Haven exists not to create. See
+/// `docs/LINK-SYSTEM.md`.
+///
+/// The link is a POINTER, not a capability — it carries no key. Only a device already in the circle
+/// can decrypt the post; everyone else gets "post not found".
+pub fn post_url(circle_id: &str, post_id: &str) -> Option<String> {
+    if circle_id.is_empty() || post_id.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "https://wemiller.com/apps/haven/open/#p/{}.{}",
+        encode_token(circle_id),
+        encode_token(post_id)
+    ))
+}
+
+#[cfg(test)]
+mod deeplink_tests {
+    use super::*;
+
+    /// The token encoding is a CROSS-PLATFORM contract: a link emitted here must split the same way
+    /// on iOS and Android, so `.` and `/` must be escaped even though they are URL-legal.
+    #[test]
+    fn delimiters_are_escaped_but_unreserved_survive() {
+        assert_eq!(encode_token("abc-XYZ_0~9"), "abc-XYZ_0~9");
+        assert_eq!(encode_token("a.b"), "a%2Eb");
+        assert_eq!(encode_token("a/b"), "a%2Fb");
+        // A dm: circle id is the case that forced this: ':' and '-' must not become delimiters.
+        assert_eq!(encode_token("dm:aa-bb"), "dm%3Aaa-bb");
+    }
+
+    #[test]
+    fn the_payload_stays_in_the_fragment() {
+        let u = post_url("default", "p1").unwrap();
+        assert!(u.starts_with("https://wemiller.com/apps/haven/open/#p/"), "{u}");
+        // Nothing identifying may appear before the '#', or the host learns who read what.
+        let (before, _) = u.split_once('#').unwrap();
+        assert!(!before.contains("default") && !before.contains("p1"), "{u}");
+    }
+
+    #[test]
+    fn empty_ids_have_no_link() {
+        assert!(post_url("", "p1").is_none());
+        assert!(post_url("c", "").is_none());
+    }
+}

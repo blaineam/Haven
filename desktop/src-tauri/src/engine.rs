@@ -72,6 +72,11 @@ struct DynState {
     media_req_at: HashMap<String, u64>,
     /// last time we mirrored our OWN media to the circle relays (idempotent backfill, ~every 2 min).
     last_media_backfill_ms: u64,
+    /// last own-device catch-up sweep, and whether one is still running. Throttled HARD (5 min) and
+    /// single-flight: the sweep RE-SEALS every envelope it hands over, so it is real CPU per item
+    /// and must never ride the sync tick or be allowed to overlap itself. See `sync_with_contacts`.
+    last_own_device_catchup_ms: u64,
+    own_device_catchup_in_flight: bool,
     /// last time we TOUCH-refreshed our event envelopes on the circle relays (mailbox-GC liveness,
     /// daily). In-memory: 0 at start → first loop tick refreshes, then every 24h of uptime.
     last_event_refresh_ms: u64,
@@ -2611,6 +2616,12 @@ impl Engine {
         for id_hex in self.social.contact_node_ids(circle_id.to_string()) {
             self.send_frame(wire::EVENT, &payload, &id_hex);
         }
+        // Hand it to MY other devices too while they're online. contact_node_ids deliberately
+        // excludes us, so before this a post authored here only reached my other devices via their
+        // mailbox poll — the send-path half of the same cross-device gap the receive path had.
+        // Strictly an optimisation: the upload_event below is unconditional and stays what a
+        // sleeping / not-yet-linked device gets. iOS/Android parity.
+        self.live_deliver_to_my_devices(wire::EVENT, &payload);
         let me = self.clone();
         let cid = circle_id.to_string();
         let env = env.to_vec();
@@ -3095,6 +3106,54 @@ impl Engine {
                     .store(false, std::sync::atomic::Ordering::SeqCst);
             });
         }
+        // Own-device catch-up over the INTERNET. The receive-time fan-out in `handle_event` only
+        // helps events arriving from NOW ON — a DM already sitting on one device and missing from
+        // another stays missing, because handle_event never runs for it again. Desktop has no local
+        // proximity transport at all, so without this two of the user's devices on different
+        // networks never reconciled and anything that reached only one of them stayed there.
+        //
+        // BOUNDED, deliberately, and it must stay that way:
+        //  - only when I actually HAVE other devices (no targets → no work at all),
+        //  - at most OWN_DEVICE_CATCHUP_LIMIT events per circle,
+        //  - no more often than every 5 minutes — this RE-SEALS per envelope, so it is real CPU and
+        //    must not ride the sync tick,
+        //  - single-flight, so a slow pass cannot overlap itself and pile up (the roster-pull
+        //    dial-storm shape guarded above),
+        //  - batched into ONE task per sweep, not one dial per envelope.
+        // Siblings dedupe on receive, so repeating a sweep is harmless.
+        const OWN_DEVICE_CATCHUP_LIMIT: u32 = 50;
+        let catchup_due = {
+            let mut st = self.dyn_state.lock().unwrap();
+            let now = now_ms();
+            if !st.own_device_catchup_in_flight && now - st.last_own_device_catchup_ms > 300_000 {
+                st.last_own_device_catchup_ms = now;
+                st.own_device_catchup_in_flight = true;
+                true
+            } else {
+                false
+            }
+        };
+        if catchup_due {
+            if self.my_other_device_hexes().is_empty() {
+                self.dyn_state.lock().unwrap().own_device_catchup_in_flight = false;
+            } else {
+                let me = self.clone();
+                tauri::async_runtime::spawn(async move {
+                    for c in me.social.circles() {
+                        // ALL authors — the point is my friends' messages that reached one device only.
+                        let envs = me
+                            .social
+                            .export_recent_envelopes(c.id.clone(), OWN_DEVICE_CATCHUP_LIMIT);
+                        if !envs.is_empty() {
+                            let payloads: Vec<Vec<u8>> =
+                                envs.iter().map(|e| wire::event_payload(&c.id, e)).collect();
+                            me.live_deliver_many_to_my_devices(wire::EVENT, payloads);
+                        }
+                    }
+                    me.dyn_state.lock().unwrap().own_device_catchup_in_flight = false;
+                });
+            }
+        }
         // Re-emit our own relay id whenever we re-greet contacts, so a peer that just came online surfaces
         // our relay instead of missing the one-shot announce.
         self.reannounce_own_relay();
@@ -3160,7 +3219,7 @@ impl Engine {
             me.dyn_state.lock().unwrap().internet_active = true;
             match t {
                 wire::HELLO => me.handle_hello_from(sender_device.as_deref(), &body),
-                wire::EVENT => me.handle_event(&body),
+                wire::EVENT => me.handle_event(&body, sender_device.as_deref()),
                 wire::RELAY_NODE => me.handle_relay_node(&body).await,
                 wire::MEDIA_REQ => me.handle_media_request(&body).await,
                 wire::MEDIA_CHUNK => me.handle_media_chunk(&body),
@@ -3271,10 +3330,34 @@ impl Engine {
         }
     }
 
-    fn handle_event(self: &Arc<Self>, payload: &[u8]) {
+    /// `sender_device` = the authenticated transport id this frame arrived from (None when relayed
+    /// or unknown), used to tell a CONTACT's delivery apart from one of my own devices'.
+    fn handle_event(self: &Arc<Self>, payload: &[u8], sender_device: Option<&str>) {
         let Some(ev) = wire::parse_event(payload) else { return };
+        // Did this come from one of MY devices? Those already have it, and re-sharing it back is how
+        // a fan-out becomes a loop.
+        let from_own_device = sender_device
+            .map(|s| {
+                let l = s.to_lowercase();
+                l == self.social.my_node_hex().to_lowercase()
+                    || self.my_other_device_hexes().iter().any(|d| *d == l)
+            })
+            .unwrap_or(false);
         let changed = self.social.receive(ev.circle_id.clone(), ev.envelope).unwrap_or(false);
         if changed {
+            // FAN OUT to my other devices. A sender dials the device ids ITS copy of my roster
+            // resolves — often just one — so a DM delivered straight to one device never reached the
+            // others, which were left waiting on a mailbox poll (and got nothing at all if the relay
+            // refused them). The send path does this for my OWN posts (after_author); the receive
+            // path did not, so anything a CONTACT sent stopped at whichever device they reached.
+            //
+            // Cannot loop: `receive` returns true only for a genuinely NEW event, so a sibling that
+            // already holds it stops here — and a frame that came FROM one of my devices is never
+            // re-shared at all. Volume is bounded by real new-event traffic. Deliberately NO push
+            // amplification: a push per inbound event would storm during a sync burst.
+            if !from_own_device {
+                self.live_deliver_to_my_devices(wire::EVENT, payload);
+            }
             self.bump_activity(); // a live event arrived → keep sync tight while the conversation is active
             self.persist();
             self.emit_changed();
@@ -5795,6 +5878,37 @@ impl Engine {
         for dev in others {
             self.send_call_frame(wire::CALL_HANDLED, &frame, &dev);
         }
+    }
+
+    /// Push a frame straight to my own other devices while they're online. Best-effort BY CONTRACT:
+    /// a sibling that's asleep is the EXPECTED case, not an error — every caller's durable mailbox
+    /// path runs regardless of what happens here. iOS `liveDeliverToMyDevices` parity.
+    fn live_deliver_to_my_devices(self: &Arc<Self>, t: u8, payload: &[u8]) {
+        for dev in self.my_other_device_hexes() {
+            self.send_frame(t, payload, &dev);
+        }
+    }
+
+    /// Batched [`live_deliver_to_my_devices`] — ONE task for MANY frames rather than one per frame.
+    /// The catch-up sweep hands over dozens of envelopes at once, and `send_frame` spawns a task per
+    /// call: spawning one each would be a needless pile of concurrent dials at the same few devices,
+    /// which is exactly the shape that drives iroh path-discovery churn. Sends sequentially inside a
+    /// single task instead.
+    fn live_deliver_many_to_my_devices(self: &Arc<Self>, t: u8, payloads: Vec<Vec<u8>>) {
+        let targets = self.my_other_device_hexes();
+        if targets.is_empty() || payloads.is_empty() {
+            return;
+        }
+        let node = self.node.lock().unwrap().clone();
+        let Some(node) = node else { return };
+        let frames: Vec<Vec<u8>> = payloads.iter().map(|p| wire::frame(t, p)).collect();
+        tauri::async_runtime::spawn(async move {
+            for dev in targets {
+                for f in &frames {
+                    let _ = node.send_to_node(dev.clone(), f.clone()).await;
+                }
+            }
+        });
     }
 
     /// My OWN other devices' node ids (excluding this one and my account id, which under per-device

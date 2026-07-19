@@ -35,6 +35,10 @@ private const val TAG = "HavenNet"
  *  bounding note where the pull is kicked off. */
 private const val ROSTER_PULL_PER_PASS = 3
 private const val ROSTER_PULL_BACKOFF_MS = 600_000L   // 10 min
+
+/** Events per circle handed to my own other devices by the catch-up sweep. Bounded because the
+ *  sweep RE-SEALS every envelope it sends — real CPU per item, not a cheap re-broadcast. */
+private const val OWN_DEVICE_CATCHUP_LIMIT = 50u
 const val DEFAULT_CIRCLE = "default"
 
 /** A known contact (their verified identity + display name). */
@@ -728,7 +732,7 @@ object HavenNet : InboundListener {
                 Wire.DEVICE_GRANT -> handleDeviceGrant(body)
                 Wire.SEEDLESS_ENROLL_REQ -> handleSeedlessEnrollRequest(body)
                 Wire.SEEDLESS_ENROLL_GRANT -> handleSeedlessEnrollGrant(body)
-                Wire.EVENT -> handleEvent(body)
+                Wire.EVENT -> handleEvent(body, senderDevice, viaNearby)
                 Wire.RELAY_NODE -> handleRelayNode(body)
                 Wire.RELAY -> handleRelay(body, viaNearby)
                 Wire.PRESIGN -> handlePresignBootstrap(body)
@@ -1222,10 +1226,32 @@ object HavenNet : InboundListener {
         return dmCircle
     }
 
-    private fun handleEvent(payload: ByteArray) {
+    /** [senderDevice] = the authenticated transport id this frame arrived from (null for nearby /
+     *  relay-unwrapped frames), used to tell a CONTACT's delivery apart from one of my own devices'. */
+    private fun handleEvent(payload: ByteArray, senderDevice: String? = null, viaNearby: Boolean = false) {
         val ev = Wire.parseEvent(payload) ?: return
+        // Did this come from one of MY devices? Those already have it, and re-sharing it back is how
+        // a fan-out becomes a loop. Nearby frames are broadcast to every device in range already.
+        val fromOwnDevice = viaNearby || senderDevice?.let { s ->
+            val l = s.lowercase()
+            l == runCatching { social.myNodeHex() }.getOrNull()?.lowercase() ||
+                myOtherDeviceTargets().any { it == l }
+        } ?: false
         val changed = runCatching { social.receive(ev.circleId, ev.envelope) }.getOrDefault(false)
         if (changed) {
+            // FAN OUT to my other devices. A sender dials the device ids ITS copy of my roster
+            // resolves — often just one — so a DM delivered straight to my tablet never reached my
+            // phone, which was left waiting on a mailbox poll (and got nothing at all if the relay
+            // refused it). The send path has always done this for my OWN posts (afterAuthor →
+            // liveDeliverToMyDevices); the receive path did not, so anything a CONTACT sent stopped
+            // at whichever device they happened to reach.
+            //
+            // Cannot loop: `receive` returns true only for a genuinely NEW event, so a sibling that
+            // already holds it stops here — and a frame that came FROM one of my devices, or over
+            // nearby (which every device in range already saw), is never re-shared at all. Volume is
+            // bounded by real new-event traffic. Deliberately NO push amplification: a push per
+            // inbound event would storm during a sync burst.
+            if (!fromOwnDevice) liveDeliverToMyDevices(Wire.EVENT, payload)
             bumpActivity()   // a live event arrived → keep sync tight while the conversation is active
             persist()
             scope.launch(Dispatchers.Main) { feedVersion.value++ }
@@ -1646,6 +1672,22 @@ object HavenNet : InboundListener {
         for (t in myOtherDeviceTargets()) sendFrame(type, payload, t)
     }
 
+    /** Batched [liveDeliverToMyDevices] — ONE coroutine for MANY frames rather than one per frame.
+     *  The catch-up sweep hands over dozens of envelopes at once, and [sendFrame] launches a
+     *  coroutine per call: spawning one each would be a needless pile of concurrent dials at the
+     *  same few devices, which is precisely the shape that drives iroh path-discovery churn. Sends
+     *  sequentially inside a single coroutine instead. Best-effort by contract — a sleeping sibling
+     *  is the EXPECTED case, and the durable mailbox path is unaffected. */
+    private fun liveDeliverManyToMyDevices(type: Int, payloads: List<ByteArray>) {
+        val targets = myOtherDeviceTargets()
+        if (targets.isEmpty() || payloads.isEmpty()) return
+        val n = node ?: return
+        val frames = payloads.map { Wire.frame(type, it) }
+        scope.launch {
+            for (t in targets) for (f in frames) runCatching { n.sendToNode(t, f) }
+        }
+    }
+
     fun unblock(idHex: String) {
         blocked.removeAll { it == idHex }
         saveBlocked()
@@ -1704,6 +1746,10 @@ object HavenNet : InboundListener {
      *  the mailbox/relay, and a freshly-added contact is back-filled directly by acceptContact. */
     private var lastHistoryResendMs: Long = 0
     private var lastMediaBackfillMs: Long = 0
+    /** Last own-device catch-up sweep. Throttled hard (5 min): it re-seals every envelope it sends,
+     *  so it must NOT ride the sync tick. See the sweep in [syncWithContacts] for why it exists. */
+    private var lastOwnDeviceCatchupMs: Long = 0
+    private var ownDeviceCatchupInFlight = false
     fun syncWithContacts() {
         if (!ready) return
         val nowMs = System.currentTimeMillis()
@@ -1766,6 +1812,45 @@ object HavenNet : InboundListener {
             }
         }
         if (resendHistory) lastHistoryResendMs = nowMs
+        // Own-device catch-up over the INTERNET. The receive-time fan-out (handleEvent) only helps
+        // events arriving from NOW ON — a DM already sitting on one device and missing from another
+        // stays missing, because handleEvent never runs for it again. A catch-up covering all authors
+        // existed only over the NEARBY transport, gated on a sibling being physically connected, so
+        // two devices on different networks never reconciled at all.
+        //
+        // BOUNDED, deliberately, and it must stay that way:
+        //  - only when I actually HAVE other devices (no targets → no work at all),
+        //  - at most OWN_DEVICE_CATCHUP_LIMIT events per circle,
+        //  - no more often than every 5 minutes — this re-seals per envelope, so it is real CPU and
+        //    battery and must not ride the sync tick,
+        //  - a single in-flight guard, so slow passes cannot overlap and pile up (the roster-pull
+        //    dial-storm shape documented above),
+        //  - batched into ONE coroutine per sweep via liveDeliverManyToMyDevices, not one dial per
+        //    envelope.
+        // Siblings dedupe on receive, so repeating a sweep is harmless.
+        if (!ownDeviceCatchupInFlight &&
+            nowMs - lastOwnDeviceCatchupMs > 300_000 &&
+            myOtherDeviceTargets().isNotEmpty()
+        ) {
+            lastOwnDeviceCatchupMs = nowMs
+            ownDeviceCatchupInFlight = true
+            val cids = runCatching { social.circles().map { it.id } }.getOrDefault(emptyList())
+            scope.launch {
+                try {
+                    for (cid in cids) {
+                        // ALL authors — the point is my friends' messages that reached one device only.
+                        val envs = runCatching {
+                            social.exportRecentEnvelopes(cid, OWN_DEVICE_CATCHUP_LIMIT)
+                        }.getOrDefault(emptyList())
+                        if (envs.isNotEmpty()) {
+                            liveDeliverManyToMyDevices(Wire.EVENT, envs.map { Wire.eventPayload(cid, it) })
+                        }
+                    }
+                } finally {
+                    ownDeviceCatchupInFlight = false
+                }
+            }
+        }
         reannounceOwnRelay()   // frame 19 was a one-shot at relay start; re-emit so peers reliably learn it
         // Push MY media up to every circle relay periodically (idempotent — skips blobs already present),
         // so a sibling reading the relay finds it. The nearby chunk path is unreliable; the relay is durable.

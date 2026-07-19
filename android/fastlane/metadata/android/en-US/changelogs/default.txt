@@ -1,6 +1,6 @@
-1.1.0 — reliability and polish:
-• Stories and media reliably reach a relay, even if you lock your phone right after posting.
-• Changes hold across all your devices — removals, deletions, and profile or settings edits.
-• A much steadier feed: cards no longer jump around as photos and videos load.
-• Music now plays on profile feeds too, and cameras and sheets reliably silence it.
-• Story editor can preview your story's sound before you post it.
+1.1.2 — media that actually arrives:
+• Big photos and videos pick up where they left off instead of restarting from scratch.
+• Receiving a large video no longer loads the whole thing into memory, so size limits are gone.
+• Sending keeps pace with your connection rather than queueing the entire file at once.
+• Fixed media that never arrived because the same transfer kept starting over.
+• Setting a relay as your default now serves every circle, not just one.

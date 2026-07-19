@@ -31,6 +31,16 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **A notification for a message that never appeared (iPhone, Mac).** You could get a banner for a
+  message or a reaction in a conversation you were literally looking at, and the thing itself would
+  never show up — not after waiting, not after force-quitting and reopening. A notification that
+  arrives while you have Haven open is handled differently by the system than one that arrives while
+  it's closed, and on that path Haven showed the banner and threw away the message that came with it.
+  Nothing then went looking for it either, so it was simply gone. Notifications now hand the message
+  over properly, and any notification prompts a check for anything else waiting — so a message can no
+  longer be announced and lost at the same time. Reactions were the most affected: a missed message is
+  obvious, while a missed reaction just quietly leaves your copy of a conversation wrong.
+
 - **Setting a relay as your default served one circle and quietly refused the rest.** A relay only ever
   authorized what its link granted, and a link carried a single circle — but the apps let you pick a
   relay as the default for every circle. So you set it once, one circle worked, and every other circle

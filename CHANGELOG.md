@@ -46,6 +46,39 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **Android and desktop caught up with tonight's four changes.** "Ask for it back" on swept media,
+  private circle nicknames, "Message <author>", host-chosen relay media limits and the three named
+  onboarding paths now work the same way on Android, Windows and Linux as they do on iPhone and Mac.
+  Two things differ on purpose. The author side of "ask for it back" is *bounded* on the new platforms
+  — a ten-minute per-blob cooldown and a one-upload-at-a-time guard — because serving one full upload
+  per request, as written, lets anyone in your circle spend your bandwidth by asking repeatedly. And
+  the desktop story composer still can't zoom out or rotate (it has no such gesture at all), though it
+  now *displays* stories framed that way on a phone correctly, over their own blurred colors.
+
+- **Ask a post's author to put media back.** "No longer available" used to be a dead end: relays sweep
+  media on whatever retention their operator set, but the person who posted it almost always still has
+  the original. Tapping "Ask for it back" now asks them, and it reaches them whenever they next open
+  Haven — even a week later — because the request travels the same store-and-forward path your messages
+  do. When they put it back you get a notification that opens the post, and the media fetches itself.
+  Media now lasts as long as its author keeps a copy, rather than as long as a relay's retention window.
+  Notifications on Android also finally open what they're *about* instead of just opening the app.
+
+- **Your own name for a circle.** Renaming a circle renames it for everyone in it, which isn't the same
+  as wanting your own name for it. There's now a private nickname alongside the rename: only you see it,
+  it never leaves your device, and the circle's real name is still what everyone else sees.
+
+- **Message a post's author.** A post's ⋯ menu offers "Message <name>": it opens (or reuses) your DM
+  with them and carries the post's photos or videos, so they know which post you mean. Not the text —
+  quoting someone's own words back at them reads like something they didn't write.
+
+- **Relays can be told how much disk to use.** Hosting a relay meant volunteering your whole drive.
+  You can now cap it by age and by size — 30 days and 32 GB by default, generous but finite — and
+  either can be set to no limit independently. Undelivered messages are never swept, only media.
+
+- **Onboarding says what each choice does to the device you already have.** Starting fresh, adding a
+  second device, and moving your account to a new one used to read as the same kind of thing, with two
+  of them tucked away as small links. All three are now named, each stating its consequence.
+
 - **Share a post as a story.** A post's ⋯ menu now offers "Share as story": it opens the usual story
   composer (filters, caption, music, reframing) with the post's photos or videos already loaded, and the
   story it publishes links back to the original. Anyone watching sees a "View post" chip that opens the

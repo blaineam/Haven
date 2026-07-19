@@ -34,7 +34,12 @@ export default {
         // content-available push the macOS app decrypts in-process (macOS has no NSE).
         tokens.push({ token, sandbox: !!sandbox, platform: platform || "ios" });
         if (tokens.length > 10) tokens.splice(0, tokens.length - 10);   // cap per identity
-        await env.TOKENS.put(nodeId, JSON.stringify({ tokens }));
+        // Write ONLY when the record actually changes. Every app launch re-registers, so an
+        // unconditional put spent a KV WRITE per launch per device for a byte-identical record —
+        // and the free tier allows just 1,000 writes/day, so idle relaunch churn alone could exhaust
+        // it. Reads are 100x cheaper than writes here; compare first.
+        const next = JSON.stringify({ tokens });
+        if (next !== JSON.stringify({ tokens: rec.tokens || [] })) await env.TOKENS.put(nodeId, next);
         return json({ ok: true, devices: tokens.length });
       }
 
@@ -44,7 +49,10 @@ export default {
         const { nodeId, token, sandbox, ts, sig } = await request.json();
         if (!nodeId || !hexToken(token)) return json({ error: "nodeId + token required" }, 400);
         if (!(await verifyReg(nodeId, token, ts, sig))) return json({ error: "unauthorized" }, 401);
-        await env.TOKENS.put(`owner:${nodeId}`, JSON.stringify({ token, sandbox: !!sandbox }));
+        // Unchanged → no write (this is also re-sent on launch). See /register.
+        const ownerNext = JSON.stringify({ token, sandbox: !!sandbox });
+        const ownerCur = await env.TOKENS.get(`owner:${nodeId}`);
+        if (ownerCur !== ownerNext) await env.TOKENS.put(`owner:${nodeId}`, ownerNext);
         return json({ ok: true });
       }
 
@@ -62,7 +70,12 @@ export default {
           .filter((t) => t.token !== token);
         tokens.push({ token, sandbox: !!sandbox });
         if (tokens.length > 5) tokens.splice(0, tokens.length - 5);   // cap per identity
-        await env.TOKENS.put(`voip:${nodeId}`, JSON.stringify({ tokens }));
+        // Unchanged record → no write. See /register above: every launch re-registers, and the KV
+        // free tier is 1,000 writes/day.
+        const nextVoip = JSON.stringify({ tokens });
+        if (nextVoip !== JSON.stringify({ tokens: rec.tokens || [] })) {
+          await env.TOKENS.put(`voip:${nodeId}`, nextVoip);
+        }
         return json({ ok: true, devices: tokens.length });
       }
 
@@ -340,14 +353,39 @@ function base64ToBytes(b) {
 }
 
 /// Soft per-source-IP rate limit (audit F6) so the blind doorbell can't be used to push-spam, ring,
-/// or battery-drain a victim. KV is eventually consistent, so this is a best-effort cap, not a hard
-/// gate; combine with Cloudflare's own rate-limiting rules for stricter control. ~60 requests/min/IP.
-async function rateLimited(env, request, bucket, limit = 60) {
+/// or battery-drain a victim. ~60 requests/min/IP.
+///
+/// IN-MEMORY, not KV. The KV version spent a WRITE on every /notify, /call and /flag — and the KV
+/// free tier allows only 1,000 writes/day, so the limiter alone capped the whole service at ~1,000
+/// requests/day and was the top consumer of the quota. That is a steep price for a check the old
+/// implementation itself described as "best-effort, not a hard gate": KV reads are eventually
+/// consistent (up to ~60s stale), so a fast burst — exactly the thing being defended against — read
+/// a stale count and slipped through anyway.
+///
+/// The trade-off, stated plainly: this counts per ISOLATE rather than globally, so an attacker whose
+/// requests land on several isolates gets a proportionally looser effective cap. Against the actual
+/// threat (one source hammering the doorbell, which lands on few isolates) it behaves much like the
+/// KV version did, at zero quota cost. For a hard global limit use Cloudflare's own rate-limiting
+/// rules — the right layer for it — or a Durable Object, which is strongly consistent and priced for
+/// per-request writes.
+const rlCounts = new Map();   // `${bucket}:${ip}` → { n, resetAt }
+function rateLimited(env, request, bucket, limit = 60) {
   const ip = request.headers.get("cf-connecting-ip") || "unknown";
-  const key = `rl:${bucket}:${ip}`;
-  const n = parseInt((await env.TOKENS.get(key)) || "0", 10) + 1;
-  await env.TOKENS.put(key, String(n), { expirationTtl: 60 });
-  return n > limit;
+  const key = `${bucket}:${ip}`;
+  const now = Date.now();
+  // Bound the map: an isolate is short-lived, but a long-lived one seeing many IPs must not grow
+  // without limit. Sweeping only when it gets big keeps the common path allocation-free.
+  if (rlCounts.size > 10_000) {
+    for (const [k, v] of rlCounts) if (v.resetAt <= now) rlCounts.delete(k);
+    if (rlCounts.size > 10_000) rlCounts.clear();   // pathological: start over rather than grow
+  }
+  const cur = rlCounts.get(key);
+  if (!cur || cur.resetAt <= now) {
+    rlCounts.set(key, { n: 1, resetAt: now + 60_000 });
+    return false;
+  }
+  cur.n += 1;
+  return cur.n > limit;
 }
 
 // ---- APNs failure reporting ----

@@ -645,6 +645,24 @@ enum SharedStore {
     /// Safe against a hostile relay: `ingestRosterWire` verifies the ACCOUNT signature over the
     /// DeviceList itself and refuses anything that doesn't bind to the account named in the key, so a
     /// relay can serve these bytes but cannot forge or alter them.
+    /// When each contact's roster was last ASKED for. A contact whose roster is on no relay never
+    /// becomes resolvable, so without a backoff the caller retries them on every sync tick forever —
+    /// every relay, every contact, HTTP timeouts overlapping — which is a dial storm, and iroh
+    /// answers a dial storm with unbounded path-discovery churn. Ask rarely; the cost of being a few
+    /// minutes late to a roster is nothing next to that.
+    private static var rosterPullAt: [String: Date] = [:]
+    private static let rosterPullBackoff: TimeInterval = 600   // 10 min
+
+    static func rosterPullDue(_ accountHex: String) -> Bool {
+        let k = accountHex.lowercased()
+        guard let last = rosterPullAt[k] else { return true }
+        return Date().timeIntervalSince(last) > rosterPullBackoff
+    }
+    static func noteRosterPullAttempt(_ accountHex: String) {
+        rosterPullAt[accountHex.lowercased()] = Date()
+        if rosterPullAt.count > 500 { rosterPullAt.removeAll() }
+    }
+
     @discardableResult
     static func fetchContactRoster(accountHex: String, social: HavenSocial) async -> Bool {
         let acct = accountHex.lowercased()

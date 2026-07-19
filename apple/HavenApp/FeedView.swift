@@ -1626,13 +1626,30 @@ final class FeedStore: ObservableObject {
         // frame, the ACCEPT included, then fails the declared-vs-signer check and is dropped as a
         // forgery. Their roster is already sitting on the relay, so ask for it. Cheap and idempotent:
         // only contacts we currently can't resolve, and the ingest is a no-op once we hold it.
-        let unresolved = ContactsStore.shared.contacts
-            .map(\.idHex)
-            .filter { hex in social.deviceNodeIdsFor(accountHex: hex).allSatisfy { $0.lowercased() == hex.lowercased() } }
-        if !unresolved.isEmpty {
-            HavenLog.sync("devroster: \(unresolved.count) contact(s) have no resolvable devices — pulling from relays")
-            Task { @MainActor in
-                for hex in unresolved { await SharedStore.fetchContactRoster(accountHex: hex, social: social) }
+        //
+        // STRICTLY BOUNDED, and it must stay that way. A contact whose roster is on NO relay never
+        // becomes resolvable, so an unguarded version of this re-dials them forever: one pass per 20s
+        // tick, every relay, per contact, with 60s HTTP timeouts — so passes overlap and pile up
+        // without limit. That is a dial storm, and iroh answers a dial storm with unbounded
+        // path-discovery churn (the self-connect leak and the open_path_on_conn OOM). It took a Mac
+        // to 28 GB. Hence: one pass at a time, a few contacts per pass, and a long per-contact
+        // backoff so a permanently-unresolvable contact costs almost nothing.
+        if !rosterPullInFlight {
+            let due = ContactsStore.shared.contacts
+                .map(\.idHex)
+                .filter { hex in social.deviceNodeIdsFor(accountHex: hex).allSatisfy { $0.lowercased() == hex.lowercased() } }
+                .filter { SharedStore.rosterPullDue($0) }
+                .prefix(3)
+            if !due.isEmpty {
+                rosterPullInFlight = true
+                HavenLog.sync("devroster: pulling \(due.count) contact roster(s) from relays")
+                Task { @MainActor in
+                    defer { rosterPullInFlight = false }
+                    for hex in due {
+                        SharedStore.noteRosterPullAttempt(hex)
+                        await SharedStore.fetchContactRoster(accountHex: hex, social: social)
+                    }
+                }
             }
         }
         // Own-device catch-up over NEARBY, every cycle: a sibling that missed the instant broadcastEvent
@@ -3446,12 +3463,33 @@ final class FeedStore: ObservableObject {
         if n != unseenMessages { unseenMessages = n }
     }
 
+    /// True while a contact-roster pull pass is running. Without it the 20s sync tick spawned a fresh
+    /// pass every time regardless of whether the previous one had finished — and each pass makes
+    /// network calls with 60s timeouts, so they overlapped and accumulated without bound.
+    private var rosterPullInFlight = false
+
+    /// The newest inbound item already counted toward each circle's badge.
+    ///
+    /// Without this the badge only ever climbed. `bumpUnseen` runs on ANY change in a circle — a
+    /// history backfill, an epoch-rotation re-seal, a reaction to an old post, a re-sync of a message
+    /// already shown — and it incremented every time as long as the newest inbound item happened to
+    /// be less than five minutes old. So ONE recent post could raise the badge indefinitely while
+    /// nothing new had actually arrived. `notifyNewest` right below already dedupes by item id for
+    /// precisely this reason; the badge never did.
+    ///
+    /// Deliberately NOT cleared by `markCircleSeen`: after you've read the circle, a later re-sync of
+    /// that same message must not be counted as new again.
+    private var lastCountedUnseen: [String: String] = [:]
+
     /// Count a fresh inbound item as "unseen" for the badge (ignores historical back-fill).
     private func bumpUnseen(_ circleId: String) {
         if circleId.hasPrefix("dm:") { recomputeUnreadDMs(); return }   // DMs: watermark-based, always exact
         let inbound = messages(in: circleId).filter { !$0.isMe && !$0.unsent }
         guard let newest = inbound.max(by: { $0.createdAt < $1.createdAt }) else { return }
         guard now() &- newest.createdAt < 5 * 60 * 1000 else { return }   // recent only
+        guard lastCountedUnseen[circleId] != newest.id else { return }    // already counted this one
+        lastCountedUnseen[circleId] = newest.id
+        if lastCountedUnseen.count > 500 { lastCountedUnseen.removeAll() }   // bound it
         unseenCircle += 1
     }
 

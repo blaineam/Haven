@@ -102,6 +102,26 @@ impl HavenId {
         Ok(())
     }
 
+    /// Verify an Ed25519-ONLY signature against a bare 32-byte node id.
+    ///
+    /// Deliberately weaker than [`Self::verify`], and used in exactly one place: the APNs doorbell
+    /// (see `seal_signed_notification`). A push is capped at 4 KiB by Apple, and the hybrid pair —
+    /// a 3,200-byte bundle plus a 3,373-byte signature — is ~10 KiB once base64'd, so EVERY push
+    /// was rejected 413 and no notification of any kind was delivered. A node id already IS an
+    /// Ed25519 public key, so 32 bytes authenticate the doorbell with no bundle to carry.
+    ///
+    /// What this does NOT cover: a quantum adversary could forge a NOTIFICATION — ring a phone,
+    /// fake a preview. It could not read or forge CONTENT, which stays hybrid-sealed and is
+    /// re-verified through the normal path once the app opens. Keep this off every other route.
+    pub fn verify_ed25519_only(node_id: &[u8; 32], msg: &[u8], sig: &[u8]) -> Result<()> {
+        let vk = VerifyingKey::from_bytes(node_id)
+            .map_err(|_| CoreError::Crypto("bad ed25519 node id"))?;
+        let sig = ed25519_dalek::Signature::from_slice(sig)
+            .map_err(|_| CoreError::Crypto("bad ed25519 signature length"))?;
+        vk.verify(msg, &sig)
+            .map_err(|_| CoreError::Crypto("ed25519 verification failed"))
+    }
+
     /// Serialize the full public bundle (for publishing to discovery).
     /// Layout: ed25519(32) ‖ x25519(32) ‖ ml-kem-ek(1184) ‖ ml-dsa-vk(rest).
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -210,6 +230,13 @@ impl Identity {
             kem_x: XPublicKey::from(&self.kem_x),
             kem_pq: self.kem_pq_ek.clone(),
         }
+    }
+
+    /// Produce an Ed25519-ONLY signature (64 bytes). The APNs doorbell's counterpart to
+    /// [`HavenId::verify_ed25519_only`] — see that method for why the hybrid signature cannot be
+    /// used there and what the reduction does and does not cost. Nothing else may call this.
+    pub fn sign_ed25519_only(&self, msg: &[u8]) -> [u8; ED_SIG_LEN] {
+        self.signing.sign(msg).to_bytes()
     }
 
     /// Produce a **hybrid** signature: `ed25519(64) ‖ ml-dsa-65(rest)`.

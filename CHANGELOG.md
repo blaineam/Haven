@@ -9,6 +9,21 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Notifications work again — all of them.** Nothing was being delivered: no DMs, no post alerts, and
+  no incoming-call ring, on any network, in any direction. The signed push envelope carried the sender's
+  full hybrid post-quantum bundle (3,200 bytes) plus a hybrid signature (3,373 bytes), which base64'd to
+  roughly 10 KB against Apple's 4 KB ceiling — so APNs rejected every push with `413 PayloadTooLarge`,
+  and the push worker checked the response only for success and threw the reason away. That is also why
+  calls never rang and no fallback banner appeared: the VoIP push blew its 5 KB limit, and the alert the
+  worker fell back to blew the 4 KB one. The envelope now carries the sender's 32-byte node id — which
+  already *is* their Ed25519 public key — and an Ed25519 signature, so the doorbell still proves who
+  sent it and still can't be forged by anyone holding only your public key. Message *content* remains
+  hybrid post-quantum sealed, as does call signalling, which has no size limit to respect. A test now
+  asserts the envelope fits inside the APNs budget, and the worker logs the exact APNs rejection reason
+  rather than discarding it.
+
 ### Added
 
 - **Share a post as a story.** A post's ⋯ menu now offers "Share as story": it opens the usual story

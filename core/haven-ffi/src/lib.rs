@@ -415,34 +415,37 @@ fn call_signing_bytes(recipient_hex: &str, frame_type: u8, plaintext: &[u8]) -> 
     v
 }
 
-/// NSE/recipient side: open a SIGNED push notification with the seed alone, verifying the carried
-/// sender bundle actually authored it. Defeats the spoof where anyone holding the recipient's public
-/// key seals an arbitrary "Alice|…" alert — a forger can only sign as *themselves*, never as a
-/// contact, and the bound recipient prevents replay. Layout:
-/// [u32 bundle_len][bundle][u32 sig_len][sig][seal_media output].
+/// Version marker for the APNs-sized notification envelope. v1 (no marker) began with a u32
+/// bundle length whose first byte was 0x80, so the two can never be confused: a v1 blob reaching a
+/// v2 reader is refused here, and a v2 blob reaching a v1 reader fails its length check. Both drop
+/// rather than misparse — acceptable because v1 blobs were never delivered at all (APNs 413'd every
+/// one; see `seal_signed_notification`), so there is no working traffic to stay compatible with.
+const NOTIF_V2: u8 = 0x02;
+/// `[version 1][node id 32][ed25519 sig 64]`.
+const NOTIF_V2_PREFIX_LEN: usize = 1 + 32 + 64;
+
+/// NSE/recipient side: open a SIGNED push notification with the seed alone, verifying the sender
+/// named by the carried node id actually authored it. Defeats the spoof where anyone holding the
+/// recipient's public key seals an arbitrary "Alice|…" alert — a forger can only sign as
+/// *themselves*, never as a contact, and the bound recipient prevents replay. Ed25519-only, for
+/// the payload-size reason documented on `seal_signed_notification`.
+/// Layout: `[NOTIF_V2][sender node id (32)][ed25519 sig (64)][seal_media output]`.
 #[uniffi::export]
 pub fn open_signed_notification_with_seed(seed: Vec<u8>, blob: Vec<u8>) -> Option<SignedNotification> {
     let seed_arr: [u8; 32] = seed.clone().try_into().ok()?;
     let me = Identity::from_seed(&seed_arr);
     let recipient_hex = hex(&me.public().node_id_bytes());
-    if blob.len() < 4 {
+    if blob.len() <= NOTIF_V2_PREFIX_LEN || blob[0] != NOTIF_V2 {
         return None;
     }
-    let blen = u32::from_le_bytes(blob[0..4].try_into().ok()?) as usize;
-    if blob.len() < 8 + blen {
-        return None;
-    }
-    let bundle = &blob[4..4 + blen];
-    let slen = u32::from_le_bytes(blob[4 + blen..8 + blen].try_into().ok()?) as usize;
-    if blob.len() < 8 + blen + slen {
-        return None;
-    }
-    let sig = &blob[8 + blen..8 + blen + slen];
-    let sealed = blob[8 + blen + slen..].to_vec();
+    let node_id: [u8; 32] = blob[1..33].try_into().ok()?;
+    let sig = &blob[33..NOTIF_V2_PREFIX_LEN];
+    let sealed = blob[NOTIF_V2_PREFIX_LEN..].to_vec();
     let plaintext = open_sealed_with_seed(seed, sealed)?;
-    let sender = HavenId::from_bytes(bundle).ok()?;
-    sender.verify(&notif_signing_bytes(&recipient_hex, &plaintext), sig).ok()?;
-    Some(SignedNotification { sender_hex: hex(&sender.node_id_bytes()), data: plaintext })
+    // Verify BEFORE trusting anything inside the plaintext (the caller name / `h` field the UI
+    // renders): the signature is what promotes a self-declared sender into a proven one.
+    HavenId::verify_ed25519_only(&node_id, &notif_signing_bytes(&recipient_hex, &plaintext), sig).ok()?;
+    Some(SignedNotification { sender_hex: hex(&node_id), data: plaintext })
 }
 
 // ===== Circle relay / mailbox (haven-relay blob store over Haven Net) =====
@@ -5269,21 +5272,32 @@ impl HavenSocial {
     /// Seal a push notification payload to a recipient AND sign it, so the recipient's NSE can prove
     /// who sent it (audit H2 — defeats the "anyone with my public key forges an alert" spoof). Used
     /// only for the small notification payload, NOT for media chunks (which would balloon with a
-    /// per-chunk signature). Layout: [u32 bundle_len][sender bundle][u32 sig_len][sig][seal_media].
+    /// per-chunk signature). Layout: `[NOTIF_V2][sender node id (32)][ed25519 sig (64)][seal_media]`.
+    ///
+    /// **Why this one route is Ed25519-only.** v1 carried the sender's full hybrid bundle (3,200 B)
+    /// and a hybrid signature (3,373 B). Base64'd into an APNs payload that is ~10 KiB against a
+    /// 4 KiB ceiling (5 KiB for VoIP), so Apple 413'd EVERY push: no DMs, no posts, and no call
+    /// doorbell — which is also why calls never rang and no fallback banner appeared. The bundle
+    /// alone exceeded the entire budget, so this could not be trimmed, only restructured.
+    ///
+    /// A node id already IS an Ed25519 public key, so the sender needs no bundle: 32 bytes both
+    /// identify and verify. Authentication against forgery by a classical attacker is unchanged.
+    /// What is given up is post-quantum authentication OF THE DOORBELL only — a future quantum
+    /// adversary could ring a phone or fake a preview, but cannot read or forge content, which
+    /// stays hybrid-sealed by `seal_media` and is re-verified through the normal path on open.
+    /// Do not reuse this construction anywhere the payload is not APNs-capped: call SIGNALING
+    /// (`seal_call_frame`) travels over iroh with no such limit and keeps the hybrid signature.
     pub fn seal_signed_notification(&self, recipient_node_hex: String, data: Vec<u8>) -> Result<Vec<u8>, HavenError> {
         let sealed = self.seal_media(recipient_node_hex.clone(), data.clone())?;
         let st = self.state.lock().unwrap();
-        // D9: sign + carry the ACCOUNT bundle when we hold the account key (no regression — pre-S4 receivers
-        // require declared==verified). A SEEDLESS device has only its device key, so it signs + carries the
-        // DEVICE bundle; those are openable once the S4.4/S4.5 receive-side device→account acceptance lands
-        // (a bounded, documented follow-on — pre-S4 receivers drop them, same as any device-signed frame).
+        // D9: sign as the ACCOUNT when we hold the account key; a SEEDLESS device signs as itself.
+        // The recipient resolves either from the 32-byte id it carries, exactly as before.
         let signer = st.account_or_device_signer();
-        let bundle = signer.public().to_bytes();
-        let sig = signer.sign(&notif_signing_bytes(&recipient_node_hex, &data));
-        let mut out = Vec::with_capacity(8 + bundle.len() + sig.len() + sealed.len());
-        out.extend_from_slice(&(bundle.len() as u32).to_le_bytes());
-        out.extend_from_slice(&bundle);
-        out.extend_from_slice(&(sig.len() as u32).to_le_bytes());
+        let node_id = signer.public().node_id_bytes();
+        let sig = signer.sign_ed25519_only(&notif_signing_bytes(&recipient_node_hex, &data));
+        let mut out = Vec::with_capacity(NOTIF_V2_PREFIX_LEN + sealed.len());
+        out.push(NOTIF_V2);
+        out.extend_from_slice(&node_id);
         out.extend_from_slice(&sig);
         out.extend_from_slice(&sealed);
         Ok(out)
@@ -6352,6 +6366,37 @@ mod net_tests {
         // A plain (unsigned) seal_media blob — the old spoofable form — can't pass as signed.
         let plain = alice.seal_media(bob.my_node_hex(), b"spoof".to_vec()).unwrap();
         assert!(open_signed_notification_with_seed([31u8; 32].to_vec(), plain).is_none());
+    }
+
+    /// APNs rejects any payload over 4 KiB (5 KiB for VoIP) with 413 PayloadTooLarge, and the push
+    /// worker discarded that status — so an oversized envelope silently killed EVERY notification:
+    /// DMs, posts, and the call doorbell alike. That is what "calls never ring and no banner ever
+    /// appears" actually was. v1 carried a 3,200-byte hybrid bundle plus a 3,373-byte hybrid
+    /// signature and base64'd to ~10 KiB — the bundle alone exceeded the whole budget.
+    ///
+    /// Assert the budget here, where a failure is one red test, instead of in a 413 that nothing
+    /// logs and no user can report. If this trips, do NOT raise the limit: APNs sets it.
+    #[test]
+    fn signed_notification_fits_in_an_apns_payload() {
+        const APNS_ALERT_LIMIT: usize = 4096;
+        let alice = HavenSocial::new([30u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([31u8; 32].to_vec()).unwrap();
+        let cid = DEFAULT_CIRCLE.to_string();
+        let bob_hex = alice.add_contact_bundle(cid, bob.my_bundle()).unwrap();
+
+        // A generous worst case: a long display name plus a full-length DM preview.
+        let body = format!(
+            r#"{{"t":"{}","b":"{}"}}"#,
+            "A Fairly Long Display Name Indeed",
+            "x".repeat(400)
+        );
+        let blob = alice.seal_signed_notification(bob_hex, body.into_bytes()).unwrap();
+        // The client base64s the envelope into the APNs JSON, so that is the length Apple measures.
+        let b64_len = blob.len().div_ceil(3) * 4;
+        assert!(
+            b64_len < APNS_ALERT_LIMIT,
+            "notification envelope is {b64_len} B base64; APNs caps at {APNS_ALERT_LIMIT} B"
+        );
     }
 
     // A minimal SDP offer body in the on-wire call-frame shape `[hex64][…][json]`; only the DTLS

@@ -466,6 +466,40 @@ pub fn make_relay_link(circle: String, members: Vec<String>) -> String {
     format!("haven-relay://circle#{}", data_encoding::BASE32_NOPAD.encode(&json))
 }
 
+/// A relay link granting MANY circles at once — parallel arrays, one entry per circle.
+///
+/// A relay authorizes exactly what its link grants, and the apps let a user point every circle at
+/// one relay. A single-circle link therefore left every OTHER circle permanently `ERR forbidden`,
+/// with no way to recover: publishing a device roster only expands device ids into circles the
+/// relay already knows, so a circle it was never granted has nothing to expand into. That is what
+/// made media unreachable on a relay that was holding it.
+///
+/// v2 keeps `c`/`m` set to the FIRST circle so a link pasted into an older relay binary still
+/// authorizes that one rather than failing outright.
+#[uniffi::export]
+pub fn make_relay_link_multi(circles: Vec<String>, members_per_circle: Vec<String>) -> String {
+    // `members_per_circle[i]` is circle i's members, comma-separated — UniFFI has no Vec<Vec<String>>.
+    let grants: Vec<serde_json::Value> = circles
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let m: Vec<&str> = members_per_circle
+                .get(i)
+                .map(|s| s.split(',').filter(|x| !x.is_empty()).collect())
+                .unwrap_or_default();
+            serde_json::json!({ "c": c, "m": m })
+        })
+        .collect();
+    let first_c = circles.first().cloned().unwrap_or_default();
+    let first_m: Vec<&str> = members_per_circle
+        .first()
+        .map(|s| s.split(',').filter(|x| !x.is_empty()).collect())
+        .unwrap_or_default();
+    let v = serde_json::json!({ "v": 2, "c": first_c, "m": first_m, "g": grants });
+    let json = serde_json::to_vec(&v).unwrap_or_default();
+    format!("haven-relay://circle#{}", data_encoding::BASE32_NOPAD.encode(&json))
+}
+
 /// Parse a relay link (the `haven-relay://` form or a bare base32 payload).
 #[uniffi::export]
 pub fn parse_relay_link(uri: String) -> Option<RelayLinkInfo> {

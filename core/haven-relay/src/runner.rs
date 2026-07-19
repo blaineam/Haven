@@ -25,9 +25,19 @@ pub async fn run(cfg: Config) -> Result<()> {
     let id = Identity::from_seed(&cfg.seed);
     let my_hex = hex32(&id.public().node_id_bytes());
 
+    // Union across EVERY grant — a v2 link carries several circles, and forwarding/authorizing for
+    // only the first is what left every other circle permanently forbidden.
+    let link_grants = cfg.link.all_grants();
+    let all_members: Vec<String> = {
+        let mut seen = std::collections::BTreeSet::new();
+        for g in &link_grants { for m in &g.members { seen.insert(m.clone()); } }
+        seen.into_iter().collect()
+    };
+
     println!("▸ Haven relay starting (no logs are written).");
-    println!("  circle tag : {}", cfg.link.circle);
-    println!("  members    : {}", cfg.link.members.len());
+    println!("  circles    : {}", link_grants.len());
+    for g in &link_grants { println!("    · {} ({} members)", g.circle, g.members.len()); }
+    println!("  members    : {} unique", all_members.len());
     println!("  data dir   : {}", cfg.data_dir.display());
     println!("  relay node : {my_hex}");
 
@@ -38,7 +48,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         .map_err(|e| anyhow!("start relay: {e}"))?;
     // Forward only for/toward this circle's members — the link the operator pasted defines them.
     // Without this the relay is an open reflector for anyone who learns its node id (audit F10).
-    relay.authorize_forwarding(cfg.link.members.clone());
+    relay.authorize_forwarding(all_members.clone());
     println!("✓ connection relay live — forwarding sealed frames toward circle members.");
 
     // --- Media store-and-forward --------------------------------------------------
@@ -90,7 +100,13 @@ pub async fn run(cfg: Config) -> Result<()> {
             // Lock the mailbox to the circle's members (+ sibling relays) so only members can read or
             // enumerate it — a stranger who learns this relay's node id gets nothing (audit
             // transport-F4). The link the operator pasted defines the membership.
-            node.relay_authorize(&cfg.link.circle, cfg.link.members.clone(), cfg.peers.clone());
+            // EVERY circle the link grants, not just the first — a relay serves exactly what it is
+            // authorized for, and the apps let a user point every circle at one relay. Honouring one
+            // grant is what produced permanent `ERR forbidden` on all the others. See RelayLink.
+            for g in &link_grants {
+                node.relay_authorize(&g.circle, g.members.clone(), cfg.peers.clone());
+            }
+            println!("  authorized {} circle(s) from the link.", link_grants.len());
 
             // Mesh replication: pull from each sibling relay every 30s so the mailbox
             // self-heals across the mesh (peers do the same in reverse → eventual set-union).

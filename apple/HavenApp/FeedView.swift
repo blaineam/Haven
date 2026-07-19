@@ -2637,6 +2637,27 @@ final class FeedStore: ObservableObject {
         return makeRelayLink(circle: circle, members: members)
     }
 
+    /// A relay link granting EVERY circle I'm in — the one to hand a relay you want to serve all of
+    /// them, which is what picking a default relay in the app already implies.
+    ///
+    /// A relay authorizes exactly what its link grants. Pasting a single-circle link and then
+    /// setting that relay as the default left every other circle answering `ERR forbidden` forever,
+    /// with no self-heal: republishing a device roster only adds DEVICE ids to circles the relay
+    /// already knows, so a circle it was never granted has nothing to expand into. The visible
+    /// symptom was media that "isn't on any relay" while the relay was holding it.
+    func relayLinkForAllCircles() -> String? {
+        guard let social else { return nil }
+        let ids = circles.map(\.id)
+        guard !ids.isEmpty else { return nil }
+        // Parallel arrays: UniFFI has no Vec<Vec<String>>, so members ride comma-separated.
+        let membersPerCircle = ids.map { cid -> String in
+            var m = social.contactNodeIds(circleId: cid)
+            m.append(myNodeHex)
+            return m.joined(separator: ",")
+        }
+        return makeRelayLinkMulti(circles: ids, membersPerCircle: membersPerCircle)
+    }
+
     /// Adopt a relay node as the mailbox for specific circles (and optionally make it the default
     /// every present + future circle inherits). Each circle's members are told over frame 19.
     func adoptRelayNode(_ nodeHex: String, circleIds: [String], setDefault: Bool) {

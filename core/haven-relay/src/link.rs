@@ -33,23 +33,68 @@
 use data_encoding::BASE32_NOPAD;
 use serde::{Deserialize, Serialize};
 
-/// A parsed relay link: which circle, and which member node ids to forward toward.
+/// One circle's grant: the circle tag and the member node ids allowed to use it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CircleGrant {
+    #[serde(rename = "c")]
+    pub circle: String,
+    #[serde(rename = "m")]
+    pub members: Vec<String>,
+}
+
+/// A parsed relay link: which circle(s), and which member node ids to forward toward.
+///
+/// ## Why v2 carries MANY circles
+///
+/// A relay authorizes exactly what its link grants. v1 carried ONE circle, but the apps let you
+/// pick a relay as the default for EVERY circle — so a user would set their relay once, watch it
+/// serve one circle, and get `ERR forbidden` on all the others forever. Republishing a device
+/// roster could not fix it: roster expansion only adds DEVICE ids to circles whose ACCOUNT the
+/// relay already knows, so a circle it was never granted has nothing to expand into. The symptom
+/// was media that "isn't on any relay" while sitting on a relay that refused to serve it.
+///
+/// v2 grants a set of circles in one link, so one paste authorizes everything. `circle`/`members`
+/// stay populated with the FIRST grant, so a v2 link pasted into an older relay binary still
+/// authorizes that circle instead of failing outright.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelayLink {
     /// Schema version.
     #[serde(rename = "v")]
     pub version: u8,
     /// Opaque circle tag (a label, not a key). Keeps multi-circle dedup state separate.
+    /// v2: the first grant, kept for older readers.
     #[serde(rename = "c")]
     pub circle: String,
     /// Member node ids (hex Ed25519) the relay forwards sealed frames toward.
+    /// v2: the first grant's members, kept for older readers.
     #[serde(rename = "m")]
     pub members: Vec<String>,
+    /// v2: every circle this link grants. Absent in v1 links.
+    #[serde(rename = "g", default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<CircleGrant>,
 }
 
 impl RelayLink {
     pub fn new(circle: impl Into<String>, members: Vec<String>) -> Self {
-        Self { version: 1, circle: circle.into(), members }
+        Self { version: 1, circle: circle.into(), members, grants: Vec::new() }
+    }
+
+    /// A v2 link granting several circles at once. Empty input yields an empty v1-shaped link.
+    pub fn new_multi(grants: Vec<CircleGrant>) -> Self {
+        let Some(first) = grants.first().cloned() else {
+            return Self { version: 2, circle: String::new(), members: Vec::new(), grants: Vec::new() };
+        };
+        Self { version: 2, circle: first.circle, members: first.members, grants }
+    }
+
+    /// Every circle this link authorizes — the ONE place callers should read, so v1 and v2 links
+    /// are handled identically and no site can accidentally honour only the first grant.
+    pub fn all_grants(&self) -> Vec<CircleGrant> {
+        if self.grants.is_empty() {
+            if self.circle.is_empty() { return Vec::new(); }
+            return vec![CircleGrant { circle: self.circle.clone(), members: self.members.clone() }];
+        }
+        self.grants.clone()
     }
 
     /// `haven-relay://circle#<base32(json)>`
@@ -74,15 +119,26 @@ impl RelayLink {
             .map_err(|_| anyhow::anyhow!("relay link is not valid base32"))?;
         let link: RelayLink =
             serde_json::from_slice(&json).map_err(|_| anyhow::anyhow!("relay link JSON malformed"))?;
-        if link.version != 1 {
+        if link.version != 1 && link.version != 2 {
             anyhow::bail!("unsupported relay link version {}", link.version);
         }
-        if link.members.is_empty() {
-            anyhow::bail!("relay link has no member node ids");
+        // Validate EVERY grant, not just the top-level pair — a v2 link's later circles carry the
+        // members that matter, and an unchecked id there would be authorized sight-unseen.
+        let grants = link.all_grants();
+        if grants.is_empty() {
+            anyhow::bail!("relay link grants no circles");
         }
-        for m in &link.members {
-            if m.len() != 64 || !m.bytes().all(|b| b.is_ascii_hexdigit()) {
-                anyhow::bail!("member node id must be 64 hex chars: {m}");
+        for g in &grants {
+            if g.circle.is_empty() {
+                anyhow::bail!("relay link has a grant with no circle tag");
+            }
+            if g.members.is_empty() {
+                anyhow::bail!("relay link grant '{}' has no member node ids", g.circle);
+            }
+            for m in &g.members {
+                if m.len() != 64 || !m.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    anyhow::bail!("member node id must be 64 hex chars: {m}");
+                }
             }
         }
         Ok(link)
@@ -125,10 +181,58 @@ mod tests {
         assert_eq!(RelayLink::parse(bare).unwrap(), link);
     }
 
+    /// A v2 link must authorize EVERY circle it grants. Honouring only the first is precisely the
+    /// bug this version exists to fix — a relay that served one circle and answered `ERR forbidden`
+    /// on all the others, permanently and with no way to self-heal.
+    #[test]
+    fn v2_link_grants_every_circle() {
+        let a = "11".repeat(32);
+        let b = "22".repeat(32);
+        let link = RelayLink::new_multi(vec![
+            CircleGrant { circle: "default".into(), members: vec![a.clone()] },
+            CircleGrant { circle: "c1ABC".into(), members: vec![a.clone(), b.clone()] },
+            CircleGrant { circle: "dm:a-b".into(), members: vec![b.clone()] },
+        ]);
+        let parsed = RelayLink::parse(&link.to_uri()).unwrap();
+        let grants = parsed.all_grants();
+        assert_eq!(grants.len(), 3, "every granted circle must survive the round trip");
+        assert_eq!(grants[1].circle, "c1ABC");
+        assert_eq!(grants[1].members.len(), 2);
+        // An OLDER relay binary reads only c/m — it must still get a usable first circle rather
+        // than choking, so a v2 link degrades instead of failing.
+        assert_eq!(parsed.circle, "default");
+        assert_eq!(parsed.members, vec![a]);
+    }
+
+    /// v1 links keep working untouched — existing relays must not need re-pasting to keep serving.
+    #[test]
+    fn v1_link_still_parses_as_one_grant() {
+        let a = "33".repeat(32);
+        let v1 = RelayLink::new("fam", vec![a.clone()]);
+        let parsed = RelayLink::parse(&v1.to_uri()).unwrap();
+        assert_eq!(parsed.version, 1);
+        let grants = parsed.all_grants();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].circle, "fam");
+        assert_eq!(grants[0].members, vec![a]);
+    }
+
+    /// A bad node id in a LATER grant must be rejected too — otherwise v2 would be a hole in the
+    /// validation that v1 enforced.
+    #[test]
+    fn rejects_bad_member_id_in_a_later_grant() {
+        let good = "44".repeat(32);
+        let link = RelayLink::new_multi(vec![
+            CircleGrant { circle: "ok".into(), members: vec![good] },
+            CircleGrant { circle: "bad".into(), members: vec!["nothex".into()] },
+        ]);
+        assert!(RelayLink::parse(&link.to_uri()).is_err());
+    }
+
     #[test]
     fn rejects_bad_member_ids() {
         assert!(RelayLink::parse("haven-relay://circle#").is_err());
-        let bad = RelayLink { version: 1, circle: "x".into(), members: vec!["zz".into()] };
+        let bad = RelayLink { version: 1, circle: "x".into(), members: vec!["zz".into()], grants: Vec::new() };
         let uri = bad.to_uri();
         assert!(RelayLink::parse(&uri).is_err());
     }

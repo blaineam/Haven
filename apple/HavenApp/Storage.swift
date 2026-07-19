@@ -296,12 +296,12 @@ struct AdvancedStorageView: View {
                 // so the whole circle adopts it.
                 Section {
                     Button {
-                        if let link = FeedStore.shared.relayLink() {
+                        if let link = FeedStore.shared.relayLinkForAllCircles() ?? FeedStore.shared.relayLink() {
                             PlatformPasteboard.string = link
                             linkCopied = true
                         }
                     } label: {
-                        Label(linkCopied ? "Copied — run: haven-relay run --link …" : "1. Copy this circle's relay link",
+                        Label(linkCopied ? "Copied — run: haven-relay run --link …" : "1. Copy my relay link (all circles)",
                               systemImage: linkCopied ? "checkmark.circle.fill" : "doc.on.doc")
                             .foregroundStyle(linkCopied ? Color.green : HavenTheme.pink)
                     }
@@ -646,13 +646,13 @@ struct AddRelaySheet: View {
                         // Storage ▸ Advanced ▸ Connect an external relay).
                         Section {
                             Button {
-                                if let link = FeedStore.shared.relayLink() {
+                                if let link = FeedStore.shared.relayLinkForAllCircles() ?? FeedStore.shared.relayLink() {
                                     PlatformPasteboard.string = link
                                     linkCopied = true
                                 }
                             } label: {
                                 Label(linkCopied ? "Copied — run: haven-relay run --link …"
-                                                 : "Copy this circle's relay link",
+                                                 : "Copy my relay link (all circles)",
                                       systemImage: linkCopied ? "checkmark.circle.fill" : "doc.on.doc")
                                     .foregroundStyle(linkCopied ? Color.green : HavenTheme.pink)
                             }

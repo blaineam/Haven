@@ -11,6 +11,48 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **A message could reach one of your devices and none of the others.** A friend's DM arrived on the
+  tablet and never on the phone. Whoever sends you something dials the devices *their* copy of your
+  device list resolves — often just one — and nothing passed it on from there, so anything a contact
+  sent stopped wherever it happened to land. Now an event accepted from a contact is handed on to your
+  own other devices, and a periodic catch-up repairs messages that were already stranded. Previously
+  that catch-up only ran over the local network with a second device physically nearby, so two devices
+  on different networks never reconciled at all; on Windows and Linux, which have no local-network
+  transport, it never ran. The catch-up is deliberately bounded — at most 50 events per circle, no more
+  than once every five minutes, one batch at a time — because it re-seals each message as it sends it.
+
+- **"Keep" on a story re-posted it to everyone instead of keeping it.** It published the story again as
+  a permanent post, so it reappeared in the circle feed as something new that everyone saw — which is a
+  different thing from wanting to hold on to it yourself. Keep now holds the story on **your own
+  profile** past the 24-hour window and leaves everyone else's story row on schedule, keeps the photo or
+  video from being cleaned up (otherwise a kept story became a row of "no longer available"
+  placeholders), reads Keep/Kept so you can tell at a glance whether it is on, and syncs across your own
+  devices per story — keeping one thing on your phone and another on your tablet ends with both kept,
+  and un-keeping something is not quietly undone by another device. Windows and Linux had no Keep at all.
+
+- **Story controls that lit up and did nothing (Android).** Keep and Delete showed their press effect
+  and then didn't fire: the swipe recognizer covering the whole screen was claiming the touch out from
+  under them the moment your finger moved a few pixels. The gestures now sit on the story itself rather
+  than above the buttons. Press-and-hold also *closed* the story instead of pausing it; it now pauses
+  and reliably resumes. The ✕ was only tappable across the glyph itself and now has a real target.
+
+- **A peer who turned their camera off froze on Windows and Linux.** Desktop never sent or understood
+  the "my camera is off" signal, so switching your camera off left everyone looking at your last frame,
+  and a phone doing the same left desktop looking at theirs. Both directions now show an avatar.
+
+- **"Message the author" sent something you hadn't written (Android).** It immediately sent the post's
+  photos and videos into a new conversation and dropped you into the wrong layout. It now opens the
+  conversation with a link to the post waiting in the message box, unsent, for you to write around.
+
+- **Haven links opened a web page inside Haven (Android).** Tapping a shared post link took you to the
+  web version, which then offered an "Open in Haven" button that could do nothing — you were already in
+  Haven. It now goes straight to the post. Where a link preview is shown, the raw URL no longer sits in
+  the message text repeating what the preview card already says.
+
+- **The story editor previewed a song against the wrong part of the clip (Android).** Picking a song
+  while the video loop was partway through paired it with whatever moment happened to be on screen, so
+  the pairing you approved wasn't the one that shipped. The clip now restarts with the song.
+
 - **Android and desktop caught up with the call, media and roster fixes.** Everything above that was
   fixed on iPhone and Mac now behaves the same way on Android, Windows and Linux: a relay's refusal is
   told apart from an outage and self-heals, a contact's device list is *pulled* from the relay instead

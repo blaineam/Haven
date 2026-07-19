@@ -12,7 +12,8 @@ package com.blaineam.haven.core
  *
  * Frame types (parity with iOS handleInbound):
  *   0 Hello · 1 Event · 3 MediaReq · 5 MediaChunk · 9 Relay · 10-13 audio call ·
- *   14 BucketConfig · 15 video · 16 SDP offer · 17 SDP answer · 18 ICE · 19 relay node · 20 presign
+ *   14 BucketConfig · 15 video · 16 SDP offer · 17 SDP answer · 18 ICE · 19 relay node · 20 presign ·
+ *   31 media-wanted · 32 media-available · 33 media-resume-req
  */
 object Wire {
     const val HELLO: Int = 0
@@ -45,6 +46,18 @@ object Wire {
      *  forgeable. See HavenNet.onInbound and CallManager.sealedSend. */
     const val MEDIA_WANTED: Int = 31
     const val MEDIA_AVAILABLE: Int = 32
+
+    /** 33 — a RESUME re-request: "send me this media, but only the chunks I'm missing".
+     *  `[hex64 requester][u16 LE refLen][ref][u32 LE total][bitmap]` — see [MediaResume].
+     *
+     *  Frame 3 is deliberately left byte-for-byte alone for a FIRST request: its ref is the unlengthed
+     *  remainder, so there is nowhere to put a bitmap without breaking every parser in the field, and a
+     *  first request has no bitmap to send anyway. 33 is the RE-request that carries one.
+     *
+     *  Rides the PLAIN blocked-sender path with frame 3 rather than the sealed call-frame path (31/32):
+     *  it asks for a strict SUBSET of what frame 3 already asks for in the clear, so sealing it would
+     *  buy nothing while making it fail exactly where its own frame-3 fallback still works. */
+    const val MEDIA_RESUME_REQ: Int = 33
 
     /** Prepend the one-byte frame type. */
     fun frame(type: Int, payload: ByteArray): ByteArray =

@@ -267,6 +267,8 @@ object HavenNet : InboundListener {
         EvictedMediaStore.init(appContext)  // deliberately-removed refs (no auto-refetch)
         MediaWantedStore.init(appContext)   // refs whose author we asked to put back (frames 31/32)
         MediaLimits.init(appContext)        // local age/size caps
+        ReassemblyStore.init(appContext)    // half-finished media transfers, so they resume not restart
+        restoreReassemblies()
         restoreState()
         if (core.seedless) {
             // A seedless device cannot mint a roster or an account-signed profile card. Install the
@@ -717,7 +719,8 @@ object HavenNet : InboundListener {
         val type = payload[0].toInt() and 0xFF
         val body = payload.copyOfRange(1, payload.size)
         // Call frames lead with a 64-char sender hex — drop blocked senders early (parity with iOS).
-        if (type in intArrayOf(Wire.MEDIA_REQ, CallWire.INVITE, CallWire.ACCEPT, CallWire.HANGUP, CallWire.OFFER,
+        if (type in intArrayOf(Wire.MEDIA_REQ, Wire.MEDIA_RESUME_REQ, CallWire.INVITE, CallWire.ACCEPT,
+                CallWire.HANGUP, CallWire.OFFER,
                 CallWire.ANSWER, CallWire.ICE, CallWire.GROUP_INVITE, CallWire.CAMERA,
                 Wire.MEDIA_WANTED, Wire.MEDIA_AVAILABLE)) {
             if (body.size >= 64) {
@@ -738,6 +741,9 @@ object HavenNet : InboundListener {
                 Wire.RELAY -> handleRelay(body, viaNearby)
                 Wire.PRESIGN -> handlePresignBootstrap(body)
                 Wire.MEDIA_REQ -> handleMediaRequest(body)
+                // 33 = the same ask carrying a bitmap of what the requester already holds, so we serve
+                // only the holes. Plaintext with frame 3's blocked-sender check for the reason in Wire.
+                Wire.MEDIA_RESUME_REQ -> handleMediaResumeRequest(body)
                 Wire.MEDIA_CHUNK -> handleMediaChunk(body)
                 Wire.DEVICE_ROSTER -> handleDeviceRosterAnnounce(body)
                 // 30 (handled-elsewhere) rides the same sealed+signed path: it can silence a ringing
@@ -3171,8 +3177,22 @@ object HavenNet : InboundListener {
     // 32KB chunks transmit reliably over a slow BLE-only nearby link (larger frames overflowed the
     // reliable-send buffer and were silently dropped, so own-device media never arrived). iOS parity.
     private val mediaChunkSize = 32 * 1024
-    private class IncomingMedia(val total: Int) { val chunks = HashMap<Int, ByteArray>() }
+
+    /** A transfer in progress. Chunks live POSITIONALLY in [part] (seek to index × chunkSize), never
+     *  in RAM: the old HashMap<Int, ByteArray> cost ~3× the media size to finish and had an OOM guard
+     *  that SILENTLY DROPPED anything over a quarter of the heap, so a big video on a small phone
+     *  could never arrive at all. [got] is the bitmap of what's landed, mirrored to [ReassemblyStore]
+     *  so a 99%-complete transfer resumes after a restart instead of going back to chunk 0. */
+    private class IncomingMedia(val part: java.io.File, val total: Int) { val got = HashSet<Int>() }
+
+    /** Reassembly state, GUARDED BY [incomingLock]. Inbound frames are handled on Dispatchers.IO, so
+     *  several threads touch this at once; the neighbouring maps here predate that realization and are
+     *  still bare (see the note in [shouldServeNearby]). */
     private val incomingMedia = HashMap<String, IncomingMedia>()
+    private val incomingLock = Any()
+    /** Refs with a frame-33 fallback timer already armed — one per ref, never one per inbound request,
+     *  so a peer cannot make us spawn coroutines. Guarded by [incomingLock]. */
+    private val resumeFallbackPending = HashSet<String>()
     private val requestedRefs = HashSet<String>()
     private val mediaReqAt = HashMap<String, Long>()   // ref -> last direct-request ms (5-min throttle)
     private val servedAt = HashMap<String, Long>()      // ref -> last nearby-serve ms (25s rate-limit)
@@ -3439,7 +3459,14 @@ object HavenNet : InboundListener {
      *  the weekly sweep). Blocking — call off the main thread. Returns (bytesFreed, filesRemoved). */
     fun cleanupUnusedMedia(): Pair<Long, Int> {
         if (!ready) return 0L to 0
-        val result = LocalMedia.sweepOrphans(mediaInUseKeys())
+        // Expire abandoned partials FIRST (24h of no progress, part file included) so the sweep sees
+        // them as plain orphans, then spare the ones still live — a 99%-complete download waiting for
+        // its last chunk is not leaked scratch, and deleting it is what made large media restart forever.
+        runCatching { ReassemblyStore.prune() }
+        val result = LocalMedia.sweepOrphans(
+            mediaInUseKeys(),
+            liveParts = runCatching { ReassemblyStore.liveParts() }.getOrDefault(emptyMap()),
+        )
         if (result.second > 0) Log.i("MediaGC", "sweep: freed ${result.first}B across ${result.second} files")
         return result
     }
@@ -3602,7 +3629,7 @@ object HavenNet : InboundListener {
         if (circleId != null) enqueueRestore(circleId, ref)   // relay-first (mailbox → HTTP → S3 → iroh)
         // Direct peer ask (tiny frame, no blob in RAM) — same per-ref request requestMissingMedia makes.
         val payload = nodeIdHex.toByteArray(Charsets.UTF_8) + ref.toByteArray(Charsets.UTF_8)
-        for (idHex in contacts.map { it.idHex }) sendFrame(Wire.MEDIA_REQ, payload, idHex)
+        askForMedia(ref, payload, contacts.map { it.idHex })   // resumes from a partial when we hold one
         scope.launch {
             kotlinx.coroutines.delay(45_000)
             downloadingMedia.remove(ref)
@@ -3650,7 +3677,7 @@ object HavenNet : InboundListener {
             mediaReqAt[ref] = nowMs; directBudget--
             requestedRefs.add(ref)
             val payload = myHex.toByteArray(Charsets.UTF_8) + ref.toByteArray(Charsets.UTF_8)
-            for (idHex in contacts.map { it.idHex }) sendFrame(Wire.MEDIA_REQ, payload, idHex)
+            askForMedia(ref, payload, contacts.map { it.idHex })   // resumes from a partial when we hold one
         }
         if (mediaReqAt.size > 4000) mediaReqAt.clear()   // bound the throttle map
     }
@@ -4134,8 +4161,15 @@ object HavenNet : InboundListener {
      * on a sibling (KEM-to-self decap is unreliable); a friend requester gets a per-recipient KEM seal.
      * Runs on the IO scope — file read + seal happen off the main thread (heavy streaming caused severe
      * UI lag on iOS when on-main). iOS sendMediaChunks parity.
+     *
+     * [missing] (from a resume request, frame 33) restricts the stream to the chunks the requester
+     * says it still needs. Skipping costs nothing — no copy, no seal, no send — so a transfer that
+     * died on its last chunk costs one chunk to finish rather than the whole file again. Null sends
+     * everything, which is what a first request (frame 3) always means.
      */
-    private suspend fun sendMediaChunks(ref: String, bytes: ByteArray, requesterHex: String) {
+    private suspend fun sendMediaChunks(
+        ref: String, bytes: ByteArray, requesterHex: String, missing: Set<Int>? = null,
+    ) {
         val total = maxOf(1, (bytes.size + mediaChunkSize - 1) / mediaChunkSize)
         SyncMetrics.incOut()   // a media item is being served/pushed (iOS nbMediaOut += 1)
         val refBytes = ref.toByteArray(Charsets.UTF_8)
@@ -4144,6 +4178,7 @@ object HavenNet : InboundListener {
         var offset = 0
         while (offset < bytes.size) {
             val end = minOf(offset + mediaChunkSize, bytes.size)
+            if (missing != null && index !in missing) { offset = end; index++; continue }
             val chunk = bytes.copyOfRange(offset, end)
             val sealed = if (isOwn) sealOwnMedia(chunk) else runCatching { social.sealMedia(requesterHex, chunk) }.getOrNull()
             if (sealed == null) return
@@ -4178,38 +4213,137 @@ object HavenNet : InboundListener {
         }
         val index = u32(); val total = u32()
         val sealed = body.copyOfRange(off, body.size)
-        if (ref.isEmpty() || total <= 0 || LocalMedia.has(ref)) return
+        // Bound every peer-controlled field before it indexes a file offset or sizes an allocation.
+        if (ref.isEmpty() || total <= 0 || total > MediaResume.MAX_CHUNKS) return
+        if (index < 0 || index >= total) return
+        if (LocalMedia.has(ref)) return
         // Own-device chunks are symmetric (account-key) sealed; friend chunks are KEM. Try the cheap
         // symmetric open first, then fall back to the engine's KEM open. iOS handleMediaChunk parity.
         val plain = openOwnMedia(sealed) ?: runCatching { social.openMedia(sealed) }.getOrNull() ?: return
-        val entry = incomingMedia.getOrPut(ref) { IncomingMedia(total) }
-        entry.chunks[index] = plain
-        if (entry.chunks.size >= entry.total) {
-            incomingMedia.remove(ref)   // detach first so a failure below can't leak the chunk map
-            val totalSize = entry.chunks.values.sumOf { it.size }
-            // OOM GUARD: sealCircleMedia needs the WHOLE plaintext in memory, so storing a media costs
-            // ~3× its size (chunk map + full array + sealed output). A large (e.g. 146 MB) iOS video
-            // therefore crashed the app with OutOfMemoryError mid-call. Skip anything too big to hold
-            // safely, free each chunk as we copy to halve the peak, and catch any residual OOM rather
-            // than letting it take the whole process (and the call/foreground service) down.
-            val safeCap = (Runtime.getRuntime().maxMemory() / 4)
-            if (totalSize <= 0 || totalSize > safeCap) { entry.chunks.clear(); return }
-            val ok = runCatching {
-                val full = ByteArray(totalSize)
-                var p = 0
-                for (i in 0 until entry.total) {
-                    val c = entry.chunks.remove(i) ?: continue   // free each chunk as it's copied
-                    c.copyInto(full, p); p += c.size
-                }
-                LocalMedia.storeUnderRef(DEFAULT_CIRCLE, ref, full)
-            }.isSuccess
-            entry.chunks.clear()
-            if (!ok) return
-            SyncMetrics.incIn()   // a media item was fully received + stored (iOS nbMediaIn += 1)
-            scope.launch(Dispatchers.Main) { feedVersion.value++ }
-            // "Save others' posts to Photos" — per-circle override (received media stores under the
-            // default circle), falling back to the app-wide default.
-            if (CircleSettings.saveOthers(DEFAULT_CIRCLE)) scope.launch { MediaSaver.autoSave(appContext, ref) }
+        // An over-long chunk would spill past its slot and corrupt the NEXT chunk's bytes, which the
+        // content-address check would then blame on the whole transfer. Refuse it instead.
+        if (plain.isEmpty() || plain.size > mediaChunkSize) return
+        val entry = synchronized(incomingLock) {
+            val existing = incomingMedia[ref]
+            if (existing != null && existing.total == total) existing else {
+                // A total that disagrees with the one we're reassembling against means the sender is
+                // serving different bytes — the old partial's indices point at a different file, so
+                // start clean rather than interleaving two files into one.
+                existing?.let { runCatching { it.part.delete() } }
+                val fresh = IncomingMedia(LocalMedia.newPlainPart(ref), total)
+                incomingMedia[ref] = fresh
+                // Registered the moment it starts, so even a transfer interrupted seconds in has a
+                // durable home to resume into (and the orphan sweep knows to spare its part file).
+                ReassemblyStore.note(ref, fresh.part.name, total, MediaResume.bitmap(emptySet(), total), force = true)
+                fresh
+            }
+        }
+        // Bytes FIRST, bookkeeping second — and never the other way round. Persisted progress may lag
+        // the file (ReassemblyStore debounces), and that is only safe in one direction: understating
+        // what we hold costs one re-sent chunk, while recording a chunk we never wrote would leave a
+        // hole nothing ever asks for again.
+        if (!LocalMedia.writePartAt(entry.part, index.toLong() * mediaChunkSize, plain)) return
+        val complete = synchronized(incomingLock) {
+            entry.got.add(index)
+            if (entry.got.size < entry.total) {
+                ReassemblyStore.note(ref, entry.part.name, entry.total, MediaResume.bitmap(entry.got, entry.total))
+                false
+            } else {
+                incomingMedia.remove(ref)   // detach first so a failure below can't leak the entry
+                true
+            }
+        }
+        if (!complete) return
+        // Whether the adopt succeeds or rejects the bytes on a digest mismatch, this reassembly is
+        // over: on rejection the part file is already gone, so leaving the record behind would
+        // resurrect a bitmap whose bytes no longer exist and stall the ref forever.
+        val ok = LocalMedia.adoptPlainPart(DEFAULT_CIRCLE, ref, entry.part)
+        ReassemblyStore.clear(ref)
+        if (!ok) return
+        SyncMetrics.incIn()   // a media item was fully received + stored (iOS nbMediaIn += 1)
+        scope.launch(Dispatchers.Main) { feedVersion.value++ }
+        // "Save others' posts to Photos" — per-circle override (received media stores under the
+        // default circle), falling back to the app-wide default.
+        if (CircleSettings.saveOthers(DEFAULT_CIRCLE)) scope.launch { MediaSaver.autoSave(appContext, ref) }
+    }
+
+    /**
+     * Frame 33 — a RESUME request: serve only the chunks the requester says it is still missing.
+     *
+     * Skipping is free (no copy, no seal, no send), so finishing a transfer that died on its last
+     * chunk costs one chunk instead of the whole file again. Frame 3 is untouched and still means
+     * "send everything", which is what a first request always means and what every un-upgraded peer
+     * in the field will keep sending.
+     */
+    private fun handleMediaResumeRequest(body: ByteArray) {
+        val req = MediaResume.decode(body) ?: return
+        if (!LocalMedia.has(req.ref)) return
+        if (!shouldServeNearby(req.ref)) return
+        val bytes = LocalMedia.loadAnyCircle(req.ref) ?: return
+        val total = maxOf(1, (bytes.size + mediaChunkSize - 1) / mediaChunkSize)
+        // A declared total that disagrees with ours means their partial was built against different
+        // bytes, so their bitmap indexes something else and honouring it would leave permanent holes.
+        // Send everything and let the content-address check at adopt decide which copy is real.
+        // Expanding their bitmap only HERE — after the totals agree — is what bounds the work by a file
+        // we hold rather than by the chunk count the peer declared (see MediaResume.Request).
+        val missing = if (total == req.total) {
+            val theirs = MediaResume.indices(req.bitmap, total)
+            (0 until total).filterNot { it in theirs }.toSet()
+        } else null
+        if (missing != null && missing.isEmpty()) return   // they have it all; the last chunk is in flight
+        Log.i("MediaSync", "resume ref=${req.ref.take(12)} from=${req.requesterHex.take(8)}: ${missing?.size ?: total}/$total chunks still needed")
+        scope.launch { sendMediaChunks(req.ref, bytes, req.requesterHex, missing) }
+    }
+
+    /**
+     * Ask for [ref]: frame 33 with our bitmap when we hold a partial, else the plain frame 3.
+     *
+     * An un-upgraded peer drops frame 33 on the floor and says nothing, so silence is the only signal
+     * we get — hence the timed fallback to a full request. ONE bounded coroutine per ref (see
+     * [resumeFallbackPending]); a peer re-requesting cannot pile these up.
+     */
+    private fun askForMedia(ref: String, plainPayload: ByteArray, targets: List<String>) {
+        val myHex = nodeIdHex
+        val resume = synchronized(incomingLock) {
+            val e = incomingMedia[ref]
+            if (e == null || e.got.isEmpty() || e.total <= 0) null
+            else MediaResume.encode(myHex, ref, e.total, e.got)
+        }
+        if (resume == null) {
+            for (idHex in targets) sendFrame(Wire.MEDIA_REQ, plainPayload, idHex)
+            return
+        }
+        for (idHex in targets) sendFrame(Wire.MEDIA_RESUME_REQ, resume, idHex)
+        val before = synchronized(incomingLock) {
+            if (!resumeFallbackPending.add(ref)) return
+            incomingMedia[ref]?.got?.size ?: 0
+        }
+        scope.launch {
+            kotlinx.coroutines.delay(8_000)
+            synchronized(incomingLock) { resumeFallbackPending.remove(ref) }
+            if (LocalMedia.has(ref)) return@launch
+            if (synchronized(incomingLock) { incomingMedia[ref]?.got?.size ?: 0 } != before) return@launch
+            Log.i("MediaSync", "resume ref=${ref.take(12)}: no answer to frame 33 — falling back to a full request")
+            for (idHex in targets) sendFrame(Wire.MEDIA_REQ, plainPayload, idHex)
+        }
+    }
+
+    /** Pick half-finished transfers back up at launch instead of restarting them from chunk 0.
+     *  Must run BEFORE anything can sweep scratch, or the 99%-complete file is deleted as an orphan. */
+    private fun restoreReassemblies() {
+        for (r in runCatching { ReassemblyStore.restore() }.getOrDefault(emptyList())) {
+            val part = LocalMedia.partFile(r.part)
+            // Adopted while we were away (relay restore, a sibling device) — drop the scratch.
+            if (LocalMedia.has(r.ref)) {
+                runCatching { part.delete() }
+                ReassemblyStore.clear(r.ref)
+                continue
+            }
+            val got = MediaResume.indices(r.got, r.total)
+            synchronized(incomingLock) {
+                incomingMedia[r.ref] = IncomingMedia(part, r.total).also { it.got.addAll(got) }
+            }
+            Log.i("MediaSync", "resume restored ref=${r.ref.take(12)}: ${got.size}/${r.total} chunks already on disk")
         }
     }
 

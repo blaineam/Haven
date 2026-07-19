@@ -449,6 +449,64 @@ object LocalMedia {
     fun appendSealedPart(part: File, bytes: ByteArray): Boolean =
         runCatching { java.io.FileOutputStream(part, true).use { it.write(bytes) }; true }.getOrDefault(false)
 
+    /** Rejoin a persisted part-file NAME with this launch's media dir. [ReassemblyStore] records the
+     *  name, not the path, because filesDir isn't guaranteed to be the same string next launch. */
+    fun partFile(name: String): File = File(dir, name)
+
+    /**
+     * A fresh temp file for a POSITIONALLY-written peer-to-peer transfer (frame 5).
+     *
+     * Same `incoming_*.part` naming as the relay path — which is what keeps it out of [storedBlobs]
+     * and, critically, out of [has]: `has` looks up the bare storage key, a name this can never
+     * produce, so a partial can never be mistaken for a complete blob. Unlike the relay path's parts
+     * this one holds PLAINTEXT (frame-5 chunks are opened before they land), so it is adopted by
+     * [adoptPlainPart], not [adoptSealedPart].
+     */
+    fun newPlainPart(ref: String): File = newSealedPart(ref)
+
+    /**
+     * Write one chunk's bytes at [offset] in a reassembly part.
+     *
+     * POSITIONAL, not append (which is all [appendSealedPart] can do): peer chunks arrive out of
+     * order, and a RESUMED transfer fills scattered holes in a file that already has most of its
+     * bytes. Writing by position is also what lets the receive path hold nothing in RAM but the one
+     * chunk in hand — the old in-memory map cost ~3× the media size and silently dropped anything
+     * over a quarter of the heap.
+     */
+    fun writePartAt(part: File, offset: Long, bytes: ByteArray): Boolean =
+        runCatching {
+            java.io.RandomAccessFile(part, "rw").use { raf -> raf.seek(offset); raf.write(bytes) }
+            true
+        }.getOrDefault(false)
+
+    /**
+     * Adopt a fully-reassembled PLAINTEXT part under [ref]: verify it accounts for its content address
+     * (streamed, so a 600 MB video costs no heap), then seal it file→file into place.
+     *
+     * The digest check is the same gate [storeUnderRef] applies — bytes that don't account for the ref
+     * a signed post pointed at are dropped at the door rather than sealed and kept. A rejected or
+     * unsealable part is deleted here, so the caller can clear its reassembly record knowing there is
+     * nothing left to resume into.
+     */
+    fun adoptPlainPart(circleId: String, ref: String, part: File): Boolean {
+        if (!verifiesRef(ref, part)) {
+            android.util.Log.w("LocalMedia", "media REJECTED ${ref.take(12)}: reassembled part does not match its content address")
+            runCatching { part.delete() }
+            return false
+        }
+        val dst = mediaFile(ref)
+        runCatching { dst.delete() }
+        val sealed = runCatching {
+            HavenNet.engine.sealCircleMediaFile(circleId, part.absolutePath, dst.absolutePath)
+        }.getOrDefault(false) && dst.exists()
+        // On a seal failure, move the verified plaintext into place rather than discarding a transfer
+        // that just cost the sender the whole file — exactly what [sealToFile] falls back to, and
+        // [load] reads a raw at-rest blob fine. Never a silent drop.
+        if (!sealed) runCatching { part.renameTo(dst) }
+        runCatching { part.delete() }
+        return dst.exists()
+    }
+
     /** Move a fully-reassembled sealed temp file into place under [ref] (load() opens it on read). */
     fun adoptSealedPart(ref: String, part: File): Boolean =
         runCatching {
@@ -594,14 +652,28 @@ object LocalMedia {
      *  anything modified recently — media staged in a composer but not yet posted and in-flight
      *  `incoming_*.part` reassemblies have fresh mtimes and no referencing event YET; age, not
      *  referencedness, is what makes them safe to judge. Covers the sealed store, the media-plain/
-     *  cache dir, and legacy loose caches in filesDir. Returns (bytesFreed, filesRemoved). */
-    fun sweepOrphans(keepKeys: Set<String>, graceMs: Long = 48L * 3600 * 1000): Pair<Long, Int> {
-        val cutoff = System.currentTimeMillis() - graceMs
+     *  cache dir, and legacy loose caches in filesDir. Returns (bytesFreed, filesRemoved).
+     *
+     *  [liveParts] (part NAME → last-progress ms, from [ReassemblyStore]) are partials belonging to a
+     *  RESUMABLE transfer: 99%-complete downloads waiting for the rest, not leaked scratch. Deleting
+     *  them was the second half of why large media never arrived — the transfer survived the relaunch
+     *  in principle, and then this sweep threw the bytes away. They are spared until abandoned, which
+     *  ReassemblyStore.prune decides at 24h of no progress (well inside the 48h grace, so an abandoned
+     *  partial is reclaimed there rather than lingering another day here). */
+    fun sweepOrphans(
+        keepKeys: Set<String>,
+        graceMs: Long = 48L * 3600 * 1000,
+        liveParts: Map<String, Long> = emptyMap(),
+    ): Pair<Long, Int> {
+        val now = System.currentTimeMillis()
+        val cutoff = now - graceMs
+        val abandoned = now - ReassemblyStore.EXPIRY_MS
         var bytes = 0L
         var files = 0
         fun rm(f: File) { bytes += f.length(); files++; runCatching { f.delete() } }
         // Sealed blobs (also retires stale incoming_*.part / *.plain.tmp scratch — never in the keep-set).
         dir.listFiles()?.forEach { f ->
+            liveParts[f.name]?.let { progressed -> if (progressed > abandoned) return@forEach }
             if (f.isFile && f.lastModified() <= cutoff && f.name !in keepKeys) rm(f)
         }
         // Decrypted playback caches: ours entirely — keep iff the sealed key is kept.

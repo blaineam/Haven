@@ -569,7 +569,43 @@ enum SharedStore {
                 HavenLog.sync("devroster blob-put OK relay=\(node.prefix(8)) — relay should now authorize our device")
             } catch {
                 HavenLog.sync("devroster blob-put FAIL relay=\(node.prefix(8)): \(error.localizedDescription)")
+                await adoptNewerOwnRosterAndRetry(node: node, key: key, sent: wire, social: social, error: error)
             }
+        }
+    }
+
+    /// Recover from a REFUSED publish of our own roster.
+    ///
+    /// `verify_devroster_put` applies a rollback defense: a validly-signed roster whose version is
+    /// strictly older than the one already stored is refused. That is correct against replay, but it
+    /// deadlocks a device that has simply fallen behind — say another of our devices published a newer
+    /// version. The publish is the BOOTSTRAP that authorizes this device, so being refused means the
+    /// device can never become authorized, and every later op (media PUT, media GET, frame-9 call
+    /// forwarding) is forbidden too. Nothing else teaches us the newer roster: `fetchContactRoster`
+    /// runs for CONTACTS, and self-sync doesn't cover a relay we can't yet write to.
+    ///
+    /// So adopt what we're being out-versioned by, then publish again at that version. Pulling our own
+    /// roster is safe for the same reason the relay's check is: `ingestRosterWire` verifies the account
+    /// signature, and only our account key could have produced it — a relay can serve it, never forge it.
+    private static func adoptNewerOwnRosterAndRetry(node: String, key: String, sent: Data, social: HavenSocial, error: Error) async {
+        guard error.localizedDescription.lowercased().contains("forbidden") else { return }
+        guard let acct = social.exportOwnRoster().first?.accountHex else { return }
+        HavenLog.sync("devroster refused by \(node.prefix(8)) — pulling the newer roster it holds and re-publishing")
+        guard await fetchContactRoster(accountHex: acct, social: social) else {
+            HavenLog.sync("devroster: could not read our own stored roster back from any relay — still unauthorized on \(node.prefix(8))")
+            return
+        }
+        guard let fresh = social.exportOwnRoster().first, fresh.wire != sent else {
+            HavenLog.sync("devroster: adopted roster is identical to the one refused — refusal is NOT a version rollback on \(node.prefix(8))")
+            return
+        }
+        guard let c = await RelayClients.client(node) else { return }
+        do {
+            try await c.put(key: key, data: fresh.wire)
+            RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
+            HavenLog.sync("devroster blob-put OK relay=\(node.prefix(8)) after adopting its newer roster — this device is authorized again")
+        } catch {
+            HavenLog.sync("devroster STILL refused by \(node.prefix(8)) after adopting: \(error.localizedDescription)")
         }
     }
 

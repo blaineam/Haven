@@ -2770,8 +2770,17 @@ final class FeedStore: ObservableObject {
     /// there is deliberately no plaintext fallback, so a relay can't force a downgrade to the old
     /// spoofable/rewritable form.
     func sendCallFrame(_ type: UInt8, _ payload: Data, to nodeHex: String) {
-        guard let sealed = try? social?.sealCallFrame(recipientNodeHex: nodeHex, frameType: type, data: payload),
-              !sealed.isEmpty else { return }
+        // `seal_media` can only seal to a recipient it can RESOLVE to a bundle: our own account, a
+        // circle member, or a known device bundle. If none match it throws and this guard drops the
+        // frame silently — nothing is transmitted and nothing is recorded. For an ACCEPT (11) that is
+        // indistinguishable from the network eating it: the callee has already flipped itself in-call,
+        // so it looks connected while the caller waits out the full invite timer. Say so.
+        let sealedOpt = try? social?.sealCallFrame(recipientNodeHex: nodeHex, frameType: type, data: payload)
+        guard let sealed = sealedOpt, !sealed.isEmpty else {
+            let known = (social?.deviceNodeIdsFor(accountHex: nodeHex).count ?? 0)
+            HavenLog.call("call frame type=\(type) NOT SENT to \(nodeHex.prefix(8)) — seal failed (recipient unresolvable: \(known) known device id(s), \(sealedOpt == nil ? "threw" : "empty"))")
+            return
+        }
         sendIroh(type, sealed, to: nodeHex)
         // Cross-NAT fallback: hop the same SEALED frame LIVE through the circle relays (frame 9 — the
         // relay host unwraps + sends it onward over its own connections). The nearby originateRelay

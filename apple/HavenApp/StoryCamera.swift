@@ -1252,6 +1252,10 @@ struct StoryComposerView: View {
     @State private var editingCaption = false
     @State private var captionSpec = StoryCaptions.Spec()
     @State private var musicStartMs = 0.0
+    /// Bumped whenever the song — or where it starts — changes, to restart the clip from frame one.
+    /// A song picked while a loop is 4s in previews against an arbitrary moment of the clip, so the
+    /// pairing you approve isn't the one that ships. Restarting both together makes the preview honest.
+    @State private var musicRestartToken = 0
     @State private var songPreviewing = false
     /// Preview sound: hear the story as it will actually play — the attached song if there is one, and
     /// otherwise the clip's own audio. Off by default so opening the editor never blares unexpectedly.
@@ -1442,7 +1446,8 @@ struct StoryComposerView: View {
                          scale: captionSpec.mediaScale, offX: captionSpec.mediaOffX, offY: captionSpec.mediaOffY,
                          rotation: captionSpec.mediaRotation,
                          filter: filter,
-                         muted: !previewSoundOn || track != nil)
+                         muted: !previewSoundOn || track != nil,
+                         restartToken: musicRestartToken)
     }
 
     /// While editing the caption, the top bar is just a Done button — the styling lives in the
@@ -1502,6 +1507,10 @@ struct StoryComposerView: View {
         #if os(iOS)
         guard previewSoundOn, let t = track else { return }
         if songPreviewing { stopSongPreview() }
+        // Restart the clip with the song so the two run from the top together — the preview should
+        // show the pairing that will actually ship, not the song against wherever the loop happened
+        // to be. Bumped for a changed START POSITION too, not just a changed track.
+        musicRestartToken &+= 1
         ensureHavenPlaybackSession(force: true) { toggleSongPreview(t) }
         #endif
     }
@@ -1656,6 +1665,10 @@ struct StoryComposerView: View {
     }
     private func seekPreview() {
         MPMusicPlayerController.applicationMusicPlayer.currentPlaybackTime = musicStartMs / 1000
+        // Moving the START POSITION re-pairs the song with the clip just as picking a new track does,
+        // so the clip restarts here too — scrubbing to a different part of the song otherwise
+        // previews it against wherever the loop happened to be.
+        musicRestartToken &+= 1
     }
     /// Size the song's usable section to the STORY's own length: a video story's section is the video's
     /// duration (so the loop matches the clip that ships), clamped to a 3–15s preview range; a photo keeps
@@ -1846,6 +1859,11 @@ struct LoopingVideo: UIViewRepresentable {
     /// Muted by default — every incidental preview (feed backdrop, review canvas) stays silent. The story
     /// editor passes `false` when the viewer turns preview sound on, so they can actually HEAR the clip.
     var muted: Bool = true
+    /// Bumped to restart the loop from its first frame. The story editor bumps it whenever the song
+    /// or its start position changes, so what you preview is what the clip and the song do TOGETHER
+    /// from the top — otherwise a song picked 4s into a looping clip previews against an arbitrary
+    /// moment of it, and the pairing you approve isn't the one that ships.
+    var restartToken: Int = 0
     func makeUIView(context: Context) -> PlayerView {
         let v = PlayerView()
         v.load(url, fill: fill, filter: filter, muted: muted)
@@ -1854,6 +1872,7 @@ struct LoopingVideo: UIViewRepresentable {
     func updateUIView(_ uiView: PlayerView, context: Context) {
         uiView.update(filter: filter)
         uiView.update(muted: muted)
+        uiView.restartIfNeeded(token: restartToken)
         uiView.ensurePlaying()
     }
 
@@ -1965,6 +1984,18 @@ struct LoopingVideo: UIViewRepresentable {
             queue.play()
         }
 
+        /// Last restart token acted on — so a re-render for any other reason can't re-seek the clip.
+        private var lastRestartToken = 0
+
+        /// Jump the loop back to its first frame, so it re-runs in step with a song that just changed.
+        func restartIfNeeded(token: Int) {
+            guard token != lastRestartToken else { return }
+            lastRestartToken = token
+            guard let queue else { return }
+            queue.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
+            queue.play()
+        }
+
         /// Swap in a new filtered composition when the chosen look changes (rebuild the loop).
         func update(filter: HavenFilter) {
             guard filter != current, let asset, let queue else { return }
@@ -2022,6 +2053,9 @@ struct LoopingVideo: NSViewRepresentable {
     var filter: HavenFilter = .original
     /// Muted by default; the story editor passes `false` when preview sound is on. See the iOS twin.
     var muted: Bool = true
+    /// Accepted for signature parity with the iOS twin. macOS has no Apple Music preview to line the
+    /// clip up with, so there is nothing to restart against — see the iOS twin for what it's for.
+    var restartToken: Int = 0
     func makeNSView(context: Context) -> PlayerNSView {
         let v = PlayerNSView()
         v.load(url, fill: fill, filter: filter, muted: muted)
@@ -2163,6 +2197,9 @@ struct StoryMediaCanvas: View {
     /// Silent by default (a canvas is usually an incidental preview). The story editor unmutes it when the
     /// author turns preview sound on, so they can hear the clip's own audio before posting.
     var muted: Bool = true
+    /// Bumped by the story editor when the song or its start position changes, to restart the clip so
+    /// the two preview from the top together. Other canvases leave it at 0 and never restart.
+    var restartToken: Int = 0
 
     /// The (optionally filtered) preview still for this ref.
     private func preview(_ img: PlatformImage) -> PlatformImage {
@@ -2199,7 +2236,8 @@ struct StoryMediaCanvas: View {
                             // once; without this the clip's audio-track teardown raced the song's start and
                             // the clip — still holding the audio session — silenced it. A second pick
                             // worked because by then the clip was already audio-free.
-                            LoopingVideo(url: url, fill: fill, filter: filter, muted: muted)
+                            LoopingVideo(url: url, fill: fill, filter: filter, muted: muted,
+                                         restartToken: restartToken)
                                 .id(muted)
                         } else if let img = still {
                             Image(platformImage: img).resizable()

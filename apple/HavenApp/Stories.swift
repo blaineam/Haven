@@ -403,7 +403,21 @@ struct StoryViewer: View {
         guard stories.indices.contains(index) else { return }
         let s = stories[index]
         // The author's song plays while you watch; the video is muted under it.
+        //
+        // The session must be playback + mixWithOthers BEFORE either starts. A muted AVPlayer still
+        // takes the audio session, and a non-mixing one suppresses Apple Music outright — which is
+        // why a video story's song played in the composer (StoryCamera prepares the session) but went
+        // silent in the viewer, which never did. Configuration is off-main and asynchronous, so start
+        // the song in the completion: starting it on the next line races the session it depends on.
+        #if os(iOS)
+        if let m = s.music {
+            ensureHavenPlaybackSession(force: true) { MusicPlayback.shared.play(m) }
+        } else {
+            MusicPlayback.shared.stop()
+        }
+        #else
         if let m = s.music { MusicPlayback.shared.play(m) } else { MusicPlayback.shared.stop() }
+        #endif
         // If the bytes haven't arrived yet (a dropped chunk on a big video), wait and
         // actively re-request instead of hanging forever on a stale "Loading…".
         if let ref = s.media.first, !MediaStore.shared.has(ref) {

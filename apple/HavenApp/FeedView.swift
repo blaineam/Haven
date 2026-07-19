@@ -3524,6 +3524,17 @@ final class FeedStore: ObservableObject {
         // Reassembly entry (temp file) is created on the main actor; the heavy decrypt + disk write run on a
         // dedicated SERIAL queue (serial = no concurrent writes to the same temp file), so thousands of
         // chunks never block the UI. Only the cheap bookkeeping returns to main.
+        // A chunk whose total disagrees with the partial we're building means the sender is streaming
+        // DIFFERENT bytes than the ones already on disk (a re-encode, or a resumed transfer against a
+        // changed file). Mixing the two would interleave two files at the same offsets and only surface
+        // as a digest mismatch after the whole thing finished — throw the stale partial away and start
+        // this one clean. Matters more now that partials outlive the app and can be days old.
+        if let prior = incoming[ref], prior.total != total {
+            HavenLog.net("media ref=\(ref.prefix(12)): chunk total \(total) != partial's \(prior.total) — discarding the stale partial")
+            try? FileManager.default.removeItem(at: prior.tempURL)
+            ReassemblyStore.shared.clear(ref)
+            incoming[ref] = nil
+        }
         let fresh = incoming[ref] == nil
         let entry = incoming[ref] ?? IncomingMedia(tempURL: MediaStore.shared.makeTempFile(), total: total, got: [])
         incoming[ref] = entry

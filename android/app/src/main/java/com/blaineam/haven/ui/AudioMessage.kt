@@ -55,21 +55,29 @@ fun AudioPlayerPill(
     var playing by remember(ref) { mutableStateOf(false) }
     val player = remember(ref) { MediaPlayer() }
     val context = LocalContext.current
-    val audioManager = remember {
-        context.getSystemService(android.content.Context.AUDIO_SERVICE) as android.media.AudioManager
-    }
     val attrs = remember {
         android.media.AudioAttributes.Builder()
             .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
             .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
             .build()
     }
-    val focusRequest = remember {
-        android.media.AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
-            .setAudioAttributes(attrs).build()
+    // Focus now goes through the app-wide coordinator, which supplies the listener this pill never
+    // had: it used to TAKE the route and never react to losing it, so a call arriving mid-message
+    // left the voice note talking underneath it. `speech = true` asks the system to pause rather
+    // than duck — a ducked voice note is just an unintelligible one.
+    val holder = remember(ref) {
+        object : com.blaineam.haven.core.AudioFocus.Holder {
+            override fun onPause() { runCatching { player.pause() }; playing = false }
+            override fun onDuck() {}   // speech is never ducked; see above
+            override fun onResume() {}  // a half-heard message is restarted by hand, not resumed at us
+            override fun onStop() { runCatching { player.pause() }; playing = false }
+        }
     }
     DisposableEffect(ref) {
-        onDispose { runCatching { player.release() }; runCatching { audioManager.abandonAudioFocusRequest(focusRequest) } }
+        onDispose {
+            runCatching { player.release() }
+            com.blaineam.haven.core.AudioFocus.abandon(context, holder)
+        }
     }
     androidx.compose.foundation.layout.Row(
         modifier.clip(RoundedCornerShape(20.dp)).background(contentColor.copy(alpha = 0.18f))
@@ -84,11 +92,17 @@ fun AudioPlayerPill(
                         player.setAudioAttributes(attrs)
                         player.setDataSource(f.absolutePath)
                         player.prepare()
-                        audioManager.requestAudioFocus(focusRequest)
+                        // A refusal means something that outranks a voice note is using the route —
+                        // don't start on top of it.
+                        if (!com.blaineam.haven.core.AudioFocus.request(context, holder, speech = true)) {
+                            return@runCatching
+                        }
+                        // A voice note and a story's song are both Haven making noise; the newer one wins.
+                        MusicPlayer.stop()
                         player.start()
                         player.setOnCompletionListener {
                             playing = false
-                            runCatching { audioManager.abandonAudioFocusRequest(focusRequest) }
+                            com.blaineam.haven.core.AudioFocus.abandon(context, holder)
                         }
                         playing = true
                     }

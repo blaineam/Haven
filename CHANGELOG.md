@@ -9,6 +9,27 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [1.1.1]
 
+### Added
+
+- **A story's song now plays on Android, and is named on desktop.** Attaching a song to a story only
+  ever did anything on iPhone — everywhere else the story played in silence with nothing on screen to
+  say a song was ever part of it. On Android the song now plays while you watch, the clip goes quiet
+  underneath it, and a pill names the track and opens it in your own music app. What Android plays is
+  a 30-second preview rather than the record: there is no music library for Haven to drive, so the
+  song is matched by title and artist the same way the feed's song chip already does it. Desktop shows
+  the same pill and deliberately plays nothing — it has neither a library to drive nor a licence to
+  stream, and a player that sometimes made noise would be worse than an honest one that doesn't.
+  Song chips across the app also stopped being dead links on iPhone-authored posts, where the song
+  arrives as a catalog id rather than a web address.
+
+- **Haven now yields the speakers like a normal app.** Nothing on Android had ever asked Android who
+  owned the audio, so Haven would talk straight over a podcast, and a phone call arriving mid-story
+  left the music playing underneath it. Every surface that makes noise now takes and gives back audio
+  focus on one consistent rule: a call or an alarm **pauses** it and it resumes afterwards, a
+  notification **ducks** the music out of the way, and another app taking over playback **stops** it
+  for good. Voice messages pause rather than duck, because a ducked voice message is just an
+  unintelligible one — they used to claim the speakers and then never react to losing them at all.
+
 ### Security
 
 - **Link previews no longer load themselves.** A link in a message used to be fetched by *your* device

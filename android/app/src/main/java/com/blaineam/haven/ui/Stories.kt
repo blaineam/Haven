@@ -23,12 +23,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material3.Icon
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
@@ -148,6 +150,58 @@ private fun StoryActionChip(label: String, tint: Color = Color.White, onClick: (
     }
 }
 
+/**
+ * The song attached to a story, over the story. Names the track while it plays and opens the real
+ * one on tap — the 30s preview Android can play is a taste, not the record.
+ *
+ * [resolved] is the viewer's already-completed lookup, passed in rather than re-fetched: this pill
+ * must not turn one resolve into two.
+ */
+@Composable
+private fun StorySongPill(
+    music: uniffi.haven_ffi.TrackRefFfi,
+    resolved: com.blaineam.haven.core.MusicSearch.Track?,
+    modifier: Modifier = Modifier,
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val art = rememberArtwork(music.artworkUrl.ifBlank { resolved?.artworkUrl })
+    // The store link when the author's client sent one (iOS sends a catalog id, desktop a URL),
+    // otherwise the resolved preview's, otherwise a search for the title and artist.
+    val q = remember(music.title, music.artist) {
+        java.net.URLEncoder.encode("${music.title} ${music.artist}".trim(), "UTF-8")
+    }
+    val link = when {
+        music.catalogId.startsWith("http") -> music.catalogId
+        !resolved?.storeUrl.isNullOrBlank() -> resolved.storeUrl
+        else -> "https://music.apple.com/search?term=$q"
+    }
+    Row(
+        modifier.clip(RoundedCornerShape(50)).background(Color.Black.copy(alpha = 0.42f))
+            .clickable { openExternal(context, link) }
+            .padding(start = 6.dp, end = 12.dp, top = 5.dp, bottom = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        Box(Modifier.size(22.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.18f)),
+            contentAlignment = Alignment.Center) {
+            if (art != null) {
+                androidx.compose.foundation.Image(
+                    art, null, Modifier.size(22.dp),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                )
+            } else {
+                Icon(Icons.Filled.MusicNote, null, tint = Color.White, modifier = Modifier.size(13.dp))
+            }
+        }
+        androidx.compose.material3.Text(
+            listOf(music.title, music.artist).filter { it.isNotBlank() }.joinToString(" · "),
+            color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium,
+            maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 190.dp),
+        )
+    }
+}
+
 @Composable
 fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, startItem: Int = 0) {
     var groupIdx by remember { mutableIntStateOf(startGroup) }
@@ -189,6 +243,43 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
         delay(5000)
         advance()
     }
+
+    // ── The author's song plays while you watch ──────────────────────────────────────────────────
+    //
+    // What Android can actually play is a 30s preview, not the track: there is no Apple Music
+    // library to drive, so the song is resolved to an iTunes preview by title+artist, exactly as the
+    // feed chip already does. Short of Apple's full-track playback, and honestly so — the pill says
+    // "Preview" and offers to open the real thing.
+    //
+    // BOUNDED, because this is a network fetch triggered by watching a peer's content:
+    //   · Keyed on the TRACK, not the story index, so flicking through a tray resolves once per
+    //     distinct song rather than once per tap — and a run of stories sharing a song plays
+    //     straight through instead of restarting on each advance.
+    //   · Changing stories cancels the coroutine, so lookups never stack up.
+    //   · MusicSearch.resolve is a bounded LRU that caches MISSES too, so an unresolvable song is
+    //     asked about once, and the underlying request carries an 8s timeout.
+    val storyContext = androidx.compose.ui.platform.LocalContext.current
+    val music = item.music
+    var preview by remember(music?.title, music?.artist) {
+        mutableStateOf<com.blaineam.haven.core.MusicSearch.Track?>(null)
+    }
+    LaunchedEffect(music?.title, music?.artist) {
+        if (music == null) { MusicPlayer.stop(); return@LaunchedEffect }
+        // Stop the outgoing song before the lookup, or the previous story's music keeps playing
+        // over this one for as long as the fetch takes.
+        MusicPlayer.stop()
+        val t = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            com.blaineam.haven.core.MusicSearch.resolve(music.title, music.artist)
+        }
+        preview = t
+        t?.previewUrl?.let { MusicPlayer.play(storyContext, it) }
+    }
+    // Holding the story still holds the song still — the video pauses, and music that kept going
+    // under a frozen frame would read as a bug.
+    LaunchedEffect(heldPaused, replying) { MusicPlayer.setUserPaused(heldPaused || replying) }
+    // Leaving the viewer by ANY route — close, swipe past the end, back out — takes the song with
+    // it. Without this the story's music outlives the story.
+    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { MusicPlayer.stop() } }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         // The navigation gestures live on THIS layer — the media, drawn beneath the controls — not on
@@ -262,7 +353,11 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
                     if (com.blaineam.haven.core.LocalMedia.isVideo(mediaId)) {
                         // A blur hides the picture, not the sound — don't play a covered story.
                         if (covered) Box(Modifier.fillMaxSize().background(HavenTheme.card))
-                        else VideoTile(DEFAULT_CIRCLE, mediaId, Modifier.fillMaxSize())
+                        // Silent under the author's song, and silent if they muted it outright
+                        // (muteVideo rode the wire unread until now). See VideoTile's forceMuted for
+                        // why muting is sufficient here and the Apple video-only strip is not needed.
+                        else VideoTile(DEFAULT_CIRCLE, mediaId, Modifier.fillMaxSize(),
+                            forceMuted = item.music != null || item.muteVideo)
                     } else {
                         // MediaImage defaults to FillWidth, which letterboxed the story into black bands.
                         // A story is full-bleed on iOS (scaledToFill), so crop to the frame instead.
@@ -340,6 +435,15 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
             )
             androidx.compose.material3.Text(
                 storyAge(item.createdAt), color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp,
+            )
+        }
+        // The song, named. Sits just under the author row and outside the gesture layer, so tapping
+        // it opens the track rather than advancing the story.
+        if (music != null) {
+            StorySongPill(
+                music = music,
+                resolved = preview,
+                modifier = Modifier.align(Alignment.TopStart).padding(start = 14.dp, top = 62.dp),
             )
         }
         Row(

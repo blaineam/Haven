@@ -1770,8 +1770,8 @@ function postCard(it, circleId, reports = []) {
   // NowPlayingPill: a full-width pink-tinted glass capsule under the media.
   const song = it.music ? el("a", {
     class: "song-chip glass tint-pink",
-    title: it.music.catalog_id && /^https?:/.test(it.music.catalog_id) ? "Open in your music app" : null,
-    onclick: () => { if (it.music.catalog_id && /^https?:/.test(it.music.catalog_id)) openExternal(it.music.catalog_id); },
+    title: "Open in your music app",
+    onclick: () => { const u = musicLink(it.music); if (u) openExternal(u); },
   }, el("span", { class: "note" }, icon("music.note")),
      el("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
        el("strong", {}, it.music.title), " · ", it.music.artist)) : null;
@@ -2446,6 +2446,39 @@ function addStoryDialog() {
   renderMedia();
 }
 
+/** Where a song chip points.
+ *
+ *  `catalog_id` is overloaded by author platform: iPhone sends an Apple Music CATALOG ID, the
+ *  desktop composer pastes a streaming URL, and Android sends the iTunes store link. Chips that
+ *  tested for `^https?:` and gave up otherwise were therefore DEAD on every iPhone-authored post —
+ *  the majority of them. A catalog id we can't linkify falls back to a search for title + artist,
+ *  which is what Android's "Listen on" menu already does. */
+function musicLink(m) {
+  if (!m) return null;
+  if (m.catalog_id && /^https?:/.test(m.catalog_id)) return m.catalog_id;
+  const q = encodeURIComponent(`${m.title || ""} ${m.artist || ""}`.trim());
+  return q ? `https://music.apple.com/search?term=${q}` : null;
+}
+
+/** The song attached to a story, named over the story.
+ *
+ *  Desktop shows the song but does NOT play it, deliberately. Apple drives MPMusicPlayerController
+ *  against the viewer's own Apple Music library and Android falls back to a 30s iTunes preview;
+ *  desktop has neither a library to drive nor a licence to stream, and the only thing it could
+ *  honestly play is nothing. A pill that names the track and opens it in the viewer's own player is
+ *  the whole truth — a half-working player that sometimes made noise would be worse. */
+function storySongChip(m) {
+  const url = musicLink(m);
+  return el("div", {
+    class: "song-chip glass tint-pink",
+    style: "margin-top:10px;max-width:min(420px,100%);cursor:pointer",
+    title: "Open in your music app",
+    onclick: (e) => { e.stopPropagation(); if (url) openExternal(url); },
+  }, el("span", { class: "note" }, icon("music.note")),
+     el("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
+       el("strong", {}, m.title || "Unknown song"), m.artist ? ` · ${m.artist}` : ""));
+}
+
 /** The rendered CONTENT of a single story — framed media (author zoom/pan preserved), the styled
  *  caption overlay, and a location chip — as a centered column. Shared by the story viewer so paging
  *  between stories only has to swap this node. Story videos autoplay muted (honouring the global sound
@@ -2456,10 +2489,16 @@ function storyContentNode(it) {
   const cap = StoryCaptions.overlay(it.body);
   const tf = StoryCaptions.decode(it.body).spec;
   if (storyRef) {
+    // A story authored against a song is SILENT here: the author picked the song as the audio, so
+    // the clip's own track is not what they meant anyone to hear, and the composer already mutes it
+    // on all three clients. `mute_video` is the author saying so outright — it rode the wire unread
+    // until now. Desktop can't play the song itself (see storySongChip), so the pill below is what
+    // explains the silence.
+    const songMuted = !!it.music || !!it.mute_video;
     const m = storyRef.startsWith("v:")
       ? el("video", Object.assign({ "data-ref": storyRef, "data-video": "1", autoplay: "", loop: "", playsinline: "",
           style: "max-width:100%;max-height:78vh;border-radius:12px;display:block" },
-          state.videoSoundOn && !callAudioActive() ? {} : { muted: "" }))
+          state.videoSoundOn && !callAudioActive() && !songMuted ? {} : { muted: "" }))
       : el("img", { "data-ref": storyRef, style: "max-width:100%;max-height:78vh;border-radius:12px;display:block" });
     // The caption's cqh units size it against the MEDIA, like the phones do — but `container-type:
     // size` applies `contain: size`, which tells the box to lay out as if it had NO contents. On the
@@ -2502,6 +2541,7 @@ function storyContentNode(it) {
   }
   const storyGeo = (it.media || []).map(parseGeo).find(Boolean);
   if (storyGeo) inner.append(geoChip(storyGeo));
+  if (it.music) inner.append(storySongChip(it.music));
   return inner;
 }
 
@@ -2796,7 +2836,8 @@ async function renderThread(root, dm) {
     if (mediaEls.length && !isSecret(m.body)) col.append(el("div", { class: "bubble-media" }, ...mediaEls));
     if (m.music) {
       col.append(el("a", { class: "song-chip glass tint-pink", style: "margin-top:0;max-width:260px",
-        onclick: () => { if (m.music.catalog_id && /^https?:/.test(m.music.catalog_id)) openExternal(m.music.catalog_id); } },
+        title: "Open in your music app",
+        onclick: () => { const u = musicLink(m.music); if (u) openExternal(u); } },
         el("span", { class: "note" }, icon("music.note")),
         el("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
           el("strong", {}, m.music.title), " · ", m.music.artist)));

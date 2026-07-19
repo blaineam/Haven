@@ -69,11 +69,62 @@ fun rememberArtwork(url: String?): ImageBitmap? {
     return bmp
 }
 
-/** A single shared MediaPlayer so only one 30s preview plays at a time. */
-object MusicPlayer {
+/**
+ * A single shared MediaPlayer so only one 30s preview plays at a time — the chip's preview button,
+ * and the song under a story you're watching.
+ *
+ * Holds real audio focus (see [com.blaineam.haven.core.AudioFocus]) rather than only consulting
+ * Haven's own state: a phone call or another app's playback now pauses the song and gives it back,
+ * and a refused request means it never starts at all.
+ */
+object MusicPlayer : com.blaineam.haven.core.AudioFocus.Holder {
     private var player: MediaPlayer? = null
     var playingUrl by mutableStateOf<String?>(null)
         private set
+
+    /** The app context, kept so a focus callback can abandon without a composable in scope. */
+    private var appContext: android.content.Context? = null
+
+    /** Paused by focus loss (as opposed to by the user holding a story) — resume on regain. */
+    private var pausedByFocus = false
+
+    /** Paused because the viewer is holding the story still. Survives focus events independently. */
+    private var pausedByUser = false
+
+    private var ducked = false
+
+    /** Full while we own the route outright, low while ducked under a notification. */
+    private fun applyVolume() {
+        val v = if (ducked) 0.2f else 1f
+        runCatching { player?.setVolume(v, v) }
+    }
+
+    private fun resumeIfClear() {
+        if (pausedByFocus || pausedByUser) return
+        runCatching { player?.start() }
+    }
+
+    override fun onPause() { pausedByFocus = true; runCatching { player?.pause() } }
+
+    override fun onDuck() { ducked = true; applyVolume() }
+
+    override fun onResume() {
+        ducked = false; applyVolume()
+        pausedByFocus = false
+        resumeIfClear()
+    }
+
+    override fun onStop() = stop()
+
+    /**
+     * Hold the song still while the viewer holds the story still, and let it go when they do.
+     * Separate from focus pausing so releasing a hold during a phone call doesn't restart the song.
+     */
+    fun setUserPaused(paused: Boolean) {
+        if (pausedByUser == paused) return
+        pausedByUser = paused
+        if (paused) runCatching { player?.pause() } else resumeIfClear()
+    }
 
     /** How many viewfinders are currently on screen. A camera and a song preview both want the audio
      *  route, and a recording that picks up the song playing beside it bakes it into the clip — so a
@@ -88,33 +139,57 @@ object MusicPlayer {
     fun beginCameraSession() { cameraSessions++; stop() }
     fun endCameraSession() { if (cameraSessions > 0) cameraSessions-- }
 
-    fun toggle(url: String) {
+    /** The chip's play/pause button: start [url], or stop it if it's the one already playing. */
+    fun toggle(context: android.content.Context, url: String) {
         if (playingUrl == url) { stop(); return }
+        play(context, url)
+    }
+
+    /**
+     * Start [url], replacing whatever was playing. A no-op if [url] is already the one playing, so a
+     * story that carries the same song as the one before it plays straight through instead of
+     * restarting on every advance.
+     */
+    fun play(context: android.content.Context, url: String) {
+        if (playingUrl == url) return
         stop()
         // Call audio priority: never start a song preview while a call is ringing/connecting/live.
         if (com.blaineam.haven.core.CallManager.callInProgress) return
         if (cameraOpen) return   // a viewfinder owns the audio route while it's up
+        appContext = context.applicationContext
+        // Ask the SYSTEM, not just ourselves. A refusal here is what keeps a story's song off the
+        // top of a call or another app's playback, and it must precede start().
+        if (!com.blaineam.haven.core.AudioFocus.request(context, this)) return
+        pausedByFocus = false; pausedByUser = false; ducked = false
         runCatching {
             player = MediaPlayer().apply {
                 setDataSource(url)
                 setOnCompletionListener { stop() }
-                setOnPreparedListener { start() }
+                setOnPreparedListener {
+                    applyVolume()
+                    // A focus change can land between the request and prepare finishing; honour it
+                    // rather than starting into a call that arrived while we were buffering.
+                    resumeIfClear()
+                }
                 prepareAsync()
             }
             playingUrl = url
-        }
+        }.onFailure { stop() }
     }
 
     fun stop() {
         runCatching { player?.release() }
         player = null
         playingUrl = null
+        pausedByFocus = false; pausedByUser = false; ducked = false
+        appContext?.let { com.blaineam.haven.core.AudioFocus.abandon(it, this) }
     }
 }
 
 /** Search-and-pick a song (iTunes Search). Replaces the old paste-a-link dialog. */
 @Composable
 fun MusicSearchSheet(onPick: (TrackRefFfi) -> Unit, onDismiss: () -> Unit) {
+    val sheetContext = LocalContext.current
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf<List<MusicSearch.Track>>(emptyList()) }
     var searching by remember { mutableStateOf(false) }
@@ -170,7 +245,7 @@ fun MusicSearchSheet(onPick: (TrackRefFfi) -> Unit, onDismiss: () -> Unit) {
                         Icon(
                             if (isPlaying) Icons.Filled.PauseCircle else Icons.Filled.PlayCircle,
                             "Preview", tint = HavenTheme.pink,
-                            modifier = Modifier.size(34.dp).clickable { MusicPlayer.toggle(t.previewUrl) },
+                            modifier = Modifier.size(34.dp).clickable { MusicPlayer.toggle(sheetContext, t.previewUrl) },
                         )
                     }
                 }
@@ -244,7 +319,7 @@ fun MusicChip(music: TrackRefFfi, modifier: Modifier = Modifier) {
             Icon(
                 if (isPlaying) Icons.Filled.PauseCircle else Icons.Filled.PlayCircle,
                 "Play preview", tint = HavenTheme.pink,
-                modifier = Modifier.size(38.dp).clickable { MusicPlayer.toggle(previewUrl) },
+                modifier = Modifier.size(38.dp).clickable { MusicPlayer.toggle(context, previewUrl) },
             )
         }
     }

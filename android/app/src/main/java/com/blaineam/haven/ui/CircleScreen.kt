@@ -1567,10 +1567,19 @@ fun VideoTile(
     // A caller that already decrypted the clip (the feed, which needs the file for its poster anyway)
     // hands it over, so we skip a frame of the placeholder tile on top of its blurred backdrop.
     resolved: java.io.File? = null,
+    // Silent no matter what the global toggle says, and no toggle offered. Set by the story viewer
+    // for a clip playing under the author's song, and for one the author muted outright.
+    //
+    // On Android muting IS enough, and the Apple side's video-only recomposition is deliberately NOT
+    // ported: an AVPlayer that owns an audio track joins the audio session even at zero volume, so
+    // there the music player's start interrupts the clip and the clip's resume interrupts the song
+    // back. MediaPlayer has no such ownership — it only takes the route if someone requests focus on
+    // its behalf, and a force-muted tile below never does (see the `audible` effect).
+    forceMuted: Boolean = false,
 ) {
     val context = LocalContext.current
     val profile = remember { ProfileStore.get(context) }
-    val soundOn = profile.videoSoundOn
+    val soundOn = profile.videoSoundOn && !forceMuted
     var file by remember(ref) { mutableStateOf(resolved) }
     val player = remember(ref) { mutableStateOf<android.media.MediaPlayer?>(null) }
     android.util.Log.i("VideoTile", "COMPOSE ref=$ref circle=${circleId.take(14)} isVideo=${LocalMedia.isVideo(ref)}")
@@ -1595,8 +1604,27 @@ fun VideoTile(
     // ready. While a call is ringing/connecting/live the video is FORCED silent (call audio
     // priority); reading callInProgress here subscribes this composable to the call state.
     val callActive = com.blaineam.haven.core.CallManager.callInProgress
-    LaunchedEffect(soundOn, callActive, player.value) {
-        val v = if (soundOn && !callActive) 1f else 0f
+    // A tile that is actually going to make noise takes audio focus for as long as it does, and
+    // yields on the same house rules as everything else (pause on a transient loss, duck under a
+    // notification, stop on a permanent one). A muted tile — which is every tile by default — asks
+    // for nothing, so scrolling a feed of silent clips never touches the route.
+    var focusDuck by remember(ref) { mutableStateOf(1f) }
+    var focusLost by remember(ref) { mutableStateOf(false) }
+    val audible = soundOn && !callActive
+    val holder = remember(ref) {
+        object : com.blaineam.haven.core.AudioFocus.Holder {
+            override fun onPause() { focusLost = true }
+            override fun onDuck() { focusDuck = 0.2f }
+            override fun onResume() { focusLost = false; focusDuck = 1f }
+            override fun onStop() { focusLost = true }
+        }
+    }
+    androidx.compose.runtime.DisposableEffect(audible, holder) {
+        if (audible) com.blaineam.haven.core.AudioFocus.request(context, holder)
+        onDispose { com.blaineam.haven.core.AudioFocus.abandon(context, holder) }
+    }
+    LaunchedEffect(audible, focusLost, focusDuck, player.value) {
+        val v = if (audible && !focusLost) focusDuck else 0f
         runCatching { player.value?.setVolume(v, v) }
     }
     val f = file
@@ -1639,7 +1667,11 @@ fun VideoTile(
                                     mp.setSurface(android.view.Surface(st))
                                     mp.isLooping = true
                                     mp.setOnPreparedListener {
-                                        val vol = if (profile.videoSoundOn && !com.blaineam.haven.core.CallManager.callInProgress) 1f else 0f
+                                        // Mirrors the `audible` effect above — a force-muted tile
+                                        // (a story under a song) must not make noise for the frame
+                                        // between prepare and that effect running.
+                                        val vol = if (profile.videoSoundOn && !forceMuted &&
+                                            !com.blaineam.haven.core.CallManager.callInProgress) 1f else 0f
                                         it.setVolume(vol, vol)
                                         it.start()   // autoplay (iOS parity)
                                         applyAspect()   // video dimensions are known now → fix the squish
@@ -1667,16 +1699,21 @@ fun VideoTile(
                     }
                 },
             )
-            Box(
-                Modifier.align(Alignment.BottomEnd).padding(8.dp).size(34.dp).clip(CircleShape)
-                    .background(Color.Black.copy(alpha = 0.45f))
-                    .clickable { profile.videoSoundOn = !profile.videoSoundOn },
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    if (soundOn) Icons.Filled.VolumeUp else Icons.Filled.VolumeOff,
-                    "Toggle sound", tint = Color.White, modifier = Modifier.size(18.dp),
-                )
+            // No toggle on a force-muted clip: the song IS the audio the author chose, and a sound
+            // button that can't produce sound is worse than no button. (This is the Android answer
+            // to the Apple bug where tapping a muted story video silenced the song.)
+            if (!forceMuted) {
+                Box(
+                    Modifier.align(Alignment.BottomEnd).padding(8.dp).size(34.dp).clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.45f))
+                        .clickable { profile.videoSoundOn = !profile.videoSoundOn },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        if (soundOn) Icons.Filled.VolumeUp else Icons.Filled.VolumeOff,
+                        "Toggle sound", tint = Color.White, modifier = Modifier.size(18.dp),
+                    )
+                }
             }
         }
     }

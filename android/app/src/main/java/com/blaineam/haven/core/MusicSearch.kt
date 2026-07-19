@@ -21,7 +21,20 @@ object MusicSearch {
         val durationMs: Long,
     )
 
-    private val previewCache = HashMap<String, Track?>()
+    /**
+     * Resolved lookups, including MISSES (a null value) so an unresolvable song is asked about once
+     * and not once per glance.
+     *
+     * Bounded and synchronized on purpose. The key is `title|artist` straight off a received post,
+     * so its contents are peer-controlled: an unbounded map here grows with every distinct song any
+     * member ever attaches, and the story viewer now resolves on every story watched. A 256-entry
+     * LRU is far more than a session touches while making the ceiling explicit. Access is from IO
+     * threads, so a bare HashMap was also a data race waiting to happen.
+     */
+    private const val CACHE_MAX = 256
+    private val previewCache = object : LinkedHashMap<String, Track?>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: Map.Entry<String, Track?>) = size > CACHE_MAX
+    }
 
     /** Search songs by free text. Returns up to [limit] results (blocking — call off-main). */
     fun search(query: String, limit: Int = 12): List<Track> {
@@ -34,10 +47,12 @@ object MusicSearch {
     /** Resolve a song (e.g. from a received post) to a playable preview by title+artist. Cached. */
     fun resolve(title: String, artist: String): Track? {
         val key = "$title|$artist"
-        if (previewCache.containsKey(key)) return previewCache[key]
+        synchronized(previewCache) { if (previewCache.containsKey(key)) return previewCache[key] }
         val q = listOf(title, artist).filter { it.isNotBlank() }.joinToString(" ")
+        // Deliberately outside the lock: this is a network round trip, and holding the cache while
+        // it runs would serialize every other resolver behind the slowest one.
         val t = search(q, limit = 1).firstOrNull()
-        previewCache[key] = t
+        synchronized(previewCache) { previewCache[key] = t }
         return t
     }
 

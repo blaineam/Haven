@@ -2111,7 +2111,7 @@ final class FeedStore: ObservableObject {
         }
         switch type {
         case 0: handleHello(payload, viaNearby: viaNearby, senderDevice: senderDevice)
-        case 1: handleEvent(payload)
+        case 1: handleEvent(payload, senderDevice: senderDevice, viaNearby: viaNearby)
         case 3: handleMediaRequest(payload)
         case 5: handleMediaChunk(payload)
         case 9: handleRelay(payload)
@@ -3532,7 +3532,9 @@ final class FeedStore: ObservableObject {
     /// Cooldown to break handshake ping-pong (see handleHello). Keyed by "<peerHex>|<circleId>".
     private var lastHelloReply: [String: Date] = [:]
 
-    private func handleEvent(_ payload: Data) {
+    /// `senderDevice` = the authenticated transport id this frame arrived from (nil for nearby /
+    /// relay-unwrapped frames), used to tell a CONTACT's delivery apart from one of my own devices'.
+    private func handleEvent(_ payload: Data, senderDevice: String? = nil, viaNearby: Bool = false) {
         guard let social else { return }
         // [LP circleId][sealed envelope]
         var off = 0
@@ -3540,12 +3542,28 @@ final class FeedStore: ObservableObject {
         let circleId = String(data: circleIdData, encoding: .utf8) ?? ""
         let envelope = payload.subdata(in: (payload.startIndex + off)..<payload.endIndex)
         guard !circleId.isEmpty, !envelope.isEmpty else { return }
+        // Did this come from one of MY devices? Those already have it, and re-sharing it back is how
+        // a fan-out becomes a loop. Nearby frames are broadcast to every device in range already.
+        let mine = Set(social.deviceNodeIdsFor(accountHex: social.myNodeHex()).map { $0.lowercased() })
+            .union([social.myNodeHex().lowercased()])
+        let fromOwnDevice = viaNearby || (senderDevice.map { mine.contains($0.lowercased()) } ?? false)
         // receive() verifies + decrypts — real CPU per frame, and event frames arrive in BURSTS
         // during a sync. Do the crypto off-main; hop back only for the (already-coalesced) applies.
         Task.detached(priority: .utility) { [weak self] in
             guard (try? social.receive(circleId: circleId, envelope: envelope)) == true else { return }
             await MainActor.run {
                 guard let self else { return }
+                // FAN OUT to my other devices. A sender dials the device ids its copy of my roster
+                // resolves — often just one — so a DM delivered straight to my Mac never reached my
+                // iPhone, which was left waiting on a mailbox poll (and got nothing at all if the
+                // relay refused it). The send path has always done this for my OWN posts via
+                // liveDeliverToMyDevices; the receive path did not, so anything a CONTACT sent
+                // stopped at whichever device they happened to reach.
+                //
+                // Cannot loop: `receive` returns true only for a genuinely NEW event, so a sibling
+                // that already holds it stops here — and a frame that came FROM one of my devices is
+                // never re-shared at all.
+                if !fromOwnDevice { self.liveDeliverToMyDevices(1, payload) }
                 // Hearing a message is proof of life — refresh "last seen" for a DM's partner.
                 if circleId.hasPrefix("dm:"), let partner = self.dmPartnerHex(circleId) { self.recordHeard(partner) }
                 self.schedulePersist()             // coalesced — a sync burst writes once, not per event

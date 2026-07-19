@@ -20,6 +20,11 @@ struct YouView: View {
     @State private var showStories = false
     @State private var storyIndex = 0
     @State private var showIdentity = false   // screenshot harness: identity switcher sheet
+    #if os(iOS)
+    /// The viewport width, rounded, used to key the scroll content so its width clamp is re-resolved
+    /// on a real size change (rotation, split view, Stage Manager) and never mid-scroll.
+    @State private var viewportWidthKey: Int = Int(PlatformScreen.bounds.width.rounded())
+    #endif
 
     var body: some View {
         NavigationStack {
@@ -50,6 +55,15 @@ struct YouView: View {
                     .containerRelativeFrame(.horizontal)
                     #endif
                 }
+                // Re-resolve that clamp when the viewport WIDTH changes (rotation, iPad split view,
+                // Stage Manager resize). `containerRelativeFrame` reads the container width when the
+                // subtree is built and does not necessarily re-propose on a size change, so a page
+                // laid out at landscape width kept it after rotating back — text and media running
+                // off both edges, exactly the reported break. Keying the subtree to the rounded
+                // width rebuilds it once per real width change, and never during a scroll.
+                #if os(iOS)
+                .id(viewportWidthKey)
+                #endif
                 // Match the Circle feed: any scroll dismisses the comment keyboard (interactively
                 // only dismissed on a deliberate keyboard drag, which felt stuck on the You tab).
                 .scrollDismissesKeyboard(.immediately)
@@ -59,6 +73,19 @@ struct YouView: View {
                 .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
                 #endif
             }
+            // Watch the ACTUAL viewport width rather than the device orientation: split view and
+            // Stage Manager resize without any rotation, and this is the width the clamp above
+            // needs to agree with. Rounded to whole points so a fractional jitter can't churn it.
+            #if os(iOS)
+            .background(
+                GeometryReader { geo in
+                    Color.clear.onChange(of: geo.size.width, initial: true) { _, w in
+                        let key = Int(w.rounded())
+                        if key != viewportWidthKey { viewportWidthKey = key }
+                    }
+                }
+            )
+            #endif
             // No big "You" header — the profile header below already identifies the tab. Keep a
             // slim inline bar so the settings gear stays in the toolbar.
             .navigationTitle("")

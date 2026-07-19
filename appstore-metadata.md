@@ -32,6 +32,37 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 Launch sale — 50% off through September 30: $4.99, then $9.99. A private, end‑to‑end encrypted home for your closest people. No ads, no tracking, peer‑to‑peer.
 
 ## whats_new
+1.1.1 — notifications, calls, and messages, fixed properly.
+
+Notifications work again
+• Nothing was arriving — no messages, no post alerts, and no incoming-call ring. Every notification Haven sent was being rejected before it reached you. That's fixed, and Haven now notices and reports it if it ever happens again.
+• Tapping a notification opens the thing it's about, instead of just opening the app.
+
+Calls
+• Answering on one device now stops your other devices ringing — no more the call jumping to whichever device you touched last, and no more one end sounding choppy because two of your devices were both in it.
+• Incoming calls ring reliably again.
+
+Messages across your devices
+• A message from a friend now reaches every one of your devices, not just whichever one they happened to connect to first — and anything that was already stranded on one device catches up.
+
+Media that outlives the relay
+• When a photo or video is no longer available, you can ask for it back. The person who posted it puts it back automatically the next time they're online, and Haven tells you when it's there with a link straight to the post.
+• If you host a relay, you now choose how much of your circles' media it keeps and for how long (30 days and 32 GB by default). Volunteering a device shouldn't mean volunteering the whole disk.
+
+Stories
+• A song attached to a video story now actually plays while you watch it.
+• Picking a song, or moving where it starts, restarts the clip so you see the pairing you're actually sharing.
+• The camera no longer rotates when you tilt your phone — shoot however you like and rotate it on the canvas with a pinch.
+
+Around the app
+• Give any circle your own private name. Only you see it; it doesn't rename the circle for anyone else.
+• Message a post's author privately — it opens your conversation with the post ready to reference, so you can just ask.
+• Haven links now open straight to the post instead of a web page.
+• Clearer setup: start fresh, add this as another of your devices, or move your account over — each says what it does.
+
+Native on iPhone, iPad, and Mac. No ads, no tracking, no servers holding your data — same private Haven.
+
+## whats_new_previous
 1.1.0 — a reliability & polish release. Nothing to set up, nothing lost.
 
 Stories & media reliably reach a relay

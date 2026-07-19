@@ -90,7 +90,6 @@ struct StorageSettingsView: View {
                         Text("With this on, Haven relays invisibly in the background: close the window and it keeps serving your circle with no dock icon (launch Haven again to reopen it). At login it starts hidden — launch it a second time to open the window, like the first time.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    RelayRetentionControls()
                 } header: {
                     Text("Circle relay")
                 } footer: {
@@ -258,7 +257,6 @@ struct CircleMailboxSection: View {
             } else if relay.enabled {
                 Label("Starting…", systemImage: "clock").font(.caption).foregroundStyle(.secondary)
             }
-            RelayRetentionControls()
         } header: {
             Text("Relay")
         } footer: {

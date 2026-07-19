@@ -178,7 +178,8 @@ final class CameraModel: NSObject, ObservableObject {
         let mirrorFront = pos == .front
         // FILE outputs honor rotation+mirror (captured media upright). The PREVIEW data output does
         // NOT reliably rotate its buffers, so the Metal preview orients the CIImage via `.oriented()`
-        // (FilteredCameraPreview.orientation = havenCameraOrientation). Leave the data output alone.
+        // (FilteredCameraPreview.orientation = havenPinnedPortraitOrientation — FIXED portrait, never
+        // derived from UIDevice: the story viewfinder must not rotate). Leave the data output alone.
         photoOutput.connection(with: .video)?.applyPreviewOrientation(angle: 90, mirroredFront: mirrorFront)
         movieOutput.connection(with: .video)?.applyPreviewOrientation(angle: 90, mirroredFront: mirrorFront)
     }
@@ -272,7 +273,7 @@ final class CameraModel: NSObject, ObservableObject {
         finalizing = false   // the next segment is starting → drop the held-over slot from the last one
         // Orient each recorded frame upright like the preview. Record RAW (filterSpec = original): the
         // composer/export bakes the chosen look exactly as before, so it isn't double-applied.
-        recorder.orientation = havenCameraOrientation(position: position)
+        recorder.orientation = havenPinnedPortraitOrientation(position: position)
         recorder.filterSpec = HavenFilter.original.spec
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("story_\(UUID().uuidString).mov")
         recorder.begin(to: url)
@@ -666,7 +667,7 @@ struct StoryCameraView: View {
                 DualCameraPreview(recorder: dual, corner: pipCorner).ignoresSafeArea()
             } else {
                 FilteredCameraPreview(tap: cam.frameTap, filter: liveFilter,
-                                      orientation: havenCameraOrientation(position: cam.position),
+                                      orientation: havenPinnedPortraitOrientation(position: cam.position),
                                       onThumbnail: { liveThumb = $0 }).ignoresSafeArea()
                     // Pinch anywhere on the preview to zoom.
                     .simultaneousGesture(MagnificationGesture()
@@ -1052,7 +1053,7 @@ struct StoryCameraView: View {
             if cam.ready {
                 // Live, Metal-backed filtered preview (same FilterEngine pipeline as iOS).
                 FilteredCameraPreview(tap: cam.frameTap, filter: liveFilter,
-                                      orientation: havenCameraOrientation(position: cam.position),
+                                      orientation: havenPinnedPortraitOrientation(position: cam.position),
                                       onThumbnail: { liveThumb = $0 }).ignoresSafeArea()
             } else {
                 VStack(spacing: 12) {

@@ -63,6 +63,34 @@ private extension View {
 
 /// Direct messages. Each DM is a private 2-person circle, so it rides the same E2E
 /// engine, delivery, mesh relay, and persistence as everything else.
+/// A DM composer draft handed over from somewhere else in the app, plus which thread to open.
+///
+/// "Message the author" from a post used to start the DM, SEND the post's media immediately, and
+/// switch the circle — so it published something you hadn't written yet and dropped you into the
+/// feed layout instead of your conversation. What it should do is take you to the thread with the
+/// post already referenced and the cursor waiting, so the message is still yours to write.
+///
+/// The reference is the post's LINK rather than its media: a draft that re-seals a whole video into
+/// the DM circle does that work before you've decided to send anything, and the link opens the real
+/// post (with its media) for anyone in the circle.
+@MainActor
+final class DMDraftStore: ObservableObject {
+    static let shared = DMDraftStore()
+    /// Thread the app should open next, if any — consumed by MessagesView.
+    @Published var openThread: String?
+    private var drafts: [String: String] = [:]
+
+    private init() {}
+
+    func stage(circleId: String, text: String) {
+        drafts[circleId] = text
+        openThread = circleId
+    }
+
+    /// Take the staged draft for a thread (once) — the composer owns the text from then on.
+    func takeDraft(_ circleId: String) -> String? { drafts.removeValue(forKey: circleId) }
+}
+
 struct MessagesView: View {
     let account: Account
     @ObservedObject private var store = FeedStore.shared
@@ -138,6 +166,12 @@ struct MessagesView: View {
         // the tab bar stays visible — you can hop straight back to Circle, and Back lands
         // on the Messages list, not the picker.
         .navigationDestination(item: $pushedDM) { id in DMThreadView(circleId: id) }
+        // Somewhere else in the app staged a draft (e.g. "Message the author" on a post) — open that
+        // thread in this tab's stack, exactly as picking it from the list would.
+        .onReceive(DMDraftStore.shared.$openThread.compactMap { $0 }) { id in
+            DMDraftStore.shared.openThread = nil
+            pushedDM = id
+        }
         .sheet(isPresented: $showPicker, onDismiss: { if let id = newDM { newDM = nil; pushedDM = id } }) {
             DMContactPicker { id in newDM = id; showPicker = false }   // HavenMacSheet brings its own frame on macOS
         }
@@ -416,6 +450,12 @@ struct DMThreadView: View {
                 // Force the newest bubble into view once after the list settles — non-animated, twice, to
                 // catch late lazy layout.
                 .onAppear {
+                    // A draft staged elsewhere (e.g. "Message the author" on a post) lands in the
+                    // composer, unsent — appended, so re-entering a thread can't discard something
+                    // half-typed.
+                    if let staged = DMDraftStore.shared.takeDraft(circleId) {
+                        text = text.isEmpty ? staged : "\(text)\n\(staged)"
+                    }
                     scrollToBottom(proxy, animated: false)
                     DispatchQueue.main.async { scrollToBottom(proxy, animated: false) }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { scrollToBottom(proxy, animated: false) }

@@ -5223,13 +5223,16 @@ private struct KillHorizontalScroller: NSViewRepresentable {
                     // you mean. Never available on your own post — that would DM yourself.
                     if !item.isMe, let authorHex = ContactsStore.shared.idHex(forNodePrefix: item.authorShort) {
                         Button {
+                            // Stage a draft; do NOT send. Referencing a post is the START of a
+                            // message, not one — the point is to ask them something about it, so
+                            // the link goes in the composer and the words stay yours. Opens the
+                            // real DM thread in Messages rather than switching the circle, which
+                            // would drop you into the feed layout instead of the conversation.
                             let dm = feed.startDM(with: authorHex, name: authorName)
-                            // Media only: the post's TEXT is theirs and echoing it back reads as a
-                            // quote they didn't write. The media is the unambiguous "this post".
-                            if !realMedia.isEmpty {
-                                feed.sendMessage(to: dm, "", media: realMedia, music: nil)
-                            }
-                            feed.setActiveCircle(dm)
+                            let ref = DeepLink.postURL(circleId: feed.activeCircleId, postId: item.id)?
+                                .absoluteString ?? ""
+                            DMDraftStore.shared.stage(circleId: dm, text: ref)
+                            DeepLinkRouter.shared.requestedTab = "messages"
                         } label: { Label("Message \(authorName)", systemImage: "bubble.left") }
                     }
                     if item.isMe {

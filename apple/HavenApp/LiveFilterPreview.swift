@@ -320,6 +320,21 @@ func havenCameraOrientation(position: AVCaptureDevice.Position) -> CGImageProper
     }
 }
 
+/// The story camera's FIXED orientation — portrait, mirrored for the front lens, and never derived
+/// from `UIDevice`.
+///
+/// The story viewfinder must not rotate. Following the device meant that holding the phone sideways
+/// for a moment re-oriented the live view, and the sensor's own orientation notifications are
+/// unreliable enough (face-up/face-down/unknown all fall through) that it could then STICK sideways
+/// — after which every downstream consumer of that frame disagreed about which way was up, and the
+/// resulting story media came out wrong. A story canvas is portrait by definition; shooting sideways
+/// is a framing choice, and the composer's pinch-to-rotate is where that choice belongs. Pinning the
+/// preview AND the recorder to the same fixed orientation also makes the capture WYSIWYG: what the
+/// viewfinder showed is what lands on the canvas.
+func havenPinnedPortraitOrientation(position: AVCaptureDevice.Position) -> CGImagePropertyOrientation {
+    position == .front ? .leftMirrored : .right
+}
+
 /// `videoRotationAngle` for the current device orientation (defaults to portrait/90).
 func havenPreviewRotationAngle() -> CGFloat {
     switch UIDevice.current.orientation {
@@ -339,4 +354,10 @@ func havenCameraOrientation(position: AVCaptureDevice.Position) -> CGImageProper
 
 /// macOS file/preview connections don't rotate (no device orientation); 0° is upright.
 func havenPreviewRotationAngle() -> CGFloat { 0 }
+
+/// macOS has no device orientation to follow, so the pinned variant is already what the normal one
+/// does — declared so the story camera can call one name on both platforms.
+func havenPinnedPortraitOrientation(position: AVCaptureDevice.Position) -> CGImagePropertyOrientation {
+    havenCameraOrientation(position: position)
+}
 #endif

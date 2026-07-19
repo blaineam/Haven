@@ -710,8 +710,10 @@ object HavenNet : InboundListener {
                 Wire.MEDIA_REQ -> handleMediaRequest(body)
                 Wire.MEDIA_CHUNK -> handleMediaChunk(body)
                 Wire.DEVICE_ROSTER -> handleDeviceRosterAnnounce(body)
+                // 30 (handled-elsewhere) rides the same sealed+signed path: it can silence a ringing
+                // device, so it must be no more forgeable than an invite or a hangup.
                 CallWire.INVITE, CallWire.ACCEPT, CallWire.HANGUP, CallWire.OFFER,
-                CallWire.ANSWER, CallWire.ICE, CallWire.GROUP_INVITE ->
+                CallWire.ANSWER, CallWire.ICE, CallWire.GROUP_INVITE, CallWire.HANDLED_ELSEWHERE ->
                     withContext(Dispatchers.Main) { callRouter?.invoke(type, body) }
                 else -> Log.d(TAG, "ignoring frame type $type (not yet handled)")
             }
@@ -841,6 +843,21 @@ object HavenNet : InboundListener {
         if (contacts.any { it.idHex == idHex }) {
             // Already a contact (e.g. their Hello-back) — make sure their bundle is in the circle.
             runCatching { social.addContactBundle(hello.circleId, hello.bundle) }
+            return
+        }
+        // A hello carrying a DEVICE bundle of an account we ALREADY know is not a new person. A linked
+        // (seedless) device signs with its own key and carries its OWN bundle, so without this it lands
+        // as a SECOND contact for someone we're already connected to: a connection request from an
+        // identity we're already connected to, which — once accepted — shows as "Someone" and is never
+        // online, because a contact record built from a device id names no account to route to.
+        //
+        // The device→account mapping comes from their ACCOUNT-SIGNED roster (verify_devroster), so a
+        // stranger cannot claim to be somebody's device; an unknown device id maps to nothing and still
+        // takes the normal approval path below. iOS parity.
+        val ownerAccount = runCatching { social.accountForDevice(idHex) }.getOrNull()?.lowercase()
+        if (ownerAccount != null && !ownerAccount.equals(idHex, ignoreCase = true)) {
+            recordDeviceHints(ownerAccount, listOf(idHex))
+            Log.i(TAG, "hello from ${idHex.take(8)} is a DEVICE of known account ${ownerAccount.take(8)} — recorded as their device, not a new contact")
             return
         }
         // Unknown sender on a non-DM circle → a request to approve — UNLESS it merely arrived over the
@@ -1415,6 +1432,11 @@ object HavenNet : InboundListener {
      *  self-connect leak) and the account id (a contact handle that resolves to NO endpoint under
      *  per-device transport seeds, so dialing it is a guaranteed timeout, not a sibling).
      *  Parity with iOS myOtherDeviceTargets. */
+    /** My OWN other devices' node ids — who to tell when a ringing call has been handled here.
+     *  Empty until their roster is known, which is the honest answer: with no roster there is no way
+     *  to address them. iOS FeedStore.myOtherDeviceHexes parity. */
+    fun myOtherDeviceHexes(): List<String> = myOtherDeviceTargets()
+
     private fun myOtherDeviceTargets(): List<String> {
         val mineAcct = runCatching { social.myNodeHex() }.getOrNull()?.lowercase() ?: return emptyList()
         val mineDev = runCatching { social.myDeviceNodeHex() }.getOrNull()?.lowercase()
@@ -1512,6 +1534,20 @@ object HavenNet : InboundListener {
                 for (r in relaysFor(c.id)) if (!r.startsWith("s3:") && r != myNode) relayTargets.add(r)
             for (r in relayTargets) sendFrame(Wire.DEVICE_ROSTER, rosterWire, r)
         }
+        // PULL the rosters we're MISSING. Announcing ours (frame 27, above) only works when the contact
+        // is DIRECTLY reachable; between two CGNAT networks it never lands in either direction, so
+        // neither side can resolve the other's devices — and a device-signed call frame, the ACCEPT
+        // included, then fails the declared-vs-signer check and is dropped as a forgery. Their roster is
+        // already sitting on the relay, so ask for it. Cheap and idempotent: only contacts we currently
+        // can't resolve, and the ingest is a no-op once we hold it.
+        val unresolved = contacts.map { it.idHex }.filter { hex ->
+            runCatching { social.deviceNodeIdsFor(hex) }.getOrDefault(emptyList())
+                .all { it.equals(hex, ignoreCase = true) }
+        }
+        if (unresolved.isNotEmpty()) {
+            Log.i(TAG, "devroster: ${unresolved.size} contact(s) have no resolvable devices — pulling from relays")
+            scope.launch { for (hex in unresolved) runCatching { fetchContactRoster(hex) } }
+        }
         if (resendHistory) lastHistoryResendMs = nowMs
         reannounceOwnRelay()   // frame 19 was a one-shot at relay start; re-emit so peers reliably learn it
         // Push MY media up to every circle relay periodically (idempotent — skips blobs already present),
@@ -1545,31 +1581,161 @@ object HavenNet : InboundListener {
      * this write is allowed BEFORE authorization (the bootstrap). Idempotent + cheap; called on the sync
      * timer so a restarted relay re-learns our devices promptly. iOS SharedStore.publishDeviceRoster parity.
      */
-    private suspend fun publishDeviceRoster() {
+    // Relays that already hold this exact roster, and when we confirmed it. A roster is ~30 KB (each
+    // device credential carries a hybrid PQ signature), and this ran on the sync tick against EVERY
+    // relay — tens of KB every couple of minutes, per relay, forever, whether or not anything had
+    // changed. That is what produced "relay put timed out" / ConnectionLost in the field logs and
+    // starved the rest of sync. Content is what matters, so key on the wire's hash: an unchanged
+    // roster is re-sent only after ROSTER_REPUBLISH_MS as liveness, and any CHANGE republishes
+    // immediately. iOS SharedStore.rosterPublished parity.
+    private val rosterPublished = HashMap<String, Pair<Int, Long>>()   // node → (wire hash, confirmed at)
+    private val rosterRepublishMs = 1_800_000L   // 30 min
+
+    private suspend fun publishDeviceRoster(force: Boolean = false) {
         val r = runCatching { social.exportOwnRoster() }.getOrDefault(emptyList()).firstOrNull() ?: return
         val wire = r.wire
         if (wire.isEmpty()) return
         val key = "haven/devroster/${r.accountHex}"
+        val wireHash = wire.contentHashCode()
         val hostedHex = runCatching { relayHost?.nodeIdHex() }.getOrNull()
+        var skipped = 0
         for (nodeHex in allRelays()) {
             if (nodeHex.startsWith("s3:")) continue
             // Our OWN hosted relay: write straight into the local store (no iroh self-dial).
             if (hostedHex != null && nodeHex == hostedHex) { runCatching { relayHost?.localPut(key, wire) }; continue }
+            // Already holds these exact bytes and confirmed recently → nothing to say.
+            val seen = rosterPublished[nodeHex]
+            if (!force && seen != null && seen.first == wireHash &&
+                System.currentTimeMillis() - seen.second < rosterRepublishMs) { skipped++; continue }
             // Relay HTTP interface first (the reliable cross-NAT path), else the iroh dial.
             val entry = relayEntries[nodeHex]
             if (entry != null && entry.httpToken.isNotEmpty()) {
                 var done = false
                 for (base in httpUrlsFor(entry)) {
-                    if (relayHttpPut(base, entry.httpToken, key, wire)) { markRelaySeen(nodeHex); done = true; break }
+                    if (relayHttpPut(base, entry.httpToken, key, wire)) {
+                        markRelaySeen(nodeHex); rosterPublished[nodeHex] = wireHash to System.currentTimeMillis()
+                        done = true; break
+                    }
                     markHttpUrlBad(base)
                 }
                 if (done) continue
             }
             val client = relayClientFor(nodeHex) ?: continue
             runCatching { client.put(key, wire) }
-                .onSuccess { markRelayOk(nodeHex) }
-                .onFailure { relayFailed(nodeHex) }
+                .onSuccess {
+                    markRelayOk(nodeHex); rosterPublished[nodeHex] = wireHash to System.currentTimeMillis()
+                    Log.i(TAG, "devroster put OK relay=${nodeHex.take(8)} — relay should now authorize our device")
+                }
+                .onFailure {
+                    relayFailed(nodeHex)
+                    Log.i(TAG, "devroster put FAIL relay=${nodeHex.take(8)}: ${it.message}")
+                    adoptNewerOwnRosterAndRetry(nodeHex, key, wire, it)
+                }
         }
+        if (skipped > 0) Log.i(TAG, "devroster: $skipped relay(s) already hold this exact roster — not re-sending ${wire.size} B each")
+    }
+
+    /**
+     * Recover from a REFUSED publish of our own roster.
+     *
+     * `verify_devroster_put` applies a rollback defense: a validly-signed roster whose version is
+     * strictly OLDER than the one already stored is refused (audit R6). That is correct against
+     * replay, but it deadlocks a device that has simply fallen behind — say another of our devices
+     * published a newer version. The publish is the BOOTSTRAP that authorizes this device, so being
+     * refused means the device can never become authorized, and every later op (media PUT, media GET,
+     * frame-9 call forwarding) is forbidden too — which is why the callee's ACCEPT never arrives and
+     * the call never connects. [healForbiddenRelays] cannot help: it answers a refusal by
+     * re-publishing, and the publish is what is refused.
+     *
+     * So adopt what we're being out-versioned by, then publish again at that version. Pulling our own
+     * roster back is safe for the same reason the relay's own check is: [fetchContactRoster] ingests
+     * through `ingestRosterWire`, which verifies the ACCOUNT signature, and only our account key could
+     * have produced it — a relay can serve it, never forge it. iOS
+     * SharedStore.adoptNewerOwnRosterAndRetry parity.
+     */
+    private suspend fun adoptNewerOwnRosterAndRetry(nodeHex: String, key: String, sent: ByteArray, error: Throwable) {
+        if (error.message?.lowercase()?.contains("forbidden") != true) return
+        val acct = runCatching { social.exportOwnRoster() }.getOrDefault(emptyList()).firstOrNull()?.accountHex ?: return
+        Log.i(TAG, "devroster refused by ${nodeHex.take(8)} — pulling the newer roster it holds and re-publishing")
+        if (!fetchContactRoster(acct)) {
+            Log.i(TAG, "devroster: could not read our own stored roster back from any relay — still unauthorized on ${nodeHex.take(8)}")
+            return
+        }
+        val fresh = runCatching { social.exportOwnRoster() }.getOrDefault(emptyList()).firstOrNull() ?: return
+        if (fresh.wire.contentEquals(sent)) {
+            Log.i(TAG, "devroster: adopted roster is identical to the one refused — refusal is NOT a version rollback on ${nodeHex.take(8)}")
+            return
+        }
+        val client = relayClientFor(nodeHex) ?: return
+        runCatching { client.put(key, fresh.wire) }
+            .onSuccess {
+                markRelayOk(nodeHex); rosterPublished[nodeHex] = fresh.wire.contentHashCode() to System.currentTimeMillis()
+                Log.i(TAG, "devroster put OK relay=${nodeHex.take(8)} after adopting its newer roster — this device is authorized again")
+            }
+            .onFailure { Log.i(TAG, "devroster STILL refused by ${nodeHex.take(8)} after adopting: ${it.message}") }
+    }
+
+    /**
+     * PULL a CONTACT's device roster from the relays and ingest it — the missing half of
+     * [publishDeviceRoster], which only ever PUSHED our own.
+     *
+     * The only other way to learn a contact's roster is frame 27, sent over a DIRECT iroh send on the
+     * periodic sweep. That never arrives when neither peer is directly reachable — two CGNAT networks,
+     * Starlink being the everyday case. Without their roster `accountForDevice` cannot map their
+     * signing device to their account, so every device-signed call frame they send us fails the
+     * declared-vs-signer check in [CallManager.openCallFrame] and is discarded as a forgery. That is
+     * precisely "the callee answers, the caller sits on Calling forever": their ACCEPT arrives and we
+     * throw it away. The relay has been holding their roster the whole time — nobody ever asked for it.
+     *
+     * Safe against a hostile relay: `ingestRosterWire` verifies the ACCOUNT signature over the
+     * DeviceList itself and refuses anything that doesn't bind to the account named in the key, so a
+     * relay can serve these bytes but cannot forge or alter them. iOS SharedStore.fetchContactRoster
+     * parity.
+     */
+    suspend fun fetchContactRoster(accountHex: String): Boolean {
+        val acct = accountHex.lowercase()
+        if (acct.length != 64) return false
+        val key = "haven/devroster/$acct"
+        val hostedHex = runCatching { relayHost?.nodeIdHex() }.getOrNull()
+        // Our own hosted store first — no dial, and a relay-hosting device usually already holds it.
+        if (hostedHex != null) {
+            val wire = runCatching { relayHost?.localGet(key) }.getOrNull()
+            if (wire != null && wire.isNotEmpty() && runCatching { social.ingestRosterWire(wire) }.getOrDefault(false)) {
+                Log.i(TAG, "devroster PULLED ${acct.take(8)} from own store — their devices are now resolvable")
+                authorizeMembership()
+                return true
+            }
+        }
+        for (nodeHex in allRelays()) {
+            if (nodeHex.startsWith("s3:")) continue
+            if (hostedHex != null && nodeHex == hostedHex) continue
+            val entry = relayEntries[nodeHex]
+            if (entry != null && entry.httpToken.isNotEmpty()) {
+                for (base in httpUrlsFor(entry)) {
+                    val r = relayHttpGet(base, entry.httpToken, key)
+                    // A refusal here routes through noteRefused, so a relay that doesn't know us yet
+                    // triggers a roster publish rather than a backoff — the same self-heal as media.
+                    if (r.exceptionOrNull() is RelayForbidden) { noteRefused(nodeHex, "devroster read for ${acct.take(8)}"); continue }
+                    if (r.isFailure) { markHttpUrlBad(base); continue }
+                    val wire = r.getOrNull()
+                    if (wire != null && wire.isNotEmpty() && runCatching { social.ingestRosterWire(wire) }.getOrDefault(false)) {
+                        markRelaySeen(nodeHex)
+                        Log.i(TAG, "devroster PULLED ${acct.take(8)} from relay ${nodeHex.take(8)}")
+                        authorizeMembership()
+                        return true
+                    }
+                }
+            }
+            val client = relayClientFor(nodeHex) ?: continue
+            val wire = runCatching { client.get(key) }.getOrNull()
+            if (wire != null && wire.isNotEmpty() && runCatching { social.ingestRosterWire(wire) }.getOrDefault(false)) {
+                markRelayOk(nodeHex)
+                Log.i(TAG, "devroster PULLED ${acct.take(8)} from relay ${nodeHex.take(8)} (dial)")
+                authorizeMembership()
+                return true
+            }
+        }
+        return false
     }
 
     private fun helloPayload(circleId: String): ByteArray? {
@@ -2737,7 +2903,14 @@ object HavenNet : InboundListener {
                             if (landed && !job.force) clearPendingBackup(job.ref, job.circleId)
                         }
                         is MediaJob.Restore -> {
-                            if (fetchMediaFromRelay(job.circleId, job.ref)) {
+                            // A relay REFUSED us rather than lacking the blob: publish our device roster
+                            // to it and try once more. Without this the fetch degrades to a peer ask that
+                            // only works while the author happens to be online — which is exactly how
+                            // media a few days old became permanently unreachable while fresh media
+                            // (author still around) looked fine.
+                            val got = fetchMediaFromRelay(job.circleId, job.ref) ||
+                                (healForbiddenRelays() && fetchMediaFromRelay(job.circleId, job.ref))
+                            if (got) {
                                 withContext(Dispatchers.Main) { feedVersion.value++ }
                             }
                         }
@@ -3196,6 +3369,17 @@ object HavenNet : InboundListener {
             httpAuthHeader(DeviceKeyStore.deviceAccount().secretSeed(), token, method, key, body)
         }.getOrNull()
 
+    /**
+     * The relay REFUSED us — it is reachable and healthy, we are simply not (yet) a member it
+     * recognizes. Distinct from a transport failure because the remedies are opposite: a broken
+     * endpoint should be backed off, whereas a refusal should trigger a device-roster publish and a
+     * retry. Folding the two together is what made a permissions problem present as MISSING media:
+     * the 403 became a plain failure → markHttpUrlBad → the relay was skipped for two minutes → the
+     * blob was reported as absent, while it sat on that relay's disk the whole time. iOS
+     * SharedStore.RelayForbidden parity.
+     */
+    class RelayForbidden : java.io.IOException("relay refused (401/403)")
+
     private fun relayHttpGet(base: String, token: String, key: String): Result<ByteArray?> = runCatching {
         val auth = httpAuth(token, "GET", key, ByteArray(0)) ?: throw java.io.IOException("cannot sign relay GET")
         val c = (java.net.URL(httpKeyUrl(base, key)).openConnection() as java.net.HttpURLConnection).apply {
@@ -3206,9 +3390,43 @@ object HavenNet : InboundListener {
             when (c.responseCode) {
                 in 200..299 -> c.inputStream.use { it.readBytes() }
                 404 -> null
+                401, 403 -> throw RelayForbidden()
                 else -> throw java.io.IOException("http ${c.responseCode}")
             }
         } finally { c.disconnect() }
+    }
+
+    // ---- Relay refusal self-heal (iOS SharedStore.noteRefused / healForbiddenRelays parity) ------
+    //
+    // Relays that have refused us since our roster last reached them. A refusal is NOT a dead
+    // endpoint — it means the relay has never been told this DEVICE id belongs to our account, so
+    // `blob_forbidden` denies us before it ever considers the key (audit F4 extended that gate to
+    // `haven/media/`, which is why media a few days old became unreachable while fresh media, whose
+    // author was usually still online to answer peer-to-peer, looked fine). Publishing the
+    // account-signed roster is precisely the remedy, so record the refusal and fix the CAUSE rather
+    // than backing off from a relay that is working perfectly.
+    private val rosterNeeded = LinkedHashSet<String>()
+    private var lastHealMs: Long = 0
+
+    private fun noteRefused(nodeHex: String, what: String) {
+        synchronized(rosterNeeded) { rosterNeeded.add(nodeHex) }
+        Log.i(TAG, "relay ${nodeHex.take(8)} REFUSED $what — not an outage; our device id isn't authorized there yet")
+    }
+
+    /** Re-publish our device roster to every relay that refused us, so the next attempt is allowed.
+     *  True if anything was published (i.e. a retry is worth making). Rate-limited to 30s: a relay
+     *  that refuses us for some OTHER reason must not turn every media miss into a publish storm. */
+    private suspend fun healForbiddenRelays(): Boolean {
+        val nodes = synchronized(rosterNeeded) {
+            if (rosterNeeded.isEmpty() || System.currentTimeMillis() - lastHealMs < 30_000) return false
+            lastHealMs = System.currentTimeMillis()
+            rosterNeeded.toList().also { rosterNeeded.clear() }
+        }
+        Log.i(TAG, "re-publishing device roster after refusal from [${nodes.joinToString(",") { it.take(8) }}]")
+        // force: a refusal means the relay does NOT have a usable roster from us, so the
+        // "already holds these bytes" skip must not suppress the very publish that fixes it.
+        runCatching { publishDeviceRoster(force = true) }
+        return true
     }
 
     private fun relayHttpPut(base: String, token: String, key: String, body: ByteArray): Boolean = runCatching {
@@ -3329,6 +3547,9 @@ object HavenNet : InboundListener {
                     var resolved = false
                     for (base in httpUrlsFor(entry)) {
                         val r = relayHttpGet(base, entry.httpToken, key)
+                        // Reachable and healthy — it just doesn't know us. Backing off here would
+                        // strand our media on a relay that would happily store it once authorized.
+                        if (r.exceptionOrNull() is RelayForbidden) { noteRefused(nodeHex, "media probe"); continue }
                         if (r.isFailure) { markHttpUrlBad(base); continue }
                         if (r.getOrNull() != null) { markRelaySeen(nodeHex); markBackedUp(nodeHex, ref); landed = true }
                         else uploadHttp.add(nodeHex to entry)
@@ -3440,6 +3661,13 @@ object HavenNet : InboundListener {
             var httpDone = false
             for (base in httpBases) {
                 val r = relayHttpGet(base, entry!!.httpToken, key)
+                // A REFUSAL is not a miss and not an outage: never markHttpUrlBad (the relay is
+                // healthy) and never set httpMiss (or the iroh fallback below is skipped too and a
+                // permissions failure is laundered into "nobody has it").
+                if (r.exceptionOrNull() is RelayForbidden) {
+                    noteRefused(nodeHex, "media fetch ${ref.take(10)}")
+                    continue
+                }
                 if (r.isFailure) {
                     android.util.Log.i("MediaSync", "  http $base unreachable (${r.exceptionOrNull()?.message})")
                     markHttpUrlBad(base); continue
@@ -3465,7 +3693,14 @@ object HavenNet : InboundListener {
             markRelayOk(nodeHex)
             return true
         }
-        android.util.Log.i("MediaSync", "fetch ref=$ref FAILED — no relay served it")
+        // Say WHICH it was. Reporting a permissions failure as absence is what made this read as data
+        // loss for days — the blob was on the relay the whole time and the device simply wasn't
+        // allowed to ask for it.
+        if (synchronized(rosterNeeded) { rosterNeeded.isEmpty() }) {
+            android.util.Log.i("MediaSync", "fetch ref=$ref NOT FOUND — no relay served it")
+        } else {
+            android.util.Log.i("MediaSync", "fetch ref=$ref REFUSED by ${synchronized(rosterNeeded) { rosterNeeded.size }} relay(s) — not missing; re-publishing our roster so the retry is allowed")
+        }
         return false
     }
 

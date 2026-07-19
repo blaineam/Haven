@@ -1074,6 +1074,12 @@ pub fn call_hangup(engine: Eng, to: Vec<String>) {
     engine.call_hangup(to);
 }
 
+/// Answered or declined a ringing call here → tell my other devices to stop ringing.
+#[tauri::command]
+pub fn call_handled_elsewhere(engine: Eng, session_id: String) {
+    engine.call_handled_elsewhere(session_id);
+}
+
 #[tauri::command]
 pub fn call_signal(engine: Eng, kind: String, session_id: String, json: String, to: String) {
     engine.call_signal(kind, session_id, json, to);

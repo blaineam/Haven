@@ -3508,6 +3508,11 @@ function addToCallDialog() {
 async function callAccept() {
   clearTimeout(call.ringTimer); call.ringTimer = null;
   call.ringing = false; call.inCall = true;
+  // Stop my OTHER devices ringing before they can join and take the audio. Every device of mine
+  // rings (right), but nothing told the losers to stand down, so the one not answered on completed
+  // signalling when the offer arrived and joined the mesh — audio jumping to whichever device was
+  // touched last, and both of them choppy from competing.
+  invoke("call_handled_elsewhere", { sessionId: call.session });
   await invoke("call_accept", { sessionId: call.session, to: invitees() });
   await startMesh();
   invitees().forEach(connectPeerIfNeeded);
@@ -3515,6 +3520,9 @@ async function callAccept() {
 }
 
 async function callHangup() {
+  // Declining counts as handling it: silence my other devices too, or they keep ringing after I have
+  // dismissed the call here.
+  if (call.ringing && !call.inCall) invoke("call_handled_elsewhere", { sessionId: call.session });
   await invoke("call_hangup", { to: invitees() });
   teardownCall();
 }
@@ -3574,6 +3582,16 @@ async function onCallEvent(payload) {
       if (!validSession(c.sessionId)) return;
       call.connecting = false; call.inCall = true; call.roster.add(c.from);
       await startMesh(); connectPeerIfNeeded(c.from); renderCallOverlay();
+      break;
+    }
+    // Another of MY devices answered or declined this call. Deliberately narrow: it silences a call
+    // this device is still RINGING — never one already answered here, so a late-arriving frame can't
+    // hang up a conversation in progress — and only from my own account, which Rust proves from the
+    // frame's signature before emitting this.
+    case "handledElsewhere": {
+      if (!call.ringing || call.inCall || c.sessionId !== call.session) return;
+      teardownCall();   // tombstones the session, so a retransmitted invite can't re-ring us
+
       break;
     }
     case "hangup": {

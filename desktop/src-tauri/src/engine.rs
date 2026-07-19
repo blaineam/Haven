@@ -192,6 +192,25 @@ pub struct Engine {
     /// Circles whose expired events were already really-purged this app session (purging is
     /// idempotent; once per session is plenty — see `maybe_purge_expired_media`).
     media_purged: StdMutex<std::collections::HashSet<String>>,
+    /// Relays that refused us since our roster last reached them (see `note_refused`).
+    roster_needed: StdMutex<std::collections::HashSet<String>>,
+    /// Last `heal_forbidden_relays` publish, epoch ms — rate-limits the self-heal to one per 30s.
+    last_heal_ms: StdMutex<u64>,
+    /// Relays that already hold this exact roster: node → (wire content hash, confirmed at epoch ms).
+    /// A roster is ~30 KB and this ran against every relay on every sync tick regardless of change —
+    /// which is what produced `relay put timed out` / ConnectionLost. See `publish_device_roster`.
+    roster_published: StdMutex<HashMap<String, (u64, u64)>>,
+}
+
+/// Why a relay HTTP request failed. The two demand OPPOSITE remedies — a dead endpoint should be
+/// backed off, a refusal should trigger a device-roster publish and a retry — and folding them
+/// together is what made a permissions problem present as MISSING media: the 403 became a plain
+/// failure, the relay was marked bad and skipped, and the blob was reported absent while it sat on
+/// that relay's disk the whole time. Mirrors iOS `SharedStore.RelayForbidden`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayErr {
+    Unreachable,
+    Forbidden,
 }
 
 /// Peer-to-peer iroh frame chunk — 32 KB, matching iOS/Android (`HavenNet.kt:2173`). Theirs is the
@@ -379,6 +398,9 @@ impl Engine {
             http_url_bad: StdMutex::new(HashMap::new()),
             seen_relay: StdMutex::new(std::collections::HashSet::new()),
             media_purged: StdMutex::new(std::collections::HashSet::new()),
+            roster_needed: StdMutex::new(std::collections::HashSet::new()),
+            last_heal_ms: StdMutex::new(0),
+            roster_published: StdMutex::new(HashMap::new()),
         }))
     }
 
@@ -458,6 +480,9 @@ impl Engine {
             http_url_bad: StdMutex::new(HashMap::new()),
             seen_relay: StdMutex::new(std::collections::HashSet::new()),
             media_purged: StdMutex::new(std::collections::HashSet::new()),
+            roster_needed: StdMutex::new(std::collections::HashSet::new()),
+            last_heal_ms: StdMutex::new(0),
+            roster_published: StdMutex::new(HashMap::new()),
         }))
     }
 
@@ -2324,7 +2349,7 @@ impl Engine {
         let me = self.clone();
         let my_hex = self.node_id_hex();
         tauri::async_runtime::spawn(async move {
-            if me.fetch_media_from_relay(&circle_id, &reference).await {
+            if me.fetch_media_healing(&circle_id, &reference).await {
                 me.emit_changed();
                 return;
             }
@@ -2932,6 +2957,31 @@ impl Engine {
                 }
             }
         }
+        // PULL the rosters we're MISSING. Announcing ours (frame 27, above) only works when the
+        // contact is DIRECTLY reachable; between two CGNAT networks it never lands in either
+        // direction, so neither side can resolve the other's devices — and a device-signed call
+        // frame, the ACCEPT included, then fails the declared-vs-signer check and is dropped as a
+        // forgery. Their roster is already sitting on the relay, so ask for it. Cheap and idempotent:
+        // only contacts we currently can't resolve, and the ingest is a no-op once we hold it.
+        let unresolved: Vec<String> = ids
+            .iter()
+            .filter(|hex| {
+                self.social
+                    .device_node_ids_for((*hex).clone())
+                    .iter()
+                    .all(|d| d.eq_ignore_ascii_case(hex))
+            })
+            .cloned()
+            .collect();
+        if !unresolved.is_empty() {
+            log::info!("devroster: {} contact(s) have no resolvable devices — pulling from relays", unresolved.len());
+            let me = self.clone();
+            tauri::async_runtime::spawn(async move {
+                for hex in unresolved {
+                    me.fetch_contact_roster(&hex).await;
+                }
+            });
+        }
         // Re-emit our own relay id whenever we re-greet contacts, so a peer that just came online surfaces
         // our relay instead of missing the one-shot announce.
         self.reannounce_own_relay();
@@ -3001,8 +3051,10 @@ impl Engine {
                 wire::RELAY_NODE => me.handle_relay_node(&body).await,
                 wire::MEDIA_REQ => me.handle_media_request(&body).await,
                 wire::MEDIA_CHUNK => me.handle_media_chunk(&body),
+                // CALL_HANDLED (30) rides the same sealed+signed path: it can silence a ringing
+                // device, so it must be no more forgeable than an invite or a hangup.
                 wire::CALL_INVITE | wire::GROUP_INVITE | wire::CALL_ACCEPT | wire::CALL_HANGUP
-                | wire::SDP_OFFER | wire::SDP_ANSWER | wire::ICE => me.handle_call(t, &body),
+                | wire::SDP_OFFER | wire::SDP_ANSWER | wire::ICE | wire::CALL_HANDLED => me.handle_call(t, &body),
                 wire::DEVICE_ENROLL => me.handle_enrollment_request(&body),
                 wire::DEVICE_GRANT => me.handle_device_grant(&body),
                 wire::SEEDLESS_ENROLL_REQ => me.handle_seedless_enroll_request(sender_device.as_deref(), &body),
@@ -3071,6 +3123,27 @@ impl Engine {
         if self.prefs.lock().unwrap().contacts.iter().any(|c| c.id_hex == id_hex) {
             let _ = self.social.add_contact_bundle(hello.circle_id.clone(), hello.bundle.clone());
             return;
+        }
+        // A hello carrying a DEVICE bundle of an account we ALREADY know is not a new person. A linked
+        // (seedless) device signs with its own key and carries its OWN bundle, so without this it
+        // lands as a SECOND contact for someone we're already connected to: a connection request from
+        // an identity we're already connected to, which — once accepted — shows as "Someone" and is
+        // never online, because a contact record built from a device id names no account to route to.
+        //
+        // The device→account mapping comes from their ACCOUNT-SIGNED roster (`verify_devroster`), so a
+        // stranger cannot claim to be somebody's device; an unknown device id maps to nothing and
+        // still takes the normal approval path below.
+        if let Some(account) = self.social.account_for_device(id_hex.clone()) {
+            let account = account.to_lowercase();
+            if !account.eq_ignore_ascii_case(&id_hex) {
+                self.record_device_hints(&account, vec![id_hex.to_lowercase()]);
+                log::info!(
+                    "hello from {} is a DEVICE of known account {} — recorded as their device, not a new contact",
+                    &id_hex.chars().take(8).collect::<String>(),
+                    &account.chars().take(8).collect::<String>()
+                );
+                return;
+            }
         }
         if !hello.circle_id.starts_with("dm:") {
             let mut st = self.dyn_state.lock().unwrap();
@@ -3483,17 +3556,38 @@ impl Engine {
     /// called on the sync timer so a restarted relay re-learns our devices promptly. Mirrors iOS
     /// `publishDeviceRoster(social:)`.
     async fn publish_device_roster(self: &Arc<Self>) {
+        self.publish_device_roster_inner(false).await
+    }
+
+    /// `force` = publish even to a relay we believe already holds these exact bytes. Required by
+    /// `heal_forbidden_relays`: a refusal means the relay does NOT have a usable roster from us, so
+    /// the content-hash skip must not suppress the very publish that fixes it.
+    ///
+    /// A roster is ~30 KB (hybrid PQ credentials are simply that big) and this ran on the sync tick
+    /// against every relay regardless of change — tens of KB per relay every couple of minutes,
+    /// forever, which is what produced `relay put timed out` / ConnectionLost in the field logs and
+    /// starved the rest of sync. Content is what matters, so key on the wire's hash: an unchanged
+    /// roster is re-sent only after ROSTER_REPUBLISH_MS as liveness, and any CHANGE publishes at once.
+    async fn publish_device_roster_inner(self: &Arc<Self>, force: bool) {
+        const ROSTER_REPUBLISH_MS: u64 = 1_800_000; // 30 min
         let Some(r) = self.social.export_own_roster().into_iter().next() else { return };
         let key = format!("haven/devroster/{}", r.account_hex);
         let wire = r.wire;
         if wire.is_empty() {
             return;
         }
+        let wire_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            wire.hash(&mut h);
+            h.finish()
+        };
         let hosted = self.relay_host.lock().unwrap().as_ref().map(|h| h.node_id_hex());
         let nodes: Vec<String> = {
             let p = self.prefs.lock().unwrap();
             p.all_active_relay_hexes().into_iter().filter(|h| !h.starts_with("s3:")).collect()
         };
+        let mut skipped = 0usize;
         for node_hex in nodes {
             // Our OWN hosted relay: write straight into the local store (no iroh self-dial).
             if hosted.as_deref() == Some(node_hex.as_str()) {
@@ -3502,6 +3596,16 @@ impl Engine {
                 }
                 continue;
             }
+            // Already holds these exact bytes and confirmed recently → nothing to say.
+            if !force {
+                let seen = self.roster_published.lock().unwrap().get(&node_hex).copied();
+                if let Some((hash, at)) = seen {
+                    if hash == wire_hash && now_ms().saturating_sub(at) < ROSTER_REPUBLISH_MS {
+                        skipped += 1;
+                        continue;
+                    }
+                }
+            }
             // Plain-HTTP interface first (the reliable cross-NAT path), else the iroh dial.
             let http_iface = self.prefs.lock().unwrap().relay_http(&node_hex);
             if let Some((urls, token)) = http_iface {
@@ -3509,6 +3613,7 @@ impl Engine {
                 for base in urls.iter().filter(|u| !self.http_url_bad(u)) {
                     if self.http_put(base, &token, &key, wire.clone()).await {
                         self.mark_relay_ok(&node_hex);
+                        self.roster_published.lock().unwrap().insert(node_hex.clone(), (wire_hash, now_ms()));
                         done = true;
                         break;
                     }
@@ -3520,11 +3625,136 @@ impl Engine {
             }
             if let Some(client) = self.relay_client_for(&node_hex).await {
                 match client.put(key.clone(), wire.clone()).await {
-                    Ok(()) => self.mark_relay_ok(&node_hex),
-                    Err(_) => self.relay_failed(&node_hex).await,
+                    Ok(()) => {
+                        self.mark_relay_ok(&node_hex);
+                        self.roster_published.lock().unwrap().insert(node_hex.clone(), (wire_hash, now_ms()));
+                    }
+                    Err(e) => {
+                        self.relay_failed(&node_hex).await;
+                        log::info!("devroster put FAIL relay={}: {e}", &node_hex.chars().take(8).collect::<String>());
+                        self.adopt_newer_own_roster_and_retry(&node_hex, &key, &wire, &e.to_string()).await;
+                    }
                 }
             }
         }
+        if skipped > 0 {
+            log::info!("devroster: {skipped} relay(s) already hold this exact roster — not re-sending {} B each", wire.len());
+        }
+    }
+
+    /// Recover from a REFUSED publish of our own roster.
+    ///
+    /// `verify_devroster_put` applies a rollback defense: a validly-signed roster whose version is
+    /// strictly OLDER than the one already stored is refused (audit R6). Correct against replay, but a
+    /// deadlock for a device that has simply fallen behind another of its own: the publish IS the
+    /// bootstrap that authorizes the device, so a refused publish means it can never become
+    /// authorized, and every later op (media PUT, media GET, frame-9 forwarding of a call accept) is
+    /// forbidden too — the call never connects and blobs never land. `heal_forbidden_relays` cannot
+    /// help: it answers a refusal by re-publishing, and the publish is what is refused.
+    ///
+    /// So adopt what we are being out-versioned by, then publish again at that version. Pulling our
+    /// own roster back is safe for the same reason the relay's check is: `ingest_roster_wire` verifies
+    /// the ACCOUNT signature, and only our account key could have produced it — a relay can serve it,
+    /// never forge it. Mirrors iOS `SharedStore.adoptNewerOwnRosterAndRetry`.
+    async fn adopt_newer_own_roster_and_retry(self: &Arc<Self>, node_hex: &str, key: &str, sent: &[u8], error: &str) {
+        if !error.to_lowercase().contains("forbidden") {
+            return;
+        }
+        let Some(acct) = self.social.export_own_roster().into_iter().next().map(|r| r.account_hex) else { return };
+        let short = node_hex.chars().take(8).collect::<String>();
+        log::info!("devroster refused by {short} — pulling the newer roster it holds and re-publishing");
+        if !self.fetch_contact_roster(&acct).await {
+            log::info!("devroster: could not read our own stored roster back from any relay — still unauthorized on {short}");
+            return;
+        }
+        let Some(fresh) = self.social.export_own_roster().into_iter().next() else { return };
+        if fresh.wire == sent {
+            log::info!("devroster: adopted roster is identical to the one refused — refusal is NOT a version rollback on {short}");
+            return;
+        }
+        let Some(client) = self.relay_client_for(node_hex).await else { return };
+        match client.put(key.to_string(), fresh.wire).await {
+            Ok(()) => {
+                self.mark_relay_ok(node_hex);
+                log::info!("devroster put OK relay={short} after adopting its newer roster — this device is authorized again");
+            }
+            Err(e) => log::info!("devroster STILL refused by {short} after adopting: {e}"),
+        }
+    }
+
+    /// PULL a CONTACT's device roster from the relays and ingest it — the missing half of
+    /// `publish_device_roster`, which only ever PUSHED our own.
+    ///
+    /// The only other way to learn a contact's roster is frame 27, sent over a DIRECT iroh send on the
+    /// periodic sweep. That never arrives when neither peer is directly reachable — two CGNAT
+    /// networks, Starlink being the everyday case. Without their roster `account_for_device` cannot map
+    /// their signing device to their account, so every device-signed call frame they send us fails the
+    /// declared-vs-signer check in `handle_call` and is discarded as a forgery. That is precisely "the
+    /// callee answers, the caller sits on Calling forever": their ACCEPT arrives and we throw it away.
+    /// The relay held their roster the whole time — nobody ever asked it for one.
+    ///
+    /// Safe against a hostile relay: `ingest_roster_wire` verifies the ACCOUNT signature over the
+    /// DeviceList and refuses anything not bound to the account named in the key, so a relay can serve
+    /// these bytes but cannot forge or alter them. Mirrors iOS `SharedStore.fetchContactRoster`.
+    async fn fetch_contact_roster(self: &Arc<Self>, account_hex: &str) -> bool {
+        let acct = account_hex.to_lowercase();
+        if acct.len() != 64 {
+            return false;
+        }
+        let key = format!("haven/devroster/{acct}");
+        let short = acct.chars().take(8).collect::<String>();
+        let hosted = self.relay_host.lock().unwrap().as_ref().map(|h| h.node_id_hex());
+        // Our own hosted store first — no dial, and a relay-hosting device usually already holds it.
+        if hosted.is_some() {
+            let local = self.relay_host.lock().unwrap().as_ref().and_then(|h| h.local_get(key.clone()));
+            if let Some(w) = local {
+                if !w.is_empty() && self.social.ingest_roster_wire(w) {
+                    log::info!("devroster PULLED {short} from own store — their devices are now resolvable");
+                    self.authorize_membership();
+                    return true;
+                }
+            }
+        }
+        let nodes: Vec<String> = {
+            let p = self.prefs.lock().unwrap();
+            p.all_active_relay_hexes().into_iter().filter(|h| !h.starts_with("s3:")).collect()
+        };
+        for node_hex in nodes {
+            if hosted.as_deref() == Some(node_hex.as_str()) {
+                continue;
+            }
+            let http_iface = self.prefs.lock().unwrap().relay_http(&node_hex);
+            if let Some((urls, token)) = http_iface {
+                for base in urls.iter().filter(|u| !self.http_url_bad(u)) {
+                    match self.http_get(base, &token, &key).await {
+                        Ok(Some(w)) => {
+                            if !w.is_empty() && self.social.ingest_roster_wire(w) {
+                                self.mark_relay_ok(&node_hex);
+                                log::info!("devroster PULLED {short} from relay {}", &node_hex.chars().take(8).collect::<String>());
+                                self.authorize_membership();
+                                return true;
+                            }
+                        }
+                        // A refusal routes through note_refused, so a relay that doesn't know us yet
+                        // triggers a roster publish rather than a backoff — same self-heal as media.
+                        Err(RelayErr::Forbidden) => self.note_refused(&node_hex, &format!("devroster read for {short}")),
+                        Err(RelayErr::Unreachable) => self.mark_http_url_bad(base),
+                        _ => {}
+                    }
+                }
+            }
+            if let Some(client) = self.relay_client_for(&node_hex).await {
+                if let Some(w) = client.get(key.clone()).await {
+                    if !w.is_empty() && self.social.ingest_roster_wire(w) {
+                        self.mark_relay_ok(&node_hex);
+                        log::info!("devroster PULLED {short} from relay {} (dial)", &node_hex.chars().take(8).collect::<String>());
+                        self.authorize_membership();
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Adopt a relay node for all circles (ADDED to the redundant set, not replacing existing
@@ -4375,7 +4605,7 @@ impl Engine {
             let my_hex = my_hex.clone();
             tauri::async_runtime::spawn(async move {
                 // ALWAYS try the circle's mailbox (relay/S3) first — content-addressed + idempotent, no flood.
-                if me.fetch_media_from_relay(&circle_id, &reference).await {
+                if me.fetch_media_healing(&circle_id, &reference).await {
                     me.emit_changed();
                     return;
                 }
@@ -4434,21 +4664,63 @@ impl Engine {
         Some(haven_net::httprelay::auth_header(&secret, token, method, key, body))
     }
     /// GET one key. `Ok(Some)` = bytes, `Ok(None)` = reachable but 404 (a real MISS — the iroh path
-    /// serves the same store, so skip dialing it), `Err(())` = unreachable.
-    async fn http_get(&self, base: &str, token: &str, key: &str) -> Result<Option<Vec<u8>>, ()> {
-        let auth = self.http_auth(token, "GET", key, b"").ok_or(())?;
+    /// serves the same store, so skip dialing it), `Err(Unreachable)` = dead endpoint,
+    /// `Err(Forbidden)` = the relay REFUSED us.
+    async fn http_get(&self, base: &str, token: &str, key: &str) -> Result<Option<Vec<u8>>, RelayErr> {
+        let auth = self.http_auth(token, "GET", key, b"").ok_or(RelayErr::Unreachable)?;
         let resp = self
             .http
             .get(Self::http_key_url(base, key))
             .header("authorization", auth)
             .send()
             .await
-            .map_err(|_| ())?;
+            .map_err(|_| RelayErr::Unreachable)?;
         match resp.status().as_u16() {
-            200..=299 => Ok(Some(resp.bytes().await.map_err(|_| ())?.to_vec())),
+            200..=299 => Ok(Some(resp.bytes().await.map_err(|_| RelayErr::Unreachable)?.to_vec())),
             404 => Ok(None),
-            _ => Err(()),
+            401 | 403 => Err(RelayErr::Forbidden),
+            _ => Err(RelayErr::Unreachable),
         }
+    }
+
+    // ---- relay refusal self-heal (mirrors iOS SharedStore.noteRefused / healForbiddenRelays) ------
+
+    /// Relays that have refused us since our roster last reached them. A refusal is NOT a dead
+    /// endpoint — it means the relay has never been told this DEVICE id belongs to our account, so
+    /// `blob_forbidden` denies us before it ever considers the key. (Audit F4 extended that gate to
+    /// `haven/media/`, which is why media a few days old became unreachable while fresh media — whose
+    /// author was usually still online to answer peer-to-peer — looked fine.) Publishing the
+    /// account-signed roster is precisely the remedy, so record the refusal and fix the CAUSE rather
+    /// than backing off from a relay that is working perfectly.
+    fn note_refused(&self, node_hex: &str, what: &str) {
+        self.roster_needed.lock().unwrap().insert(node_hex.to_string());
+        log::info!(
+            "relay {} REFUSED {what} — not an outage; our device id isn't authorized there yet",
+            &node_hex.chars().take(8).collect::<String>()
+        );
+    }
+
+    /// Re-publish our device roster to every relay that refused us, so the next attempt is allowed.
+    /// True if anything was published (i.e. a retry is worth making). Rate-limited to 30s: a relay
+    /// that refuses us for some OTHER reason must not turn every media miss into a publish storm.
+    async fn heal_forbidden_relays(self: &Arc<Self>) -> bool {
+        let nodes: Vec<String> = {
+            let mut needed = self.roster_needed.lock().unwrap();
+            let mut last = self.last_heal_ms.lock().unwrap();
+            if needed.is_empty() || now_ms().saturating_sub(*last) < 30_000 {
+                return false;
+            }
+            *last = now_ms();
+            needed.drain().collect()
+        };
+        log::info!(
+            "re-publishing device roster after refusal from [{}]",
+            nodes.iter().map(|n| n.chars().take(8).collect::<String>()).collect::<Vec<_>>().join(",")
+        );
+        // force: a refusal means the relay does NOT have a usable roster from us, so the "already
+        // holds these bytes" skip must not suppress the very publish that fixes it.
+        self.publish_device_roster_inner(true).await;
+        true
     }
     async fn http_put(&self, base: &str, token: &str, key: &str, body: Vec<u8>) -> bool {
         // Digest over the EXACT bytes sent — `.body(body)` puts this buffer on the wire verbatim.
@@ -4530,7 +4802,10 @@ impl Engine {
                                 http_uploads.push((node_hex.clone(), base.clone(), token.clone()));
                                 resolved = true;
                             }
-                            Err(()) => self.mark_http_url_bad(base),
+                            // Reachable and healthy — it just doesn't know us. Backing off here would
+                            // strand our media on a relay that would happily store it once authorized.
+                            Err(RelayErr::Forbidden) => self.note_refused(&node_hex, "media probe"),
+                            Err(RelayErr::Unreachable) => self.mark_http_url_bad(base),
                         }
                         if resolved { break; }
                     }
@@ -4671,7 +4946,14 @@ impl Engine {
                 let mut http_miss = false;
                 for base in urls.iter().filter(|u| !self.http_url_bad(u)) {
                     match self.http_get(base, &token, &key).await {
-                        Err(()) => { self.mark_http_url_bad(base); continue; }
+                        // NOT a miss and NOT an outage: never mark the URL bad (the relay is healthy)
+                        // and never set http_miss, or the iroh fallback below is skipped too and a
+                        // refusal is laundered into "nobody has it".
+                        Err(RelayErr::Forbidden) => {
+                            self.note_refused(&node_hex, &format!("media fetch {}", &reference.chars().take(10).collect::<String>()));
+                            continue;
+                        }
+                        Err(RelayErr::Unreachable) => { self.mark_http_url_bad(base); continue; }
                         Ok(None) => { http_miss = true; break; } // reachable, doesn't hold it
                         Ok(Some(head)) => {
                             if let Some(count) = Self::parse_manifest(&head) {
@@ -4727,7 +5009,28 @@ impl Engine {
                 }
             }
         }
+        // Say WHICH it was. Reporting a permissions failure as absence is what made this read as data
+        // loss for days — the blob was on the relay the whole time and the device simply wasn't
+        // allowed to ask for it.
+        let refused = self.roster_needed.lock().unwrap().len();
+        let short = reference.chars().take(12).collect::<String>();
+        if refused == 0 {
+            log::info!("media restore {short}: NOT FOUND on any relay/S3");
+        } else {
+            log::info!("media restore {short}: REFUSED by {refused} relay(s) — not missing; re-publishing our roster so the retry is allowed");
+        }
         false
+    }
+
+    /// Fetch a blob, and if every relay REFUSED us rather than lacking it, publish our device roster
+    /// to the refusers and try once more. Without this the fetch degrades to a peer ask that only
+    /// works while the author happens to be online — which is exactly how media a few days old became
+    /// permanently unreachable while fresh media (author still around) looked fine.
+    async fn fetch_media_healing(self: &Arc<Self>, circle_id: &str, reference: &str) -> bool {
+        if self.fetch_media_from_relay(circle_id, reference).await {
+            return true;
+        }
+        self.heal_forbidden_relays().await && self.fetch_media_from_relay(circle_id, reference).await
     }
 
     async fn handle_media_request(self: &Arc<Self>, body: &[u8]) {
@@ -4915,6 +5218,9 @@ impl Engine {
             wire::CALL_HANGUP => callwire::parse_hangup(body).map(|from| {
                 serde_json::json!({ "kind": "hangup", "from": from })
             }),
+            wire::CALL_HANDLED => callwire::parse_accept(body).map(|a| {
+                serde_json::json!({ "kind": "handledElsewhere", "from": a.from, "sessionId": a.session_id })
+            }),
             wire::SDP_OFFER | wire::SDP_ANSWER | wire::ICE => callwire::parse_signal(body, "").map(|s| {
                 let kind = match t { wire::SDP_OFFER => "offer", wire::SDP_ANSWER => "answer", _ => "ice" };
                 serde_json::json!({ "kind": kind, "from": s.from, "sessionId": s.session_id, "json": String::from_utf8_lossy(&s.json) })
@@ -4926,7 +5232,15 @@ impl Engine {
             // negotiate a call (audit F3, iOS/Android parity). These frames are unsealed, so the
             // self-asserted `from` is gated against the contact list here.
             let from = ev.get("from").and_then(|v| v.as_str()).unwrap_or("");
-            if !self.is_contact(from) {
+            // Frame 30 comes from MY OWN account, which is never in my contact list — gate it on that
+            // instead. Narrow on purpose: only my own account may silence my ring, and the signature
+            // verified above is what proves it. (The UI then refuses to act on one for a call it has
+            // already answered, so a late copy can never hang up a live conversation.)
+            if t == wire::CALL_HANDLED {
+                if !from.eq_ignore_ascii_case(&self.social.my_node_hex()) {
+                    return;
+                }
+            } else if !self.is_contact(from) {
                 return;
             }
             let _ = app.emit("haven:call", ev);
@@ -4947,9 +5261,22 @@ impl Engine {
         // encrypted (a relay on the frame-9 path can't read candidate IPs or rewrite the DTLS-SRTP
         // fingerprint) and signed (the recipient proves the sender). No plaintext fallback — if
         // sealing fails we send NOTHING, so a relay can't force a downgrade to the spoofable form.
+        // `seal_media` can only seal to a recipient it can RESOLVE to a bundle: our own account, a
+        // circle member, or a known device bundle. If none match this drops the frame silently —
+        // nothing transmitted, nothing recorded. For an ACCEPT that is indistinguishable from the
+        // network eating it: the callee has already flipped itself in-call, so it looks connected while
+        // the caller waits out the full invite timer. Say so.
         let sealed = match self.social.seal_call_frame(to_hex.to_string(), t, frame_body.to_vec()) {
             Ok(s) if !s.is_empty() => s,
-            _ => return,
+            other => {
+                let known = self.social.device_node_ids_for(to_hex.to_string()).len();
+                log::info!(
+                    "call frame type={t} NOT SENT to {} — seal failed (recipient unresolvable: {known} known device id(s), {})",
+                    &to_hex.chars().take(8).collect::<String>(),
+                    if other.is_err() { "threw" } else { "empty" }
+                );
+                return;
+            }
         };
         self.send_frame(t, &sealed, to_hex);
         let mut dests = self.social.device_node_ids_for(to_hex.to_string());
@@ -5074,6 +5401,49 @@ impl Engine {
         for t in to {
             self.send_call_frame(wire::CALL_ACCEPT, &frame, &t);
         }
+    }
+
+    /// Tell my OTHER devices this ringing call was handled here (answered or declined), so they stop
+    /// ringing and never join.
+    ///
+    /// Every device of mine rings — that part is right. Nothing told the losers to stand down, so the
+    /// one I didn't answer on kept its session live, completed signalling when the offer arrived, and
+    /// joined the mesh: "I answered on my phone and my PC took the audio", then the reverse when I
+    /// touched the PC. Two devices in one call also explains one of them sounding choppy — they were
+    /// competing, not degraded.
+    ///
+    /// Sealed PER DEVICE rather than to my account, so a seedless device (which holds no account key)
+    /// can open it too. Mirrors iOS `CallManager.notifyOwnDevicesHandled`.
+    pub fn call_handled_elsewhere(self: &Arc<Self>, session_id: String) {
+        if session_id.is_empty() {
+            return;
+        }
+        let others = self.my_other_device_hexes();
+        if others.is_empty() {
+            return; // no roster yet = no way to address them; that is the honest answer
+        }
+        log::info!(
+            "call {} handled here — standing down {} other device(s) of mine",
+            &session_id.chars().take(8).collect::<String>(),
+            others.len()
+        );
+        let frame = callwire::handled_elsewhere(&self.social.my_node_hex(), &session_id);
+        for dev in others {
+            self.send_call_frame(wire::CALL_HANDLED, &frame, &dev);
+        }
+    }
+
+    /// My OWN other devices' node ids (excluding this one and my account id, which under per-device
+    /// transport seeds resolves to no endpoint).
+    fn my_other_device_hexes(&self) -> Vec<String> {
+        let account = self.social.my_node_hex().to_lowercase();
+        let mine = self.social.my_device_node_hex().to_lowercase();
+        self.social
+            .device_node_ids_for(account.clone())
+            .into_iter()
+            .map(|d| d.to_lowercase())
+            .filter(|d| *d != mine && *d != account)
+            .collect()
     }
 
     pub fn call_hangup(self: &Arc<Self>, to: Vec<String>) {

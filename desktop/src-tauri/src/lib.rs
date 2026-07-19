@@ -433,6 +433,7 @@ pub fn run() {
             commands::call_group_invite,
             commands::call_accept,
             commands::call_hangup,
+            commands::call_handled_elsewhere,
             commands::call_signal,
             commands::my_node_hex,
             commands::identities,

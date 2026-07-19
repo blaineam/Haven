@@ -11,6 +11,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Android and desktop caught up with the call, media and roster fixes.** Everything above that was
+  fixed on iPhone and Mac now behaves the same way on Android, Windows and Linux: a relay's refusal is
+  told apart from an outage and self-heals, a contact's device list is *pulled* from the relay instead
+  of only ever being announced (so a call between two home networks connects rather than sitting on
+  "Calling"), a device that has fallen behind can re-authorize itself instead of being locked out
+  forever, answering a call on one device stops your others ringing and joining behind your back, a
+  friend's newly-linked device is recognized as theirs instead of arriving as a stranger, and the
+  30 KB device list is no longer re-sent to every relay every couple of minutes.
+
 - **Older media stopped being reachable — it was refused, not missing.** A relay now denies any device
   it hasn't been told about (a hardening fix), and media requests are covered by that check. The apps
   still assumed media was permission-free, so a `403 Forbidden` was handled as a transport error: the

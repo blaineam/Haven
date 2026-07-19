@@ -130,8 +130,18 @@ object CallManager {
      *  proves the sender). No plaintext fallback: if sealing fails we send NOTHING, so a relay can't
      *  force a downgrade to the old spoofable form. Mirrors iOS `FeedStore.sendCallFrame`. */
     private fun send(type: Int, body: ByteArray, to: String) {
-        val sealed = runCatching { HavenNet.engine.sealCallFrame(to, type.toUByte(), body) }.getOrNull() ?: return
-        if (sealed.isEmpty()) return
+        // seal_media can only seal to a recipient it can RESOLVE to a bundle: our own account, a circle
+        // member, or a known device bundle. If none match it throws and this drops the frame silently —
+        // nothing is transmitted and nothing is recorded. For an ACCEPT that is indistinguishable from
+        // the network eating it: the callee has already flipped itself in-call, so it looks connected
+        // while the caller waits out the full invite timer. Say so. iOS parity.
+        val sealed = runCatching { HavenNet.engine.sealCallFrame(to, type.toUByte(), body) }.getOrNull()
+        if (sealed == null || sealed.isEmpty()) {
+            val known = runCatching { HavenNet.engine.deviceNodeIdsFor(to).size }.getOrDefault(0)
+            Log.i(TAG, "call frame type=$type NOT SENT to ${to.take(8)} — seal failed " +
+                "(recipient unresolvable: $known known device id(s), ${if (sealed == null) "threw" else "empty"})")
+            return
+        }
         HavenNet.sendCallFrame(type, sealed, to)
     }
 
@@ -183,6 +193,7 @@ object CallManager {
         mainHandler.removeCallbacks(ringTimeoutRunnable)
         ringing.value = false
         inCall.value = true
+        notifyOwnDevicesHandled()   // stop my OTHER devices ringing before they can join and take the audio
         invitees().forEach { send(CallWire.ACCEPT, CallWire.accept(myHex, sessionId), it) }
         startMesh()
         invitees().forEach { connectPeerIfNeeded(it) }
@@ -190,7 +201,53 @@ object CallManager {
 
     fun decline() = hangup()
 
+    /**
+     * Tell my OTHER devices this ringing call was handled here (answered or declined), so they stop
+     * ringing and never join.
+     *
+     * Every device of mine rings — that part is right. Nothing told the losers to stand down, so the
+     * one I didn't answer on kept its session live, completed signalling when the offer arrived, and
+     * joined the mesh: "I answered on my phone and my Mac took the audio", then the reverse when I
+     * touched the Mac. Two devices in one call also explains one of them sounding choppy — they were
+     * competing, not degraded.
+     *
+     * Sealed PER DEVICE rather than to my account, so a seedless device (which holds no account key)
+     * can open it too. iOS CallManager.notifyOwnDevicesHandled parity.
+     */
+    private fun notifyOwnDevicesHandled() {
+        if (sessionId.isEmpty()) return
+        val others = runCatching { HavenNet.myOtherDeviceHexes() }.getOrDefault(emptyList())
+        if (others.isEmpty()) return
+        Log.i(TAG, "call ${sessionId.take(8)} handled here — standing down ${others.size} other device(s) of mine")
+        val frame = CallWire.handledElsewhere(myHex, sessionId)
+        others.forEach { send(CallWire.HANDLED_ELSEWHERE, frame, it) }
+    }
+
+    /**
+     * Another of MY devices answered or declined this call: stop ringing and tear down.
+     *
+     * Deliberately narrow. It only silences a call this device is still RINGING — never one already
+     * answered here ([inCall]), so a late-arriving frame can't hang up a conversation in progress —
+     * and only when the sender is my own account, which the frame's signature proves in
+     * [openCallFrame] before dispatch. iOS CallManager.handleHandledElsewhere parity.
+     */
+    private fun handleHandledElsewhere(body: ByteArray) {
+        val a = CallWire.parseAccept(body) ?: return
+        if (a.from != myHex) return   // only MY account may silence my ring
+        if (!ringing.value || inCall.value || a.sessionId != sessionId) {
+            Log.i(TAG, "handled-elsewhere for ${a.sessionId.take(8)} ignored " +
+                "(ringing=${ringing.value} inCall=${inCall.value} mine=${sessionId.take(8)})")
+            return
+        }
+        Log.i(TAG, "call ${a.sessionId.take(8)} was handled on another of my devices — standing down")
+        endedSessions[a.sessionId] = System.currentTimeMillis()   // a retransmitted invite must not re-ring us
+        teardown()
+    }
+
     fun hangup() {
+        // Declining counts as handling it: silence my other devices too, or they keep ringing after I
+        // have dismissed the call here.
+        if (ringing.value && !inCall.value) notifyOwnDevicesHandled()
         // The hangup is one fire-and-forget UDP frame; a single drop makes the far side wait out the
         // ICE timeout (~seconds) instead of ending promptly. Send it a few times — it's idempotent on
         // receipt. Capture targets before teardown clears the roster.
@@ -243,6 +300,7 @@ object CallManager {
             }
             CallWire.ACCEPT -> handleAccept(body)
             CallWire.HANGUP -> handleHangup(body)
+            CallWire.HANDLED_ELSEWHERE -> handleHandledElsewhere(body)
             CallWire.CAMERA -> handleCameraState(body)
             CallWire.OFFER -> handleOffer(body)
             CallWire.ANSWER -> handleAnswer(body)

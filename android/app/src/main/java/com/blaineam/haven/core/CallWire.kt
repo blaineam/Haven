@@ -12,6 +12,7 @@ package com.blaineam.haven.core
  *   12 hangup       : [hex64]
  *   16/17/18 signal : [hex64][lp sessionId][json]      (offer / answer / ice; SDP or candidate JSON)
  *   10 legacy invite: [hex64][name utf8]
+ *   30 handled-elsewhere: [hex64][lp sessionId]
  */
 object CallWire {
     const val INVITE = 10
@@ -22,6 +23,11 @@ object CallWire {
     const val ICE = 18
     const val GROUP_INVITE = 21
     const val CAMERA = 22   // [hex64][lp sessionId][on byte] — peer camera on/off (avoid frozen frame)
+    /** [hex64][lp sessionId] — "I answered/declined this call on another of MY devices, stand down".
+     *  Sent only to one's OWN devices, and only ever silences a device still RINGING (see
+     *  CallManager.handleHandledElsewhere). Rides the sealed+signed call path: it can silence a
+     *  ringing phone, so it must be no more forgeable than an invite. */
+    const val HANDLED_ELSEWHERE = 30
 
     private fun hexHead(payload: ByteArray): String? {
         if (payload.size < 64) return null
@@ -58,6 +64,9 @@ object CallWire {
     }
 
     fun hangup(myHex: String): ByteArray = myHex.toByteArray(Charsets.UTF_8)
+
+    /** Frame 30 — same shape as [accept], so the receiver reads the session it names. */
+    fun handledElsewhere(myHex: String, sessionId: String): ByteArray = accept(myHex, sessionId)
 
     /** Frame 22: tell peers my camera is on/off so they show my avatar instead of a frozen last frame. */
     fun cameraState(myHex: String, sessionId: String, on: Boolean): ByteArray {

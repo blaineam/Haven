@@ -32,6 +32,11 @@ pub const DEVICE_GRANT: u8 = 25; // the primary returns a signed credential to t
 pub const DEVICE_ROSTER: u8 = 27; // a contact's signed device roster announce (iOS/Android-compat)
 pub const SEEDLESS_ENROLL_REQ: u8 = 28; // a SEEDLESS new device proves ticket possession (seed-drop S4)
 pub const SEEDLESS_ENROLL_GRANT: u8 = 29; // the primary grants credential + roster + self-sync key back
+/// "I answered/declined this ringing call on another of MY devices — stand down." Sent only to one's
+/// OWN devices, and it only ever silences a device still RINGING (see `handle_call`). Rides the
+/// sealed+signed call path: it can silence a ringing machine, so it must be no more forgeable than an
+/// invite. iOS/Android-compat.
+pub const CALL_HANDLED: u8 = 30;
 
 /// Prepend the one-byte frame type.
 pub fn frame(t: u8, payload: &[u8]) -> Vec<u8> {

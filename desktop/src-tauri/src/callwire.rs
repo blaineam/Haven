@@ -56,6 +56,12 @@ pub fn hangup(my_hex: &str) -> Vec<u8> {
     my_hex.as_bytes().to_vec()
 }
 
+/// Frame 30 — same shape as `accept`, so the receiver reads the session it names (and `parse_accept`
+/// decodes it).
+pub fn handled_elsewhere(my_hex: &str, session_id: &str) -> Vec<u8> {
+    accept(my_hex, session_id)
+}
+
 /// offer/answer/ice body: `[hex64][lp sessionId][json]`.
 pub fn signal(my_hex: &str, session_id: &str, json: &[u8]) -> Vec<u8> {
     let mut out = my_hex.as_bytes().to_vec();

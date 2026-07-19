@@ -2013,7 +2013,16 @@ final class FeedStore: ObservableObject {
         // block-check and to hand (as unchanged plaintext) to CallManager.
         let callFrameTypes: Set<UInt8> = [10, 11, 12, 16, 17, 18, 21, 22]
         if callFrameTypes.contains(type) {
-            guard let opened = social?.openCallFrame(frameType: type, blob: payload) else { return }
+            // Every rejection below is silent by design — a forged frame shouldn't announce itself.
+            // But that also means a LEGITIMATE frame dropped by one of these guards is invisible, and
+            // "the callee answers, the caller sits on Calling forever" is exactly what that looks
+            // like: the accept (11) is dropped here and nothing, anywhere, records that it arrived.
+            // Log which guard fired. The frame is already authenticated-or-not by this point, so the
+            // log leaks nothing an attacker doesn't already know they sent.
+            guard let opened = social?.openCallFrame(frameType: type, blob: payload) else {
+                HavenLog.call("call frame type=\(type) DROPPED — seal/signature did not verify")
+                return
+            }
             let verified = opened.senderHex.lowercased()
             let plaintext = Data(opened.data)
             let declared = String(data: plaintext.prefix(64), encoding: .utf8)?.lowercased() ?? ""
@@ -2021,14 +2030,29 @@ final class FeedStore: ObservableObject {
             // DEVICE key and carries the device bundle, so `verified` is a device id — resolve it to the
             // account that authorized it (a seeded sender signs with the account key, where the account
             // resolves to itself). This is the receive-side half of accepting device-signed frames.
-            let signerAccount = social?.accountForDevice(deviceHex: verified)?.lowercased() ?? verified
-            guard verified.count == 64, declared == signerAccount else { return }   // proven signer's account == self-declared
+            let resolved = social?.accountForDevice(deviceHex: verified)?.lowercased()
+            let signerAccount = resolved ?? verified
+            guard verified.count == 64, declared == signerAccount else {   // proven signer's account == self-declared
+                // If `resolved` is nil the sender signed as a DEVICE we can't map to an account —
+                // i.e. we don't hold their device roster — so a perfectly genuine frame from a
+                // seedless/linked device fails this check. That is a roster-propagation problem
+                // wearing a signature-mismatch costume; it is NOT a forgery.
+                HavenLog.call("call frame type=\(type) DROPPED — declared=\(declared.prefix(8)) != signerAccount=\(signerAccount.prefix(8)) (signer device=\(verified.prefix(8)), device→account \(resolved == nil ? "UNRESOLVED — we lack their roster" : "resolved"))")
+                return
+            }
             // Defense in depth: when the transport gave us a verified device id, it must resolve to the
             // SAME account as the signer (nil on the relay path, where the signature already did the work).
             if let senderDevice, senderDevice.count == 64,
                let acct = social?.accountForDevice(deviceHex: senderDevice)?.lowercased(),
-               acct != signerAccount { return }
-            if ConnectionsStore.shared.isBlocked(verified) { return }
+               acct != signerAccount {
+                HavenLog.call("call frame type=\(type) DROPPED — transport device \(senderDevice.prefix(8)) maps to \(acct.prefix(8)), signer is \(signerAccount.prefix(8))")
+                return
+            }
+            if ConnectionsStore.shared.isBlocked(verified) {
+                HavenLog.call("call frame type=\(type) DROPPED — sender \(verified.prefix(8)) is blocked")
+                return
+            }
+            HavenLog.call("call frame type=\(type) accepted from \(signerAccount.prefix(8))")
             payload = plaintext
         } else if [3, 13, 15].contains(type) {
             // Remaining sender-prefixed frames (media req + call audio/video placeholders): drop if

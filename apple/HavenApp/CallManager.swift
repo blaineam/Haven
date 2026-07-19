@@ -528,9 +528,19 @@ final class CallManager: NSObject, ObservableObject {
 
     /// Caller side: a callee accepted → stop re-inviting, bring up media + dial that peer.
     func handleAccept(_ payload: Data) {
-        guard active, payload.count >= 64 else { return }
+        guard active, payload.count >= 64 else {
+            HavenLog.call("ACCEPT ignored — active=\(active) bytes=\(payload.count) (no call in progress to answer)")
+            return
+        }
         let from = String(data: payload.prefix(64), encoding: .utf8) ?? ""
-        guard from.count == 64, knownContact(from) else { return }   // only a contact can accept (F3)
+        // The last gate before the caller leaves "Calling". `knownContact` keys on the ACCOUNT hex,
+        // so an accept that names a device id — or comes from someone missing from our contact list —
+        // is dropped here and the caller rings on forever with no indication why.
+        guard from.count == 64, knownContact(from) else {
+            HavenLog.call("ACCEPT DROPPED from=\(from.prefix(8)) — not a known contact; caller stays stuck on Calling")
+            return
+        }
+        HavenLog.call("ACCEPT from \(from.prefix(8)) — connecting → in-call")
         inviteTimer?.invalidate(); inviteTimer = nil
         connecting = false; inCall = true
         if !roster.contains(from) { roster.insert(from); refreshParticipants() }

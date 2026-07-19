@@ -3256,7 +3256,11 @@ final class FeedStore: ObservableObject {
         let haveLocal = MediaStore.shared.storagePath(for: ref).map { FileManager.default.fileExists(atPath: $0.path) } ?? false
         HavenLog.net("media REQ ref=\(ref.prefix(12)) have=\(haveLocal) from=\(requesterHex.prefix(8))")
         if let url = MediaStore.shared.storagePath(for: ref), FileManager.default.fileExists(atPath: url.path) {
-            if shouldServeNearby(ref) { sendMediaChunks(ref: ref, fileURL: url, to: requesterHex) }
+            if servingNow.contains("\(ref)|\(requesterHex)") {
+                HavenLog.net("media REQ ref=\(ref.prefix(12)) — already streaming to \(requesterHex.prefix(8)), ignoring")
+            } else if shouldServeNearby(ref) {
+                sendMediaChunks(ref: ref, fileURL: url, to: requesterHex)
+            }
             return
         }
         // I don't hold it locally — if I'm the circle's backup, restore it and serve.
@@ -3272,6 +3276,18 @@ final class FeedStore: ObservableObject {
         }
     }
 
+    /// Serves currently streaming, keyed `ref|requester`.
+    ///
+    /// A serve is SLOW by construction — 32 KB chunks, a KEM seal each, 12 ms apart — so a 50 MB
+    /// video takes ~19s and a 200 MB one over a minute. The requester re-asks every ~30s while it
+    /// waits, and the 25s throttle below would happily let that second request start ANOTHER full
+    /// serve of the same file. Three or four of those pile up, compete on the main actor, and none
+    /// of them ever finishes — so the media never arrives and the requester asks again, forever.
+    /// (Field evidence: one video re-requested 16 times in 20 minutes.)
+    ///
+    /// One serve per ref per requester at a time. A re-request during a transfer is exactly the
+    /// case where doing nothing is right — the bytes are already on their way.
+    private var servingNow: Set<String> = []
     private var servedAt: [String: UInt64] = [:]
     /// Rate-limit serving a media ref over nearby: the Mac re-requests every cycle while it waits, so
     /// without this the iPhone re-served the same blobs hundreds of times (↑323 for ~18 items), flooding
@@ -3327,6 +3343,9 @@ final class FeedStore: ObservableObject {
     /// large-file friendly. Chunk N's plaintext goes at offset N*chunkSize on reassembly.
     private func sendMediaChunks(ref: String, fileURL url: URL, to requesterHex: String) {
         guard let social, let handle = try? FileHandle(forReadingFrom: url) else { return }
+        // Marked for the whole stream and cleared when it ends (however it ends) — see `servingNow`.
+        let serveKey = "\(ref)|\(requesterHex)"
+        servingNow.insert(serveKey)
         let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         let total = max(1, (size + Self.mediaChunkSize - 1) / Self.mediaChunkSize)
         SyncMetrics.shared.nbMediaOut += 1
@@ -3338,8 +3357,11 @@ final class FeedStore: ObservableObject {
         // BACKGROUND queue. This loop streams thousands of chunks; running it on the main actor (as it did)
         // made the whole UI lag while syncing. It needs no engine, so it's safe off-main.
         if requesterHex == social.myNodeHex(), let ownKey = Self.ownMediaKey() {
-            DispatchQueue.global(qos: .utility).async {
-                defer { try? handle.close() }
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                defer {
+                    try? handle.close()
+                    Task { @MainActor in self?.servingNow.remove(serveKey) }
+                }
                 var index = 0
                 while true {
                     let chunk = handle.readData(ofLength: chunkSize)
@@ -3357,12 +3379,20 @@ final class FeedStore: ObservableObject {
         // FRIEND path: per-recipient KEM seal needs the engine, so keep it on the main actor (rare +
         // reachability-gated, so it isn't the lag source).
         Task { @MainActor in
-            defer { try? handle.close() }
+            defer {
+                try? handle.close()
+                self.servingNow.remove(serveKey)
+            }
             var index = 0
             while true {
                 let chunk = handle.readData(ofLength: chunkSize)
                 if chunk.isEmpty { break }
-                guard let sealed = try? social.sealMedia(recipientNodeHex: requesterHex, data: chunk) else { break }
+                // A failed seal abandons the transfer MID-FILE, leaving the requester with a partial
+                // set it can never complete — say so rather than stopping silently.
+                guard let sealed = try? social.sealMedia(recipientNodeHex: requesterHex, data: chunk) else {
+                    HavenLog.net("media serve ref=\(ref.prefix(12)) → \(requesterHex.prefix(8)): seal FAILED at chunk \(index); transfer abandoned")
+                    break
+                }
                 let out = Data([5]) + Self.chunkFrame(refData: refData, index: index, total: total, sealed: sealed)
                 nearby?.broadcast(out)
                 if let node { Task.detached { try? await node.sendToNode(nodeIdHex: requesterHex, payload: out) } }

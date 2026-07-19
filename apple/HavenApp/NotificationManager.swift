@@ -163,6 +163,19 @@ private final class NotificationTapRouter: NSObject, UNUserNotificationCenterDel
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        // A push that arrives while we're FRONTMOST comes here instead of to the NSE — so this was the
+        // one path that saw the sealed event inline (`ev`) and threw it away. The banner appeared and
+        // the message did not, for as long as the app stayed open: nothing ingested the envelope, and
+        // nothing drained the queue until the next cold launch. Exactly the "I get a notification for
+        // the thread I'm looking at and no message ever shows up" report.
+        //
+        // Ingest it here, same as the NSE and silent-push paths do. Bounded: the queue is capped at 64
+        // and ingestPushInbox does the receive() crypto off-main in one batch.
+        if let ev = notification.request.content.userInfo["ev"] as? String,
+           let env = Data(base64Encoded: ev) {
+            SharedInbox.append(env: env)
+            Task { @MainActor in FeedStore.shared.ingestPushInbox() }
+        }
         completionHandler([.banner, .sound])
     }
 }

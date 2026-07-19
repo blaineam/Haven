@@ -114,6 +114,9 @@ final class HavenAppDelegate: NSObject, NSApplicationDelegate {
     func application(_ application: NSApplication, didReceiveRemoteNotification userInfo: [String: Any]) {
         if let ev = userInfo["ev"] as? String, let env = Data(base64Encoded: ev) {
             SharedInbox.append(env: env)
+            // iOS reaches its drain via forceSync() at the end of its handler; macOS had no equivalent,
+            // so a stashed envelope sat here until the next launch while its banner was already up.
+            Task { @MainActor in FeedStore.shared.ingestPushInbox() }
         }
         if userInfo["remint"] != nil {
             Task { @MainActor in PresignStore.shared.remintAllOwned() }
@@ -179,6 +182,11 @@ struct HavenApp: App {
             switch phase {
             case .active:
                 AudioCoordinator.shared.appBecameActive()   // allow playback again now we're foreground
+                // Drain anything the NSE stashed while we were away. SharedInbox has always promised
+                // "next launch/foreground" and only ever delivered the launch half — so a message that
+                // arrived by push while backgrounded stayed invisible until the app was cold-started,
+                // even though its banner had already been shown. Cheap: no-ops when the queue is empty.
+                FeedStore.shared.ingestPushInbox()
                 #if os(iOS)
                 // Re-read the ring/silent switch: it may well have been flipped while we were away.
                 SilentSwitch.startMonitoring()

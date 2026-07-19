@@ -493,6 +493,29 @@ private fun StorageLimitPicker(label: String, options: List<Pair<Int, String>>, 
     }
 }
 
+/** [StorageLimitPicker]'s shape, but generic over the value type — the relay's two limits are an Int
+ *  (days) and a Long (bytes), and duplicating the whole picker to change one type would be worse. */
+@Composable
+private fun <T> RelayLimitRow(label: String, options: List<Pair<T, String>>, current: T, onSelect: (T) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val shown = options.firstOrNull { it.first == current }?.second ?: options.first().second
+    Box {
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { open = true }
+            .padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(label, color = HavenTheme.textPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Text(shown, color = HavenTheme.pink, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+        }
+        androidx.compose.material3.DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            options.forEach { (value, text) ->
+                androidx.compose.material3.DropdownMenuItem(
+                    text = { Text(text, color = if (value == current) HavenTheme.pink else HavenTheme.textPrimary) },
+                    onClick = { onSelect(value); open = false },
+                )
+            }
+        }
+    }
+}
+
 /**
  * BYO-storage (S3-compatible bucket) for multi-device self-sync — the Android counterpart of iOS's
  * owner-S3 transport. With these 5 fields, self-sync converges your own devices over your OWN bucket
@@ -588,6 +611,31 @@ private fun RelaysHubCard(context: android.content.Context) {
                 colors = androidx.compose.material3.SwitchDefaults.colors(
                     checkedThumbColor = Color.White, checkedTrackColor = HavenTheme.pink),
             )
+        }
+        // How much of your circles' media this phone is willing to hold, and for how long.
+        // Volunteering a device shouldn't mean volunteering the whole disk.
+        if (hosting) {
+            Spacer(Modifier.height(12.dp))
+            RelayLimitRow(
+                label = "Keep media for",
+                options = listOf(7 to "7 days", 30 to "30 days", 90 to "90 days", 365 to "1 year", 0 to "No limit"),
+                current = HavenNet.relayMediaMaxAgeDays,
+            ) { HavenNet.relayMediaMaxAgeDays = it }
+            Spacer(Modifier.height(8.dp))
+            RelayLimitRow(
+                label = "Media storage limit",
+                options = listOf(
+                    2L shl 30 to "2 GB", 8L shl 30 to "8 GB", 32L shl 30 to "32 GB",
+                    128L shl 30 to "128 GB", 0L to "No limit",
+                ),
+                current = HavenNet.relayMediaMaxBytes,
+            ) { HavenNet.relayMediaMaxBytes = it }
+            Spacer(Modifier.height(8.dp))
+            Text("Changes apply next time the relay starts — switch “Be a relay on this phone” off and " +
+                "on to apply them now. Whichever limit is reached first wins: old media is swept on age, " +
+                "and the oldest goes first if the size cap is hit. Your circles' undelivered messages are " +
+                "never swept — only media.",
+                color = HavenTheme.textSecondary, fontSize = 11.sp)
         }
     }
 

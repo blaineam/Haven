@@ -196,18 +196,32 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
                 ),
             )
             Spacer(Modifier.height(28.dp))
+            // THREE paths, each named for what it DOES. The two alternatives used to be small
+            // secondary links under an unlabelled default, so the ADDITIVE choice (another device)
+            // and the MIGRATING one (move the account) read as the same kind of thing, and neither
+            // said what happens to the device you already have. That is the part people get wrong,
+            // so each now states its consequence — in the same words the Devices screen uses, so the
+            // two screens can be followed side by side.
             BrandButton(
-                text = "Create my Haven",
+                text = "I'm new to Haven",
                 enabled = name.isNotBlank(),
             ) { onDone(name.trim(), emoji, avatarB64) }
-            Spacer(Modifier.height(6.dp))
-            TextButton(onClick = { enrollCode = ""; enrollError = false; showSeedless = true }) {
-                Text("Link to my other device (recommended)", color = HavenTheme.pink, fontSize = 14.sp)
-            }
-            TextButton(onClick = { code = ""; linkError = false; showLink = true }) {
-                Text("Copy my identity (advanced)", color = HavenTheme.textSecondary, fontSize = 13.sp)
-            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Create a brand-new identity on this device, with the name and photo above.",
+                color = HavenTheme.textSecondary, textAlign = TextAlign.Center, fontSize = 12.sp,
+            )
+            Spacer(Modifier.height(14.dp))
+            OnboardingChoice(
+                title = "Add this as another of my devices",
+                subtitle = "Use my existing Haven account here too. My other device stays signed in, and both stay in sync.",
+            ) { enrollCode = ""; enrollError = false; showSeedless = true }
             Spacer(Modifier.height(10.dp))
+            OnboardingChoice(
+                title = "Move my account to this device",
+                subtitle = "Bring my identity over from another device using a transfer code. Use this when replacing a device, not when adding one.",
+            ) { code = ""; linkError = false; showLink = true }
+            Spacer(Modifier.height(16.dp))
             Text(
                 "No phone number. No email. Your keys never leave this device.",
                 color = HavenTheme.textSecondary,
@@ -340,5 +354,26 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
                 }
             }
         }
+    }
+}
+
+/**
+ * One onboarding path: what it's called, and — the part that actually prevents mistakes — what it
+ * does to the device you already have. A card rather than a text link, so an alternative reads as a
+ * real choice next to the primary button instead of fine print under it.
+ */
+@Composable
+private fun OnboardingChoice(title: String, subtitle: String, onClick: () -> Unit) {
+    Column(
+        Modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(HavenTheme.card)
+            .clickable { onClick() }
+            .padding(14.dp),
+    ) {
+        Text(title, color = HavenTheme.textPrimary, fontSize = 15.sp,
+            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+        Spacer(Modifier.height(3.dp))
+        Text(subtitle, color = HavenTheme.textSecondary, fontSize = 12.sp)
     }
 }

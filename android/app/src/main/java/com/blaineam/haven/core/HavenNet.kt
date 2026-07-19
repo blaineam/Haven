@@ -2661,6 +2661,30 @@ object HavenNet : InboundListener {
     /** Start serving the circle's mailbox from this device + adopt it for every circle. The relay now
      *  ATTACHES to the messaging node's endpoint (one iroh node, two ALPNs) — running a second in-process
      *  iroh node made iroh churn paths unboundedly (the tens-of-GB leak). Relay id == account node id. */
+    /**
+     * How much of your circles' media this device is willing to keep, and for how long. Hosting a
+     * relay used to mean volunteering the whole disk with no way to say otherwise — the FFI simply
+     * never exposed the retention haven-net has supported all along. `0` on either means "no limit"
+     * for that dimension; with both set the sweep applies whichever frees space first.
+     *
+     * Defaults are deliberately generous but finite: an unbounded default is how a helpful relay
+     * quietly eats a phone. The mailbox TTL is deliberately NOT exposed — undelivered messages are a
+     * delivery guarantee, not disposable cache.
+     *
+     * Read at ATTACH time, so a change applies when the relay next starts; the UI says so rather
+     * than pretending a live change took effect.
+     */
+    const val DEFAULT_MEDIA_MAX_AGE_DAYS = 30
+    const val DEFAULT_MEDIA_MAX_BYTES = 32L * 1024 * 1024 * 1024   // 32 GB
+
+    var relayMediaMaxAgeDays: Int
+        get() = prefs.getInt("relay.mediaMaxAgeDays", DEFAULT_MEDIA_MAX_AGE_DAYS)
+        set(v) { prefs.edit().putInt("relay.mediaMaxAgeDays", v.coerceAtLeast(0)).apply(); bumpRelays() }
+
+    var relayMediaMaxBytes: Long
+        get() = prefs.getLong("relay.mediaMaxBytes", DEFAULT_MEDIA_MAX_BYTES)
+        set(v) { prefs.edit().putLong("relay.mediaMaxBytes", v.coerceAtLeast(0)).apply(); bumpRelays() }
+
     fun startHosting() {
         if (relayHost != null) return
         val n = node ?: run {
@@ -2670,8 +2694,14 @@ object HavenNet : InboundListener {
         }
         scope.launch {
             val dir = File(appContext.filesDir, "relay").apply { mkdirs() }.absolutePath
-            val h = runCatching { uniffi.haven_ffi.RelayServerHandle.attach(n, dir) }
-                .getOrElse { Log.e(TAG, "relay host attach failed", it); return@launch }
+            // attachWithLimits, not attach: attach runs media UNLIMITED, which is the whole disk.
+            val h = runCatching {
+                uniffi.haven_ffi.RelayServerHandle.attachWithLimits(
+                    n, dir,
+                    relayMediaMaxAgeDays.toUInt(),
+                    relayMediaMaxBytes.toULong(),
+                )
+            }.getOrElse { Log.e(TAG, "relay host attach failed", it); return@launch }
             relayHost = h
             withContext(Dispatchers.Main) { hosting.value = true }
             val nodeHex = h.nodeIdHex()   // == the account node id now

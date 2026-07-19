@@ -121,7 +121,12 @@ struct StoryViewer: View {
                             missing
                         }
                     }
+                    // Scale, then rotate, then move — the order the fingers did it in. A scale BELOW 1
+                    // deliberately stops short of filling the frame: that is how a landscape photo
+                    // shows whole, sitting over the blurred backdrop above rather than being cropped
+                    // to the portrait keyhole.
                     .scaleEffect(tf.mediaScale)
+                    .rotationEffect(.radians(tf.mediaRotation))
                     .offset(x: tf.mediaOffX * geo.size.width, y: tf.mediaOffY * geo.size.height)
                     // Blur a sensitive received story (local SCA or a circle member's federated flag).
                     .sensitiveContentGuard(ref: s.media.first ?? "", circleId: FeedStore.shared.activeCircleId,

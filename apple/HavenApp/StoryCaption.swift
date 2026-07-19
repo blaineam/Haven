@@ -59,9 +59,16 @@ enum StoryCaptions {
         var mediaScale = 1.0
         var mediaOffX = 0.0
         var mediaOffY = 0.0
+        /// Rotation the author applied while framing, in RADIANS. Travels with the scale and offset so
+        /// a viewer sees the same composition. Pairs with scales BELOW 1: shrinking a landscape photo
+        /// and tilting it slightly is how it sits over the blurred backdrop instead of being cropped
+        /// to a portrait keyhole.
+        var mediaRotation = 0.0
 
         var style: Style { Style(rawValue: styleRaw) ?? .glow }
-        var hasMediaTransform: Bool { mediaScale != 1.0 || mediaOffX != 0 || mediaOffY != 0 }
+        var hasMediaTransform: Bool {
+            mediaScale != 1.0 || mediaOffX != 0 || mediaOffY != 0 || mediaRotation != 0
+        }
         mutating func cycleFont() { font = (font + 1) % fontStyles.count }
         mutating func cycleStyle() { styleRaw = (styleRaw + 1) % Style.allCases.count }
     }
@@ -83,9 +90,11 @@ enum StoryCaptions {
         let t = caption.trimmingCharacters(in: .whitespacesAndNewlines)
         // Encode even with no caption when the author reframed the media (so the zoom travels).
         guard !t.isEmpty || s.hasMediaTransform else { return "" }
-        // color,font,style,x,y,size,mediaScale,mediaOffX,mediaOffY
-        let extra = String(format: "%.3f,%.3f,%.3f,%.3f,%.4f,%.4f",
-                           s.x, s.y, s.size, s.mediaScale, s.mediaOffX, s.mediaOffY)
+        // color,font,style,x,y,size,mediaScale,mediaOffX,mediaOffY,mediaRotation
+        // Rotation is APPENDED, so a client that only knows the 9-field form reads everything it
+        // understands and ignores the tail rather than failing to decode the story at all.
+        let extra = String(format: "%.3f,%.3f,%.3f,%.3f,%.4f,%.4f,%.4f",
+                           s.x, s.y, s.size, s.mediaScale, s.mediaOffX, s.mediaOffY, s.mediaRotation)
         return "\u{1}\(s.color),\(s.font),\(s.styleRaw),\(extra)\u{1}\(t)"
     }
     static func decode(_ body: String) -> (text: String, spec: Spec) {
@@ -102,6 +111,7 @@ enum StoryCaptions {
                     if n.count >= 9, let ms = Double(n[6]), let mx = Double(n[7]), let my = Double(n[8]) {
                         spec.mediaScale = ms; spec.mediaOffX = mx; spec.mediaOffY = my
                     }
+                    if n.count >= 10, let rot = Double(n[9]) { spec.mediaRotation = rot }
                     return (String(parts[1]), spec)
                 }
             }

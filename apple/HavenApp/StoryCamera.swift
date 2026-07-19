@@ -1265,6 +1265,7 @@ struct StoryComposerView: View {
     @State private var mediaBaseScale: CGFloat = 1
     @State private var mediaBaseOffX: CGFloat = 0
     @State private var mediaBaseOffY: CGFloat = 0
+    @State private var mediaBaseRotation: Double = 0
     @FocusState private var captionFocused: Bool
 
     var body: some View {
@@ -1284,10 +1285,29 @@ struct StoryComposerView: View {
                         if editingCaption { captionFocused = false; editingCaption = false }
                         else { editingCaption = true }
                     }
+                    // Pinch scales, twist rotates, drag moves — all at once, the way every photo
+                    // editor behaves. The floor is 0.25 rather than 1: clamping to 1 meant the media
+                    // could only ever be zoomed IN, so a LANDSCAPE photo could not be made to fit a
+                    // portrait story at all — it was cropped to whatever fell inside the keyhole.
+                    // Shrinking it below full-bleed is exactly what lets it sit whole over the
+                    // blurred backdrop, which is why zoom-out and rotation land together.
                     .gesture(editingCaption ? nil : SimultaneousGesture(
-                        MagnificationGesture()
-                            .onChanged { v in captionSpec.mediaScale = min(max(1, mediaBaseScale * v), 4) }
-                            .onEnded { _ in mediaBaseScale = captionSpec.mediaScale },
+                        SimultaneousGesture(
+                            MagnificationGesture()
+                                .onChanged { v in captionSpec.mediaScale = min(max(0.25, mediaBaseScale * v), 4) }
+                                .onEnded { _ in mediaBaseScale = captionSpec.mediaScale },
+                            RotationGesture()
+                                .onChanged { a in captionSpec.mediaRotation = mediaBaseRotation + a.radians }
+                                .onEnded { _ in
+                                    // Snap to level when they land within a couple of degrees, so
+                                    // "straight" is reachable with fingers instead of luck.
+                                    let deg = captionSpec.mediaRotation * 180 / .pi
+                                    if abs(deg.truncatingRemainder(dividingBy: 90)) < 2.5 {
+                                        captionSpec.mediaRotation = (deg / 90).rounded() * 90 * .pi / 180
+                                    }
+                                    mediaBaseRotation = captionSpec.mediaRotation
+                                }
+                        ),
                         DragGesture()
                             .onChanged { v in
                                 captionSpec.mediaOffX = mediaBaseOffX + v.translation.width / max(geo.size.width, 1)
@@ -1419,6 +1439,7 @@ struct StoryComposerView: View {
         // attached the video stays muted and you hear the song; with no track you hear the clip itself.
         StoryMediaCanvas(mediaRef: draft.mediaRef,
                          scale: captionSpec.mediaScale, offX: captionSpec.mediaOffX, offY: captionSpec.mediaOffY,
+                         rotation: captionSpec.mediaRotation,
                          filter: filter,
                          muted: !previewSoundOn || track != nil)
     }
@@ -2130,6 +2151,8 @@ struct StoryMediaCanvas: View {
     var scale: CGFloat = 1
     var offX: CGFloat = 0
     var offY: CGFloat = 0
+    /// Author's rotation in RADIANS. Zero for every existing story and for callers that don't frame.
+    var rotation: Double = 0
     /// Live preview-only filter, applied to both stills and video frames here for instant
     /// feedback; it is baked into the actual media bytes at share time. Defaults to `.original`.
     var filter: HavenFilter = .original
@@ -2183,7 +2206,12 @@ struct StoryMediaCanvas: View {
                                 .frame(width: geo.size.width, height: geo.size.height)
                         }
                     }
+                    // Scale → rotate → move, matching StoryViewer exactly so the composer stays
+                    // WYSIWYG. A scale below 1 pulls the media in off the edges and the blurred
+                    // backdrop above shows around it — which is how a LANDSCAPE item gets shared
+                    // whole in a portrait story instead of being cropped to the middle of itself.
                     .scaleEffect(scale)
+                    .rotationEffect(.radians(rotation))
                     .offset(x: offX * geo.size.width, y: offY * geo.size.height)
                 }
             }

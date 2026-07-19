@@ -9,6 +9,20 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [1.1.1]
 
+### Security
+
+- **Link previews no longer load themselves.** A link in a message used to be fetched by *your* device
+  the moment the message scrolled into view, without you touching it. That quietly told whoever sent it
+  when you read it and what your IP address is — a read receipt you never agreed to — and pointed your
+  device at whatever address they chose to name, including addresses on your own home network that only
+  your device can reach. Previews now wait for you to tap **Load preview**, and before anything is
+  fetched Haven refuses destinations that are not on the public internet: your own machine, your home
+  network, and the link-local addresses used to reach cloud metadata. Redirects are re-checked at every
+  hop on Android rather than followed blindly. The 256 KB limit on a page is now real — the whole page
+  used to be pulled into memory and only *then* trimmed, so an endless reply could exhaust it — poster
+  images are capped and size-checked before being drawn, and the preview cache is bounded instead of
+  growing for as long as the app is open. See [`docs/SECURITY.md`](docs/SECURITY.md#link-previews-peer-supplied-urls).
+
 ### Fixed
 
 - **A message could reach one of your devices and none of the others.** A friend's DM arrived on the

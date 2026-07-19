@@ -11,7 +11,9 @@ struct OGHarness: View {
             Color.black.ignoresSafeArea()
             VStack(alignment: .trailing, spacing: 8) {
                 Spacer()
-                LinkPreviewCard(url: url)
+                // autoLoad: this harness exists to check the poster's layout, so it needs the fetch
+                // to happen without a tap. Safe here and only here — DEBUG-only, first-party URL.
+                LinkPreviewCard(url: url, autoLoad: true)
                     .frame(maxWidth: 260)
                     .padding(8)
                     .background(HavenTheme.brand, in: RoundedRectangle(cornerRadius: 18))

@@ -250,14 +250,32 @@ final class LinkMetaLoader: ObservableObject {
     @Published var title = ""
     @Published var host = ""
     @Published var image: PlatformImage?
+    @Published var isLoading = false
+    /// True once a fetch has been asked for, whatever came back — the card stops offering to load.
+    @Published var didAttempt = false
     private var started = false
 
     func load(_ url: URL) {
         guard !started else { return }
         started = true
         host = url.host ?? ""
+        isLoading = true
+        didAttempt = true
+        // Vet the destination BEFORE handing it to LPMetadataProvider, off the main thread because
+        // resolution blocks. See LinkSafety for what this does and does not cover on Apple.
+        Task.detached(priority: .utility) { [weak self] in
+            guard LinkSafety.resolvesPublicly(url) else {
+                await MainActor.run { self?.isLoading = false }
+                return
+            }
+            await MainActor.run { self?.beginFetch(url) }
+        }
+    }
+
+    private func beginFetch(_ url: URL) {
         let provider = LPMetadataProvider()
         provider.startFetchingMetadata(for: url) { [weak self] meta, _ in
+            Task { @MainActor in self?.isLoading = false }
             guard let meta else { return }
             let title = meta.title ?? ""
             let host = meta.url?.host ?? meta.originalURL?.host ?? ""
@@ -284,8 +302,19 @@ final class LinkMetaLoader: ObservableObject {
 /// A tappable Open Graph preview for a URL. Renders the fetched poster image at its NATURAL aspect
 /// ratio above the title + host in a custom card (the system `LPLinkView` cropped the image to a
 /// thin band and overflowed the bubble). Tapping opens it in the in-app browser.
+///
+/// NOTHING IS FETCHED UNTIL YOU ASK FOR IT. The metadata fetch used to fire from `.onAppear`, which
+/// handed any circle member a network primitive aimed at the RECIPIENT's device: putting a link in a
+/// message made the reader's device connect to it on render, with no tap. That leaks the reader's IP
+/// and the moment they read — a read receipt nobody consented to — and points their device at
+/// whatever host the sender named. Loading is now behind an explicit "Load preview" tap, and
+/// `LinkSafety` vets the destination before the fetch starts.
+///
+/// `autoLoad` exists for the DEBUG layout harness, which needs a poster on screen to check bubble
+/// geometry and uses a first-party URL. Do not set it on a surface that renders peer content.
 struct LinkPreviewCard: View {
     let url: URL
+    var autoLoad: Bool = false
     @StateObject private var meta = LinkMetaLoader()
 
     var body: some View {
@@ -304,6 +333,18 @@ struct LinkPreviewCard: View {
                     if !meta.host.isEmpty {
                         Text(meta.host).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
+                    // Its own tap target inside the card, so the card's tap still means "open the
+                    // link" — one control, one meaning.
+                    if !meta.didAttempt {
+                        Button { meta.load(url) } label: {
+                            Text("Load preview").font(.caption).foregroundStyle(HavenTheme.pink)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 2)
+                    } else if meta.isLoading {
+                        Text("Loading preview…").font(.caption).foregroundStyle(.secondary)
+                            .padding(.top, 2)
+                    }
                 }
                 .padding(.horizontal, 12).padding(.vertical, 10)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -312,7 +353,7 @@ struct LinkPreviewCard: View {
             .clipShape(RoundedRectangle(cornerRadius: 14))
         }
         .buttonStyle(.plain)
-        .onAppear { meta.load(url) }
+        .onAppear { if autoLoad { meta.load(url) } }
     }
 
     private var displayTitle: String {

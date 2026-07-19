@@ -142,6 +142,37 @@ desktop's block POST is refused (400). No data is exposed by this; it is a parit
 - **Biometric circle locks**: gate the in-app UI for a circle. They are a privacy convenience, not an
   access-control boundary for a fully-compromised, unlocked device.
 
+## Link previews (peer-supplied URLs)
+
+A link preview is the only place where a **peer's message decides what your device connects to**, so
+it is treated as hostile input rather than as a rendering detail.
+
+- **Nothing is fetched on render.** Previews load only when you tap **Load preview**. Automatic
+  fetching turned any message into an IP-and-online-presence beacon aimed at the *recipient* — the
+  sender learned when you read and from where, with no tap and no consent — and let a sender aim your
+  device at a host of their choosing. Note that Haven sets `NSAllowsLocalNetworking` (for the LAN
+  relay media path), so App Transport Security does **not** backstop this; the check below does.
+- **Non-public destinations are refused** before connecting: loopback, RFC1918 private space,
+  link-local (including `169.254.169.254` cloud metadata), CGNAT `100.64/10`, IPv6 unique-local,
+  multicast and reserved ranges. Every address a host resolves to must be public — one private record
+  disqualifies the host. Implemented in `LinkSafety` on both Android and Apple.
+- **Redirects are followed by hand and re-vetted per hop** (max 3) on Android, because a public host
+  answering `302 → 169.254.169.254` otherwise defeats the destination check. On Apple the fetch is
+  `LPMetadataProvider`, which follows redirects internally with no hook to inspect them; that residual
+  is bounded by the tap gate — after an explicit tap the exposure matches tapping the link into the
+  in-app browser, which would follow the same redirect.
+- **Transfers are bounded**, not truncated after the fact: 256 KB for HTML, 2 MB for a poster image,
+  with connect/read timeouts. Poster images are size-checked from their header before rasterizing, so
+  a small file declaring enormous dimensions cannot blow the heap.
+- **The preview cache is bounded** (LRU, 64 entries) and negative results expire, so browsing a busy
+  circle cannot grow it without limit and one failed fetch is not permanent.
+
+Residual, stated plainly: destination checking is resolve-then-connect, so a DNS rebind with a very
+short TTL could still swap the answer between the check and the connection. Closing that needs
+dialing the vetted IP directly while carrying the original `Host` header. The exposure is narrow —
+it requires winning a sub-second race to reach a LAN address whose response is never surfaced beyond
+a title — and it cannot happen at all without an explicit tap on that specific link.
+
 ## Third-party services
 
 - **Apple Push Notification service (APNs)** via a self-hosted **Cloudflare Worker** push server — the

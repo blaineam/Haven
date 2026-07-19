@@ -62,6 +62,23 @@ pub fn handled_elsewhere(my_hex: &str, session_id: &str) -> Vec<u8> {
     accept(my_hex, session_id)
 }
 
+/// Frame 22 body: `[hex64][lp sessionId][on byte]` — tell peers my camera is on/off, so they show my
+/// avatar rather than a frozen last frame.
+pub fn camera_state(my_hex: &str, session_id: &str, on: bool) -> Vec<u8> {
+    let mut out = my_hex.as_bytes().to_vec();
+    lp_append(&mut out, session_id.as_bytes());
+    out.push(if on { 1 } else { 0 });
+    out
+}
+
+/// `(from, camera_on)`. iOS/Android read only the leading hex and the trailing flag byte, so we
+/// match that rather than re-parsing the session id.
+pub fn parse_camera_state(payload: &[u8]) -> Option<(String, bool)> {
+    let from = hex_head(payload)?;
+    let on = payload.last().copied() == Some(1);
+    Some((from, on))
+}
+
 /// offer/answer/ice body: `[hex64][lp sessionId][json]`.
 pub fn signal(my_hex: &str, session_id: &str, json: &[u8]) -> Vec<u8> {
     let mut out = my_hex.as_bytes().to_vec();

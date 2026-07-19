@@ -3589,6 +3589,9 @@ const ICE_SERVERS = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.goog
 const call = {
   session: "", me: "", name: "", roster: new Set(), pcs: new Map(),
   localStream: null, micOn: true, camOn: true,
+  /// Peers whose camera is OFF, per frame 22 — their tile shows an avatar instead of the frozen
+  /// last frame their stopped track left behind. Cleared with the rest of the call state.
+  camOff: {},
   ringing: false, connecting: false, inCall: false, video: true,
   screenOn: false, screenStream: null, camTrack: null,
   ringTimer: null, ended: new Map(),
@@ -3808,6 +3811,14 @@ async function onCallEvent(payload) {
 
       break;
     }
+    // A peer's camera went on or off (frame 22). Their track stops producing frames either way, so
+    // without this their tile holds the last frame it received and looks like a live, frozen person.
+    case "camera": {
+      if (!call.camOff) call.camOff = {};
+      if (c.on) delete call.camOff[c.from]; else call.camOff[c.from] = true;
+      renderCallOverlay();
+      break;
+    }
     case "hangup": {
       const pc = call.pcs.get(c.from); if (pc) pc.close();
       call.pcs.delete(c.from); call.roster.delete(c.from);
@@ -3867,7 +3878,7 @@ function teardownCall() {
   }
   clearTimeout(call.ringTimer); call.ringTimer = null;
   if (call.screenStream) { call.screenStream.getTracks().forEach((t) => t.stop()); call.screenStream = null; }
-  call.screenOn = false; call.camTrack = null;
+  call.screenOn = false; call.camTrack = null; call.camOff = {};
   call.pcs.forEach((pc) => pc.close()); call.pcs.clear();
   if (call.localStream) call.localStream.getTracks().forEach((t) => t.stop());
   call.localStream = null; call.remote = {};
@@ -3877,7 +3888,18 @@ function teardownCall() {
 }
 
 function toggleMic() { call.micOn = !call.micOn; if (call.localStream) call.localStream.getAudioTracks().forEach((t) => (t.enabled = call.micOn)); renderCallOverlay(); }
-function toggleCam() { call.camOn = !call.camOn; if (call.localStream) call.localStream.getVideoTracks().forEach((t) => (t.enabled = call.camOn)); renderCallOverlay(); }
+function toggleCam() {
+  call.camOn = !call.camOn;
+  if (call.localStream) call.localStream.getVideoTracks().forEach((t) => (t.enabled = call.camOn));
+  // TELL the other participants (frame 22). Disabling the track locally stops sending frames, so
+  // without this every peer is left staring at our frozen last frame instead of our avatar. iOS and
+  // Android both send and handle this; desktop declared neither, so it was the odd one out.
+  const peers = invitees();
+  if (peers.length) {
+    invoke("call_camera_state", { sessionId: call.session, on: call.camOn, to: peers }).catch(() => {});
+  }
+  renderCallOverlay();
+}
 
 // Swap the outgoing video track on every peer connection without renegotiating (replaceTrack).
 function replaceOutgoingVideo(track) {
@@ -3948,9 +3970,17 @@ function renderCallOverlay() {
   grid.append(localTile);
   for (const peer of invitees()) {
     const tile = el("div", { class: "call-tile" });
-    const v = el("video", { autoplay: "", playsinline: "" });
-    if (call.remote && call.remote[peer]) v.srcObject = call.remote[peer];
-    tile.append(v, el("span", { class: "call-name" }, displayNameFor(peer)));
+    const camOff = !!(call.camOff && call.camOff[peer]);
+    // Camera off (told to us by frame 22) → show their avatar, NOT the frozen last frame their
+    // stopped track left behind.
+    if (camOff) {
+      tile.append(el("div", { class: "avatar big" }, initials(displayNameFor(peer))));
+    } else {
+      const v = el("video", { autoplay: "", playsinline: "" });
+      if (call.remote && call.remote[peer]) v.srcObject = call.remote[peer];
+      tile.append(v);
+    }
+    tile.append(el("span", { class: "call-name" }, displayNameFor(peer) + (camOff ? " (camera off)" : "")));
     grid.append(tile);
   }
   root.replaceChildren(el("div", { class: "modal-backdrop" }, el("div", { class: "call-overlay-full" },

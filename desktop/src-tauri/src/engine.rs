@@ -3272,7 +3272,7 @@ impl Engine {
         let t = payload[0];
         let body = payload[1..].to_vec();
         // Call/media frames lead with a 64-char sender hex — drop blocked senders early.
-        if matches!(t, wire::MEDIA_REQ | wire::CALL_INVITE | wire::CALL_ACCEPT | wire::CALL_HANGUP | wire::SDP_OFFER | wire::SDP_ANSWER | wire::ICE | wire::GROUP_INVITE | wire::MEDIA_WANTED | wire::MEDIA_AVAILABLE) {
+        if matches!(t, wire::MEDIA_REQ | wire::CALL_INVITE | wire::CALL_ACCEPT | wire::CALL_HANGUP | wire::SDP_OFFER | wire::SDP_ANSWER | wire::ICE | wire::GROUP_INVITE | wire::CALL_CAMERA | wire::MEDIA_WANTED | wire::MEDIA_AVAILABLE) {
             if body.len() >= 64 {
                 let head = String::from_utf8_lossy(&body[..64]).into_owned();
                 if head.len() == 64 && self.prefs.lock().unwrap().blocked.contains(&head) {
@@ -3292,7 +3292,8 @@ impl Engine {
                 // CALL_HANDLED (30) rides the same sealed+signed path: it can silence a ringing
                 // device, so it must be no more forgeable than an invite or a hangup.
                 wire::CALL_INVITE | wire::GROUP_INVITE | wire::CALL_ACCEPT | wire::CALL_HANGUP
-                | wire::SDP_OFFER | wire::SDP_ANSWER | wire::ICE | wire::CALL_HANDLED => me.handle_call(t, &body),
+                | wire::SDP_OFFER | wire::SDP_ANSWER | wire::ICE | wire::CALL_HANDLED
+                | wire::CALL_CAMERA => me.handle_call(t, &body),
                 // 31/32 are media frames, not call signaling, so they're handled here rather than
                 // emitted to the UI — but they borrow the call path's sealing, because one asks an
                 // author to spend upload bandwidth and the other triggers a notification and a fetch.
@@ -5541,6 +5542,11 @@ impl Engine {
                 let kind = match t { wire::SDP_OFFER => "offer", wire::SDP_ANSWER => "answer", _ => "ice" };
                 serde_json::json!({ "kind": kind, "from": s.from, "sessionId": s.session_id, "json": String::from_utf8_lossy(&s.json) })
             }),
+            // Frame 22 — a peer's camera went on/off. Without it a peer who stops their video
+            // leaves everyone staring at a frozen last frame instead of their avatar.
+            wire::CALL_CAMERA => callwire::parse_camera_state(body).map(|(from, on)| {
+                serde_json::json!({ "kind": "camera", "from": from, "on": on })
+            }),
             _ => None,
         };
         if let Some(ev) = ev {
@@ -5988,6 +5994,16 @@ impl Engine {
             .map(|d| d.to_lowercase())
             .filter(|d| *d != mine && *d != account)
             .collect()
+    }
+
+    /// Frame 22 — tell the other participants my camera just went on or off. Without it, disabling
+    /// the local video track leaves every peer staring at a frozen last frame instead of my avatar.
+    /// Bounded by the call roster the caller passes; this is a user action, not a tick.
+    pub fn call_camera_state(self: &Arc<Self>, session_id: String, on: bool, to: Vec<String>) {
+        let frame = callwire::camera_state(&self.node_id_hex(), &session_id, on);
+        for t in to {
+            self.send_call_frame(wire::CALL_CAMERA, &frame, &t);
+        }
     }
 
     pub fn call_hangup(self: &Arc<Self>, to: Vec<String>) {

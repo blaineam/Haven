@@ -1153,6 +1153,11 @@ pub fn call_handled_elsewhere(engine: Eng, session_id: String) {
 }
 
 #[tauri::command]
+pub fn call_camera_state(engine: Eng, session_id: String, on: bool, to: Vec<String>) {
+    engine.call_camera_state(session_id, on, to);
+}
+
+#[tauri::command]
 pub fn call_signal(engine: Eng, kind: String, session_id: String, json: String, to: String) {
     engine.call_signal(kind, session_id, json, to);
 }

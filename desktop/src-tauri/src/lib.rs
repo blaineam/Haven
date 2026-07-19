@@ -435,6 +435,7 @@ pub fn run() {
             commands::call_hangup,
             commands::call_handled_elsewhere,
             commands::call_signal,
+            commands::call_camera_state,
             commands::my_node_hex,
             commands::identities,
             commands::add_identity,

@@ -27,6 +27,9 @@ pub const ICE: u8 = 18;
 pub const RELAY_NODE: u8 = 19;
 pub const PRESIGN: u8 = 20;
 pub const GROUP_INVITE: u8 = 21;
+/// A peer's camera turned on/off mid-call. Without it a peer who stops their video leaves everyone
+/// staring at a frozen last frame instead of their avatar. iOS/Android both send and handle it.
+pub const CALL_CAMERA: u8 = 22;
 pub const DEVICE_ENROLL: u8 = 24; // a device asks its primary to authorize it (multi-device, iOS-compat)
 pub const DEVICE_GRANT: u8 = 25; // the primary returns a signed credential to the requesting device
 pub const DEVICE_ROSTER: u8 = 27; // a contact's signed device roster announce (iOS/Android-compat)

@@ -178,6 +178,12 @@ pub struct Engine {
     /// PRIMARY side: verified frame-28 requests awaiting the user's confirm (surfaced to the UI).
     enroll_requests: StdMutex<Vec<PendingEnrollRequest>>,
     sched_counter: std::sync::atomic::AtomicU64,
+    /// True while a contact-roster pull pass is running, and when each contact was last ASKED.
+    /// Both bound the pull: a contact whose roster is on NO relay never becomes resolvable, so
+    /// without them the sync tick re-dials them forever, passes overlap, and iroh answers the
+    /// resulting dial storm with unbounded path-discovery churn. It took a Mac to 28 GB.
+    roster_pull_in_flight: std::sync::atomic::AtomicBool,
+    roster_pull_at: StdMutex<HashMap<String, std::time::Instant>>,
     relay_clients: TokioMutex<HashMap<String, Arc<RelayClient>>>,
     /// Per-relay backoff health, keyed by node hex — drives graceful fallback.
     relay_health: StdMutex<HashMap<String, crate::relayhealth::RelayHealth>>,
@@ -388,6 +394,8 @@ impl Engine {
             enroll_tickets: StdMutex::new(Vec::new()),
             enroll_requests: StdMutex::new(Vec::new()),
             sched_counter: std::sync::atomic::AtomicU64::new(0),
+            roster_pull_in_flight: std::sync::atomic::AtomicBool::new(false),
+            roster_pull_at: StdMutex::new(HashMap::new()),
             relay_clients: TokioMutex::new(HashMap::new()),
             relay_health: StdMutex::new(HashMap::new()),
             s3: TokioMutex::new(None),
@@ -470,6 +478,8 @@ impl Engine {
             enroll_tickets: StdMutex::new(Vec::new()),
             enroll_requests: StdMutex::new(Vec::new()),
             sched_counter: std::sync::atomic::AtomicU64::new(0),
+            roster_pull_in_flight: std::sync::atomic::AtomicBool::new(false),
+            roster_pull_at: StdMutex::new(HashMap::new()),
             relay_clients: TokioMutex::new(HashMap::new()),
             relay_health: StdMutex::new(HashMap::new()),
             s3: TokioMutex::new(None),
@@ -2973,13 +2983,40 @@ impl Engine {
             })
             .cloned()
             .collect();
-        if !unresolved.is_empty() {
-            log::info!("devroster: {} contact(s) have no resolvable devices — pulling from relays", unresolved.len());
+        // STRICTLY BOUNDED — see the note on `roster_pull_in_flight`. One pass at a time, a few
+        // contacts per pass, and a long per-contact backoff, so an unresolvable contact costs
+        // almost nothing instead of being re-dialled on every tick forever.
+        const ROSTER_PULL_PER_PASS: usize = 3;
+        const ROSTER_PULL_BACKOFF: std::time::Duration = std::time::Duration::from_secs(600);
+        let due: Vec<String> = {
+            let seen = self.roster_pull_at.lock().unwrap();
+            unresolved
+                .into_iter()
+                .filter(|hex| {
+                    seen.get(&hex.to_lowercase())
+                        .map(|t| t.elapsed() > ROSTER_PULL_BACKOFF)
+                        .unwrap_or(true)
+                })
+                .take(ROSTER_PULL_PER_PASS)
+                .collect()
+        };
+        if !due.is_empty()
+            && !self
+                .roster_pull_in_flight
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            log::info!("devroster: pulling {} contact roster(s) from relays", due.len());
             let me = self.clone();
             tauri::async_runtime::spawn(async move {
-                for hex in unresolved {
+                for hex in due {
+                    me.roster_pull_at
+                        .lock()
+                        .unwrap()
+                        .insert(hex.to_lowercase(), std::time::Instant::now());
                     me.fetch_contact_roster(&hex).await;
                 }
+                me.roster_pull_in_flight
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
             });
         }
         // Re-emit our own relay id whenever we re-greet contacts, so a peer that just came online surfaces

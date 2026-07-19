@@ -29,6 +29,12 @@ import java.io.File
 import java.security.MessageDigest
 
 private const val TAG = "HavenNet"
+
+/** Contacts whose rosters we pull per sync pass, and how long before re-asking the same one.
+ *  Both exist to keep an unresolvable contact from being re-dialled every tick forever — see the
+ *  bounding note where the pull is kicked off. */
+private const val ROSTER_PULL_PER_PASS = 3
+private const val ROSTER_PULL_BACKOFF_MS = 600_000L   // 10 min
 const val DEFAULT_CIRCLE = "default"
 
 /** A known contact (their verified identity + display name). */
@@ -1540,13 +1546,36 @@ object HavenNet : InboundListener {
         // included, then fails the declared-vs-signer check and is dropped as a forgery. Their roster is
         // already sitting on the relay, so ask for it. Cheap and idempotent: only contacts we currently
         // can't resolve, and the ingest is a no-op once we hold it.
-        val unresolved = contacts.map { it.idHex }.filter { hex ->
-            runCatching { social.deviceNodeIdsFor(hex) }.getOrDefault(emptyList())
-                .all { it.equals(hex, ignoreCase = true) }
-        }
-        if (unresolved.isNotEmpty()) {
-            Log.i(TAG, "devroster: ${unresolved.size} contact(s) have no resolvable devices — pulling from relays")
-            scope.launch { for (hex in unresolved) runCatching { fetchContactRoster(hex) } }
+        //
+        // STRICTLY BOUNDED, and it must stay that way. A contact whose roster is on NO relay never
+        // becomes resolvable, so an unguarded version re-asks them forever: one pass per sync tick,
+        // every relay, per contact, with long network timeouts — so passes overlap and pile up
+        // without limit. That is a dial storm, and iroh answers a dial storm with unbounded
+        // path-discovery churn (the self-connect leak / open_path_on_conn OOM already on record).
+        // It took a Mac to 28 GB before it was caught. One pass at a time, a few per pass, long
+        // per-contact backoff.
+        if (!rosterPullInFlight) {
+            val due = contacts.map { it.idHex }
+                .filter { hex ->
+                    runCatching { social.deviceNodeIdsFor(hex) }.getOrDefault(emptyList())
+                        .all { it.equals(hex, ignoreCase = true) }
+                }
+                .filter { rosterPullDue(it) }
+                .take(ROSTER_PULL_PER_PASS)
+            if (due.isNotEmpty()) {
+                rosterPullInFlight = true
+                Log.i(TAG, "devroster: pulling ${due.size} contact roster(s) from relays")
+                scope.launch {
+                    try {
+                        for (hex in due) {
+                            noteRosterPullAttempt(hex)
+                            runCatching { fetchContactRoster(hex) }
+                        }
+                    } finally {
+                        rosterPullInFlight = false
+                    }
+                }
+            }
         }
         if (resendHistory) lastHistoryResendMs = nowMs
         reannounceOwnRelay()   // frame 19 was a one-shot at relay start; re-emit so peers reliably learn it
@@ -1692,6 +1721,23 @@ object HavenNet : InboundListener {
      * relay can serve these bytes but cannot forge or alter them. iOS SharedStore.fetchContactRoster
      * parity.
      */
+    /** True while a roster-pull pass is running — see the bounding note at the call site. */
+    @Volatile private var rosterPullInFlight = false
+    /** When each contact's roster was last ASKED for, so an unresolvable contact costs ~nothing. */
+    private val rosterPullAt = mutableMapOf<String, Long>()
+
+    private fun rosterPullDue(accountHex: String): Boolean {
+        val last = synchronized(rosterPullAt) { rosterPullAt[accountHex.lowercase()] } ?: return true
+        return System.currentTimeMillis() - last > ROSTER_PULL_BACKOFF_MS
+    }
+
+    private fun noteRosterPullAttempt(accountHex: String) {
+        synchronized(rosterPullAt) {
+            rosterPullAt[accountHex.lowercase()] = System.currentTimeMillis()
+            if (rosterPullAt.size > 500) rosterPullAt.clear()
+        }
+    }
+
     suspend fun fetchContactRoster(accountHex: String): Boolean {
         val acct = accountHex.lowercase()
         if (acct.length != 64) return false

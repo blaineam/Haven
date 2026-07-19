@@ -5354,15 +5354,95 @@ impl HavenSocial {
         let sig = &blob[8 + blen..8 + blen + slen];
         let sealed = blob[8 + blen + slen..].to_vec();
         let plaintext = self.open_media(sealed)?;
-        let me_hex = {
+        // The sender signs over the hex it ADDRESSED. Under device-id transport that may be one of
+        // our DEVICE ids rather than our account id — a linked device dials and is dialed as itself.
+        // Verifying only against the account id therefore rejected genuine frames as forgeries, which
+        // is why a call could ring, be answered, and never connect: every invite (21) and hangup (12)
+        // was discarded at this line.
+        //
+        // Accepting either identity does NOT weaken the recipient binding. Its purpose is to stop a
+        // frame captured for one USER being replayed at another; both hexes here are OURS, so a frame
+        // addressed to either is addressed to us. A frame addressed to anyone else still fails both.
+        let (me_hex, my_device_hex) = {
             let st = self.state.lock().unwrap();
-            hex(&st.me().node_id_bytes())
+            (
+                hex(&st.me().node_id_bytes()),
+                st.device.as_ref().map(|d| hex(&d.public().node_id_bytes())),
+            )
         };
         let sender = HavenId::from_bytes(bundle).ok()?;
-        sender
+        let addressed_to_us = sender
             .verify(&call_signing_bytes(&me_hex, frame_type, &plaintext), sig)
-            .ok()?;
+            .is_ok()
+            || my_device_hex.as_deref().is_some_and(|dev| {
+                sender.verify(&call_signing_bytes(dev, frame_type, &plaintext), sig).is_ok()
+            });
+        if !addressed_to_us {
+            return None;
+        }
         Some(SignedCallFrame { sender_hex: hex(&sender.node_id_bytes()), data: plaintext })
+    }
+
+    /// Why [`Self::open_call_frame`] refused a frame. Diagnostics only — it changes nothing and
+    /// decides nothing; the caller logs the string when the real open returns None.
+    ///
+    /// The two failures mean OPPOSITE things and were previously indistinguishable, which is how
+    /// "call frame DROPPED — seal/signature did not verify" could be either a fatal bug or entirely
+    /// expected traffic:
+    ///   * `decrypt-failed` — the blob was not sealed to a key we hold. Either the frame is simply
+    ///     not for this device (a sibling device's copy), or the sender sealed to an identity we
+    ///     can't open under (the account-leaf / seedless-device case).
+    ///   * `sig-failed` — we DECRYPTED it, so it was addressed to us, but the signature doesn't
+    ///     verify for `(me, frame_type, plaintext)`. The sender signs over the hex it ADDRESSED,
+    ///     while we verify over our ACCOUNT hex — so a frame addressed to one of our DEVICE ids can
+    ///     never verify here no matter how genuine it is. That asymmetry is a real bug, and this is
+    ///     the string that proves it rather than inferring it.
+    pub fn diagnose_call_frame(&self, frame_type: u8, blob: Vec<u8>) -> String {
+        if blob.len() < 4 {
+            return "malformed:short".into();
+        }
+        let Some(blen) = blob[0..4].try_into().ok().map(u32::from_le_bytes).map(|v| v as usize) else {
+            return "malformed:len".into();
+        };
+        if blob.len() < 8 + blen {
+            return "malformed:bundle".into();
+        }
+        let bundle = &blob[4..4 + blen];
+        let Some(slen) = blob[4 + blen..8 + blen].try_into().ok().map(u32::from_le_bytes).map(|v| v as usize) else {
+            return "malformed:siglen".into();
+        };
+        if blob.len() < 8 + blen + slen {
+            return "malformed:sig".into();
+        }
+        let sig = &blob[8 + blen..8 + blen + slen];
+        let sealed = blob[8 + blen + slen..].to_vec();
+        let Some(plaintext) = self.open_media(sealed) else {
+            return "decrypt-failed (not sealed to a key this device holds)".into();
+        };
+        let (me_hex, my_device) = {
+            let st = self.state.lock().unwrap();
+            (hex(&st.me().node_id_bytes()), st.device.as_ref().map(|d| hex(&d.public().node_id_bytes())))
+        };
+        let Some(sender) = HavenId::from_bytes(bundle).ok() else {
+            return "bad-sender-bundle".into();
+        };
+        if sender.verify(&call_signing_bytes(&me_hex, frame_type, &plaintext), sig).is_ok() {
+            return "ok".into();
+        }
+        // Decrypted fine but won't verify as addressed-to-our-account. If it verifies against our
+        // DEVICE hex, the sender addressed the device and the receive side is checking the wrong id.
+        if let Some(dev) = &my_device {
+            if sender.verify(&call_signing_bytes(dev, frame_type, &plaintext), sig).is_ok() {
+                return format!(
+                    "sig-failed AS ACCOUNT but VERIFIES AS DEVICE {} — frame was addressed to our device id, receive side checks the account id",
+                    &dev[..8.min(dev.len())]
+                );
+            }
+        }
+        format!("sig-failed for account {} (and device {:?}) — sender {}",
+            &me_hex[..8.min(me_hex.len())],
+            my_device.as_ref().map(|d| d[..8.min(d.len())].to_string()),
+            &hex(&sender.node_id_bytes())[..8])
     }
 
     /// Open a media blob sealed to us by a contact. Returns the plaintext bytes.
@@ -5381,9 +5461,19 @@ impl HavenSocial {
         let st = self.state.lock().unwrap();
         // Dual-open: device key (Option 1), then account key (legacy account-sealed media). Seedless: the
         // account arm is absent, and media addressed to a seedless device is sealed to its device bundle (C7).
-        let key = st.device.as_ref().and_then(|d| decapsulate(d, &enc).ok())
-            .or_else(|| st.me_secret.as_ref().and_then(|m| decapsulate(m, &enc).ok()))?;
-        open(&key, ct).ok()
+        //
+        // Branch on the AEAD open, NOT on `decapsulate(..).ok()`. ML-KEM decapsulation applies implicit
+        // rejection: given a ciphertext it cannot decapsulate, it returns a PSEUDORANDOM shared secret
+        // rather than an error (FIPS-203). So the device arm always returned `Some(garbage_key)`, the
+        // `or_else` account arm was unreachable dead code, and `open` then failed — meaning a device
+        // that had adopted a device identity could no longer open ANYTHING sealed to its account.
+        // For calls that is every invite (21) and hangup (12): the phone rings, the callee answers,
+        // and the call never connects. Only a successful AEAD open proves we used the right key.
+        let try_open = |id: &Identity| decapsulate(id, &enc).ok().and_then(|k| open(&k, ct).ok());
+        st.device
+            .as_ref()
+            .and_then(|d| try_open(d))
+            .or_else(|| st.me_secret.as_ref().and_then(|m| try_open(m)))
     }
 
     /// Seal a media blob to the WHOLE circle (any member can open it). The shared
@@ -6406,6 +6496,79 @@ mod net_tests {
         let json = format!(r#"{{"t":"offer","sdp":"a=fingerprint:sha-256 {fingerprint}"}}"#);
         v.extend_from_slice(json.as_bytes());
         v
+    }
+
+    /// A call frame addressed to one of our DEVICE ids must open. Under device-id transport a linked
+    /// device dials and is dialed AS ITSELF, so the sender signs over the device hex it addressed —
+    /// while `open_call_frame` verified only against the ACCOUNT hex and threw the frame away as a
+    /// forgery. Field symptom: the callee's phone rings, they answer, and the call never connects,
+    /// because every invite (21) and hangup (12) was discarded at that check.
+    ///
+    /// This is the cross-peer case `141bb57` called out as untested when the same class of bug hit
+    /// media ("this path had NO cross-peer test, which is why it shipped"). It asserts BOTH halves:
+    /// a device-addressed frame is accepted, and widening to device ids does not accept a frame
+    /// addressed to somebody else.
+    #[test]
+    fn a_call_frame_addressed_to_our_device_id_opens() {
+        const INVITE: u8 = 21;
+        let alice = HavenSocial::new([60u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([61u8; 32].to_vec()).unwrap();
+        let carol = HavenSocial::new([62u8; 32].to_vec()).unwrap();
+        let cid = DEFAULT_CIRCLE.to_string();
+        let bob_account = alice.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+        bob.add_contact_bundle(cid.clone(), alice.my_bundle()).unwrap();
+        let carol_account = alice.add_contact_bundle(cid.clone(), carol.my_bundle()).unwrap();
+
+        // Bob is a linked device: he transports as his DEVICE id, not his account id.
+        assert!(bob.use_device_identity([63u8; 32].to_vec()));
+        let bob_device = bob.my_device_node_hex();
+        assert_ne!(bob_device, bob_account, "device identity must differ from the account id");
+
+        // Alice can only ADDRESS a device she knows about, so Bob publishes a roster authorizing his
+        // account + his linked device, and Alice ingests it. This ordering is the whole point: before
+        // the roster lands Alice seals to Bob's ACCOUNT and everything works, which is why this bug
+        // hides until rosters actually propagate — and `52c3e01` made them propagate.
+        let bob_dev_bundle = bob.my_device_bundle();
+        let bob_acct_id = Identity::from_seed(&[61u8; 32]).public().node_id_bytes().to_vec();
+        let bob_dev_id = HavenId::from_bytes(&bob_dev_bundle).unwrap().node_id_bytes().to_vec();
+        let acct_cred =
+            crate::multidevice::issue_device_credential([61u8; 32].to_vec(), bob.my_bundle(), "bob-primary".into(), 0).unwrap();
+        let dev_cred =
+            crate::multidevice::issue_device_credential([61u8; 32].to_vec(), bob_dev_bundle, "bob-linked".into(), 1).unwrap();
+        let roster = crate::multidevice::sign_device_list(
+            [61u8; 32].to_vec(),
+            1,
+            0,
+            vec![bob_acct_id, bob_dev_id],
+            vec![],
+        )
+        .unwrap();
+        assert!(bob.set_my_device_roster(roster.clone(), vec![acct_cred.clone(), dev_cred.clone()]));
+        assert!(alice.ingest_device_roster(bob.my_bundle(), roster, vec![acct_cred, dev_cred]));
+
+        // Alice invites the DEVICE (what device-id transport actually addresses).
+        let to_device = alice.seal_call_frame(bob_device.clone(), INVITE, b"invite-body".to_vec()).unwrap();
+        let opened = bob
+            .open_call_frame(INVITE, to_device)
+            .expect("a frame addressed to our own device id must open — this is the call-connect bug");
+        assert_eq!(opened.sender_hex, alice.my_node_hex(), "sender still cryptographically proven");
+        assert_eq!(opened.data, b"invite-body");
+
+        // The account-addressed form keeps working — a seeded peer still addresses the account.
+        let to_account = alice.seal_call_frame(bob_account, INVITE, b"invite-body".to_vec()).unwrap();
+        assert!(
+            bob.open_call_frame(INVITE, to_account.clone()).is_some(),
+            "account-addressed frames still open — diagnosis: {}",
+            bob.diagnose_call_frame(INVITE, to_account)
+        );
+
+        // And the recipient binding still binds: a frame for CAROL must not open for Bob, or
+        // accepting device ids would have widened this into a cross-user replay.
+        let for_carol = alice.seal_call_frame(carol_account, INVITE, b"invite-body".to_vec()).unwrap();
+        assert!(
+            bob.open_call_frame(INVITE, for_carol).is_none(),
+            "a frame addressed to another user must still be refused"
+        );
     }
 
     /// R1: a WebRTC call frame is now sealed + signed, so the relay-MITM (rewrite the DTLS-SRTP

@@ -2035,7 +2035,12 @@ final class FeedStore: ObservableObject {
             // Log which guard fired. The frame is already authenticated-or-not by this point, so the
             // log leaks nothing an attacker doesn't already know they sent.
             guard let opened = social?.openCallFrame(frameType: type, blob: payload) else {
-                HavenLog.call("call frame type=\(type) DROPPED — seal/signature did not verify")
+                // "seal/signature did not verify" collapsed two opposite causes into one line. Ask
+                // which: a decrypt failure means the frame wasn't sealed to a key we hold, while a
+                // signature failure means it WAS addressed to us and the signature is checked against
+                // the wrong id of ours. Diagnostics only — the frame is already refused either way.
+                let why = social?.diagnoseCallFrame(frameType: type, blob: payload) ?? "no social"
+                HavenLog.call("call frame type=\(type) DROPPED — \(why)")
                 return
             }
             let verified = opened.senderHex.lowercased()

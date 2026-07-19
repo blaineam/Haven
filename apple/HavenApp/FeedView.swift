@@ -4487,6 +4487,10 @@ struct PostCard: View {
     @ObservedObject private var audio = AudioCoordinator.shared
     @ObservedObject private var profile = ProfileStore.shared
     @ObservedObject private var feed = FeedStore.shared
+    /// Observed so "Keep on this device" visibly changes state. Reading the store WITHOUT observing
+    /// it meant the pin was recorded but nothing on screen moved — the menu closed and the post
+    /// looked identical, so a working toggle read as a dead button.
+    @ObservedObject private var pinned = PinnedMediaStore.shared
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var hSizeClass
     private var isPortraitPhone: Bool { hSizeClass == .compact }
@@ -5135,10 +5139,12 @@ private struct KillHorizontalScroller: NSViewRepresentable {
     /// "Keep on this device" toggle — pins/unpins this ref in the device-local retention set so no
     /// cleanup (orphan sweep, age/size limit, or the cleanup screen) ever removes its bytes.
     @ViewBuilder private func keepOnDeviceButton(_ ref: String) -> some View {
-        let pinned = PinnedMediaStore.shared.isPinned(ref)
-        Button { PinnedMediaStore.shared.togglePin([ref]) } label: {
-            Label(pinned ? "Stop keeping on this device" : "Keep on this device",
-                  systemImage: pinned ? "pin.slash" : "pin")
+        // Through the OBSERVED store, so toggling re-renders the card (and its pin badge) rather
+        // than silently recording a pin nothing on screen reflects.
+        let isPinned = pinned.isPinned(ref)
+        Button { pinned.togglePin([ref]) } label: {
+            Label(isPinned ? "Stop keeping on this device" : "Keep on this device",
+                  systemImage: isPinned ? "pin.slash.fill" : "pin")
         }
     }
 
@@ -5251,6 +5257,15 @@ private struct KillHorizontalScroller: NSViewRepresentable {
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .background(Color(.tertiarySystemFill), in: Capsule()).foregroundStyle(.secondary)
             }
+            // Kept on THIS device. Without a mark on the card, "Keep on this device" recorded the pin
+            // and showed nothing — the menu closed and the post looked identical, so a working toggle
+            // read as a dead button. This is the state, visible where the decision applies.
+            if item.media.contains(where: { !MediaStore.isSynthetic($0) && pinned.isPinned($0) }) {
+                Image(systemName: "pin.fill")
+                    .font(.caption2)
+                    .foregroundStyle(HavenTheme.pink)
+                    .accessibilityLabel("Kept on this device")
+            }
             // Upload state for your OWN media posts, shown whenever the circle has a relay to back up to
             // (any relay — not just an S3 mailbox this device volunteers, which the old gate required and
             // so hid this for everyone on the default relay-HTTP path). Driven PER-MEDIA off the backup
@@ -5328,10 +5343,12 @@ private struct KillHorizontalScroller: NSViewRepresentable {
                     // "Keep on this device" the storage screen advertises.
                     let keepRefs = item.media.filter { !MediaStore.isSynthetic($0) }
                     if !keepRefs.isEmpty {
-                        let anyPinned = keepRefs.contains { PinnedMediaStore.shared.isPinned($0) }
-                        Button { PinnedMediaStore.shared.togglePin(keepRefs) } label: {
+                        // `pinned` (observed) rather than the singleton, so flipping this re-renders
+                        // the card and its badge — the toggle has to be visible to be believed.
+                        let anyPinned = keepRefs.contains { pinned.isPinned($0) }
+                        Button { pinned.togglePin(keepRefs) } label: {
                             Label(anyPinned ? "Stop keeping on this device" : "Keep on this device",
-                                  systemImage: anyPinned ? "pin.slash" : "pin")
+                                  systemImage: anyPinned ? "pin.slash.fill" : "pin")
                         }
                     }
                     // Hide any post from my own feed (reversible). Local + per-device.

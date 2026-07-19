@@ -10,10 +10,24 @@ final class LinkPresenter: ObservableObject {
     static let shared = LinkPresenter()
     @Published var presented: PresentedURL?
 
-    /// Open a link string in the in-app browser, normalizing a bare host into https://.
+    /// Open a link string, normalizing a bare host into https://.
+    ///
+    /// A HAVEN link never reaches the browser. Haven's own post/profile links are web-routed so they
+    /// survive being shared anywhere, but that meant tapping one INSIDE Haven loaded the web page in
+    /// the in-app browser — which then offers an "Open in Haven" button that can't do anything,
+    /// because you are already in Haven looking at a web view of your own content. The link's whole
+    /// purpose is the destination it names, and in here we can just go there.
     func open(_ string: String) {
+        if let url = Self.normalized(string) ?? URL(string: string), routeInApp(url) { return }
         guard let url = Self.normalized(string) else { return }
         presented = PresentedURL(url: url)
+    }
+
+    /// True if this URL is a Haven route and has been handled in-app.
+    @discardableResult
+    func routeInApp(_ url: URL) -> Bool {
+        var scratchTab = ""
+        return DeepLinkRouter.shared.handle(url, tab: &scratchTab)
     }
 
     /// Turn user/profile text into a real URL: add https:// if no scheme, reject non-web.
@@ -307,19 +321,39 @@ struct LinkedText: View {
 
     var body: some View {
         let urls = LinkScanner.urls(in: text)
+        let previewed = showsPreview ? urls.first : nil
+        // When a preview card IS shown, the raw URL is redundant copy — the card already names the
+        // destination, more legibly. A message that is only a link collapsed to just the card
+        // already; one with anything typed around it kept the bare URL sitting in the sentence.
+        // Strip the previewed URL from the text, not every URL: a second link has no card of its
+        // own, so removing it would lose it entirely.
+        let shown = previewed.map { Self.stripping($0, from: text) } ?? text
         VStack(alignment: .leading, spacing: 8) {
-            if !text.isEmpty {
-                Text(Self.attributed(text))
+            if !shown.isEmpty {
+                Text(Self.attributed(shown))
                     .font(font)
-                    // Route link taps into the in-app browser instead of leaving the app.
+                    // Route link taps in-app: a Haven link goes straight to the post/profile, and
+                    // anything else opens in the in-app browser rather than leaving Haven.
                     .environment(\.openURL, OpenURLAction { url in
                         LinkPresenter.shared.open(url.absoluteString); return .handled
                     })
             }
-            if showsPreview, let first = urls.first {
-                LinkPreviewCard(url: first)
+            if let previewed {
+                LinkPreviewCard(url: previewed)
             }
         }
+    }
+
+    /// Remove one URL's text from a body, tidying the whitespace it leaves behind so the remaining
+    /// sentence doesn't keep a hole where the link was.
+    private static func stripping(_ url: URL, from text: String) -> String {
+        guard let range = text.range(of: url.absoluteString) else { return text }
+        var out = text
+        out.removeSubrange(range)
+        // Collapse the doubled spaces / stranded blank lines the removal can leave mid-sentence.
+        while let r = out.range(of: "  ") { out.replaceSubrange(r, with: " ") }
+        while let r = out.range(of: "\n\n\n") { out.replaceSubrange(r, with: "\n\n") }
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func attributed(_ s: String) -> AttributedString {

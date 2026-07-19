@@ -22,7 +22,7 @@ struct PortraitLock: ViewModifier {
                 }
                 UIViewController.attemptRotationToDeviceOrientationCompat()
             }
-            .onDisappear { HavenAppDelegate.orientationLock = .all }
+            .onDisappear { HavenAppDelegate.orientationLock = HavenAppDelegate.defaultMask }
     }
 }
 #else

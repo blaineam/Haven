@@ -9,9 +9,21 @@ import AppKit
 /// Receives the APNs device token + remote-notification wakes (SwiftUI App needs a delegate
 /// for these callbacks).
 final class HavenAppDelegate: NSObject, UIApplicationDelegate {
-    /// The story camera locks this to `.portrait` so capture/compose never rotate; reset to
-    /// `.all` elsewhere. Driven by `OrientationLock`.
-    static var orientationLock: UIInterfaceOrientationMask = .all
+    /// What the app is currently allowed to rotate to. The story camera pins this to `.portrait`
+    /// while capturing; everywhere else it returns to [`defaultMask`].
+    static var orientationLock: UIInterfaceOrientationMask = HavenAppDelegate.defaultMask
+
+    /// iPhone is portrait-only; iPad rotates freely.
+    ///
+    /// Haven's phone layout is designed portrait — feed, composer, story canvas — and rotating it
+    /// gains nothing while breaking the story canvas's portrait assumption. iPad is a different
+    /// shape of device where landscape is genuinely useful, so it keeps every orientation. (The
+    /// Info.plist still DECLARES landscape for iPhone: that's what lets AVKit take a video
+    /// full-screen landscape, which is the one place a phone should rotate. This runtime mask is
+    /// what governs Haven's own UI.)
+    static var defaultMask: UIInterfaceOrientationMask {
+        UIDevice.current.userInterfaceIdiom == .pad ? .all : .portrait
+    }
 
     func application(_ application: UIApplication,
                      supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {

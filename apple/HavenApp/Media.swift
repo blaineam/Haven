@@ -1382,6 +1382,9 @@ final class KeptStoriesStore: ObservableObject {
         let body: String
         let media: [String]
         let createdAt: UInt64
+        /// When I kept it — the LWW clock for syncing this entry against a sibling's tombstone.
+        /// Optional so records written before syncing existed still decode.
+        var keptAt: UInt64?
         // Flattened rather than holding a TrackRefFfi: that's generated FFI glue, not a storage type,
         // and pinning a persisted format to it would break on the next binding regeneration.
         let musicCatalogId: String?
@@ -1392,8 +1395,13 @@ final class KeptStoriesStore: ObservableObject {
     }
 
     @Published private(set) var kept: [Kept]
+    /// Un-kept story ids and WHEN — so un-keeping propagates to my other devices instead of a
+    /// sibling's copy quietly re-adding it. Absence is not removal; this codebase has already paid
+    /// for that lesson once with additive-only self-sync.
+    private(set) var removed: [String: UInt64]
     private let d = UserDefaults.standard
     private let key = "haven.stories.kept"
+    private let removedKey = "haven.stories.kept.removed"
 
     private init() {
         if let data = d.data(forKey: key), let list = try? JSONDecoder().decode([Kept].self, from: data) {
@@ -1401,7 +1409,11 @@ final class KeptStoriesStore: ObservableObject {
         } else {
             kept = []
         }
+        removed = (d.dictionary(forKey: removedKey) as? [String: NSNumber])?
+            .mapValues { $0.uint64Value } ?? [:]
     }
+
+    private func nowMs() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
 
     func isKept(_ id: String) -> Bool { kept.contains { $0.id == id } }
 
@@ -1410,10 +1422,11 @@ final class KeptStoriesStore: ObservableObject {
     /// become a row of "no longer available" placeholders — kept in name only.
     func keep(id: String, body: String, media: [String], createdAt: UInt64, music: TrackRefFfi?) {
         guard !isKept(id) else { return }
-        kept.append(Kept(id: id, body: body, media: media, createdAt: createdAt,
+        kept.append(Kept(id: id, body: body, media: media, createdAt: createdAt, keptAt: nowMs(),
                          musicCatalogId: music?.catalogId, musicTitle: music?.title,
                          musicArtist: music?.artist, musicArtworkUrl: music?.artworkUrl,
                          musicDurationMs: music?.durationMs))
+        removed.removeValue(forKey: id)   // re-keeping clears the tombstone
         PinnedMediaStore.shared.pin(media)
         save()
     }
@@ -1423,10 +1436,57 @@ final class KeptStoriesStore: ObservableObject {
         guard let i = kept.firstIndex(where: { $0.id == id }) else { return }
         let media = kept[i].media
         kept.remove(at: i)
-        // Only unpin blobs no OTHER kept story still needs (a story shared twice can share refs).
+        removed[id] = nowMs()   // tombstone, so a sibling doesn't re-add it on the next sync
+        unpinIfUnused(media)
+        save()
+    }
+
+    /// Release pins for blobs no OTHER kept story still needs (a story shared twice can share refs).
+    private func unpinIfUnused(_ media: [String]) {
         let stillNeeded = Set(kept.flatMap(\.media))
         PinnedMediaStore.shared.unpin(media.filter { !stillNeeded.contains($0) })
-        save()
+    }
+
+    // MARK: Self-sync (per-entry LWW, tombstoned)
+
+    /// What to publish to my other devices.
+    func syncPayload() -> Data? {
+        guard !kept.isEmpty || !removed.isEmpty else { return nil }
+        let wire = Wire(kept: kept, removed: removed)
+        return try? JSONEncoder().encode(wire)
+    }
+
+    /// Merge a sibling's state. Per ENTRY, not wholesale: keeping a story on my phone and a different
+    /// one on my Mac must end with both kept, which a last-writer-wins collection would not do.
+    /// A tombstone beats an entry only if it is NEWER — so re-keeping something later still wins.
+    func applySynced(_ data: Data) {
+        guard let wire = try? JSONDecoder().decode(Wire.self, from: data) else { return }
+        var changed = false
+        for (id, ts) in wire.removed where (removed[id] ?? 0) < ts {
+            removed[id] = ts; changed = true
+        }
+        for entry in wire.kept {
+            let entryAt = entry.keptAt ?? entry.createdAt
+            if (removed[entry.id] ?? 0) > entryAt { continue }   // un-kept more recently than kept
+            if let i = kept.firstIndex(where: { $0.id == entry.id }) {
+                if (kept[i].keptAt ?? 0) < entryAt { kept[i] = entry; changed = true }
+            } else {
+                kept.append(entry); PinnedMediaStore.shared.pin(entry.media); changed = true
+            }
+        }
+        // Apply tombstones that are newer than my own copy.
+        for (id, ts) in removed {
+            if let i = kept.firstIndex(where: { $0.id == id }), (kept[i].keptAt ?? 0) < ts {
+                let media = kept[i].media
+                kept.remove(at: i); unpinIfUnused(media); changed = true
+            }
+        }
+        if changed { save() }
+    }
+
+    private struct Wire: Codable {
+        let kept: [Kept]
+        let removed: [String: UInt64]
     }
 
     func toggle(id: String, body: String, media: [String], createdAt: UInt64, music: TrackRefFfi?) {
@@ -1435,6 +1495,13 @@ final class KeptStoriesStore: ObservableObject {
 
     private func save() {
         if let data = try? JSONEncoder().encode(kept) { d.set(data, forKey: key) }
+        // Bound the tombstones: they only need to outlive a sibling being offline, not forever.
+        if removed.count > 500 {
+            removed = Dictionary(uniqueKeysWithValues:
+                removed.sorted { $0.value > $1.value }.prefix(250).map { ($0.key, $0.value) })
+        }
+        d.set(removed.mapValues { NSNumber(value: $0) }, forKey: removedKey)
+        objectWillChange.send()
     }
 }
 

@@ -147,6 +147,10 @@ final class SelfSyncCoordinator {
         // no device can un-read another, and a fresh device's empty map changes nothing).
         let reads = DMReadStore.shared.lastRead
         if !reads.isEmpty, let data = try? JSONEncoder().encode(reads) { m["setting:dmLastRead"] = data }
+        // Stories I kept to my profile. Carries its own per-entry timestamps and tombstones, so it
+        // merges rather than last-writer-wins: keeping one story on my phone and another on my Mac
+        // must end with BOTH kept, and un-keeping must not be undone by a sibling's stale copy.
+        if let keptData = KeptStoriesStore.shared.syncPayload() { m["setting:keptStories"] = keptData }
         // Roster: contacts (full card) + blocked list.
         for c in ContactsStore.shared.contacts {
             if let data = try? JSONEncoder().encode(c) { m["contact:\(c.idHex)"] = data }
@@ -289,6 +293,9 @@ final class SelfSyncCoordinator {
         if let v = h.get(key: "setting:dmLastRead"), let m = try? JSONDecoder().decode([String: UInt64].self, from: v) {
             DMReadStore.shared.applySynced(m)   // per-key MAX merge
             FeedStore.shared.recomputeUnreadDMs()
+        }
+        if let v = h.get(key: "setting:keptStories") {
+            KeptStoriesStore.shared.applySynced(v)   // per-entry LWW + tombstones
         }
 
         // Roster reconciliation (set-like — enumerate the converged state via entries()).

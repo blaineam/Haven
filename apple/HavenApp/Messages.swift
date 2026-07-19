@@ -564,13 +564,21 @@ struct DMThreadView: View {
                 } else if SecretMessages.isSecret(m.body) {
                     SecretBubble(text: SecretMessages.text(m.body), isMe: m.isMe)
                 } else if !m.body.isEmpty {
-                    Text(m.body)
-                        .padding(.horizontal, 12).padding(.vertical, 8)
-                        .background(m.isMe ? AnyShapeStyle(HavenTheme.brand) : AnyShapeStyle(Color(.secondarySystemBackground)),
-                                    in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .foregroundStyle(m.isMe ? .white : .primary)
+                    // The previewed link is dropped from the bubble: the card below already names the
+                    // destination, so leaving the raw URL in the text repeats it (and a shared post
+                    // link is long enough to swamp the sentence around it). A bubble with ONLY a link
+                    // becomes just its card.
+                    let previewed = LinkScanner.urls(in: m.body).first
+                    let shown = previewed.map { LinkScanner.stripping($0, from: m.body) } ?? m.body
+                    if !shown.isEmpty {
+                        Text(shown)
+                            .padding(.horizontal, 12).padding(.vertical, 8)
+                            .background(m.isMe ? AnyShapeStyle(HavenTheme.brand) : AnyShapeStyle(Color(.secondarySystemBackground)),
+                                        in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            .foregroundStyle(m.isMe ? .white : .primary)
+                    }
                     // Rich Open Graph preview for a link in the message.
-                    if let url = LinkScanner.urls(in: m.body).first {
+                    if let url = previewed {
                         LinkPreviewCard(url: url).frame(maxWidth: 260)
                     }
                 }

@@ -11,6 +11,24 @@ import AppKit
 /// Stories are ordinary posts flagged `story` with a 24h retention, so they expire
 /// on their own — no special server, just the existing retention rule.
 struct StoryViewer: View {
+    /// The clip's video track with its audio DROPPED, so a story playing under a song owns no audio
+    /// track at all. See the call site for why muting is not sufficient. Returns nil if the asset
+    /// can't be rebuilt, in which case the caller falls back to a plain muted player.
+    private static func videoOnlyAsset(_ url: URL) -> AVAsset? {
+        let asset = AVURLAsset(url: url)
+        let comp = AVMutableComposition()
+        guard let vTrack = asset.tracks(withMediaType: .video).first,
+              let cTrack = comp.addMutableTrack(withMediaType: .video,
+                                                preferredTrackID: kCMPersistentTrackID_Invalid)
+        else { return nil }
+        do {
+            try cTrack.insertTimeRange(CMTimeRange(start: .zero, duration: asset.duration),
+                                       of: vTrack, at: .zero)
+        } catch { return nil }
+        cTrack.preferredTransform = vTrack.preferredTransform
+        return comp
+    }
+
     let stories: [FeedItemFfi]
     @State var index: Int
     let friendName: String
@@ -430,9 +448,22 @@ struct StoryViewer: View {
         waitingMedia = nil
         if let ref = s.media.first, let item = MediaStore.shared.item(ref),
            item.kind == .video, let url = item.videoURL {
-            let p = AVPlayer(url: url)
-            // Muted under the author's song — or while a call is ringing/live (call audio priority).
-            p.isMuted = (s.music != nil) || CallManager.shared.callInProgress
+            // Under a song, hand the player a VIDEO-ONLY composition rather than muting it.
+            //
+            // `isMuted` is not enough, and the composer already learned this the hard way: a player
+            // that still OWNS an audio track joins the audio session, so the music player's start
+            // interrupts it, anything that resumes it interrupts the song right back, and the two
+            // ping-pong — which is why tapping a muted story video killed the song that was already
+            // playing. With no audio track the clip can neither interrupt the song nor be
+            // interrupted by it, and both simply run.
+            let silentUnderSong = s.music != nil
+            let p: AVPlayer = {
+                guard silentUnderSong,
+                      let stripped = Self.videoOnlyAsset(url) else { return AVPlayer(url: url) }
+                return AVPlayer(playerItem: AVPlayerItem(asset: stripped))
+            }()
+            // Belt and braces: a call still takes priority, and a clip we couldn't strip stays muted.
+            p.isMuted = silentUnderSong || CallManager.shared.callInProgress
             // Weak capture + keep the token so loadCurrent/teardown can remove it. A strong capture +
             // discarded token is exactly what leaked every story player forever.
             endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime,

@@ -50,6 +50,24 @@ struct PresentedURL: Identifiable {
 enum LinkScanner {
     private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
 
+    /// Remove one URL's text from a body, tidying the whitespace it leaves behind so the remaining
+    /// sentence doesn't keep a hole where the link was.
+    ///
+    /// Lives here rather than on a view because MORE THAN ONE surface renders a body next to a
+    /// preview card: the feed and comments go through `LinkedText`, but a DM bubble draws
+    /// `Text(m.body)` itself and adds the card separately — so a strip that lived only in
+    /// `LinkedText` left the raw URL sitting in every DM, which is exactly what "Message the author"
+    /// produces. Any new surface that shows a card should strip through this too.
+    static func stripping(_ url: URL, from text: String) -> String {
+        guard let range = text.range(of: url.absoluteString) else { return text }
+        var out = text
+        out.removeSubrange(range)
+        // Collapse the doubled spaces / stranded blank lines the removal can leave mid-sentence.
+        while let r = out.range(of: "  ") { out.replaceSubrange(r, with: " ") }
+        while let r = out.range(of: "\n\n\n") { out.replaceSubrange(r, with: "\n\n") }
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     static func urls(in text: String) -> [URL] {
         guard let detector else { return [] }
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
@@ -344,16 +362,8 @@ struct LinkedText: View {
         }
     }
 
-    /// Remove one URL's text from a body, tidying the whitespace it leaves behind so the remaining
-    /// sentence doesn't keep a hole where the link was.
     private static func stripping(_ url: URL, from text: String) -> String {
-        guard let range = text.range(of: url.absoluteString) else { return text }
-        var out = text
-        out.removeSubrange(range)
-        // Collapse the doubled spaces / stranded blank lines the removal can leave mid-sentence.
-        while let r = out.range(of: "  ") { out.replaceSubrange(r, with: " ") }
-        while let r = out.range(of: "\n\n\n") { out.replaceSubrange(r, with: "\n\n") }
-        return out.trimmingCharacters(in: .whitespacesAndNewlines)
+        LinkScanner.stripping(url, from: text)
     }
 
     private static func attributed(_ s: String) -> AttributedString {

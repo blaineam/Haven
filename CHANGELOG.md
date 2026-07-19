@@ -7,7 +7,7 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [1.1.1]
+## [1.1.2]
 
 ### Added
 
@@ -28,6 +28,26 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   impossible, and nothing said so. Pieces are now written straight to storage as they arrive, so
   receiving a 500 MB video takes no more memory than a small photo and the size limits are gone
   entirely rather than merely raised. iPhone and Mac already worked this way.
+
+### Fixed
+
+- **Setting a relay as your default served one circle and quietly refused the rest.** A relay only ever
+  authorized what its link granted, and a link carried a single circle — but the apps let you pick a
+  relay as the default for every circle. So you set it once, one circle worked, and every other circle
+  was refused permanently. This is what "media isn't on any relay" has usually been: the relay holding
+  the bytes and declining to hand them over. Relay links now carry every circle they grant. Existing
+  links keep working and don't need re-pasting, and a new link pasted into an older relay still
+  authorizes at least its first circle rather than failing outright.
+
+- **Media that never arrived because it kept starting over.** Asking for a large item while it was
+  already being sent started a *second* copy of the same transfer, then a third — each competing with
+  the last, none of them finishing, so the item never landed and got asked for again. One transfer per
+  item per recipient now, and a request that arrives mid-transfer is correctly ignored, because the
+  bytes are already on their way.
+
+## [1.1.1]
+
+### Added
 
 - **A story's song now plays on Android, and is named on desktop.** Attaching a song to a story only
   ever did anything on iPhone — everywhere else the story played in silence with nothing on screen to

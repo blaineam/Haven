@@ -1554,6 +1554,9 @@ final class FeedStore: ObservableObject {
     /// circle's posts, so the circle forms on their side and back-fills.
     private var lastHistoryResendMs: UInt64 = 0
     private var lastMediaBackfillMs: UInt64 = 0
+    /// Last own-device catch-up sweep. Throttled hard (5 min): it re-seals every envelope it sends,
+    /// so it must not ride the 20s sync tick. See the sweep for why it exists.
+    private var lastOwnDeviceCatchupMs: UInt64 = 0
     func syncWithContacts() {
         guard let social else { return }
         // Re-blasting our ENTIRE history (every post → every contact) on every 20s tick flooded the
@@ -1674,6 +1677,33 @@ final class FeedStore: ObservableObject {
                 await MainActor.run {
                     guard let self else { return }
                     for (cid, envs) in work { for env in envs { self.nearbyBroadcast(1, self.eventPayload(cid, env)) } }
+                }
+            }
+        }
+        // Own-device catch-up over the INTERNET. The nearby sweep above only runs when a sibling is
+        // physically connected — so two devices on different networks never reconciled, and anything
+        // that reached only ONE of them stayed there. That is the "a DM landed on my Mac and never on
+        // my iPhone" case, and fixing the receive-time fan-out alone would not have repaired the
+        // messages already sitting on one device.
+        //
+        // BOUNDED, deliberately: only when I actually have other devices, at most 50 events per
+        // circle, and no more than every 5 minutes — this re-seals per envelope, so it is real CPU
+        // and must not ride the 20s tick. Siblings dedupe, so a repeat sweep is harmless.
+        if nowMs - lastOwnDeviceCatchupMs > 300_000, !myOtherDeviceTargets().isEmpty {
+            lastOwnDeviceCatchupMs = nowMs
+            let cidsForDevices = circles.map(\.id)
+            Task.detached(priority: .utility) { [weak self, social] in
+                var work: [(String, [Data])] = []
+                for cid in cidsForDevices {
+                    // ALL authors — the point is my friends' messages that reached one device only.
+                    let envs = social.exportRecentEnvelopes(circleId: cid, limit: 50)
+                    if !envs.isEmpty { work.append((cid, envs)) }
+                }
+                await MainActor.run {
+                    guard let self else { return }
+                    for (cid, envs) in work {
+                        self.liveDeliverManyToMyDevices(1, envs.map { self.eventPayload(cid, $0) })
+                    }
                 }
             }
         }
@@ -2023,6 +2053,20 @@ final class FeedStore: ObservableObject {
         let f = frame(type, payload)
         Task {
             for t in targets { try? await node.sendToNode(nodeIdHex: t, payload: f) }
+        }
+    }
+
+    /// Batched [`liveDeliverToMyDevices`] — one Task for MANY frames rather than one per frame.
+    /// A catch-up sweep hands over dozens of envelopes at once; spawning a Task each would be a
+    /// needless pile of concurrent sends to the same few devices.
+    private func liveDeliverManyToMyDevices(_ type: UInt8, _ payloads: [Data]) {
+        let targets = myOtherDeviceTargets()
+        guard !targets.isEmpty, !payloads.isEmpty, let node else { return }
+        let frames = payloads.map { frame(type, $0) }
+        Task {
+            for t in targets {
+                for f in frames { try? await node.sendToNode(nodeIdHex: t, payload: f) }
+            }
         }
     }
 

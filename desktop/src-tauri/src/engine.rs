@@ -86,6 +86,12 @@ struct DynState {
     /// already held. iOS `MediaBackupLedger` / Android `backedUp` parity.
     media_backed_up: HashSet<String>,
     media_backed_up_dirty: bool,
+    /// ref -> when we last re-uploaded it for a frame-31 ask, and the refs an upload is in flight
+    /// for. Serving one full-blob upload per inbound frame with no bound is a bandwidth amplifier a
+    /// circle member could aim at us; these bound it. In-memory on purpose — the cooldown is about
+    /// the current session's bandwidth, and a restart re-serving once is fine.
+    media_served_at: HashMap<String, u64>,
+    media_serving: HashSet<String>,
     internet_active: bool,
     relay_active: bool,
     started: bool,
@@ -256,6 +262,12 @@ fn raw_base64(s: &str) -> String {
         Some((head, payload)) if head.starts_with("data:") => payload.to_string(),
         _ => s.to_string(),
     }
+}
+
+/// First 10 chars of an id/ref, for logs — long enough to correlate, short enough not to dump a
+/// full identifier into a log file.
+fn short(s: &str) -> String {
+    s.chars().take(10).collect()
 }
 
 fn now_ms() -> u64 {
@@ -535,15 +547,36 @@ impl Engine {
     }
 
     fn notify(&self, title: &str, body: &str) {
-        if self.dyn_state.lock().unwrap().foreground {
+        self.notify_with_link(title, body, None)
+    }
+
+    /// [`Self::notify`] with an optional `haven://…` deep link describing what the notification is
+    /// ABOUT, so acting on it can open that rather than just raising the window.
+    ///
+    /// The link rides the in-app `haven:notify` event, which the frontend routes through the same
+    /// `DeepLink` parser as a pasted or shared link — one route table, one set of rules about what a
+    /// link may open. It is NOT attached to the OS toast: tauri-plugin-notification has no
+    /// cross-platform click payload here, so a click on the native toast still only raises the app.
+    /// That's an honest limitation rather than a silently-broken affordance — the in-app toast is
+    /// clickable, and the fetch happens either way.
+    fn notify_with_link(&self, title: &str, body: &str, deep_link: Option<&str>) {
+        // A deep-linked notification is worth showing while FOREGROUND too — "your media is back"
+        // silently doing nothing for someone already looking at the app is the case this exists for.
+        if deep_link.is_none() && self.dyn_state.lock().unwrap().foreground {
             return;
         }
         if let Some(app) = self.app.lock().unwrap().clone() {
-            // Native OS notification (Action Center / toast)…
-            use tauri_plugin_notification::NotificationExt;
-            let _ = app.notification().builder().title(title).body(body).show();
+            // Native OS notification (Action Center / toast) — skipped while frontmost, where the
+            // in-app toast below is the better surface.
+            if !self.dyn_state.lock().unwrap().foreground {
+                use tauri_plugin_notification::NotificationExt;
+                let _ = app.notification().builder().title(title).body(body).show();
+            }
             // …and an in-app event for a toast if a window is open.
-            let _ = app.emit("haven:notify", serde_json::json!({ "title": title, "body": body }));
+            let _ = app.emit(
+                "haven:notify",
+                serde_json::json!({ "title": title, "body": body, "deepLink": deep_link }),
+            );
         }
     }
 
@@ -2693,6 +2726,43 @@ impl Engine {
         }
     }
 
+    /// DM a post's author about that post, from the post's ⋯ menu. Returns the DM circle id (`None`
+    /// when the author isn't a contact — you can't DM someone you don't hold).
+    ///
+    /// Carries the post's MEDIA and not its body: echoing someone's own words back at them reads as
+    /// a quote they didn't write, while the media is the unambiguous "this post".
+    ///
+    /// Media can't simply be forwarded by reference: every blob is sealed under the circle it was
+    /// posted to, so a ref carried into a DM would be undecryptable there. It's re-sealed under the
+    /// DM's key, off the caller's thread — a blob is decrypted and re-encrypted whole, which is not
+    /// an amount of work to do on the UI's round trip for a video.
+    pub fn message_author(self: &Arc<Self>, author_short: String, media: Vec<String>) -> Option<String> {
+        let (hex, name) = {
+            let p = self.prefs.lock().unwrap();
+            let c = p.contacts.iter().find(|c| c.id_hex.starts_with(&author_short))?;
+            (c.id_hex.clone(), c.name.clone())
+        };
+        let dm = self.start_dm(hex, name);
+        if media.is_empty() {
+            return Some(dm);
+        }
+        let me = self.clone();
+        let dm_id = dm.clone();
+        tauri::async_runtime::spawn(async move {
+            let refs: Vec<String> = media
+                .iter()
+                .filter_map(|r| {
+                    let bytes = me.media.load_any_circle(&me.social, r)?;
+                    Some(me.media.store(&me.social, &dm_id, &bytes, r.starts_with("v:")))
+                })
+                .collect();
+            if !refs.is_empty() {
+                me.send_dm(dm_id, String::new(), refs, None);
+            }
+        });
+        Some(dm)
+    }
+
     /// A DM's read watermark: its `dm_last_read` entry, else the first-run seed (so pre-feature
     /// history doesn't badge). Mirrors iOS `DMReadStore.watermark`.
     fn dm_watermark(&self, circle_id: &str) -> u64 {
@@ -3077,7 +3147,7 @@ impl Engine {
         let t = payload[0];
         let body = payload[1..].to_vec();
         // Call/media frames lead with a 64-char sender hex — drop blocked senders early.
-        if matches!(t, wire::MEDIA_REQ | wire::CALL_INVITE | wire::CALL_ACCEPT | wire::CALL_HANGUP | wire::SDP_OFFER | wire::SDP_ANSWER | wire::ICE | wire::GROUP_INVITE) {
+        if matches!(t, wire::MEDIA_REQ | wire::CALL_INVITE | wire::CALL_ACCEPT | wire::CALL_HANGUP | wire::SDP_OFFER | wire::SDP_ANSWER | wire::ICE | wire::GROUP_INVITE | wire::MEDIA_WANTED | wire::MEDIA_AVAILABLE) {
             if body.len() >= 64 {
                 let head = String::from_utf8_lossy(&body[..64]).into_owned();
                 if head.len() == 64 && self.prefs.lock().unwrap().blocked.contains(&head) {
@@ -3098,6 +3168,11 @@ impl Engine {
                 // device, so it must be no more forgeable than an invite or a hangup.
                 wire::CALL_INVITE | wire::GROUP_INVITE | wire::CALL_ACCEPT | wire::CALL_HANGUP
                 | wire::SDP_OFFER | wire::SDP_ANSWER | wire::ICE | wire::CALL_HANDLED => me.handle_call(t, &body),
+                // 31/32 are media frames, not call signaling, so they're handled here rather than
+                // emitted to the UI — but they borrow the call path's sealing, because one asks an
+                // author to spend upload bandwidth and the other triggers a notification and a fetch.
+                wire::MEDIA_WANTED => me.handle_media_wanted(&body).await,
+                wire::MEDIA_AVAILABLE => me.handle_media_available(&body),
                 wire::DEVICE_ENROLL => me.handle_enrollment_request(&body),
                 wire::DEVICE_GRANT => me.handle_device_grant(&body),
                 wire::SEEDLESS_ENROLL_REQ => me.handle_seedless_enroll_request(sender_device.as_deref(), &body),
@@ -3329,6 +3404,20 @@ impl Engine {
         (st.hosting, has_relay, st.relay_active, st.internet_active, st.started)
     }
 
+    /// The host's media limits, `(days, bytes)`; `0` on either = no limit for that dimension.
+    pub fn relay_media_limits(&self) -> (u32, u64) {
+        self.prefs.lock().unwrap().relay_media_limits()
+    }
+
+    /// Set the host's media limits. Takes effect when the relay NEXT STARTS — the retention is handed
+    /// to the store at attach time, so the UI says so rather than pretending a live change applied.
+    pub fn set_relay_media_limits(&self, max_age_days: u32, max_bytes: u64) {
+        let mut p = self.prefs.lock().unwrap();
+        p.relay_media_max_age_days = Some(max_age_days);
+        p.relay_media_max_bytes = Some(max_bytes);
+        let _ = p.save(&self.paths);
+    }
+
     /// The relay's node id (64-hex), which a friend pastes into "Adopt relay" so we share a
     /// mailbox. `None` unless we're currently hosting.
     pub fn relay_link(&self) -> Option<String> {
@@ -3350,7 +3439,15 @@ impl Engine {
         };
         let dir = self.paths.relay_dir();
         std::fs::create_dir_all(&dir).ok();
-        let handle = RelayServerHandle::attach(node, dir.to_string_lossy().to_string());
+        // attach_with_limits, not attach: plain `attach` runs media UNLIMITED, so hosting meant
+        // volunteering the whole disk with no way to say otherwise.
+        let (max_age_days, max_bytes) = self.prefs.lock().unwrap().relay_media_limits();
+        let handle = RelayServerHandle::attach_with_limits(
+            node,
+            dir.to_string_lossy().to_string(),
+            max_age_days,
+            max_bytes,
+        );
         let node_hex = handle.node_id_hex();
         *self.relay_host.lock().unwrap() = Some(handle.clone());
         self.dyn_state.lock().unwrap().hosting = true;
@@ -5260,27 +5357,9 @@ impl Engine {
     /// frame-9-relayed frames — authentication is the signature, not a transport id.
     fn handle_call(self: &Arc<Self>, t: u8, sealed: &[u8]) {
         let Some(app) = self.app.lock().unwrap().clone() else { return };
-        let Some(opened) = self.social.open_call_frame(t, sealed.to_vec()) else { return };
-        let verified = opened.sender_hex.to_lowercase();
-        let body = &opened.data;
-        if verified.len() != 64 || body.len() < 64 {
-            return;
-        }
-        let declared = String::from_utf8_lossy(&body[..64]).to_lowercase();
-        if declared != verified {
-            // D9: a SEEDLESS sender signs call frames with its DEVICE key, so the proven signer is the
-            // device id while the body's `from` is the account id. Accept when the verified device
-            // resolves (via the verified roster) to the declared account — otherwise it's a forgery.
-            match self.social.account_for_device(verified.clone()) {
-                Some(acct) if acct.eq_ignore_ascii_case(&declared) => {}
-                _ => return, // proven sender must equal, or speak for, the self-declared `from`
-            }
-        }
-        // Block by ACCOUNT id (`declared`), which for a device-signed frame is the account behind the
-        // device, not the transient device hex.
-        if self.prefs.lock().unwrap().blocked.contains(&declared) {
-            return;
-        }
+        // The verified sender is re-derived per frame type below, from the parser's own `from` field
+        // — `open_sealed_frame` has already proven the two agree.
+        let Some((_declared, body)) = self.open_sealed_frame(t, sealed) else { return };
         let body = body.as_slice();
         let ev = match t {
             wire::CALL_INVITE => callwire::parse_invite_name(body).map(|(from, name)| {
@@ -5333,6 +5412,203 @@ impl Engine {
             }
             let _ = app.emit("haven:call", ev);
         }
+    }
+
+    // ---- "Tell me when this media is back" (frames 31/32) --------------------------------
+
+    /// Body of both media frames, addressed from us. The format itself lives in `wire`.
+    fn media_frame_body(&self, reference: &str, circle_id: &str, post_id: &str) -> Vec<u8> {
+        wire::media_frame(&self.social.my_node_hex(), reference, circle_id, post_id)
+    }
+
+    /// Whether we're waiting to hear that `reference` is back.
+    pub fn media_is_wanted(&self, reference: &str) -> bool {
+        self.prefs.lock().unwrap().media_wanted.iter().any(|r| r == reference)
+    }
+
+    /// Ask a post's AUTHOR to re-upload media a relay has swept, and remember that we asked.
+    ///
+    /// The request rides the sealed frame path, which means the circle mailbox carries it: an author
+    /// offline for a week gets it the moment they next sync. That is the whole mechanism — nothing is
+    /// parked on a relay by hand, and no relay-side change was needed.
+    pub fn request_media_when_available(
+        self: &Arc<Self>,
+        reference: String,
+        circle_id: String,
+        post_id: String,
+        author_short: String,
+    ) {
+        let Some(author_hex) = self.id_hex_for(&author_short) else {
+            log::info!("media-wanted {}: author not resolvable — cannot ask", short(&reference));
+            return;
+        };
+        {
+            let mut p = self.prefs.lock().unwrap();
+            if !p.media_wanted.iter().any(|r| *r == reference) {
+                p.media_wanted.push(reference.clone());
+                // Bounded: someone who taps this on everything shouldn't grow an unbounded list, and
+                // the oldest asks are the least likely to still matter.
+                while p.media_wanted.len() > 500 {
+                    p.media_wanted.remove(0);
+                }
+                let _ = p.save(&self.paths);
+            }
+        }
+        let body = self.media_frame_body(&reference, &circle_id, &post_id);
+        self.send_call_frame(wire::MEDIA_WANTED, &body, &author_hex);
+        log::info!("media-wanted {} → author {}", short(&reference), short(&author_hex));
+        self.emit_changed();
+    }
+
+    /// Author side: someone wants media from a post of ours that a relay no longer holds. If we still
+    /// have the original, put it back on a relay we share and tell them when it lands.
+    ///
+    /// This is the point of the feature: media stays reachable for as long as its AUTHOR keeps a copy,
+    /// rather than for as long as a relay's retention window.
+    async fn handle_media_wanted(self: &Arc<Self>, sealed: &[u8]) {
+        let Some((from, body)) = self.open_sealed_frame(wire::MEDIA_WANTED, sealed) else { return };
+        let Some((reference, circle_id, post_id)) = wire::parse_media_frame(&body) else { return };
+        if !self.is_contact(&from) {
+            return; // only our circle may ask
+        }
+        // Only serve a circle they're actually IN — a request names a circle, and naming one is not
+        // the same as belonging to it.
+        let members = self.social.contact_node_ids(circle_id.clone());
+        if !members.iter().any(|m| m.eq_ignore_ascii_case(&from)) {
+            log::info!(
+                "media-wanted {} from {} — not a member of {}, ignoring",
+                short(&reference), short(&from), short(&circle_id)
+            );
+            return;
+        }
+        if !self.media.has(&reference) {
+            log::info!("media-wanted {} from {} — we don't hold it either", short(&reference), short(&from));
+            return;
+        }
+        // A frame 31 costs the RECIPIENT a full blob upload, so serving one per inbound frame with no
+        // bound is a bandwidth amplifier any circle member could aim at us. Inside the cooldown we
+        // answer from what we already did: the blob really is on the relay, which is all 32 claims,
+        // so re-sending it is both cheaper and honest. An in-flight guard collapses concurrent asks
+        // for the same ref into one upload.
+        const RESERVE_COOLDOWN_MS: u64 = 10 * 60 * 1000;
+        let now = now_ms();
+        let served_recently = {
+            let st = self.dyn_state.lock().unwrap();
+            st.media_served_at.get(&reference).is_some_and(|at| now.saturating_sub(*at) < RESERVE_COOLDOWN_MS)
+        };
+        if served_recently {
+            let body = self.media_frame_body(&reference, &circle_id, &post_id);
+            self.send_call_frame(wire::MEDIA_AVAILABLE, &body, &from);
+            log::info!("media-wanted {}: served recently — re-answering without re-upload", short(&reference));
+            return;
+        }
+        {
+            let mut st = self.dyn_state.lock().unwrap();
+            if !st.media_serving.insert(reference.clone()) {
+                log::info!("media-wanted {}: re-upload already in flight — dropping duplicate ask", short(&reference));
+                return;
+            }
+        }
+        log::info!("media-wanted {} from {} — re-uploading to a shared relay", short(&reference), short(&from));
+        // force: true — the "already has it" probe consults a ledger and the relay's own answer, and a
+        // relay that has SWEPT the blob is exactly the case where both can say "held" and skip the
+        // upload the asker is waiting for.
+        let ok = self.upload_media_inner(&circle_id, &reference, true).await;
+        {
+            let mut st = self.dyn_state.lock().unwrap();
+            st.media_serving.remove(&reference);
+            if ok {
+                st.media_served_at.insert(reference.clone(), now);
+                if st.media_served_at.len() > 500 {
+                    st.media_served_at.clear();
+                }
+            }
+        }
+        if !ok {
+            log::info!("media-wanted {}: re-upload failed — they'll re-ask", short(&reference));
+            return;
+        }
+        let body = self.media_frame_body(&reference, &circle_id, &post_id);
+        self.send_call_frame(wire::MEDIA_AVAILABLE, &body, &from);
+        log::info!("media-wanted {}: back on a relay, told {}", short(&reference), short(&from));
+    }
+
+    /// Requester side: media we asked about is back. Notify with a deep link straight to the post,
+    /// and re-fetch immediately, while the blob is known to be present.
+    fn handle_media_available(self: &Arc<Self>, sealed: &[u8]) {
+        let Some((from, body)) = self.open_sealed_frame(wire::MEDIA_AVAILABLE, sealed) else { return };
+        let Some((reference, circle_id, post_id)) = wire::parse_media_frame(&body) else { return };
+        if !self.is_contact(&from) {
+            return;
+        }
+        // Only act on something we actually asked for — an unsolicited "it's back" is just noise.
+        {
+            let mut p = self.prefs.lock().unwrap();
+            let Some(i) = p.media_wanted.iter().position(|r| *r == reference) else { return };
+            p.media_wanted.remove(i);
+            let _ = p.save(&self.paths);
+        }
+        self.clear_evicted(&reference);
+        self.media_download(reference.clone()); // pull it now, while we know it's there
+        let who = self.display_name(&from[..from.len().min(8)]);
+        // The on-device link form: it never leaves this machine, so routing it through the web
+        // landing page would be a pointless round trip.
+        let link = (!post_id.is_empty()).then(|| format!("haven://p/{circle_id}/{post_id}"));
+        self.notify_with_link(
+            "Media is available again",
+            &format!("{who} put back the media you asked for."),
+            link.as_deref(),
+        );
+        log::info!("media-wanted {}: author says it's back — fetching", short(&reference));
+        self.emit_changed();
+    }
+
+    /// A contact's FULL node id from the short (8-hex) author id a feed item carries — the short id
+    /// is all a post has, but anything addressed to a person needs the full hex. Mirrors iOS
+    /// `ContactsStore.idHex(forNodePrefix:)`.
+    fn id_hex_for(&self, author_short: &str) -> Option<String> {
+        if author_short.is_empty() {
+            return None;
+        }
+        self.prefs
+            .lock()
+            .unwrap()
+            .contacts
+            .iter()
+            .find(|c| c.id_hex.starts_with(author_short))
+            .map(|c| c.id_hex.clone())
+    }
+
+    /// Open + verify a sealed+signed frame, returning `(declared sender hex, plaintext body)`.
+    ///
+    /// The ONE verification implementation for every sealed frame type — call signaling and the
+    /// media frames 31/32 alike — so a guard tightened here is tightened for all of them. Drops any
+    /// frame we can't decrypt, whose signature doesn't verify for this recipient AND frame type (a
+    /// relay-forged, relay-rewritten, or replayed-as-another-type frame all fail), or whose PROVEN
+    /// sender doesn't match the self-declared `from` the parsers key on.
+    fn open_sealed_frame(&self, t: u8, sealed: &[u8]) -> Option<(String, Vec<u8>)> {
+        let opened = self.social.open_call_frame(t, sealed.to_vec())?;
+        let verified = opened.sender_hex.to_lowercase();
+        let body = opened.data;
+        if verified.len() != 64 || body.len() < 64 {
+            return None;
+        }
+        let declared = String::from_utf8_lossy(&body[..64]).to_lowercase();
+        if declared != verified {
+            // D9: a SEEDLESS sender signs with its DEVICE key, so the proven signer is the device id
+            // while the body's `from` is the account id. Accept when the verified device resolves
+            // (via the verified roster) to the declared account — otherwise it's a forgery.
+            match self.social.account_for_device(verified) {
+                Some(acct) if acct.eq_ignore_ascii_case(&declared) => {}
+                _ => return None, // proven sender must equal, or speak for, the self-declared `from`
+            }
+        }
+        // Block by ACCOUNT id (`declared`), which for a device-signed frame is the account behind the
+        // device, not the transient device hex.
+        if self.prefs.lock().unwrap().blocked.contains(&declared) {
+            return None;
+        }
+        Some((declared, body))
     }
 
     /// Whether `hex` is a known contact — gates unsealed call control frames.

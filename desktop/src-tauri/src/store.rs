@@ -256,6 +256,34 @@ pub struct Prefs {
     /// `EvictedMediaStore`.
     #[serde(default)]
     pub evicted_media: std::collections::HashMap<String, u64>,
+    /// Media we've asked an AUTHOR to put back (frame 31), awaiting their "it's back" (frame 32).
+    ///
+    /// A relay sweeps media on the operator's retention and a post outlives its blob, so "No longer
+    /// available" is a permanent dead end even though the author usually still holds the original.
+    /// This records that we want it — and gates acting on frame 32, so an unsolicited "it's back"
+    /// from a contact can't make us fetch things we never asked about. Device-local, never synced.
+    /// Insertion-ordered by convention and bounded on write. Mirrors iOS `MediaWantedStore`.
+    #[serde(default)]
+    pub media_wanted: Vec<String>,
+    /// How much of your circles' media THIS host is willing to keep, and for how long — the in-app
+    /// equivalent of the headless relay's `--media-max-age-days` / `--media-max-bytes`. Volunteering
+    /// a machine shouldn't mean volunteering the whole disk, and until these existed the in-app relay
+    /// always ran unlimited media.
+    ///
+    /// `0` on either means "no limit" for that dimension, so either can be set independently; with
+    /// both set the sweep applies whichever frees space first. The mailbox TTL is deliberately NOT
+    /// exposed — undelivered messages are a delivery guarantee, not disposable cache.
+    ///
+    /// Read at ATTACH time, so a change applies when the relay next starts.
+    ///
+    /// `Option`, resolved through [`Prefs::relay_media_limits`], specifically so `derive(Default)`
+    /// can't silently mean "unlimited" on a fresh install: `None` is "the user hasn't chosen", which
+    /// resolves to the generous-but-finite defaults, while `Some(0)` is a deliberate "no limit".
+    /// A plain `u32` here would have made every new install host without a cap.
+    #[serde(default)]
+    pub relay_media_max_age_days: Option<u32>,
+    #[serde(default)]
+    pub relay_media_max_bytes: Option<u64>,
     /// LOCAL media age cap in DAYS (#4): delete this device's cached blobs older than N days
     /// (0 = no age limit, the default). The event stays; the blob becomes a re-downloadable
     /// placeholder. Mirrors iOS `SettingsStore.localMediaMaxDays`.
@@ -330,6 +358,20 @@ pub struct Prefs {
 }
 
 impl Prefs {
+    /// Generous but finite. An unbounded default is how a helpful relay quietly fills a disk, and
+    /// whoever volunteers a machine is the least likely to go looking for a setting first.
+    pub const DEFAULT_MEDIA_MAX_AGE_DAYS: u32 = 30;
+    pub const DEFAULT_MEDIA_MAX_BYTES: u64 = 32 * 1024 * 1024 * 1024; // 32 GB
+
+    /// The host's chosen media limits as the relay wants them: `(days, bytes)`, where `0` on either
+    /// means "no limit" for that dimension. Unset resolves to the defaults, NOT to unlimited.
+    pub fn relay_media_limits(&self) -> (u32, u64) {
+        (
+            self.relay_media_max_age_days.unwrap_or(Self::DEFAULT_MEDIA_MAX_AGE_DAYS),
+            self.relay_media_max_bytes.unwrap_or(Self::DEFAULT_MEDIA_MAX_BYTES),
+        )
+    }
+
     pub fn load(paths: &Paths) -> Self {
         let mut prefs: Prefs = match fs::read(paths.prefs_file()) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),

@@ -38,6 +38,45 @@ pub const SEEDLESS_ENROLL_GRANT: u8 = 29; // the primary grants credential + ros
 /// invite. iOS/Android-compat.
 pub const CALL_HANDLED: u8 = 30;
 
+/// "Put this media back" — a reader asks a post's AUTHOR to re-upload a blob a relay has swept.
+/// `[hex64 sender][LP ref][LP circleId][LP postId]`. iOS/Android-compat.
+///
+/// Rides the sealed+signed call path rather than the plain one: it asks someone to spend their
+/// upload bandwidth, so it must be no more forgeable than an invite.
+pub const MEDIA_WANTED: u8 = 31;
+
+/// "It's back" — the author's reply once the re-upload has landed on a relay. Same body shape as
+/// [`MEDIA_WANTED`]. Also sealed+signed: it raises a notification and triggers a fetch.
+pub const MEDIA_AVAILABLE: u8 = 32;
+
+/// Build a media frame's body: `[hex64 sender][LP ref][LP circleId][LP postId]`. Shared by 31 and 32
+/// — the reply names the same blob the request did.
+pub fn media_frame(my_hex: &str, reference: &str, circle_id: &str, post_id: &str) -> Vec<u8> {
+    let mut out = my_hex.as_bytes().to_vec();
+    lp_append(&mut out, reference.as_bytes());
+    lp_append(&mut out, circle_id.as_bytes());
+    lp_append(&mut out, post_id.as_bytes());
+    out
+}
+
+/// Parse a media frame body into `(ref, circleId, postId)`; `None` if malformed. The 64-char sender
+/// head is SKIPPED rather than returned — the caller already holds the cryptographically VERIFIED
+/// sender, and the self-declared head must never be what anything keys on.
+pub fn parse_media_frame(body: &[u8]) -> Option<(String, String, String)> {
+    if body.len() <= 64 {
+        return None;
+    }
+    let mut r = Reader::new(body);
+    r.off = 64;
+    let reference = String::from_utf8(r.lp()?).ok()?;
+    let circle_id = String::from_utf8(r.lp()?).ok()?;
+    let post_id = String::from_utf8(r.lp()?).ok()?;
+    if reference.is_empty() || circle_id.is_empty() {
+        return None;
+    }
+    Some((reference, circle_id, post_id))
+}
+
 /// Prepend the one-byte frame type.
 pub fn frame(t: u8, payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(1 + payload.len());
@@ -161,6 +200,47 @@ pub fn chunk_frame(ref_bytes: &[u8], index: u32, total: u32, sealed: &[u8]) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn media_frame_roundtrip() {
+        let me = "a".repeat(64);
+        let p = media_frame(&me, "img_abc123", "default", "post-7");
+        let (r, c, post) = parse_media_frame(&p).unwrap();
+        assert_eq!(r, "img_abc123");
+        assert_eq!(c, "default");
+        assert_eq!(post, "post-7");
+    }
+
+    #[test]
+    fn media_frame_accepts_an_empty_post_id() {
+        // A ref can be asked about without naming a post (nothing to deep-link to); only the ref and
+        // the circle are load-bearing, since the circle is what membership is checked against.
+        let p = media_frame(&"b".repeat(64), "v:deadbeef", "dm:x-y", "");
+        let (r, c, post) = parse_media_frame(&p).unwrap();
+        assert_eq!((r.as_str(), c.as_str(), post.as_str()), ("v:deadbeef", "dm:x-y", ""));
+    }
+
+    #[test]
+    fn media_frame_rejects_malformed_and_unnamed_circles() {
+        assert!(parse_media_frame(&[0u8; 64]).is_none()); // head only, no fields
+        assert!(parse_media_frame(b"short").is_none());
+        // A frame naming no circle can't be membership-checked, so it must not parse into one that
+        // looks servable — the member check is the whole guard on the author side.
+        assert!(parse_media_frame(&media_frame(&"c".repeat(64), "img_x", "", "p1")).is_none());
+        assert!(parse_media_frame(&media_frame(&"c".repeat(64), "", "default", "p1")).is_none());
+    }
+
+    #[test]
+    fn media_frame_tolerates_a_future_trailing_field() {
+        // Every platform's parser must ignore fields it doesn't know, so a later version can append
+        // one without breaking this one — the same rule the call invite's timestamp relies on.
+        let mut p = media_frame(&"d".repeat(64), "img_x", "default", "p1");
+        let extra = b"future-field";
+        p.extend_from_slice(&(extra.len() as u16).to_le_bytes());
+        p.extend_from_slice(extra);
+        let (r, c, post) = parse_media_frame(&p).unwrap();
+        assert_eq!((r.as_str(), c.as_str(), post.as_str()), ("img_x", "default", "p1"));
+    }
 
     #[test]
     fn hello_roundtrip() {

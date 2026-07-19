@@ -679,6 +679,34 @@ pub fn media_download(engine: Eng, reference: String) {
     engine.media_download(reference);
 }
 
+/// User tapped "Ask for it back": ask the post's AUTHOR to re-upload media a relay has swept.
+/// A relay's retention swept it, but the author almost always still has the original — this is the
+/// difference between "gone" and "gone from the relay".
+#[tauri::command]
+pub fn media_request_when_available(
+    engine: Eng,
+    reference: String,
+    circle_id: String,
+    post_id: String,
+    author_short: String,
+) {
+    engine.request_media_when_available(reference, circle_id, post_id, author_short);
+}
+
+/// Whether we're already waiting to hear that this ref is back, so the placeholder can say
+/// "We'll tell you when it's back" instead of offering the ask a second time.
+#[tauri::command]
+pub fn media_is_wanted(engine: Eng, reference: String) -> bool {
+    engine.media_is_wanted(&reference)
+}
+
+/// "Message <author>" from a post's ⋯ menu: open (or reuse) the DM with them and carry the post's
+/// media. Returns the DM circle id, or `None` when the author isn't a contact.
+#[tauri::command]
+pub fn message_author(engine: Eng, author_short: String, media: Vec<String>) -> Option<String> {
+    engine.message_author(author_short, media)
+}
+
 // ---- #4 local media limits (age/size caps) ----------------------------------------------
 
 #[derive(Serialize)]
@@ -778,6 +806,25 @@ pub async fn start_hosting(engine: Eng<'_>) -> R<String> {
 #[tauri::command]
 pub fn stop_hosting(engine: Eng) {
     engine.stop_hosting();
+}
+
+#[derive(Serialize)]
+pub struct RelayMediaLimitsDto {
+    pub max_age_days: u32,
+    pub max_bytes: u64,
+}
+
+/// How much of your circles' media this host keeps, and for how long. `0` on either = no limit for
+/// that dimension.
+#[tauri::command]
+pub fn get_relay_media_limits(engine: Eng) -> RelayMediaLimitsDto {
+    let (max_age_days, max_bytes) = engine.relay_media_limits();
+    RelayMediaLimitsDto { max_age_days, max_bytes }
+}
+
+#[tauri::command]
+pub fn set_relay_media_limits(engine: Eng, max_age_days: u32, max_bytes: u64) {
+    engine.set_relay_media_limits(max_age_days, max_bytes);
 }
 
 #[derive(Serialize)]

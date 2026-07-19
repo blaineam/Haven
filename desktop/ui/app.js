@@ -38,12 +38,17 @@ const el = (tag, props = {}, ...kids) => {
 };
 const esc = (s) => (s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
-function toast(msg) {
+/** `onClick` makes the toast an affordance rather than an announcement — used where the notification
+ *  is ABOUT something openable (e.g. "your media is back", which should land you on the post). The
+ *  handler is cleared on every toast, so a plain one can never inherit the last one's action. */
+function toast(msg, onClick) {
   const t = $("#toast");
   t.textContent = msg;
   t.classList.add("show");
+  t.onclick = onClick ? () => { t.classList.remove("show"); onClick(); } : null;
+  t.style.cursor = onClick ? "pointer" : "";
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => t.classList.remove("show"), 2200);
+  toast._t = setTimeout(() => t.classList.remove("show"), onClick ? 6000 : 2200);
 }
 
 function relTime(ms) {
@@ -223,8 +228,13 @@ async function loadMedia(node, circleId, ref) {
     const url = await invoke("media_data_url", { circleId, reference: ref });
     if (url) { node.src = url; return; }
     const isVideo = ref.startsWith("v:");
+    // Which post this tile sits in, if any — read off the card rather than threaded through every
+    // gallery/pager helper in between. Absent for a tile that isn't inside a post (a DM attachment,
+    // a profile header), where the ask simply isn't offered rather than guessing at an author.
+    const card = node.closest?.("[data-post]");
+    const post = card ? { circleId, postId: card.dataset.post, authorShort: card.dataset.author, isMe: !!card.dataset.mine } : null;
     const bytes = await invoke("media_evicted_size", { reference: ref }).catch(() => null);
-    if (bytes != null) node.replaceWith(evictedPlaceholder(circleId, ref, bytes, isVideo));
+    if (bytes != null) node.replaceWith(evictedPlaceholder(circleId, ref, bytes, isVideo, post));
     else node.replaceWith(el("div", { class: "tag" }, "media syncing…"));
   } catch (_) {}
 }
@@ -232,17 +242,32 @@ async function loadMedia(node, circleId, ref) {
 // The #3 placeholder for a deliberately-evicted blob: a tap re-fetches it (media_download clears the
 // eviction first, then pulls it relay-first with a peer fallback). Spinner while pending; "No longer
 // available" + Retry if it hasn't arrived after ~45s (relay/peers don't have it either).
-function evictedPlaceholder(circleId, ref, bytes, isVideo) {
+function evictedPlaceholder(circleId, ref, bytes, isVideo, post) {
   const box = el("div", { class: "media-evicted" });
-  const draw = (mode) => {
+  // A relay's retention swept this, but the AUTHOR probably still has the original. Asking them is
+  // the difference between "gone" and "gone from the relay". Nothing to ask for on your own post:
+  // you ARE the author, so if the bytes are gone here they're gone everywhere.
+  const askBack = async () => {
+    await invoke("media_request_when_available", {
+      reference: ref, circleId: post.circleId, postId: post.postId, authorShort: post.authorShort,
+    }).catch(() => {});
+    draw("gone");
+  };
+  const draw = async (mode) => {
     if (mode === "loading") {
       box.replaceChildren(el("div", { class: "spinner" }), el("div", { class: "muted small" }, "Downloading…"));
       return;
     }
     if (mode === "gone") {
+      const wanted = await invoke("media_is_wanted", { reference: ref }).catch(() => false);
       box.replaceChildren(
         el("div", { class: "muted small" }, "No longer available"),
-        el("button", { class: "btn small", onclick: () => start() }, "Retry"));
+        el("button", { class: "btn small", onclick: () => start() }, "Retry"),
+        wanted
+          ? el("div", { class: "muted small" }, "🔔 We'll tell you when it's back")
+          : post && !post.isMe
+            ? el("button", { class: "btn small primary", onclick: askBack }, "Ask for it back")
+            : null);
       return;
     }
     box.replaceChildren(
@@ -343,7 +368,7 @@ function renderTitlebarTrailing() {
 async function circleMenu(anchor) {
   const circles = await invoke("circles").catch(() => []);
   const items = circles.map((c) => ({
-    label: `${c.name} (${c.member_count})`,
+    label: `${circleDisplayName(c.id, c.name)} (${c.member_count})`,
     icon: c.id === state.activeCircle ? "checkmark" : "circle.dashed",
     on: () => { state.activeCircle = c.id; renderFeed(); renderTitlebarTrailing(); },
   }));
@@ -643,6 +668,31 @@ function relayWalkthrough(circleId) {
 
 // ---- Feed ------------------------------------------------------------------------------
 // Posts the user hid from their own feed — local + per-device, never touches the circle/relay.
+/**
+ * What *I* call a circle. Purely local, exactly like a contact nickname: it never leaves this
+ * machine, so renaming a circle for myself can't rename it for everyone else in it. The circle's
+ * real name stays authoritative on the wire — this is resolved only at DISPLAY time, via
+ * `circleDisplayName`, which every display site should go through so a renamed circle doesn't revert
+ * wherever one was missed. An empty string clears it.
+ *
+ * Distinct from Rename in the manage sheet, which renames the circle for EVERYONE in it.
+ * localStorage rather than Prefs on purpose: it is device-local and must never reach self-sync.
+ */
+const CircleNick = {
+  map: JSON.parse(localStorage.getItem("haven-circle-nick") || "{}"),
+  get(id) { return (this.map[id] || "").trim() || null; },
+  set(id, v) {
+    const t = (v || "").trim();
+    if (t) this.map[id] = t; else delete this.map[id];
+    localStorage.setItem("haven-circle-nick", JSON.stringify(this.map));
+  },
+};
+
+/** The name to SHOW for a circle: my private nickname if I set one, else its real name. */
+function circleDisplayName(id, real) {
+  return CircleNick.get(id) || real || "My Circle";
+}
+
 const Hidden = {
   ids: new Set(JSON.parse(localStorage.getItem("haven-hidden") || "[]")),
   showHidden: false,
@@ -661,7 +711,9 @@ async function renderFeed() {
   const circles = await invoke("circles");
   const active = circles.find((c) => c.id === state.activeCircle);
   if (!active) state.activeCircle = "default";
-  state.activeCircleName = (active || {}).name || "My Circle";
+  // Through circleDisplayName: the header is a display site, so a circle I have privately renamed
+  // reads the same here as it does in the switcher.
+  state.activeCircleName = circleDisplayName(state.activeCircle, (active || {}).name);
   renderTitlebarTrailing();
 
   // macOS `banner`: a dot + one plain sentence. No sidebar footer to hide it in any more.
@@ -1774,7 +1826,10 @@ function postCard(it, circleId, reports = []) {
   const geoNode = geo ? geoChip(geo) : null;
   // data-post is how a post link finds its card (focusPostCard) — ids can hold anything, so it's an
   // attribute lookup rather than an id selector that would need escaping.
-  return el("div", { class: "card post", "data-post": it.id }, head, banner, body, media.children.length ? media : null, geoNode, audio.children.length ? audio : null, song, actions, comments);
+  // data-author / data-mine ride alongside so a media tile that discovers its bytes are missing can
+  // find out which post it belongs to and offer "Ask for it back" — the tile is several helpers deep
+  // by then, and galleries and pagers have no business carrying a post id through.
+  return el("div", { class: "card post", "data-post": it.id, "data-author": it.author_short || "", "data-mine": it.is_me ? "1" : "" }, head, banner, body, media.children.length ? media : null, geoNode, audio.children.length ? audio : null, song, actions, comments);
 }
 
 // ---- Reports (decentralized moderation) --------------------------------------------------
@@ -1924,6 +1979,9 @@ function postMenu(anchor, it, circleId) {
   const isHidden = Hidden.has(it.id);
   // #2 device pin: real, fetchable media refs only (a geo: location pin carries no bytes to keep).
   const keepRefs = (it.media || []).filter((r) => !r.startsWith("geo:"));
+  // The post's author as a CONTACT — undefined when we don't hold them, which is what hides
+  // "Message …": you can't DM someone you don't have.
+  const author = authorContact(it.author_short);
   popMenu(anchor, [
     keepRefs.length ? { label: "Keep on this device", icon: "pin", on: async () => {
       try { await invoke("media_pin", { refs: keepRefs }); toast("Kept on this device"); }
@@ -1940,6 +1998,19 @@ function postMenu(anchor, it, circleId) {
     // Hide any post from my own feed (reversible via the circle menu's "Show hidden posts").
     { label: isHidden ? "Unhide" : "Hide", icon: isHidden ? "eye" : "eye.slash",
       on: () => { isHidden ? Hidden.unhide(it.id) : Hidden.hide(it.id); renderFeed(); } },
+    // Reply to the AUTHOR privately, the same move a story reply makes: open (or reuse) the DM with
+    // them and carry the post's MEDIA so they know which post you mean — not the body, since echoing
+    // someone's own words back reads as a quote they didn't write. Never on your own post (that
+    // would DM yourself), and only when the author resolves to a contact.
+    it.is_me || !author ? null : {
+      label: `Message ${author.name}`, icon: "bubble.left",
+      on: async () => {
+        const dm = await invoke("message_author", { authorShort: it.author_short, media: keepRefs }).catch(() => null);
+        if (!dm) { toast("Couldn't open the message"); return; }
+        state.activeCircle = dm;
+        switchView("messages");
+      },
+    },
     // Report to the whole circle (decentralized moderation — see reportDialog).
     it.is_me ? null : { label: "Report", icon: "flag", danger: true, on: () => reportDialog(it, circleId) },
   ], { align: "right" });
@@ -1972,7 +2043,10 @@ async function circleSheet() {
 async function manageCircleDialog(circle) {
   if (!circle) return;
   const isDefault = circle.id === "default";
+  // The REAL name — this field renames the circle for everyone, so it must never be seeded with my
+  // private nickname, which would silently push my name for it onto the whole circle on Rename.
   const nameInp = el("input", { value: circle.name });
+  const nickInp = el("input", { value: CircleNick.get(circle.id) || "", placeholder: "Your name for this circle" });
   const contacts = await invoke("contacts").catch(() => []);
   // Switch-Flip 1.0.7 §2: the circle's current admin set (creator + delegated admins), so we can
   // label existing admins and only offer promotion to the rest.
@@ -2027,13 +2101,26 @@ async function manageCircleDialog(circle) {
   }
   relaySection.append(el("button", { class: "btn small ghost", style: "align-self:flex-start", onclick: () => relaySheet() }, "Manage relays →"));
 
-  sheet("My Circle", el("div", { class: "col" },
+  // The circle's own name (nickname-resolved), not a hardcoded "My Circle" — this sheet manages
+  // whichever circle is active.
+  sheet(circleDisplayName(circle.id, circle.name), el("div", { class: "col" },
     // Connect's front door, now that it isn't a tab — the same prominent gradient pill macOS gives
     // it in YouView.actionsRow.
     el("button", { class: "btn primary wide", onclick: () => connectSheet() }, "Invite someone to this circle"),
     el("label", { class: "muted small", style: "margin-top:6px" }, "Name"),
     el("div", { class: "row" }, nameInp,
       el("button", { class: "btn", onclick: async () => { const n = nameInp.value.trim(); if (n && n !== circle.name) { await invoke("rename_circle", { id: circle.id, name: n }); toast("Renamed"); closeModal(); renderFeed(); } } }, "Rename")),
+    el("div", { class: "muted small" }, "What this circle is called for you and everyone in it."),
+    // A PRIVATE name, alongside the shared rename above. Renaming already renamed it for everyone in
+    // the circle, which is not the same thing as wanting your own name for it.
+    el("label", { class: "muted small", style: "margin-top:6px" }, "Your name"),
+    el("div", { class: "row" }, nickInp,
+      el("button", { class: "btn", onclick: () => {
+        CircleNick.set(circle.id, nickInp.value);
+        toast(nickInp.value.trim() ? "Saved — only you see this" : "Using the circle's own name");
+        closeModal(); renderFeed(); renderTitlebarTrailing();
+      } }, "Save")),
+    el("div", { class: "muted small" }, "Only you see this. It never reaches anyone else in the circle, and it doesn't change the circle's name for them. Leave it empty to use the circle's own name."),
     el("label", { class: "muted small", style: "margin-top:6px" }, "Relays for this circle"),
     el("div", { class: "muted small" }, "Choose which configured relays this circle uses, overriding the default. The default relay (if set) always applies — change it under Settings ▸ Relays."),
     relaySection,
@@ -2074,10 +2161,12 @@ const StoryCaptions = {
     if (!t) return "";
     const f = (n, d) => Number(n).toFixed(d);
     return "\u0001" + [spec.color, spec.font, spec.style, f(spec.x, 3), f(spec.y, 3), f(spec.size, 3),
-                        "1.000", "0.0000", "0.0000"].join(",") + "\u0001" + t;
+                        // Desktop authors no media transform (there is no zoom/rotate gesture here),
+                        // so these ride as the identity. mediaRotation is the APPENDED 10th field.
+                        "1.000", "0.0000", "0.0000", "0.0000"].join(",") + "\u0001" + t;
   },
   decode(body) {
-    const def = { color: 0, font: 0, style: 1, x: 0.5, y: 0.5, size: 1, mediaScale: 1, mediaOffX: 0, mediaOffY: 0 };
+    const def = { color: 0, font: 0, style: 1, x: 0.5, y: 0.5, size: 1, mediaScale: 1, mediaOffX: 0, mediaOffY: 0, mediaRotation: 0 };
     if (!body || body[0] !== "\u0001") return { text: body || "", spec: def };
     const sep = body.indexOf("\u0001", 1);
     if (sep < 0) return { text: body.slice(1), spec: def };
@@ -2090,6 +2179,10 @@ const StoryCaptions = {
       // Author's media framing (fields 6-8, the composer's zoom + pan). Absent on legacy/6-field
       // bodies → identity, so old stories render exactly as before.
       mediaScale: parseFloat(n[6]) || 1, mediaOffX: parseFloat(n[7]) || 0, mediaOffY: parseFloat(n[8]) || 0,
+      // Rotation (RADIANS) is field 9, APPENDED after the 9-field form — a story from a client that
+      // knows it decodes here, and one from a client that doesn't reads as rotation 0 rather than
+      // failing to decode at all.
+      mediaRotation: parseFloat(n[9]) || 0,
     } };
   },
   // A styled, absolutely-positioned overlay for a media container (position:relative required).
@@ -2260,12 +2353,25 @@ function storyContentNode(it) {
     // offset of offX×W/offY×H of the container). CSS `translate(...) scale(...)` composes the same
     // way — the leftmost translate is applied outside the scale — and the translate percentages
     // resolve against this element's layout box, which lays out at the wrapper/container's size.
-    if (tf.mediaScale !== 1 || tf.mediaOffX !== 0 || tf.mediaOffY !== 0) {
-      m.style.transform = `translate(${tf.mediaOffX * 100}%, ${tf.mediaOffY * 100}%) scale(${tf.mediaScale})`;
+    if (tf.mediaScale !== 1 || tf.mediaOffX !== 0 || tf.mediaOffY !== 0 || tf.mediaRotation !== 0) {
+      // Scale → rotate → move, matching the phones' composer and viewer, so a story looks the same
+      // wherever it's opened. CSS applies the LEFTMOST function outermost, which is why the order
+      // here reads reversed: translate wraps rotate wraps scale.
+      const deg = (tf.mediaRotation * 180) / Math.PI;
+      m.style.transform = `translate(${tf.mediaOffX * 100}%, ${tf.mediaOffY * 100}%) rotate(${deg}deg) scale(${tf.mediaScale})`;
       // iOS clips the reframed media to the story frame (.clipped()); the wrapper takes over the
       // media's rounding so the scaled overflow doesn't square the corners.
       wrap.style.overflow = "hidden";
       wrap.style.borderRadius = "12px";
+      // An author who zoomed OUT (scale below 1) deliberately stopped short of filling the frame so
+      // the item shows WHOLE — it should sit over its own blurred colors, the same treatment a
+      // landscape post gets in the feed, rather than over a flat gap.
+      if (tf.mediaScale < 1 && !storyRef.startsWith("v:")) {
+        const bg = el("img", { "data-ref": storyRef, "aria-hidden": "true",
+          style: "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;"
+               + "filter:blur(28px);opacity:0.6;transform:scale(1.1);z-index:-1;pointer-events:none" });
+        wrap.prepend(bg);
+      }
     }
     if (cap) wrap.append(el("div", { style: "position:absolute;inset:0;container-type:size;pointer-events:none" }, cap));
     inner.append(wrap);
@@ -2778,6 +2884,40 @@ async function startScan() {
 // settings. Desktop matches: the gear on the You tab → Relays, plus the "Manage relays →" link
 // inside the circle sheet, plus the relay nudge's walkthrough. Nothing else.
 const renderRelay = () => relaySheet();   // legacy call sites (the walkthrough) keep working
+
+/**
+ * How much of your circles' media this machine is willing to hold, and for how long. Volunteering a
+ * PC shouldn't mean volunteering the whole disk, and until `attach_with_limits` the in-app relay had
+ * no way to say otherwise — it always ran unlimited media.
+ *
+ * "No limit" is 0 for that dimension; with both set the sweep applies whichever frees space first.
+ * The mailbox TTL is deliberately absent: undelivered messages are a delivery guarantee, not cache.
+ */
+async function relayLimitsSection(hosting) {
+  const cur = await invoke("get_relay_media_limits").catch(() => ({ max_age_days: 30, max_bytes: 32 * 1024 ** 3 }));
+  const GB = 1024 ** 3;
+  const ageSel = el("select", {},
+    ...[[7, "7 days"], [30, "30 days"], [90, "90 days"], [365, "1 year"], [0, "No limit"]]
+      .map(([v, label]) => el("option", Object.assign({ value: String(v) }, v === cur.max_age_days ? { selected: "" } : {}), label)));
+  const sizeSel = el("select", {},
+    ...[[8 * GB, "8 GB"], [32 * GB, "32 GB"], [128 * GB, "128 GB"], [512 * GB, "512 GB"], [0, "No limit"]]
+      .map(([v, label]) => el("option", Object.assign({ value: String(v) }, v === cur.max_bytes ? { selected: "" } : {}), label)));
+  const apply = async () => {
+    await invoke("set_relay_media_limits", {
+      maxAgeDays: Number(ageSel.value), maxBytes: Number(sizeSel.value),
+    }).catch((e) => toast("" + e));
+    toast(hosting ? "Saved — applies next time the relay starts" : "Saved");
+  };
+  ageSel.onchange = apply;
+  sizeSel.onchange = apply;
+  return el("div", { class: "col", style: "margin-top:10px" },
+    el("label", { class: "muted small" }, "Keep media for"), ageSel,
+    el("label", { class: "muted small", style: "margin-top:6px" }, "Media storage limit"), sizeSel,
+    el("div", { class: "muted small" }, hosting
+      ? "Changes apply next time the relay starts — Stop hosting and start again to apply them now. Whichever limit is reached first wins: old media is swept on age, and the oldest goes first if the size cap is hit. Your circles' undelivered messages are never swept — only media."
+      : "Whichever limit is reached first wins: old media is swept on age, and the oldest goes first if the size cap is hit. Your circles' undelivered messages are never swept — only media."),
+  );
+}
 async function relaySheet() {
   const s = await invoke("relay_status");
   const adoptInput = el("input", { placeholder: "Paste a relay node id (64 hex)…" });
@@ -2792,6 +2932,7 @@ async function relaySheet() {
           el("button", { class: "btn danger small", onclick: async () => { await invoke("stop_hosting"); renderRelay(); } }, "Stop hosting"),
         )
       : el("button", { class: "btn primary", onclick: async () => { try { await invoke("start_hosting"); toast("Relay started"); } catch (e) { toast("" + e); } renderRelay(); } }, "Start hosting"),
+    await relayLimitsSection(s.hosting),
   );
   // Configured relays (active + inactive). "Remove" DEACTIVATES (config survives); "Delete" erases.
   const relayList = await invoke("relays").catch(() => []);
@@ -3635,6 +3776,13 @@ function displayNameFor(hex) {
   return c ? c.name : "Someone";
 }
 
+/** The contact behind a feed item's SHORT (8-hex) author id, or undefined if we don't hold them.
+ *  A post only carries the short id, so anything addressed to its author has to resolve it first. */
+function authorContact(authorShort) {
+  if (!authorShort) return undefined;
+  return (state.contacts || []).find((c) => (c.id_hex || "").startsWith(authorShort));
+}
+
 function teardownCall() {
   // Remember the session so the caller's still-in-flight invite retransmits can't re-ring it.
   if (call.session) {
@@ -3835,6 +3983,10 @@ function renderOnboarding() {
   let emoji = "🌿";
   let avatar = "";
   let showLink = false;
+  /// "add" (another device, both stay signed in) or "move" (migrate, this replaces the old one) —
+  /// the two codes go in the same box, but the instructions for getting one differ, and so does
+  /// what happens to the device you already have.
+  let linkMode = "add";
 
   const brandMark = () => {
     const m = el("div", { style: "width:112px;height:112px;border-radius:56px;background:var(--grad);"
@@ -3849,8 +4001,11 @@ function renderOnboarding() {
 
   const code = el("input", { class: "field-capsule", placeholder: "haven-enroll:… or haven-seed:…", style: "width:100%" });
   const linkBox = () => el("div", { class: "col", style: "width:100%;gap:8px" },
-    el("div", { class: "muted small" }, "On your other device open You ▸ Devices ▸ Add a device (secure link) for a one-time code, or copy its transfer code. Paste it here."),
+    el("div", { class: "muted small" }, linkMode === "move"
+      ? "On the device you're replacing, open You ▸ Devices ▸ Advanced ▸ Transfer my identity and copy the transfer code. Paste it here. Your identity MOVES — finish setting up here before you retire that device."
+      : "On your other device open You ▸ Devices ▸ Add a device (secure link) for a one-time code. Paste it here. Both devices stay signed in and stay in sync."),
     code,
+    el("button", { class: "btn ghost small", style: "align-self:flex-start", onclick: () => { showLink = false; draw(); } }, "← Back"),
     el("button", { class: "btn primary", style: "width:100%", onclick: async () => {
       const c = code.value.trim();
       if (!c) { toast("Paste a link code first"); return; }
@@ -3865,16 +4020,39 @@ function renderOnboarding() {
         else await invoke("onboard_link", { code: c });
       }
       catch (e) { toast("Couldn't link: " + e); }
-    } }, "Link this device"));
+    } }, linkMode === "move" ? "Move my account here" : "Add this device"));
 
+  /// One onboarding path: what it's called, and — the part that actually prevents mistakes — what
+  /// it does to the device you already have. A card, not a text link, so an alternative reads as a
+  /// real choice rather than fine print.
+  const choice = (title, subtitle, on) =>
+    el("button", { class: "btn ghost", style: "width:100%;text-align:left;padding:14px", onclick: on },
+      el("div", { class: "col", style: "gap:3px" },
+        el("div", { style: "font-weight:600" }, title),
+        el("div", { class: "muted small", style: "white-space:normal" }, subtitle)));
+
+  // THREE paths, each named for what it DOES. This screen used to offer starting fresh as an
+  // unlabelled "Get started" with linking as a small ghost button underneath — so the ADDITIVE
+  // choice (another device) and the MIGRATING one (move the account) were not distinguished at all,
+  // and nothing said what happens to the device you already have. That is the part people get wrong.
+  // `linkMode` picks which text the shared paste box explains itself with; both codes have always
+  // worked in it, but a box that mentions both is a box that answers neither question.
   const welcome = () => el("div", { class: "col", style: "align-items:center;gap:20px;text-align:center" },
     brandMark(),
     el("h1", { style: "font-size:34px;font-weight:800;margin:6px 0 0" }, "Welcome to Haven"),
     el("p", { class: "muted", style: "margin:0;white-space:pre-line" },
       "A private little place for the people you love.\nNo ads. No tracking. No strangers. Just your people."),
     showLink ? linkBox()
-             : el("button", { class: "btn ghost", style: "width:100%", onclick: () => { showLink = true; draw(); } },
-                  "Link this as another of my devices"));
+             : el("div", { class: "col", style: "width:100%;gap:10px" },
+                 choice("I'm new to Haven",
+                        "Create a brand-new identity on this PC.",
+                        () => advance()),
+                 choice("Add this as another of my devices",
+                        "Use my existing Haven account here too. My other device stays signed in, and both stay in sync.",
+                        () => { showLink = true; linkMode = "add"; draw(); }),
+                 choice("Move my account to this device",
+                        "Bring my identity over from another device using a transfer code. Use this when replacing a device, not when adding one.",
+                        () => { showLink = true; linkMode = "move"; draw(); })));
 
   const pickName = () => {
     const field = el("input", { class: "pill-field", style: "text-align:center;font-size:18px", placeholder: "Your name or nickname", value: name,
@@ -3934,7 +4112,10 @@ function renderOnboarding() {
   function draw() {
     body.innerHTML = "";
     body.appendChild([welcome, pickName, howItWorks, () => el("div", { style: "max-height:52vh;overflow:auto" }, termsContent())][step]());
-    next.textContent = step === 0 ? "Get started" : step === 3 ? "I agree — enter Haven" : "Continue";
+    // Step 0 now offers the three paths as explicit choices, so a generic "Get started" underneath
+    // them would be a fourth, ambiguous door onto the same screen.
+    next.style.display = step === 0 ? "none" : "";
+    next.textContent = step === 3 ? "I agree — enter Haven" : "Continue";
     const needName = step === 1 && !name.trim();
     next.disabled = needName;
     next.style.opacity = needName ? 0.5 : 1;
@@ -4029,7 +4210,14 @@ async function boot() {
     if (state.view === "you" && ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA") && $("#view-you").contains(ae)) return;
     await render();
   });
-  listen("haven:notify", (e) => { const p = e.payload || {}; toast(`${p.title}: ${p.body}`); });
+  // A notification carrying a deepLink is ABOUT something openable — make the toast take you there
+  // rather than just announcing it. Routed through routeDeepLink, the same parser a pasted or
+  // OS-delivered link uses, so there is one route table rather than a parallel one.
+  listen("haven:notify", (e) => {
+    const p = e.payload || {};
+    if (p.deepLink) toast(`${p.title}: ${p.body}`, () => routeDeepLink(p.deepLink));
+    else toast(`${p.title}: ${p.body}`);
+  });
   // seed-drop S4: a new device asked THIS primary to link with a secure code. Nudge the user to the
   // Devices sheet, where the request shows an Approve/Dismiss row.
   listen("haven:enroll-request", (e) => { const p = e.payload || {}; toast(`“${p.name || "A device"}” wants to link — open You ▸ Devices to approve`); });

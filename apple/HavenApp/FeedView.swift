@@ -3291,7 +3291,7 @@ final class FeedStore: ObservableObject {
     /// call-frame path. Sealing it would buy nothing while making it fail wherever its own fallback
     /// still works.
     private func handleMediaResumeRequest(_ payload: Data) {
-        guard let (requesterHex, ref, claimed, theirs) = ReassemblyStore.decodeResume(payload) else { return }
+        guard let (requesterHex, ref, claimed, bitmap) = ReassemblyStore.decodeResume(payload) else { return }
         guard let url = MediaStore.shared.storagePath(for: ref),
               FileManager.default.fileExists(atPath: url.path) else { return }
         let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
@@ -3299,7 +3299,9 @@ final class FeedStore: ObservableObject {
         // A total that disagrees with ours means their partial was built against different bytes —
         // their bitmap indexes something else, so honouring it would leave permanent holes. Send the
         // whole file and let the content-address check at adopt() sort out which copy is real.
-        let missing = Set(0..<total).subtracting(total == claimed ? theirs : [])
+        // This check is also what bounds the expansion below: the bitmap only becomes a set of indices
+        // once its size is pinned to a file WE hold, never to a total the peer picked.
+        let missing = Set(0..<total).subtracting(total == claimed ? ReassemblyStore.indices(bitmap, total: total) : [])
         guard !missing.isEmpty else { return }   // they have it all; the last chunk is presumably in flight
         HavenLog.net("media RESUME ref=\(ref.prefix(12)) from=\(requesterHex.prefix(8)): \(missing.count)/\(total) chunks still needed")
         if servingNow.contains("\(ref)|\(requesterHex)") {

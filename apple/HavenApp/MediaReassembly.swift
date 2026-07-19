@@ -95,7 +95,13 @@ final class ReassemblyStore {
     /// Returns nil for anything malformed. Every bound here is a bound on what a PEER can make us
     /// allocate: the declared total must be plausible (4M chunks ≈ 128 GB, far past any real media)
     /// and the bitmap must be exactly the size that total implies.
-    static func decodeResume(_ payload: Data) -> (requesterHex: String, ref: String, total: Int, got: Set<Int>)? {
+    ///
+    /// The bitmap is returned RAW rather than expanded to a Set of indices, deliberately. Expanding it
+    /// here would let a peer turn a 500 KB frame into a multi-million-element set before we had even
+    /// checked whether we hold the ref — a cheap amplification against us. The caller expands only
+    /// after matching the declared total against the one IT computes from its own file, which bounds
+    /// the expansion by a file we actually have rather than by a number the peer chose.
+    static func decodeResume(_ payload: Data) -> (requesterHex: String, ref: String, total: Int, bitmap: Data)? {
         guard payload.count >= 64 + 2 else { return nil }
         let requesterHex = String(data: payload.prefix(64), encoding: .utf8) ?? ""
         var off = 64
@@ -111,7 +117,7 @@ final class ReassemblyStore {
         let bits = payload.subdata(in: off..<payload.count)
         guard requesterHex.count == 64, !ref.isEmpty,
               total > 0, total <= 4_000_000, bits.count == (total + 7) / 8 else { return nil }
-        return (requesterHex, ref, total, indices(bits, total: total))
+        return (requesterHex, ref, total, bits)
     }
 
     // MARK: - Records

@@ -39,6 +39,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -200,10 +202,21 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
             // the container. graphicsLayer translation is unscaled parent-space px, matching
             // SwiftUI's .scaleEffect().offset() order.
             val tf = decoded.spec
+            // Blurred backdrop beneath the framed media: an author who zoomed OUT (scale below 1)
+            // deliberately stopped short of filling the frame so the item shows whole, and it should
+            // sit over its own colors rather than over black bars. Only drawn when it can actually be
+            // seen — at scale >= 1 the media covers it and this would be a wasted second decode.
+            if (tf.mediaScale < 1f && !com.blaineam.haven.core.LocalMedia.isVideo(mediaId)) {
+                MediaImage(DEFAULT_CIRCLE, mediaId,
+                    Modifier.fillMaxSize().blur(36.dp).alpha(0.6f), ContentScale.Crop)
+            }
             Box(
                 Modifier.fillMaxSize().graphicsLayer {
+                    // Scale → rotate → move, the order the composer applies them and the order the
+                    // author's fingers did it in, so a story looks the same everywhere it's viewed.
                     scaleX = tf.mediaScale
                     scaleY = tf.mediaScale
+                    rotationZ = Math.toDegrees(tf.mediaRotation.toDouble()).toFloat()
                     translationX = tf.mediaOffX * size.width
                     translationY = tf.mediaOffY * size.height
                 },

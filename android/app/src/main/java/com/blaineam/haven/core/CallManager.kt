@@ -145,6 +145,16 @@ object CallManager {
         HavenNet.sendCallFrame(type, sealed, to)
     }
 
+    /** Seal + send a NON-call frame that must be as unforgeable as a call frame — today the media
+     *  frames 31/32 (HavenNet). They aren't call signaling, but "re-upload this blob" and "your media
+     *  is back" are exactly as abusable as an invite if they can be forged, so they borrow this path
+     *  rather than growing a second, subtly-different sealing implementation. */
+    fun sealedSend(type: Int, body: ByteArray, to: String) = send(type, body, to)
+
+    /** [openCallFrame] for the same non-call frames — one verification implementation, so a guard
+     *  fixed here is fixed for every sealed frame type. Returns the verified plaintext, or null. */
+    fun openSealed(type: Int, sealedBody: ByteArray): ByteArray? = openCallFrame(type, sealedBody)
+
     // ---- Starting / joining ----
 
     private fun invitees(): List<String> = (roster - myHex).sorted()

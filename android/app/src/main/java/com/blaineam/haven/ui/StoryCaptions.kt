@@ -10,7 +10,13 @@ import androidx.compose.ui.text.font.FontWeight
  *    \u0001color,font,styleRaw,x,y,size,mediaScale,mediaOffX,mediaOffY\u0001text
  * All position/size values are NORMALIZED (x/y as fractions of the media rect; size as a
  * multiplier on a 28-unit base), so a caption authored on any platform renders in the same spot
- * at the same relative size everywhere. A plain body (no \u0001 prefix) is just the text.
+ * at the same relative size everywhere.
+ *
+ * `mediaRotation` (RADIANS) is APPENDED as a 10th field: a client that only knows the 9-field form
+ * reads everything it understands and ignores the tail rather than failing to decode the story.
+ * Old stories decode to rotation 0.
+ *
+ * A plain body (no\u0001 prefix) is just the text.
  */
 object StoryCaptions {
     // Must match iOS StoryCaptions.colors index-for-index (the color rides as an index on the wire).
@@ -49,6 +55,10 @@ object StoryCaptions {
         val mediaScale: Float = 1f,
         val mediaOffX: Float = 0f,
         val mediaOffY: Float = 0f,
+        /** Rotation the author applied while framing, in RADIANS (wire field 9). Pairs with scales
+         *  BELOW 1: shrinking a landscape photo and tilting it slightly is how it sits over the
+         *  blurred backdrop instead of being cropped to a portrait keyhole. */
+        val mediaRotation: Float = 0f,
     )
     data class Decoded(val text: String, val spec: Spec)
 
@@ -57,13 +67,14 @@ object StoryCaptions {
         caption: String, colorIdx: Int, fontIdx: Int, style: CapStyle,
         x: Float, y: Float, size: Float,
         mediaScale: Float = 1f, mediaOffX: Float = 0f, mediaOffY: Float = 0f,
+        mediaRotation: Float = 0f,
     ): String {
         val t = caption.trim()
-        val hasTransform = mediaScale != 1f || mediaOffX != 0f || mediaOffY != 0f
+        val hasTransform = mediaScale != 1f || mediaOffX != 0f || mediaOffY != 0f || mediaRotation != 0f
         if (t.isEmpty() && !hasTransform) return ""
         val extra = String.format(
-            java.util.Locale.US, "%.3f,%.3f,%.3f,%.3f,%.4f,%.4f",
-            x, y, size, mediaScale, mediaOffX, mediaOffY,
+            java.util.Locale.US, "%.3f,%.3f,%.3f,%.3f,%.4f,%.4f,%.4f",
+            x, y, size, mediaScale, mediaOffX, mediaOffY, mediaRotation,
         )
         return "\u0001$colorIdx,$fontIdx,${styleRaw(style)},$extra\u0001$t"
     }
@@ -94,6 +105,7 @@ object StoryCaptions {
                 mediaScale = n.getOrNull(6)?.toFloatOrNull() ?: 1f,
                 mediaOffX = n.getOrNull(7)?.toFloatOrNull() ?: 0f,
                 mediaOffY = n.getOrNull(8)?.toFloatOrNull() ?: 0f,
+                mediaRotation = n.getOrNull(9)?.toFloatOrNull() ?: 0f,
             ),
         )
     }

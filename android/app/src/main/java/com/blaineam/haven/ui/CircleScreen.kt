@@ -478,7 +478,10 @@ fun CircleScreen(onAddFriend: () -> Unit) {
 private fun CircleManageSheet(circleId: String, onDismiss: () -> Unit) {
     val circlesVersion by HavenNet.circlesVersion
     val version by HavenNet.feedVersion
-    var name by remember { mutableStateOf(HavenNet.circleName(circleId)) }
+    // The REAL name — this field renames the circle for everyone, so it must never be seeded with my
+    // private nickname (which would silently push my name for it onto the whole circle on Done).
+    var name by remember { mutableStateOf(HavenNet.realCircleName(circleId)) }
+    var nick by remember { mutableStateOf(com.blaineam.haven.core.CircleSettings.nickname(circleId) ?: "") }
     val members = remember(circlesVersion, version, circleId) { HavenNet.membersOf(circleId) }
     val isDefault = circleId == com.blaineam.haven.core.DEFAULT_CIRCLE
     val cs = com.blaineam.haven.core.CircleSettings
@@ -494,7 +497,20 @@ private fun CircleManageSheet(circleId: String, onDismiss: () -> Unit) {
                         label = { Text("Circle name") }, modifier = Modifier.fillMaxWidth(),
                         colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink),
                     )
+                    Text("What this circle is called for you and everyone in it.",
+                        color = HavenTheme.textSecondary, fontSize = 11.sp)
                 }
+                // A PRIVATE name, alongside the shared rename above. Renaming a circle already
+                // renamed it for everyone in it, which is not the same thing as wanting your own name
+                // for it — this is the contact-nickname shape: local, never sent, never synced.
+                OutlinedTextField(
+                    value = nick, onValueChange = { nick = it }, singleLine = true,
+                    label = { Text("Your name for this circle") }, modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink),
+                )
+                Text("Only you see this. It never reaches anyone else in the circle, and it doesn't " +
+                    "change the circle's name for them. Leave it empty to use the circle's own name.",
+                    color = HavenTheme.textSecondary, fontSize = 11.sp)
                 // Per-circle media overrides (parity with iOS "Media in this circle"). Each falls
                 // back to the app-wide default in Settings unless pinned here.
                 key(csVersion) {
@@ -529,6 +545,7 @@ private fun CircleManageSheet(circleId: String, onDismiss: () -> Unit) {
         confirmButton = {
             androidx.compose.material3.TextButton(onClick = {
                 if (!isDefault && name.isNotBlank()) HavenNet.renameCircle(circleId, name.trim())
+                com.blaineam.haven.core.CircleSettings.setNickname(circleId, nick)   // blank clears it
                 onDismiss()
             }) { Text("Done", color = HavenTheme.pink) }
         },
@@ -824,6 +841,19 @@ private fun rememberMediaBitmap(circleId: String, ref: String, reloadKey: Any? =
     return bmp to done
 }
 
+/**
+ * Which post a media tile belongs to, and who wrote it. Needed to ask the AUTHOR to put a swept blob
+ * back (and to deep-link the notification when they do).
+ *
+ * Ambient rather than a parameter: a tile is six composables deep by the time it discovers its bytes
+ * are missing, and the intervening ones (galleries, pagers, thumbnails) have no business knowing
+ * about posts. Null wherever a tile ISN'T inside a post — a profile header, a DM attachment — where
+ * the ask simply isn't offered rather than guessing at an author.
+ */
+data class PostMediaContext(val circleId: String, val postId: String, val authorShort: String, val isMe: Boolean)
+
+val LocalPostMediaContext = androidx.compose.runtime.compositionLocalOf<PostMediaContext?> { null }
+
 /** The states of a media bitmap: the image, a graceful missing-media placeholder (bytes absent), a
  *  plain tile (bytes present but undrawable — e.g. an un-played video's missing poster), or a spinner. */
 @Composable
@@ -879,6 +909,28 @@ private fun MissingMediaPlaceholder(circleId: String, ref: String, isVideo: Bool
                     modifier = Modifier.clip(RoundedCornerShape(8.dp))
                         .clickable { com.blaineam.haven.core.HavenNet.downloadEvicted(ref) }
                         .padding(horizontal = 10.dp, vertical = 4.dp))
+                // A relay's retention swept this, but the AUTHOR probably still has the original.
+                // Asking them is the difference between "gone" and "gone from the relay".
+                com.blaineam.haven.core.MediaWantedStore.version.intValue
+                val post = LocalPostMediaContext.current
+                when {
+                    com.blaineam.haven.core.MediaWantedStore.isWanted(ref) -> {
+                        Spacer(Modifier.height(6.dp))
+                        Text("We'll tell you when it's back", color = HavenTheme.textSecondary, fontSize = 11.sp)
+                    }
+                    // Nothing to ask for on your own post: you ARE the author, so if the bytes are
+                    // gone here they're gone everywhere.
+                    post != null && !post.isMe -> {
+                        Spacer(Modifier.height(6.dp))
+                        Text("Ask for it back", color = HavenTheme.pink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                                .clickable {
+                                    com.blaineam.haven.core.HavenNet.requestMediaWhenAvailable(
+                                        ref, post.circleId, post.postId, post.authorShort)
+                                }
+                                .padding(horizontal = 10.dp, vertical = 4.dp))
+                    }
+                }
             }
             evictedBytes != null -> Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -1296,7 +1348,9 @@ private fun CircleSwitcher(activeId: String, circlesVersion: Int) {
         ) {
             circles.forEach { c ->
                 androidx.compose.material3.DropdownMenuItem(
-                    text = { Text("${c.name}  ·  ${c.memberCount}", color = HavenTheme.textPrimary) },
+                    // Through circleName, not c.name — the switcher is a display site, so a circle
+                    // I've privately renamed must read the same here as it does in the header.
+                    text = { Text("${HavenNet.circleName(c.id)}  ·  ${c.memberCount}", color = HavenTheme.textPrimary) },
                     onClick = { HavenNet.setActiveCircle(c.id); menu = false },
                 )
             }
@@ -1778,6 +1832,27 @@ fun PostCard(
                             postMenu = false
                         },
                     )
+                    // Reply to the AUTHOR privately, the same move a story reply makes: open (or
+                    // reuse) the DM with them and carry the post's media so they know which post you
+                    // mean. Never on your own post — that would DM yourself — and only when the
+                    // author resolves to a contact, since you can't DM someone you don't hold.
+                    if (!item.isMe) {
+                        val authorHex = remember(item.authorShort, HavenNet.feedVersion.value) {
+                            HavenNet.idHexFor(item.authorShort)
+                        }
+                        if (authorHex != null) {
+                            val authorName = HavenNet.displayName(item.authorShort)
+                            DropdownMenuItem(
+                                text = { Text("Message $authorName", color = HavenTheme.textPrimary) },
+                                onClick = {
+                                    postMenu = false
+                                    val refs = item.media.filter { !com.blaineam.haven.core.LocalMedia.isSynthetic(it) }
+                                    HavenNet.messageAuthor(item.authorShort, refs)
+                                        ?.let { HavenNet.setActiveCircle(it) }
+                                },
+                            )
+                        }
+                    }
                     if (!item.isMe) DropdownMenuItem(
                         text = { Text("Report", color = Color(0xFFF87171)) },
                         onClick = { postMenu = false; showReport = true },
@@ -1819,7 +1894,13 @@ fun PostCard(
         if (mediaRefs.isNotEmpty()) {
             Spacer(Modifier.height(10.dp))
             // A card whose viewer is open stops autoplaying underneath it — one decode, not two.
-            MediaGallery(circleId, mediaRefs, videoActive = videoActive && viewerStart == null) { viewerStart = it }
+            // The post context rides down to any tile that discovers its bytes are missing, so it can
+            // offer "Ask for it back" without every layer in between having to carry a post id.
+            androidx.compose.runtime.CompositionLocalProvider(
+                LocalPostMediaContext provides PostMediaContext(circleId, item.id, item.authorShort, item.isMe)
+            ) {
+                MediaGallery(circleId, mediaRefs, videoActive = videoActive && viewerStart == null) { viewerStart = it }
+            }
         }
 
         // Attached song — artwork + 30s preview playback, resolved via iTunes Search.

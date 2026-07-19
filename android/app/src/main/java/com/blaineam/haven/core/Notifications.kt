@@ -26,12 +26,28 @@ object Notifications {
         }
     }
 
-    fun notify(context: Context, title: String, body: String) {
+    /**
+     * [deepLink] (a `haven://…` or `https://…` post URL) makes the notification OPEN what it's about
+     * when tapped instead of just raising the app. It's delivered as an ordinary ACTION_VIEW, so it
+     * lands in `MainActivity.handleShare` and routes through the SAME `DeepLink` parser as a pasted
+     * or shared link — one route table, one set of rules about what a link may open.
+     */
+    fun notify(context: Context, title: String, body: String, deepLink: String? = null) {
         ensureChannel(context)
-        val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
-            ?.apply { addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP) }
+        val id = nextId++
+        val intent = if (deepLink != null) {
+            Intent(Intent.ACTION_VIEW, android.net.Uri.parse(deepLink))
+                .setPackage(context.packageName)
+                .apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP) }
+        } else {
+            context.packageManager.getLaunchIntentForPackage(context.packageName)
+                ?.apply { addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP) }
+        }
+        // The request code must be UNIQUE per notification: with a shared code, FLAG_UPDATE_CURRENT
+        // rewrites the one PendingIntent every other posted notification is still holding, so every
+        // pending tap would open whichever post notified last.
         val pi = PendingIntent.getActivity(
-            context, 0, launch ?: Intent(),
+            context, id, intent ?: Intent(),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val n = NotificationCompat.Builder(context, CHANNEL)
@@ -42,6 +58,6 @@ object Notifications {
             .setContentIntent(pi)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
-        runCatching { NotificationManagerCompat.from(context).notify(nextId++, n) }
+        runCatching { NotificationManagerCompat.from(context).notify(id, n) }
     }
 }

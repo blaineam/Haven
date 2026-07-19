@@ -58,6 +58,30 @@ object CircleSettings {
         val n = retentionDays(c); return if (n <= 0) null else (n.toLong() * 86_400L).toULong()
     }
 
+    // --- My own name for a circle (local only — never sent, never synced to members) ---
+
+    /**
+     * What *I* call this circle, if I've renamed it for myself. `null` = use the circle's real name.
+     *
+     * Purely local, exactly like a contact nickname: it never leaves this account, so renaming a
+     * circle for myself can't rename it for everyone else in it. The circle's real name stays
+     * authoritative on the wire — this only changes what I see, and only at DISPLAY time.
+     */
+    fun nickname(c: String): String? =
+        prefs?.getString("nickname.$c", null)?.trim()?.takeIf { it.isNotEmpty() }
+
+    /** The name to SHOW for a circle: my nickname if I set one, else its real name. Every display
+     *  site should go through this (or [HavenNet.circleName]) so a renamed circle doesn't revert
+     *  wherever one was missed. */
+    fun displayName(c: String, real: String): String = nickname(c) ?: real
+
+    /** Set — or clear, with a blank string — my own name for a circle. */
+    fun setNickname(c: String, v: String) {
+        val trimmed = v.trim()
+        prefs?.edit()?.apply { if (trimmed.isEmpty()) remove("nickname.$c") else putString("nickname.$c", trimmed) }?.apply()
+        bump()
+    }
+
     fun hasAnyOverride(c: String): Boolean =
         saveOwnOverride(c) != null || saveOthersOverride(c) != null ||
             optimizeOverride(c) != null || retentionOverride(c) != null

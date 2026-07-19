@@ -260,6 +260,7 @@ object HavenNet : InboundListener {
         DmRead.init(appContext)
         PinnedMediaStore.init(appContext)   // device-pin retention exemption (storage management)
         EvictedMediaStore.init(appContext)  // deliberately-removed refs (no auto-refetch)
+        MediaWantedStore.init(appContext)   // refs whose author we asked to put back (frames 31/32)
         MediaLimits.init(appContext)        // local age/size caps
         restoreState()
         if (core.seedless) {
@@ -572,7 +573,15 @@ object HavenNet : InboundListener {
         if (changed) { persist(); bumpCircles() }
     }
 
+    /** What to SHOW a circle as: my own private nickname if I've set one, else its real name. The
+     *  real name is what travels on the wire and what everyone else sees — renaming it for myself
+     *  must never rename it for them, so the nickname is resolved only here, at display time. */
     fun circleName(id: String): String =
+        CircleSettings.displayName(id, realCircleName(id))
+
+    /** The circle's name as it actually is on the wire — for the rename field (which edits the shared
+     *  name) and for anything that PUTS a name on the wire, where a private nickname must not leak. */
+    fun realCircleName(id: String): String =
         runCatching { social.circles().firstOrNull { it.id == id }?.name }.getOrNull() ?: "My Circle"
 
     fun createCircle(name: String): String {
@@ -673,6 +682,15 @@ object HavenNet : InboundListener {
 
     private fun bumpCircles() { scope.launch(Dispatchers.Main) { circlesVersion.value++ } }
 
+    /** Resolve a feed item's short author id (8 hex) to the contact's FULL node id, or null if we
+     *  don't hold them. The short id is all a feed item carries, but anything addressed to a person
+     *  (a DM, a sealed frame) needs the full hex. Mirrors iOS `ContactsStore.idHex(forNodePrefix:)`. */
+    fun idHexFor(authorShort: String): String? =
+        if (authorShort.isEmpty()) null else contacts.firstOrNull { it.idHex.startsWith(authorShort) }?.idHex
+
+    /** Is this full node id someone in my circles? */
+    fun isContact(hex: String): Boolean = contacts.any { it.idHex.equals(hex, ignoreCase = true) }
+
     /** Resolve a feed item's short author id (8 hex) to a contact's display name. */
     fun displayName(authorShort: String): String =
         contacts.firstOrNull { it.idHex.startsWith(authorShort) }?.name
@@ -695,7 +713,8 @@ object HavenNet : InboundListener {
         val body = payload.copyOfRange(1, payload.size)
         // Call frames lead with a 64-char sender hex — drop blocked senders early (parity with iOS).
         if (type in intArrayOf(Wire.MEDIA_REQ, CallWire.INVITE, CallWire.ACCEPT, CallWire.HANGUP, CallWire.OFFER,
-                CallWire.ANSWER, CallWire.ICE, CallWire.GROUP_INVITE)) {
+                CallWire.ANSWER, CallWire.ICE, CallWire.GROUP_INVITE, CallWire.CAMERA,
+                Wire.MEDIA_WANTED, Wire.MEDIA_AVAILABLE)) {
             if (body.size >= 64) {
                 val head = String(body.copyOfRange(0, 64), Charsets.UTF_8)
                 if (head.length == 64 && blocked.contains(head)) return
@@ -717,10 +736,18 @@ object HavenNet : InboundListener {
                 Wire.MEDIA_CHUNK -> handleMediaChunk(body)
                 Wire.DEVICE_ROSTER -> handleDeviceRosterAnnounce(body)
                 // 30 (handled-elsewhere) rides the same sealed+signed path: it can silence a ringing
-                // device, so it must be no more forgeable than an invite or a hangup.
+                // device, so it must be no more forgeable than an invite or a hangup. 22 (camera
+                // state) was declared and handled in CallManager but never routed here, so a peer
+                // turning their camera off left everyone staring at a frozen last frame.
                 CallWire.INVITE, CallWire.ACCEPT, CallWire.HANGUP, CallWire.OFFER,
-                CallWire.ANSWER, CallWire.ICE, CallWire.GROUP_INVITE, CallWire.HANDLED_ELSEWHERE ->
+                CallWire.ANSWER, CallWire.ICE, CallWire.GROUP_INVITE, CallWire.HANDLED_ELSEWHERE,
+                CallWire.CAMERA ->
                     withContext(Dispatchers.Main) { callRouter?.invoke(type, body) }
+                // 31/32 are media frames, not call signaling, so they're handled here rather than in
+                // CallManager — but they borrow the call path's sealing because one asks an author to
+                // spend upload bandwidth and the other triggers a notification and a fetch.
+                Wire.MEDIA_WANTED -> handleMediaWanted(body)
+                Wire.MEDIA_AVAILABLE -> withContext(Dispatchers.Main) { handleMediaAvailable(body) }
                 else -> Log.d(TAG, "ignoring frame type $type (not yet handled)")
             }
         }
@@ -740,6 +767,139 @@ object HavenNet : InboundListener {
         if (dests.isEmpty()) dests.add(toNodeHex)
         dests.addAll(deviceHintsFor(toNodeHex))
         originateRelayInternet(dests.toList(), Wire.frame(type, payload))
+    }
+
+    // ---- "Tell me when this media is back" (frames 31/32; iOS parity) ---------------------
+
+    /** Body of both media frames: `[hex64 me][LP ref][LP circleId][LP postId]`. */
+    private fun mediaFrameBody(ref: String, circleId: String, postId: String): ByteArray {
+        val out = ArrayList<Byte>()
+        nodeIdHex.toByteArray(Charsets.UTF_8).forEach { out.add(it) }
+        Wire.lpAppend(out, ref.toByteArray(Charsets.UTF_8))
+        Wire.lpAppend(out, circleId.toByteArray(Charsets.UTF_8))
+        Wire.lpAppend(out, postId.toByteArray(Charsets.UTF_8))
+        return out.toByteArray()
+    }
+
+    /** (from, ref, circleId, postId) — null if the frame is malformed. */
+    private fun parseMediaFrame(body: ByteArray): Quadruple? {
+        if (body.size <= 64) return null
+        val from = runCatching { String(body.copyOfRange(0, 64), Charsets.UTF_8) }.getOrNull() ?: return null
+        if (from.length != 64) return null
+        val r = Wire.Reader(body, 64)
+        val ref = r.lp()?.let { String(it, Charsets.UTF_8) } ?: return null
+        val circleId = r.lp()?.let { String(it, Charsets.UTF_8) } ?: return null
+        val postId = r.lp()?.let { String(it, Charsets.UTF_8) } ?: return null
+        if (ref.isEmpty() || circleId.isEmpty()) return null
+        return Quadruple(from.lowercase(), ref, circleId, postId)
+    }
+
+    private data class Quadruple(val from: String, val ref: String, val circleId: String, val postId: String)
+
+    /**
+     * Ask a post's AUTHOR to re-upload media a relay has swept, and remember that I asked.
+     *
+     * The request rides the sealed frame path, which means the circle mailbox carries it: an author
+     * who is offline for a week gets it the moment they next sync. That is the whole mechanism —
+     * nothing is parked on a relay by hand, and no relay change was needed.
+     */
+    fun requestMediaWhenAvailable(ref: String, circleId: String, postId: String, authorShort: String) {
+        val authorHex = idHexFor(authorShort)
+        if (authorHex == null) {
+            Log.i(TAG, "media-wanted ${ref.take(10)}: author not resolvable — cannot ask")
+            return
+        }
+        MediaWantedStore.add(ref)
+        CallManager.sealedSend(Wire.MEDIA_WANTED, mediaFrameBody(ref, circleId, postId), authorHex)
+        Log.i(TAG, "media-wanted ${ref.take(10)} → author ${authorHex.take(8)}")
+    }
+
+    /**
+     * Author side: someone wants media from a post of mine that a relay no longer holds. If I still
+     * have the original, put it back on a relay we share and tell them when it lands.
+     *
+     * This is the point of the feature: media stays reachable for as long as its AUTHOR keeps a
+     * copy, rather than for as long as a relay's retention window.
+     */
+    /** Refs we've recently put back, and refs a re-upload is in flight for. A frame 31 costs the
+     *  RECIPIENT a full blob upload, so an unbounded one-upload-per-frame handler is a bandwidth
+     *  amplifier a circle member can point at us. Within the cooldown we answer from what we already
+     *  did — re-sending frame 32 is cheap and is the honest answer, because the blob really is back. */
+    private val mediaServedAt = LinkedHashMap<String, Long>()
+    private val mediaServing = HashSet<String>()
+    private const val MEDIA_RESERVE_COOLDOWN_MS = 10 * 60 * 1000L
+
+    private suspend fun handleMediaWanted(sealedBody: ByteArray) {
+        val body = CallManager.openSealed(Wire.MEDIA_WANTED, sealedBody) ?: return
+        val f = parseMediaFrame(body) ?: return
+        if (!isContact(f.from)) return   // only my circle may ask
+        // Only serve a circle they're actually in — a request NAMES a circle, and naming one is not
+        // the same as belonging to it.
+        val members = runCatching { social.contactNodeIds(f.circleId) }.getOrDefault(emptyList())
+        if (members.none { it.equals(f.from, ignoreCase = true) || it.lowercase().startsWith(f.from.take(16)) }) {
+            Log.i(TAG, "media-wanted ${f.ref.take(10)} from ${f.from.take(8)} — not a member of ${f.circleId.take(12)}, ignoring")
+            return
+        }
+        if (!LocalMedia.has(f.ref)) {
+            Log.i(TAG, "media-wanted ${f.ref.take(10)} from ${f.from.take(8)} — I don't hold it either")
+            return
+        }
+        // Already put this one back a moment ago (or two people asked at once): don't pay for the
+        // upload again, just answer. The blob is on the relay either way, which is all 32 claims.
+        val now = System.currentTimeMillis()
+        val servedRecently = synchronized(mediaServedAt) {
+            val at = mediaServedAt[f.ref]
+            at != null && now - at < MEDIA_RESERVE_COOLDOWN_MS
+        }
+        if (servedRecently) {
+            CallManager.sealedSend(Wire.MEDIA_AVAILABLE, mediaFrameBody(f.ref, f.circleId, f.postId), f.from)
+            Log.i(TAG, "media-wanted ${f.ref.take(10)}: served recently — re-answering without re-upload")
+            return
+        }
+        if (!synchronized(mediaServing) { mediaServing.add(f.ref) }) {
+            Log.i(TAG, "media-wanted ${f.ref.take(10)}: re-upload already in flight — dropping duplicate ask")
+            return
+        }
+        Log.i(TAG, "media-wanted ${f.ref.take(10)} from ${f.from.take(8)} — re-uploading to a shared relay")
+        // force = true: the "already has it" probe consults a ledger and the relay's own answer, and
+        // a relay that has SWEPT the blob is exactly the case where both can say "held" and skip the
+        // upload the asker is waiting for.
+        val ok = try {
+            uploadMedia(f.circleId, f.ref, force = true)
+        } finally {
+            synchronized(mediaServing) { mediaServing.remove(f.ref) }
+        }
+        if (!ok) {
+            Log.i(TAG, "media-wanted ${f.ref.take(10)}: re-upload failed — they'll re-ask")
+            return
+        }
+        synchronized(mediaServedAt) {
+            mediaServedAt[f.ref] = now
+            while (mediaServedAt.size > 500) mediaServedAt.remove(mediaServedAt.keys.first())
+        }
+        CallManager.sealedSend(Wire.MEDIA_AVAILABLE, mediaFrameBody(f.ref, f.circleId, f.postId), f.from)
+        Log.i(TAG, "media-wanted ${f.ref.take(10)}: back on a relay, told ${f.from.take(8)}")
+    }
+
+    /** Requester side: media I asked about is back. Notify with a deep link straight to the post. */
+    private fun handleMediaAvailable(sealedBody: ByteArray) {
+        val body = CallManager.openSealed(Wire.MEDIA_AVAILABLE, sealedBody) ?: return
+        val f = parseMediaFrame(body) ?: return
+        if (!isContact(f.from)) return
+        // Only act on something I actually asked for — an unsolicited "it's back" is just noise.
+        if (!MediaWantedStore.isWanted(f.ref)) return
+        MediaWantedStore.clear(f.ref)
+        unavailableMedia.remove(f.ref)
+        EvictedMediaStore.clear(f.ref)
+        downloadEvicted(f.ref)   // pull it now, while we know it's there
+        val who = displayName(f.from.take(8))
+        Notifications.notify(
+            appContext,
+            "Media is available again",
+            "$who put back the media you asked for.",
+            deepLink = if (f.postId.isEmpty()) null else DeepLink.internalPostUrl(f.circleId, f.postId),
+        )
+        Log.i(TAG, "media-wanted ${f.ref.take(10)}: author says it's back — fetching")
     }
 
     // ---- Frame-9 mesh relay (internet live-forward; wire parity with iOS emitRelay) --------
@@ -1031,6 +1191,34 @@ object HavenNet : InboundListener {
             LocalMedia.loadAnyCircle(ref)?.let { listOf(LocalMedia.store(dmCircle, it, isVideo = LocalMedia.isVideo(ref))) }
         } ?: emptyList()
         sendDm(dmCircle, text, media)
+        return dmCircle
+    }
+
+    /**
+     * DM a post's author about that post — the same move [replyToStory] makes, from the post's ⋯ menu.
+     *
+     * Carries the post's MEDIA and not its body: echoing someone's own words back at them reads as a
+     * quote they didn't write, while the media is the unambiguous "this post". Returns the DM circle
+     * id immediately so the caller can switch to it; the media is re-sealed and sent in the
+     * background, because a blob is decrypted and re-encrypted whole and that is not a main-thread
+     * amount of work for a video.
+     *
+     * Media can't simply be forwarded by reference: every blob is sealed under the circle it was
+     * posted to, so a ref carried into a DM would be undecryptable there. It is re-stored under the
+     * DM's key, exactly as a story reply does.
+     */
+    fun messageAuthor(authorShort: String, mediaRefs: List<String>): String? {
+        val contact = contacts.firstOrNull { it.idHex.startsWith(authorShort) } ?: return null
+        val dmCircle = startDm(contact)
+        if (mediaRefs.isEmpty()) return dmCircle
+        scope.launch(Dispatchers.IO) {
+            val media = mediaRefs.mapNotNull { ref ->
+                LocalMedia.loadAnyCircle(ref)?.let {
+                    LocalMedia.store(dmCircle, it, isVideo = LocalMedia.isVideo(ref))
+                }
+            }
+            if (media.isNotEmpty()) withContext(Dispatchers.Main) { sendDm(dmCircle, "", media) }
+        }
         return dmCircle
     }
 

@@ -54,6 +54,17 @@ object DeepLink {
         return "https://$HOST$LINK_PATH/#p/${encodeToken(circleId)}.${encodeToken(postId)}"
     }
 
+    /**
+     * The ON-DEVICE form, for a link Haven hands to itself (today: a notification's tap intent).
+     * Deliberately the `haven://` scheme rather than [postUrl]'s web form — this one never leaves the
+     * device, so routing it through wemiller.com's landing page would be a pointless round trip, and
+     * the custom scheme resolves without depending on App Link verification. Parsed by [legacyPost].
+     */
+    fun internalPostUrl(circleId: String, postId: String): String? {
+        if (circleId.isEmpty() || postId.isEmpty()) return null
+        return "haven://p/${Uri.encode(circleId)}/${Uri.encode(postId)}"
+    }
+
     /** Not `Uri.encode` — its unreserved set keeps `.` literal, which would let a `dm:<a>-<b>`
      *  style id slide the split and hand our own parser the wrong circle. */
     private fun encodeToken(s: String): String = buildString {

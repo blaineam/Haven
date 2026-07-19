@@ -47,6 +47,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -136,12 +138,23 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
     var boxSize by remember { mutableStateOf(IntSize.Zero) }
     var sharing by remember { mutableStateOf(false) }
     var shareLabel by remember { mutableStateOf("Share to story") }
-    // Pinch-zoom + drag to position the media within the story frame (baked into the share).
+    // Pinch to zoom, twist to rotate, drag to position the media within the story frame (baked into
+    // the share). The floor is 0.25 rather than 1: clamping to 1 meant the media could only ever be
+    // zoomed IN, so a LANDSCAPE photo could not be made to fit a portrait story at all — it was
+    // cropped to whatever fell inside the keyhole, with no gesture that could pull it back out.
+    // Below 1 it stops short of filling the canvas and the blurred backdrop shows around the edges.
     var mediaScale by remember { mutableStateOf(1f) }
     var mediaOffset by remember { mutableStateOf(Offset.Zero) }
-    val mediaTransform = rememberTransformableState { zoom, pan, _ ->
-        mediaScale = (mediaScale * zoom).coerceIn(1f, 5f)
+    /** DEGREES here (Compose's gesture + graphicsLayer unit); converted to radians on the wire. */
+    var mediaRotation by remember { mutableStateOf(0f) }
+    val mediaTransform = rememberTransformableState { zoom, pan, rotate ->
+        mediaScale = (mediaScale * zoom).coerceIn(0.25f, 5f)
         mediaOffset += pan
+        val next = mediaRotation + rotate
+        // Snap to level when they land within a couple of degrees of a right angle, so "straight" is
+        // reachable with fingers instead of luck.
+        val off = next.mod(90f)
+        mediaRotation = if (off < 2.5f || off > 87.5f) Math.round(next / 90f) * 90f else next
     }
 
     val filter = HavenFilter.all[filterIdx]
@@ -173,8 +186,18 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
         // ── Media (photo + video both preview the live filter) — pinch to zoom, drag to position;
         //    aspect-FILLS the frame (no squish/letterbox), and the transform is baked on share. ───
         Box(Modifier.fillMaxSize().transformable(mediaTransform)) {
+            // Blurred backdrop, drawn BENEATH the framed media: once the scale drops below 1 the
+            // media stops filling the canvas, and black bars around a shrunken landscape photo would
+            // read as a bug rather than a composition. Same treatment a landscape post gets in the
+            // feed. Modifier.blur is a no-op below API 31, which degrades to the old black — the
+            // media is still whole, just plainer.
+            previewBmp?.let {
+                Image(it.asImageBitmap(), null,
+                    Modifier.fillMaxSize().blur(36.dp).alpha(0.6f), contentScale = ContentScale.Crop)
+            }
             val mediaMod = Modifier.fillMaxSize().graphicsLayer(
                 scaleX = mediaScale, scaleY = mediaScale,
+                rotationZ = mediaRotation,
                 translationX = mediaOffset.x, translationY = mediaOffset.y,
             )
             if (isVideo) EditorVideo(ref, filter.spec, muted = music != null || !previewSound, mediaMod)
@@ -301,13 +324,13 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
                                         // Transcode is filter-only — a video's zoom/pan can't be baked
                                         // like a photo's, so the framing rides the wire fields instead
                                         // (viewers apply it, matching iOS).
-                                        HavenNet.postStory(encodedCaption(caption, colorIdx, fontIdx, style, capOffset, boxSize, sizeSp, mediaScale, mediaOffset), newRef, music)
+                                        HavenNet.postStory(encodedCaption(caption, colorIdx, fontIdx, style, capOffset, boxSize, sizeSp, mediaScale, mediaOffset, mediaRotation), newRef, music)
                                     } else {
                                         // Filter + the author's zoom/pan are pixel operations and stay
                                         // baked; the CAPTION rides the wire format instead (parity with
                                         // iOS/desktop) so every platform renders it live + identically.
                                         val baked = withContext(Dispatchers.IO) {
-                                            bakePhoto(srcBmp, filter.spec, "", capColor, style, fontIdx, sizeSp, capOffset, boxSize, mediaScale, mediaOffset)
+                                            bakePhoto(srcBmp, filter.spec, "", capColor, style, fontIdx, sizeSp, capOffset, boxSize, mediaScale, mediaOffset, mediaRotation)
                                         }
                                         HavenNet.postStory(encodedCaption(caption, colorIdx, fontIdx, style, capOffset, boxSize, sizeSp), baked ?: ref, music)
                                     }
@@ -349,7 +372,7 @@ private fun CtlButton(onClick: () -> Unit, content: @Composable () -> Unit) {
 private fun bakePhoto(
     srcBmp: Bitmap?, spec: FilterSpec, caption: String, capColor: Color, style: CapStyle,
     fontIdx: Int, sizeSp: Float, capOffset: Offset, boxSize: IntSize,
-    mediaScale: Float, mediaOffset: Offset,
+    mediaScale: Float, mediaOffset: Offset, mediaRotation: Float,
 ): String? {
     val src = srcBmp ?: return null
     if (boxSize.width <= 0 || boxSize.height <= 0) return null
@@ -361,14 +384,28 @@ private fun bakePhoto(
         val out = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
         canvas.drawColor(android.graphics.Color.BLACK)
-        // Media: cover-fill the frame (matches ContentScale.Crop), then the user's pinch-zoom + pan.
+        // Blurred backdrop first, so a media scaled BELOW 1 sits over its own colors rather than over
+        // black bars. Downscale-then-upscale rather than a real gaussian: RenderScript is deprecated
+        // and this is a background nobody looks at directly, so the cheap blur is the right one.
+        run {
+            val tiny = Bitmap.createScaledBitmap(filtered, 24, 24, true)
+            canvas.drawBitmap(tiny, null, android.graphics.RectF(0f, 0f, outW.toFloat(), outH.toFloat()),
+                Paint(Paint.FILTER_BITMAP_FLAG).apply { alpha = 153 })   // ~0.6, matching the composer
+            tiny.recycle()
+        }
+        // Media: cover-fill the frame (matches ContentScale.Crop), then the user's pinch-zoom, twist
+        // and pan. Scale → rotate → move, the same order the composer applies them, so the bake is
+        // WYSIWYG. Rotation is about the frame's centre, which is what graphicsLayer does by default.
         val m = maxOf(outW.toFloat() / filtered.width, outH.toFloat() / filtered.height) * mediaScale
         val drawW = filtered.width * m
         val drawH = filtered.height * m
         val left = outW / 2f - drawW / 2f + mediaOffset.x * s
         val top = outH / 2f - drawH / 2f + mediaOffset.y * s
+        canvas.save()
+        if (mediaRotation != 0f) canvas.rotate(mediaRotation, outW / 2f, outH / 2f)
         canvas.drawBitmap(filtered, null, android.graphics.RectF(left, top, left + drawW, top + drawH),
             Paint(Paint.FILTER_BITMAP_FLAG))
+        canvas.restore()
         // Caption (positions + size map from on-screen px via s).
         if (caption.isNotBlank()) {
             val textColor = if (style == CapStyle.NEON) android.graphics.Color.WHITE
@@ -414,7 +451,7 @@ private fun bakePhoto(
 private fun encodedCaption(
     caption: String, colorIdx: Int, fontIdx: Int, style: CapStyle,
     capOffset: Offset, boxSize: IntSize, sizeSp: Float,
-    mediaScale: Float = 1f, mediaOffset: Offset = Offset.Zero,
+    mediaScale: Float = 1f, mediaOffset: Offset = Offset.Zero, mediaRotation: Float = 0f,
 ): String {
     val wireStyle = when (style) {
         CapStyle.PLAIN -> StoryCaptions.CapStyle.PLAIN
@@ -432,5 +469,8 @@ private fun encodedCaption(
         mediaScale = mediaScale,
         mediaOffX = if (boxSize.width > 0) mediaOffset.x / boxSize.width else 0f,
         mediaOffY = if (boxSize.height > 0) mediaOffset.y / boxSize.height else 0f,
+        // The gesture works in degrees; the wire field is RADIANS (iOS authors it from a
+        // RotationGesture, whose unit is radians), so convert once, here at the boundary.
+        mediaRotation = Math.toRadians(mediaRotation.toDouble()).toFloat(),
     )
 }

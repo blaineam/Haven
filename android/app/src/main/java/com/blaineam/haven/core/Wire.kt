@@ -36,6 +36,16 @@ object Wire {
     const val SDP_ANSWER: Int = 17
     const val ICE: Int = 18
 
+    /** 31 — "put this media back": a reader asks a post's AUTHOR to re-upload a blob a relay swept.
+     *  32 — "it's back": the author's reply once the re-upload lands.
+     *  Both: `[hex64 sender][LP ref][LP circleId][LP postId]`.
+     *
+     *  These ride the SEALED+SIGNED call-frame path, not the plain one: 31 asks someone to spend
+     *  their upload bandwidth and 32 raises a notification and triggers a fetch, so neither may be
+     *  forgeable. See HavenNet.onInbound and CallManager.sealedSend. */
+    const val MEDIA_WANTED: Int = 31
+    const val MEDIA_AVAILABLE: Int = 32
+
     /** Prepend the one-byte frame type. */
     fun frame(type: Int, payload: ByteArray): ByteArray =
         ByteArray(1 + payload.size).also {

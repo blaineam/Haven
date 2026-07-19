@@ -573,6 +573,60 @@ enum SharedStore {
         }
     }
 
+    /// PULL a CONTACT's device roster from the relays and ingest it — the missing half of
+    /// `publishDeviceRoster`, which only ever pushed OUR OWN.
+    ///
+    /// The only other way to learn a contact's roster is frame 27, sent over a DIRECT iroh send on the
+    /// periodic sweep. That never arrives when neither peer is directly reachable — two CGNAT networks,
+    /// Starlink being the everyday case. Without their roster `accountForDevice` cannot map their
+    /// signing device to their account, so every device-signed call frame they send us fails the
+    /// declared-vs-signer check and is discarded as a forgery. That is precisely "the callee answers,
+    /// the caller sits on Calling forever": their ACCEPT arrives and we throw it away. The relay has
+    /// been holding their roster the whole time — nobody ever asked it for one.
+    ///
+    /// Safe against a hostile relay: `ingestRosterWire` verifies the ACCOUNT signature over the
+    /// DeviceList itself and refuses anything that doesn't bind to the account named in the key, so a
+    /// relay can serve these bytes but cannot forge or alter them.
+    @discardableResult
+    static func fetchContactRoster(accountHex: String, social: HavenSocial) async -> Bool {
+        let acct = accountHex.lowercased()
+        guard acct.count == 64 else { return false }
+        let key = "haven/devroster/\(acct)"
+
+        // Our own hosted store first — no dial, and a relay-hosting device usually already holds it.
+        if RelayHost.shared.serving, let wire = RelayHost.shared.localGet(key), !wire.isEmpty,
+           social.ingestRosterWire(wire: wire) {
+            HavenLog.sync("devroster PULLED \(acct.prefix(8)) from own store — their devices are now resolvable")
+            return true
+        }
+        for node in RelayMailboxStore.shared.allRelays() where !node.hasPrefix("s3:") {
+            if RelayHost.shared.serving, node == RelayHost.shared.nodeId { continue }
+            if let http = RelayMailboxStore.shared.httpInterface(node) {
+                for base in http.urls where !httpUrlBad(base) {
+                    switch await httpGet(base, http.token, key) {
+                    case .success(let wire):
+                        if let wire, !wire.isEmpty, social.ingestRosterWire(wire: wire) {
+                            RelayMailboxStore.shared.markSeen(node)
+                            HavenLog.sync("devroster PULLED \(acct.prefix(8)) from relay \(node.prefix(8))")
+                            return true
+                        }
+                    case .failure(is RelayForbidden):
+                        noteRefused(node, "devroster read for \(acct.prefix(8))")
+                    case .failure:
+                        markHttpUrlBad(base)
+                    }
+                }
+            }
+            guard let c = await RelayClients.client(node) else { continue }
+            if let wire = await c.get(key: key), !wire.isEmpty, social.ingestRosterWire(wire: wire) {
+                RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
+                HavenLog.sync("devroster PULLED \(acct.prefix(8)) from relay \(node.prefix(8)) (dial)")
+                return true
+            }
+        }
+        return false
+    }
+
     /// The bucket used for MEDIA in this circle: the owner's own creds for a circle whose pre-signed
     /// pool we mint, else the shared/volunteer mailbox bucket. Same selection as `uploadEvent`.
     private static func mediaS3(for circleId: String) -> S3Client? {

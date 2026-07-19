@@ -1612,6 +1612,21 @@ final class FeedStore: ObservableObject {
             originateRelay(dests: Array(targets), inner: frame(0, hello))
         }
         if resendHistory { lastHistoryResendMs = nowMs }
+        // PULL the rosters we're missing. Announcing ours (frame 27, above) only works when the
+        // contact is DIRECTLY reachable; between two CGNAT networks it never lands in either
+        // direction, so neither side can resolve the other's devices — and a device-signed call
+        // frame, the ACCEPT included, then fails the declared-vs-signer check and is dropped as a
+        // forgery. Their roster is already sitting on the relay, so ask for it. Cheap and idempotent:
+        // only contacts we currently can't resolve, and the ingest is a no-op once we hold it.
+        let unresolved = ContactsStore.shared.contacts
+            .map(\.idHex)
+            .filter { hex in social.deviceNodeIdsFor(accountHex: hex).allSatisfy { $0.lowercased() == hex.lowercased() } }
+        if !unresolved.isEmpty {
+            HavenLog.sync("devroster: \(unresolved.count) contact(s) have no resolvable devices — pulling from relays")
+            Task { @MainActor in
+                for hex in unresolved { await SharedStore.fetchContactRoster(accountHex: hex, social: social) }
+            }
+        }
         // Own-device catch-up over NEARBY, every cycle: a sibling that missed the instant broadcastEvent
         // (e.g. nearby was reconnecting when I posted) shows my latest post within a cycle (~20s) instead of
         // waiting for the 3-min full re-send. Re-seal (the expensive part) runs OFF the main thread; only the

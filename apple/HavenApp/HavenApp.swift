@@ -144,6 +144,7 @@ struct HavenApp: App {
     init() {
         // Register the background-refresh task at launch (required before didFinishLaunching).
         NotificationManager.shared.registerBackgroundTask()
+        NotificationManager.shared.registerTapRouting()   // notification taps route to what they're about
     }
 
     var body: some Scene {

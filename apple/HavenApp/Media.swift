@@ -1404,6 +1404,42 @@ final class PinnedMediaStore: ObservableObject {
 /// "Download X MB" placeholder and are re-fetched only on tap. Keyed by on-disk stem → last-known bytes
 /// (for the placeholder label). DEVICE-LOCAL, persisted as JSON in UserDefaults.
 @MainActor
+/// Media I've asked to be told about when it comes back.
+///
+/// A relay sweeps media on the operator's retention, and a post outlives its blob — so "No longer
+/// available" is a permanent dead end even though the AUTHOR usually still has the original sitting
+/// on their device. This records that I want it, so I can be told when it returns.
+///
+/// Deliberately just a local set of refs: the REQUEST itself travels as a sealed frame through the
+/// circle's mailbox, which is already store-and-forward, so an author who is offline for a week
+/// receives it the moment they next sync. Nothing needs to be parked on a relay by hand.
+final class MediaWantedStore: ObservableObject {
+    static let shared = MediaWantedStore()
+    @Published private(set) var wanted: Set<String>
+    private let d = UserDefaults.standard
+    private let key = "haven.media.wanted"
+
+    private init() { wanted = Set(d.stringArray(forKey: key) ?? []) }
+
+    func isWanted(_ ref: String) -> Bool { wanted.contains(ref) }
+
+    func add(_ ref: String) {
+        guard !wanted.contains(ref) else { return }
+        wanted.insert(ref)
+        // Bounded: a user who taps this on everything shouldn't grow an unbounded list, and the
+        // oldest asks are the least likely to still matter.
+        if wanted.count > 500 { wanted.removeFirst() }
+        d.set(Array(wanted), forKey: key)
+    }
+
+    /// It arrived (or the ask is moot) — stop tracking it.
+    func clear(_ ref: String) {
+        guard wanted.contains(ref) else { return }
+        wanted.remove(ref)
+        d.set(Array(wanted), forKey: key)
+    }
+}
+
 final class EvictedMediaStore: ObservableObject {
     static let shared = EvictedMediaStore()
     @Published private(set) var sizes: [String: Int64]
@@ -1447,8 +1483,13 @@ final class EvictedMediaStore: ObservableObject {
 struct MissingMediaPlaceholder: View {
     let ref: String
     var isVideo: Bool = false
+    /// Which post this blob belongs to, and who wrote it. Needed to ask the AUTHOR to put it back
+    /// (and to deep-link the notification when they do). Absent where a placeholder isn't rendered
+    /// inside a post — the ask simply isn't offered there rather than guessing at an author.
+    var postContext: (circleId: String, postId: String, authorShort: String)?
     @ObservedObject private var feed = FeedStore.shared
     @ObservedObject private var evicted = EvictedMediaStore.shared
+    @ObservedObject private var wanted = MediaWantedStore.shared
 
     var body: some View {
         ZStack {
@@ -1469,6 +1510,20 @@ struct MissingMediaPlaceholder: View {
                 Text("No longer available").font(.caption).foregroundStyle(.secondary)
                 Button("Retry") { feed.downloadEvicted(ref) }
                     .font(.caption.weight(.semibold)).buttonStyle(.borderless).tint(HavenTheme.pink)
+                // A relay's retention swept this, but the AUTHOR probably still has the original.
+                // Asking them is the difference between "gone" and "gone from the relay".
+                if wanted.isWanted(ref) {
+                    Label("We'll tell you when it's back", systemImage: "bell.fill")
+                        .font(.caption2).foregroundStyle(.secondary)
+                } else if let ctx = postContext {
+                    Button {
+                        feed.requestMediaWhenAvailable(ref: ref, circleId: ctx.circleId,
+                                                       postId: ctx.postId, authorShort: ctx.authorShort)
+                    } label: {
+                        Label("Ask for it back", systemImage: "bell")
+                    }
+                    .font(.caption.weight(.semibold)).buttonStyle(.borderless).tint(HavenTheme.pink)
+                }
             }
         } else if let bytes = evicted.size(ref) {
             Button { feed.downloadEvicted(ref) } label: {

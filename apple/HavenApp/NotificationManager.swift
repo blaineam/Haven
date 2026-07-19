@@ -100,7 +100,10 @@ final class NotificationManager {
     /// `dedupeKey` across relaunches (persisted), so re-ingested history can't re-notify.
     /// `persist: false` keeps the old session-only dedupe — for deliberate, repeatable flows
     /// (e.g. device enrollment) where the SAME key should notify again on a later occasion.
-    func notify(title: String, body: String, dedupeKey: String, persist: Bool = true) {
+    /// `deepLink` (a `haven://…` URL) makes the notification OPEN something when tapped instead of
+    /// just raising the app — carried in userInfo and routed through the same DeepLink parser as a
+    /// pasted or shared link, so there is one route table rather than a parallel one.
+    func notify(title: String, body: String, dedupeKey: String, persist: Bool = true, deepLink: String? = nil) {
         guard authorized else { return }
         guard !PlatformApp.isActive else { return }
         loadNotifiedIfNeeded()
@@ -117,6 +120,7 @@ final class NotificationManager {
         content.title = title
         content.body = body
         content.sound = .default
+        if let deepLink { content.userInfo["havenDeepLink"] = deepLink }
         let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(req)
         #if os(iOS)
@@ -124,5 +128,41 @@ final class NotificationManager {
         WatchSessionManager.shared.mirrorNotification(title: title, body: body, dedupeKey: dedupeKey)
         WatchSessionManager.shared.pushSnapshot()
         #endif
+    }
+
+    /// Route a tapped notification that carries a `havenDeepLink`. Until now nothing handled taps at
+    /// all — a notification could only raise the app, so "your media is back" had no way to take you
+    /// to the post it was about. Registered from the app's startup.
+    func registerTapRouting() {
+        UNUserNotificationCenter.current().delegate = Self.tapRouter
+    }
+    private static let tapRouter = NotificationTapRouter()
+}
+
+/// Turns a tapped notification's `havenDeepLink` into an in-app route. Deliberately reuses
+/// `DeepLinkRouter` rather than parsing URLs a second way — one route table, one set of rules about
+/// what a link may open (a locked circle still lands on its lock screen, not the post).
+private final class NotificationTapRouter: NSObject, UNUserNotificationCenterDelegate {
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        let info = response.notification.request.content.userInfo
+        if let link = info["havenDeepLink"] as? String, let url = URL(string: link) {
+            Task { @MainActor in
+                // `handle` also wants to switch tabs, which a delegate has no binding for; the
+                // published `route` is what actually presents, so a scratch tab is enough here.
+                var scratchTab = ""
+                _ = DeepLinkRouter.shared.handle(url, tab: &scratchTab)
+            }
+        }
+        completionHandler()
+    }
+
+    /// Show Haven's own notifications while the app is frontmost too — otherwise "media is back"
+    /// silently does nothing for someone who is already looking at the app.
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
     }
 }

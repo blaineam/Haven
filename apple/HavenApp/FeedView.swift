@@ -2053,7 +2053,9 @@ final class FeedStore: ObservableObject {
         // block-check and to hand (as unchanged plaintext) to CallManager.
         // 30 (handled-elsewhere) rides the same sealed+signed path: it can silence a ringing device,
         // so it must be no more forgeable than an invite or a hangup.
-        let callFrameTypes: Set<UInt8> = [10, 11, 12, 16, 17, 18, 21, 22, 30]
+        // 31/32 (media wanted / media back) ride the same sealed+signed path: one asks an author to
+        // re-upload, the other triggers a notification and a fetch, so neither may be forgeable.
+        let callFrameTypes: Set<UInt8> = [10, 11, 12, 16, 17, 18, 21, 22, 30, 31, 32]
         if callFrameTypes.contains(type) {
             // Every rejection below is silent by design — a forged frame shouldn't announce itself.
             // But that also means a LEGITIMATE frame dropped by one of these guards is invisible, and
@@ -2134,6 +2136,8 @@ final class FeedStore: ObservableObject {
         case 28: handleSeedlessEnrollRequest(payload)           // S4: a new seedless device asks my primary to enroll it
         case 29: handleSeedlessEnrollGrant(payload)             // S4: the primary granted my new device its seedless identity
         case 30: CallManager.shared.handleHandledElsewhere(payload)  // another of MY devices took/declined this call
+        case 31: handleMediaWanted(payload)                          // someone wants media I authored, that a relay swept
+        case 32: handleMediaAvailable(payload)                       // media I asked about is back on a relay
         default: break
         }
     }
@@ -2802,6 +2806,95 @@ final class FeedStore: ObservableObject {
     /// fails (no engine, or the recipient isn't a known member we can seal to) we send NOTHING —
     /// there is deliberately no plaintext fallback, so a relay can't force a downgrade to the old
     /// spoofable/rewritable form.
+    // MARK: - "Tell me when this media is back"
+
+    /// Ask a post's AUTHOR to re-upload media a relay has swept, and remember that I asked.
+    ///
+    /// The request rides the sealed frame path, which means the circle mailbox carries it: an author
+    /// who is offline for a week gets it the moment they next sync. That is the whole mechanism —
+    /// nothing is parked on a relay by hand, and no relay change was needed.
+    func requestMediaWhenAvailable(ref: String, circleId: String, postId: String, authorShort: String) {
+        guard let authorHex = ContactsStore.shared.idHex(forNodePrefix: authorShort) else {
+            HavenLog.sync("media-wanted \(ref.prefix(10)): author not resolvable — cannot ask")
+            return
+        }
+        MediaWantedStore.shared.add(ref)
+        var f = Data(myNodeHex.utf8)
+        lpAppend(&f, Data(ref.utf8))
+        lpAppend(&f, Data(circleId.utf8))
+        lpAppend(&f, Data(postId.utf8))
+        sendCallFrame(31, f, to: authorHex)
+        HavenLog.sync("media-wanted \(ref.prefix(10)) → author \(authorHex.prefix(8))")
+    }
+
+    /// Author side: someone wants media from a post of mine that a relay no longer holds. If I still
+    /// have the original, put it back on a relay we share and tell them when it lands.
+    ///
+    /// This is the point of the feature: media stays reachable for as long as its AUTHOR keeps a
+    /// copy, rather than for as long as a relay's retention window.
+    private func handleMediaWanted(_ payload: Data) {
+        guard payload.count > 64, let social else { return }
+        let from = String(data: payload.prefix(64), encoding: .utf8) ?? ""
+        guard from.count == 64, isContact(from) else { return }   // only my circle may ask
+        let body = payload.subdata(in: (payload.startIndex + 64)..<payload.endIndex)
+        var off = 0
+        guard let refD = lpRead(body, &off), let cidD = lpRead(body, &off), let pidD = lpRead(body, &off) else { return }
+        let ref = String(data: refD, encoding: .utf8) ?? ""
+        let circleId = String(data: cidD, encoding: .utf8) ?? ""
+        let postId = String(data: pidD, encoding: .utf8) ?? ""
+        guard !ref.isEmpty, !circleId.isEmpty else { return }
+        // Only serve a circle they're actually in — a request names a circle, and naming one is not
+        // the same as belonging to it.
+        guard memberHexes(circleId: circleId).contains(where: { $0.hasPrefix(from.prefix(16)) }) else {
+            HavenLog.sync("media-wanted \(ref.prefix(10)) from \(from.prefix(8)) — not a member of \(circleId.prefix(12)), ignoring")
+            return
+        }
+        guard MediaStore.shared.has(ref) else {
+            HavenLog.sync("media-wanted \(ref.prefix(10)) from \(from.prefix(8)) — I don't hold it either")
+            return
+        }
+        HavenLog.sync("media-wanted \(ref.prefix(10)) from \(from.prefix(8)) — re-uploading to a shared relay")
+        Task { @MainActor in
+            let ok = await SharedStore.backup(ref: ref, circleId: circleId, social: social, force: true)
+            guard ok else {
+                HavenLog.sync("media-wanted \(ref.prefix(10)): re-upload failed — they'll re-ask")
+                return
+            }
+            var f = Data(self.myNodeHex.utf8)
+            self.lpAppend(&f, Data(ref.utf8))
+            self.lpAppend(&f, Data(circleId.utf8))
+            self.lpAppend(&f, Data(postId.utf8))
+            self.sendCallFrame(32, f, to: from)
+            HavenLog.sync("media-wanted \(ref.prefix(10)): back on a relay, told \(from.prefix(8))")
+        }
+    }
+
+    /// Requester side: media I asked about is back. Notify with a deep link straight to the post.
+    private func handleMediaAvailable(_ payload: Data) {
+        guard payload.count > 64 else { return }
+        let from = String(data: payload.prefix(64), encoding: .utf8) ?? ""
+        guard from.count == 64, isContact(from) else { return }
+        let body = payload.subdata(in: (payload.startIndex + 64)..<payload.endIndex)
+        var off = 0
+        guard let refD = lpRead(body, &off), let cidD = lpRead(body, &off), let pidD = lpRead(body, &off) else { return }
+        let ref = String(data: refD, encoding: .utf8) ?? ""
+        let circleId = String(data: cidD, encoding: .utf8) ?? ""
+        let postId = String(data: pidD, encoding: .utf8) ?? ""
+        // Only act on something I actually asked for — an unsolicited "it's back" is just noise.
+        guard MediaWantedStore.shared.isWanted(ref) else { return }
+        MediaWantedStore.shared.clear(ref)
+        unavailableMedia.remove(ref)
+        EvictedMediaStore.shared.clear(ref)
+        requestMedia(ref)   // pull it now, while we know it's there
+        let who = ContactsStore.shared.name(forNodePrefix: from) ?? "Someone"
+        NotificationManager.shared.notify(
+            title: "Media is available again",
+            body: "\(who) put back the media you asked for.",
+            dedupeKey: "media-back-\(ref)",
+            deepLink: postId.isEmpty ? nil : "haven://p/\(circleId)/\(postId)")
+        HavenLog.sync("media-wanted \(ref.prefix(10)): author says it's back — fetching")
+    }
+
     /// My OWN other devices' node ids (excluding this one and my account id) — who to tell when a
     /// ringing call has been handled here. Empty until their roster is known, which is the honest
     /// answer: with no roster there is no way to address them.
@@ -4883,7 +4976,9 @@ private struct KillHorizontalScroller: NSViewRepresentable {
 /// Shown for a media reference whose bytes haven't arrived yet, so the post doesn't look
     /// broken while it's still downloading from the sender, a relay, or the shared mailbox.
     @ViewBuilder private func mediaLoadingPlaceholder(_ ref: String) -> some View {
-        MissingMediaPlaceholder(ref: ref, isVideo: MediaKind(ref: ref) == .video)
+        MissingMediaPlaceholder(ref: ref, isVideo: MediaKind(ref: ref) == .video,
+                                postContext: (circleId: feed.activeCircleId, postId: item.id,
+                                              authorShort: item.authorShort))
             .frame(maxWidth: .infinity, minHeight: 160)
     }
 

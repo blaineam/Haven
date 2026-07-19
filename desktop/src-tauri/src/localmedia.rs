@@ -222,22 +222,6 @@ impl LocalMedia {
         Self::checked(reference, stored)
     }
 
-    /// Store received plaintext bytes under an exact ref (sealed at rest to the circle). Bytes that
-    /// don't account for `reference` are dropped at the door rather than sealed and kept.
-    pub fn store_under_ref(&self, social: &Arc<HavenSocial>, circle_id: &str, reference: &str, bytes: &[u8]) {
-        if !mediaref::verify(reference, bytes) {
-            eprintln!(
-                "media REJECTED {}: inbound bytes do not match its content address",
-                &reference[..reference.len().min(12)]
-            );
-            return;
-        }
-        let to_write = social
-            .seal_circle_media(circle_id.to_string(), bytes.to_vec())
-            .unwrap_or_else(|_| bytes.to_vec());
-        let _ = fs::write(self.dir.join(bare_id(reference)), &to_write);
-    }
-
     /// The at-rest sealed blob for a ref — uploaded to the relay verbatim.
     pub fn raw_sealed(&self, reference: &str) -> Option<Vec<u8>> {
         fs::read(self.dir.join(bare_id(reference))).ok()
@@ -275,6 +259,99 @@ impl LocalMedia {
     pub fn adopt_sealed_part(&self, reference: &str, part: &Path) -> bool {
         let dst = self.dir.join(bare_id(reference));
         fs::rename(part, &dst).is_ok()
+    }
+
+    // ---- Positional (peer-to-peer) reassembly ----------------------------------------------
+    // The peer chunk path (frames 3/5/33) is different from the relay one above in two ways that
+    // matter: its chunks are PLAINTEXT (each is opened on arrival) and they arrive OUT OF ORDER and
+    // with gaps. So it can't append — it seeks to `index * chunkSize` and writes there, leaving a
+    // sparse file with holes in exactly the right places. That is what makes a transfer resumable:
+    // the partial is a real, restartable artifact rather than a `HashMap<u32, Vec<u8>>` in RAM that
+    // dies with the process (which is what this replaced — along with its silent 1 GB cap, above
+    // which a completed transfer was simply thrown away).
+    //
+    // Its scratch is named `incoming_p2p_…` — distinct from the sealed relay part for the same ref,
+    // which would otherwise be the SAME file holding sealed bytes, and still `incoming_`-prefixed so
+    // no sweep or inventory mistakes it for a stored blob. Nothing can name it as a storage key, so
+    // `has(ref)` stays false until the whole thing is adopted.
+
+    /// The scratch file name a peer reassembly of `reference` uses. Persisted (a NAME, not a path —
+    /// the media dir differs per install) and matched by the orphan sweep's spare-list.
+    pub fn part_name(reference: &str) -> String {
+        format!("incoming_p2p_{}.part", bare_id(reference))
+    }
+
+    pub fn part_path(&self, name: &str) -> PathBuf {
+        self.dir.join(name)
+    }
+
+    /// A fresh, EMPTY part file for a peer reassembly starting from nothing. Truncating on purpose:
+    /// leftovers from an abandoned transfer of the same ref would sit at offsets we never rewrite
+    /// and fail the content-address check at adoption. Only ever called when no record exists —
+    /// resuming an existing transfer must never come through here.
+    pub fn new_plain_part(&self, reference: &str) -> PathBuf {
+        let p = self.dir.join(Self::part_name(reference));
+        let _ = fs::File::create(&p);
+        p
+    }
+
+    /// Write one chunk's plaintext at its own offset. `false` on any IO failure, and the caller MUST
+    /// treat that as "this chunk did not arrive": recording a chunk whose bytes aren't on disk is the
+    /// one direction the persisted bitmap can be wrong in that leaves a permanent hole.
+    pub fn write_part_at(&self, part: &Path, offset: u64, bytes: &[u8]) -> bool {
+        use std::io::{Seek, SeekFrom, Write};
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(part)
+            .and_then(|mut f| {
+                f.seek(SeekFrom::Start(offset))?;
+                f.write_all(bytes)
+            })
+            .is_ok()
+    }
+
+    /// Adopt a fully-reassembled PLAINTEXT part file as `reference`'s stored blob.
+    ///
+    /// The content address is verified BEFORE the seal and STREAMED, so a substituted or short
+    /// partial is rejected without a hundreds-of-MB video ever landing in a `Vec` here — the same
+    /// gate `store_under_ref` applies, minus its whole-file buffer. A rejected partial is deleted:
+    /// its bytes can never become the ref they claim, so keeping them only strands the transfer.
+    pub fn adopt_plain_part(
+        &self,
+        social: &Arc<HavenSocial>,
+        circle_id: &str,
+        reference: &str,
+        part: &Path,
+    ) -> bool {
+        if !mediaref::verify_file(reference, part) {
+            eprintln!(
+                "media REJECTED {}: reassembled bytes do not match its content address",
+                &reference[..reference.len().min(12)]
+            );
+            let _ = fs::remove_file(part);
+            return false;
+        }
+        let dst = self.dir.join(bare_id(reference));
+        let sealed = social.seal_circle_media_file(
+            circle_id.to_string(),
+            part.to_string_lossy().into_owned(),
+            dst.to_string_lossy().into_owned(),
+        );
+        if !sealed {
+            // Same fallback as `store_file` (unknown circle / IO error in the file seal): seal in
+            // memory, or keep the plaintext, rather than losing media we just spent a transfer on.
+            let Ok(bytes) = fs::read(part) else { return false };
+            let to_write = social
+                .seal_circle_media(circle_id.to_string(), bytes.clone())
+                .unwrap_or(bytes);
+            if fs::write(&dst, &to_write).is_err() {
+                return false;
+            }
+        }
+        let _ = fs::remove_file(part);
+        true
     }
 
     /// Delete every stored media file (part of "start over").
@@ -319,10 +396,29 @@ impl LocalMedia {
     /// anything modified recently: media staged in a composer but not yet posted and an in-flight
     /// `incoming_*.part` reassembly have fresh mtimes and no referencing event YET — age, not
     /// referencedness, is what makes those safe to judge. Dot-files (the GC stamp) are never touched.
+    ///
+    /// `live_parts` (part file NAME → epoch secs of its last progress, from
+    /// [`crate::mediaresume::ReassemblyIndex::live_parts`]) names the partials belonging to a
+    /// RESUMABLE peer transfer. Those are 99%-complete downloads waiting for the rest, not leaked
+    /// scratch, and deleting them was half of why large media never arrived: the transfer survived
+    /// in principle, and then this sweep threw the bytes away. They are spared until ABANDONED — no
+    /// progress in [`crate::mediaresume::EXPIRY_SECS`] — after which they expire here regardless of
+    /// the (longer) mtime grace, so a stalled transfer can't accumulate disk either.
+    ///
     /// Returns (bytes_freed, files_removed).
-    pub fn sweep_orphans(&self, keep: &std::collections::HashSet<String>, grace_secs: u64) -> (u64, usize) {
+    pub fn sweep_orphans(
+        &self,
+        keep: &std::collections::HashSet<String>,
+        grace_secs: u64,
+        live_parts: &std::collections::HashMap<String, u64>,
+    ) -> (u64, usize) {
         let cutoff = std::time::SystemTime::now()
             .checked_sub(std::time::Duration::from_secs(grace_secs));
+        let abandoned = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+            .saturating_sub(crate::mediaresume::EXPIRY_SECS);
         let mut bytes = 0u64;
         let mut files = 0usize;
         if let Ok(entries) = fs::read_dir(&self.dir) {
@@ -332,16 +428,23 @@ impl LocalMedia {
                 if !md.is_file() {
                     continue;
                 }
-                let fresh = match (md.modified().ok(), cutoff) {
-                    (Some(m), Some(c)) => m > c,
-                    _ => true, // unreadable mtime = treat as fresh (never judge it)
-                };
-                if fresh {
-                    continue;
-                }
                 let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
                 if name.starts_with('.') || keep.contains(name) {
                     continue;
+                }
+                match live_parts.get(name) {
+                    Some(&progressed) if progressed > abandoned => continue, // live transfer — spare it
+                    // Abandoned: judged by its own 24h expiry, not the 48h grace.
+                    Some(_) => {}
+                    None => {
+                        let fresh = match (md.modified().ok(), cutoff) {
+                            (Some(m), Some(c)) => m > c,
+                            _ => true, // unreadable mtime = treat as fresh (never judge it)
+                        };
+                        if fresh {
+                            continue;
+                        }
+                    }
                 }
                 bytes += md.len();
                 files += 1;
@@ -626,6 +729,70 @@ mod tests {
         assert_eq!(names, vec!["aaaa", "bbbb"]);
         assert_eq!(blobs.iter().find(|(n, _, _)| n == "aaaa").unwrap().1, 1000);
         assert_eq!(blobs.iter().find(|(n, _, _)| n == "bbbb").unwrap().1, 2000);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The half of the resume fix that lives here: the sweep that reclaims leaked scratch must not
+    /// reclaim a 99%-complete download waiting for its last chunk — that was the second reason large
+    /// media never arrived (the transfer survived, then the sweep threw the bytes away).
+    #[test]
+    fn sweep_spares_a_live_partial_and_expires_an_abandoned_one() {
+        let (m, dir) = tmp_media();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        // Both are old enough for the 48h grace to judge them.
+        write_aged(&dir, "incoming_p2p_live.part", 1000, 72 * 3600);
+        write_aged(&dir, "incoming_p2p_dead.part", 1000, 72 * 3600);
+        write_aged(&dir, "incoming_p2p_untracked.part", 1000, 72 * 3600);
+        let live: std::collections::HashMap<String, u64> = [
+            ("incoming_p2p_live.part".to_string(), now - 60), // progress a minute ago
+            ("incoming_p2p_dead.part".to_string(), now - crate::mediaresume::EXPIRY_SECS - 60),
+        ]
+        .into_iter()
+        .collect();
+        let (_, files) = m.sweep_orphans(&HashSet::new(), 48 * 3600, &live);
+        assert!(dir.join("incoming_p2p_live.part").exists(), "a live reassembly's bytes must survive");
+        assert!(!dir.join("incoming_p2p_dead.part").exists(), "no progress in 24h = abandoned");
+        // A partial with no record at all (e.g. the sealed relay reassembly) keeps the old 48h rule.
+        assert!(!dir.join("incoming_p2p_untracked.part").exists());
+        assert_eq!(files, 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_partial_is_never_mistaken_for_a_stored_blob() {
+        // `has(ref)` must stay FALSE until every chunk is in, or the feed renders a hole and the
+        // missing-media sweep stops asking for the rest. The part name is unreachable as a
+        // storage key: storage keys are `bare_id(ref)`, which can never grow an `incoming_p2p_`
+        // prefix or a `.part` suffix.
+        let (m, dir) = tmp_media();
+        let reference = "vid_deadbeef";
+        let part = m.new_plain_part(reference);
+        assert!(m.write_part_at(&part, 0, b"first chunk"));
+        assert!(part.exists());
+        assert!(!m.has(reference), "a partial must not answer has()");
+        assert!(m.stored_blobs().is_empty(), "nor appear in the media inventory");
+        // Built on the LOCAL `bare_id` (== `storage_name`), which strips only the legacy `v:`/`a:`/
+        // `i:` schemes — so the part name is derived from exactly the string the finished blob would
+        // be stored under, and the two can never collide.
+        assert_eq!(LocalMedia::part_name(reference), "incoming_p2p_vid_deadbeef.part");
+        assert_eq!(LocalMedia::part_name("v:deadbeef"), "incoming_p2p_deadbeef.part");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn positional_writes_fill_holes_in_any_order() {
+        // Chunks arrive out of order and with gaps; the partial is a sparse file whose holes are in
+        // exactly the right places, which is the whole basis of resuming one.
+        let (m, dir) = tmp_media();
+        let part = m.new_plain_part("img_x");
+        assert!(m.write_part_at(&part, 8, b"CCCC")); // chunk 2 first
+        assert!(m.write_part_at(&part, 0, b"AAAA")); // then chunk 0
+        assert!(m.write_part_at(&part, 4, b"BBBB")); // then the hole between them
+        assert_eq!(fs::read(&part).unwrap(), b"AAAABBBBCCCC");
+        // A re-sent chunk is a rewrite of identical bytes at the same offset — never an append.
+        assert!(m.write_part_at(&part, 4, b"BBBB"));
+        assert_eq!(fs::read(&part).unwrap().len(), 12);
         let _ = fs::remove_dir_all(&dir);
     }
 

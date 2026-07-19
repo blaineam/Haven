@@ -9,7 +9,8 @@
 //!
 //! Frame types (parity with iOS `handleInbound` / Android `Wire`):
 //!   0 Hello · 1 Event · 3 MediaReq · 5 MediaChunk · 9 Relay · 10-13 audio call ·
-//!   14 BucketConfig · 15 video · 16 SDP offer · 17 SDP answer · 18 ICE · 19 relay node · 20 presign
+//!   14 BucketConfig · 15 video · 16 SDP offer · 17 SDP answer · 18 ICE · 19 relay node · 20 presign ·
+//!   31 MediaWanted · 32 MediaAvailable · 33 MediaResumeReq
 
 pub const HELLO: u8 = 0;
 pub const EVENT: u8 = 1;
@@ -51,6 +52,109 @@ pub const MEDIA_WANTED: u8 = 31;
 /// "It's back" — the author's reply once the re-upload has landed on a relay. Same body shape as
 /// [`MEDIA_WANTED`]. Also sealed+signed: it raises a notification and triggers a fetch.
 pub const MEDIA_AVAILABLE: u8 = 32;
+
+/// "Send me only what I'm missing" — the RE-request for a media transfer that was interrupted.
+/// `[hex64 requester][LP ref][u32 LE total][bitmap]`, all little-endian. iOS/Android-compat.
+///
+/// [`MEDIA_REQ`] is deliberately untouched: its ref is the unlengthed REMAINDER of the body, so
+/// there is nowhere to put a resume hint without breaking every parser in the field — and a FIRST
+/// request has no bitmap to send anyway. So frame 3 keeps meaning "send everything" and 33 carries
+/// the bitmap. An un-upgraded peer ignores 33 and says nothing, so the requester falls back to a
+/// full frame 3 after ~8s and nothing regresses.
+///
+/// Rides the PLAINTEXT blocked-sender path with frame 3 rather than the sealed call-frame set: it
+/// asks for a strict SUBSET of what frame 3 already asks for in the clear, so sealing it would buy
+/// nothing while making it fail in exactly the places its own frame-3 fallback still works.
+pub const MEDIA_RESUME_REQ: u8 = 33;
+
+/// The largest chunk count a resume frame may declare — 4M × 32 KB ≈ 128 GB, far past any real
+/// media. The bound is the whole point: `total` is peer-controlled and sizes a bitmap allocation, so
+/// an unbounded one lets a single 70-byte frame ask us for half a gigabyte of `Vec` (`u32::MAX / 8`).
+pub const MAX_RESUME_CHUNKS: u32 = 4_000_000;
+
+/// Pack held chunk indices into a bitmap: bit `i` of byte `i / 8` set means chunk `i` is on disk.
+/// 1,600 chunks is 200 bytes — cheap to keep and cheap to send.
+pub fn bitmap(got: &std::collections::HashSet<u32>, total: u32) -> Vec<u8> {
+    let mut bits = vec![0u8; (total as usize + 7) / 8];
+    for &i in got {
+        if i < total {
+            bits[(i / 8) as usize] |= 1 << (i % 8);
+        }
+    }
+    bits
+}
+
+/// Unpack a bitmap into the indices it claims. Bits past `total` are ignored rather than trusted.
+pub fn bitmap_indices(bits: &[u8], total: u32) -> std::collections::HashSet<u32> {
+    let mut out = std::collections::HashSet::new();
+    for i in 0..total {
+        let byte = (i / 8) as usize;
+        if byte < bits.len() && bits[byte] & (1 << (i % 8)) != 0 {
+            out.insert(i);
+        }
+    }
+    out
+}
+
+/// A parsed [`MEDIA_RESUME_REQ`] body.
+pub struct ResumeReq {
+    /// The requester's self-declared node hex — a DIAL TARGET only, never something to key trust on.
+    pub requester_hex: String,
+    pub reference: String,
+    /// The chunk count the requester's partial was built against. If it disagrees with the total we
+    /// compute from our own file, their bitmap indexes different bytes and must be ignored whole.
+    pub total: u32,
+    /// The requester's bitmap, RAW — deliberately not expanded into a set of chunk indices here.
+    ///
+    /// [`MAX_RESUME_CHUNKS`] is 4 million, so expanding at parse time would let a peer spend a ~500 KB
+    /// frame to make us build a 4M-entry `HashSet<u32>` before anything had checked we even hold the
+    /// ref. The caller expands only after the declared total matches the one IT computes from its own
+    /// file, which bounds the work by a file we actually have rather than by a number the sender chose.
+    pub bitmap: Vec<u8>,
+}
+
+/// Build a [`MEDIA_RESUME_REQ`] body.
+pub fn resume_frame(my_hex: &str, reference: &str, total: u32, got: &std::collections::HashSet<u32>) -> Vec<u8> {
+    let mut out = my_hex.as_bytes().to_vec();
+    lp_append(&mut out, reference.as_bytes());
+    out.extend_from_slice(&total.to_le_bytes());
+    out.extend_from_slice(&bitmap(got, total));
+    out
+}
+
+/// Parse a [`MEDIA_RESUME_REQ`] body; `None` for anything malformed.
+///
+/// Every bound here is a bound on what a PEER can make us do: the declared total must be plausible
+/// ([`MAX_RESUME_CHUNKS`]) and the bitmap must be EXACTLY the size that total implies, so a frame
+/// claiming 4.2 billion chunks is refused rather than allocated for. The exact-length check (rather
+/// than the "ignore trailing fields" tolerance the other media frames grant) is deliberate: the
+/// bitmap is the frame's last field, so a trailing extension is indistinguishable from a bitmap that
+/// disagrees with its own total, and the wrong guess silently corrupts which chunks get served.
+pub fn parse_resume_frame(body: &[u8]) -> Option<ResumeReq> {
+    if body.len() < 64 + 2 {
+        return None;
+    }
+    let requester_hex = std::str::from_utf8(&body[..64]).ok()?.to_string();
+    if requester_hex.chars().count() != 64 {
+        return None;
+    }
+    let mut r = Reader::new(body);
+    r.off = 64;
+    let reference = String::from_utf8(r.lp()?).ok()?;
+    if body.len() < r.off + 4 {
+        return None;
+    }
+    let total = u32::from_le_bytes([body[r.off], body[r.off + 1], body[r.off + 2], body[r.off + 3]]);
+    r.off += 4;
+    let bits = &body[r.off..];
+    if reference.is_empty() || total == 0 || total > MAX_RESUME_CHUNKS {
+        return None;
+    }
+    if bits.len() != (total as usize + 7) / 8 {
+        return None;
+    }
+    Some(ResumeReq { requester_hex, reference, total, bitmap: bits.to_vec() })
+}
 
 /// Build a media frame's body: `[hex64 sender][LP ref][LP circleId][LP postId]`. Shared by 31 and 32
 /// — the reply names the same blob the request did.
@@ -243,6 +347,137 @@ mod tests {
         p.extend_from_slice(extra);
         let (r, c, post) = parse_media_frame(&p).unwrap();
         assert_eq!((r.as_str(), c.as_str(), post.as_str()), ("img_x", "default", "p1"));
+    }
+
+    // ---- frame 33 (resume request) ---------------------------------------------------------
+
+    use std::collections::HashSet;
+
+    #[test]
+    fn bitmap_roundtrips_at_every_byte_boundary() {
+        // The off-by-one that would matter is at the byte edges, so walk them explicitly. 1,600 is a
+        // 50 MB video at 32 KB a chunk — the transfer this whole feature exists for.
+        for total in [1u32, 7, 8, 9, 63, 64, 65, 1600, 1601] {
+            let got: HashSet<u32> = (0..total).filter(|i| i % 3 == 0).collect();
+            let bits = bitmap(&got, total);
+            assert_eq!(bits.len(), (total as usize + 7) / 8, "total={total}");
+            assert_eq!(bitmap_indices(&bits, total), got, "total={total}");
+        }
+    }
+
+    #[test]
+    fn bitmap_ignores_indices_outside_the_total() {
+        // Neither our own bookkeeping nor a peer's bitmap may set a bit that names a chunk which
+        // does not exist — it would count toward completion and finish a transfer with a hole in it.
+        let got: HashSet<u32> = [0, 5, 99].into_iter().collect();
+        let bits = bitmap(&got, 8);
+        assert_eq!(bits.len(), 1);
+        assert_eq!(bitmap_indices(&bits, 8), [0u32, 5].into_iter().collect::<HashSet<u32>>());
+        // A byte with high bits set, read back under a total that doesn't reach them.
+        assert_eq!(bitmap_indices(&[0xFF], 3), [0u32, 1, 2].into_iter().collect::<HashSet<u32>>());
+    }
+
+    #[test]
+    fn resume_frame_roundtrip() {
+        let me = "a".repeat(64);
+        let got: HashSet<u32> = (0..1599).collect(); // the 1,599-of-1,600 transfer
+        let p = resume_frame(&me, "vid_abc123", 1600, &got);
+        let r = parse_resume_frame(&p).unwrap();
+        assert_eq!(r.requester_hex, me);
+        assert_eq!(r.reference, "vid_abc123");
+        assert_eq!(r.total, 1600);
+        let theirs = bitmap_indices(&r.bitmap, r.total);
+        let missing: Vec<u32> = (0..1600).filter(|i| !theirs.contains(i)).collect();
+        assert_eq!(missing, vec![1599], "the server must serve exactly one chunk, not 50 MB");
+        // 1,600 chunks of bitmap is 200 bytes on top of the head — the ask stays tiny.
+        assert_eq!(p.len(), 64 + 2 + 10 + 4 + 200);
+    }
+
+    #[test]
+    fn resume_frame_survives_a_ref_with_a_colon() {
+        // The legacy desktop/iOS media schemes (`v:`/`a:`/`i:`) are still in real posts.
+        let p = resume_frame(&"b".repeat(64), "v:deadbeef", 9, &[0u32, 8].into_iter().collect());
+        let r = parse_resume_frame(&p).unwrap();
+        assert_eq!(r.reference, "v:deadbeef");
+        assert_eq!(bitmap_indices(&r.bitmap, r.total), [0u32, 8].into_iter().collect::<HashSet<u32>>());
+        // The parser must hand back the RAW bitmap: expanding 4M indices before we have even checked
+        // we hold the ref is a peer-priced allocation, which is the whole reason it is a Vec<u8>.
+        assert_eq!(r.bitmap.len(), (r.total as usize + 7) / 8);
+    }
+
+    /// Every field in frame 33 is peer-controlled, and `total` sizes an allocation. These are the
+    /// shapes a hostile peer sends; none of them may parse into something servable.
+    #[test]
+    fn resume_frame_refuses_every_hostile_shape() {
+        let me = "c".repeat(64);
+        let good = resume_frame(&me, "img_x", 16, &[0u32, 3].into_iter().collect());
+        assert!(parse_resume_frame(&good).is_some()); // control
+
+        assert!(parse_resume_frame(&[]).is_none());
+        assert!(parse_resume_frame(b"short").is_none());
+        assert!(parse_resume_frame(&[0u8; 64]).is_none()); // head only, no LP ref
+        assert!(parse_resume_frame(&good[..good.len() - 1]).is_none()); // truncated bitmap
+
+        // A bitmap LONGER than the total implies: either a lie or a different chunking. Either way
+        // acting on it serves the wrong chunk indices.
+        let mut long = good.clone();
+        long.push(0);
+        assert!(parse_resume_frame(&long).is_none());
+
+        // total = 0: nothing to serve, and `(0 + 7) / 8 == 0` would make an empty bitmap "valid".
+        assert!(parse_resume_frame(&resume_frame(&me, "img_x", 0, &HashSet::new())).is_none());
+
+        // A ref length that overruns the buffer — the classic parser walk-off.
+        let mut over = me.as_bytes().to_vec();
+        over.extend_from_slice(&u16::MAX.to_le_bytes());
+        over.extend_from_slice(b"img_x");
+        assert!(parse_resume_frame(&over).is_none());
+
+        // An empty ref names nothing servable.
+        let mut empty_ref = me.as_bytes().to_vec();
+        lp_append(&mut empty_ref, b"");
+        empty_ref.extend_from_slice(&1u32.to_le_bytes());
+        empty_ref.push(1);
+        assert!(parse_resume_frame(&empty_ref).is_none());
+
+        // THE ALLOCATION ATTACK: 4.2 billion chunks in a 71-byte frame. Believed, `(total + 7) / 8`
+        // is a 536 MB bitmap — refused at the bound, never allocated for.
+        let mut absurd = me.as_bytes().to_vec();
+        lp_append(&mut absurd, b"img_x");
+        absurd.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(parse_resume_frame(&absurd).is_none());
+        // ...and one chunk past the bound, with a correctly-sized bitmap, is still refused.
+        let mut just_over = me.as_bytes().to_vec();
+        lp_append(&mut just_over, b"img_x");
+        let t = MAX_RESUME_CHUNKS + 1;
+        just_over.extend_from_slice(&t.to_le_bytes());
+        just_over.extend_from_slice(&vec![0u8; (t as usize + 7) / 8]);
+        assert!(parse_resume_frame(&just_over).is_none());
+        // The bound itself parses — it is a limit, not an off-by-one.
+        let mut at_bound = me.as_bytes().to_vec();
+        lp_append(&mut at_bound, b"img_x");
+        at_bound.extend_from_slice(&MAX_RESUME_CHUNKS.to_le_bytes());
+        at_bound.extend_from_slice(&vec![0u8; (MAX_RESUME_CHUNKS as usize + 7) / 8]);
+        assert!(parse_resume_frame(&at_bound).is_some());
+
+        // A non-utf8 head can't be a node hex, so it can't be a dial target either.
+        let mut bad_head = vec![0xFFu8; 64];
+        lp_append(&mut bad_head, b"img_x");
+        bad_head.extend_from_slice(&1u32.to_le_bytes());
+        bad_head.push(1);
+        assert!(parse_resume_frame(&bad_head).is_none());
+    }
+
+    #[test]
+    fn resume_frame_head_must_be_a_full_64_char_hex() {
+        // Multi-byte utf8 fills 64 BYTES with fewer than 64 chars — the length check is on chars, so
+        // it matches the iOS parser byte-for-byte rather than accidentally admitting these.
+        let mut short_head = "é".repeat(32).into_bytes(); // 64 bytes, 32 chars
+        assert_eq!(short_head.len(), 64);
+        lp_append(&mut short_head, b"img_x");
+        short_head.extend_from_slice(&1u32.to_le_bytes());
+        short_head.push(1);
+        assert!(parse_resume_frame(&short_head).is_none());
     }
 
     #[test]

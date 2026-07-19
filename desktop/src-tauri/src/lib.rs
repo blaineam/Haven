@@ -10,6 +10,7 @@ mod commands;
 mod demo;
 mod engine;
 mod localmedia;
+mod mediaresume;
 mod relayhealth;
 mod roster;
 mod scheduled;

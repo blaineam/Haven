@@ -62,8 +62,15 @@ struct DynState {
     seen_mailbox: HashSet<String>,
     /// seen_mailbox holds keys not yet flushed to disk.
     seen_mailbox_dirty: bool,
-    /// ref -> partial chunks while a media transfer is in flight.
-    incoming_media: HashMap<String, IncomingMedia>,
+    /// Half-finished chunked media transfers — which chunks of which ref are already on disk.
+    /// PERSISTED to `media-reassembly.txt` (see `mediaresume`), so a 99%-complete transfer resumes
+    /// where it stopped instead of restarting at chunk 0. This replaced an in-memory
+    /// `HashMap<u32, Vec<u8>>` of chunk plaintexts that died with the process — the reason large
+    /// media "never loaded": it wasn't failing once, it was restarting forever.
+    reassembly: crate::mediaresume::ReassemblyIndex,
+    /// Refs with a frame-33 resume ask outstanding, so a burst of re-requests can't spawn a fallback
+    /// task each. Bounded by the reassembly index's own 512-record cap.
+    resume_fallback: HashSet<String>,
     requested_refs: HashSet<String>,
     /// ref -> last direct (peer) media-request ms. THROTTLE: a missing ref must not be re-blasted to
     /// every contact on every sweep (that floods the network with hundreds of thousands of frames and
@@ -122,11 +129,6 @@ struct DynState {
 enum SelfSyncTransport {
     Relay(String),
     S3(Arc<S3Mailbox>),
-}
-
-struct IncomingMedia {
-    total: u32,
-    chunks: HashMap<u32, Vec<u8>>,
 }
 
 /// One row of the #1 "Manage media" cleanup screen: a stored blob, its size, and the post/DM it
@@ -393,6 +395,13 @@ impl Engine {
             media_backed_up: std::fs::read_to_string(paths.root.join("media-backed-up.txt"))
                 .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
                 .unwrap_or_default(),
+            // Pick half-finished media transfers back up rather than restarting them. `load` prunes
+            // as it reads (expired, or part file gone), so nothing here can resume into bytes that
+            // aren't there.
+            reassembly: crate::mediaresume::ReassemblyIndex::load(
+                paths.root.join("media-reassembly.txt"),
+                paths.media_dir(),
+            ),
             ..DynState::default()
         };
         Ok(Arc::new(Self {
@@ -477,6 +486,13 @@ impl Engine {
             media_backed_up: std::fs::read_to_string(paths.root.join("media-backed-up.txt"))
                 .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
                 .unwrap_or_default(),
+            // Pick half-finished media transfers back up rather than restarting them. `load` prunes
+            // as it reads (expired, or part file gone), so nothing here can resume into bytes that
+            // aren't there.
+            reassembly: crate::mediaresume::ReassemblyIndex::load(
+                paths.root.join("media-reassembly.txt"),
+                paths.media_dir(),
+            ),
             ..DynState::default()
         };
         Ok(Arc::new(Self {
@@ -2126,7 +2142,20 @@ impl Engine {
     /// and the weekly sweep). Blocking. Returns (bytes_freed, files_removed).
     pub fn cleanup_unused_media(&self) -> (u64, usize) {
         let keep = self.media_in_use_names();
-        let res = self.media.sweep_orphans(&keep, 48 * 3600);
+        // Expire first, THEN sweep with what's left alive. Order matters both ways: expiring first
+        // means `live_parts` can't name a partial the sweep should have reclaimed, and sweeping
+        // against that map means the sweep can't delete a 99%-complete download a record still
+        // points at — which is exactly how resume died on Apple before this landed there.
+        let live_parts = {
+            let mut st = self.dyn_state.lock().unwrap();
+            let dropped = st.reassembly.expire();
+            if dropped > 0 {
+                log::info!("media reassembly: dropped {dropped} abandoned or orphaned partial(s)");
+            }
+            st.reassembly.flush(); // land whatever the save debounce is still holding
+            st.reassembly.live_parts()
+        };
+        let res = self.media.sweep_orphans(&keep, 48 * 3600, &live_parts);
         if res.1 > 0 {
             log::info!("media GC sweep: freed {}B across {} files", res.0, res.1);
         }
@@ -2475,12 +2504,10 @@ impl Engine {
             }
             // Relay couldn't serve it → ask peers directly (same payload shape as request_missing_media).
             me.dyn_state.lock().unwrap().requested_refs.insert(reference.clone());
-            let mut payload = my_hex.into_bytes();
+            let mut payload = my_hex.clone().into_bytes();
             payload.extend_from_slice(reference.as_bytes());
             let ids: Vec<String> = me.prefs.lock().unwrap().contacts.iter().map(|c| c.id_hex.clone()).collect();
-            for id_hex in ids {
-                me.send_frame(wire::MEDIA_REQ, &payload, &id_hex);
-            }
+            me.ask_for_media(&reference, &my_hex, payload, ids); // resumes from a partial when we have one
         });
     }
 
@@ -3270,7 +3297,10 @@ impl Engine {
         let t = payload[0];
         let body = payload[1..].to_vec();
         // Call/media frames lead with a 64-char sender hex — drop blocked senders early.
-        if matches!(t, wire::MEDIA_REQ | wire::CALL_INVITE | wire::CALL_ACCEPT | wire::CALL_HANGUP | wire::SDP_OFFER | wire::SDP_ANSWER | wire::ICE | wire::GROUP_INVITE | wire::CALL_CAMERA | wire::MEDIA_WANTED | wire::MEDIA_AVAILABLE) {
+        // 33 (resume) sits here with frame 3 rather than in the sealed call-frame set below: it asks
+        // for a strict SUBSET of what frame 3 already asks for in the clear, so sealing it would buy
+        // nothing while making it fail in exactly the places its own frame-3 fallback still works.
+        if matches!(t, wire::MEDIA_REQ | wire::MEDIA_RESUME_REQ | wire::CALL_INVITE | wire::CALL_ACCEPT | wire::CALL_HANGUP | wire::SDP_OFFER | wire::SDP_ANSWER | wire::ICE | wire::GROUP_INVITE | wire::CALL_CAMERA | wire::MEDIA_WANTED | wire::MEDIA_AVAILABLE) {
             if body.len() >= 64 {
                 let head = String::from_utf8_lossy(&body[..64]).into_owned();
                 if head.len() == 64 && self.prefs.lock().unwrap().blocked.contains(&head) {
@@ -3286,6 +3316,7 @@ impl Engine {
                 wire::EVENT => me.handle_event(&body, sender_device.as_deref()),
                 wire::RELAY_NODE => me.handle_relay_node(&body).await,
                 wire::MEDIA_REQ => me.handle_media_request(&body).await,
+                wire::MEDIA_RESUME_REQ => me.handle_media_resume_request(&body).await,
                 wire::MEDIA_CHUNK => me.handle_media_chunk(&body),
                 // CALL_HANDLED (30) rides the same sealed+signed path: it can silence a ringing
                 // device, so it must be no more forgeable than an invite or a hangup.
@@ -4915,7 +4946,7 @@ impl Engine {
                     return;
                 }
                 me.dyn_state.lock().unwrap().requested_refs.insert(reference.clone());
-                let mut payload = my_hex.into_bytes();
+                let mut payload = my_hex.clone().into_bytes();
                 payload.extend_from_slice(reference.as_bytes());
                 // NOTE: we deliberately do NOT add our own account node id as a request target here. iroh
                 // publishes this device's endpoint under the shared account id, so dialing it is a self-dial,
@@ -4923,9 +4954,9 @@ impl Engine {
                 // RelayClient guard already prevents). Own-device media converges via the relay backfill
                 // (each device mirrors its own media to the relays a sibling reads) — the reliable path.
                 let ids: Vec<String> = me.prefs.lock().unwrap().contacts.iter().map(|c| c.id_hex.clone()).collect();
-                for id_hex in ids {
-                    me.send_frame(wire::MEDIA_REQ, &payload, &id_hex);
-                }
+                // A partial we already hold upgrades this to frame 33, so an interrupted transfer
+                // finishes on its missing chunks instead of re-sending everything each sweep.
+                me.ask_for_media(&reference, &my_hex, payload, ids);
             });
         }
     }
@@ -5366,6 +5397,61 @@ impl Engine {
         self.heal_forbidden_relays().await && self.fetch_media_from_relay(circle_id, reference).await
     }
 
+    /// Ask `targets` for `reference`: frame 33 with our bitmap when we hold a partial of it, else the
+    /// plain frame 3 the callers already built.
+    ///
+    /// The frame-3 path is byte-for-byte what it always was, deliberately — a FIRST request has no
+    /// bitmap to send, and keeping it identical is what keeps the common case compatible with every
+    /// peer in the field. Only a RE-request for a ref we're part-way through upgrades to 33.
+    ///
+    /// An un-upgraded peer drops frame 33 on the floor and says nothing, so silence is the only
+    /// signal we get: fall back to a full frame 3 after 8s if no chunk arrived. That fallback is
+    /// bounded to ONE pending task per ref — never one per incoming request, or a peer could make us
+    /// spawn tasks by re-asking.
+    fn ask_for_media(self: &Arc<Self>, reference: &str, my_hex: &str, plain: Vec<u8>, targets: Vec<String>) {
+        let hint = self.dyn_state.lock().unwrap().reassembly.resume_hint(reference);
+        let Some((total, got)) = hint else {
+            for id_hex in &targets {
+                self.send_frame(wire::MEDIA_REQ, &plain, id_hex);
+            }
+            return;
+        };
+        let before = got.len() as u32;
+        let resume = wire::resume_frame(my_hex, reference, total, &got);
+        log::debug!(
+            "media RESUME asking for {}: have {}/{}",
+            &reference[..reference.len().min(12)],
+            before,
+            total
+        );
+        for id_hex in &targets {
+            self.send_frame(wire::MEDIA_RESUME_REQ, &resume, id_hex);
+        }
+        if !self.dyn_state.lock().unwrap().resume_fallback.insert(reference.to_string()) {
+            return; // a fallback for this ref is already armed
+        }
+        let me = self.clone();
+        let reference = reference.to_string();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+            let progressed = {
+                let mut st = me.dyn_state.lock().unwrap();
+                st.resume_fallback.remove(&reference);
+                st.reassembly.progress(&reference).map(|n| n != before).unwrap_or(true)
+            };
+            if progressed || me.media.has(&reference) {
+                return; // chunks arrived (or the whole thing did) — the peer understood 33
+            }
+            log::debug!(
+                "media RESUME {}: no answer to frame 33 — falling back to a full request",
+                &reference[..reference.len().min(12)]
+            );
+            for id_hex in &targets {
+                me.send_frame(wire::MEDIA_REQ, &plain, id_hex);
+            }
+        });
+    }
+
     async fn handle_media_request(self: &Arc<Self>, body: &[u8]) {
         if body.len() <= 64 {
             return;
@@ -5379,10 +5465,56 @@ impl Engine {
             return;
         }
         let Some(bytes) = self.media.load_any_circle(&self.social, &reference) else { return };
-        self.send_media_chunks(&reference, &bytes, &requester).await;
+        // Frame 3 means "send everything" and always has — see `wire::MEDIA_RESUME_REQ`.
+        self.send_media_chunks(&reference, &bytes, &requester, None).await;
     }
 
-    async fn send_media_chunks(self: &Arc<Self>, reference: &str, bytes: &[u8], requester_hex: &str) {
+    /// Frame 33 — a RESUME request carrying a bitmap of what the requester already holds, so the
+    /// serve can skip it. A transfer that died on chunk 1,599 of 1,600 costs one chunk to finish
+    /// rather than the whole file again. See `wire::MEDIA_RESUME_REQ` for why frame 3 is untouched.
+    async fn handle_media_resume_request(self: &Arc<Self>, body: &[u8]) {
+        let Some(req) = wire::parse_resume_frame(body) else { return };
+        if !self.media.has(&req.reference) {
+            return;
+        }
+        let Some(bytes) = self.media.load_any_circle(&self.social, &req.reference) else { return };
+        let total = ((bytes.len() + MEDIA_CHUNK_SIZE - 1) / MEDIA_CHUNK_SIZE).max(1) as u32;
+        // A total that disagrees with ours means their partial was built against different bytes, so
+        // their bitmap indexes something else and honouring it would leave permanent holes. Send the
+        // whole file and let the content-address check at adoption sort out which copy is real.
+        // Expanding their bitmap only HERE — after the totals agree — is what bounds the work by a
+        // file we hold rather than by the chunk count the peer declared (see wire::ResumeReq).
+        let missing: HashSet<u32> = if total == req.total {
+            let theirs = wire::bitmap_indices(&req.bitmap, total);
+            (0..total).filter(|i| !theirs.contains(i)).collect()
+        } else {
+            (0..total).collect()
+        };
+        if missing.is_empty() {
+            return; // they have it all; the last chunk is presumably still in flight
+        }
+        log::debug!(
+            "media RESUME {}: {}/{} chunks still needed by {}",
+            &req.reference[..req.reference.len().min(12)],
+            missing.len(),
+            total,
+            &req.requester_hex[..8]
+        );
+        self.send_media_chunks(&req.reference, &bytes, &req.requester_hex, Some(&missing)).await;
+    }
+
+    /// Stream a media file to the requester as individually-sealed 32 KB chunks.
+    ///
+    /// `missing` (from a resume request, frame 33) restricts the stream to the chunks the requester
+    /// says it still needs. Skipping one is FREE — no seal, no frame, no send — which is the whole
+    /// economy of resume. `None` sends everything, which is what a frame-3 first request means.
+    async fn send_media_chunks(
+        self: &Arc<Self>,
+        reference: &str,
+        bytes: &[u8],
+        requester_hex: &str,
+        missing: Option<&HashSet<u32>>,
+    ) {
         let total = ((bytes.len() + MEDIA_CHUNK_SIZE - 1) / MEDIA_CHUNK_SIZE).max(1) as u32;
         let ref_bytes = reference.as_bytes();
         // Own-device (the requester is MY OWN account) → seal each chunk with the symmetric account-key, which
@@ -5390,10 +5522,15 @@ impl Engine {
         // seal as before. The receiver tries the symmetric open first, then falls back to the engine's KEM.
         let own = requester_hex == self.node_id_hex();
         let own_key = if own { Some(self.own_media_key()) } else { None };
-        let mut index = 0u32;
-        let mut offset = 0;
-        while offset < bytes.len() {
+        for index in 0..total {
+            if missing.is_some_and(|m| !m.contains(&index)) {
+                continue; // requester already has it
+            }
+            let offset = index as usize * MEDIA_CHUNK_SIZE;
             let end = (offset + MEDIA_CHUNK_SIZE).min(bytes.len());
+            if offset >= end {
+                break;
+            }
             let chunk = &bytes[offset..end];
             let sealed = if let Some(key) = own_key.as_ref() {
                 haven_p2p::crypto::seal(key, chunk)
@@ -5404,8 +5541,6 @@ impl Engine {
                 }
             };
             self.send_frame(wire::MEDIA_CHUNK, &wire::chunk_frame(ref_bytes, index, total, &sealed), requester_hex);
-            offset = end;
-            index += 1;
         }
     }
 
@@ -5424,7 +5559,12 @@ impl Engine {
         let total = u32::from_le_bytes([body[off], body[off + 1], body[off + 2], body[off + 3]]);
         off += 4;
         let sealed = &body[off..];
-        if reference.is_empty() || total == 0 || self.media.has(&reference) {
+        // `total` is peer-controlled and now sizes a bitmap, so it is bounded here as well as at the
+        // frame-33 parse: believed, `u32::MAX` would ask for a 536 MB `Vec` of bits.
+        if reference.is_empty() || total == 0 || total > wire::MAX_RESUME_CHUNKS || index >= total {
+            return;
+        }
+        if self.media.has(&reference) {
             return;
         }
         // Own-device chunks are symmetric (account-key) sealed; friend chunks are KEM. Try the cheap
@@ -5433,31 +5573,48 @@ impl Engine {
             .ok()
             .or_else(|| self.social.open_media(sealed.to_vec()));
         let Some(plain) = plain else { return };
-        let mut complete: Option<Vec<u8>> = None;
+        // Reassembly is POSITIONAL and ON DISK: chunk N's plaintext goes at offset N*chunkSize, so
+        // the partial is a valid sparse file with holes exactly where the missing chunks are. That is
+        // what makes it resumable — and it removes the old in-memory accumulation (with its silent
+        // 1 GB cap, above which a fully-received transfer was simply dropped).
+        let part_name = {
+            let mut st = self.dyn_state.lock().unwrap();
+            if st.reassembly.get(&reference).map(|r| r.got.contains(&index)).unwrap_or(false) {
+                return; // already on disk — a re-send filling someone else's gap, or our own resume
+            }
+            let (name, is_new) = st.reassembly.begin(&reference, LocalMedia::part_name(&reference), total);
+            if is_new {
+                // Truncate ONLY for a transfer starting from nothing: a RESUMED one must never lose
+                // the 99% already on disk. Done under the same lock as the record it belongs to —
+                // chunks arrive concurrently, and a truncate racing another chunk's positional write
+                // would erase bytes the bitmap already claims, the one direction it must never lie in.
+                self.media.new_plain_part(&reference);
+            }
+            name
+        };
+        let part = self.media.part_path(&part_name);
+        if !self.media.write_part_at(&part, index as u64 * MEDIA_CHUNK_SIZE as u64, &plain) {
+            // A chunk whose bytes did NOT land must not enter the bitmap. Understating progress costs
+            // one re-sent chunk; overstating it leaves a hole nothing will ever ask for again.
+            return;
+        }
+        let complete = {
+            let mut st = self.dyn_state.lock().unwrap();
+            st.reassembly.mark(&reference, index).unwrap_or(false)
+        };
+        if !complete {
+            return;
+        }
+        // Adoption verifies the content address (streamed) before sealing. Either way the reassembly
+        // is over: on rejection the partial is already discarded, so leaving the record behind would
+        // resurrect a bitmap whose bytes are gone and stall the ref forever.
+        let ok = self.media.adopt_plain_part(&self.social, DEFAULT_CIRCLE, &reference, &part);
         {
             let mut st = self.dyn_state.lock().unwrap();
-            let entry = st.incoming_media.entry(reference.clone()).or_insert(IncomingMedia { total, chunks: HashMap::new() });
-            entry.chunks.insert(index, plain);
-            if entry.chunks.len() as u32 >= entry.total {
-                // Sanity cap: store_under_ref seals the whole media in memory (~2-3x its size). Skip
-                // anything absurdly large (corrupt total, or media bigger than we should hold at once)
-                // rather than risk an allocation blow-up. (Android, a low-heap phone, caps tighter.)
-                let total_size: usize = entry.chunks.values().map(|c| c.len()).sum();
-                const MAX_MEDIA: usize = 1024 * 1024 * 1024; // 1 GB
-                if total_size > 0 && total_size <= MAX_MEDIA {
-                    let mut full = Vec::with_capacity(total_size);
-                    for i in 0..entry.total {
-                        if let Some(c) = entry.chunks.get(&i) {
-                            full.extend_from_slice(c);
-                        }
-                    }
-                    complete = Some(full);
-                }
-                st.incoming_media.remove(&reference);
-            }
+            st.reassembly.clear(&reference);
+            st.resume_fallback.remove(&reference);
         }
-        if let Some(full) = complete {
-            self.media.store_under_ref(&self.social, DEFAULT_CIRCLE, &reference, &full);
+        if ok {
             self.emit_changed();
         }
     }

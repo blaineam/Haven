@@ -7,9 +7,20 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.1.1]
 
 ### Fixed
+
+- **Older media stopped being reachable — it was refused, not missing.** A relay now denies any device
+  it hasn't been told about (a hardening fix), and media requests are covered by that check. The apps
+  still assumed media was permission-free, so a `403 Forbidden` was handled as a transport error: the
+  relay got backed off as if it were down, the fetch fell through to asking the author directly, and
+  the whole thing was logged as "NOT FOUND on any relay/S3" — for blobs sitting on that relay's disk
+  the entire time. That is why fresh media looked fine (the author was usually online to answer
+  peer-to-peer) while anything a few days old appeared to have vanished, and why it followed the
+  viewer rather than the network. A refusal is now told apart from an outage, reported as a refusal,
+  and self-heals: the device re-publishes its signed roster to the relay that refused it and retries,
+  so it authorizes itself instead of waiting for someone to notice.
 
 - **Notifications work again — all of them.** Nothing was being delivered: no DMs, no post alerts, and
   no incoming-call ring, on any network, in any direction. The signed push envelope carried the sender's

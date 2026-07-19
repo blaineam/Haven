@@ -310,10 +310,13 @@ enum SharedStore {
     }
 
     /// Relay node ids to MIRROR media to / FETCH media from — the circle's own relays PLUS every other
-    /// known relay. Media keys (`haven/media/<ref>`) are content-addressed AND permission-free on the
-    /// relay (unlike mailbox keys, which are circle-membership gated — a relay can `ERR forbidden` a
-    /// device for messages while still storing its media), so a blob may safely live on ANY relay the
-    /// members can reach. Mirroring to every known relay is what makes media land when a circle's own
+    /// known relay. Media keys (`haven/media/<ref>`) are content-addressed and NOT gated per circle,
+    /// so a blob may safely live on ANY relay the members can reach — but since audit F4 they are no
+    /// longer permission-FREE: `blob_forbidden` denies any peer it does not already know as a member
+    /// of some circle it serves, media included. A device earns that only by publishing its
+    /// account-signed roster (`publishDeviceRoster`). Treat a refusal from these relays as "publish
+    /// the roster and retry" (`healForbiddenRelays`), never as "this relay is down" — conflating the
+    /// two is what reported present-but-refused media as NOT FOUND. Mirroring to every known relay is what makes media land when a circle's own
     /// relays are all offline/NAT-unreachable but some OTHER relay (e.g. a hosted/NAS relay configured
     /// for a different circle) is reachable — that relay accepts the media even though it forbids the
     /// device's mailbox writes. Content-addressed keys make the extra puts idempotent, unreachable
@@ -412,6 +415,10 @@ enum SharedStore {
                             uploads.append((node, .http(base: base, token: http.token)))
                         }
                         resolved = true
+                    case .failure(is RelayForbidden):
+                        // Reachable and healthy — it just doesn't know us. Backing off here would
+                        // strand our media on a relay that would happily store it once authorized.
+                        noteRefused(node, "media probe")
                     case .failure:
                         markHttpUrlBad(base)
                     }
@@ -632,6 +639,33 @@ enum SharedStore {
     private static func httpUrlBad(_ base: String) -> Bool { (httpUrlBadUntil[base] ?? .distantPast) > Date() }
     private static func markHttpUrlBad(_ base: String) { httpUrlBadUntil[base] = Date().addingTimeInterval(120) }
 
+    /// Relays that have refused us since our roster last reached them. A refusal is not a dead
+    /// endpoint — it means the relay has never been told this DEVICE id belongs to our account, so
+    /// `blob_forbidden` denies us before it ever considers the key. Publishing the account-signed
+    /// roster is precisely the remedy, so record the refusal and let `healForbiddenRelays` fix the
+    /// cause rather than backing off from a relay that is working perfectly.
+    private static var rosterNeeded: Set<String> = []
+    private static var lastHeal = Date.distantPast
+
+    static func noteRefused(_ node: String, _ what: String) {
+        rosterNeeded.insert(node)
+        HavenLog.relay("relay \(node.prefix(8)) REFUSED \(what) — not an outage; our device id isn't authorized there yet")
+    }
+
+    /// Re-publish our device roster to every relay that refused us, so the next attempt is allowed.
+    /// Returns true if anything was published (i.e. a retry is worth making). Rate-limited: a relay
+    /// that refuses us for some OTHER reason must not turn every media miss into a publish storm.
+    @discardableResult
+    static func healForbiddenRelays(social: HavenSocial) async -> Bool {
+        guard !rosterNeeded.isEmpty, Date().timeIntervalSince(lastHeal) > 30 else { return false }
+        let nodes = rosterNeeded.map { $0.prefix(8) }.joined(separator: ",")
+        HavenLog.relay("re-publishing device roster after refusal from [\(nodes)]")
+        lastHeal = Date()
+        rosterNeeded.removeAll()
+        await publishDeviceRoster(social: social)
+        return true
+    }
+
     private static func httpKeyURL(_ base: String, _ key: String) -> URL? {
         let trimmed = base.hasSuffix("/") ? String(base.dropLast()) : base
         let enc = key.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? key
@@ -648,6 +682,14 @@ enum SharedStore {
 
     /// GET one key. `.success(nil)` = relay reached but doesn't hold it (a real MISS — the iroh
     /// path serves the same store, so don't dial it for the same key); `.failure` = unreachable.
+    /// The relay REFUSED us — it is reachable and healthy, we are simply not (yet) a member it
+    /// recognises. Distinct from a transport failure because the remedies are opposite: a broken
+    /// endpoint should be backed off, whereas a refusal should trigger a device-roster publish and a
+    /// retry. Folding the two together is what made a permissions problem present as missing media:
+    /// the 403 became `.failure` → `markHttpUrlBad` → the relay was skipped → "NOT FOUND on any
+    /// relay/S3", for a blob sitting on that relay's disk the whole time.
+    struct RelayForbidden: Error {}
+
     private static func httpGet(_ base: String, _ token: String, _ key: String) async -> Result<Data?, Error> {
         guard let url = httpKeyURL(base, key) else { return .failure(URLError(.badURL)) }
         guard let auth = httpAuth(token, "GET", key, Data()) else { return .failure(URLError(.userAuthenticationRequired)) }
@@ -658,6 +700,7 @@ enum SharedStore {
             switch (resp as? HTTPURLResponse)?.statusCode ?? 0 {
             case 200...299: return .success(data)
             case 404: return .success(nil)
+            case 401, 403: return .failure(RelayForbidden())
             default: return .failure(URLError(.badServerResponse))
             }
         } catch { return .failure(error) }
@@ -711,6 +754,11 @@ enum SharedStore {
                                 break httpOuter
                             }
                             httpMissed.insert(node)   // reachable, doesn't hold it
+                        case .failure(is RelayForbidden):
+                            // NOT a miss: never add to `httpMissed`, or the iroh fallback below is
+                            // skipped too and a refusal is laundered into "nobody has it".
+                            noteRefused(node, "media fetch \(ref.prefix(10))")
+                            continue
                         case .failure:
                             markHttpUrlBad(base)
                             continue
@@ -735,7 +783,14 @@ enum SharedStore {
             }
         }
         guard let head, let source = chosen else {
-            HavenLog.relay("media restore \(ref.prefix(12)): NOT FOUND on any relay/S3")
+            // Say which it was. "NOT FOUND" for what was actually a refusal is what made a
+            // membership problem look like data loss for days — the blob was on the relay the
+            // whole time, and the device simply wasn't allowed to ask for it.
+            if rosterNeeded.isEmpty {
+                HavenLog.relay("media restore \(ref.prefix(12)): NOT FOUND on any relay/S3")
+            } else {
+                HavenLog.relay("media restore \(ref.prefix(12)): REFUSED by \(rosterNeeded.count) relay(s) — not missing; re-publishing our roster so the retry is allowed")
+            }
             return nil
         }
 

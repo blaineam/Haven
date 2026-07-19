@@ -2951,6 +2951,14 @@ final class FeedStore: ObservableObject {
                     if let data = await SharedStore.restore(ref: ref, circleIds: circleIds, social: social) {
                         HavenLog.relay("MEDIA-FETCH ok ref=\(ref.prefix(10)) bytes=\(data.count) via=relay")
                         MediaStore.shared.store(ref, data); autoSaveReceived(ref); scheduleRefresh()
+                    // A relay REFUSED us rather than lacking the blob: publish our device roster to it
+                    // and try once more. Without this the fetch degrades to a peer ask that only works
+                    // while the author happens to be online — which is exactly how media a few days old
+                    // became permanently unreachable while fresh media (author still around) looked fine.
+                    } else if await SharedStore.healForbiddenRelays(social: social),
+                              let data = await SharedStore.restore(ref: ref, circleIds: circleIds, social: social) {
+                        HavenLog.relay("MEDIA-FETCH ok ref=\(ref.prefix(10)) bytes=\(data.count) via=relay (after roster publish)")
+                        MediaStore.shared.store(ref, data); autoSaveReceived(ref); scheduleRefresh()
                     } else {
                         HavenLog.relay("MEDIA-FETCH miss ref=\(ref.prefix(10)) — relay had none, asking peers")
                         directAsk()   // relay didn't have it (or unreachable) → ask a peer

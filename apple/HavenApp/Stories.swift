@@ -66,16 +66,51 @@ struct StoryViewer: View {
                 if stories.indices.contains(index) {
                     content(stories[index]).ignoresSafeArea()
                 }
-                // Prev/next tap zones — below the overlay, so the header's controls see taps first.
-                HStack(spacing: 0) {
-                    Color.clear.contentShape(Rectangle()).onTapGesture { prev() }
-                    Color.clear.contentShape(Rectangle()).onTapGesture { next() }
+                // Prev/next tap zones. They deliberately do NOT span the full height: the strips the
+                // header controls and the reply field occupy are carved out entirely, so a tap on
+                // Keep / delete / close / reply cannot reach a navigation zone no matter how the
+                // gesture arbitration resolves. Relying on Z-order alone did not hold — the controls
+                // sit above these and taps still advanced the story — and "the button is on top" is
+                // not worth debugging per-control when the zones simply have no business being under
+                // them in the first place.
+                VStack(spacing: 0) {
+                    Color.clear.frame(height: 104).allowsHitTesting(false)   // header strip
+                    HStack(spacing: 0) {
+                        Color.clear.contentShape(Rectangle())
+                            .onTapGesture { prev() }
+                        Color.clear.contentShape(Rectangle())
+                            .onTapGesture { next() }
+                    }
+                    Color.clear.frame(height: 96).allowsHitTesting(false)    // reply / chip strip
                 }
             }
+            // Hold-to-pause via the PRESSING callback, not a zero-distance drag.
+            //
+            // The drag version set heldPaused on touch-DOWN and cleared it in onEnded — but when a
+            // competing gesture won the sequence, onEnded never fired and the story stayed paused
+            // forever ("it stopped progressing"). `pressing:` is always called with false when the
+            // press resolves, however it resolves, so the pause can't stick.
+            .onLongPressGesture(minimumDuration: 0.2, maximumDistance: 30) {
+                // Long press completed — nothing to do; pausing is handled by `pressing:`.
+            } onPressingChanged: { down in
+                if down { if !heldPaused { heldPaused = true; player?.pause() } }
+                else if heldPaused { heldPaused = false; player?.play() }
+            }
+            // Swipe DOWN to dismiss; swipe LEFT/RIGHT to skip whole users (Instagram-style). Attached
+            // HERE rather than to the whole screen: a drag recognizer on an ancestor of a Button
+            // delays and then CANCELS the button's action — the button highlights on touch-down and
+            // then does nothing, which is exactly how Keep and delete failed. The controls layer must
+            // have no gesture-bearing ancestor at all.
             .simultaneousGesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in if !heldPaused { heldPaused = true; player?.pause() } }
-                    .onEnded { _ in if heldPaused { heldPaused = false; player?.play() } }
+                DragGesture(minimumDistance: 24)
+                    .onChanged { v in if v.translation.height > 0 && abs(v.translation.height) > abs(v.translation.width) { dragOffset = v.translation.height } }
+                    .onEnded { v in
+                        if abs(v.translation.width) > abs(v.translation.height), abs(v.translation.width) > 60 {
+                            withAnimation(.spring()) { dragOffset = 0 }
+                            if v.translation.width < 0 { skipToNextUser() } else { skipToPrevUser() }
+                        } else if v.translation.height > 130 { dismiss() }
+                        else { withAnimation(.spring()) { dragOffset = 0 } }
+                    }
             )
             .offset(y: dragOffset)
 
@@ -89,20 +124,8 @@ struct StoryViewer: View {
             .offset(y: dragOffset)
         }
         .havenStatusBarHidden()
-        // Swipe DOWN to dismiss; swipe LEFT/RIGHT to skip whole users (Instagram-style — a horizontal
-        // swipe jumps past the rest of THIS person's stories to the next/previous person's first story).
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 24)
-                .onChanged { v in if v.translation.height > 0 && abs(v.translation.height) > abs(v.translation.width) { dragOffset = v.translation.height } }
-                .onEnded { v in
-                    if abs(v.translation.width) > abs(v.translation.height), abs(v.translation.width) > 60 {
-                        withAnimation(.spring()) { dragOffset = 0 }
-                        if v.translation.width < 0 { skipToNextUser() } else { skipToPrevUser() }
-                    } else if v.translation.height > 130 { dismiss() }
-                    else { withAnimation(.spring()) { dragOffset = 0 } }
-                }
-        )
-        // (Press-and-hold to pause now lives on the media layer above — see the note there.)
+        // (Both gestures now live on the MEDIA layer — see the note there. Nothing gestural is
+        // attached at this level, so the controls layer has no gesture-bearing ancestor at all.)
         .onAppear { loadCurrent() }
         .onDisappear { teardown() }
         // A call starting MID-story mutes the clip's own audio immediately (call audio priority);
@@ -224,6 +247,7 @@ struct StoryViewer: View {
                             sharerAvatar(s)
                             Text(name).font(.subheadline.weight(.semibold)).foregroundStyle(.white)
                         }
+                        .contentShape(Rectangle())   // .plain adds no hit shape — see the Keep pill
                     }
                     .buttonStyle(.plain)
                 }
@@ -253,6 +277,11 @@ struct StoryViewer: View {
                             // Real glass, not a hand-rolled white scrim — and .plain so macOS
                             // paints no bezel behind the pill.
                             .havenGlass(in: Capsule())
+                            // `.buttonStyle(.plain)` adds no implicit hit shape, so the tappable area
+                            // collapsed to the drawn glyph and text — missing the pill's padding, and
+                            // most taps with it. The close button worked precisely because it does NOT
+                            // use .plain. Make the whole pill the target.
+                            .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
                     .animation(.easeInOut(duration: 0.15), value: isKept)
@@ -264,6 +293,7 @@ struct StoryViewer: View {
                         Image(systemName: "trash").font(.caption.weight(.semibold)).foregroundStyle(.white)
                             .padding(.horizontal, 10).padding(.vertical, 5)
                             .havenGlass(in: Capsule())
+                            .contentShape(Capsule())   // see the Keep pill above
                     }
                     .buttonStyle(.plain)
                 }
@@ -337,6 +367,7 @@ struct StoryViewer: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 12).padding(.vertical, 7)
                 .havenGlass(in: Capsule())
+                .contentShape(Capsule())   // .plain adds no hit shape — see the Keep pill
             }
             .buttonStyle(.plain)
             .padding(.bottom, 8)
@@ -393,6 +424,7 @@ struct StoryViewer: View {
                 Button { sendReply(to: s) } label: {
                     Image(systemName: "paperplane.fill").foregroundStyle(.white).padding(10)
                         .background(HavenTheme.brand, in: Circle())
+                        .contentShape(Circle())   // .plain adds no hit shape — see the Keep pill
                 }
                 .buttonStyle(.plain)   // gradient circle is the surface; no bezel behind it
             }

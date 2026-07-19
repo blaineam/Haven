@@ -79,19 +79,60 @@ struct OnboardingView: View {
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-            // Glass pills, not bare Buttons — bare ones pick up macOS's default rectangular
-            // push-button bezel, and the house style is circles and pills everywhere.
-            VStack(spacing: 10) {
-                Button { showLink = true } label: {
-                    Label("Link a device", systemImage: "laptopcomputer.and.iphone")
-                }
-                Button { showRestore = true } label: {
-                    Text("Restore my identity from a code")
-                }
+
+            // THREE paths, each named for what it DOES. Previously this screen offered "Link a
+            // device" and "Restore my identity from a code" as small secondary links, with starting
+            // fresh as the unlabelled default — so the one destructive-ish choice (moving an account)
+            // and the one additive choice (adding a device) read as the same kind of thing, and
+            // neither said what happens to the device you already have. Each option now states its
+            // consequence in the subtitle, because that is the part people get wrong.
+            VStack(spacing: 12) {
+                onboardingChoice(
+                    title: "I'm new to Haven",
+                    subtitle: "Create a brand-new identity on this device.",
+                    icon: "sparkles",
+                    action: advance)
+                onboardingChoice(
+                    title: "Add this as another of my devices",
+                    subtitle: "Use my existing Haven account here too. My other device stays signed in, and both stay in sync.",
+                    icon: "laptopcomputer.and.iphone",
+                    action: { showLink = true })
+                onboardingChoice(
+                    title: "Move my account to this device",
+                    subtitle: "Bring my identity over from another device using a transfer code. Use this when replacing a device, not when adding one.",
+                    icon: "arrow.right.circle",
+                    action: { showRestore = true })
             }
-            .buttonStyle(GlassPillButtonStyle(tint: HavenTheme.pink))
+            .padding(.horizontal, 8)
             Spacer()
         }
+    }
+
+    /// One onboarding path: what it's called, and — the part that actually prevents mistakes — what
+    /// it does to the device you already have.
+    @ViewBuilder
+    private func onboardingChoice(title: String, subtitle: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: icon)
+                    .font(.title3)
+                    .foregroundStyle(HavenTheme.pink)
+                    .frame(width: 28)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title).font(.headline).foregroundStyle(.primary)
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .buttonStyle(.plain)   // the card IS the button — no macOS bezel behind it
     }
 
     private var pickName: some View {
@@ -158,12 +199,16 @@ struct OnboardingView: View {
 
     private var controls: some View {
         VStack(spacing: 14) {
-            Button(action: advance) {
-                Text(step == 0 ? "Get started" : step == 3 ? "I agree — enter Haven" : "Continue")
+            // Step 0 now offers the three paths as explicit choices, so a generic "Get started"
+            // underneath them would be a fourth, ambiguous door onto the same screen.
+            if step != 0 {
+                Button(action: advance) {
+                    Text(step == 3 ? "I agree — enter Haven" : "Continue")
+                }
+                .buttonStyle(BrandButtonStyle())
+                .disabled(step == 1 && name.trimmingCharacters(in: .whitespaces).isEmpty)
+                .opacity(step == 1 && name.trimmingCharacters(in: .whitespaces).isEmpty ? 0.5 : 1)
             }
-            .buttonStyle(BrandButtonStyle())
-            .disabled(step == 1 && name.trimmingCharacters(in: .whitespaces).isEmpty)
-            .opacity(step == 1 && name.trimmingCharacters(in: .whitespaces).isEmpty ? 0.5 : 1)
 
             HStack(spacing: 7) {
                 ForEach(0..<4) { i in

@@ -90,6 +90,32 @@ struct StorageSettingsView: View {
                         Text("With this on, Haven relays invisibly in the background: close the window and it keeps serving your circle with no dock icon (launch Haven again to reopen it). At login it starts hidden — launch it a second time to open the window, like the first time.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                    // How much of your circles' media this machine is willing to hold, and for how
+                    // long. Volunteering a device shouldn't mean volunteering the whole disk.
+                    if relay.enabled {
+                        Picker(selection: Binding(get: { relay.mediaMaxAgeDays },
+                                                  set: { relay.mediaMaxAgeDays = $0 })) {
+                            Text("7 days").tag(7)
+                            Text("30 days").tag(30)
+                            Text("90 days").tag(90)
+                            Text("1 year").tag(365)
+                            Text("No limit").tag(0)
+                        } label: { Label("Keep media for", systemImage: "clock.arrow.circlepath") }
+
+                        Picker(selection: Binding(get: { relay.mediaMaxBytes },
+                                                  set: { relay.mediaMaxBytes = $0 })) {
+                            Text("8 GB").tag(UInt64(8) << 30)
+                            Text("32 GB").tag(UInt64(32) << 30)
+                            Text("128 GB").tag(UInt64(128) << 30)
+                            Text("512 GB").tag(UInt64(512) << 30)
+                            Text("No limit").tag(UInt64(0))
+                        } label: { Label("Media storage limit", systemImage: "internaldrive") }
+
+                        Text(relay.serving
+                             ? "Changes apply next time the relay starts — switch “Be your circle's relay” off and on to apply them now."
+                             : "Whichever limit is reached first wins: old media is swept on age, and the oldest goes first if the size cap is hit. Your circles' undelivered messages are never swept — only media.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 } header: {
                     Text("Circle relay")
                 } footer: {

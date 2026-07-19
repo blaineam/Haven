@@ -585,6 +585,35 @@ impl RelayServerHandle {
         Arc::new(Self { node })
     }
 
+    /// [`Self::attach`] with the limits the HOST chose for how much of their circles' media they're
+    /// willing to keep, and for how long — the in-app equivalent of the headless binary's
+    /// `--media-max-age-days` / `--media-max-bytes`. Someone volunteering a laptop should be able to
+    /// say "help my circles, but not with my whole disk", and until now the app-hosted relay had no
+    /// way to say it: it always ran unlimited media.
+    ///
+    /// `0` means "no limit" for that dimension, so either can be set independently. When BOTH are
+    /// set the sweep applies whichever frees space first — an old blob goes on age even if there's
+    /// room, and a fresh one goes on size if the cap is hit. The mailbox TTL is deliberately not
+    /// exposed: it's a delivery guarantee for undelivered messages, not disposable cache.
+    #[uniffi::constructor]
+    pub fn attach_with_limits(
+        node: Arc<HavenNode>,
+        dir: String,
+        media_max_age_days: u32,
+        media_max_bytes: u64,
+    ) -> Arc<Self> {
+        let mut retention = haven_net::blobstore::Retention::default();
+        if media_max_age_days > 0 {
+            retention.media_max_age =
+                Some(std::time::Duration::from_secs(u64::from(media_max_age_days) * 86_400));
+        }
+        if media_max_bytes > 0 {
+            retention.media_max_bytes = Some(media_max_bytes);
+        }
+        node.node.enable_relay_with_retention(PathBuf::from(dir), retention);
+        Arc::new(Self { node })
+    }
+
     /// The relay's node id (hex) — now equal to the account/messaging node id. Put it in the relay link.
     pub fn node_id_hex(&self) -> String {
         self.node.node.node_id_hex()

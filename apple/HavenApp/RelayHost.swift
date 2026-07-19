@@ -28,6 +28,28 @@ final class RelayHost: ObservableObject {
     private var handle: RelayServerHandle?
     private let d = UserDefaults.standard
     private let enabledKey = "haven.relay.host.enabled"
+    private let maxAgeKey = "haven.relay.host.mediaMaxAgeDays"
+    private let maxBytesKey = "haven.relay.host.mediaMaxBytes"
+
+    /// How much of your circles' media this host is willing to keep, and for how long. Volunteering a
+    /// machine shouldn't mean volunteering the whole disk, so both are user-chosen; `0` on either
+    /// means "no limit" for that dimension. When both are set the sweep applies whichever frees space
+    /// first. Defaults are deliberately generous but finite — an unbounded default is how a helpful
+    /// relay quietly eats a laptop.
+    static let defaultMediaMaxAgeDays = 30
+    static let defaultMediaMaxBytes: UInt64 = 32 * 1024 * 1024 * 1024   // 32 GB
+
+    /// Changing either takes effect when the relay next starts — the retention is handed to the store
+    /// at attach time, so the UI tells the user to toggle hosting off and on rather than pretending
+    /// a live change applied.
+    var mediaMaxAgeDays: Int {
+        get { d.object(forKey: maxAgeKey) as? Int ?? Self.defaultMediaMaxAgeDays }
+        set { d.set(newValue, forKey: maxAgeKey); objectWillChange.send() }
+    }
+    var mediaMaxBytes: UInt64 {
+        get { (d.object(forKey: maxBytesKey) as? NSNumber)?.uint64Value ?? Self.defaultMediaMaxBytes }
+        set { d.set(NSNumber(value: newValue), forKey: maxBytesKey); objectWillChange.send() }
+    }
 
     private init() { enabled = d.bool(forKey: enabledKey) }
 
@@ -73,7 +95,9 @@ final class RelayHost: ObservableObject {
         // Keep the device awake while relaying: screen-on on iOS (relaying stops when the app
         // suspends), system-sleep prevention on Mac (the display may sleep; the app keeps serving).
         PlatformIdle.disabled = true
-        let h = RelayServerHandle.attach(node: node, dir: storeDir)
+        let h = RelayServerHandle.attachWithLimits(node: node, dir: storeDir,
+                                                   mediaMaxAgeDays: UInt32(max(0, mediaMaxAgeDays)),
+                                                   mediaMaxBytes: mediaMaxBytes)
         handle = h
         nodeId = h.nodeIdHex()   // == the account node id now (the relay shares the node)
         serving = true

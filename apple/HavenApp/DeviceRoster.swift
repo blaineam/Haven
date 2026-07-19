@@ -333,8 +333,36 @@ struct AuthorizedDevicesView: View {
                         NavigationLink { EnrollDeviceView() } label: {
                             Label("Link a device…", systemImage: "qrcode")
                         }
-                    } footer: { Text("Show a QR/code for your new device to scan on its welcome screen (“Link a device”). It gets its own key and a copy of your circles — never your master key, so you can revoke it anytime.")
+                    } footer: { Text("Show a QR/code for your new device to scan on its welcome screen (“Add this as another of my devices”). It gets its own key and a copy of your circles — never your master key, so you can revoke it anytime.")
                         .fixedSize(horizontal: false, vertical: true) }
+
+                    // Setting up Haven somewhere else is two different jobs and people pick the wrong
+                    // one: ADDING a device keeps both, MOVING an account retires this one. Say which is
+                    // which here, in the same words the new device's welcome screen uses, so the two
+                    // screens can be followed together.
+                    Section {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Label {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Keeping this device too?").font(.subheadline.weight(.semibold))
+                                    Text("Use “Link a device…” above, and on the new device choose “Add this as another of my devices”. Both stay signed in and stay in sync.")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            } icon: { Image(systemName: "laptopcomputer.and.iphone").foregroundStyle(HavenTheme.pink) }
+                            Divider()
+                            Label {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Replacing this device?").font(.subheadline.weight(.semibold))
+                                    Text("Use Advanced ▸ Transfer my identity instead, and on the new device choose “Move my account to this device”. Your identity moves rather than being copied.")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            } icon: { Image(systemName: "arrow.right.circle").foregroundStyle(HavenTheme.pink) }
+                        }
+                    } header: {
+                        Text("Setting up Haven on another device")
+                    }
                 }
                 Section {
                     if roster.devices.isEmpty {

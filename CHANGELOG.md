@@ -43,7 +43,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   already being sent started a *second* copy of the same transfer, then a third — each competing with
   the last, none of them finishing, so the item never landed and got asked for again. One transfer per
   item per recipient now, and a request that arrives mid-transfer is correctly ignored, because the
-  bytes are already on their way.
+  bytes are already on their way. This was fixed on iPhone and Mac in the last release; Android and
+  desktop have it now too.
+
+- **Sending a large item no longer queues the whole thing up at once (Android, desktop).** Both used to
+  hand every piece of a file to the network as fast as they could produce them, without waiting for any
+  of it to actually go out — so sending a 200 MB video meant the entire video sat queued in memory,
+  once per device it was going to, and the slower the connection the worse it got. Sending now keeps
+  pace with the connection itself: one piece in hand at a time, as fast as the link will actually
+  carry it.
 
 ## [1.1.1]
 

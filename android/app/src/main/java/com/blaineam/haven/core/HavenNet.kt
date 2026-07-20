@@ -2127,27 +2127,33 @@ object HavenNet : InboundListener {
         media.forEach { enqueueBackup(circleId, it) }   // same relay push a post's media gets
     }
 
-    /** Edit your own post's text; broadcasts the edit event. */
     /**
-     * Edit your own post or message.
+     * Edit your own post or message — text only. Attachments are carried through untouched.
      *
-     * [media] and [music] REPLACE what the item currently carries — the reducer does not merge, so
-     * omitting them strips the item for the whole circle. This defaulted to `emptyList()` and the
-     * circle-post editor called it without arguments, which meant changing a caption silently
-     * deleted every photo, video and track off that post on every member's device. Callers editing
-     * an item that has attachments must pass its CURRENT media back in. (Apple's DM edit passes an
-     * empty array too, but its post editor threads the full array through — the divergence was
-     * Android routing both paths through this one function.)
+     * An Edit event RESTATES the whole item: the reducer overwrites body/media/music/muteVideo from
+     * it rather than merging (`haven-p2p/src/social.rs`, `EventKind::Edit`). That is deliberate —
+     * it is what lets re-optimize re-point an item at smaller bytes ([applyReoptimized]) — but it
+     * means anything the edit does not carry forward is DELETED, for the author and for every
+     * member of the circle, permanently.
+     *
+     * So this reads the attachments back off the item instead of taking them from the caller. The
+     * previous signature defaulted them to `emptyList()`/`null`/`false` and trusted each editor to
+     * remember; the post editor did, the DM editor did not, and editing a message's text deleted
+     * its photo and its track for everyone in the thread. Nothing a text editor can pass should be
+     * able to do that, so it can no longer pass anything: a caller that means to REPLACE media
+     * calls [social].edit directly, the way [applyReoptimized] does.
+     *
+     * Blocking (feed() re-opens every envelope in the circle) — same as the other author paths.
      */
-    fun editPost(
-        circleId: String,
-        postId: String,
-        body: String,
-        media: List<String> = emptyList(),
-        music: uniffi.haven_ffi.TrackRefFfi? = null,
-    ) {
+    fun editPost(circleId: String, postId: String, body: String) {
+        // viewerRetentionSecs null: retention only hides items from MY feed. Resolving through a
+        // filtered feed would miss an item the viewer can no longer see and fall back to "wipe".
+        val feed = runCatching { social.feed(circleId, nowMs(), null) }.getOrDefault(emptyList())
+        // No match means we could not read what to preserve. Dropping the edit is the safe failure:
+        // the user retypes, versus the attachments being gone from everyone's device.
+        val keep = EditCarry.forEvent(feed, postId) ?: return
         val env = runCatching {
-            social.edit(circleId, postId, body, media, music, false, nowMs())
+            social.edit(circleId, postId, body, keep.media, keep.music, keep.muteVideo, nowMs())
         }.getOrNull() ?: return
         afterAuthor(circleId, env)
     }

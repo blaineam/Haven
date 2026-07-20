@@ -260,7 +260,16 @@ final class MediaReoptimizer: ObservableObject {
 
         // Re-scan so the remaining count is honest, and so anything just rewritten drops off the
         // list (nothing references the old ref any more, so it is no longer one of my shared items).
+        //
+        // But HOLD THE WARNING ACROSS IT. `scan()` clears `lastWarning` (a fresh measurement
+        // shouldn't inherit a stale complaint), which means this trailing re-scan would otherwise
+        // wipe the two messages this run most needs to deliver — "Stopped." and "not enough free
+        // space" — before `ReoptimizeMediaRow` ever renders them. A warning that is only displayed
+        // for the duration of a re-scan is a warning that was never shown. A warning raised BY the
+        // re-scan wins, since that one describes the state the user is looking at now.
+        let raised = lastWarning
         await scan()
+        if let raised, lastWarning == nil { lastWarning = raised }
     }
 
     /// Re-encode one blob through the SAME entry points a brand-new attachment uses — the whole

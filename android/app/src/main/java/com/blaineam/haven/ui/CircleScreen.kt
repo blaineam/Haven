@@ -2044,9 +2044,10 @@ fun PostCard(
                     colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink))
                 Text("Save", color = HavenTheme.pink, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable {
-                        // Carry the post's existing attachments through — an edit REPLACES the
-                        // media array, so dropping them here deletes them for the whole circle.
-                        HavenNet.editPost(circleId, item.id, editText.trim(), item.media, item.music)
+                        // Text only — editPost carries the post's photos, video mute flag and
+                        // track through itself, because an edit REPLACES them rather than
+                        // merging and dropping them here would delete them for the whole circle.
+                        HavenNet.editPost(circleId, item.id, editText.trim())
                         showEdit = false
                     }.padding(10.dp))
             }

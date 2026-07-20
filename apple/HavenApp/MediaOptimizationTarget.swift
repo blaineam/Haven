@@ -41,7 +41,7 @@ enum MediaOptimizationTarget {
         c.year = 2026; c.month = 7; c.day = 20; c.hour = 8; c.minute = 0
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = TimeZone(identifier: "America/Los_Angeles") ?? .gmt
-        return cal.date(from: c) ?? Date(timeIntervalSince1970: 1_784_732_400)
+        return cal.date(from: c) ?? Date(timeIntervalSince1970: 1_784_559_600)   // == 2026-07-20 15:00Z
     }()
 
     /// Was this posted before the encoder rewrite?

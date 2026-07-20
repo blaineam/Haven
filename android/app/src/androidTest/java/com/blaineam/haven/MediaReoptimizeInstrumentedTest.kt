@@ -148,6 +148,56 @@ class MediaReoptimizeInstrumentedTest {
         assertFalse(com.blaineam.haven.core.MediaReoptimizer.running.value)
     }
 
+    /**
+     * A run that stops early must still be SAYING SO once it has finished.
+     *
+     * [MediaReoptimizer.run] ends with a re-scan, and [MediaReoptimizer.scan] opens by clearing
+     * `lastWarning` — a fresh measurement shouldn't inherit a stale complaint. Those two facts used
+     * to combine into a swallow: the two messages a stopped run most needs to deliver ("Stopped."
+     * and the disk-headroom refusal) were set, then wiped by the trailing re-scan before
+     * `SettingsScreen` could ever render them. The row went quiet and the user saw a run halt with
+     * no explanation. A warning displayed only for the duration of a re-scan was never shown.
+     *
+     * Driven through the headroom guard rather than the cancel latch because it is the DETERMINISTIC
+     * door into that tail: run() clears `cancelRequested` on entry, so a cancel can only be raced in
+     * from another thread, whereas a candidate too big to fit refuses on the first iteration every
+     * time — no encode, no network, no engine. The two warnings share one code path out of the loop,
+     * so this pins the behaviour for both.
+     */
+    @Test
+    fun aStoppedRunStillShowsWhyAfterItsTrailingRescan() = kotlinx.coroutines.runBlocking {
+        com.blaineam.haven.core.MediaReoptimizer.init(ctx)
+        // LocalMedia too: hasDiskHeadroom is fed LocalMedia.usableSpaceBytes(), which answers 0 when
+        // the store was never initialised — and 0 means "could not determine", which deliberately
+        // does NOT block. Without a real free-space figure the guard would wave the item through and
+        // this test would encode instead of stopping.
+        com.blaineam.haven.core.LocalMedia.init(ctx)
+        val saved = com.blaineam.haven.core.MediaReoptimizer.candidates.value
+        try {
+            // Bigger than any disk, so hasDiskHeadroom refuses it before anything is encoded.
+            com.blaineam.haven.core.MediaReoptimizer.candidates.value = listOf(
+                com.blaineam.haven.core.MediaReoptimizer.Candidate(
+                    ref = "vid_never_encoded", circleId = "c",
+                    shape = MediaOptimizationTarget.Shape(
+                        Long.MAX_VALUE / 4, 3840, "video/hevc", 38_000_000, 30.0, "test"),
+                    firstSharedMs = 0, legacyByAge = true,
+                )
+            )
+
+            com.blaineam.haven.core.MediaReoptimizer.run()
+
+            assertFalse("the run must have finished", com.blaineam.haven.core.MediaReoptimizer.running.value)
+            assertEquals(
+                "the reason the run stopped must survive the re-scan that follows it",
+                "Stopped — not enough free space to re-encode safely.",
+                com.blaineam.haven.core.MediaReoptimizer.lastWarning.value)
+        } finally {
+            com.blaineam.haven.core.MediaReoptimizer.candidates.value = saved
+            com.blaineam.haven.core.MediaReoptimizer.lastWarning.value = null
+        }
+        Unit
+    }
+
     // ---- Stills ---------------------------------------------------------------------------------
 
     /** A noisy JPEG at [dim]x[dim] and [quality] — noise so the encoder actually spends its budget. */

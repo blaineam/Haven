@@ -53,7 +53,13 @@ current default.
   carries the post's whole attachment list and replaces what was there — it is not a patch — and the
   desktop client was sending an empty list. So fixing a typo detached every photo on the post, for
   every member of the circle. The current attachments are now re-sent unchanged; only the text moves.
-  (iPhone and Android were always correct here.)
+- **Same bug on Android, in direct messages.** The circle-post editor was fixed alongside desktop,
+  but the DM editor shared the same underlying call and did not pass anything through — so editing
+  the text of a message deleted its photo, its video and its attached song, for both people in the
+  thread, permanently. Editing a message's text is now text-only by construction: the attachments
+  are read back off the message itself rather than handed over by whichever screen is doing the
+  editing, so no editor can drop them by forgetting to mention them. Editing a muted video's caption
+  also no longer un-mutes it for everyone.
 - **A stopped or out-of-disk re-optimize run now tells you it stopped.** The run ends by
   re-measuring, and re-measuring cleared the message it had just set — so "Stopped." and "not enough
   free space to re-encode safely" were both wiped before they could be read.

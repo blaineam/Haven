@@ -1,4 +1,4 @@
-1.1.2 — media that actually arrives:
+1.1.3 — relays that behave:
 • Big photos and videos pick up where they left off instead of restarting from scratch.
 • Receiving a large video no longer loads the whole thing into memory, so size limits are gone.
 • Sending keeps pace with your connection rather than queueing the entire file at once.

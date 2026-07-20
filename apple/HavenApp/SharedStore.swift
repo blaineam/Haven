@@ -401,7 +401,14 @@ enum SharedStore {
             if !force && MediaBackupLedger.has(node, ref) { landed = true; continue }   // already confirmed
             // Our OWN hosted relay: the local store answers instantly (no dial).
             if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
-                if !force, RelayHost.shared.localGet(key(ref)) != nil { MediaBackupLedger.mark(node, ref); landed = true }
+                // localHas, NOT localGet != nil: this only asks "is it already there?", and localGet
+                // reads the WHOLE blob to answer it — a full media file, hundreds of MB for a video,
+                // pulled into memory on the MAIN ACTOR (RelayHost is @MainActor). The 2-minute media
+                // backfill runs this for every ref the device knows, so hosting a relay meant reading
+                // your entire media library into RAM on the main thread every two minutes. That is the
+                // "my Mac became unresponsive after I enabled the relay" report: not the relay serving
+                // peers, but the host's own backup check. localHas answers from the index.
+                if !force, RelayHost.shared.localHas(key(ref)) { MediaBackupLedger.mark(node, ref); landed = true }
                 else { uploads.append((node, .ownRelay)) }
                 continue
             }
@@ -499,7 +506,7 @@ enum SharedStore {
             case .ownRelay:
                 // Our OWN hosted relay: store directly in the local mailbox (no iroh self-dial).
                 try? await putMediaFile(ref: ref, sealedURL: sealedURL, size: sealedSize,
-                                        exists: { RelayHost.shared.localGet($0) != nil }) { _ = RelayHost.shared.localPut($0, $1) }
+                                        exists: { RelayHost.shared.localHas($0) }) { _ = RelayHost.shared.localPut($0, $1) }
                 MediaBackupLedger.mark(node, ref); landed = true
             case .http(let base, let token):
                 do {

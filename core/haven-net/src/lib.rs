@@ -95,6 +95,20 @@ pub struct Node {
     dialing: Arc<Mutex<HashMap<EndpointId, Arc<tokio::sync::Mutex<()>>>>>,
     /// Dials actually handed to `endpoint.connect` (diagnostics + the single-flight unit test).
     dial_attempts: Arc<std::sync::atomic::AtomicU64>,
+    /// One long-lived blob client per relay peer, so a mesh tick REUSES its connection.
+    ///
+    /// `relay_sync_from` used to build a fresh client every ~20s tick and application-close it at the
+    /// end. Each cycle therefore started cold on the DERP relay path, did its LIST/pull, and was torn
+    /// down before iroh could promote it to a direct path — so blob traffic never left the relay path
+    /// (observed in a field trace: 4,387 relayed blob paths, ZERO direct, and 1,453 paths Established
+    /// then immediately Abandoned with ApplicationClosed). The blob ALPN drops datagrams on a pure-relay
+    /// cross-NAT route, so every put and get then timed out — a 500-byte device roster failing exactly
+    /// like a 297 MB video — while `haven/social`, whose connections are long-lived and DO punch
+    /// through, kept working. That asymmetry (messages arrive, media never does) is the symptom.
+    ///
+    /// Keeping the client alive lets the connection live long enough to hole-punch, which is the entire
+    /// point of the NAT traversal this project is built on — no public endpoint, no port-forward.
+    blob_clients: Arc<tokio::sync::Mutex<HashMap<EndpointId, Arc<crate::blobstore::BlobClient>>>>,
     secret: [u8; 32], // this node's key — also the in-process relay's identity (one shared node)
 }
 
@@ -144,6 +158,7 @@ impl Node {
             dial_gate: Arc::new(Mutex::new(HashMap::new())),
             dialing: Arc::new(Mutex::new(HashMap::new())),
             dial_attempts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            blob_clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             secret,
         })
     }

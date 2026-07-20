@@ -35,13 +35,19 @@ current default.
 
 ### Fixed
 
-- **Photos and videos wouldn't move between people on different networks.** Messages and posts
-  arrived normally, but the media attached to them never did — uploads sat on an arrow forever and
-  downloads never started. The cause was a connection to your relay being torn down and rebuilt every
-  twenty seconds, which never left it long enough to find a direct route between the two devices.
-  Everything was left crawling through a fallback path that can't actually carry media. It now keeps
-  that connection open, so the direct route gets established and media moves. This needs no
-  port-forwarding, no public address and no configuration — the same as it always should have.
+- **Nothing reached anyone who wasn't online at the same time as you.** Messages and photos moved
+  fine between two people both using Haven at that moment, and then simply stopped: a relay is
+  supposed to hold what you send and pass it on later, and that part had quietly stopped working
+  between different networks. So a post, a reply or a picture would reach whoever happened to be
+  awake and never reach anybody else — and on your own devices, whichever one was acting as the relay
+  appeared to be the only one receiving anything.
+
+  Two causes, both the same mistake: the connection to a relay was being thrown away and rebuilt —
+  once on a timer, and once every time an attempt failed. Rebuilding it meant starting over on a slow
+  fallback route, which then failed, which threw it away again. It was never left alone long enough to
+  find the direct route between the two devices. It now survives, so it settles onto the direct route
+  and stays there. No port-forwarding, no public address, no configuration — as it always should have
+  been.
 
 - **Media shared in a conversation didn't arrive.** A photo or video sent in a DM was only ever
   fetched if it happened to be pushed while both people were online. Nothing asked for it otherwise,

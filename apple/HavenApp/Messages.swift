@@ -442,8 +442,11 @@ struct DMThreadView: View {
                 .contentMargins(.bottom, composerHeight + 10, for: .scrollContent)
                 .defaultScrollAnchor(.bottom)
                 .scrollDismissesKeyboard(.interactively)
-                .onChange(of: store.postTick) { scrollToBottom(proxy) }
+                .onChange(of: store.postTick) { scrollToBottom(proxy); fetchMissingThreadMedia() }
                 .onChange(of: store.items.count) { scrollToBottom(proxy) }
+                // Ask for anything this thread references and we don't hold — on open, and again when
+                // a new message lands. Nothing else ever does this for DMs (see fetchMissingThreadMedia).
+                .task(id: circleId) { fetchMissingThreadMedia() }
                 .onChange(of: composerHeight) { scrollToBottom(proxy, animated: false) }
                 // On open, `defaultScrollAnchor(.bottom)` gets short threads right, but a LONG (often group)
                 // thread's lazy content isn't measured yet, so it can rest too low behind the composer.
@@ -763,6 +766,29 @@ struct DMThreadView: View {
     /// Oldest → newest, so the newest message sits at the bottom (standard chat order).
     private var ordered: [FeedItemFfi] {
         store.messages(in: circleId).sorted { $0.createdAt < $1.createdAt }
+    }
+
+    /// Fetch media this thread references but we don't hold.
+    ///
+    /// Nothing did this for DMs. `requestMissingMedia` scans `items` — the ACTIVE CIRCLE's feed — and
+    /// DM messages are never in it, so a photo or video sent in a DM was only ever fetched from a
+    /// relay by accident. It arrived if the sender happened to push it peer-to-peer while both were
+    /// online, and otherwise never: the message showed up, sat there with nothing in it, and no device
+    /// ever asked for the bytes — even when the blob was sitting complete on a relay the receiver was
+    /// itself hosting.
+    ///
+    /// Bounded deliberately: newest messages first (what you're looking at), a handful per pass, and
+    /// `requestMedia` no-ops for anything already held. Opening a thread must not turn into a fetch
+    /// storm on a long history.
+    private func fetchMissingThreadMedia() {
+        var budget = 6
+        for item in ordered.reversed() {
+            for ref in item.media where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref) {
+                guard budget > 0 else { return }
+                budget -= 1
+                store.requestMedia(ref, circleId: circleId)
+            }
+        }
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {

@@ -3204,13 +3204,20 @@ final class FeedStore: ObservableObject {
     /// Actively (re-)request one media ref from every contact, nearby, and the shared
     /// store. Safe to call repeatedly — re-sent chunks just fill the gaps a lossy transfer
     /// left, which is what large videos need (one dropped chunk otherwise hangs forever).
-    func requestMedia(_ ref: String) {
+    /// `circleId` names the circle the ref belongs to — it defaults to the active one, but a DM thread
+    /// must pass its own: the active circle is whatever feed is behind the conversation, and using it
+    /// would re-mirror a DM's media to the wrong circle's relay.
+    func requestMedia(_ ref: String, circleId: String? = nil) {
         guard let social, !MediaStore.isSynthetic(ref), !MediaStore.shared.has(ref) else { return }
-        mediaReqCircle[ref] = activeCircleId   // remember the circle so a peer-delivered blob re-mirrors correctly
+        let circle = circleId ?? activeCircleId
+        mediaReqCircle[ref] = circle   // remember the circle so a peer-delivered blob re-mirrors correctly
         let myHex = social.myNodeHex()
         var payload = Data(myHex.utf8); payload.append(Data(ref.utf8))
         askForMedia(ref: ref, myHex: myHex, plain: payload)   // resumes from a partial when we have one
-        let circleIds = circles.map { $0.id }
+        // Always include the ref's OWN circle, even if it isn't in `circles` yet — a DM's relay copy
+        // lives under its dm: circle, and restoring only from the circles list would skip it.
+        var circleIds = circles.map { $0.id }
+        if !circleIds.contains(circle) { circleIds.append(circle) }
         Task { @MainActor in   // also pull from the circle's shared store if one exists
             if let data = await SharedStore.restore(ref: ref, circleIds: circleIds, social: social) {
                 MediaStore.shared.store(ref, data); autoSaveReceived(ref); scheduleRefresh()

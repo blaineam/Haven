@@ -12,6 +12,7 @@ mod engine;
 mod localmedia;
 mod mediaresume;
 mod relayhealth;
+mod reoptimize;
 mod roster;
 mod scheduled;
 mod secret;
@@ -449,6 +450,12 @@ pub fn run() {
             commands::s3_clear,
             commands::media_cleanup,
             commands::media_inventory,
+            commands::reoptimize_scan,
+            commands::reoptimize_targets,
+            commands::reoptimize_accept,
+            commands::reoptimize_apply,
+            commands::reoptimize_skip,
+            commands::reoptimize_headroom,
             commands::media_delete_selected,
             commands::media_pin,
             commands::media_unpin,

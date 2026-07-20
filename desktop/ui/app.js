@@ -1855,6 +1855,259 @@ function imageToJpegBase64(file, maxDim = MEDIA_TARGETS.STILL_LONG_EDGE, quality
   });
 }
 
+// ---- re-optimize media I already shared ------------------------------------------------
+//
+// Design spec: `apple/HavenApp/MediaReoptimize.swift` (read its header first) and the desktop
+// module header in `desktop/src-tauri/src/reoptimize.rs`. The one-paragraph version:
+//
+//   A media ref IS the sha-256 of the blob's plaintext, so re-encoding cannot happen in place — new
+//   bytes are a new address. The mechanism is therefore an EDIT of the post carrying a full media
+//   array with the new ref, keeping id/author/thread-position/original-timestamp so nothing reorders
+//   and nobody is notified. Only MY OWN posts, because an Edit is signed by the author. The old blob
+//   is NOT deleted (offline members still hold the pre-edit post naming it); the orphan sweep
+//   retires it later, with its grace window.
+//
+// DESKTOP COVERS STILLS ONLY. The encoder here is the WebView, and MediaRecorder emits VP8/Opus in
+// WebM. Re-encoding a video of mine — which on this device includes clips authored on my phone and
+// synced here as H.264/MP4 — would replace media every member can play with media Apple cannot
+// decode, and then EDIT the post so the broken copy is the only one anyone fetches. So video and
+// audio are counted and reported, never rewritten. Full reasoning in the Rust module header.
+//
+// WHY THE LOOP IS HERE and not in Rust: the encoder is the canvas. Rust owns every DECISION (what
+// is a candidate, whether an encode is a big enough win to adopt, what a post's Edit actually says);
+// this file owns only the pixels and the progress bar.
+const Reoptimize = {
+  scanning: false,
+  running: false,
+  cancelRequested: false,
+  hasScanned: false,
+  candidates: [],
+  videos: 0,
+  videoBytes: 0,
+  batchLimit: 25,
+  doneCount: 0,
+  batchCount: 0,
+  lastSummary: null,
+  lastWarning: null,
+  _host: null,
+
+  /// Measure my shared stills. Blocking in the backend (it decrypts each blob to probe it), which is
+  /// exactly why nothing calls this on a timer — a button is the only caller, on both platforms.
+  async scan() {
+    if (this.scanning || this.running) return;
+    this.scanning = true; this.lastWarning = null; this.draw();
+    try {
+      const r = await invoke("reoptimize_scan");
+      this.candidates = (r && r.candidates) || [];
+      this.videos = (r && r.videos_above_target) || 0;
+      this.videoBytes = (r && r.video_bytes) || 0;
+      if (r && r.batch_limit) this.batchLimit = r.batch_limit;
+      this.hasScanned = true;
+    } catch (e) {
+      this.lastWarning = "Couldn't check your media: " + e;
+    }
+    this.scanning = false; this.draw();
+  },
+
+  cancel() { this.cancelRequested = true; this.draw(); },
+
+  /// Re-encode up to `batchLimit` candidates, then re-share every post that named them.
+  async run() {
+    if (this.running || !this.candidates.length) return;
+    this.running = true; this.cancelRequested = false;
+    this.lastWarning = null; this.lastSummary = null; this.doneCount = 0;
+    const batch = this.candidates.slice(0, this.batchLimit);
+    this.batchCount = batch.length;
+    let before = 0, after = 0;
+    // old ref -> new ref, built across the WHOLE batch and applied in one pass afterwards, so a post
+    // with three rewritten photos gets a single edit rather than three.
+    const swap = {};
+    this.draw();
+
+    for (const c of batch) {
+      if (this.cancelRequested) break;
+      // Refuse to start an encode without room for the source and its output plus a margin. Filling
+      // the disk in a loop is the other way a job like this ruins someone's day.
+      let room = true;
+      try { room = await invoke("reoptimize_headroom", { bytes: c.bytes }); } catch (_) {}
+      if (!room) { this.lastWarning = "Stopped — not enough free space to re-encode safely."; break; }
+
+      let newRef = null, newBytes = 0;
+      try {
+        const url = await invoke("media_data_url", { circleId: c.circle_id, reference: c.reference });
+        if (url) {
+          const b64 = await stillToJpegBase64FromSrc(url);
+          newBytes = base64ByteLength(b64);
+          // Rust decides whether this is a big enough win to adopt, and only writes the blob if it
+          // is — so a rejected encode never mints a ref, and never needs deleting.
+          newRef = await invoke("reoptimize_accept", { circleId: c.circle_id, reference: c.reference, dataBase64: b64 });
+        }
+      } catch (e) {
+        newRef = null;
+      }
+      if (!newRef) {
+        // A rejected encode was already recorded by the backend; a THROWN one (no bytes, decode
+        // failure) was not. Recording twice is a no-op, so this is unconditional and simple.
+        try { await invoke("reoptimize_skip", { reference: c.reference }); } catch (_) {}
+        this.doneCount++; this.draw();
+        continue;
+      }
+      before += c.bytes; after += newBytes;
+      swap[c.reference] = newRef;
+      this.doneCount++; this.draw();
+    }
+
+    // APPLY. Targets are re-read NOW rather than reused from the scan: minutes have passed, and a
+    // post edited or retracted in the meantime must be edited against its current state, not a stale
+    // copy that would silently revert the user's own change. (The backend re-reads them a second
+    // time inside reoptimize_apply, which is the authoritative check — this pass only decides which
+    // events to touch.)
+    let reshared = 0;
+    const swapped = Object.keys(swap).length;
+    if (swapped) {
+      try {
+        for (const t of await invoke("reoptimize_targets")) {
+          if (!t.media.some((r) => swap[r])) continue;
+          // `map` preserves order and passes everything else through untouched — including synthetic
+          // `geo:` location pins, which ride in the same array and carry no bytes.
+          const media = t.media.map((r) => swap[r] || r);
+          if (await invoke("reoptimize_apply", { circleId: t.circle_id, eventId: t.event_id, media })) reshared++;
+        }
+      } catch (e) {
+        this.lastWarning = "Some posts couldn't be re-shared: " + e;
+      }
+    }
+
+    const pct = before > 0 ? Math.max(0, 100 - Math.round((after * 100) / before)) : 0;
+    this.lastSummary = !swapped
+      ? "Nothing could be made smaller"
+      : `${swapped} item${swapped === 1 ? "" : "s"} re-shared across ${reshared} post${reshared === 1 ? "" : "s"} · `
+        + `${fmtBytes(before)} → ${fmtBytes(after)} (${pct}% smaller)`;
+    if (this.cancelRequested) this.lastWarning = "Stopped.";
+    this.running = false;
+    // Re-scan so the remaining count is honest and anything just rewritten drops off the list —
+    // nothing references the old ref any more, so it is no longer one of my shared items.
+    //
+    // But HOLD THE WARNING ACROSS IT. `scan()` clears `lastWarning` (a fresh measurement shouldn't
+    // inherit a stale complaint), which means this trailing re-scan would otherwise wipe the two
+    // messages this run most needs to deliver — "Stopped." and "not enough free space" — before the
+    // user ever sees them. A warning that is only displayed for the duration of a re-scan is a
+    // warning that was never shown. (Apple's `MediaReoptimizer.run` has the same ordering and the
+    // same swallow; worth fixing there too.) A warning raised BY the re-scan wins, since that one
+    // describes the state the user is looking at now.
+    const raised = this.lastWarning;
+    await this.scan();
+    if (raised && !this.lastWarning) { this.lastWarning = raised; this.draw(); }
+  },
+
+  get pendingBytes() { return this.candidates.reduce((n, c) => n + c.bytes, 0); },
+
+  title() {
+    if (this.scanning) return "Checking your shared media…";
+    if (this.running) return `Re-optimizing ${Math.min(this.doneCount + 1, this.batchCount)} of ${this.batchCount}…`;
+    if (!this.candidates.length) return "Re-optimize media I already shared";
+    const n = Math.min(this.candidates.length, this.batchLimit);
+    return `Shrink & re-share ${n} photo${n === 1 ? "" : "s"}`;
+  },
+
+  foundText() {
+    const total = this.candidates.length;
+    const batch = Math.min(total, this.batchLimit);
+    const legacy = this.candidates.filter((c) => c.legacy_by_age).length;
+    let s = `${total} photo${total === 1 ? "" : "s"} · ${fmtBytes(this.pendingBytes)} currently on every member's device`;
+    if (legacy > 0) s += ` · ${legacy} shared before Haven learned to compress`;
+    if (batch < total) s += `. This run does the ${batch} largest; click again for the rest.`;
+    return s;
+  },
+
+  /// Re-render in place. The row owns a single host element and repaints it, which is how the rest
+  /// of this file handles live state without a framework.
+  draw() {
+    const host = this._host;
+    if (!host || !host.isConnected) return;
+    const busy = this.scanning || this.running;
+    const kids = [];
+
+    const btn = el("button", { class: "btn" + (this.candidates.length && !busy ? " primary" : ""),
+      style: "display:flex;justify-content:space-between;align-items:center" },
+      el("span", {}, this.title()), busy ? el("span", { class: "muted small" }, "…") : el("span", {}, ""));
+    btn.disabled = busy;
+    // TWO CLICKS BY DESIGN: the first measures and TELLS you what it found, the second commits. A
+    // button that silently re-encoded a gigabyte and re-published a year of posts on one click would
+    // be the wrong shape of thing entirely.
+    btn.onclick = () => { if (!this.candidates.length) this.scan(); else this.run(); };
+    kids.push(btn);
+
+    if (this.running) {
+      const stop = el("button", { class: "btn danger small" }, this.cancelRequested ? "Stopping…" : "Stop after this one");
+      stop.disabled = this.cancelRequested;
+      stop.onclick = () => this.cancel();
+      kids.push(stop);
+    }
+    if (this.lastWarning) kids.push(el("div", { class: "small", style: "color:var(--warn,#c60)" }, "⚠️ " + this.lastWarning));
+    if (this.lastSummary && !this.running) kids.push(el("div", { class: "small", style: "color:var(--ok,#2a7)" }, "✓ " + this.lastSummary));
+
+    if (this.candidates.length && !this.running) {
+      kids.push(el("div", { class: "muted small" }, this.foundText()));
+    } else if (this.hasScanned && !busy && !this.lastSummary) {
+      kids.push(el("div", { class: "muted small" }, "✓ Every photo you've shared is already as small as it can be."));
+    }
+    // The honest footnote. Silently omitting my own oversized videos would let a 1.2 GB library look
+    // like it had nothing to gain — and this device genuinely cannot re-encode them without handing
+    // the circle a clip Apple can't play.
+    if (this.hasScanned && this.videos > 0) {
+      kids.push(el("div", { class: "muted small" },
+        `${this.videos} video${this.videos === 1 ? "" : "s"} and voice note${this.videos === 1 ? "" : "s"} of yours (${fmtBytes(this.videoBytes)}) can't be re-optimized on desktop — `
+        + "this app can only re-encode video to a format iPhone can't play, so it leaves them alone. Use Haven on your phone for those."));
+    }
+    host.replaceChildren(...kids);
+  },
+
+  /// Build (or rebuild) the Settings ▸ Storage row.
+  row() {
+    // Never leave a previous sheet's stale flags on screen; state that outlives the sheet is only
+    // the scan RESULT, which the backend can reproduce anyway.
+    if (!this.running && !this.scanning) { this.lastSummary = null; this.lastWarning = null; }
+    this._host = el("div", { class: "col", style: "gap:6px" });
+    this.draw();
+    return this._host;
+  },
+};
+
+/// Byte length of a base64 payload, without materialising it.
+function base64ByteLength(b64) {
+  if (!b64) return 0;
+  let n = Math.floor((b64.length * 3) / 4);
+  if (b64.endsWith("==")) n -= 2;
+  else if (b64.endsWith("=")) n -= 1;
+  return n;
+}
+
+/// Re-encode an already-decoded still (a `data:` URL from the store) to the STILL target.
+///
+/// Deliberately the SAME transform `imageToJpegBase64` applies to a newly-attached photo —
+/// STILL_LONG_EDGE / STILL_JPEG_QUALITY, via a canvas — so a re-optimized photo is byte-for-byte the
+/// kind of thing this client already posts, and so a change to the targets moves both at once. It
+/// differs only in its input: a data URL rather than a File, because the source here is a blob we
+/// already hold rather than something the user just picked.
+function stillToJpegBase64FromSrc(src, maxDim = MEDIA_TARGETS.STILL_LONG_EDGE, quality = MEDIA_TARGETS.STILL_JPEG_QUALITY) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+      const c = el("canvas");
+      c.width = Math.max(1, Math.round(img.width * scale));
+      c.height = Math.max(1, Math.round(img.height * scale));
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      const out = c.toDataURL("image/jpeg", quality).split(",")[1];
+      if (!out) rej(new Error("canvas produced no JPEG"));
+      else res(out);
+    };
+    img.onerror = () => rej(new Error("couldn't decode the stored image"));
+    img.src = src;
+  });
+}
+
 function postCard(it, circleId, reports = []) {
   // macOS `header`: avatar, name and relative time all on ONE line, `···` at the far right.
   const kebab = el("button", { class: "kebab", title: "More", "aria-label": "More" }, icon("ellipsis"));
@@ -3778,6 +4031,10 @@ async function advancedSheet() {
         el("label", { class: "row", style: "gap:8px;align-items:center" }, el("span", { style: "flex:1" }, "Keep local media under"), gbSel),
         el("div", { class: "muted small" }, "Automatically remove old/excess cached media (oldest first) to stay under your caps — posts stay and re-download on demand. Kept items are never removed."));
     })(),
+    // Shrink what I've ALREADY shared, and re-share it, so the whole circle gets the smaller copy.
+    // Sits beside "Clean up unused media" because the two are the only levers on media that is
+    // already out there: this one makes it smaller for everybody, that one reclaims local bytes.
+    Reoptimize.row(),
     // Clear only media nothing references anymore.
     (() => {
       const status = el("div", { class: "muted small" }, "");

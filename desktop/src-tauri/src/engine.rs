@@ -172,6 +172,47 @@ pub struct MediaRow {
     pub is_pinned: bool,
 }
 
+/// One post or comment OF MINE that carries media — everything an Edit needs to be written back
+/// unchanged except for the media array. Mirrors Apple's `ReoptimizeTarget`.
+#[derive(Clone)]
+pub struct ReoptimizeTarget {
+    pub circle_id: String,
+    pub event_id: String,
+    pub body: String,
+    pub media: Vec<String>,
+    pub music: Option<TrackRefFfi>,
+    pub mute_video: bool,
+    pub created_at: u64,
+}
+
+/// One still of mine whose stored bytes are above target.
+pub struct ReoptimizeCandidate {
+    pub reference: String,
+    /// The circle this blob is sealed to — the re-encode is re-sealed to the same one.
+    pub circle_id: String,
+    /// PLAINTEXT length, which is what the new encode is compared against.
+    pub bytes: u64,
+    pub width: u32,
+    pub height: u32,
+    pub format: String,
+    /// Why this is being offered ("4032px, target 1600px"), for the detail line.
+    pub reason: String,
+    /// Timestamp of the oldest post/comment of mine that names it.
+    pub first_shared_ms: u64,
+    /// Shared before the encoder rewrite landed — REPORTED, not used as a gate (see reoptimize.rs).
+    pub legacy_by_age: bool,
+}
+
+/// The result of a scan: what this device can shrink, and what it deliberately won't touch.
+pub struct ReoptimizeScan {
+    pub candidates: Vec<ReoptimizeCandidate>,
+    /// My own videos/voice notes that are above target but which THIS platform must not re-encode
+    /// (WebM/VP8 out of a WebView would be unplayable on Apple). Surfaced so the user is told the
+    /// truth rather than shown a clean bill of health.
+    pub videos_above_target: usize,
+    pub video_bytes: u64,
+}
+
 /// PRIMARY side: a minted enrollment ticket kept in memory until it's consumed or expires. The
 /// `secret` keys both handshake MACs; `consumed` guards single-use once a grant is sent.
 struct PendingEnrollTicket {
@@ -2374,6 +2415,296 @@ impl Engine {
         }
     }
 
+    // ---- Re-optimize media I already shared -----------------------------------------------
+    //
+    // The DESIGN lives in `reoptimize.rs` (and, upstream of it, in the header of
+    // `apple/HavenApp/MediaReoptimize.swift`). What lives HERE is only the part that needs the
+    // engine: which of my events carry media, what their blobs actually are, and writing the Edit.
+    //
+    // The orchestration — batching, cancel, the encode itself — is in the WebView (`app.js`),
+    // because the encoder IS the WebView. Desktop covers STILLS ONLY; see the module header for why
+    // re-encoding video here would replace playable media with media Apple cannot decode.
+
+    /// Every post and comment I AUTHORED that carries media, across every circle including DMs.
+    ///
+    /// AUTHORED, because re-optimizing means re-publishing and an Edit is signed by the author: I
+    /// cannot re-point someone else's post at new bytes and must not be able to. Media others sent me
+    /// is left exactly as it arrived — the local caps and the cleanup sweep are the answer for that.
+    ///
+    /// Stories are excluded (they expire on their own, so a rewrite spends an encode and a re-upload
+    /// on bytes that are about to be dropped anyway), and so are unsent/retracted items. Retention is
+    /// passed as `None` deliberately: retention hides old posts from MY feed, but they are still live
+    /// on everyone else's devices and still costing them the old bytes.
+    pub fn reoptimize_targets(&self) -> Vec<ReoptimizeTarget> {
+        let mut out = Vec::new();
+        let now = now_ms();
+        for c in self.social.circles() {
+            for item in self.social.feed(c.id.clone(), now, None) {
+                if item.is_me && !item.unsent && !item.story && !item.media.is_empty() {
+                    out.push(ReoptimizeTarget {
+                        circle_id: c.id.clone(),
+                        event_id: item.id.clone(),
+                        body: item.body.clone(),
+                        media: item.media.clone(),
+                        music: item.music.clone(),
+                        mute_video: item.mute_video,
+                        created_at: item.created_at,
+                    });
+                }
+                for cm in &item.comments {
+                    if cm.is_me && !cm.unsent && !cm.media.is_empty() {
+                        out.push(ReoptimizeTarget {
+                            circle_id: c.id.clone(),
+                            event_id: cm.id.clone(),
+                            body: cm.body.clone(),
+                            media: cm.media.clone(),
+                            // A comment carries neither a music attachment nor a mute flag.
+                            music: None,
+                            mute_video: false,
+                            created_at: cm.created_at,
+                        });
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Find my shared STILLS that are above target, biggest first, plus a count of the video/audio
+    /// this device deliberately cannot handle.
+    ///
+    /// Blocking and honest about it: judging a blob means DECRYPTING it (everything at rest is sealed
+    /// to its circle), so this is O(my media). It is button-driven and never runs on its own, which is
+    /// what makes that acceptable — see the bounding rules in the Apple header.
+    pub fn reoptimize_scan(&self) -> ReoptimizeScan {
+        let skipped: std::collections::HashSet<String> =
+            self.prefs.lock().unwrap().reoptimize_skipped.iter().cloned().collect();
+
+        // Earliest time each ref was shared by me, and which circle it lives in. A ref used by
+        // several posts is ONE encode.
+        let mut first_shared: std::collections::HashMap<String, (u64, String)> = Default::default();
+        // Refs that turn up under MORE THAN ONE circle. A blob is sealed to exactly one circle's key,
+        // so a re-encode could only be re-sealed to one of them — the other circle's members would
+        // receive an envelope they cannot open. Rather than half-fix that, such refs are left alone.
+        let mut cross_circle: std::collections::HashSet<String> = Default::default();
+        let mut videos_above_target = 0usize;
+        let mut video_bytes = 0u64;
+
+        for t in self.reoptimize_targets() {
+            for r in &t.media {
+                if LocalMedia::is_synthetic(r) {
+                    continue; // `geo:` pins ride in the media array and carry no bytes
+                }
+                match first_shared.get_mut(r) {
+                    Some((ms, circle)) => {
+                        *ms = (*ms).min(t.created_at);
+                        if *circle != t.circle_id {
+                            cross_circle.insert(r.clone());
+                        }
+                    }
+                    None => {
+                        first_shared.insert(r.clone(), (t.created_at, t.circle_id.clone()));
+                    }
+                }
+            }
+        }
+
+        let mut candidates: Vec<ReoptimizeCandidate> = Vec::new();
+        for (reference, (since, circle_id)) in first_shared {
+            // Video and audio are COUNTED so the user isn't told a 1.2 GB library is already optimal,
+            // but never offered: this device's only encoder emits VP8/Opus in WebM, which would turn
+            // a clip every member can play into one Apple cannot decode. Module header has the full
+            // reasoning.
+            if LocalMedia::is_video(&reference) || LocalMedia::is_audio(&reference) {
+                if let Some(bytes) = self.media.raw_sealed(&reference) {
+                    // No decrypt: the sealed size is within AEAD overhead of the plaintext size, and
+                    // this figure is only ever shown as "N videos, X MB".
+                    if bytes.len() as u64 >= crate::reoptimize::MINIMUM_INTERESTING_BYTES {
+                        videos_above_target += 1;
+                        video_bytes += bytes.len() as u64;
+                    }
+                }
+                continue;
+            }
+            if skipped.contains(&reference) || cross_circle.contains(&reference) {
+                continue;
+            }
+            // Only refs whose bytes are actually HERE. One that was evicted or never arrived cannot be
+            // re-encoded from nothing, and re-downloading a blob in order to shrink it is a decision
+            // for the user, not for a settings button.
+            let Some(plain) = self.media_bytes(&circle_id, &reference) else { continue };
+            let Some(shape) = crate::reoptimize::probe_image(&plain) else { continue };
+            if !shape.above_target() {
+                continue;
+            }
+            candidates.push(ReoptimizeCandidate {
+                reference,
+                circle_id,
+                bytes: shape.bytes,
+                width: shape.width,
+                height: shape.height,
+                format: shape.format.to_string(),
+                reason: shape.above_target_reason.clone().unwrap_or_default(),
+                first_shared_ms: since,
+                legacy_by_age: crate::reoptimize::is_legacy_by_age(since),
+            });
+        }
+        // Biggest first: the win is dominated by a handful of files, so a user who runs one batch and
+        // stops should still have captured most of the saving.
+        candidates.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+        ReoptimizeScan { candidates, videos_above_target, video_bytes }
+    }
+
+    /// Judge a freshly re-encoded still and, only if it is a real win, store it and return its ref.
+    ///
+    /// THIS is where "never keep a re-encode that isn't smaller" is enforced, rather than in the
+    /// WebView that produced the bytes: a rewrite that does not clearly win is WORSE than none,
+    /// because every member of the circle pays a re-download for nothing. Keeping the rule next to
+    /// `is_worth_adopting` (and its tests) means there is one definition of "clear win", not a
+    /// constant copied into JS that can drift.
+    ///
+    /// Returns `Ok(None)` when the encode is rejected — the caller keeps the original, and the ref
+    /// is added to the skip set so no future scan offers it again. Note the new blob is only written
+    /// AFTER it has been accepted, so a rejected encode never mints a ref at all.
+    pub fn reoptimize_accept(
+        &self,
+        circle_id: String,
+        reference: String,
+        bytes: Vec<u8>,
+    ) -> Option<String> {
+        // The ORIGINAL's authoritative plaintext length, read back from the store rather than taken
+        // from the caller: the number the comparison turns on must not be one the WebView supplies.
+        let Some(original) = self.media_bytes(&circle_id, &reference) else {
+            self.reoptimize_skip(reference);
+            return None;
+        };
+        let old_len = original.len() as u64;
+        let new_len = bytes.len() as u64;
+
+        // Whatever came back must still be a still we can parse. An encoder that emitted something
+        // unreadable must never have its output published in place of a working photo.
+        let Some(shape) = crate::reoptimize::probe_image(&bytes) else {
+            log::warn!("reoptimize: re-encode of {} was unreadable — keeping the original", &reference[..reference.len().min(12)]);
+            self.reoptimize_skip(reference);
+            return None;
+        };
+        if !crate::reoptimize::is_worth_adopting(old_len, new_len) {
+            log::info!(
+                "reoptimize: {} came back no smaller ({new_len} vs {old_len}) — keeping the original",
+                &reference[..reference.len().min(12)]
+            );
+            self.reoptimize_skip(reference);
+            return None;
+        }
+        let new_ref = self.media.store(&self.social, &circle_id, &bytes, false);
+        if new_ref == reference {
+            // Identical bytes hash to an identical address, so there is nothing to swap.
+            self.reoptimize_skip(reference);
+            return None;
+        }
+        // The win is real, so it is adopted — but if the OUTPUT is itself still above target (a huge
+        // dense source whose q0.62 copy is smaller yet still over the ceiling), record the NEW ref as
+        // skipped. The user keeps the saving, and the next scan doesn't offer the same photo forever.
+        // This is stricter than Apple, which relies on the encoder's targets alone for idempotence.
+        if shape.above_target() {
+            log::info!(
+                "reoptimize: adopted {} -> {} ({old_len} -> {new_len}) but output is still {} at {}px; not offering it again",
+                &reference[..reference.len().min(12)],
+                &new_ref[..new_ref.len().min(12)],
+                shape.format,
+                shape.max_dimension()
+            );
+            self.reoptimize_skip(new_ref.clone());
+        }
+        Some(new_ref)
+    }
+
+    /// Record a ref as not-worth-retrying (encode failed, or came back no smaller). Bounded.
+    pub fn reoptimize_skip(&self, reference: String) {
+        let mut p = self.prefs.lock().unwrap();
+        if crate::reoptimize::push_skip(&mut p.reoptimize_skipped, reference) {
+            let _ = p.save(&self.paths);
+        }
+    }
+
+    /// Would an encode of this size fit? Refuses on a nearly-full disk (Apple parity).
+    pub fn reoptimize_has_headroom(&self, bytes: u64) -> bool {
+        crate::reoptimize::has_disk_headroom(&self.paths.media_dir(), bytes)
+    }
+
+    /// Re-point one of my posts/comments at newly-encoded refs and re-share it.
+    ///
+    /// An ordinary EDIT — the same event the caption editor writes. It keeps the item's id, author,
+    /// thread position and original timestamp, so nobody's feed reorders and no notification fires;
+    /// only the media array changes. The new blob is then uploaded exactly as a fresh post's would
+    /// be, so members who are offline right now still find it waiting for them.
+    ///
+    /// SILENT by construction on this platform: `after_author` sends the event to members and to my
+    /// own devices, and desktop has no push/banner leg at all (the sealed-notification wake in
+    /// Apple's `broadcastEvent`, which its `silent:` flag suppresses, has no desktop analogue). So
+    /// the property Apple's flag exists to guarantee — 25 re-shares must not fire 25 alerts on every
+    /// member's phone for content nobody wrote — holds here without a flag to set.
+    ///
+    /// THE OLD BLOB IS DELIBERATELY NOT DELETED. A member who is offline right now still holds the
+    /// PRE-edit post naming the old ref; if they ask for it while our copy is gone they get a
+    /// permanently broken post. It is retired the ordinary way, by the orphan sweep, which already
+    /// skips anything a live event references and gives everything a grace window.
+    pub fn reoptimize_apply(
+        self: &Arc<Self>,
+        circle_id: String,
+        event_id: String,
+        media: Vec<String>,
+    ) -> bool {
+        // Re-read the target NOW rather than trusting what the caller scanned minutes ago: a post
+        // edited or retracted in the meantime must be edited against its CURRENT state, or this
+        // silently reverts the user's own change.
+        let Some(current) = self
+            .reoptimize_targets()
+            .into_iter()
+            .find(|t| t.circle_id == circle_id && t.event_id == event_id)
+        else {
+            return false;
+        };
+        // The array handed back must be the CURRENT one with only real media refs substituted:
+        // same length, same order, and every synthetic entry (a `geo:` location pin, which rides in
+        // the media array and carries no bytes) byte-identical. Anything else means either the feed
+        // moved under us or the caller built an array the user never composed — and this writes a
+        // SIGNED event, so it verifies rather than trusts.
+        if media.len() != current.media.len() {
+            return false;
+        }
+        for (was, now) in current.media.iter().zip(media.iter()) {
+            if LocalMedia::is_synthetic(was) && was != now {
+                log::error!("reoptimize: refusing to rewrite a synthetic ref ({was} -> {now})");
+                return false;
+            }
+        }
+        match self.social.edit(
+            circle_id.clone(),
+            event_id,
+            current.body.clone(),
+            media.clone(),
+            current.music.clone(),
+            current.mute_video,
+            now_ms(),
+        ) {
+            Ok(env) => {
+                self.after_author(&circle_id, &env);
+                let me = self.clone();
+                tauri::async_runtime::spawn(async move {
+                    for r in media {
+                        me.upload_media(&circle_id, &r).await;
+                    }
+                });
+                true
+            }
+            Err(e) => {
+                log::error!("reoptimize edit failed: {e}");
+                false
+            }
+        }
+    }
+
     // ---- #1 cleanup screen (size-sorted inventory + multi-select delete) ------------------
 
     /// Every stored media blob joined to the post/DM/comment that references it (best-effort), sorted
@@ -2672,22 +3003,40 @@ impl Engine {
         }
     }
 
-    /// Edit your own post or message.
+    /// Edit your own post, comment or message.
     ///
-    /// `media` and `music` REPLACE what the item currently carries — the reducer assigns rather than
-    /// merges (`haven-p2p` `social.rs`, `it.media = media.clone()`), and there are tests there
-    /// pinning that. This used to pass `vec![], None` unconditionally, and both call sites in the UI
-    /// (the feed editor and the DM editor) used it, so correcting a typo in a caption deleted every
-    /// photo, video and song from that item on every member's device.
+    /// An Edit carries a FULL media array and the reducer REPLACES with it (`EventKind::Edit` in
+    /// haven-p2p `social.rs` — `it.media = media.clone()`, pinned by tests there). It is not a patch.
+    /// This used to pass `vec![], None` unconditionally, and BOTH UI call sites used it, so fixing a
+    /// typo in a caption silently detached every photo and song from that item for the whole circle.
+    ///
+    /// Two belts, because this failure is silent and permanent from the member's side:
+    ///  - callers pass the item's current attachments explicitly (`Some(...)`), which is what the
+    ///    feed and DM editors now do; and
+    ///  - `None` does NOT mean "strip" — it means "look them up", so a future caller that forgets
+    ///    the argument entirely still cannot destroy anyone's media.
     pub fn edit_post(
         self: &Arc<Self>,
         circle_id: String,
         target: String,
         body: String,
-        media: Vec<String>,
+        media: Option<Vec<String>>,
         music: Option<TrackRefFfi>,
     ) {
-        if let Ok(env) = self.social.edit(circle_id.clone(), target, body, media, music, false, now_ms()) {
+        // `reoptimize_targets` lists every one of my items that carries media (it is NOT filtered to
+        // oversized ones — that happens later), so "absent" genuinely means "carries none".
+        let looked_up = self
+            .reoptimize_targets()
+            .into_iter()
+            .find(|t| t.circle_id == circle_id && t.event_id == target);
+        let (media, music, mute_video) = match (media, looked_up) {
+            (Some(m), found) => (m, music.or_else(|| found.and_then(|t| t.music)), false),
+            (None, Some(t)) => (t.media, t.music, t.mute_video),
+            (None, None) => (vec![], None, false),
+        };
+        if let Ok(env) =
+            self.social.edit(circle_id.clone(), target, body, media, music, mute_video, now_ms())
+        {
             self.after_author(&circle_id, &env);
         }
     }

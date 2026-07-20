@@ -373,13 +373,13 @@ pub fn edit_post(
     circle_id: String,
     target: String,
     body: String,
-    // The caller MUST pass the item's current attachments back in — an edit replaces the media
-    // array rather than merging it. Optional only so an older UI bundle can't fail to invoke;
-    // `None` still means "strip", which is why both call sites in app.js pass the real values.
+    // Pass the item's current attachments back in — an edit REPLACES the media array rather than
+    // merging it. Both call sites in app.js do. Omitting it does not strip: the engine looks the
+    // attachments up instead, so a caller that forgets cannot destroy anyone's media.
     media: Option<Vec<String>>,
     music: Option<TrackInput>,
 ) {
-    engine.edit_post(circle_id, target, body, media.unwrap_or_default(), music.map(|m| m.into_ffi()));
+    engine.edit_post(circle_id, target, body, media, music.map(|m| m.into_ffi()));
 }
 
 #[tauri::command]
@@ -655,6 +655,125 @@ pub fn media_inventory(engine: Eng) -> Vec<MediaInventoryRowDto> {
 #[tauri::command]
 pub fn media_delete_selected(engine: Eng, refs: Vec<String>) -> u64 {
     engine.media_delete_selected(refs)
+}
+
+// ---- Re-optimize media I already shared --------------------------------------------------
+//
+// Design: `reoptimize.rs` (and `apple/HavenApp/MediaReoptimize.swift`, which is the spec). The
+// WebView drives the batch because the WebView IS the encoder; these commands are the engine half.
+// STILLS ONLY on this platform — see the module header.
+
+#[derive(Serialize)]
+pub struct ReoptimizeCandidateDto {
+    pub reference: String,
+    pub circle_id: String,
+    pub bytes: u64,
+    pub width: u32,
+    pub height: u32,
+    pub format: String,
+    pub reason: String,
+    pub first_shared_ms: u64,
+    pub legacy_by_age: bool,
+}
+
+#[derive(Serialize)]
+pub struct ReoptimizeScanDto {
+    pub candidates: Vec<ReoptimizeCandidateDto>,
+    /// My own video/audio above target that this platform deliberately will not re-encode.
+    pub videos_above_target: usize,
+    pub video_bytes: u64,
+    /// So the UI never hard-codes the batch size the engine actually enforces.
+    pub batch_limit: usize,
+}
+
+/// Measure my shared stills. Blocking — it decrypts and probes each blob (everything at rest is
+/// sealed), the same precedent as `media_inventory`.
+#[tauri::command]
+pub fn reoptimize_scan(engine: Eng) -> ReoptimizeScanDto {
+    let s = engine.reoptimize_scan();
+    ReoptimizeScanDto {
+        candidates: s
+            .candidates
+            .into_iter()
+            .map(|c| ReoptimizeCandidateDto {
+                reference: c.reference,
+                circle_id: c.circle_id,
+                bytes: c.bytes,
+                width: c.width,
+                height: c.height,
+                format: c.format,
+                reason: c.reason,
+                first_shared_ms: c.first_shared_ms,
+                legacy_by_age: c.legacy_by_age,
+            })
+            .collect(),
+        videos_above_target: s.videos_above_target,
+        video_bytes: s.video_bytes,
+        batch_limit: crate::reoptimize::BATCH_LIMIT,
+    }
+}
+
+#[derive(Serialize)]
+pub struct ReoptimizeTargetDto {
+    pub circle_id: String,
+    pub event_id: String,
+    pub media: Vec<String>,
+}
+
+/// Every post/comment of mine carrying media, re-read at APPLY time so an item edited or retracted
+/// since the scan is not silently reverted. Body/music/mute are deliberately NOT sent to the UI:
+/// they are re-read inside `reoptimize_apply`, so the WebView can never be the thing that decides
+/// what a signed post says.
+#[tauri::command]
+pub fn reoptimize_targets(engine: Eng) -> Vec<ReoptimizeTargetDto> {
+    engine
+        .reoptimize_targets()
+        .into_iter()
+        .map(|t| ReoptimizeTargetDto {
+            circle_id: t.circle_id,
+            event_id: t.event_id,
+            media: t.media,
+        })
+        .collect()
+}
+
+/// Re-point one of my posts at the new refs and re-share it (an ordinary Edit).
+#[tauri::command]
+pub fn reoptimize_apply(
+    engine: Eng,
+    circle_id: String,
+    event_id: String,
+    media: Vec<String>,
+) -> bool {
+    engine.reoptimize_apply(circle_id, event_id, media)
+}
+
+/// Hand back a re-encoded still. Returns the NEW ref if it was a clear enough win to adopt, or
+/// `null` if it was rejected (in which case the original stands and the ref is skipped from now on).
+/// The accept/reject decision is made in Rust, not here — see `Engine::reoptimize_accept`.
+#[tauri::command]
+pub fn reoptimize_accept(
+    engine: Eng,
+    circle_id: String,
+    reference: String,
+    data_base64: String,
+) -> R<Option<String>> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.trim())
+        .map_err(|e| format!("bad base64: {e}"))?;
+    Ok(engine.reoptimize_accept(circle_id, reference, bytes))
+}
+
+/// Remember that this ref failed or came back no smaller, so no future scan offers it again.
+#[tauri::command]
+pub fn reoptimize_skip(engine: Eng, reference: String) {
+    engine.reoptimize_skip(reference);
+}
+
+/// Refuse to start an encode on a nearly-full disk.
+#[tauri::command]
+pub fn reoptimize_headroom(engine: Eng, bytes: u64) -> bool {
+    engine.reoptimize_has_headroom(bytes)
 }
 
 // ---- #2 device pin ("keep on this device") ----------------------------------------------

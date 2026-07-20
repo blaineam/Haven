@@ -166,8 +166,6 @@ struct SettingsView: View {
     @ObservedObject private var settings = SettingsStore.shared
     @ObservedObject private var pinnedStore = PinnedMediaStore.shared
     @State private var storageText = "…"
-    @State private var cleaningMedia = false
-    @State private var cleanupResult: String?
     private var pinnedCount: Int { pinnedStore.count }
 
     /// Walk the media dir off the main actor and format the total (e.g. "1.2 GB · 340 files").
@@ -258,32 +256,15 @@ struct SettingsView: View {
                         Text("25 GB").tag(25)
                     }
                     .tint(HavenTheme.pink)
-                    Button {
-                        guard !cleaningMedia else { return }
-                        cleaningMedia = true
-                        cleanupResult = nil
-                        Task {
-                            let r = await FeedStore.shared.cleanupUnusedMedia()
-                            cleanupResult = r.files == 0
-                                ? "Nothing to clean up"
-                                : "Freed \(ByteCountFormatter.string(fromByteCount: r.bytes, countStyle: .file)) · \(r.files) file\(r.files == 1 ? "" : "s")"
-                            await measureStorage()
-                            cleaningMedia = false
-                        }
-                    } label: {
-                        HStack {
-                            Label(cleaningMedia ? "Cleaning up…" : "Clean up unused media", systemImage: "trash")
-                            Spacer()
-                            if cleaningMedia { ProgressView() }
-                            else if let cleanupResult {
-                                Text(cleanupResult).foregroundStyle(.secondary).font(.caption).monospacedDigit()
-                            }
-                        }
-                    }
-                    .disabled(cleaningMedia)
+                    // Was "Clean up unused media" — a local-only delete of orphaned blobs. That
+                    // still happens, automatically, on the weekly sweep, so nothing was lost by
+                    // giving the slot to something only a person can decide to do: making media
+                    // ALREADY out in the circles smaller for everyone who holds it. A local delete
+                    // helps one device; this helps every member of every circle it touches.
+                    ReoptimizeMediaRow(onFinished: { await measureStorage() })
                 } header: { Text("Storage") }
                 footer: {
-                    Text("Photos and videos from your circles, cached on this device. **Manage media** lists everything by size so you can free the biggest items or keep favorites on this device forever. The local limits automatically remove old/excess cached media (oldest first) to stay under your caps — the posts stay and re-download on demand. Kept items are never removed. **Clean up unused media** removes only media no post, message or scheduled send references anymore.")
+                    Text("Photos and videos from your circles, cached on this device. **Manage media** lists everything by size so you can free the biggest items or keep favorites on this device forever. The local limits automatically remove old/excess cached media (oldest first) to stay under your caps — the posts stay and re-download on demand. Kept items are never removed. **Re-optimize** re-encodes photos and videos you shared before Haven learned to compress them properly (or shared with auto-optimize off) and quietly re-shares the smaller copy, so everyone in the circle gets the space back — your captions, comments and timestamps are untouched. Unused media is cleaned up on its own each week.")
                 }
                 .task { await measureStorage() }
                 Section {

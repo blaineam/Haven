@@ -1055,6 +1055,63 @@ final class FeedStore: ObservableObject {
         return freed
     }
 
+    // MARK: - Re-optimize media I already shared
+    //
+    // These two live here rather than in MediaReoptimize.swift only because `social` and
+    // `broadcastEvent` are private to this store. Everything else about the feature — deciding what
+    // needs rewriting, encoding it, driving the UI — is in that file.
+
+    /// Every post and comment I AUTHORED that carries real media, across every circle including DMs.
+    ///
+    /// Authored, because re-optimizing means re-publishing: the swap below is an Edit event, and an
+    /// Edit is signed by the author. I cannot re-point someone else's post at new bytes, and I should
+    /// not be able to — that would be rewriting another person's signed content. So this button
+    /// improves what I put into my circles, and media others sent me is left exactly as it arrived.
+    ///
+    /// Stories are excluded: they expire on their own, so rewriting one spends an encode and a
+    /// re-upload on bytes that are about to be dropped anyway. Unsent (retracted) items too.
+    func reoptimizeTargets() -> [ReoptimizeTarget] {
+        guard let social else { return [] }
+        var out: [ReoptimizeTarget] = []
+        let nowMs = now()
+        for c in social.circles() {
+            // viewerRetentionSecs nil: retention hides old posts from MY feed, but they are still
+            // live on everyone else's devices and still costing them the old bytes.
+            for item in social.feed(circleId: c.id, nowMs: nowMs, viewerRetentionSecs: nil) {
+                if item.isMe, !item.unsent, !item.story, !item.media.isEmpty {
+                    out.append(ReoptimizeTarget(circleId: c.id, eventId: item.id, body: item.body,
+                                                media: item.media, music: item.music,
+                                                muteVideo: item.muteVideo, createdAtMs: item.createdAt))
+                }
+                for cm in item.comments where cm.isMe && !cm.unsent && !cm.media.isEmpty {
+                    out.append(ReoptimizeTarget(circleId: c.id, eventId: cm.id, body: cm.body,
+                                                media: cm.media, music: nil, muteVideo: false,
+                                                createdAtMs: cm.createdAt))
+                }
+            }
+        }
+        return out
+    }
+
+    /// Re-point one of my posts/comments at the newly-encoded refs and re-share it.
+    ///
+    /// This is an ordinary Edit — the same event `EditPostSheet` writes when you change a caption.
+    /// It keeps the item's id, author, thread position and timestamp, so nobody's feed reorders and
+    /// no notification fires; only the media array changes. The new blob is then queued for the
+    /// relay exactly as a fresh post's would be, so members who are offline right now still find it
+    /// waiting for them.
+    @discardableResult
+    func applyReoptimized(_ target: ReoptimizeTarget, media: [String]) -> Bool {
+        guard let social,
+              let env = try? social.edit(circleId: target.circleId, target: target.eventId,
+                                         body: target.body, media: media, music: target.music,
+                                         muteVideo: target.muteVideo, createdAt: now())
+        else { return false }
+        broadcastEvent(target.circleId, env)
+        for ref in media { MediaBackupQueue.shared.enqueue(ref, circleId: target.circleId, social: social) }
+        return true
+    }
+
     // MARK: - Local limits (#4) — age/size caps
 
     private var lastLimitSweepAt: TimeInterval = 0

@@ -150,6 +150,18 @@ enum MediaBackupLedger {
             return dest != ownRelayHex
         }
     }
+    /// Every destination confirmed to hold `ref`.
+    ///
+    /// The ledger has always known this — it is keyed `dest|ref` — but nothing ever showed it, so
+    /// "is my post actually anywhere?" could only be answered by reading logs. That question came up
+    /// while debugging a delivery failure where the tick was green and no friend could fetch a thing.
+    static func destinations(for ref: String) -> [String] {
+        set.compactMap { entry in
+            guard entry.hasSuffix("|\(ref)") else { return nil }
+            return String(entry.dropLast(ref.count + 1))
+        }
+    }
+
     static func mark(_ dest: String, _ ref: String) {
         guard set.insert("\(dest)|\(ref)").inserted else { return }
         if set.count > 20_000 { set = Set(set.suffix(20_000)) }

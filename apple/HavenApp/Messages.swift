@@ -384,6 +384,8 @@ struct DMThreadView: View {
     @State private var text = ""
     @State private var secret = false
     @State private var editingId: String?      // editing one of my sent messages
+    /// Set when a DM's backup indicator is tapped — "which relays actually hold this attachment?"
+    @State private var backupDetailRefs: BackupRefs?
     @State private var editingMedia: [String] = []          // its attachments, preserved across the edit
     @State private var editingTrack: TrackRefFfi?           // and its song
     @State private var disappearSecs: UInt64?  // disappearing-message mode (nil = off)
@@ -527,6 +529,9 @@ struct DMThreadView: View {
         .sheet(item: $reactTarget) { t in
             ReactionPicker { e in store.reactMessage(in: circleId, t.id, e) }
         }
+        .sheet(item: $backupDetailRefs) { b in
+            BackupDetailView(refs: b.refs, circleId: circleId).macSheetFrame()
+        }
     }
 
     @ViewBuilder private func dmMedia(_ m: FeedItemFfi) -> some View {
@@ -624,6 +629,27 @@ struct DMThreadView: View {
                         Image(systemName: store.relayReachable ? "checkmark.circle.fill" : "checkmark")
                             .font(.system(size: 9))
                             .foregroundStyle(store.relayReachable ? HavenTheme.pink : Color.secondary)
+                    }
+                    // A DM attachment is stored and fetched exactly like a post's, but the feed was
+                    // the only place that ever said whether it landed — so "why can't they open the
+                    // photo I sent?" had no answer anywhere in the app. Same ledger, same sheet.
+                    if m.isMe && !m.unsent {
+                        let blobs = m.media.filter { !MediaStore.isSynthetic($0) }
+                        if !blobs.isEmpty {
+                            let own = RelayHost.shared.serving ? RelayHost.shared.nodeId : ""
+                            let backed = blobs.allSatisfy { MediaBackupLedger.hasAnyRemote($0, ownRelayHex: own) }
+                            let localOnly = !backed && blobs.allSatisfy { MediaBackupLedger.hasAny($0) }
+                            Image(systemName: backed ? "checkmark.icloud.fill"
+                                      : (localOnly ? "externaldrive.badge.exclamationmark" : "arrow.up.circle"))
+                                .font(.system(size: 9))
+                                .foregroundStyle(backed ? AnyShapeStyle(HavenTheme.pink)
+                                                        : (localOnly ? AnyShapeStyle(Color.orange)
+                                                                     : AnyShapeStyle(Color.secondary)))
+                                .contentShape(Rectangle())
+                                .onTapGesture { backupDetailRefs = BackupRefs(refs: blobs) }
+                                .accessibilityAddTraits(.isButton)
+                                .accessibilityHint("Shows which relays hold a copy")
+                        }
                     }
                 }
             }

@@ -4817,6 +4817,8 @@ struct PostCard: View {
     @State private var showEdit = false
     @State private var showReport = false
     @State private var linkCopied = false
+    /// Set when the backup indicator is tapped — "which relays actually hold this?"
+    @State private var showBackupDetail = false
     @State private var zoomTarget: ZoomTarget?
     @State private var players: [String: AVPlayer] = [:]
     @State private var playerObservers: [String: NSObjectProtocol] = [:]   // loop observers, removed on teardown
@@ -5626,6 +5628,9 @@ private struct KillHorizontalScroller: NSViewRepresentable {
             // keep Haven open a moment until it lands, instead of assuming it's broken and bailing.
             if item.isMe && !item.unsent, !item.media.isEmpty,
                !(RelayMailboxStore.shared.relays(forCircle: feed.activeCircleId).isEmpty) {
+                // The whole cluster is one tap target: every state below is a partial answer to
+                // "where is this?", and the sheet is the full one — including which relays hold
+                // nothing, which no icon can express.
                 TimelineView(.periodic(from: .now, by: 1.0)) { _ in
                     let blobs = item.media.filter { !MediaStore.isSynthetic($0) }
                     // "Backed up" must mean a relay SOMEONE ELSE can read. Writing to our own
@@ -5672,6 +5677,15 @@ private struct KillHorizontalScroller: NSViewRepresentable {
                             .help(stuck ? "Still trying to upload — it has restarted several times"
                                         : "Waiting to upload to a relay…")
                     }
+                }
+                .contentShape(Rectangle())
+                .onTapGesture { showBackupDetail = true }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint("Shows which relays hold a copy")
+                .sheet(isPresented: $showBackupDetail) {
+                    BackupDetailView(refs: item.media.filter { !MediaStore.isSynthetic($0) },
+                                     circleId: feed.activeCircleId)
+                        .macSheetFrame()
                 }
             }
             Spacer()

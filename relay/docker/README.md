@@ -41,6 +41,32 @@ Every later start is just `docker compose up -d` — the link and identity live 
 `haven-relay-data` volume, so the container stays the **same** relay across restarts and updates.
 Don't delete that volume unless you want a brand-new relay identity.
 
+## If members reach this relay over the internet, set `HAVEN_RELAY_HTTP_URL`
+
+**Media cannot cross NAT without it.** The plain-HTTP interface is not an optimisation — it is the
+only working media transport between networks. The iroh blob path drops its datagrams over a
+pure-relay cross-NAT route, so a blob dial that must cross a NAT stalls ~30s and dies, *while
+messaging keeps working*. That asymmetry is exactly what the failure looks like from outside: posts
+and messages arrive normally, media never does, and the log says only `relay put timed out`.
+
+The relay advertises this interface by enumerating its own addresses — under Docker that is the
+container's `172.x.y.z`, which nobody can reach, and a LAN address is no better for a remote member.
+Set it to the address members actually use:
+
+```sh
+# .env next to docker-compose.yml
+HAVEN_RELAY_HTTP_URL=https://relay.example.com     # reverse proxy / tunnel — preferred
+# HAVEN_RELAY_HTTP_URL=http://203.0.113.10:8674    # or port-forward 8674 to this box
+# HAVEN_RELAY_HTTP_URL=http://192.168.1.50:8674    # LAN-only relay, no remote members
+```
+
+then `docker compose up -d`. Within a minute the members' logs should show `http-put OK` instead of
+`relay put timed out`.
+
+Everything served is already end-to-end sealed, so plain HTTP carries ciphertext only — but if you
+have a reverse proxy, TLS is the tidier answer. `network_mode: host` fixes only the
+container-address half; a remote member still needs a publicly reachable URL.
+
 ## Building from source (test a relay fix without cutting a release)
 
 Source mode fetches the repo at a branch, tag or commit and builds the relay inside the image — so a

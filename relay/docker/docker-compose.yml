@@ -43,14 +43,25 @@ services:
       # re-adopt the relay. Without it the id comes from /data/identity.json and lives only as long
       # as that volume. Put HAVEN_RELAY_SEED=… in your .env next to this file.
       HAVEN_RELAY_SEED: ${HAVEN_RELAY_SEED:-}
-      # ── SET THIS. It is not optional under Docker. ────────────────────────────────────────
-      # The relay advertises its HTTP media interface — the fast path peers use for media — by
-      # listing its OWN addresses. Under bridge networking that is the CONTAINER's address
-      # (172.x.y.z), which nothing on your LAN can reach. Peers then get an unusable URL, fall
-      # back to the iroh blob dial, and every put/fetch times out: media stops syncing while the
-      # relay looks perfectly healthy from inside the container.
-      #   HAVEN_RELAY_HTTP_URL=http://192.168.1.50:8674   ← how members actually reach this box
-      # (Or use `network_mode: host` below and let the relay work it out itself.)
+      # ── SET THIS if anyone reaches this relay over the INTERNET. Media cannot move without it.
+      #
+      # The HTTP interface is not a nicety — it is the ONLY working media transport across NAT. The
+      # iroh blob path drops its datagrams over a pure-relay cross-NAT route, so a blob dial that
+      # must cross a NAT stalls ~30s and dies, WHILE MESSAGING KEEPS WORKING. That asymmetry is what
+      # the failure looks like from the outside: posts and messages arrive, media never does, and
+      # the logs say only "relay put timed out".
+      #
+      # The relay advertises this interface by enumerating its own addresses, which under Docker
+      # bridge networking is the CONTAINER's (172.x.y.z) — unreachable by anyone. A LAN address is
+      # no better for a remote member. It must be the address members ACTUALLY use:
+      #   HAVEN_RELAY_HTTP_URL=https://relay.example.com        (reverse proxy / tunnel — preferred)
+      #   HAVEN_RELAY_HTTP_URL=http://203.0.113.10:8674         (port-forward 8674 to this box)
+      #   HAVEN_RELAY_HTTP_URL=http://192.168.1.50:8674         (LAN-only relay, no remote members)
+      #
+      # Everything it serves is already end-to-end sealed, so plain HTTP exposes ciphertext only —
+      # but a proxy with TLS is still the tidier answer if you have one.
+      # `network_mode: host` fixes ONLY the container-address half; a remote member still needs a
+      # publicly reachable URL here.
       HAVEN_RELAY_HTTP_URL: ${HAVEN_RELAY_HTTP_URL:-}
     # Alternative to setting HAVEN_RELAY_HTTP_URL: host networking, where the relay sees the
     # box's real LAN addresses and advertises them correctly on its own. Drop `ports:` if you

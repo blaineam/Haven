@@ -5505,13 +5505,26 @@ private struct KillHorizontalScroller: NSViewRepresentable {
                !(RelayMailboxStore.shared.relays(forCircle: feed.activeCircleId).isEmpty) {
                 TimelineView(.periodic(from: .now, by: 1.0)) { _ in
                     let blobs = item.media.filter { !MediaStore.isSynthetic($0) }
-                    let backed = !blobs.isEmpty && blobs.allSatisfy { MediaBackupLedger.hasAny($0) }
+                    // "Backed up" must mean a relay SOMEONE ELSE can read. Writing to our own
+                    // in-process relay is a local file copy that cannot fail, so counting it showed a
+                    // confident tick on every post while friends could fetch none of them — the single
+                    // biggest reason tonight's delivery failure stayed invisible for hours.
+                    let ownRelay = RelayHost.shared.serving ? RelayHost.shared.nodeId : ""
+                    let backed = !blobs.isEmpty && blobs.allSatisfy {
+                        MediaBackupLedger.hasAnyRemote($0, ownRelayHex: ownRelay)
+                    }
+                    // Reached OUR relay and nowhere else: not an error, not safe either. Says so.
+                    let localOnly = !backed && !blobs.isEmpty && blobs.allSatisfy { MediaBackupLedger.hasAny($0) }
                     let progress = MediaUploadProgress.shared.fraction(for: blobs)
                     let stuck = MediaUploadProgress.shared.looksStuck(blobs)
                     if backed {
                         Image(systemName: "checkmark.icloud.fill")
                             .font(.caption2).foregroundStyle(HavenTheme.pink)
-                            .help("Backed up to a relay")
+                            .help("Backed up to a relay others can read")
+                    } else if localOnly {
+                        Image(systemName: "externaldrive.badge.exclamationmark")
+                            .font(.caption2).foregroundStyle(.orange)
+                            .help("Only on this device's own relay — nobody else can fetch it yet")
                     } else if let progress {
                         // A real fraction, because a big video genuinely takes minutes and a motionless
                         // arrow made "slow" and "broken" look identical. Determinate ring + percentage.

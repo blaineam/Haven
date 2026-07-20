@@ -128,9 +128,28 @@ enum MediaBackupLedger {
     private static let defaultsKey = "haven.media.backedUp"
     private static var set: Set<String> = Set(UserDefaults.standard.stringArray(forKey: defaultsKey) ?? [])
     static func has(_ dest: String, _ ref: String) -> Bool { set.contains("\(dest)|\(ref)") }
-    /// Confirmed on ANY destination (relay node or s3) — drives the post's "backed up to a relay" light,
-    /// which doesn't care WHICH relay holds it, only that at least one durably does.
+    /// Confirmed on ANY destination (relay node or s3), INCLUDING our own in-process relay.
     static func hasAny(_ ref: String) -> Bool { set.contains { $0.hasSuffix("|\(ref)") } }
+
+    /// Confirmed somewhere a DIFFERENT DEVICE can read it — what "backed up" should have meant.
+    ///
+    /// `hasAny` counts our own in-process relay, and writing to that is a LOCAL FILE COPY: it never
+    /// crosses the network and cannot fail. So a post whose media only ever reached this device's own
+    /// relay showed a confident "backed up to a relay" tick while no one else could fetch it. That is
+    /// precisely what happened tonight — a user watched checked-cloud icons on every post while their
+    /// friends saw nothing, because the only relay the media reached was the one running inside their
+    /// own app. An indicator that cannot distinguish "safe" from "only I have it" is worse than none:
+    /// it is the reason the failure went unnoticed for hours.
+    ///
+    /// Our own relay is excluded even though it may be reachable by others (LAN, or a public URL),
+    /// because we cannot tell from here — and the honest failure is to under-claim, not over-claim.
+    static func hasAnyRemote(_ ref: String, ownRelayHex: String) -> Bool {
+        set.contains { entry in
+            guard entry.hasSuffix("|\(ref)") else { return false }
+            let dest = String(entry.dropLast(ref.count + 1))
+            return dest != ownRelayHex
+        }
+    }
     static func mark(_ dest: String, _ ref: String) {
         guard set.insert("\(dest)|\(ref)").inserted else { return }
         if set.count > 20_000 { set = Set(set.suffix(20_000)) }

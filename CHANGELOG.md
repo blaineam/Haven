@@ -72,7 +72,7 @@ current default.
 
 ### Added
 
-- **You can now shrink media you already shared, for everyone (Apple).** The compression rewrite only
+- **You can now shrink media you already shared, for everyone (Apple, Android).** The compression rewrite only
   ever helped the next thing you posted — everything already out in your circles stayed as big as it
   was, and one device was carrying 1.3 GB with single videos at 320 MB. Settings ▸ Storage now
   measures what you shared before Haven learned to compress properly (or shared with auto-optimize
@@ -80,8 +80,13 @@ current default.
   copy so every member gets the space back. Captions, comments, timestamps and feed order are
   untouched, and only your own posts are eligible — nobody can rewrite someone else's. Measured on
   real files: 305.7 MB → 37.7 MB for a video, 10.9 MB → 2.8 MB across five photos. Runs in bounded
-  batches, one encode at a time, and can be stopped mid-run. Replaces the old "Clean up unused
-  media" button; that cleanup still runs on its own each week.
+  batches, one encode at a time, and can be stopped mid-run. It sits alongside "Clean up unused
+  media" rather than replacing it — the two solve opposite halves of the problem, since cleanup
+  frees space on your device only while this frees it for everyone. A re-encode that doesn't come
+  back clearly smaller is thrown away and the original kept, and the old copy is never deleted here:
+  someone who is offline still has the pre-edit post, so those bytes retire through the ordinary
+  weekly sweep instead. On Android the same button re-encodes photos and videos; voice notes are
+  already recorded at the target and are left alone.
 - **Haven's own relays can answer "where is node X".** Today every connection bootstraps through
   Number Zero's public DNS and relay fleet; if those stop, installs that can't hole-punch stop
   connecting. A node can now publish a short, signed record of where it can be reached to a relay it

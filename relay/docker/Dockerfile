@@ -5,9 +5,14 @@
 # Multi-arch: BuildKit/buildx sets TARGETARCH; the LEGACY builder (older NAS Docker) does NOT —
 # there the declared-but-unset ARG tripped `set -u` (exit 2) before wget even ran, so we default
 # it to "" and fall back to `uname -m` on the build machine (NAS builds are native-arch anyway).
-# Pin a version with `--build-arg HAVEN_RELAY_VERSION=v0.1.0-beta.23` (or `latest`).
+# The default tracks the newest RELEASE, deliberately. It used to pin v0.1.0-beta.23, which meant
+# anyone following the README got a relay from before 1.0 and kept it indefinitely — a relay is
+# invisible when it works, so nothing ever prompted a rebuild. Relay-side protocol fixes (e.g. 1.1.2,
+# where a link granted only ONE circle so a default relay served one and refused the rest) then never
+# reached the boxes that needed them. Pin a specific tag with
+# `--build-arg HAVEN_RELAY_VERSION=v1.1.2` when you want to hold a version on purpose.
 FROM alpine:3.20
-ARG HAVEN_RELAY_VERSION=v0.1.0-beta.23
+ARG HAVEN_RELAY_VERSION=latest
 ARG TARGETARCH=""
 RUN set -eux; \
     apk add --no-cache wget; \

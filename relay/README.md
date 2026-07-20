@@ -75,7 +75,7 @@ curl -fsSL https://wemiller.com/apps/haven/relay/install.sh | sh   # (add the sa
 # then, whichever way it starts on your box:
 systemctl --user restart haven-relay                        # Linux, systemd user unit
 launchctl kickstart -k gui/$(id -u)/com.haven.relay         # macOS, launchd agent
-docker compose pull && docker compose up -d                 # Docker / NAS
+docker compose build --no-cache && docker compose up -d     # Docker / NAS (built locally, not pulled)
 haven-relay run                                             # anything else: stop it, then this
 ```
 

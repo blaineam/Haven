@@ -141,7 +141,7 @@ install_relay() {
     echo "    Restart it to pick this up — your identity, link and store are untouched:"
     echo "      Linux (systemd user unit):  systemctl --user restart haven-relay"
     echo "      macOS (launchd agent):      launchctl kickstart -k gui/\$(id -u)/com.haven.relay"
-    echo "      Docker:                     docker compose pull && docker compose up -d"
+    echo "      Docker:                     docker compose build --no-cache && docker compose up -d"
     echo "      Anything else:              stop it, then  haven-relay run $DATA_ARG"
   fi
   echo

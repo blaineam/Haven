@@ -41,6 +41,27 @@ Every later start is just `docker compose up -d` — the link and identity live 
 `haven-relay-data` volume, so the container stays the **same** relay across restarts and updates.
 Don't delete that volume unless you want a brand-new relay identity.
 
+## Updating
+
+There is no published image to `docker compose pull` — the image is built locally from a release
+binary, so an update means **rebuilding**:
+
+```sh
+docker compose build --no-cache      # re-fetches the newest haven-relay release
+docker compose up -d
+docker compose exec haven-relay haven-relay --version
+```
+
+Your relay keeps its identity, circle link and sealed store (they live in the volume), so the node
+id is unchanged and nobody has to re-adopt it.
+
+> **If you set this up before, check your version.** The Dockerfile used to default to
+> `v0.1.0-beta.23`, so a NAS built from the old instructions is running a pre-1.0 relay and will
+> keep running it forever — a relay is invisible while it works, so nothing ever asks you to
+> rebuild. That matters: a relay older than 1.1.2 authorizes only the ONE circle its link granted,
+> so if you made it the default relay for every circle it serves one and refuses the rest, which
+> looks exactly like "my media isn't on any relay".
+
 > **Pin the node id (recommended).** If the `/data` volume is ever lost or the container is recreated
 > without it, the relay generates a brand-new node id and your circle has to re-adopt it. To make the
 > id permanent regardless of the volume, set a fixed seed: run `openssl rand -hex 32` once and put

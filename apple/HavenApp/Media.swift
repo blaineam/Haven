@@ -1285,26 +1285,54 @@ final class MediaStore: ObservableObject {
         thumbCache.object(forKey: "\(ref)@\(Int(maxDimension.rounded()))" as NSString)?.item.image
     }
 
+    /// Decodes in flight, keyed ref@size. More than one view now wants the same bitmap — the tile draws it
+    /// and the blurred backdrop behind the tile blurs it — and without this they each ran their own decode.
+    /// For a video that second decode is an AVAssetImageGenerator poster pass, the expensive thing this
+    /// whole path exists to keep off the scroll. Unstructured on purpose: one awaiter walking away (a lazy
+    /// cell recycled mid-decode) must not cancel the decode the other awaiter is still waiting on.
+    private var thumbTasks: [String: Task<PlatformImage?, Never>] = [:]
+
     /// Decode a downsampled thumbnail OFF the main thread and cache it, WITHOUT nudging any global feed
     /// refresh. `FeedImage` awaits this and swaps the result into JUST itself — so a fast scroll never
     /// decodes on the main thread AND a finished decode never re-renders (or flashes) the rest of the feed.
+    /// Concurrent callers for the same ref+size share one decode (see `thumbTasks`).
     func thumbnailAsync(_ ref: String, maxDimension: CGFloat) async -> PlatformImage? {
         if let cached = cachedThumbnail(ref, maxDimension: maxDimension) { return cached }
+        let key = "\(ref)@\(Int(maxDimension.rounded()))"
+        if let inFlight = thumbTasks[key] { return await inFlight.value }
         guard let url = fileURL(ref), FileManager.default.fileExists(atPath: url.path) else { return nil }
         let isVideo = (MediaKind(ref: ref) == .video)
-        let img: PlatformImage? = await Task.detached(priority: .userInitiated) {
-            if isVideo {
-                guard let poster = Self.poster(for: url) else { return nil }
-                return max(poster.size.width, poster.size.height) <= maxDimension ? poster
-                                                                                   : Self.downscale(poster, maxDimension: maxDimension)
-            }
-            return Self.downsampled(at: url, maxPixel: maxDimension)
-        }.value
-        if let img {
-            let mi = MediaItem(id: ref, kind: isVideo ? .video : .image, image: img, videoURL: isVideo ? url : nil)
-            thumbCache.setObject(Boxed(mi), forKey: "\(ref)@\(Int(maxDimension.rounded()))" as NSString, cost: Self.decodedCost(mi))
+        // A video's poster may already be resident from an earlier generation — downscale that (cheap,
+        // and on the main actor where every other poster resize already happens) rather than running
+        // AVAssetImageGenerator again just to land in a different size bucket.
+        if isVideo, let poster = cacheGet(ref)?.image {
+            let img = max(poster.size.width, poster.size.height) <= maxDimension
+                ? poster : Self.downscale(poster, maxDimension: maxDimension)
+            let mi = MediaItem(id: ref, kind: .video, image: img, videoURL: url)
+            thumbCache.setObject(Boxed(mi), forKey: key as NSString, cost: Self.decodedCost(mi))
+            return img
         }
-        return img
+        let task = Task { @MainActor [weak self] () -> PlatformImage? in
+            let img: PlatformImage? = await Task.detached(priority: .userInitiated) {
+                if isVideo {
+                    guard let poster = Self.poster(for: url) else { return nil }
+                    return max(poster.size.width, poster.size.height) <= maxDimension ? poster
+                                                                                       : Self.downscale(poster, maxDimension: maxDimension)
+                }
+                return Self.downsampled(at: url, maxPixel: maxDimension)
+            }.value
+            guard let self else { return img }
+            self.thumbTasks[key] = nil
+            if let img {
+                let mi = MediaItem(id: ref, kind: isVideo ? .video : .image, image: img, videoURL: isVideo ? url : nil)
+                self.thumbCache.setObject(Boxed(mi), forKey: key as NSString, cost: Self.decodedCost(mi))
+            }
+            return img
+        }
+        // Registered before the first suspension point below, so a second caller arriving while this
+        // decode runs joins it instead of starting its own.
+        thumbTasks[key] = task
+        return await task.value
     }
 
     /// Pixel dimensions of a media ref WITHOUT decoding the full bitmap — ImageIO reads just the header for

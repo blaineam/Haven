@@ -447,16 +447,31 @@ enum PlatformScreen {
     /// large monitor the target sat below every post, so "nearest to centre" always resolved to the
     /// same wrong post and the first video never became active: it never auto-played, and because the
     /// duration was only learned from a playback observer, it could not be scrubbed either.
+    #if !canImport(UIKit)
+    /// Last known window content height. Sticky ON PURPOSE — see `contentCenterY`.
+    nonisolated(unsafe) private static var lastContentHeight: CGFloat = 0
+    #endif
+
     static var contentCenterY: CGFloat {
         #if canImport(UIKit)
         return bounds.midY
         #else
-        // The key window's CONTENT height (not the display, not the frame — SwiftUI's global space
-        // starts below the title bar). Falls back to the screen only if there is no window yet.
-        if let content = NSApp.keyWindow?.contentView ?? NSApp.windows.first(where: { $0.isVisible })?.contentView {
-            return content.bounds.height / 2
+        // The key window's CONTENT height (not the display, not the window frame — SwiftUI's global
+        // space starts below the title bar).
+        //
+        // This is read from `onPreferenceChange` during a SwiftUI update, and it MUST return the same
+        // answer every time for a given window size. An earlier version fell back to the screen's
+        // midY whenever `keyWindow` was momentarily nil, which is a much larger number — so the
+        // target oscillated between window-centre and screen-centre, selecting a different post each
+        // time, re-rendering, firing the preference again, and spinning at 100% CPU. A value used to
+        // decide layout must never flicker between two answers.
+        if let h = NSApp.keyWindow?.contentView?.bounds.height, h > 0 {
+            lastContentHeight = h
+            return h / 2
         }
-        return bounds.midY
+        // No key window right now (app not frontmost, or mid-launch): reuse the last real height
+        // rather than substituting a different one.
+        return lastContentHeight > 0 ? lastContentHeight / 2 : bounds.midY
         #endif
     }
 }

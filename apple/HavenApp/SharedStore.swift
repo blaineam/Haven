@@ -1266,10 +1266,15 @@ enum SharedStore {
                         HavenLog.relay("poll OWN relay \(cid): \(localKeys.count) keys, \(fresh.count) new\(deferred > 0 ? " (+\(deferred) next poll)" : "")")
                         // Read OFF the main actor — RelayHost's accessors are nonisolated precisely so
                         // this file I/O doesn't have to happen on the thread drawing the UI.
+                        // Capture the accessor ONCE on the main actor rather than touching
+                        // `RelayHost.shared` — a @MainActor singleton — from inside the detached task.
+                        // Reaching across the actor boundary there is exactly the kind of thing that
+                        // compiles under Swift 5 isolation checking and misbehaves at runtime.
+                        let host = RelayHost.shared
                         let read: [(String, Data)] = await Task.detached(priority: .utility) {
                             var acc: [(String, Data)] = []
                             for key in fresh {
-                                if let data = RelayHost.shared.localGet(key) { acc.append((key, data)) }
+                                if let data = host.localGet(key) { acc.append((key, data)) }
                             }
                             return acc
                         }.value

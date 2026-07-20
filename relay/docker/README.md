@@ -41,6 +41,37 @@ Every later start is just `docker compose up -d` — the link and identity live 
 `haven-relay-data` volume, so the container stays the **same** relay across restarts and updates.
 Don't delete that volume unless you want a brand-new relay identity.
 
+## Building from source (test a relay fix without cutting a release)
+
+Source mode fetches the repo at a branch, tag or commit and builds the relay inside the image — so a
+fix can be tried on the box that actually has the problem. It downloads the source itself, so
+**nothing but this folder needs to be on the NAS**:
+
+```sh
+# .env next to docker-compose.yml
+HAVEN_RELAY_SOURCE=1
+HAVEN_RELAY_REF=main        # or a tag, or a commit sha
+
+docker compose build --no-cache && docker compose up -d
+docker compose exec haven-relay haven-relay version
+```
+
+or without touching `.env`:
+
+```sh
+docker compose build --build-arg HAVEN_RELAY_SOURCE=1 --build-arg HAVEN_RELAY_REF=main
+docker compose up -d
+```
+
+The binary is statically linked against musl exactly like the released one. Note that
+`haven-relay version` reports the crate version it was built from, so a source build of an
+unreleased `main` still shows the last version bump — trust the ref you passed, not just the number.
+
+> **This is a real Rust build.** The relay pulls in iroh and the whole networking stack: minutes on a
+> fast machine, considerably longer on a NAS CPU, and it wants a couple of GB of RAM. If your NAS is
+> short on either, build the image on a desktop and `docker save` / `docker load` it across. Set
+> `HAVEN_RELAY_SOURCE=0` to go back to the plain release download, which needs no toolchain at all.
+
 ## Updating
 
 There is no published image to `docker compose pull` — the image is built locally from a release

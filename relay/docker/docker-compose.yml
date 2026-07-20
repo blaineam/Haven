@@ -20,8 +20,17 @@ services:
   haven-relay:
     build:
       context: .
-      # Track the newest release instead of the pinned default:
-      # args: { HAVEN_RELAY_VERSION: latest }
+      # Pin a specific release instead of the newest:
+      #   args: { HAVEN_RELAY_VERSION: v1.1.3 }
+      #
+      # Or build from SOURCE at a branch/tag/sha — for trying a relay fix without waiting on a
+      # release. It fetches the source itself, so nothing but this folder needs to be on the NAS:
+      #   args: { HAVEN_RELAY_SOURCE: 1, HAVEN_RELAY_REF: main }
+      # (equivalently: docker compose build --build-arg HAVEN_RELAY_SOURCE=1 --build-arg HAVEN_RELAY_REF=main)
+      # Expect a long first build — it compiles the whole net stack.
+      args:
+        HAVEN_RELAY_SOURCE: ${HAVEN_RELAY_SOURCE:-0}
+        HAVEN_RELAY_REF: ${HAVEN_RELAY_REF:-main}
     image: haven-relay:local
     container_name: haven-relay
     restart: unless-stopped

@@ -443,6 +443,10 @@ struct DMThreadView: View {
                 .defaultScrollAnchor(.bottom)
                 .scrollDismissesKeyboard(.interactively)
                 .onChange(of: store.postTick) { scrollToBottom(proxy); fetchMissingThreadMedia() }
+                // postTick only moves for OUR OWN send/edit/delete — nothing bumps it on receive — so
+                // watching it alone meant a picture arriving while you were looking at the thread was
+                // fetched by nothing. Watch the message count, which does move when one lands.
+                .onChange(of: ordered.count) { fetchMissingThreadMedia() }
                 .onChange(of: store.items.count) { scrollToBottom(proxy) }
                 // Ask for anything this thread references and we don't hold — on open, and again when
                 // a new message lands. Nothing else ever does this for DMs (see fetchMissingThreadMedia).

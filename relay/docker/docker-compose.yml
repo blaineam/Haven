@@ -43,6 +43,19 @@ services:
       # re-adopt the relay. Without it the id comes from /data/identity.json and lives only as long
       # as that volume. Put HAVEN_RELAY_SEED=… in your .env next to this file.
       HAVEN_RELAY_SEED: ${HAVEN_RELAY_SEED:-}
+      # ── SET THIS. It is not optional under Docker. ────────────────────────────────────────
+      # The relay advertises its HTTP media interface — the fast path peers use for media — by
+      # listing its OWN addresses. Under bridge networking that is the CONTAINER's address
+      # (172.x.y.z), which nothing on your LAN can reach. Peers then get an unusable URL, fall
+      # back to the iroh blob dial, and every put/fetch times out: media stops syncing while the
+      # relay looks perfectly healthy from inside the container.
+      #   HAVEN_RELAY_HTTP_URL=http://192.168.1.50:8674   ← how members actually reach this box
+      # (Or use `network_mode: host` below and let the relay work it out itself.)
+      HAVEN_RELAY_HTTP_URL: ${HAVEN_RELAY_HTTP_URL:-}
+    # Alternative to setting HAVEN_RELAY_HTTP_URL: host networking, where the relay sees the
+    # box's real LAN addresses and advertises them correctly on its own. Drop `ports:` if you
+    # use it (host networking publishes directly). Linux/most NAS only — not Docker Desktop.
+    # network_mode: host
     ports:
       - "8674:8674"        # plain-HTTP media interface (fast cross-NAT / LAN media path)
     volumes:

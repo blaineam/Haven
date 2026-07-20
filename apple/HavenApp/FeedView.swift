@@ -1995,12 +1995,38 @@ final class FeedStore: ObservableObject {
         guard !ingested.isEmpty else { return }
         bumpActivity()   // a message arrived → keep sync tight while the conversation is live
         var dmIngested = false
+        var dmCircles = Set<String>()
         for cid in ingested {
             notifyNewest(in: cid)
-            if cid.hasPrefix("dm:") { dmIngested = true } else { bumpUnseen(cid) }
+            if cid.hasPrefix("dm:") { dmIngested = true; dmCircles.insert(cid) } else { bumpUnseen(cid) }
         }
         if dmIngested { recomputeUnreadDMs() }   // once for the whole batch, not per DM circle
         refresh(); requestMissingMedia()
+        // `requestMissingMedia` only ever scans `items` — the ACTIVE CIRCLE's feed — so it has never
+        // asked for anything a DM references. The thread view now asks when you open it, but that is
+        // not enough on its own: nothing bumps `postTick` on RECEIVE (only your own send/edit/delete
+        // do), so a picture arriving while you sit in the conversation was fetched by nothing at all,
+        // and one arriving while the app ran only downloaded if you left the thread and came back.
+        // Ask HERE, where we know exactly which DM circles just received something — so it lands
+        // whether or not the thread is open.
+        for cid in dmCircles { requestMissingDMMedia(cid) }
+    }
+
+    /// Fetch media the NEWEST messages in a DM circle reference and we don't hold.
+    ///
+    /// Bounded hard, because this runs off an ingest and a peer decides when that happens: newest
+    /// messages only, a handful of refs, and `requestMedia` no-ops for anything already held. It
+    /// deliberately does not walk the whole conversation — history fills in when you open the thread.
+    @MainActor func requestMissingDMMedia(_ circleId: String) {
+        let recent = messages(in: circleId).sorted { $0.createdAt > $1.createdAt }.prefix(8)
+        var budget = 4
+        for item in recent {
+            for ref in item.media where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref) {
+                guard budget > 0 else { return }
+                budget -= 1
+                requestMedia(ref, circleId: circleId)
+            }
+        }
     }
 
     /// Drain events that arrived inline in a push (stashed by the NSE) and ingest them — silent

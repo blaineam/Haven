@@ -498,11 +498,17 @@ enum SharedStore {
             switch route {
             case .ownRelay:
                 // Our OWN hosted relay: store directly in the local mailbox (no iroh self-dial).
-                try? await putMediaFile(ref: ref, sealedURL: sealedURL, size: sealedSize) { _ = RelayHost.shared.localPut($0, $1) }
+                try? await putMediaFile(ref: ref, sealedURL: sealedURL, size: sealedSize,
+                                        exists: { RelayHost.shared.localGet($0) != nil }) { _ = RelayHost.shared.localPut($0, $1) }
                 MediaBackupLedger.mark(node, ref); landed = true
             case .http(let base, let token):
                 do {
-                    try await putMediaFile(ref: ref, sealedURL: sealedURL, size: sealedSize) { k, d in
+                    try await putMediaFile(
+                        ref: ref, sealedURL: sealedURL, size: sealedSize,
+                        exists: { k in
+                            if case .success(let d) = await httpGet(base, token, k), let d, !d.isEmpty { return true }
+                            return false
+                        }) { k, d in
                         if case .failure(let e) = await httpPut(base, token, k, d) { throw e }
                     }
                     RelayMailboxStore.shared.markSeen(node)
@@ -747,12 +753,25 @@ enum SharedStore {
     /// STREAMING the file in 8 MB windows so the whole sealed blob is never resident on the managed
     /// heap (a large video's sealed envelope is hundreds of MB — holding it whole traps the allocator).
     /// Large → 8 MB chunk keys + a manifest; small → a single blob. Same wire format as `putMedia`.
+    /// `exists` lets a destination say it already holds a chunk key, so an interrupted upload RESUMES
+    /// instead of restarting.
+    ///
+    /// Without it, this loop re-sent every window from 0 on every attempt — and a phone only gets a
+    /// foreground session plus ~30s of background time, while iOS suspends the app the moment the user
+    /// leaves. So a 600 MB video (≈75 windows) would upload maybe 20 of them, get suspended, and start
+    /// again at window 0 next time. It never converges: the blob is simply larger than what one
+    /// uninterrupted session can push, and no amount of retrying fixes that when every retry throws away
+    /// the progress. That is the difference between "slow" and "never", and it is why an upload could sit
+    /// on the same indicator for hours. Chunk keys are content-addressed and idempotent, so skipping the
+    /// ones already stored is always safe.
     private static func putMediaFile(ref: String, sealedURL: URL, size: Int,
+                                     exists: ((String) async -> Bool)? = nil,
                                      put: (String, Data) async throws -> Void) async throws {
         if size > mediaChunkBytes {
             guard let fh = try? FileHandle(forReadingFrom: sealedURL) else { throw URLError(.cannotOpenFile) }
             defer { try? fh.close() }
             var sizes: [Int] = []
+            var skipped = 0
             // The upload already moves in 8 MB windows, so "how far along is this" was sitting here
             // unused while the UI could only say "pending" forever. Report it: a 600 MB video is 75
             // windows, and a post stuck at 3/75 is a visibly different thing from one at 74/75.
@@ -761,9 +780,19 @@ enum SharedStore {
             while true {
                 let slice = (try? fh.read(upToCount: mediaChunkBytes)) ?? nil
                 guard let slice, !slice.isEmpty else { break }
-                try await put(chunkKey(ref, sizes.count), slice)
+                let ck = chunkKey(ref, sizes.count)
+                // Already on this relay from an earlier, interrupted attempt — the manifest still has to
+                // be written at the end, but these bytes never need to cross the wire again.
+                if let exists, await exists(ck) {
+                    skipped += 1
+                } else {
+                    try await put(ck, slice)
+                }
                 sizes.append(slice.count)
                 await MediaUploadProgress.shared.advance(ref, done: sizes.count)
+            }
+            if skipped > 0 {
+                HavenLog.sync("backup ref=\(ref.prefix(12)): resumed, \(skipped)/\(sizes.count) windows already on the relay")
             }
             try await put(key(ref), makeManifest(sizes: sizes))
         } else {

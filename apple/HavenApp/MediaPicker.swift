@@ -99,7 +99,10 @@ struct MediaPicker: UIViewControllerRepresentable {
                     let dest = FileManager.default.temporaryDirectory
                         .appendingPathComponent(UUID().uuidString + "." + url.pathExtension)
                     try? FileManager.default.copyItem(at: url, to: dest)
-                    Task { @MainActor in completion(await MediaStore.shared.addVideo(url: dest)) }
+                    Task { @MainActor in
+                        let r = await MediaStore.shared.addVideo(url: dest)
+                        if !r.isEmpty { completion(r) }   // "" = refused (over the length limit)
+                    }
                 }
             } else {
                 completion(nil)
@@ -156,7 +159,10 @@ struct MediaPicker: NSViewControllerRepresentable {
                                 cont.resume(returning: dest)
                             }
                         }
-                        if let dest { refs.append(await MediaStore.shared.addVideo(url: dest)) }
+                        if let dest {
+                            let r = await MediaStore.shared.addVideo(url: dest)
+                            if !r.isEmpty { refs.append(r) }   // "" = refused (over the length limit)
+                        }
                     } else if provider.canLoadObject(ofClass: PlatformImage.self) {
                         let img: PlatformImage? = await withCheckedContinuation { cont in
                             provider.loadObject(ofClass: PlatformImage.self) { obj, _ in cont.resume(returning: obj as? PlatformImage) }
@@ -195,7 +201,8 @@ struct FilePicker: View {
                             let scoped = url.startAccessingSecurityScopedResource()
                             let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType
                             if let type, type.conforms(to: .movie) {
-                                refs.append(await MediaStore.shared.addVideo(url: url))
+                                let r = await MediaStore.shared.addVideo(url: url)
+                                if !r.isEmpty { refs.append(r) }   // "" = refused (over the length limit)
                             } else if let img = PlatformImage(contentsOf: url) {
                                 refs.append(MediaStore.shared.addImage(img))
                             }

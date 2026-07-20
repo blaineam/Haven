@@ -1015,6 +1015,7 @@ struct StoryCameraView: View {
             // segment thumbnail is never a black placeholder while the final blob re-encodes.
             let poster = await Task.detached { MediaStore.poster(for: url) }.value
             let ref = await MediaStore.shared.addVideo(url: url)
+            guard !ref.isEmpty else { return }   // "" = refused (over the length limit)
             capture.add(ref: ref, duration: raw, thumb: poster ?? MediaStore.shared.item(ref)?.image)   // add clamps to 15s
             // Continuous hold auto-splits: if the finger is still down and a cap isn't hit, immediately
             // record the next 15s segment (startRecording clears finalizing + resets the counter, so the

@@ -249,6 +249,7 @@ struct CameraCaptureRepresentable: View {
         guard let url else { return }
         Task { @MainActor in
             let ref = await MediaStore.shared.addVideo(url: url)
+            guard !ref.isEmpty else { return }   // "" = refused (over the length limit)
             onCaptured([ref])
         }
     }

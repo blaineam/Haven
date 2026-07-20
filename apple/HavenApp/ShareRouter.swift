@@ -27,7 +27,8 @@ final class ShareRouter: ObservableObject {
                 }
             case .video:
                 if let url = ShareInbox.fileURL(item.file) {
-                    imported.append(await MediaStore.shared.addVideo(url: url))
+                    let r = await MediaStore.shared.addVideo(url: url)
+                    if !r.isEmpty { imported.append(r) }   // "" = refused (over the length limit)
                 }
             }
         }

@@ -995,19 +995,42 @@ pub fn add_media(engine: Eng, circle_id: String, data_base64: String, is_video: 
     Ok(engine.add_local_media(&cid, &bytes, is_video))
 }
 
-/// Stage a media file dropped onto the window. Tauri's drag-drop event hands us a filesystem path
-/// (not bytes), so read it here, detect video by extension, and return the stored ref.
+/// Extensions the drop path will read back. Anything else is not media and is refused here rather
+/// than in JS, so this command can never be turned into a general "read any file" primitive.
+const DROP_VIDEO_EXTS: &[&str] = &["mp4", "mov", "m4v", "webm", "avi", "mkv", "3gp"];
+const DROP_IMAGE_EXTS: &[&str] =
+    &["jpg", "jpeg", "png", "gif", "heic", "heif", "webp", "bmp", "tif", "tiff"];
+
+/// Read a file dropped onto the window back into the WebView as base64, so the drop path can run
+/// through the SAME JS sanitize/downscale pipeline the file picker uses.
+///
+/// This replaces the old `add_media_path`, which sealed the dropped file straight from disk. That
+/// was cheaper — file→file, never a Vec in this process — but it also meant a dropped photo or video
+/// was posted BYTE-FOR-BYTE as it sat on disk: full resolution, and with its capture EXIF/GPS intact.
+/// The picker path has stripped that since day one (canvas re-encode); drag-and-drop was the hole.
+/// Correctness wins over the allocation: the WebView already base64s the picker's re-encoded output
+/// across this same boundary, so the only new cost is holding the SOURCE in memory too — and
+/// `max_bytes` (the caller's `MEDIA_TARGETS.MAX_SOURCE_BYTES_*`) bounds it. Enforced here, not just
+/// in JS, so an oversize file is refused before it is ever read.
 #[tauri::command]
-pub fn add_media_path(engine: Eng, circle_id: String, path: String) -> R<String> {
-    let cid = if circle_id.is_empty() { DEFAULT_CIRCLE.to_string() } else { circle_id };
-    let ext = std::path::Path::new(&path)
-        .extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-    let is_video = matches!(ext.as_str(), "mp4" | "mov" | "m4v" | "webm" | "avi" | "mkv" | "3gp");
-    // Seal the file straight to the at-rest store (off-heap file→file) — a large dropped video is
-    // never loaded into a Vec here, avoiding a plaintext + sealed double-allocation in this process.
-    engine
-        .add_local_media_file(&cid, &path, is_video)
-        .ok_or_else(|| format!("seal/store failed: {path}"))
+pub fn read_media_file_b64(path: String, max_bytes: u64) -> R<serde_json::Value> {
+    let p = std::path::Path::new(&path);
+    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let is_video = DROP_VIDEO_EXTS.contains(&ext.as_str());
+    if !is_video && !DROP_IMAGE_EXTS.contains(&ext.as_str()) {
+        return Err(format!("not a media file: {path}"));
+    }
+    let len = std::fs::metadata(p).map_err(|e| format!("{path}: {e}"))?.len();
+    if len > max_bytes {
+        return Err(format!("too large: {len} bytes"));
+    }
+    let bytes = std::fs::read(p).map_err(|e| format!("{path}: {e}"))?;
+    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("dropped").to_string();
+    Ok(serde_json::json!({
+        "name": name,
+        "is_video": is_video,
+        "data_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+    }))
 }
 
 /// Store a recorded voice note (sealed, content-addressed) and return an `a:` ref.

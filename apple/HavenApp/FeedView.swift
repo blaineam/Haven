@@ -4564,6 +4564,10 @@ struct FeedView: View {
                     try? FileManager.default.copyItem(at: url, to: tmp)
                     Task { @MainActor in
                         let ref = await MediaStore.shared.addVideo(url: tmp)
+                        // `addVideo` returns "" when it REFUSES the clip (over the 15-minute limit).
+                        // Appending that would attach an empty ref: a post carrying an attachment
+                        // with no bytes behind it, which can never upload or render.
+                        guard !ref.isEmpty else { return }
                         attachedMedia.append(ref)
                     }
                 }
@@ -4589,7 +4593,11 @@ struct FeedView: View {
                 let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("files_\(UUID().uuidString).\(ext)")
                 try? FileManager.default.copyItem(at: url, to: tmp)
                 if scoped { url.stopAccessingSecurityScopedResource() }
-                Task { @MainActor in attachedMedia.append(await MediaStore.shared.addVideo(url: tmp)) }
+                Task { @MainActor in
+                    // "" means REFUSED (over the 15-minute limit) — never attach an empty ref.
+                    let ref = await MediaStore.shared.addVideo(url: tmp)
+                    if !ref.isEmpty { attachedMedia.append(ref) }
+                }
             } else if let data = try? Data(contentsOf: url), let img = PlatformImage(data: data) {
                 if scoped { url.stopAccessingSecurityScopedResource() }
                 attachedMedia.append(MediaStore.shared.addImage(img))

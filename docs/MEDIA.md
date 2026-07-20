@@ -21,15 +21,77 @@ back to the app-wide default). It controls **compression only** — metadata str
 Desktop has no user-facing optimize toggle today: images are always canvas-re-encoded and videos are
 always transcoded (both strip metadata as a side effect).
 
+## The targets, and where they live
+
+Each platform keeps **one** constants block, so the three can be diffed at a glance:
+
+| Platform | File |
+| --- | --- |
+| Apple | `apple/HavenApp/MediaOptimizationTarget.swift` + `apple/HavenApp/VideoEncoder.swift` |
+| Android | `android/app/src/main/java/com/blaineam/haven/core/MediaTargets.kt` |
+| Desktop | `MEDIA_TARGETS` in `desktop/ui/app.js` |
+
+| Target | Value | Apple | Android | Desktop |
+| --- | --- | --- | --- | --- |
+| Video long edge | 1920 | ✅ | ✅ | ✅ |
+| Video bitrate | **4.5 Mbps, explicit** | ✅ | ✅ | ✅ |
+| Video codec | H.264 | ✅ | ✅ | ❌ VP8/9 (WebM) |
+| Faststart (`moov` first) | required | ✅ | ✅ (muxer already does it) | ❌ n/a to WebM |
+| Rotation | upright on arrival | ✅ baked into pixels | ✅ MP4 display matrix | decoder-handled |
+| Audio-in-video | AAC 128 kbps | ✅ | ⚠️ copied through | ✅ |
+| Stills | 1600px, JPEG q0.62 | ✅ | ✅ | ✅ |
+| Standalone audio | AAC 96 kbps, channels preserved (≤2) | ✅ | n/a (no import path) | ✅ |
+| Length cap | 15 min, refused at import | ✅ | ✅ | ✅ |
+
+**Why an explicit bitrate at all.** Both the old Apple and old Android paths capped *dimensions* and
+let the encoder choose its own rate — ~8 Mbps at 1080p. Apple got that from
+`AVAssetExportSession` presets; Android computed "≈4 bits/pixel clamped to 2–8 Mbps", which at
+1920×1080 is 8.3 Mbps and therefore pinned to its own 8 Mbps ceiling on every clip — adaptive in
+appearance only. That is why a real device was holding 53 items / 1.3 GB with single videos at
+320 MB. Dimensions alone do not target a size; a bitrate does.
+
+Measured after the rewrite — Apple, real library videos: 305.7 MB → 37.7, 191.5 → 47.0, 179.9 → 22.4.
+Android, `VideoTranscodeTargetTest` on a 1080p fixture: **5.80 MB / 12,170 kbps → 2.30 MB /
+4,822 kbps (40%)**, H.264, duration and rotation intact.
+
+### Known divergences (decisions, not oversights)
+
+- **Android does not bake rotation into pixels.** Apple bakes it because its writer emits a
+  transform tag some Android decode paths ignore, so a portrait iPhone clip arrived sideways. The
+  reverse is not a problem: `MediaMuxer.setOrientationHint` writes the standard MP4 `tkhd` display
+  matrix, honoured by AVFoundation, ExoPlayer and Chrome. Baking it would mean replacing the
+  decoder→encoder-surface path with an EGL/SurfaceTexture pass (~250 lines) to fix a bug Android
+  does not have. If it is ever needed, `Mp4Composer.rotation()` from the mp4compose dependency the
+  app already ships for story filters is the cheap route.
+- **Android copies the audio track through instead of re-encoding to 128 kbps.** The source is
+  virtually always already AAC from the camera; re-encoding costs a second decode/encode pair and a
+  class of interleaving bug for a few hundred KB.
+- **Desktop cannot emit H.264/MP4.** `MediaRecorder` produces VP8/VP9 + Opus in WebM and there is no
+  encoder on the Rust side. Desktop matches every dimension, bitrate and cap exactly, and diverges
+  on container/codec only. Closing it means a real encoder in `src-tauri` and moving transcode out
+  of the WebView — a project, not a patch.
+- **Android has no audio-file import path**, so `STANDALONE_AUDIO_BITRATE` has no call site yet;
+  every `aud_` ref comes from the in-app recorder, which writes mono AAC at 64 kbps (already below
+  the 96 kbps ceiling, so it is deliberately *not* raised to "meet" the target).
+
+### Never inflate
+
+`VIDEO_BITRATE` is a target, not a ceiling on the source. A clip already leaner than 4.5 Mbps — a
+screen recording, something re-shared, anything a sender already compressed — would otherwise be
+re-encoded *up* to the target, paying bytes **and** a generation of quality. Android compares the
+transcoded output against the source and falls through to the lossless strip-remux when the
+"optimized" bytes are not actually smaller (`readVideoBytes`). Caught by measurement, not review: a
+720p fixture went in at 0.48 MB and came out at 0.59 MB before the guard existed.
+
 ## Parameters in effect
 
 ### Images
 
 | | optimize ON | optimize OFF |
 | --- | --- | --- |
-| **Apple** (`MediaStore.addImage`) | long edge ≤ 2048px, JPEG q0.70 | original size, JPEG q0.95 |
-| **Android** (`loadAndDownscale`) | long edge ≤ 2048px, JPEG q70 | long edge ≤ 4096px, JPEG q95 |
-| **Desktop** (`imageToJpegBase64`) | long edge ≤ 2048px, JPEG q0.82 | (same — no "off") |
+| **Apple** (`MediaStore.addImage`) | long edge ≤ 1600px, JPEG q0.62 | original size, JPEG q0.95 |
+| **Android** (`loadAndDownscale`) | long edge ≤ 1600px, JPEG q62 | long edge ≤ 4096px, JPEG q95 |
+| **Desktop** (`imageToJpegBase64`) | long edge ≤ 1600px, JPEG q0.62 | (same — no "off") |
 
 All three re-encode from a decoded bitmap, which bakes in EXIF orientation and **drops all EXIF
 (orientation, GPS, device)**. So images never leak location, on any platform, in any mode.
@@ -41,9 +103,13 @@ Avatars: 192px JPEG q0.70 (rides the signed profile card) — Apple `Profile.ava
 
 | | optimize ON | optimize OFF |
 | --- | --- | --- |
-| **Apple** (`MediaStore.addVideo` → `optimizeVideo`) | re-encode to ≤1080p H.264 + AAC, faststart | passthrough remux (same codec/quality), faststart |
-| **Android** (`readVideoBytes` → `transcodeVideo`) | re-encode to ≤1080p H.264 + copied audio | passthrough remux (same codec/quality) |
-| **Desktop** (`handleFiles` → `optimizeVideoStrippingMetadata`) | re-encode to ≤1080p via canvas+MediaRecorder | (same — no "off") |
+| **Apple** (`MediaStore.addVideo` → `VideoEncoder.encode`) | ≤1080p H.264 @ 4.5 Mbps + AAC 128k, faststart, rotation baked | passthrough remux (same codec/quality), faststart |
+| **Android** (`readVideoBytes` → `transcodeVideo`) | ≤1080p H.264 @ 4.5 Mbps + copied audio, faststart, rotation as display matrix | passthrough remux (same codec/quality) |
+| **Desktop** (`handleFiles` → `optimizeVideoStrippingMetadata`) | ≤1080p @ 4.5 Mbps via canvas+MediaRecorder (VP8/9 WebM) | (same — no "off") |
+
+Apple's ladder falls back preset-export → passthrough remux if the bitrate encode fails, so a clip
+it cannot handle is still shareable rather than lost. Android's falls back to the strip-remux, which
+is also where the never-inflate guard sends already-lean clips.
 
 Metadata handling (GPS) is **always** applied, in every mode:
 
@@ -65,6 +131,13 @@ Metadata handling (GPS) is **always** applied, in every mode:
   ships the located original. (Prior behavior: `fileToBase64` sent the raw file bytes with GPS intact —
   the desktop leak this closes.)
 
+  **Drag-and-drop used to bypass all of that.** The drop handler called a Rust `add_media_path` that
+  sealed the file straight from disk — no decode, no downscale, no strip — so a dragged photo or clip
+  shipped its capture GPS at full resolution while the file picker beside it was clean. Drops now go
+  through `read_media_file_b64` (extension allowlist + size cap enforced in Rust) into the same
+  `sanitizeMediaFile` chokepoint every other import uses. Every desktop import path is now processed;
+  there is no unprocessed route left.
+
 #### Android transcode specifics (`transcodeVideo`)
 
 - Pipeline: `MediaExtractor` → hardware `MediaCodec` decoder → **encoder's input Surface** → AVC
@@ -72,7 +145,13 @@ Metadata handling (GPS) is **always** applied, in every mode:
   to the encoder's configured (downscaled) size via the BufferQueue — no GL. Audio track copied through
   verbatim.
 - Target size: fit within 1920×1080 (long×short edge), preserve aspect, never upscale, even dims.
-- Target bitrate: ≈4 bits/pixel clamped to 2–8 Mbps, and never above the source's declared bitrate.
+- Target bitrate: an **explicit** `MediaTargets.VIDEO_BITRATE` (4.5 Mbps), never above the source's
+  declared bitrate, and never producing output larger than the source (see "Never inflate" above).
+- Faststart: `Mp4Faststart.relocate` moves `moov` ahead of `mdat` and fixes the `stco`/`co64` chunk
+  offsets. Measured on API 35, `MediaMuxer` already emits `ftyp moov free mdat`, so this is a no-op
+  on the ordinary path; it is kept because that reservation is best-effort and OEM muxers are not
+  obliged to make it. It returns null (keep the muxer's bytes) for anything already correct or not
+  fully understood — a slightly worse stream beats a corrupted one.
 - Off-heap by construction (frames live in native codec buffers/surface), so it does not reintroduce
   the large-media OOM the sealed store avoids. A 20s no-progress stall guard converts a wedged codec
   into a fallback rather than a hang.
@@ -83,6 +162,12 @@ Stories/trim/mute/filter video exports on Apple all go through `AVAssetExportSes
 
 ## Size caps
 
+- **Length: 15 minutes, all three platforms, refused at import** before any ref is minted. A product
+  limit, not a technical one: without it a person can hand their circle a feature film and every
+  member's device pays to store and move it. Apple's `addVideo` returns `""` and every call site
+  skips it; Android's `readVideoBytes` returns null, which every call site already treats as "skip";
+  desktop refuses in `sanitizeMediaFile` with a toast. A refusal must never become a ref with no
+  bytes behind it.
 - Android picked video: 60 MB, applied after transcode/remux (`readVideoBytes`).
 - Cross-device transfer: blobs > 256 MB move as 8 MB chunks (`HVCHUNK1` manifest); see the chunked-media
   notes.

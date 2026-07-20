@@ -1490,6 +1490,57 @@ function secretBubble(body, isMe) {
   return wrap;
 }
 
+// ---- media encode targets --------------------------------------------------------------
+//
+// ONE source of truth for every number the media pipeline encodes to, mirroring the names the
+// iOS/macOS encoder uses so the three platforms can be diffed by eye. Every call site below reads
+// from here — no inline magic numbers.
+//
+// CODEC DIVERGENCE (deliberate, documented, NOT a bug to "fix" halfway):
+//   Apple's target is H.264 in MP4 (faststart, rotation baked into pixels) with AAC audio.
+//   Desktop has no encoder of its own: all processing happens in the WebView, and the only encoder
+//   a WebView exposes is `MediaRecorder`, which emits VP8/VP9 (video) + Opus (audio) in WebM. There
+//   is ZERO Rust-side transcode — `desktop/src-tauri` carries no ffmpeg/image/codec crate (only
+//   sha2/hkdf/base64/reqwest), by design, so the desktop bundle stays small and license-clean.
+//   Therefore desktop matches the DIMENSIONS, BITRATES, QUALITY and LIMITS exactly, and diverges on
+//   CONTAINER + CODEC. Closing that gap means adding a real encoder to the Rust side (ffmpeg-next
+//   or a pure-Rust H.264 encoder) and moving transcode out of the WebView entirely — a project, not
+//   a patch. Until then the numbers below are the parity surface, and they are honest.
+const MEDIA_TARGETS = {
+  // Video: long edge 1920 (1080p), explicit bitrates. Container/codec diverge — see above.
+  VIDEO_LONG_EDGE: 1920,
+  VIDEO_BITRATE_BPS: 4_500_000,
+  VIDEO_AUDIO_BITRATE_BPS: 128_000,
+  // Stills: longest edge 1600, JPEG quality 0.62.
+  STILL_LONG_EDGE: 1600,
+  STILL_JPEG_QUALITY: 0.62,
+  // Standalone audio (voice notes): 96 kbps, channels preserved up to stereo.
+  AUDIO_BITRATE_BPS: 96_000,
+  AUDIO_MAX_CHANNELS: 2,
+  // Hard length cap. Refused at IMPORT — a refusal must never mint a media ref with no bytes
+  // behind it, so every check below runs BEFORE `add_media` is invoked.
+  MAX_DURATION_SEC: 900,               // 15 minutes
+  // Source-size caps. Desktop has no equivalent on iOS (the OS picker bounds it there), but the
+  // WebView re-encode holds the decoded frames plus the recorded chunks in memory, and the drop
+  // path additionally base64s the source across the IPC boundary — an unbounded drop is an OOM.
+  MAX_SOURCE_BYTES_VIDEO: 512 * 1024 * 1024,
+  MAX_SOURCE_BYTES_STILL: 64 * 1024 * 1024,
+};
+
+/** Human-readable size for the refusal toasts. */
+const fmtMB = (b) => (b >= 1024 * 1024 * 1024 ? (b / 1024 / 1024 / 1024).toFixed(1) + " GB" : Math.round(b / 1024 / 1024) + " MB");
+
+/** Gate a source file BEFORE anything is sealed. Returns true to proceed; toasts and returns false
+ *  to refuse. Size only — duration needs the decoder, so it's checked inside the video re-encode. */
+function mediaSourceAllowed(sizeBytes, isVideo, label) {
+  const cap = isVideo ? MEDIA_TARGETS.MAX_SOURCE_BYTES_VIDEO : MEDIA_TARGETS.MAX_SOURCE_BYTES_STILL;
+  if (sizeBytes > cap) {
+    toast(`${label || "That file"} is ${fmtMB(sizeBytes)} — Haven caps ${isVideo ? "videos" : "photos"} at ${fmtMB(cap)}, so it wasn't attached.`);
+    return false;
+  }
+  return true;
+}
+
 // Record a voice note → returns an `a:` media ref (or null if cancelled).
 function recordVoice(circleId) {
   return new Promise((resolve) => {
@@ -1502,9 +1553,11 @@ function recordVoice(circleId) {
     const stopBtn = el("button", { class: "btn danger", style: "display:none" }, "■ Stop & attach");
     const finish = (ref) => { if (done) return; done = true; clearInterval(timer); if (stream) stream.getTracks().forEach((t) => t.stop()); releaseCapture(); $("#modal-root").replaceChildren(); resolve(ref); };
     recBtn.onclick = async () => {
-      try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+      // Channel count is PRESERVED, capped at stereo (Apple's rule) — asking for `channelCount: 2`
+      // as a max lets a mono mic stay mono rather than being upmixed to a wasteful stereo stream.
+      try { stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: { ideal: 1, max: MEDIA_TARGETS.AUDIO_MAX_CHANNELS } } }); }
       catch (e) { toast("Mic unavailable: " + e); return; }
-      recorder = new MediaRecorder(stream);
+      recorder = new MediaRecorder(stream, { audioBitsPerSecond: MEDIA_TARGETS.AUDIO_BITRATE_BPS });
       recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
       recorder.onstop = async () => {
         const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
@@ -1513,7 +1566,15 @@ function recordVoice(circleId) {
       };
       recorder.start();
       recBtn.style.display = "none"; stopBtn.style.display = ""; status.textContent = "Recording…";
-      timer = setInterval(() => { secs++; timeEl.textContent = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`; }, 1000);
+      timer = setInterval(() => {
+        secs++; timeEl.textContent = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+        // Length cap: stop AT the limit rather than refusing after the fact — the user keeps what
+        // they recorded, and nothing over the cap is ever sealed.
+        if (secs >= MEDIA_TARGETS.MAX_DURATION_SEC && recorder && recorder.state !== "inactive") {
+          toast(`Voice notes are capped at ${MEDIA_TARGETS.MAX_DURATION_SEC / 60} minutes.`);
+          recorder.stop();
+        }
+      }, 1000);
     };
     stopBtn.onclick = () => { if (recorder && recorder.state !== "inactive") recorder.stop(); };
     modal(el("div", {}, el("h2", {}, "🎙️ Voice message"), timeEl, status,
@@ -1536,7 +1597,7 @@ const CAMERA_FILTERS = [
 // short video recording. Returns {ref, isVideo} or null.
 function cameraDialog(circleId) {
   return new Promise((resolve) => {
-    let stream, recorder, chunks = [], recording = false, done = false, filter = CAMERA_FILTERS[0], rafId, recStream;
+    let stream, recorder, chunks = [], recording = false, done = false, filter = CAMERA_FILTERS[0], rafId, recStream, recTimer;
     // The camera owns the audio while it's up: feed clips stop now and stay muted until it closes.
     // Dismissing with Escape / the backdrop routes back through finish(), so the tracks stop too.
     const releaseCapture = beginCapture(() => finish(null));
@@ -1544,11 +1605,17 @@ function cameraDialog(circleId) {
     const strip = el("div", { class: "row wrap", style: "gap:6px;margin-top:8px" });
     const setFilter = (f) => { filter = f; video.style.filter = f.css; [...strip.children].forEach((b) => b.classList.toggle("primary", b.textContent === f.name)); };
     CAMERA_FILTERS.forEach((f) => strip.append(el("button", { class: "btn small", onclick: () => setFilter(f) }, f.name)));
-    const finish = (out) => { if (done) return; done = true; if (rafId) cancelAnimationFrame(rafId); if (recStream) recStream.getTracks().forEach((t) => t.stop()); if (stream) stream.getTracks().forEach((t) => t.stop()); releaseCapture(); $("#modal-root").replaceChildren(); resolve(out); };
+    const finish = (out) => { if (done) return; done = true; if (rafId) cancelAnimationFrame(rafId); if (recTimer) clearTimeout(recTimer); if (recStream) recStream.getTracks().forEach((t) => t.stop()); if (stream) stream.getTracks().forEach((t) => t.stop()); releaseCapture(); $("#modal-root").replaceChildren(); resolve(out); };
     const shoot = el("button", { class: "btn primary", onclick: async () => {
-      const c = document.createElement("canvas"); c.width = video.videoWidth || 1280; c.height = video.videoHeight || 720;
+      // Capture at the STILL target, not at the sensor's full resolution: the canvas is sized to the
+      // downscaled dimensions and the filtered frame is drawn straight into it, so the one JPEG we
+      // encode is already 1600px on its long edge (no full-res intermediate to throw away).
+      const sw = video.videoWidth || 1280, sh = video.videoHeight || 720;
+      const s = Math.min(1, MEDIA_TARGETS.STILL_LONG_EDGE / Math.max(sw, sh));
+      const c = document.createElement("canvas");
+      c.width = Math.max(1, Math.round(sw * s)); c.height = Math.max(1, Math.round(sh * s));
       const ctx = c.getContext("2d"); ctx.filter = filter.css || "none"; ctx.drawImage(video, 0, 0, c.width, c.height);
-      const b64 = c.toDataURL("image/jpeg", 0.85).split(",")[1];
+      const b64 = c.toDataURL("image/jpeg", MEDIA_TARGETS.STILL_JPEG_QUALITY).split(",")[1];
       try { const ref = await invoke("add_media", { circleId, dataBase64: b64, isVideo: false }); finish({ ref, isVideo: false }); }
       catch (e) { toast("Capture failed: " + e); }
     } }, "📸 Capture");
@@ -1556,16 +1623,32 @@ function cameraDialog(circleId) {
       if (!recording) {
         // Record a *filtered* canvas (the selected filter is drawn into every frame) plus the
         // mic audio, so the chosen filter is baked into the saved video — not just the preview.
+        // The recording canvas is sized to the VIDEO target, so the downscale to 1080p happens in the
+        // same pass that bakes the filter in — the recorder never sees a full-sensor frame.
+        const sw = video.videoWidth || 1280, sh = video.videoHeight || 720;
+        const s = Math.min(1, MEDIA_TARGETS.VIDEO_LONG_EDGE / Math.max(sw, sh));
         const c = document.createElement("canvas");
-        c.width = video.videoWidth || 1280; c.height = video.videoHeight || 720;
+        c.width = Math.max(2, Math.round(sw * s) & ~1); c.height = Math.max(2, Math.round(sh * s) & ~1);
         const ctx = c.getContext("2d");
         const draw = () => { ctx.filter = filter.css || "none"; ctx.drawImage(video, 0, 0, c.width, c.height); rafId = requestAnimationFrame(draw); };
         draw();
         recStream = c.captureStream(30);
         stream.getAudioTracks().forEach((t) => recStream.addTrack(t)); // mix in the mic
-        chunks = []; recorder = new MediaRecorder(recStream);
+        chunks = []; recorder = new MediaRecorder(recStream, {
+          videoBitsPerSecond: MEDIA_TARGETS.VIDEO_BITRATE_BPS,
+          audioBitsPerSecond: MEDIA_TARGETS.VIDEO_AUDIO_BITRATE_BPS,
+        });
         recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+        // Length cap: stop AT the limit. Nothing longer is ever encoded, so no ref can be minted
+        // for a clip that would then have to be rejected.
+        recTimer = setTimeout(() => {
+          if (recorder && recorder.state !== "inactive") {
+            toast(`Clips are capped at ${MEDIA_TARGETS.MAX_DURATION_SEC / 60} minutes.`);
+            recorder.stop();
+          }
+        }, MEDIA_TARGETS.MAX_DURATION_SEC * 1000);
         recorder.onstop = async () => {
+          if (recTimer) { clearTimeout(recTimer); recTimer = null; }
           if (rafId) cancelAnimationFrame(rafId);
           const blob = new Blob(chunks, { type: recorder.mimeType || "video/webm" });
           try { const ref = await invoke("add_media", { circleId, dataBase64: await blobToBase64(blob), isVideo: true }); finish({ ref, isVideo: true }); }
@@ -1596,18 +1679,42 @@ function scheduleDialog(onPick) {
       el("button", { class: "btn primary", onclick: () => { const ms = new Date(input.value).getTime(); if (!ms || ms < Date.now()) { toast("Pick a future time"); return; } onPick(ms); $("#modal-root").replaceChildren(); } }, "Schedule"))));
 }
 
+/**
+ * THE one place a user-supplied file becomes bytes Haven will post. Every import path (file picker,
+ * drag-and-drop) goes through here, so the size cap, the length cap and the metadata strip are
+ * impossible to route around.
+ *
+ * Returns base64 of the sanitized bytes, or null if the file was REFUSED — in which case the caller
+ * must not mint a ref. Refusals toast for themselves.
+ *
+ * Images: the canvas re-encode (STILL_LONG_EDGE / STILL_JPEG_QUALITY) drops all EXIF/GPS as a side
+ * effect of going through a canvas. Videos: the RAW bytes used to be sent verbatim, which carried
+ * the capture GPS (in the MP4 `©xyz`/`loci` userdata) to the whole circle — the desktop half of the
+ * leak iOS/Android already close. We re-encode through a canvas + MediaRecorder (the same pipeline
+ * the in-app camera uses), producing an entirely new container: no source metadata survives, and
+ * it's downscaled to VIDEO_LONG_EDGE at the target bitrates in the same pass. If that re-encode
+ * isn't possible in this webview we WARN and skip rather than silently ship a located original
+ * (see optimizeVideoStrippingMetadata).
+ */
+async function sanitizeMediaFile(f, isVideo) {
+  // Refuse OVERSIZE BEFORE anything is sealed. The duration cap is enforced the same way, inside
+  // optimizeVideoStrippingMetadata, once the decoder reports it.
+  if (!mediaSourceAllowed(f.size, isVideo, f.name)) return null;
+  try {
+    return isVideo ? await optimizeVideoStrippingMetadata(f) : await imageToJpegBase64(f);
+  } catch (e) {
+    // optimizeVideoStrippingMetadata already toasted its own reason for refusing/failing.
+    if (!isVideo) toast("Couldn't attach: " + e);
+    return null;
+  }
+}
+
 async function handleFiles(files, after) {
   for (const f of files) {
     const isVideo = f.type.startsWith("video");
+    const b64 = await sanitizeMediaFile(f, isVideo);
+    if (b64 === null) continue;                    // refused — no ref, no attachment entry
     try {
-      // Images: canvas re-encode (2048px/0.82) — that already drops all EXIF/GPS. Videos: the picker's
-      // RAW bytes used to be sent verbatim, which carried the capture GPS (in the MP4 `©xyz`/`loci`
-      // userdata) to the whole circle — the desktop half of the leak iOS/Android already close. We
-      // re-encode the video through a canvas + MediaRecorder (the same pipeline the in-app camera uses),
-      // which produces an entirely new container: no source metadata survives, and it's downscaled to
-      // 1080p at the same time. If that re-encode isn't possible in this webview we WARN and skip rather
-      // than silently ship a located original (see optimizeVideoStrippingMetadata).
-      const b64 = isVideo ? await optimizeVideoStrippingMetadata(f) : await imageToJpegBase64(f);
       const ref = await invoke("add_media", { circleId: state.activeCircle, dataBase64: b64, isVideo });
       const url = await invoke("media_data_url", { circleId: state.activeCircle, reference: ref });
       state.attachments.push({ ref, url, isVideo });
@@ -1619,14 +1726,14 @@ async function handleFiles(files, after) {
 // Re-encode a picked video to a metadata-free ≤1080p clip and return its base64. This is the desktop
 // counterpart of iOS `MediaStore.optimizeVideo` / Android `transcodeVideo`: it plays the source into a
 // canvas and captures that (plus the source audio track) with MediaRecorder, so the bytes we send are a
-// BRAND-NEW container — the original's GPS/device/capture metadata cannot ride along. Downscales to a
-// 1920px long edge in the same pass.
+// BRAND-NEW container — the original's GPS/device/capture metadata cannot ride along. Downscales to
+// MEDIA_TARGETS.VIDEO_LONG_EDGE and applies the target bitrates in the same pass.
 //
 // SECURITY: on any failure we REJECT the attachment (throw) instead of falling back to the raw file —
 // the raw file is exactly the located original we must never post silently. The webviews desktop ships
 // on (WebView2 on Windows, WebKitGTK on Linux) support MediaRecorder — it's the same API the camera
 // dialog already relies on — but if it's unavailable the user is told, not leaked.
-function optimizeVideoStrippingMetadata(file, maxDim = 1920) {
+function optimizeVideoStrippingMetadata(file, maxDim = MEDIA_TARGETS.VIDEO_LONG_EDGE) {
   return new Promise((res, rej) => {
     if (typeof MediaRecorder === "undefined") {
       toast("This video can't be stripped of location data on this system, so it wasn't attached.");
@@ -1647,8 +1754,22 @@ function optimizeVideoStrippingMetadata(file, maxDim = 1920) {
       toast("Couldn't process this video's metadata, so it wasn't attached.");
       rej(e instanceof Error ? e : new Error(String(e)));
     };
+    // A refusal (as opposed to a failure) has its own message and, like `fail`, rejects — so the
+    // caller never reaches `add_media` and no ref is minted for bytes that were never stored.
+    const refuse = (msg) => {
+      if (settled) return; settled = true;
+      URL.revokeObjectURL(url);
+      toast(msg);
+      rej(new Error(msg));
+    };
     video.onerror = () => fail(new Error("video decode failed"));
     video.onloadedmetadata = () => {
+      // Length cap, checked the moment the decoder knows the duration — before a single frame is
+      // drawn, recorded or sealed.
+      const dur = video.duration;
+      if (Number.isFinite(dur) && dur > MEDIA_TARGETS.MAX_DURATION_SEC) {
+        return refuse(`That video is ${Math.round(dur / 60)} minutes — Haven caps videos at ${MEDIA_TARGETS.MAX_DURATION_SEC / 60}, so it wasn't attached.`);
+      }
       const vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
       const scale = Math.min(1, maxDim / Math.max(vw, vh));
       const w = Math.max(2, Math.round(vw * scale) & ~1);
@@ -1666,7 +1787,12 @@ function optimizeVideoStrippingMetadata(file, maxDim = 1920) {
         if (elStream) elStream.getAudioTracks().forEach((t) => capStream.addTrack(t));
       } catch (e) { return fail(e); }
       const chunks = [];
-      try { rec = new MediaRecorder(capStream); } catch (e) { return fail(e); }
+      try {
+        rec = new MediaRecorder(capStream, {
+          videoBitsPerSecond: MEDIA_TARGETS.VIDEO_BITRATE_BPS,
+          audioBitsPerSecond: MEDIA_TARGETS.VIDEO_AUDIO_BITRATE_BPS,
+        });
+      } catch (e) { return fail(e); }
       const stopDraw = () => { if (raf) cancelAnimationFrame(raf); raf = null; };
       rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
       rec.onstop = async () => {
@@ -1677,7 +1803,13 @@ function optimizeVideoStrippingMetadata(file, maxDim = 1920) {
           const b64 = await blobToBase64(blob);
           URL.revokeObjectURL(url);
           res(b64);
-        } catch (e) { URL.revokeObjectURL(url); rej(e); }
+        } catch (e) {
+          // Every rejection out of here must have SAID something — the caller stays silent for
+          // videos precisely because this function owns its own messaging.
+          URL.revokeObjectURL(url);
+          toast("Couldn't finish processing this video, so it wasn't attached.");
+          rej(e);
+        }
       };
       // Drive the canvas draw off requestVideoFrameCallback (fires per PRESENTED video frame) when
       // available — that's robust even if requestAnimationFrame is throttled (e.g. the window drops to
@@ -1691,14 +1823,22 @@ function optimizeVideoStrippingMetadata(file, maxDim = 1920) {
         video.onplay = () => loop();
       }
       video.onended = () => { if (rec && rec.state !== "inactive") rec.stop(); };
-      try { rec.start(); } catch (e) { return fail(e); }
+      // Backstop for sources whose duration the decoder reports as NaN/Infinity (some streamed WebM):
+      // the check above can't fire, so bound the capture in wall-clock time instead. The re-encode
+      // runs at playback speed, so this is the same ceiling expressed the other way.
+      const capTimer = setTimeout(() => { if (rec && rec.state !== "inactive") rec.stop(); },
+                                  MEDIA_TARGETS.MAX_DURATION_SEC * 1000);
+      rec.addEventListener("stop", () => clearTimeout(capTimer));
+      try { rec.start(); } catch (e) { clearTimeout(capTimer); return fail(e); }
       video.play().catch(fail);
     };
     video.src = url;
   });
 }
 
-function imageToJpegBase64(file, maxDim = 2048, quality = 0.82) {
+// Re-encode a still to the STILL target. The canvas round-trip is also what drops EXIF/GPS — a
+// canvas has no metadata to write back out, so the JPEG we emit is unconditionally clean.
+function imageToJpegBase64(file, maxDim = MEDIA_TARGETS.STILL_LONG_EDGE, quality = MEDIA_TARGETS.STILL_JPEG_QUALITY) {
   return new Promise((res, rej) => {
     const img = new Image();
     img.onload = () => {
@@ -4508,6 +4648,16 @@ async function boot() {
   drainDeepLinks();
   listen("haven:call", (e) => onCallEvent(e.payload));
   // Drag photos/videos from the file manager onto the window → attach to the active composer.
+  //
+  // A dropped file goes through the SAME `sanitizeMediaFile` pipeline as a picked one. It used to
+  // call `add_media_path`, which sealed the file straight off disk — full resolution, and with the
+  // capture EXIF/GPS still in it. That was the last metadata leak on desktop, and it only existed
+  // because file→file sealing avoided pulling the bytes through this process.
+  //
+  // Closing it costs one memory hop: `read_media_file_b64` reads the file back into the WebView so
+  // the canvas can re-encode it. That hop is bounded by MAX_SOURCE_BYTES_* (enforced in Rust too),
+  // and it is the same hop the picker path has always paid on the way OUT — every re-encoded blob
+  // already crosses this boundary as base64. Correctness over the allocation.
   const MEDIA_RE = { img: /\.(jpe?g|png|gif|heic|heif|webp|bmp|tiff?)$/i, vid: /\.(mp4|mov|m4v|webm|avi|mkv|3gp)$/i };
   listen("tauri://drag-enter", () => document.body.classList.add("drop-target"));
   listen("tauri://drag-leave", () => document.body.classList.remove("drop-target"));
@@ -4518,10 +4668,28 @@ async function boot() {
     for (const p of paths) {
       const isVideo = MEDIA_RE.vid.test(p);
       if (!isVideo && !MEDIA_RE.img.test(p)) continue;   // skip non-media files
+      const maxBytes = isVideo ? MEDIA_TARGETS.MAX_SOURCE_BYTES_VIDEO : MEDIA_TARGETS.MAX_SOURCE_BYTES_STILL;
       try {
-        const ref = await invoke("add_media_path", { circleId: state.composerCircle || state.activeCircle, path: p });
+        const got = await invoke("read_media_file_b64", { path: p, maxBytes });
+        // Rebuild a File so the shared pipeline sees exactly what the picker hands it. The `type`
+        // is only used for the isVideo split, which we already know from the extension.
+        const bin = atob(got.data_base64);
+        const buf = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+        const file = new File([buf], got.name, { type: isVideo ? "video/*" : "image/*" });
+        const b64 = await sanitizeMediaFile(file, isVideo);
+        if (b64 === null) continue;                      // refused — no ref, no attachment entry
+        const circleId = state.composerCircle || state.activeCircle;
+        const ref = await invoke("add_media", { circleId, dataBase64: b64, isVideo });
         await state.composerAdd(ref, isVideo, false);
-      } catch (err) { console.error("drop ingest failed", p, err); toast("Couldn't attach that file"); }
+      } catch (err) {
+        console.error("drop ingest failed", p, err);
+        // The Rust side enforces the same size cap before it reads, so name that reason explicitly
+        // rather than reporting it as a generic failure.
+        toast(String(err).includes("too large")
+          ? `That ${isVideo ? "video" : "photo"} is over Haven's ${fmtMB(maxBytes)} limit, so it wasn't attached.`
+          : "Couldn't attach that file");
+      }
     }
   });
   setInterval(refreshStatus, 5000);

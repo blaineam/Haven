@@ -697,11 +697,21 @@ mod tests {
     use std::collections::HashSet;
 
     /// A LocalMedia backed by a fresh unique temp dir.
+    /// A scratch dir this test and no other owns.
+    ///
+    /// The nanosecond clock alone was NOT enough: `SystemTime::now()` is coarser than a nanosecond
+    /// here, so two tests starting on different threads at the same instant got the SAME directory
+    /// and swept each other's files — `limit_sweep_grace_protects_fresh_even_when_over_cap` deleted a
+    /// 40-day-old blob belonging to `limit_sweep_age_...`, and both then failed by exactly one file.
+    /// Intermittently, and only under `--test-threads > 1`, which is the default. A monotonic counter
+    /// makes the name unique by construction.
     fn tmp_media() -> (LocalMedia, PathBuf) {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let base = std::env::temp_dir().join(format!(
-            "haven-localmedia-test-{}-{}",
+            "haven-localmedia-test-{}-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         (LocalMedia::new(base.clone()), base)
     }

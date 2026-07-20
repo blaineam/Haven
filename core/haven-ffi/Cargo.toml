@@ -24,16 +24,19 @@ uniffi = { version = "0.31.2", features = ["cli", "tokio"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
-# Dev-only: the Tier-1 migration/regression harness in tests/ is a separate crate, so it
-# must re-declare the deps it uses directly (base64/hex for fixture files, serde_json for the
-# fixture generator). These do NOT affect the shipped lib/staticlib/cdylib.
+# Dev-only: what the harnesses in tests/ need ON TOP of this package's normal dependencies (cargo
+# passes those to test targets too). Only crates the shipped lib does not already pull in belong
+# here — base64/hex for fixture files, serde_json for the fixture generator. No effect on the
+# shipped lib/staticlib/cdylib.
 [dev-dependencies]
 data-encoding = "2.11.0"
 serde_json = "1.0.150"
-# The `enabled_paths` end-to-end harness reads the ratchet index off a live-lane DM wire
-# (haven_p2p::groupkey::EpochEnvelope) to prove per-message forward secrecy — the ONE piece of
-# wire structure the public FFI does not surface. Test-only; no effect on the shipped lib.
-haven-p2p = { path = "../haven-p2p" }
+# NOTE: haven-p2p is deliberately NOT re-declared here. The `enabled_paths` harness does read the
+# ratchet index off a live-lane DM wire (haven_p2p::groupkey::EpochEnvelope), but cargo already
+# passes every NORMAL dependency of this package to its test targets, and haven-p2p is one (above).
+# Declaring it in both tables adds a second graph edge that exists only under `cargo test`, which is
+# how `cargo check` and `cargo test` end up resolving the same crate differently. One edge, one
+# resolution.
 
 # Android-only: wire the JavaVM + Context into ndk-context so iroh's rustls platform
 # verifier can reach the system trust store (otherwise the node panics with

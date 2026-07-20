@@ -278,6 +278,107 @@ fn parse_line(line: &str) -> Option<(String, Reassembly)> {
     Some((reference, Reassembly { part, total, got: crate::wire::bitmap_indices(&bits, total), updated }))
 }
 
+// ---- The UPLOAD side of resume ------------------------------------------------------------------
+//
+// Everything above resumes a chunked DOWNLOAD. This half resumes a chunked UPLOAD, which fails in a
+// different way and needs a guard the download side does not.
+//
+// Why resume at all: a large sealed video rides as 8 MB windows written IN ORDER to
+// `haven/media/<ref>.p/<i>`, then an `HVCHUNK1` manifest at `haven/media/<ref>`. The uploader used to
+// re-send every window from 0 on each attempt. On a phone, leaving the app IS an interruption, so
+// past a certain size the upload could never finish: each retry discarded what the last achieved, and
+// the blob was simply larger than one uninterrupted session could push. That is the difference
+// between "slow" and "never". Desktop is interrupted less often, but a laptop lid, a sleep, or a
+// dropped link produce exactly the same non-convergence, and the wire format is shared — a window
+// this machine already pushed is a window an iPhone must not push again either.
+//
+// Why the probe is a PREFIX scan: windows are written strictly in order and the loop stops at the
+// first failure, so a destination's progress is always a PREFIX — never a hole in the middle. Probing
+// sequentially and stopping at the first miss costs exactly (skipped + 1) probes, i.e. ONE when there
+// is no prior progress. That is what keeps it affordable on destinations (S3, the relay's HTTP
+// interface) whose only existence check is a full GET.
+//
+// Why a probe is NOT enough — the correctness half, and it is not optional. Sealing is NOT
+// byte-stable. The envelope carries per-recipient key material (so its length moves as device rosters
+// arrive) AND a fresh nonce — so for an IDENTICAL recipient set the bytes differ while the length
+// matches EXACTLY. iOS meets this by re-sealing per attempt; here the at-rest file IS the seal, but it
+// is still rewritten for an existing ref: a ref is the digest of the PLAINTEXT, so re-storing the same
+// photo re-seals it under the same ref with a new nonce, and a local wipe and re-post, or repairing a
+// stored blob that won't decrypt, does the same.
+//
+// Splice windows from one seal onto windows from another and the blob reassembles to precisely the
+// right length and decrypts to nothing. The equal-length case is the COMMON one, so it corrupts
+// SILENTLY, presents as "media won't open", and — the key being content-addressed and write-once — is
+// then frozen in place. One such blob is already in the field.
+//
+// The trap is that asking a destination "do you hold window i?" cannot distinguish "present" from
+// "present AND sliced from these bytes". Two ways to get a YES that must NOT be trusted:
+//
+//   * the seal was replaced PART-WAY through an upload. The destination now holds a mix — the leading
+//     windows this attempt rewrote, and a tail left from the old seal. Every one of them probes present.
+//   * another device of the same account uploaded the same ref. Same plaintext, same ref, an entirely
+//     different seal — and own-device media sync makes that ordinary, not a corner case.
+//
+// So a window is skipped only when WE wrote it, from THESE bytes: `trusted_prefix` caps the skip at the
+// high-water mark recorded for that destination under this exact fingerprint, and the probe then
+// confirms the bytes are still there (a relay may have swept them). Both must agree. The asymmetry is
+// the whole point — a cap that is too LOW costs a re-upload of bytes that were fine, one that is too
+// HIGH is permanent corruption. When in doubt, re-send.
+
+/// 8 MB — well under the relay's 256 MB MAX_BLOB, and identical on iOS/Android so the three platforms
+/// slice the same sealed blob into the same chunk keys.
+pub const UPLOAD_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+
+/// Byte ranges of each window over a blob of `size` bytes: `(from, to_exclusive)`, in wire order.
+pub fn upload_windows(size: usize, chunk: usize) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut off = 0;
+    while off < size {
+        let end = (off + chunk).min(size);
+        out.push((off, end));
+        off = end;
+    }
+    out
+}
+
+/// Identity of the exact sealed bytes an upload is made of. Hashing a few hundred MB costs about a
+/// second — trivial next to the tens of windows of network this decision gates, and it runs only when
+/// a reachable destination actually needs the blob.
+pub fn seal_fingerprint(blob: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(blob);
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// How many leading windows a destination may be ASKED about — the count we ourselves wrote to it from
+/// these exact sealed bytes, and nothing beyond. Windows past this point may well be present; they are
+/// simply not provably ours (see the two YES-you-must-not-trust cases above).
+///
+/// `force` is the recovery path, whose whole purpose is to OVERWRITE what is stored, so it trusts
+/// nothing. A destination with no record for this ref (first attempt, another device's upload, or an
+/// eviction from the bounded record) also trusts nothing and re-sends everything — the safe direction,
+/// and the only one that is safe.
+pub fn trusted_prefix(
+    force: bool,
+    recorded_fp: Option<&str>,
+    current_fp: &str,
+    recorded_windows: usize,
+    total: usize,
+) -> usize {
+    if force || recorded_fp != Some(current_fp) {
+        return 0;
+    }
+    recorded_windows.min(total)
+}
+
+/// Index of the first window that still has to be sent, given the probe answers gathered so far.
+/// Anything after the first miss is ignored even if it is `true`: a gap means the "progress is a
+/// prefix" invariant did not hold, and re-sending is the safe reading of that.
+pub fn upload_skip_count(probed: &[bool]) -> usize {
+    probed.iter().take_while(|held| **held).count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +547,92 @@ mod tests {
         ix.begin("img_e", "incoming_p2p_e.part".into(), 4);
         assert!(ix.resume_hint("img_e").is_none());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- Upload-side resume ------------------------------------------------------------------
+
+    #[test]
+    fn windows_cover_the_blob_exactly_with_a_short_tail() {
+        let c = UPLOAD_CHUNK_BYTES;
+        let size = c * 3 + 12_345;
+        let w = upload_windows(size, c);
+        assert_eq!(w.len(), 4);
+        assert_eq!(w[0].0, 0);
+        assert_eq!(w[w.len() - 1].1, size);
+        // Contiguous — a gap or an overlap here is a corrupt blob on the far side.
+        for i in 1..w.len() {
+            assert_eq!(w[i - 1].1, w[i].0);
+        }
+        assert_eq!(w[3].1 - w[3].0, 12_345);
+    }
+
+    #[test]
+    fn an_exact_multiple_produces_no_empty_trailing_window() {
+        assert_eq!(upload_windows(UPLOAD_CHUNK_BYTES * 2, UPLOAD_CHUNK_BYTES).len(), 2);
+    }
+
+    #[test]
+    fn an_empty_blob_produces_no_windows() {
+        assert!(upload_windows(0, UPLOAD_CHUNK_BYTES).is_empty());
+    }
+
+    #[test]
+    fn the_leading_run_already_stored_is_skipped() {
+        assert_eq!(upload_skip_count(&[true, true, true, false]), 3);
+        assert_eq!(upload_skip_count(&[false]), 0);
+        assert_eq!(upload_skip_count(&[]), 0);
+    }
+
+    #[test]
+    fn a_gap_stops_the_skip_rather_than_jumping_it() {
+        // Progress is a prefix by construction. A hole means that did not hold, so re-send from the
+        // hole — skipping past it would leave a window nothing ever writes.
+        assert_eq!(upload_skip_count(&[true, true, false, true, true]), 2);
+    }
+
+    #[test]
+    fn windows_we_wrote_from_these_bytes_may_be_skipped() {
+        let fp = seal_fingerprint(b"sealed");
+        assert_eq!(trusted_prefix(false, Some(&fp), &fp, 20, 75), 20);
+    }
+
+    #[test]
+    fn a_reseal_of_the_same_length_must_not_be_resumed_across() {
+        // The trap: sealing carries a fresh nonce, so re-sealing the same plaintext to the same
+        // recipients yields bytes that DIFFER while the length matches exactly. Resuming across that
+        // boundary produces a blob of precisely the right size that decrypts to nothing — silently,
+        // and permanently, since the key is content-addressed and write-once.
+        let first = vec![7u8; 1024];
+        let mut resealed = vec![7u8; 1024];
+        resealed[0] = 9;
+        assert_eq!(first.len(), resealed.len());
+        let a = seal_fingerprint(&first);
+        let b = seal_fingerprint(&resealed);
+        assert_ne!(a, b, "a same-length re-seal must not fingerprint the same");
+        assert_eq!(trusted_prefix(false, Some(&a), &b, 40, 75), 0);
+    }
+
+    #[test]
+    fn a_destination_we_have_never_uploaded_to_gets_everything() {
+        // Covers the first attempt AND the case a probe alone gets wrong: ANOTHER device of this
+        // account uploaded the same ref. Same plaintext, same ref, a completely different seal — its
+        // windows all probe present, and trusting them would splice two seals together.
+        let fp = seal_fingerprint(b"x");
+        assert_eq!(trusted_prefix(false, None, &fp, 0, 75), 0);
+    }
+
+    #[test]
+    fn trust_never_exceeds_the_windows_that_exist() {
+        // A record left over from a LARGER earlier blob must not authorise skipping past the end.
+        let fp = seal_fingerprint(b"x");
+        assert_eq!(trusted_prefix(false, Some(&fp), &fp, 900, 3), 3);
+    }
+
+    #[test]
+    fn the_recovery_overwrite_never_resumes() {
+        // `force` exists to REPLACE what a destination holds (the 1.0.7 frozen-blob repair). Skipping
+        // windows it already has would leave exactly the bytes we came to overwrite.
+        let fp = seal_fingerprint(b"x");
+        assert_eq!(trusted_prefix(true, Some(&fp), &fp, 40, 75), 0);
     }
 }

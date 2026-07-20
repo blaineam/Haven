@@ -1107,7 +1107,10 @@ final class FeedStore: ObservableObject {
                                          body: target.body, media: media, music: target.music,
                                          muteVideo: target.muteVideo, createdAt: now())
         else { return false }
-        broadcastEvent(target.circleId, env)
+        // SILENT: this republish carries no news — it re-points an existing post at a smaller copy of
+        // the same media. Notifying normally would fire one alert per rewritten post at every member
+        // (25 per tap), for content nobody wrote. The event still delivers and still syncs.
+        broadcastEvent(target.circleId, env, silent: true)
         for ref in media { MediaBackupQueue.shared.enqueue(ref, circleId: target.circleId, social: social) }
         return true
     }
@@ -1925,7 +1928,10 @@ final class FeedStore: ObservableObject {
         var p = Data(); lpAppend(&p, Data(circleId.utf8)); p.append(env); return p
     }
 
-    private func broadcastEvent(_ circleId: String, _ env: Data) {
+    /// `silent` suppresses the recipient banner — the event still delivers and still syncs. Use it for
+    /// a republish that is not news (see the re-optimize pass); everything a person actually wrote
+    /// should notify normally.
+    private func broadcastEvent(_ circleId: String, _ env: Data, silent: Bool = false) {
         bumpActivity()   // I just posted/messaged → keep sync tight
         let payload = eventPayload(circleId, env)
         let members = social?.contactNodeIds(circleId: circleId) ?? []
@@ -1950,8 +1956,10 @@ final class FeedStore: ObservableObject {
         for nodeHex in members {
             // Seal + SIGN the banner to this recipient; the relay forwards it blind, their NSE
             // decrypts AND verifies it really came from us (audit H2).
-            let sealed = notifJSON.isEmpty ? nil : try? social?.sealSignedNotification(recipientNodeHex: nodeHex, data: notifJSON)
-            PushManager.shared.wake(nodeHex, ciphertext: sealed?.base64EncodedString(), event: eventB64)
+            let sealed = (notifJSON.isEmpty || silent) ? nil
+                : try? social?.sealSignedNotification(recipientNodeHex: nodeHex, data: notifJSON)
+            PushManager.shared.wake(nodeHex, ciphertext: sealed?.base64EncodedString(),
+                                    event: eventB64, silent: silent)
         }
         nearbyBroadcast(1, payload)   // sealed — only members + the user's own devices open it, so a DM syncs to your other device too
         originateRelay(dests: members, inner: frame(1, payload))   // reach members behind a relay

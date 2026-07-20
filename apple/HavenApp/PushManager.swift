@@ -126,10 +126,15 @@ final class PushManager: NSObject, ObservableObject {
     /// `event` is the base64 of the sealed circle event itself; when present (and small enough)
     /// the relay inlines it in the push so the recipient's NSE stashes it and the app ingests it
     /// with no mailbox round-trip (push-inline sync).
-    func wake(_ nodeId: String, ciphertext: String? = nil, event: String? = nil) {
+    /// `silent` delivers the event WITHOUT a banner — a content-available push, same as `syncSelf`.
+    /// For a republish that carries no news: re-optimizing already-shared media rewrites the post to
+    /// name the smaller blob, and alerting the whole circle for each one would turn a storage chore
+    /// into a notification storm (25 posts x every member, for content nobody wrote).
+    func wake(_ nodeId: String, ciphertext: String? = nil, event: String? = nil, silent: Bool = false) {
         guard !nodeId.isEmpty else { return }
         var body: [String: Any] = ["nodeId": nodeId, "ciphertext": ciphertext ?? "_"]
         if let event { body["event"] = event }
+        if silent { body["silent"] = true }
         post("/notify", body)
     }
 

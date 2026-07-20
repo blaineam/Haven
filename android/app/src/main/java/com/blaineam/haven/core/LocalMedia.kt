@@ -806,8 +806,9 @@ object LocalMedia {
  *
  *  1. **Compression (optimize on — the default).** When the active circle's optimize setting is on,
  *     the clip is TRANSCODED to ≤1080p H.264 + copied audio via [transcodeVideo] (Android has no
- *     one-liner — it's a MediaCodec decode→encoder-input-surface pipeline). This matches iOS's
- *     `optimizeVideo` (AVAssetExportPreset1920x1080, H.264, faststart): a full-HD re-encode, so a
+ *     one-liner — it's a MediaCodec decode→encoder-input-surface pipeline). This matches Apple's
+ *     `VideoEncoder`: 1080p H.264 at an EXPLICIT [MediaTargets.VIDEO_BITRATE] with the `moov` atom
+ *     moved to the front ([Mp4Faststart]) — a full-HD re-encode, so a
  *     4K/200 MB original lands well under the cap and every recipient can decode it. Because the
  *     transcode writes a brand-new container via [MediaMuxer], it ALSO drops all identifying
  *     metadata (GPS included) — the same guarantee the strip-remux below gives.
@@ -828,15 +829,54 @@ object LocalMedia {
  * Historical note: this used to hand the picker's raw bytes straight to [LocalMedia.store], so a clip
  * recorded with location on carried its capture coordinates to everyone in the circle.
  */
-fun readVideoBytes(context: Context, uri: Uri, maxBytes: Int = 60 * 1024 * 1024): ByteArray? {
+fun readVideoBytes(context: Context, uri: Uri, maxBytes: Int = MediaTargets.MAX_VIDEO_BYTES): ByteArray? {
+    // HARD LIMIT first, before any work: no amount of encoding makes a feature film reasonable to
+    // hand a circle, and every member pays to store and move whatever this produces.
+    //
+    // Returning null IS the refusal channel on Android — every call site already treats null as
+    // "skip this item" — so a refusal can never become a ref with no bytes behind it. A duration we
+    // cannot read at all is NOT treated as a refusal: an unreadable header is usually an exotic
+    // container, not a two-hour film, and failing closed there would reject legitimate media.
+    val seconds = runCatching {
+        android.media.MediaMetadataRetriever().use { r ->
+            r.setDataSource(context, uri)
+            r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull()?.let { it / 1000.0 }
+        }
+    }.getOrNull()
+    if (seconds != null && seconds > MediaTargets.MAX_VIDEO_SECONDS) {
+        android.util.Log.w("LocalMedia",
+            "video REJECTED — ${seconds.toInt()}s exceeds the ${MediaTargets.MAX_VIDEO_SECONDS}s limit")
+        return null
+    }
     // Optimize per the active circle's override (falls back to the app-wide default), same as photos
     // ([loadAndDownscale]) — media is picked while composing for that circle.
     val optimize = runCatching { CircleSettings.optimize(HavenNet.activeCircle.value) }.getOrDefault(true)
+    // Source size, for the anti-inflation check below. Null when it can't be determined.
+    val srcBytes = runCatching {
+        context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length }
+    }.getOrNull()?.takeIf { it > 0 }
+
     if (optimize) {
         // Transcode reads the source directly (MediaExtractor), NOT the capped raw read below — so a
         // large 4K original that would blow the cap is shrunk first, then checked against it. On any
         // failure it returns null and we fall through to the always-on metadata strip.
-        transcodeVideo(context, uri, maxBytes)?.let { return it }
+        transcodeVideo(context, uri, maxBytes)?.let { encoded ->
+            // "Optimize" must never make a file BIGGER. [MediaTargets.VIDEO_BITRATE] is a target,
+            // not a ceiling on the source: a clip that was already leaner than 4.5 Mbps — a short
+            // screen recording, a 720p clip someone else already compressed, anything re-shared —
+            // gets re-encoded UP to the target and grows, while also losing a generation of quality.
+            // Caught by measurement, not review: the rotation test's 720p fixture went 0.48 MB in,
+            // 0.59 MB out. `KEY_BIT_RATE` on the source format would have prevented it, but
+            // MediaExtractor usually does not expose it, so the honest check is on the real output.
+            //
+            // Falling through hands the clip to the lossless strip-remux below, which still removes
+            // GPS and still costs nothing in quality.
+            if (srcBytes == null || encoded.size < srcBytes) return encoded
+            android.util.Log.i("LocalMedia",
+                "transcode produced ${encoded.size}B from a ${srcBytes}B source — keeping the " +
+                    "original via strip-remux rather than inflating it")
+        }
     }
     // Optimize off, or transcode failed: passthrough strip-remux (metadata gone, no re-encode). The raw
     // read here is capped, so an un-optimizable clip over the cap is rejected rather than sent huge.
@@ -900,21 +940,30 @@ private fun transcodeVideo(context: Context, uri: Uri, maxBytes: Int): ByteArray
         fun even(v: Int) = (v and 1.inv()).coerceAtLeast(2)
         val srcLong = max(srcW, srcH).toDouble()
         val srcShort = min(srcW, srcH).toDouble()
-        val scale = minOf(1.0, 1920.0 / srcLong, 1080.0 / srcShort)
+        val scale = minOf(1.0,
+            MediaTargets.VIDEO_LONG_EDGE / srcLong, MediaTargets.VIDEO_SHORT_EDGE / srcShort)
         val dstW = even((srcW * scale).toInt())
         val dstH = even((srcH * scale).toInt())
 
-        // Target bitrate ≈ 4 bits/pixel, clamped to a 2–8 Mbps sane 1080p band. If the source declares a
-        // lower bitrate, never inflate past it.
+        // An EXPLICIT target rate — see [MediaTargets.VIDEO_BITRATE].
+        //
+        // This used to be "≈4 bits/pixel clamped to 2–8 Mbps", which reads adaptive and was not: at
+        // 1920×1080 the formula yields 8.3 Mbps and clamps to the 8 Mbps ceiling, so every optimized
+        // 1080p clip came out at the maximum. That is the Android half of the 320 MB-video problem.
+        //
+        // Still never INFLATE a source that was already leaner than the target — re-encoding a
+        // 2 Mbps clip up to 4.5 would spend bytes to lose quality.
         val srcBitrate = if (srcFormat.containsKey(MediaFormat.KEY_BIT_RATE)) srcFormat.getInteger(MediaFormat.KEY_BIT_RATE) else Int.MAX_VALUE
-        val bitrate = ((dstW.toLong() * dstH * 4).coerceIn(2_000_000L, 8_000_000L)).toInt().coerceAtMost(srcBitrate)
-        val fps = if (srcFormat.containsKey(MediaFormat.KEY_FRAME_RATE)) srcFormat.getInteger(MediaFormat.KEY_FRAME_RATE).coerceIn(1, 60) else 30
+        val bitrate = MediaTargets.VIDEO_BITRATE.coerceAtMost(srcBitrate)
+        val fps = if (srcFormat.containsKey(MediaFormat.KEY_FRAME_RATE))
+            srcFormat.getInteger(MediaFormat.KEY_FRAME_RATE).coerceIn(MediaTargets.VIDEO_FPS_MIN, MediaTargets.VIDEO_FPS_MAX)
+        else MediaTargets.VIDEO_FPS_DEFAULT
 
         val outFormat = MediaFormat.createVideoFormat("video/avc", dstW, dstH).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, MediaTargets.VIDEO_I_FRAME_INTERVAL_SEC)
         }
         encoder = MediaCodec.createEncoderByType("video/avc")
         encoder.configure(outFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
@@ -1023,7 +1072,21 @@ private fun transcodeVideo(context: Context, uri: Uri, maxBytes: Int): ByteArray
         }
 
         muxer.stop()
-        val bytes = out.readBytes()
+        val muxed = out.readBytes()
+        // Faststart: `moov` (the index) must precede `mdat`, or a streaming recipient has to fetch
+        // the whole blob before the first frame renders. Apple gets this from
+        // `shouldOptimizeForNetworkUse`; Android has no such API.
+        //
+        // MEASURED, not assumed: on API 35 `MediaMuxer` already emits `ftyp moov free mdat` — it
+        // reserves an estimated `moov` up front and backfills it — so this call is a NO-OP on the
+        // ordinary path and returns null. It is kept because that reservation is best-effort: when
+        // MPEG4Writer cannot fit the real `moov` into the space it guessed, it falls back to writing
+        // it last, and OEM muxers are not obliged to reserve at all. So this is a safety net that
+        // costs one box walk and can only ever improve the layout — it returns null (keep the
+        // muxer's bytes) for anything already correct or not fully understood.
+        // See VideoTranscodeTargetTest.muxerOutputIsRewrittenIndexFirst, which asserts the
+        // POSTCONDITION rather than the mechanism.
+        val bytes = Mp4Faststart.relocate(muxed) ?: muxed
         if (bytes.size > maxBytes) null else bytes
     } catch (t: Throwable) {
         android.util.Log.w("LocalMedia", "video transcode failed (falling back to strip): ${t.message}")
@@ -1112,11 +1175,14 @@ fun loadAndDownscale(
     context: Context, uri: Uri,
     // Optimize per the active circle's override (falls back to the app-wide default) — media is
     // picked while composing for that circle.
-    // Auto-optimize → 2048px JPEG @ 70% (cross-platform share spec, iOS parity); off → original quality.
-    // Either way we re-encode from a decoded bitmap, which bakes the rotation into the pixels AND strips
-    // all EXIF (orientation, GPS, device) — so nothing sideways and no location leaks.
-    maxDim: Int = if (CircleSettings.optimize(HavenNet.activeCircle.value)) 2048 else 4096,
-    quality: Int = if (CircleSettings.optimize(HavenNet.activeCircle.value)) 70 else 95,
+    // Auto-optimize → 1600px JPEG @ 62% (cross-platform share spec, Apple parity — see MediaTargets);
+    // off → original quality. Either way we re-encode from a decoded bitmap, which bakes the rotation
+    // into the pixels AND strips all EXIF (orientation, GPS, device) — so nothing sideways and no
+    // location leaks.
+    maxDim: Int = if (CircleSettings.optimize(HavenNet.activeCircle.value))
+        MediaTargets.STILL_LONG_EDGE else MediaTargets.STILL_LONG_EDGE_UNOPTIMIZED,
+    quality: Int = if (CircleSettings.optimize(HavenNet.activeCircle.value))
+        MediaTargets.STILL_JPEG_QUALITY else MediaTargets.STILL_JPEG_QUALITY_UNOPTIMIZED,
 ): ByteArray? = runCatching {
     val raw = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
         ?: return null.also { android.util.Log.w("LocalMedia", "openInputStream null for $uri") }
@@ -1163,5 +1229,5 @@ fun loadAndDownscale(
  * both go through here so the two can't drift.
  */
 fun loadAvatarB64(context: Context, uri: Uri): String? =
-    loadAndDownscale(context, uri, maxDim = 192, quality = 70)
+    loadAndDownscale(context, uri, maxDim = MediaTargets.AVATAR_LONG_EDGE, quality = MediaTargets.AVATAR_JPEG_QUALITY)
         ?.let { android.util.Base64.encodeToString(it, android.util.Base64.NO_WRAP) }

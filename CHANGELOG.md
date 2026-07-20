@@ -13,6 +13,23 @@ Exploratory work on outliving the infrastructure Haven doesn't own. **Nothing he
 behavior** — the discovery layer is behind a flag that defaults to off, and the push relay keeps its
 current default.
 
+### Changed
+
+- **Photos and videos you send are much smaller, on every platform.** "Auto-optimize" used to cap
+  the *dimensions* of a video and then let the encoder pick its own bitrate — around 8 Mbps at
+  1080p, an archival setting applied to something meant to cross a network. That is how a single
+  clip reached 320 MB. All three platforms now encode to an explicit 4.5 Mbps, and photos to 1600px
+  at JPEG q0.62 (was 2048 at q0.70). Measured on a 1080p test clip: 5.80 MB → 2.30 MB, same
+  duration, same resolution, still upright. Android was the worst offender and did not look it: its
+  "≈4 bits/pixel, clamped to 2–8 Mbps" formula works out to 8.3 Mbps at 1080p, so it pinned itself
+  to the 8 Mbps ceiling on every single clip while appearing to adapt.
+- **Videos longer than 15 minutes are refused when you attach them**, rather than quietly costing
+  everyone in the circle the storage and transfer. Refused before anything is saved, so a refusal
+  can never leave a post carrying an attachment with no video behind it.
+- **Optimizing will no longer make a file bigger.** A clip already leaner than the target — a screen
+  recording, something re-shared, anything already compressed — was being re-encoded *up* to
+  4.5 Mbps, paying bytes and a generation of quality for it. Android now keeps the smaller original.
+
 ### Fixed
 
 - **Android and Windows/Linux desktop kept trying to reach a relay at an address that could not
@@ -34,6 +51,11 @@ current default.
   inside your own app is a local file copy that cannot fail, so posts showed a confident tick while
   nobody else could fetch them. It now means a relay someone else can read, with a distinct warning
   state for media that has only reached this device's own relay. (Apple parity.)
+- **Dragging a photo or video onto the desktop app sent its GPS location and full resolution.** The
+  file picker stripped location and downscaled; the drop target sealed the file straight off disk
+  and did neither, so which of two identical-looking gestures you used decided whether your capture
+  coordinates went to the circle. Drops now go through exactly the same processing as every other
+  import.
 - **A relay was frozen to whatever circles its link said on the day you set it up.** It read the
   link once at startup and refused everything else for the rest of its life — including every DM
   conversation, which is created the first time two people message and so can never be in a link

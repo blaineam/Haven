@@ -22,8 +22,13 @@ class AudioRecorder(private val context: Context) {
         r.setAudioSource(MediaRecorder.AudioSource.MIC)
         r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
         r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-        r.setAudioSamplingRate(44_100)
-        r.setAudioEncodingBitRate(64_000)
+        // Mono, explicitly — a voice note upmixed to stereo is twice the bytes for no information.
+        // Apple's standalone-audio ceiling is MediaTargets.STANDALONE_AUDIO_BITRATE (96k) for FILES
+        // shared in; this recorder is mono speech and already sits below it, so it is NOT raised to
+        // meet the target — that would make every voice note bigger to hit a number.
+        r.setAudioChannels(1)
+        r.setAudioSamplingRate(MediaTargets.AUDIO_SAMPLE_RATE)
+        r.setAudioEncodingBitRate(MediaTargets.VOICE_NOTE_BITRATE)
         r.setOutputFile(f.absolutePath)
         runCatching { r.prepare(); r.start() }
         recorder = r

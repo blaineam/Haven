@@ -425,7 +425,7 @@ pub fn run() {
             commands::autostart_status,
             commands::set_autostart,
             commands::add_media,
-            commands::add_media_path,
+            commands::read_media_file_b64,
             commands::add_audio,
             commands::media_data_url,
             commands::schedule_message,

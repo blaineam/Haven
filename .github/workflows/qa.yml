@@ -26,9 +26,14 @@ name: qa
 # a PAT as the SHARED_REPO_TOKEN secret; a public repo needs no token (github.token
 # for a *different* repo has no access, hence the fallback). See _shared/soren/docs/ci.md.
 
+# ── DISABLED ON rc TAGS (2026-07-20) ─────────────────────────────────────────────
+# The automatic rc-tag trigger is off. Soren lives in the PRIVATE blaineam/rocket
+# repo, and without a SHARED_REPO_TOKEN secret the checkout above 404s on "Retrieving
+# the default branch name" — so every rc tag produced a red qa run that reported a
+# missing credential, not a failing test. A permanently-red gate teaches you to ignore
+# the gate. Re-enable the `push:` trigger below once SHARED_REPO_TOKEN is set (or the
+# tools repo goes public); until then this is still runnable by hand.
 on:
-  push:
-    tags: ["v*-rc.*"]
   workflow_dispatch:
     inputs:
       suites:

@@ -617,10 +617,37 @@ final class RelayMailboxStore: ObservableObject {
     }
 
     /// The relay's HTTP interface (urls + token), or nil for an iroh-only relay.
+    ///
+    /// PRIVATE addresses are dropped unless we are on that subnet ourselves. A relay hosted in the
+    /// app announces every LAN IPv4 it has, which is right for a member on the same network and
+    /// useless to everyone else — a `192.168.4.x` URL cannot be reached from a `10.0.0.x` network,
+    /// ever. Those URLs were tried FIRST anyway (HTTP is the preferred media path), so every remote
+    /// member burned a connect attempt and a timeout per operation on an address that could never
+    /// work, then fell through to iroh in a worse state.
+    ///
+    /// This is exactly why the Dockerised NAS relay behaved better than the in-app Mac relays: it
+    /// announces no HTTP interface at all, so callers go straight to the path that works. Filtering
+    /// here gives the Mac relays the same behaviour instead of a broken fast path.
     func httpInterface(_ hex: String) -> (urls: [String], token: String)? {
         guard let e = entries[hex], let t = e.httpToken, !t.isEmpty,
               let u = e.httpUrls, !u.isEmpty else { return nil }
-        return (u, t)
+        let usable = u.filter { Self.urlPlausiblyReachable($0) }
+        guard !usable.isEmpty else { return nil }   // nil = iroh-only, which is the honest answer
+        return (usable, t)
+    }
+
+    /// Is this URL worth trying from where we are? Public hosts always; a private address only when
+    /// one of our own interfaces sits on the same /24.
+    static func urlPlausiblyReachable(_ url: String) -> Bool {
+        guard let host = URL(string: url)?.host else { return false }
+        let parts = host.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 4 else { return true }   // a hostname/domain — assume routable
+        let isPrivate = parts[0] == 10
+            || (parts[0] == 172 && (16...31).contains(parts[1]))
+            || (parts[0] == 192 && parts[1] == 168)
+        guard isPrivate else { return true }
+        let ourPrefixes = Set(RelayHost.lanIPv4s().map { $0.split(separator: ".").prefix(3).joined(separator: ".") })
+        return ourPrefixes.contains(parts.prefix(3).map(String.init).joined(separator: "."))
     }
 
     /// Stamp a relay as just-seen (a successful op). Cheap; persisted so "last seen" survives a restart.

@@ -63,6 +63,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.blaineam.haven.core.Contact
 import com.blaineam.haven.core.HavenNet
+import kotlinx.coroutines.launch
 
 /** Messages tab — a list of people to DM, then a chat thread. DM = private 2-person circle. */
 @Composable
@@ -400,13 +401,20 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
     }
     val isGroup = remember(circleId) { HavenNet.isGroupDm(circleId) }
     val relayReachable by HavenNet.relayActive
+    // Attaching to a DM encodes exactly like a post does, so it leaves the main thread the same way
+    // — see MediaProcessing. This callback arrives on the main looper.
+    val mediaScope = androidx.compose.runtime.rememberCoroutineScope()
     val picker = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) {
-            if (com.blaineam.haven.core.isVideoUri(context, uri)) {
-                com.blaineam.haven.core.readVideoBytes(context, uri)?.let { pendingPhoto = com.blaineam.haven.core.LocalMedia.store(circleId, it, isVideo = true) }
-            } else {
-                com.blaineam.haven.core.loadAndDownscale(context, uri)?.let { pendingPhoto = com.blaineam.haven.core.LocalMedia.store(circleId, it) }
+            mediaScope.launch {
+                val ref = com.blaineam.haven.core.MediaProcessing.processing {
+                    if (com.blaineam.haven.core.isVideoUri(context, uri))
+                        com.blaineam.haven.core.readVideoBytes(context, uri)?.let { com.blaineam.haven.core.LocalMedia.store(circleId, it, isVideo = true) }
+                    else
+                        com.blaineam.haven.core.loadAndDownscale(context, uri)?.let { com.blaineam.haven.core.LocalMedia.store(circleId, it) }
+                }
+                if (ref != null) pendingPhoto = ref
             }
         }
     }
@@ -451,6 +459,10 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
                     })
                 }
             }
+
+            // Shown while the attachment is still encoding — before this, picking a video in a DM
+            // looked identical to the picker having silently failed.
+            MediaProcessingCard(Modifier.padding(horizontal = 16.dp))
 
             pendingPhoto?.let { ref ->
                 Box(Modifier.padding(start = 16.dp, bottom = 4.dp)) {

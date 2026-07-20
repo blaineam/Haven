@@ -110,6 +110,10 @@ import uniffi.haven_ffi.FeedItemFfi
 @Composable
 fun CircleScreen(onAddFriend: () -> Unit) {
     val context = LocalContext.current
+    // Media encoding must NOT run on the thread this composable's picker callbacks arrive on — see
+    // MediaProcessing. ActivityResult callbacks are delivered on the main looper, and readVideoBytes
+    // is a full MediaCodec transcode.
+    val mediaScope = androidx.compose.runtime.rememberCoroutineScope()
     var draft by remember { mutableStateOf("") }
     // Staged media for the next post — photos/videos AND a `geo:` location ref (multi-attach, iOS parity).
     val pendingMedia = remember { androidx.compose.runtime.mutableStateListOf<String>() }
@@ -195,11 +199,17 @@ fun CircleScreen(onAddFriend: () -> Unit) {
     fun openStoryCamera() = openCamera(false)
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(8)) { uris ->
         val cid = HavenNet.activeCircle.value
-        uris.forEach { uri ->
-            val ref = if (com.blaineam.haven.core.isVideoUri(context, uri))
-                com.blaineam.haven.core.readVideoBytes(context, uri)?.let { LocalMedia.store(cid, it, isVideo = true) }
-            else loadAndDownscale(context, uri)?.let { LocalMedia.store(cid, it) }
-            if (ref != null) pendingMedia.add(ref)
+        // OFF the main thread: this callback arrives on the main looper, and each video here is a
+        // full decode→encode→mux. Doing it inline froze the app until Android killed it.
+        mediaScope.launch {
+            uris.forEach { uri ->
+                val ref = com.blaineam.haven.core.MediaProcessing.processing {
+                    if (com.blaineam.haven.core.isVideoUri(context, uri))
+                        com.blaineam.haven.core.readVideoBytes(context, uri)?.let { LocalMedia.store(cid, it, isVideo = true) }
+                    else loadAndDownscale(context, uri)?.let { LocalMedia.store(cid, it) }
+                }
+                if (ref != null) pendingMedia.add(ref)
+            }
         }
     }
     // Location: best-effort current location → a geo: ref appended to the post (iOS parity).
@@ -299,6 +309,9 @@ fun CircleScreen(onAddFriend: () -> Unit) {
             }
 
             if (!locked) {
+            // Sits ABOVE the staged previews: while it is showing, the thumbnails for those items
+            // don't exist yet, so this is the only thing telling you the attach is alive.
+            MediaProcessingCard(Modifier.padding(horizontal = 16.dp))
             // Staged media preview (multiple photos/videos + a location pin), each removable.
             if (pendingMedia.isNotEmpty()) {
                 androidx.compose.foundation.lazy.LazyRow(
@@ -1735,6 +1748,8 @@ fun PostCard(
     videoActive: Boolean = false,
 ) {
     val context = LocalContext.current
+    // Encoding a comment attachment must leave the main thread — see MediaProcessing.
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
     var postMenu by remember(item.id) { mutableStateOf(false) }
     var showReport by remember(item.id) { mutableStateOf(false) }
     var commentDraft by remember(item.id) { mutableStateOf("") }
@@ -1751,11 +1766,16 @@ fun PostCard(
     // Same store-under-the-circle's-key flow as the post composer's picker.
     val commentPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(4)) { uris ->
-        uris.forEach { uri ->
-            val ref = if (com.blaineam.haven.core.isVideoUri(context, uri))
-                com.blaineam.haven.core.readVideoBytes(context, uri)?.let { LocalMedia.store(circleId, it, isVideo = true) }
-            else loadAndDownscale(context, uri)?.let { LocalMedia.store(circleId, it) }
-            if (ref != null) commentMedia.add(ref)
+        // Off-main for the same reason as the post composer's picker — see MediaProcessing.
+        scope.launch {
+            uris.forEach { uri ->
+                val ref = com.blaineam.haven.core.MediaProcessing.processing {
+                    if (com.blaineam.haven.core.isVideoUri(context, uri))
+                        com.blaineam.haven.core.readVideoBytes(context, uri)?.let { LocalMedia.store(circleId, it, isVideo = true) }
+                    else loadAndDownscale(context, uri)?.let { LocalMedia.store(circleId, it) }
+                }
+                if (ref != null) commentMedia.add(ref)
+            }
         }
     }
     viewerStart?.let { start ->

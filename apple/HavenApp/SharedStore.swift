@@ -666,6 +666,13 @@ enum SharedStore {
                 HavenLog.sync("devroster blob-put OK relay=\(node.prefix(8)) — relay should now authorize our device")
             } catch {
                 HavenLog.sync("devroster blob-put FAIL relay=\(node.prefix(8)): \(error.localizedDescription)")
+                // Record it, like every OTHER failure path does. Without this a relay that never
+                // answers accumulates no backoff from roster publishing, so the 120s backfill tick
+                // re-attempts it forever — 9 of 22 failures in one 20-minute window came from here,
+                // against a relay advertising a private address nobody outside its own LAN can reach.
+                // `available()` is what gates the other paths, and it can only hold a relay off if
+                // somebody tells it the relay is failing.
+                RelayHealth.shared.recordFailure(node)
                 await adoptNewerOwnRosterAndRetry(node: node, key: key, sent: wire, social: social, error: error)
             }
         }

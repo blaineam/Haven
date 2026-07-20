@@ -163,14 +163,23 @@ final class RelayHost: ObservableObject {
     }
 
     /// URLs peers can reach our HTTP interface at: the configured public URL first, then LAN IPv4s.
+    /// What we tell the circle they can reach this relay's HTTP interface at.
+    ///
+    /// A configured public URL wins OUTRIGHT — LAN addresses are not appended to it. The operator has
+    /// said how members reach this box; adding `192.168.x` behind that only gives every remote member
+    /// something to try and time out on, which is precisely the failure the CLI relay never had: it
+    /// announces nothing unless told, so callers go straight to the path that works.
+    ///
+    /// With no public URL we still announce LAN addresses, because a member on the SAME network should
+    /// use them — that is the fast local path and it genuinely works. Remote members discard them on
+    /// receipt (`httpInterface` keeps a private address only when we are on that /24), so the useless
+    /// case is filtered by the side that can actually tell.
     static func reachableHttpUrls(port: UInt16) -> [String] {
-        var out: [String] = []
         if let pub = UserDefaults.standard.string(forKey: "haven.relay.publicURL")?
             .trimmingCharacters(in: .whitespacesAndNewlines), pub.hasPrefix("http") {
-            out.append(pub.hasSuffix("/") ? String(pub.dropLast()) : pub)
+            return [pub.hasSuffix("/") ? String(pub.dropLast()) : pub]
         }
-        for ip in lanIPv4s() { out.append("http://\(ip):\(port)") }
-        return out
+        return lanIPv4s().map { "http://\($0):\(port)" }
     }
 
     /// Every up, non-loopback, non-link-local IPv4 on this device (getifaddrs).

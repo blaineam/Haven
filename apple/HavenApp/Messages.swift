@@ -661,6 +661,7 @@ struct DMThreadView: View {
                 }
                 .foregroundStyle(HavenTheme.pink).padding(.horizontal, 6)
             }
+            MediaProcessingCard()   // spinner while a video encodes — see MediaProcessing
             if !attachedMedia.isEmpty || attachedTrack != nil {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {

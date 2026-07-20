@@ -4402,6 +4402,7 @@ struct FeedView: View {
                 // yellow = still syncing, red = only on this device. So you know if a post got out.
                 // Delivery light: tap the yellow/red pill to dive into live sync detail (sent/received/waiting).
                 HStack { Spacer(); SyncStatusBadge(circleId: store.activeCircleId) }
+                MediaProcessingCard()   // spinner while a video encodes — see MediaProcessing
                 if !attachedMedia.isEmpty || attachedTrack != nil || composeRetention != nil { attachmentTray }
                 // Opt-in location tag — only when a photo/video with GPS is attached. Default off.
                 if MediaStore.shared.anyLocated(attachedMedia) {

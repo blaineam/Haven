@@ -702,6 +702,10 @@ final class MediaStore: ObservableObject {
         let scratch = scratchURL("mp4")
         try? FileManager.default.removeItem(at: scratch)
         var ok = false
+        // Tell the UI something is happening. Attaching a video takes tens of seconds; without this
+        // the composer sits blank and "working on it" is indistinguishable from "it didn't take".
+        MediaProcessing.shared.begin("video")
+        defer { MediaProcessing.shared.end() }
         // HARD LIMIT first: no amount of encoding makes a feature film reasonable to hand a circle,
         // and every member pays to store and move whatever this produces.
         if let dur = try? await AVURLAsset(url: src).load(.duration), dur.seconds > Self.maxVideoSeconds {

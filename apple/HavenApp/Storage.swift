@@ -562,18 +562,16 @@ struct RelaysView: View {
                 }
                 Spacer()
             }
-            // A relay can be perfectly reachable from HERE and reach nobody you share with — a
-            // Tailscale or LAN address works for its owner and resolves for no one else. That
-            // combination is invisible without saying it: everything looks green while your posts
-            // land somewhere your circle cannot fetch from. Loudest when it is also the default,
-            // because the default is where posts and media go.
+            // A private/tailnet address is a SHORTCUT, not the relay's reachability. Members who
+            // can't use it still reach this relay peer-to-peer — that path is the whole point, and
+            // it's why the Docker relay, which advertises no address at all, works fine. So this is
+            // informational: it explains why some members connect slower, and must NOT read as
+            // "broken" or send anyone hunting for a different relay.
             if privateOnly(e) {
-                Label(isDefault
-                          ? "Only your devices can reach this — and it's your default, so posts and photos go here. Pick a relay your circle can reach."
-                          : "Only your own devices can reach this address.",
-                      systemImage: "exclamationmark.triangle.fill")
+                Label("Direct address works on your network only — others connect peer-to-peer (slower first connect).",
+                      systemImage: "info.circle")
                     .font(.caption2)
-                    .foregroundStyle(isDefault ? .orange : .secondary)
+                    .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 8) {

@@ -36,12 +36,13 @@ enum RelayAddress {
         return ours.contains(parts.prefix(3).map(String.init).joined(separator: "."))
     }
 
-    /// Can a member on some OTHER network fetch from this URL?
+    /// Can a member on some OTHER network use this URL as a direct shortcut?
     ///
-    /// Deliberately stricter than ``plausiblyReachable(_:ourIPv4s:)``. That one answers "should I try
-    /// this from here", which is YES for my own tailnet relay. This answers "is this a sane address
-    /// to hand a circle", which is NO — being in someone's circle does not put you on their tailnet
-    /// or their LAN. Used to warn about a relay that looks healthy locally and reaches nobody.
+    /// NOT "can they reach the relay" — they can, over iroh, from anywhere; that path is the point
+    /// of the network and it is why the Docker relay, which advertises no HTTP address at all, is
+    /// the best-behaved one. This answers only whether the HTTP fast path is usable off-network, so
+    /// the UI can explain a slower first connect. Anything built on this must not imply the relay is
+    /// unreachable — an earlier version of that copy said exactly that, and it was wrong.
     static func reachableByOthers(_ url: String) -> Bool {
         guard let p = octets(url) else { return true }       // hostname/domain — assume public DNS
         if p[0] == 127 { return false }                      // loopback

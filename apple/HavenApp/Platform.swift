@@ -436,6 +436,29 @@ enum PlatformScreen {
         return NSScreen.main?.frame ?? .zero
         #endif
     }
+
+    /// The vertical middle of what the user is actually LOOKING at, in the same coordinate space
+    /// SwiftUI reports `frame(in: .global).midY` in.
+    ///
+    /// The feed decides which post is "centered" (and therefore which video plays) by comparing each
+    /// post's global midY against this. Using `bounds.midY` worked on iOS, where the app fills the
+    /// screen so global coordinates and screen coordinates coincide — and was wrong on macOS, where
+    /// `bounds` is the whole DISPLAY while SwiftUI's global frames are relative to the WINDOW. On a
+    /// large monitor the target sat below every post, so "nearest to centre" always resolved to the
+    /// same wrong post and the first video never became active: it never auto-played, and because the
+    /// duration was only learned from a playback observer, it could not be scrubbed either.
+    static var contentCenterY: CGFloat {
+        #if canImport(UIKit)
+        return bounds.midY
+        #else
+        // The key window's CONTENT height (not the display, not the frame — SwiftUI's global space
+        // starts below the title bar). Falls back to the screen only if there is no window yet.
+        if let content = NSApp.keyWindow?.contentView ?? NSApp.windows.first(where: { $0.isVisible })?.contentView {
+            return content.bounds.height / 2
+        }
+        return bounds.midY
+        #endif
+    }
 }
 
 // MARK: - Haptics (no-op on macOS — there's no Taptic Engine)

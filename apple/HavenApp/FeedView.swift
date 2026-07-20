@@ -4133,7 +4133,7 @@ struct FeedView: View {
                 .scrollDismissesKeyboard(.immediately)
                 .onPreferenceChange(PostCenterKey.self) { centers in
                     // The post nearest the vertical center of the screen becomes active.
-                    let target = PlatformScreen.bounds.midY
+                    let target = PlatformScreen.contentCenterY
                     let nearest = centers.min { abs($0.value - target) < abs($1.value - target) }
                     AudioCoordinator.shared.center(nearest?.key)
                 }
@@ -6007,7 +6007,7 @@ struct UserProfileView: View {
             }
             .onPreferenceChange(PostCenterKey.self) { centers in
                 // The profile post nearest the vertical center becomes active → its video plays + loops.
-                let target = PlatformScreen.bounds.midY
+                let target = PlatformScreen.contentCenterY
                 let nearest = centers.min { abs($0.value - target) < abs($1.value - target) }
                 AudioCoordinator.shared.center(nearest?.key)
             }

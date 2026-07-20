@@ -303,6 +303,19 @@ struct GestureVideoPlayer: View {
     private func addObserver() {
         removeObserver()   // never stack observers / leave a stale one
         if let d = player.currentItem?.duration.seconds, d.isFinite { duration = d }
+        // Load the duration from the ASSET as well, rather than relying on the periodic observer
+        // below to eventually supply it. That observer only fires as playback advances, so a video
+        // that hasn't started has duration 0 — and `seek` refuses to move with duration 0, which is
+        // why a not-yet-playing video showed its first frame and could not be scrubbed at all. The
+        // two failures looked separate and were the same one.
+        if duration <= 0, let asset = player.currentItem?.asset {
+            Task { @MainActor in
+                if let d = try? await asset.load(.duration), d.seconds.isFinite, d.seconds > 0,
+                   duration <= 0 {
+                    duration = d.seconds
+                }
+            }
+        }
         let token = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { time in
             if duration <= 0, let d = player.currentItem?.duration.seconds, d.isFinite { duration = d }

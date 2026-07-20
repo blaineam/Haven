@@ -1310,7 +1310,17 @@ pub struct BlobClient {
     /// (`over_endpoint`). `close()` must never shut down a borrowed endpoint — closing the
     /// node's shared messaging endpoint kills the whole transport.
     owns_endpoint: bool,
+    /// When the last dial to `dest` failed, so a sick peer costs ONE dial per cooldown instead of one
+    /// per operation. `conn()` re-dials whenever the cached connection has a close reason, and with a
+    /// peer that is timing out that means every op starts a fresh dial: a field trace caught 1,320
+    /// `haven/blob/1` connects in five minutes (~4-5/sec) plus 943 DNS lookups, each spinning up
+    /// hole-punch machinery. That is why the phone ran hot. Failing fast during the cooldown also
+    /// stops a doomed op from occupying its caller for the full 12s dial timeout.
+    last_dial_fail: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
 }
+
+/// How long to stop re-dialling a peer whose last dial failed.
+const DIAL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl BlobClient {
     /// Connect by the volunteer's hex node id (discovery resolves a live address).
@@ -1337,7 +1347,7 @@ impl BlobClient {
         if endpoint.id() == dest.id {
             anyhow::bail!("refusing to dial our own node id (blob self-connect guard)");
         }
-        Ok(Self { endpoint, dest, conn: Arc::new(tokio::sync::Mutex::new(None)), owns_endpoint: true })
+        Ok(Self { endpoint, dest, conn: Arc::new(tokio::sync::Mutex::new(None)), owns_endpoint: true, last_dial_fail: Arc::new(std::sync::Mutex::new(None)) })
     }
 
     /// Reuse an EXISTING, warm endpoint (the messaging node's) instead of binding a fresh one. The
@@ -1349,7 +1359,7 @@ impl BlobClient {
         if endpoint.id() == dest.id {
             anyhow::bail!("refusing to dial our own node id (blob self-connect guard)");
         }
-        Ok(Self { endpoint, dest, conn: Arc::new(tokio::sync::Mutex::new(None)), owns_endpoint: false })
+        Ok(Self { endpoint, dest, conn: Arc::new(tokio::sync::Mutex::new(None)), owns_endpoint: false, last_dial_fail: Arc::new(std::sync::Mutex::new(None)) })
     }
 
     /// Return the ONE warm connection to `dest`, reusing it if still open, else dialing (and caching) a
@@ -1361,12 +1371,29 @@ impl BlobClient {
                 return Ok(c.clone());
             }
         }
-        let c = tokio::time::timeout(DIAL_TIMEOUT, self.endpoint.connect(self.dest.clone(), BLOB_ALPN))
+        // A recent dial failure means don't try again yet — see `last_dial_fail`.
+        if let Ok(g) = self.last_dial_fail.lock() {
+            if let Some(t) = *g {
+                if t.elapsed() < DIAL_COOLDOWN {
+                    bail!("relay dial in cooldown");
+                }
+            }
+        }
+        let dialed = tokio::time::timeout(DIAL_TIMEOUT, self.endpoint.connect(self.dest.clone(), BLOB_ALPN))
             .await
-            .map_err(|_| anyhow!("relay dial timed out"))?
-            .ah()?;
-        *guard = Some(c.clone());
-        Ok(c)
+            .map_err(|_| anyhow!("relay dial timed out"))
+            .and_then(|r| r.ah());
+        match dialed {
+            Ok(c) => {
+                if let Ok(mut g) = self.last_dial_fail.lock() { *g = None; }
+                *guard = Some(c.clone());
+                Ok(c)
+            }
+            Err(e) => {
+                if let Ok(mut g) = self.last_dial_fail.lock() { *g = Some(std::time::Instant::now()); }
+                Err(e)
+            }
+        }
     }
 
     /// Store a (sealed) blob at `key`. The relay stores it verbatim.

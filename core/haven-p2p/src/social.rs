@@ -662,6 +662,80 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+mod edit_tests {
+    use super::*;
+
+    fn ev(author: u8, t: u64, kind: EventKind) -> Event {
+        Event::new(&[author; 32], t, kind)
+    }
+
+    fn post_with_media(author: u8, t: u64, media: Vec<String>) -> Event {
+        ev(author, t, EventKind::Post {
+            body: "beach day".into(),
+            media,
+            music: None,
+            retention_secs: None,
+            story: false,
+            mute_video: false,
+        })
+    }
+
+    /// An Edit REPLACES the media array — it does not merge.
+    ///
+    /// This is the contract every client has to honor, and Android did not: its post editor called
+    /// `editPost(circle, id, body)` with the media parameter defaulted to empty, so fixing a typo in
+    /// a caption deleted every photo on that post for the entire circle. The bytes survive, but the
+    /// post stops referencing them everywhere, which for the user is the same as losing them.
+    ///
+    /// Pinned here, in the reducer's own crate, because the trap is shared by all four clients and
+    /// the next one to add an edit affordance deserves to be caught by a test rather than by a
+    /// member asking where their photos went.
+    #[test]
+    fn an_edit_replaces_media_so_omitting_it_strips_the_post() {
+        let photos = vec!["ref-a".to_string(), "ref-b".to_string()];
+        let post = post_with_media(1, 100, photos.clone());
+        let pid = post.id.clone();
+
+        // Baseline: the post carries both attachments.
+        let feed = build_feed(vec![post.clone()], 500, None, None);
+        assert_eq!(feed[0].media, photos, "precondition: the post starts with its media");
+
+        // Editing the text WITHOUT re-supplying media wipes it. This is the bug's shape.
+        let stripped = build_feed(vec![post.clone(), ev(1, 200, EventKind::Edit {
+            target: pid.clone(), body: "beach day!".into(),
+            media: vec![], music: None, mute_video: false,
+        })], 500, None, None);
+        assert_eq!(stripped[0].body, "beach day!");
+        assert!(stripped[0].media.is_empty(),
+            "an edit with no media clears it — callers MUST pass the current media back in");
+
+        // Doing it correctly: carry the existing media through, and it survives.
+        let kept = build_feed(vec![post, ev(1, 200, EventKind::Edit {
+            target: pid, body: "beach day!".into(),
+            media: photos.clone(), music: None, mute_video: false,
+        })], 500, None, None);
+        assert_eq!(kept[0].body, "beach day!");
+        assert_eq!(kept[0].media, photos, "re-supplied media must be preserved across an edit");
+    }
+
+    /// Only the author can edit — a re-point of someone else's post must be ignored.
+    #[test]
+    fn a_non_author_edit_cannot_change_media() {
+        let photos = vec!["ref-a".to_string()];
+        let post = post_with_media(1, 100, photos.clone());
+        let pid = post.id.clone();
+
+        let feed = build_feed(vec![post, ev(2, 200, EventKind::Edit {
+            target: pid, body: "hijacked".into(),
+            media: vec!["attacker-ref".into()], music: None, mute_video: false,
+        })], 500, None, None);
+
+        assert_eq!(feed[0].body, "beach day", "a stranger's edit must not apply");
+        assert_eq!(feed[0].media, photos, "and must not re-point the media");
+    }
+}
+
+#[cfg(test)]
 mod poll_tests {
     use super::*;
 

@@ -2124,9 +2124,26 @@ object HavenNet : InboundListener {
     }
 
     /** Edit your own post's text; broadcasts the edit event. */
-    fun editPost(circleId: String, postId: String, body: String) {
+    /**
+     * Edit your own post or message.
+     *
+     * [media] and [music] REPLACE what the item currently carries — the reducer does not merge, so
+     * omitting them strips the item for the whole circle. This defaulted to `emptyList()` and the
+     * circle-post editor called it without arguments, which meant changing a caption silently
+     * deleted every photo, video and track off that post on every member's device. Callers editing
+     * an item that has attachments must pass its CURRENT media back in. (Apple's DM edit passes an
+     * empty array too, but its post editor threads the full array through — the divergence was
+     * Android routing both paths through this one function.)
+     */
+    fun editPost(
+        circleId: String,
+        postId: String,
+        body: String,
+        media: List<String> = emptyList(),
+        music: uniffi.haven_ffi.TrackRefFfi? = null,
+    ) {
         val env = runCatching {
-            social.edit(circleId, postId, body, emptyList(), null, false, nowMs())
+            social.edit(circleId, postId, body, media, music, false, nowMs())
         }.getOrNull() ?: return
         afterAuthor(circleId, env)
     }

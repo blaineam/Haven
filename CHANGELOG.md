@@ -13,6 +13,23 @@ Exploratory work on outliving the infrastructure Haven doesn't own. **Nothing he
 behavior** — the discovery layer is behind a flag that defaults to off, and the push relay keeps its
 current default.
 
+### Added
+
+- **"Re-optimize media I already shared" now works on Windows/Linux/macOS desktop** (Settings ▸
+  Advanced ▸ Storage), alongside "Clean up unused media". The compression work above only ever
+  applied to the *next* thing you post; everything already out there stayed exactly as big as it
+  was, on every member's device. This is the lever for that: it re-encodes photos you shared, then
+  re-shares them, so the whole circle gets the smaller copy. Two clicks by design — the first
+  measures and tells you what it found, the second commits — and it does at most 25 items per click,
+  can be stopped between items, and refuses to start if the disk is nearly full.
+- **Desktop covers photos only, and says so.** The desktop app has no video encoder of its own: all
+  its media processing happens in the WebView, whose only encoder produces WebM/VP8 — a format
+  iPhone cannot play. Re-encoding a video here would take a clip every member can currently watch
+  and replace it with one Apple devices cannot open, which is worse than leaving it alone. So videos
+  and voice notes are *counted and reported* ("N videos can't be re-optimized on desktop — use
+  Haven on your phone for those") but never rewritten. Photos have no such problem and are handled
+  in full.
+
 ### Changed
 
 - **Photos and videos you send are much smaller, on every platform.** "Auto-optimize" used to cap
@@ -32,6 +49,14 @@ current default.
 
 ### Fixed
 
+- **Editing a caption on desktop silently removed the post's photos, for everybody.** An edit event
+  carries the post's whole attachment list and replaces what was there — it is not a patch — and the
+  desktop client was sending an empty list. So fixing a typo detached every photo on the post, for
+  every member of the circle. The current attachments are now re-sent unchanged; only the text moves.
+  (iPhone and Android were always correct here.)
+- **A stopped or out-of-disk re-optimize run now tells you it stopped.** The run ends by
+  re-measuring, and re-measuring cleared the message it had just set — so "Stopped." and "not enough
+  free space to re-encode safely" were both wiped before they could be read.
 - **Android and Windows/Linux desktop kept trying to reach a relay at an address that could not
   work.** A relay hosted inside the app announced every local network address it had. To someone on
   the same Wi-Fi those are the fast path; to everyone else a `192.168.4.x` address is simply

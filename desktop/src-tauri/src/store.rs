@@ -293,6 +293,16 @@ pub struct Prefs {
     /// on-disk storage_name into the sweep keep-sets. Mirrors iOS `PinnedMediaStore`.
     #[serde(default)]
     pub pinned_media: Vec<String>,
+    /// DON'T-RETRY set for "re-optimize media I already shared" (see `reoptimize.rs`): refs whose
+    /// re-encode FAILED, or came back no smaller than the original.
+    ///
+    /// Persisted because otherwise every scan would re-decide the same thing forever, burning a
+    /// decrypt-and-probe per blob per tap for an answer we already have. BOUNDED
+    /// (`reoptimize::SKIP_SET_LIMIT`) because an unbounded don't-retry list is just a slower leak.
+    /// DEVICE-LOCAL and never synced: it records what THIS machine's encoder could not improve, which
+    /// is not a fact about the account.
+    #[serde(default)]
+    pub reoptimize_skipped: Vec<String>,
     /// Stories the user chose to KEEP — held on their own profile after the 24h story window closes.
     ///
     /// A story is an ordinary post with a 24h retention, so the event itself is purged on schedule

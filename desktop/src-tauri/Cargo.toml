@@ -70,6 +70,15 @@ dirs = "5"
 base64 = "0.22"
 log = "0.4"
 
+# Free-space query for the re-optimize headroom guard (see reoptimize::free_space_bytes). Both are
+# already in the dependency tree via tauri, so this costs no extra compilation — and it is a far
+# smaller thing to depend on than the alternative of shelling out or of vendoring a disk-usage crate.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
+
 [features]
 # Default to a custom binary protocol for the heavier media payloads later.
 default = ["custom-protocol"]

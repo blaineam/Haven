@@ -26,6 +26,25 @@ final class RelayHost: ObservableObject {
     @Published private(set) var nodeId = ""
 
     private var handle: RelayServerHandle?
+    /// The same handle, reachable OFF the main actor.
+    ///
+    /// RelayHost is @MainActor, so every local-store accessor below used to force its caller onto the
+    /// main thread — and those accessors do file I/O. The mailbox poll's own-relay branch lists the
+    /// store and then reads EVERY unseen key through them, which on a freshly-enabled relay means the
+    /// entire store, synchronously, on the main thread. That is the "unresponsive since I turned the
+    /// relay on" report, and why the hang counter climbs many times a second rather than once per
+    /// sync tick. The Rust side is internally locked, so the only thing needing protection here is the
+    /// pointer itself, which changes just at start/stop.
+    private static let handleLock = NSLock()
+    nonisolated(unsafe) private static var sharedHandle: RelayServerHandle?
+    nonisolated private static func currentHandle() -> RelayServerHandle? {
+        handleLock.lock(); defer { handleLock.unlock() }
+        return sharedHandle
+    }
+    private func setHandle(_ h: RelayServerHandle?) {
+        handle = h
+        Self.handleLock.lock(); Self.sharedHandle = h; Self.handleLock.unlock()
+    }
     private let d = UserDefaults.standard
     private let enabledKey = "haven.relay.host.enabled"
     private let maxAgeKey = "haven.relay.host.mediaMaxAgeDays"
@@ -98,7 +117,7 @@ final class RelayHost: ObservableObject {
         let h = RelayServerHandle.attachWithLimits(node: node, dir: storeDir,
                                                    mediaMaxAgeDays: UInt32(max(0, mediaMaxAgeDays)),
                                                    mediaMaxBytes: mediaMaxBytes)
-        handle = h
+        setHandle(h)
         nodeId = h.nodeIdHex()   // == the account node id now (the relay shares the node)
         serving = true
         RelayMailboxStore.shared.unforget(nodeId)   // hosting is an explicit adoption of our own relay
@@ -180,13 +199,17 @@ final class RelayHost: ObservableObject {
 
     /// Store one of OUR OWN sealed events/media into the in-process mailbox directly (no iroh
     /// self-connection). Returns false if we aren't currently hosting.
-    func localPut(_ key: String, _ data: Data) -> Bool { handle?.localPut(key: key, data: data) ?? false }
-    func localHas(_ key: String) -> Bool { handle?.localHas(key: key) ?? false }
+    nonisolated func localPut(_ key: String, _ data: Data) -> Bool {
+        Self.currentHandle()?.localPut(key: key, data: data) ?? false
+    }
+    nonisolated func localHas(_ key: String) -> Bool { Self.currentHandle()?.localHas(key: key) ?? false }
     /// Read a blob from our OWN hosted mailbox (a sibling device's / friend's upload), without dialing
     /// ourselves — the host can't poll its own relay over iroh (self-dial guard), so it reads locally.
-    func localGet(_ key: String) -> Data? { handle?.localGet(key: key) }
+    nonisolated func localGet(_ key: String) -> Data? { Self.currentHandle()?.localGet(key: key) }
     /// Keys under `prefix` in our own mailbox, so the host can ingest what others uploaded to it.
-    func localList(_ prefix: String) -> [String] { handle?.localList(prefix: prefix) ?? [] }
+    nonisolated func localList(_ prefix: String) -> [String] {
+        Self.currentHandle()?.localList(prefix: prefix) ?? []
+    }
     /// Refresh the liveness of `keys` in our OWN hosted mailbox (the daily refresh can't TOUCH
     /// itself over iroh — self-dial guard). Returns the keys the store lacks (re-PUT via localPut);
     /// empty when not hosting so a stopped relay never triggers a local re-upload storm.
@@ -197,7 +220,7 @@ final class RelayHost: ObservableObject {
 
     private func stop() {
         handle?.disable()      // detach the relay from the node's endpoint
-        handle = nil           // releases the FFI handle (best-effort; OS reclaims on exit)
+        setHandle(nil)         // releases the FFI handle (best-effort; OS reclaims on exit)
         serving = false
         nodeId = ""
         PlatformIdle.disabled = false

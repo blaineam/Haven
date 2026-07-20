@@ -1252,13 +1252,30 @@ enum SharedStore {
                     // friend uploaded to it (the previously-missing read-own-relay path).
                     if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
                         let localKeys = RelayHost.shared.localList(prefix)
-                        let fresh = localKeys.filter { !seenContains($0) }
-                        HavenLog.relay("poll OWN relay \(cid): \(localKeys.count) keys, \(fresh.count) new")
-                        for key in fresh {
-                            // Mark seen only once the bytes are in hand, so a failed read is
-                            // retried on the next poll instead of being skipped forever.
-                            if let data = RelayHost.shared.localGet(key) { markSeen(key); out.append((cid, data)) }
-                        }
+                        var fresh = localKeys.filter { !seenContains($0) }
+                        // BOUND the pass. On a freshly-enabled relay nothing is in the seen-set, so
+                        // "fresh" is the WHOLE store — thousands of envelopes — and this loop used to
+                        // read every one of them synchronously ON THE MAIN THREAD (SharedStore is
+                        // @MainActor and RelayHost was too). That is why enabling the relay made the
+                        // app unresponsive within seconds rather than gradually: one poll could block
+                        // main for thousands of file reads back to back. The remainder is picked up by
+                        // the next poll — ingestion is idempotent and the seen-set carries across.
+                        let cap = 200
+                        let deferred = max(0, fresh.count - cap)
+                        if deferred > 0 { fresh = Array(fresh.prefix(cap)) }
+                        HavenLog.relay("poll OWN relay \(cid): \(localKeys.count) keys, \(fresh.count) new\(deferred > 0 ? " (+\(deferred) next poll)" : "")")
+                        // Read OFF the main actor — RelayHost's accessors are nonisolated precisely so
+                        // this file I/O doesn't have to happen on the thread drawing the UI.
+                        let read: [(String, Data)] = await Task.detached(priority: .utility) {
+                            var acc: [(String, Data)] = []
+                            for key in fresh {
+                                if let data = RelayHost.shared.localGet(key) { acc.append((key, data)) }
+                            }
+                            return acc
+                        }.value
+                        // Mark seen only once the bytes are in hand, so a failed read is retried on the
+                        // next poll instead of being skipped forever.
+                        for (key, data) in read { markSeen(key); out.append((cid, data)) }
                         continue
                     }
                     guard let c = await RelayClients.client(node) else { continue }

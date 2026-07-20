@@ -477,10 +477,34 @@ enum SharedStore {
         // OFF the main thread — the serial backup queue runs these back-to-back.
         let sealedURL = url.deletingLastPathComponent()
             .appendingPathComponent(".seal-\(ref).tmp")
-        defer { try? FileManager.default.removeItem(at: sealedURL) }
-        let sealedOK = await Task.detached(priority: .utility) { () -> Bool in
-            social.sealCircleMediaFile(circleId: circleId, inPath: url.path, outPath: sealedURL.path)
-        }.value
+        // REUSE an existing seal rather than making a new one per attempt. Two reasons, and the first
+        // is a correctness bug, not an optimisation:
+        //
+        // 1. Sealing is NOT byte-stable. The envelope carries per-recipient key material, so its size
+        //    moves as device rosters arrive (observed on one 297 MB video across retries: 297496263,
+        //    297487820, 297498198 bytes) — and even with an identical recipient set the nonce differs,
+        //    so the bytes change while the LENGTH stays the same. A resumed chunked upload skips the
+        //    windows already stored and sends the rest from the NEW seal, producing a blob that
+        //    reassembles to the right length and decrypts to nothing. The same-length case is the
+        //    common one, so this would corrupt silently and look like "media won't open".
+        // 2. Re-sealing 297 MB on every retry, every ~90s, for an upload that keeps failing, is a
+        //    staggering amount of CPU and disk for no gain.
+        //
+        // `seal_circle_media_file` writes `<out>.part` and renames, so a file AT this path is a
+        // COMPLETE seal — never a half-written one. Stale seals are bounded below.
+        let existing = (try? sealedURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]))
+        var sealedOK = false
+        if let existing, (existing.fileSize ?? 0) > 0,
+           let made = existing.contentModificationDate,
+           Date().timeIntervalSince(made) < 24 * 3600 {
+            HavenLog.sync("backup ref=\(ref): reusing the existing seal (stable bytes → resume is safe)")
+            sealedOK = true
+        } else {
+            if existing != nil { try? FileManager.default.removeItem(at: sealedURL) }   // stale → re-seal
+            sealedOK = await Task.detached(priority: .utility) { () -> Bool in
+                social.sealCircleMediaFile(circleId: circleId, inPath: url.path, outPath: sealedURL.path)
+            }.value
+        }
         guard sealedOK,
               let sealedSize = (try? FileManager.default.attributesOfItem(atPath: sealedURL.path)[.size] as? Int) ?? nil
         else { HavenLog.sync("backup SEAL-FAIL ref=\(ref)"); MediaBackupBackoff.recordStalled(ref); return false }
@@ -561,7 +585,14 @@ enum SharedStore {
         else { MediaBackupBackoff.recordLanded(ref) }
         // The ring's job is done the moment the ledger can answer; leaving the entry behind
         // would keep a finished upload showing as in-flight.
-        if landed { MediaUploadProgress.shared.finish(ref) }
+        if landed {
+            MediaUploadProgress.shared.finish(ref)
+            // Drop the seal ONLY on success. Deleting it on every exit (the old unconditional defer)
+            // is what forced a fresh, byte-different seal on each retry. A failed attempt keeps it so
+            // the next one resumes against identical bytes; the 24h staleness check above bounds it,
+            // and the scratch sweep reclaims anything abandoned.
+            try? FileManager.default.removeItem(at: sealedURL)
+        }
         return landed
     }
 

@@ -311,6 +311,7 @@ targets:
     deploymentTarget: "14.0"
     sources:
       - path: HavenApp/MediaUploadPlan.swift
+      - path: HavenApp/RelayAddress.swift
       - path: HavenLogicTests
     settings:
       base:

@@ -562,6 +562,20 @@ struct RelaysView: View {
                 }
                 Spacer()
             }
+            // A relay can be perfectly reachable from HERE and reach nobody you share with — a
+            // Tailscale or LAN address works for its owner and resolves for no one else. That
+            // combination is invisible without saying it: everything looks green while your posts
+            // land somewhere your circle cannot fetch from. Loudest when it is also the default,
+            // because the default is where posts and media go.
+            if privateOnly(e) {
+                Label(isDefault
+                          ? "Only your devices can reach this — and it's your default, so posts and photos go here. Pick a relay your circle can reach."
+                          : "Only your own devices can reach this address.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(isDefault ? .orange : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             HStack(spacing: 8) {
                 if e.active {
                     Button { store.forget(nodeHex: e.hex) } label: { Label("Deactivate", systemImage: "pause.fill") }
@@ -590,6 +604,14 @@ struct RelaysView: View {
             .labelStyle(.titleAndIcon)
         }
         .padding(.vertical, 4)
+    }
+
+    /// True when this relay advertises HTTP addresses and NONE of them can be reached from another
+    /// network. An iroh-only relay (no HTTP at all) is not flagged — it has no misleading fast path,
+    /// which is exactly why the Dockerised NAS relay always behaved better than an in-app Mac one.
+    private func privateOnly(_ e: RelayEntry) -> Bool {
+        guard !e.isS3, let urls = e.httpUrls, !urls.isEmpty else { return false }
+        return !urls.contains { RelayAddress.reachableByOthers($0) }
     }
 
     private func statusLine(_ e: RelayEntry, isSelf: Bool, proven: Bool, backedOff: Bool) -> String {

@@ -645,18 +645,31 @@ final class RelayMailboxStore: ObservableObject {
         return (usable, t)
     }
 
-    /// Is this URL worth trying from where we are? Public hosts always; a private address only when
-    /// one of our own interfaces sits on the same /24.
+    /// Is this URL worth trying from where we are? Public hosts always; an address that only works
+    /// inside some private network only when we are demonstrably inside that same network.
+    ///
+    /// TWO kinds of "private", and they need different tests:
+    ///
+    ///  - **RFC1918** (`10/8`, `172.16/12`, `192.168/16`) — ordinary LANs, which are subnetted, so
+    ///    "are we on the same /24" is a good proxy for "can we reach it".
+    ///
+    ///  - **CGNAT `100.64.0.0/10`** — what Tailscale (and carrier NAT) hands out. The /24 test is
+    ///    WRONG here: Tailscale assigns every device a /32 out of one flat /10, so two peers on the
+    ///    same tailnet almost never share a /24 and the check rejects addresses that work perfectly.
+    ///    Membership of the /10 at all is the honest signal available locally.
+    ///
+    /// This mattered in practice: a Mac relay hosted in-app announced its Tailscale address, that
+    /// relay became someone's DEFAULT, and every post and photo went to an address no one outside
+    /// the tailnet could resolve — silently, because CGNAT is not RFC1918 and sailed past the filter
+    /// that catches `192.168.x`. Same failure as the LAN case, wearing an address that looks public.
+    /// The rules live in `RelayAddress` (dependency-free, so `HavenLogicTests` can cover them).
     static func urlPlausiblyReachable(_ url: String) -> Bool {
-        guard let host = URL(string: url)?.host else { return false }
-        let parts = host.split(separator: ".").compactMap { Int($0) }
-        guard parts.count == 4 else { return true }   // a hostname/domain — assume routable
-        let isPrivate = parts[0] == 10
-            || (parts[0] == 172 && (16...31).contains(parts[1]))
-            || (parts[0] == 192 && parts[1] == 168)
-        guard isPrivate else { return true }
-        let ourPrefixes = Set(RelayHost.lanIPv4s().map { $0.split(separator: ".").prefix(3).joined(separator: ".") })
-        return ourPrefixes.contains(parts.prefix(3).map(String.init).joined(separator: "."))
+        RelayAddress.plausiblyReachable(url, ourIPv4s: RelayHost.lanIPv4s())
+    }
+
+    /// Can a member on some OTHER network fetch from this URL? See `RelayAddress.reachableByOthers`.
+    static func urlReachableByOthers(_ url: String) -> Bool {
+        RelayAddress.reachableByOthers(url)
     }
 
     /// Stamp a relay as just-seen (a successful op). Cheap; persisted so "last seen" survives a restart.

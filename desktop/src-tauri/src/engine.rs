@@ -2672,8 +2672,22 @@ impl Engine {
         }
     }
 
-    pub fn edit_post(self: &Arc<Self>, circle_id: String, target: String, body: String) {
-        if let Ok(env) = self.social.edit(circle_id.clone(), target, body, vec![], None, false, now_ms()) {
+    /// Edit your own post or message.
+    ///
+    /// `media` and `music` REPLACE what the item currently carries — the reducer assigns rather than
+    /// merges (`haven-p2p` `social.rs`, `it.media = media.clone()`), and there are tests there
+    /// pinning that. This used to pass `vec![], None` unconditionally, and both call sites in the UI
+    /// (the feed editor and the DM editor) used it, so correcting a typo in a caption deleted every
+    /// photo, video and song from that item on every member's device.
+    pub fn edit_post(
+        self: &Arc<Self>,
+        circle_id: String,
+        target: String,
+        body: String,
+        media: Vec<String>,
+        music: Option<TrackRefFfi>,
+    ) {
+        if let Ok(env) = self.social.edit(circle_id.clone(), target, body, media, music, false, now_ms()) {
             self.after_author(&circle_id, &env);
         }
     }

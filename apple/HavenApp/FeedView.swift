@@ -860,8 +860,14 @@ final class FeedStore: ObservableObject {
     }
 
     /// Edit one of your own messages in a specific (DM) circle.
-    func editMessage(in circleId: String, _ id: String, _ body: String) {
-        guard let social, let env = try? social.edit(circleId: circleId, target: id, body: body, media: [], music: nil, muteVideo: false, createdAt: now()) else { return }
+    ///
+    /// `media` and `music` REPLACE what the message carries — the reducer assigns rather than merges
+    /// (see the tests in `haven-p2p`'s `social.rs`). This defaulted to empty, so editing the text of
+    /// a DM that had a photo or a song deleted it for both people. DMs carry attachments exactly
+    /// like posts do; the empty array was only ever right for a message that had none.
+    func editMessage(in circleId: String, _ id: String, _ body: String,
+                     media: [String] = [], music: TrackRefFfi? = nil) {
+        guard let social, let env = try? social.edit(circleId: circleId, target: id, body: body, media: media, music: music, muteVideo: false, createdAt: now()) else { return }
         broadcastEvent(circleId, env); postTick += 1; refresh()
     }
 

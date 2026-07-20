@@ -2173,7 +2173,9 @@ function editPostDialog(it, circleId) {
   ta.value = it.body;
   modal(el("div", {}, el("h2", {}, "Edit post"), ta,
     el("div", { class: "row", style: "margin-top:12px;justify-content:flex-end" },
-      el("button", { class: "btn primary", onclick: async () => { await invoke("edit_post", { circleId, target: it.id, body: ta.value.trim() }); $("#modal-root").replaceChildren(); } }, "Save"))));
+      // media/music are passed back UNCHANGED: an edit replaces the arrays rather than merging, so
+      // omitting them here deleted every photo and song off the post for the whole circle.
+      el("button", { class: "btn primary", onclick: async () => { await invoke("edit_post", { circleId, target: it.id, body: ta.value.trim(), media: it.media || [], music: it.music || null }); $("#modal-root").replaceChildren(); } }, "Save"))));
 }
 
 function newCircleDialog() {
@@ -2952,6 +2954,11 @@ async function renderThread(root, dm) {
   try { const rs = await invoke("relay_status"); relayReachable = !!(rs.hosting || rs.relay_active || (rs.has_relay && rs.internet_active)); } catch (_) {}
   let secretOn = false;
   let editingId = null;
+  // The attachments of the message being edited. Held alongside the id because an edit REPLACES the
+  // media array — sending the new text without these strips the photo off the message for both
+  // people in the thread.
+  let editingMedia = [];
+  let editingMusic = null;
   const chat = el("div", { class: "chat" });
   for (const m of msgs) {
     // A `geo:` ref renders as a map chip, not media (otherwise a broken tile in the bubble).
@@ -3032,6 +3039,8 @@ async function renderThread(root, dm) {
   const editBar = el("div", { class: "edit-bar", style: "display:none" });
   const beginEdit = (m) => {
     editingId = m.id;
+    editingMedia = m.media || [];
+    editingMusic = m.music || null;
     input.value = m.body; autoGrow(); input.focus();
     editBar.style.display = "";
     editBar.replaceChildren(
@@ -3056,10 +3065,10 @@ async function renderThread(root, dm) {
     const t = input.value.trim();
     // A song on its own is a valid message (the engine's guard allows it), so don't require text.
     if (!t && !pendingMusic) return;
-    if (editingId) {   // saving an edit — edits don't carry a track
+    if (editingId) {   // saving an edit — carry the message's existing attachments through
       if (!t) return;
-      await invoke("edit_post", { circleId: dm.id, target: editingId, body: t });
-      editingId = null; editBar.style.display = "none";
+      await invoke("edit_post", { circleId: dm.id, target: editingId, body: t, media: editingMedia, music: editingMusic });
+      editingId = null; editingMedia = []; editingMusic = null; editBar.style.display = "none";
     } else {
       await invoke("send_dm", { circleId: dm.id, body: t ? (secretOn ? SECRET_MARKER + t : t) : "", media: [], music: pendingMusic });
       pendingMusic = null; drawDmMusic();

@@ -368,8 +368,18 @@ pub fn unreact(engine: Eng, circle_id: String, target: String, emoji: String) {
 }
 
 #[tauri::command]
-pub fn edit_post(engine: Eng, circle_id: String, target: String, body: String) {
-    engine.edit_post(circle_id, target, body);
+pub fn edit_post(
+    engine: Eng,
+    circle_id: String,
+    target: String,
+    body: String,
+    // The caller MUST pass the item's current attachments back in — an edit replaces the media
+    // array rather than merging it. Optional only so an older UI bundle can't fail to invoke;
+    // `None` still means "strip", which is why both call sites in app.js pass the real values.
+    media: Option<Vec<String>>,
+    music: Option<TrackInput>,
+) {
+    engine.edit_post(circle_id, target, body, media.unwrap_or_default(), music.map(|m| m.into_ffi()));
 }
 
 #[tauri::command]

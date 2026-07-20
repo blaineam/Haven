@@ -384,6 +384,8 @@ struct DMThreadView: View {
     @State private var text = ""
     @State private var secret = false
     @State private var editingId: String?      // editing one of my sent messages
+    @State private var editingMedia: [String] = []          // its attachments, preserved across the edit
+    @State private var editingTrack: TrackRefFfi?           // and its song
     @State private var disappearSecs: UInt64?  // disappearing-message mode (nil = off)
     @State private var attachedMedia: [String] = []
     @State private var attachedTrack: TrackRefFfi?
@@ -654,6 +656,10 @@ struct DMThreadView: View {
 
     private func beginEdit(_ m: FeedItemFfi) {
         editingId = m.id
+        // Held so `send()` can hand them back: an edit REPLACES the media array rather than merging,
+        // so saving without them strips the photo or song off the message for both people.
+        editingMedia = m.media
+        editingTrack = m.music
         text = m.body
         secret = false
         focused = true
@@ -763,8 +769,8 @@ struct DMThreadView: View {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if let id = editingId {   // saving an edit
             guard !t.isEmpty else { return }
-            store.editMessage(in: circleId, id, t)
-            editingId = nil; text = ""; focused = false
+            store.editMessage(in: circleId, id, t, media: editingMedia, music: editingTrack)
+            editingId = nil; editingMedia = []; editingTrack = nil; text = ""; focused = false
             return
         }
         guard !t.isEmpty || !attachedMedia.isEmpty || attachedTrack != nil else { return }

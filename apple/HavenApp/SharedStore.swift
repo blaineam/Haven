@@ -1062,15 +1062,15 @@ enum SharedStore {
     // circle feed, all burned on crypto for duplicates the engine then dropped). Guarded by a lock
     // (poll/upload run on detached tasks); writes are debounced to one file save per burst.
     private static let seenLock = NSLock()
-    private static var seenLoaded = false
-    private static var seenMailbox = Set<String>()
-    private static var seenSavePending = false
-    private static var seenURL: URL {
+    nonisolated(unsafe) private static var seenLoaded = false
+    nonisolated(unsafe) private static var seenMailbox = Set<String>()
+    nonisolated(unsafe) private static var seenSavePending = false
+    nonisolated private static var seenURL: URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("haven-mailbox-seen.txt")
     }
-    private static func withSeen<T>(_ body: (inout Set<String>) -> T) -> T {
+    nonisolated private static func withSeen<T>(_ body: (inout Set<String>) -> T) -> T {
         seenLock.lock(); defer { seenLock.unlock() }
         if !seenLoaded {
             seenLoaded = true
@@ -1080,7 +1080,7 @@ enum SharedStore {
         }
         return body(&seenMailbox)
     }
-    private static func seenContains(_ key: String) -> Bool { withSeen { $0.contains(key) } }
+    nonisolated private static func seenContains(_ key: String) -> Bool { withSeen { $0.contains(key) } }
     /// Record a key as seen and schedule a debounced save (one write per burst, off the caller).
     private static func markSeen(_ key: String) {
         let scheduleSave: Bool = withSeen { set in
@@ -1251,8 +1251,21 @@ enum SharedStore {
                     // (self-dial guard), so this is how the host ingests what a sibling device or a
                     // friend uploaded to it (the previously-missing read-own-relay path).
                     if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
-                        let localKeys = RelayHost.shared.localList(prefix)
-                        var fresh = localKeys.filter { !seenContains($0) }
+                        let host = RelayHost.shared
+                        // LIST and FILTER off-main too, not just the reads. `localList` enumerates the
+                        // whole circle prefix — one real store here holds 7,557 keys in a single
+                        // circle — and the seen-set filter walks every one of them. Leaving those two
+                        // on the main actor meant that even with nothing new to fetch, every poll
+                        // still cost ~10k directory entries plus 10k set lookups on the thread drawing
+                        // the UI, per circle. Fast enough to hide on an M4; not on an M1 with a real
+                        // store behind it. The seen-set is NSLock-guarded and always was — it just
+                        // wasn't declared callable from off the main actor.
+                        let scan: (all: Int, fresh: [String]) = await Task.detached(priority: .utility) {
+                            let all = host.localList(prefix)
+                            return (all.count, all.filter { !seenContains($0) })
+                        }.value
+                        var fresh = scan.fresh
+                        let localKeys = scan.all
                         // BOUND the pass. On a freshly-enabled relay nothing is in the seen-set, so
                         // "fresh" is the WHOLE store — thousands of envelopes — and this loop used to
                         // read every one of them synchronously ON THE MAIN THREAD (SharedStore is
@@ -1263,14 +1276,9 @@ enum SharedStore {
                         let cap = 200
                         let deferred = max(0, fresh.count - cap)
                         if deferred > 0 { fresh = Array(fresh.prefix(cap)) }
-                        HavenLog.relay("poll OWN relay \(cid): \(localKeys.count) keys, \(fresh.count) new\(deferred > 0 ? " (+\(deferred) next poll)" : "")")
+                        HavenLog.relay("poll OWN relay \(cid): \(localKeys) keys, \(fresh.count) new\(deferred > 0 ? " (+\(deferred) next poll)" : "")")
                         // Read OFF the main actor — RelayHost's accessors are nonisolated precisely so
                         // this file I/O doesn't have to happen on the thread drawing the UI.
-                        // Capture the accessor ONCE on the main actor rather than touching
-                        // `RelayHost.shared` — a @MainActor singleton — from inside the detached task.
-                        // Reaching across the actor boundary there is exactly the kind of thing that
-                        // compiles under Swift 5 isolation checking and misbehaves at runtime.
-                        let host = RelayHost.shared
                         let read: [(String, Data)] = await Task.detached(priority: .utility) {
                             var acc: [(String, Data)] = []
                             for key in fresh {

@@ -1084,6 +1084,23 @@ enum SharedStore {
             }
         }
         HavenLog.relay("media restore \(ref.prefix(12)): found via \(src) (\(blob.count)B) but OPEN FAILED for all \(circleIds.count) circles")
+        // The bytes are THERE and cannot be decrypted — the stored copy is bad, not missing. Until now
+        // that was a permanent dead end: every cycle re-fetched the same unopenable blob, failed
+        // identically, and nothing ever replaced it.
+        //
+        // The most likely way a blob gets into this state is a resumed chunked upload that stitched
+        // windows from two DIFFERENT seals: sealing is not byte-stable (per-recipient key material
+        // plus a fresh nonce), so the result reassembles to exactly the right length and decrypts to
+        // nothing. That is fixed at the source now — a seal is reused across retries — but blobs
+        // written during the window are still out there, and one is already in the field.
+        //
+        // If we hold the plaintext we can repair it: a FORCED backup re-seals and overwrites the
+        // stored copy. If we don't, there is nothing to do here but say so — the author's device is
+        // the only one that can fix it.
+        if MediaStore.shared.hasLocalFile(ref), let cid = circleIds.first {
+            HavenLog.relay("media restore \(ref.prefix(12)): we hold the plaintext — re-sealing and overwriting the bad copy")
+            Task { @MainActor in _ = await SharedStore.backup(ref: ref, circleId: cid, social: social, force: true) }
+        }
         return nil
     }
 

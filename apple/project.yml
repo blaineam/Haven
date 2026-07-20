@@ -112,7 +112,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "1.1.2"
+        MARKETING_VERSION: "1.1.3"
         CURRENT_PROJECT_VERSION: "291"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         ENABLE_USER_SCRIPT_SANDBOXING: YES
@@ -182,7 +182,7 @@ targets:
         PRODUCT_NAME: Haven
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "1.1.2"
+        MARKETING_VERSION: "1.1.3"
         CURRENT_PROJECT_VERSION: "291"
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         ENABLE_USER_SCRIPT_SANDBOXING: YES
@@ -223,7 +223,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith.NotificationService
         PRODUCT_MODULE_NAME: HavenNotificationService
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "1.1.2"
+        MARKETING_VERSION: "1.1.3"
         CURRENT_PROJECT_VERSION: "291"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         ENABLE_USER_SCRIPT_SANDBOXING: YES
@@ -255,7 +255,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith.Broadcast
         PRODUCT_MODULE_NAME: HavenBroadcast
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "1.1.2"
+        MARKETING_VERSION: "1.1.3"
         CURRENT_PROJECT_VERSION: "291"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         ENABLE_USER_SCRIPT_SANDBOXING: YES
@@ -291,7 +291,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith.ShareExtension
         PRODUCT_MODULE_NAME: HavenShareExtension
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "1.1.2"
+        MARKETING_VERSION: "1.1.3"
         CURRENT_PROJECT_VERSION: "291"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         ENABLE_USER_SCRIPT_SANDBOXING: YES
@@ -340,7 +340,7 @@ targets:
         # iOS app's Haven.app; the user-facing name is still "Haven" via CFBundleDisplayName.
         PRODUCT_NAME: HavenWatch
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "1.1.2"
+        MARKETING_VERSION: "1.1.3"
         # Keep in lock-step with the host iOS app's build number (Apple requires an embedded
         # watch app to share the companion's version/build).
         CURRENT_PROJECT_VERSION: "291"

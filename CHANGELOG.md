@@ -7,6 +7,41 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.1.3]
+
+### Fixed
+
+- **Hosting a relay made the app crawl — worst on the machines most likely to host one.** Turning on
+  "be my circle's relay" left Haven pegging a CPU core and stuttering constantly; on an M1 Mac it piled
+  up hangs within seconds of starting. Two separate causes, both the app doing the relay's file reads
+  on the thread that draws the screen. Reading everything the relay had just been handed happened in
+  one unbroken burst, so the app froze for as long as it took; and, separately, a routine check of
+  which media the relay already held was reading every file in full merely to ask whether it existed.
+  The first is now spread across passes and done off the drawing thread; the second asks the question
+  without opening anything. A faster Mac hid this rather than escaping it.
+
+- **Uploads that could never finish.** Sending a large photo or video to a relay restarted from the
+  beginning every time it was interrupted — and on a phone, leaving the app *is* an interruption. Past
+  a certain size nothing could ever complete: each attempt threw away what the last one achieved.
+  Uploads now resume where they stopped, so a big video finishes over however many sessions it needs.
+
+- **"Auto-optimize" quietly shipping the original.** If shrinking a video failed for any reason — the
+  app backgrounded mid-export, low disk, an awkward recording format — Haven silently sent the full
+  original instead, which for a 4K clip is hundreds of megabytes nobody asked to upload. It now retries
+  at a smaller size first, and records what it actually sent.
+
+### Added
+
+- **You can see uploads progress now.** A post being stored on a relay showed one motionless arrow
+  whether it was moving, crawling, or permanently stuck. It now shows a real progress ring, and turns
+  orange when an upload has retried enough times to be worth your attention rather than your patience.
+
+- **`haven-relay version`.** A relay is invisible while it seems to work, so a home server could sit on
+  an old build indefinitely with no way to ask what it was running — while the symptoms of an outdated
+  relay look like ordinary "my media won't load". It now answers, and the Docker image tracks the newest
+  release instead of a pinned pre-1.0 one. Re-running the installer is also a working upgrade now: it
+  used to fail outright when the relay was already running, and blamed a missing download for it.
+
 ## [1.1.2]
 
 ### Added

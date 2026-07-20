@@ -77,6 +77,12 @@ struct EditPostSheet: View {
                 .padding(12)
                 .havenGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
+            // Same spinner the composer and the DM composer show. Editing attaches media through
+            // the very same picker, so a 35-second re-encode was just as long here — but the edit
+            // sheet reported nothing at all, so the only visible difference between "encoding" and
+            // "the app has hung" was your patience.
+            MediaProcessingCard()
+
             if !media.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 10) {

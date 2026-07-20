@@ -5207,24 +5207,102 @@ struct PostCard: View {
     /// layer draws. A blurred still is the honest trade: no second decode, and behind a 24pt blur the
     /// difference between a still and a moving copy isn't visible anyway.
     @ViewBuilder private func blurredBackdrop(_ ref: String) -> some View {
-        if let img = backdropSource(ref) {
-            // GeometryReader (not `Color.clear.overlay { … .scaledToFill() }`) so the fill size is
-            // COMPUTED and bounded — see `backdropFill`. `scaledToFill` let the layer size run away on a
-            // narrow source, and a runaway layer is exactly what made the backdrop vanish.
-            GeometryReader { g in
-                let fill = Self.backdropFill(source: img.size, container: g.size)
-                Image(platformImage: img)
-                    .resizable()
-                    .frame(width: fill.width, height: fill.height)
-                    .position(x: g.size.width / 2, y: g.size.height / 2)
-                    .blur(radius: 24, opaque: true)
+        BlurredMediaBackdrop(ref: ref)
+    }
+
+    /// The carousel's per-page backdrop: only pay for it when the page's media actually letterboxes
+    /// inside the shared page shape. (Single media gates on the page frame instead — see `mediaView`.)
+    @ViewBuilder private func pageBackdrop(_ ref: String, containerAspect: CGFloat) -> some View {
+        if letterboxes(ref, in: containerAspect) { blurredBackdrop(ref) }
+    }
+
+    /// The measured width of a post's media column, so a page can span the card rather than shrink to the
+/// media's own shape. `max` because the reducer sees one value per card.
+private struct MediaWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+/// The blurred backdrop itself — SELF-LOADING, which is the whole reason it's a view and not a
+/// `@ViewBuilder` helper reading the thumbnail cache inline.
+///
+/// It used to be exactly that: a cache PEEK evaluated in `PostCard.body`. But nothing ever tells a
+/// card that its thumbnail has since landed — `FeedImage` decodes off-main and swaps the bitmap into
+/// JUST itself, deliberately WITHOUT nudging a feed refresh (that refresh is what used to flash
+/// already-shown media and chop the scroll). So a card whose body ran before its thumbnail was
+/// resident saw an empty cache, drew no backdrop, and was never re-evaluated to notice otherwise.
+/// It stayed flat for the life of the card.
+///
+/// That is the "top posts have no blur behind them" report. The cards you scroll DOWN to are built
+/// after their decode finishes, so they look right; the ones on screen at launch race it and lose.
+/// On a tall Mac window those top cards are also never recycled, so they never got a second chance —
+/// which is why it read as a macOS bug even though the race is the same everywhere.
+///
+/// Holding its own `@State` bitmap keeps the property that made the old design worth having: a
+/// finished decode re-renders this one backdrop, never the feed. Loading is awaited via
+/// `thumbnailAsync`, which decodes off the main thread (and generates a video's poster off-thread),
+/// so the backdrop still never decodes on the scroll hot path.
+private struct BlurredMediaBackdrop: View {
+    let ref: String
+    @State private var img: PlatformImage?
+    /// Which ref `img` belongs to — a lazy cell reused for another post must not show the old blur.
+    @State private var loadedRef: String?
+
+    var body: some View {
+        Group {
+            if let img, loadedRef == ref {
+                // GeometryReader (not `Color.clear.overlay { … .scaledToFill() }`) so the fill size is
+                // COMPUTED and bounded — see `backdropFill`. `scaledToFill` let the layer size run away on a
+                // narrow source, and a runaway layer is exactly what made the backdrop vanish.
+                GeometryReader { g in
+                    let fill = Self.backdropFill(source: img.size, container: g.size)
+                    Image(platformImage: img)
+                        .resizable()
+                        .frame(width: fill.width, height: fill.height)
+                        .position(x: g.size.width / 2, y: g.size.height / 2)
+                        .blur(radius: 24, opaque: true)
+                }
+                .clipped()
+                // Rasterize the blur ONCE instead of re-running it every scroll frame — a 24pt blur
+                // re-composited per frame is what made scrolling past a post chop.
+                .drawingGroup()
+                .allowsHitTesting(false)
             }
-            .clipped()
-            // Rasterize the blur ONCE instead of re-running it every scroll frame — a 24pt blur
-            // re-composited per frame is what made scrolling past a post chop.
-            .drawingGroup()
-            .allowsHitTesting(false)
         }
+        .task(id: ref) {
+            if let cached = Self.cachedSource(ref) { img = cached; loadedRef = ref; return }
+            img = nil; loadedRef = nil
+            // Awaited purely as the completion signal the peek never had. Deliberately the 1200px
+            // bucket — the tile in FRONT of this backdrop decodes exactly that, so `thumbnailAsync`'s
+            // single-flight makes this the same decode rather than a second one. (Asking for the 64px
+            // thumb instead would be a separate cache bucket, i.e. real extra work, and for a video a
+            // whole second poster generation.)
+            _ = await MediaStore.shared.thumbnailAsync(ref, maxDimension: 1200)
+            guard !Task.isCancelled else { return }
+            img = Self.cachedSource(ref)
+            loadedRef = ref
+        }
+    }
+
+    /// The bitmap to blur. Falls back through sizes because the 64px thumb ALONE is not dependable: it
+    /// lives in an NSCache that evicts under pressure (the backdrop would vanish from a post that had
+    /// one a moment ago), and for a video it's nil until the poster finishes generating off-thread.
+    /// The 1200px thumb is already resident — it's what the page itself draws — so the fallback is
+    /// free in the case that matters. Blurring a bigger bitmap costs nothing extra once rasterized.
+    ///
+    /// Cache PEEK only — no decode happens here. The decode is awaited in `.task`, off the main thread.
+    ///
+    /// The 64px thumb is preferred ONLY while it still has pixels to blur. A narrow source collapses its
+    /// minor axis at that size (a 40×1600 sliver thumbs to 2×64), and a 2px-wide bitmap carries no color
+    /// detail a 24pt blur can show — it bands. The 1200px thumb is the page's own bitmap, already resident,
+    /// and holds its shape at any aspect, so it's the better source precisely in the narrow case.
+    private static func cachedSource(_ ref: String) -> PlatformImage? {
+        if let small = MediaStore.shared.cachedThumbnail(ref, maxDimension: 64),
+           min(small.size.width, small.size.height) >= 8 {
+            return small
+        }
+        return MediaStore.shared.cachedThumbnail(ref, maxDimension: 1200)
+            ?? MediaStore.shared.cachedThumbnail(ref, maxDimension: 64)
     }
 
     /// How far past the container a uniform crop-to-fill may spill before we stretch instead.
@@ -5257,40 +5335,6 @@ struct PostCard: View {
         let overflow = max(filled.width / container.width, filled.height / container.height)
         return overflow <= maxBackdropOverflow ? filled : container
     }
-
-    /// The bitmap to blur. Falls back through sizes because the 64px thumb ALONE is not dependable: it
-    /// lives in an NSCache that evicts under pressure (the backdrop would vanish from a post that had
-    /// one a moment ago), and for a video it's nil until the poster finishes generating off-thread.
-    /// The 1200px thumb is already resident — it's what the page itself draws — so the fallback is
-    /// free in the case that matters. Blurring a bigger bitmap costs nothing extra once rasterized.
-    private func backdropSource(_ ref: String) -> PlatformImage? {
-        // Cache PEEK only — the backdrop is a decorative blur, so it must never decode (a main-thread decode
-        // here is the worst place to hitch a scroll, and it caused the flash). It shows once `FeedImage` has
-        // decoded + cached the tile's own 1200px thumbnail; until then the base black/backdrop-less page is fine.
-        //
-        // The 64px thumb is preferred ONLY while it still has pixels to blur. A narrow source collapses its
-        // minor axis at that size (a 40×1600 sliver thumbs to 2×64), and a 2px-wide bitmap carries no color
-        // detail a 24pt blur can show — it bands. The 1200px thumb is the page's own bitmap, already resident,
-        // and holds its shape at any aspect, so it's the better source precisely in the narrow case.
-        if let small = MediaStore.shared.cachedThumbnail(ref, maxDimension: 64),
-           min(small.size.width, small.size.height) >= 8 {
-            return small
-        }
-        return MediaStore.shared.cachedThumbnail(ref, maxDimension: 1200)
-            ?? MediaStore.shared.cachedThumbnail(ref, maxDimension: 64)
-    }
-
-    /// The carousel's per-page backdrop: only pay for it when the page's media actually letterboxes
-    /// inside the shared page shape. (Single media gates on the page frame instead — see `mediaView`.)
-    @ViewBuilder private func pageBackdrop(_ ref: String, containerAspect: CGFloat) -> some View {
-        if letterboxes(ref, in: containerAspect) { blurredBackdrop(ref) }
-    }
-
-    /// The measured width of a post's media column, so a page can span the card rather than shrink to the
-/// media's own shape. `max` because the reducer sees one value per card.
-private struct MediaWidthKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 #if os(macOS)

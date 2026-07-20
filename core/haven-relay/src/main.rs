@@ -47,6 +47,15 @@ fn main() -> Result<()> {
                 std::process::exit(2);
             }
         },
+        // An operator had no way to ask a running relay what it is. That matters more here than for
+        // most CLIs: a relay is invisible while it appears to work, so a box can sit on a build from
+        // before a PROTOCOL change indefinitely — and the symptom of that (a relay authorizing only
+        // the one circle its link granted, pre-1.1.2) looks like "my media isn't on any relay", not
+        // like an out-of-date binary. Both spellings, because `--version` is what everyone tries.
+        Some("version") | Some("-V") | Some("--version") => {
+            println!("haven-relay {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Some("-h") | Some("--help") | None => {
             print_help();
             Ok(())
@@ -71,6 +80,7 @@ fn print_help() {
          haven-relay run --config relay.json      everything from a JSON file\n  \
          haven-relay link                         reprint the saved link + QR for the app\n  \
          haven-relay id                           print this relay's node id\n  \
+         haven-relay version                      print the relay version (are you up to date?)\n  \
          haven-relay service install              auto-start on login/reboot (systemd/launchd/Task)\n  \
          haven-relay service uninstall            remove the auto-start\n  \
          haven-relay make-link --circle <tag> --member <hex> …   (operator helper)\n\n\

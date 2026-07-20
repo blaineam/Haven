@@ -49,7 +49,7 @@ binary, so an update means **rebuilding**:
 ```sh
 docker compose build --no-cache      # re-fetches the newest haven-relay release
 docker compose up -d
-docker compose exec haven-relay haven-relay --version
+docker compose exec haven-relay haven-relay version
 ```
 
 Your relay keeps its identity, circle link and sealed store (they live in the volume), so the node

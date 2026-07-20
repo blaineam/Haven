@@ -267,6 +267,12 @@ impl Node {
                 http: None,
                 retention,
             });
+            // Replay the circles paired members taught this relay BEFORE any link grant is applied,
+            // so a relay whose link grants nothing (or whose operator never re-pastes) still serves
+            // everything it learned last run. `relay_authorize` re-merges after each link grant.
+            if let Some(cfg) = g.as_ref() {
+                blobstore::rehydrate_learned_grants(&root, &cfg.auth);
+            }
             // Stamp the GC-enabled marker(s) now so the 48h first-enable grace clock starts.
             let _ = blobstore::gc_sweep_with(&root, &retention, blobstore::GC_GRACE);
             // Hourly GC for the in-process store. A plain thread (not a tokio task):
@@ -344,8 +350,28 @@ impl Node {
             // DEVICE ids from any device rosters already stored on this relay, so a headless relay
             // that (re)authorizes circles on startup doesn't drop device authorization until the apps
             // re-publish. Signature-verified inside; safe to call on every authorize.
+            // MERGE, never replace: `authorize()` sets this circle's member set to exactly what the
+            // operator's LINK says, so any circle (or extra member) this relay LEARNED from a paired
+            // member — see `RelayAuth::learn` — would silently vanish on every startup and every
+            // reconfigure if it were not re-unioned right here. A relay that forgets what it learned
+            // every restart is the frozen relay all over again.
+            blobstore::rehydrate_learned_grants(&cfg.root, &cfg.auth);
             blobstore::rehydrate_device_rosters(&cfg.root, &cfg.auth);
         }
+    }
+
+    /// Every circle this relay currently serves — link grants and learned grants alike. Operator
+    /// visibility (the headless daemon prints it), never a policy input.
+    pub fn relay_circle_count(&self) -> usize {
+        lock(&self.relay).as_ref().map(|c| lock(&c.auth).circle_count()).unwrap_or(0)
+    }
+
+    /// The circles this relay LEARNED from paired members, as persisted in its data dir.
+    pub fn relay_learned_grants(&self) -> Vec<(String, Vec<String>)> {
+        lock(&self.relay)
+            .as_ref()
+            .map(|c| blobstore::load_learned_grants(&c.root))
+            .unwrap_or_default()
     }
     pub fn relay_deauthorize(&self, circle_id: &str) {
         if let Some(cfg) = lock(&self.relay).as_ref() {

@@ -106,7 +106,25 @@ pub async fn run(cfg: Config) -> Result<()> {
             for g in &link_grants {
                 node.relay_authorize(&g.circle, g.members.clone(), cfg.peers.clone());
             }
-            println!("  authorized {} circle(s) from the link.", link_grants.len());
+            // The link is a PAIRING HANDSHAKE, not a frozen policy. Circles the members taught this
+            // relay (ENROLL — see `RelayAuth::learn`) were merged back in by `relay_authorize`, and
+            // they persist in the data dir across restarts. Before that, a relay authorized its
+            // circles exactly once and answered `ERR forbidden` on every circle created afterwards —
+            // including every `dm:`, which meant DMs had no store-and-forward at all.
+            let learned = node.relay_learned_grants();
+            if !learned.is_empty() {
+                println!("  learned {} additional circle(s) from paired members:", learned.len());
+                for (c, m) in &learned {
+                    println!("    · {} ({} members)", c, m.len());
+                }
+            }
+            println!(
+                "  serving {} circle(s): {} from the link + {} learned. Members may teach this relay \
+                 new circles at any time — no re-pasting.",
+                node.relay_circle_count(),
+                link_grants.len(),
+                learned.len()
+            );
 
             // Mesh replication: pull from each sibling relay every 30s so the mailbox
             // self-heals across the mesh (peers do the same in reverse → eventual set-union).

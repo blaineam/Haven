@@ -54,9 +54,10 @@ threat model. Cons: new code path replacing the mature S3 one; do it once Design
 the tunnel.
 
 > **Shipped** as `core/haven-net/blobstore.rs` on ALPN `haven/blob/1` (verbs: PUT / GET /
-> HAS / LIST, plus TOUCH + AGES for mailbox garbage collection — see the module docs and
-> [`RELAY-AND-DEPLOY.md`](RELAY-AND-DEPLOY.md) "Mailbox garbage collection"), with a plain-
-> HTTP twin of the same store for the cross-NAT media path.
+> HAS / LIST, plus TOUCH + AGES for mailbox garbage collection, and ENROLL so a paired member
+> can teach the relay a circle its link never mentioned — see the module docs and
+> [`RELAY-AND-DEPLOY.md`](RELAY-AND-DEPLOY.md) "Mailbox garbage collection" / "Learning circles
+> after the link"), with a plain-HTTP twin of the same store for the cross-NAT media path.
 
 Both designs preserve the security model: envelopes are **already circle-sealed**, so the
 volunteer (and the tunnel) only ever moves opaque bytes.

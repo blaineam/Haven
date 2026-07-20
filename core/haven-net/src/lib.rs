@@ -178,6 +178,38 @@ impl Node {
         crate::blobstore::BlobClient::over_endpoint(self.endpoint.clone(), self.dial_addr(id))
     }
 
+    /// The LONG-LIVED blob client for `node_hex`, created once and reused.
+    ///
+    /// Every caller must come through here rather than `blob_client`, which mints a fresh client (and
+    /// therefore a fresh, cold connection) each time. A blob connection that is rebuilt keeps starting
+    /// on the DERP relay path and is torn down before iroh can promote it to a direct one — and the
+    /// blob ALPN drops its datagrams on a pure-relay cross-NAT route, so the mailbox simply does not
+    /// work between networks. Reuse is what lets the connection survive long enough to hole-punch.
+    ///
+    /// Bounded at 32: a relay mesh is a handful of peers, so the cap exists only so a pathological
+    /// peer set cannot grow this without limit. Eviction drops the entry (and the last reference to
+    /// its connection) rather than closing anything that might be mid-use.
+    pub async fn blob_client_cached(&self, node_hex: &str) -> Result<Arc<crate::blobstore::BlobClient>> {
+        let bytes = decode_hex32(node_hex)?;
+        let id = EndpointId::from_bytes(&bytes).map_err(|e| anyhow!("{e:?}"))?;
+        let mut cache = self.blob_clients.lock().await;
+        if let Some(c) = cache.get(&id) {
+            return Ok(c.clone());
+        }
+        const MAX_BLOB_CLIENTS: usize = 32;
+        if cache.len() >= MAX_BLOB_CLIENTS {
+            if let Some(k) = cache.keys().next().copied() {
+                cache.remove(&k);
+            }
+        }
+        let c = Arc::new(crate::blobstore::BlobClient::over_endpoint(
+            self.endpoint.clone(),
+            self.dial_addr(id),
+        )?);
+        cache.insert(id, c.clone());
+        Ok(c)
+    }
+
     /// Diagnostic-only: a blob client that dials `node_hex` at an explicit `ip:port` direct
     /// address (no relay, no discovery) — used to bisect identity vs routing failures.
     pub fn blob_client_direct(&self, node_hex: &str, direct: &str) -> Result<crate::blobstore::BlobClient> {
@@ -367,13 +399,17 @@ impl Node {
         // our node id, so it STEALS our DERP relay registration every mesh tick (home-relay flap) and
         // refuses all inbound handshakes while it lives. That single line made relay-path INBOUND to
         // any relay-hosting device effectively dead (dials timed out at 30s; direct dials took ~5ms).
-        let Ok(client) = self.blob_client(peer_node_hex) else { return 0 };
+        // Reuse the CACHED client — see `blob_clients`. Building a fresh one per tick, and closing it
+        // at the end, restarted the connection cold on the DERP relay path every cycle.
+        let Ok(client) = self.blob_client_cached(peer_node_hex).await else { return 0 };
         // Age-preserving pull (shared with BlobServer::sync_pull_from): entries past OUR
         // retention (mailbox TTL; media under the operator's own limits) are never pulled
         // back, and pulled files keep the peer's idle age — so a GC'd entry can't ping-pong
         // between sibling relays forever.
         let pulled = blobstore::pull_missing_from_peer(&root, &client, &retention).await;
-        let _ = client.close().await;
+        // Deliberately NOT closed. An application close abandons whatever path iroh had just
+        // established, so the next tick starts cold on the relay path again and the connection never
+        // lives long enough to go direct. `conn()` re-dials by itself if it genuinely dropped.
         pulled
     }
 

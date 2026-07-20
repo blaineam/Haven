@@ -870,7 +870,9 @@ enum RelayClients {
         // fetches actually complete over the internet. (Peer identity is now our device id; media keys are
         // permissive so they serve regardless, and mailbox auth expands to device ids via the roster.)
         guard let node = FeedStore.shared.transportNode else { return nil }
-        guard let c = try? node.relayClient(relayNodeHex: nodeHex) else {
+        // `relayClient` is async now: it hands back the node's CACHED blob client (shared with the
+        // relay mesh) instead of minting a fresh, cold one per call.
+        guard let c = try? await node.relayClient(relayNodeHex: nodeHex) else {
             RelayHealth.shared.recordFailure(nodeHex)
             HavenLog.relay("dial relay \(nodeHex.prefix(10)) → CONNECT FAIL")
             return nil

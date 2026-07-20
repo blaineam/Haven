@@ -548,7 +548,11 @@ pub fn http_auth_header(seed: Vec<u8>, token: String, method: String, key: Strin
 /// credentials, just the relay's node id. The relay never sees content (blobs are sealed).
 #[derive(uniffi::Object)]
 pub struct RelayClient {
-    inner: BlobClient,
+    /// Shared with the node's per-peer cache (`blob_client_cached`) so the app and the relay mesh use
+    /// ONE warm connection per relay instead of each holding their own. A connection that keeps being
+    /// rebuilt never lives long enough for iroh to promote it to a direct path, which is what left the
+    /// mailbox unable to cross NAT at all.
+    inner: Arc<BlobClient>,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -563,7 +567,7 @@ impl RelayClient {
         let inner = BlobClient::connect(s, &relay_node_hex)
             .await
             .map_err(|e| HavenError::Invalid { msg: format!("relay connect: {e}") })?;
-        Ok(Arc::new(Self { inner }))
+        Ok(Arc::new(Self { inner: Arc::new(inner) }))
     }
 
     /// Store a sealed blob under `key` (e.g. `mailbox/<circle>/<hash>`).
@@ -1062,10 +1066,15 @@ impl HavenNode {
     /// of RelayClient::connect binding a fresh endpoint that cold-starts DERP on every fetch (the reason a
     /// cross-network relay GET timed out at 30s while messaging showed "Connected · Relay"). Reuses the
     /// same endpoint that keeps the messaging/relay path alive, so media fetches actually complete.
-    pub fn relay_client(&self, relay_node_hex: String) -> Result<Arc<RelayClient>, HavenError> {
+    pub async fn relay_client(&self, relay_node_hex: String) -> Result<Arc<RelayClient>, HavenError> {
+        // The CACHED client — see `Node::blob_client_cached`. Building a fresh one per call meant the
+        // connection restarted cold (on the DERP relay path) whenever the caller's own cache dropped
+        // it, and a cold blob connection that is torn down before it can hole-punch never carries
+        // anything cross-NAT.
         let inner = self
             .node
-            .blob_client(&relay_node_hex)
+            .blob_client_cached(&relay_node_hex)
+            .await
             .map_err(|e| HavenError::Invalid { msg: format!("relay client: {e}") })?;
         Ok(Arc::new(RelayClient { inner }))
     }

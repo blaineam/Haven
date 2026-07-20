@@ -2837,18 +2837,34 @@ object HavenNet : InboundListener {
         return tok
     }
 
-    /** URLs peers can reach our HTTP interface at: every non-loopback IPv4 + the optional public URL. */
+    /**
+     * What we tell the circle they can reach this relay's HTTP interface at.
+     *
+     * A configured public URL wins OUTRIGHT — LAN addresses are not appended to it. The operator has
+     * said how members reach this box; adding `192.168.x` behind that only gives every remote member
+     * something to try and time out on, which is precisely the failure the CLI relay never had: it
+     * announces nothing unless told, so callers go straight to the path that works.
+     *
+     * With no public URL we still announce LAN addresses, because a member on the SAME network should
+     * use them — that is the fast local path and it genuinely works. Remote members discard them on
+     * receipt ([httpUrlsFor] keeps a private address only when we are on that /24), so the useless
+     * case is filtered by the side that can actually tell. Mirrors iOS `RelayHost.reachableHttpUrls`.
+     */
     private fun relayHttpUrls(port: Int): List<String> {
+        prefs.getString("relayPublicUrl", null)?.trim()?.takeIf { it.startsWith("http") }
+            ?.let { return listOf(it.trimEnd('/')) }
+        return lanIPv4s().map { "http://$it:$port" }
+    }
+
+    /** Every up, non-loopback, non-link-local IPv4 on this device (iOS `RelayHost.lanIPv4s`). */
+    private fun lanIPv4s(): List<String> {
         val out = LinkedHashSet<String>()
-        // A user-configured public URL (port-forward / reverse proxy / tunnel) goes FIRST — it's the
-        // one that works across the internet; LAN addresses follow for same-network peers.
-        prefs.getString("relayPublicUrl", null)?.trim()?.takeIf { it.startsWith("http") }?.let { out.add(it.trimEnd('/')) }
         runCatching {
             for (ni in java.net.NetworkInterface.getNetworkInterfaces()) {
                 if (!ni.isUp || ni.isLoopback) continue
                 for (addr in ni.inetAddresses) {
-                    if (addr is java.net.Inet4Address && !addr.isLoopbackAddress) {
-                        out.add("http://${addr.hostAddress}:$port")
+                    if (addr is java.net.Inet4Address && !addr.isLoopbackAddress && !addr.isLinkLocalAddress) {
+                        addr.hostAddress?.let { out.add(it) }
                     }
                 }
             }
@@ -3281,8 +3297,9 @@ object HavenNet : InboundListener {
                             // only works while the author happens to be online — which is exactly how
                             // media a few days old became permanently unreachable while fresh media
                             // (author still around) looked fine.
-                            val got = fetchMediaFromRelay(job.circleId, job.ref) ||
-                                (healForbiddenRelays() && fetchMediaFromRelay(job.circleId, job.ref))
+                            val got = (fetchMediaFromRelay(job.circleId, job.ref) ||
+                                (healForbiddenRelays() && fetchMediaFromRelay(job.circleId, job.ref))) &&
+                                acceptFetchedBlob(job.ref)
                             if (got) {
                                 withContext(Dispatchers.Main) { feedVersion.value++ }
                             }
@@ -3398,6 +3415,28 @@ object HavenNet : InboundListener {
     fun isMediaBackedUpAny(ref: String): Boolean {
         ensureLedger()
         return backedUp.any { it.substringAfterLast('|') == ref }
+    }
+
+    /** The node id of the relay THIS device is hosting in-process, or "" when we host none. */
+    fun ownHostedRelayHex(): String = runCatching { relayHost?.nodeIdHex() }.getOrNull().orEmpty()
+
+    /**
+     * Confirmed somewhere a DIFFERENT DEVICE can read it — what "backed up" should have meant.
+     *
+     * [isMediaBackedUpAny] counts our own in-process relay, and writing to that is a LOCAL FILE COPY:
+     * it never crosses the network and cannot fail. So a post whose media only ever reached this
+     * device's own relay showed a confident "backed up" tick while no one else could fetch it — a
+     * user watching checked icons on every post while their friends saw nothing. An indicator that
+     * cannot distinguish "safe" from "only I have it" is worse than none: it is why the failure went
+     * unnoticed for hours.
+     *
+     * Our own relay is excluded even though it MAY be reachable by others (LAN, or a public URL),
+     * because we cannot tell from here — and the honest failure is to under-claim, not over-claim.
+     * iOS `MediaBackupLedger.hasAnyRemote` parity.
+     */
+    fun isMediaBackedUpRemote(ref: String, ownRelayHex: String): Boolean {
+        ensureLedger()
+        return backedUp.any { it.substringAfterLast('|') == ref && it.substringBeforeLast('|') != ownRelayHex }
     }
 
     /** Whether a circle has any relay (or S3) to back media up to — the gate for showing the indicator. */
@@ -3654,8 +3693,11 @@ object HavenNet : InboundListener {
                 // refetching would silently undo the freed space. They re-download only on an explicit
                 // "Download" tap (downloadEvicted clears the eviction first), and are excluded from the
                 // pending metric too (never added to `missing`). Media never evicted still fetches.
-                item.media.forEach { if (!LocalMedia.isSynthetic(it) && !LocalMedia.has(it) && !EvictedMediaStore.contains(it)) missing.putIfAbsent(it, c.id) }
-                item.comments.forEach { cm -> cm.media.forEach { if (!LocalMedia.isSynthetic(it) && !LocalMedia.has(it) && !EvictedMediaStore.contains(it)) missing.putIfAbsent(it, c.id) } }
+                // Skip refs whose relay copy was found and could not be opened (acceptFetchedBlob):
+                // re-fetching them just re-downloads the same unopenable bytes; only the author's
+                // re-seal fixes them, and the set is dropped on restart so a repair is picked up.
+                item.media.forEach { if (!LocalMedia.isSynthetic(it) && !LocalMedia.has(it) && !EvictedMediaStore.contains(it) && !unopenableMedia.contains(it)) missing.putIfAbsent(it, c.id) }
+                item.comments.forEach { cm -> cm.media.forEach { if (!LocalMedia.isSynthetic(it) && !LocalMedia.has(it) && !EvictedMediaStore.contains(it) && !unopenableMedia.contains(it)) missing.putIfAbsent(it, c.id) } }
             }
         }
         SyncMetrics.setPending(missing.size)   // media refs still missing locally (iOS nbMediaPending)
@@ -3710,7 +3752,10 @@ object HavenNet : InboundListener {
         nodes.addAll(allRelays())
         return nodes.sortedByDescending { hex ->
             when {
-                relayEntries[hex]?.httpUrls?.isNotEmpty() == true -> 2
+                // Rank on URLs we could actually USE (httpUrlsFor drops a LAN address we aren't on),
+                // or an unreachable 192.168.x announce still sorts a relay to the front of the media
+                // order and every operation pays its connect timeout before falling through to iroh.
+                relayEntries[hex]?.let { httpUrlsFor(it).isNotEmpty() } == true -> 2
                 hex.startsWith("s3:") -> 1
                 else -> 0
             }
@@ -3732,9 +3777,32 @@ object HavenNet : InboundListener {
     // seed), or the relay sees a node id in no roster and answers 403.
 
     private val httpUrlBad = HashMap<String, Long>()   // url -> retry-after epoch ms (2-min backoff)
+
+    /**
+     * The relay's usable HTTP URLs from where WE are — empty means "iroh-only", which is the honest
+     * answer rather than a fast path that cannot work.
+     *
+     * PRIVATE addresses are dropped unless we are on that subnet ourselves. A relay hosted in the app
+     * announces every LAN IPv4 it has, which is right for a member on the same network and useless to
+     * everyone else — a `192.168.4.x` URL cannot be reached from a `10.0.0.x` network, ever. Those
+     * URLs are tried FIRST anyway (HTTP is the preferred media path, see mediaRelaysFor), so every
+     * remote member burned a connect attempt and a timeout per operation on an address that could
+     * never work, then fell through to iroh in a worse state. In one 20-minute field window every
+     * single media failure was this.
+     *
+     * It is also why the Dockerised NAS relay behaved better than the in-app relays: it announces no
+     * HTTP interface at all, so callers go straight to the path that works. iOS
+     * `RelayMailboxStore.httpInterface` parity.
+     */
     private fun httpUrlsFor(e: RelayEntry): List<String> =
         if (e.httpToken.isEmpty()) emptyList()
-        else e.httpUrls.filter { (httpUrlBad[it] ?: 0L) < System.currentTimeMillis() }
+        else e.httpUrls.filter { urlPlausiblyReachable(it) && (httpUrlBad[it] ?: 0L) < System.currentTimeMillis() }
+
+    /** Is this URL worth trying from where we are? Public hosts always; a private address only when
+     *  one of our own interfaces sits on the same /24. The rule itself lives in [RelayUrls] (pure +
+     *  unit-tested); this only supplies where "here" currently is. */
+    private fun urlPlausiblyReachable(url: String): Boolean =
+        RelayUrls.plausiblyReachable(url, RelayUrls.prefixes(lanIPv4s()))
     private fun markHttpUrlBad(url: String) { httpUrlBad[url] = System.currentTimeMillis() + 120_000 }
 
     private fun httpKeyUrl(base: String, key: String) = "${base.trimEnd('/')}/k/${android.net.Uri.encode(key, "/")}"
@@ -4170,6 +4238,48 @@ object HavenNet : InboundListener {
             android.util.Log.i("MediaSync", "resumed upload to ${node.take(8)}: $skip/$total windows already stored")
         }
         return skip
+    }
+
+    /**
+     * Refs whose stored copy was FOUND on a relay and could not be opened — the bytes are bad, not
+     * missing (see [acceptFetchedBlob]). Deliberately in-memory only: a restart, or an author who
+     * re-seals and overwrites the blob, both deserve another attempt. Its whole job is to stop the
+     * 20-second sweep re-downloading the same unopenable bytes forever.
+     */
+    private val unopenableMedia = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    /**
+     * Gate a just-fetched sealed blob on it actually OPENING before we call the fetch a success.
+     *
+     * A relay serves opaque bytes, so "the GET returned 200" is not "the media arrived". When the
+     * bytes are there and cannot be decrypted for ANY of our circles, the stored copy is BAD, not
+     * missing — and until now that was a permanent, silent dead end here: the unopenable blob was
+     * written to disk, [LocalMedia.has] began answering true, the ref dropped out of
+     * [requestMissingMedia], and the post kept a broken placeholder forever with nothing logged.
+     *
+     * The most likely way a blob gets into this state is a resumed chunked upload that stitched
+     * windows from two DIFFERENT seals: sealing is not byte-stable (per-recipient key material plus a
+     * fresh nonce), so the result reassembles to exactly the right length and decrypts to nothing.
+     * That is fixed at the source now (a seal is reused across retries), but blobs written during the
+     * window are still out there.
+     *
+     * So: say what actually happened, drop the bad bytes rather than let them masquerade as held
+     * media, and remember the ref for this session. Only the AUTHOR can really repair it — they still
+     * hold the plaintext, and their forced re-seal ([maybeResealOwnMedia] / uploadMedia(force=true))
+     * overwrites the stored copy — so the skip is deliberately not persisted.
+     *
+     * A blob we cannot JUDGE (no circles loaded yet) is kept and reported as fetched: under-claiming
+     * corruption is the safe direction. iOS `SharedStore.restore`'s "found … but OPEN FAILED" branch.
+     */
+    private fun acceptFetchedBlob(ref: String): Boolean {
+        val opens = LocalMedia.opensForAnyCircle(ref) ?: return true
+        if (opens) return true
+        android.util.Log.w("MediaSync",
+            "media restore ${ref.take(12)}: found on a relay but OPEN FAILED for every circle — " +
+            "the stored copy is bad, not missing; dropping it and not re-fetching this session")
+        LocalMedia.delete(ref)
+        unopenableMedia.add(ref)
+        return false
     }
 
     private suspend fun fetchMediaFromRelay(circleId: String, ref: String): Boolean {

@@ -409,6 +409,42 @@ object LocalMedia {
         return checked(ref, stored)   // fall back to raw (was stored unsealed)
     }
 
+    /**
+     * Does the sealed blob we hold for [ref] actually OPEN for one of our circles?
+     *
+     * `true`/`false` are answers; `null` means we CANNOT TELL and the caller must not condemn the
+     * blob — no circles yet, or the file is too large to decrypt within this device's heap. A big
+     * video is decrypted file→file in NATIVE memory (the same route [videoFile] uses) precisely so
+     * "too big to check in RAM" doesn't become "declared corrupt", which would delete perfectly good
+     * media on a low-heap phone.
+     */
+    fun opensForAnyCircle(ref: String): Boolean? {
+        val f = mediaFile(ref)
+        if (!f.exists()) return null
+        val circles = runCatching { HavenNet.engine.circles() }.getOrDefault(emptyList())
+        if (circles.isEmpty()) return null
+        if (f.length() <= maxInMemoryBytes()) {
+            val stored = f.readBytes()
+            for (c in circles) {
+                if (runCatching { HavenNet.engine.openCircleMedia(c.id, stored) }.getOrNull() != null) return true
+            }
+            return false
+        }
+        // Too big for the managed heap — decrypt to a scratch file off-heap instead of guessing.
+        val probe = plainCacheFile(ref, "probe")
+        try {
+            for (c in circles) {
+                val ok = runCatching {
+                    HavenNet.engine.openCircleMediaFile(c.id, f.absolutePath, probe.absolutePath)
+                }.getOrDefault(false)
+                if (ok && probe.exists() && probe.length() > 0) return true
+            }
+            return false
+        } finally {
+            runCatching { probe.delete() }
+        }
+    }
+
     /** Store received plaintext bytes under an exact ref (sealed at rest to the circle). Bytes that
      *  don't account for [ref] are dropped at the door rather than sealed and kept. */
     fun storeUnderRef(circleId: String, ref: String, bytes: ByteArray) {

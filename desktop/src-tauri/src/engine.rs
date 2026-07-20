@@ -98,6 +98,11 @@ struct DynState {
     /// already held. iOS `MediaBackupLedger` / Android `backedUp` parity.
     media_backed_up: HashSet<String>,
     media_backed_up_dirty: bool,
+    /// Refs whose stored copy on every relay was FOUND but could not be opened — the bytes are bad,
+    /// not missing (see `accept_fetched_blob`). Deliberately in-session only: a restart, or an author
+    /// who re-seals and overwrites the blob, both deserve another attempt. Its whole job is to stop
+    /// the 20-second sweep re-downloading the same unopenable bytes forever.
+    media_unopenable: HashSet<String>,
     /// How far a chunked upload of a ref got on ONE destination, and from WHICH sealed bytes:
     /// `"<dest>|<ref>"` -> `"<sha256 of the seal>:<windows written>"`. PERSISTED to
     /// `media-upload-progress.txt`.
@@ -415,6 +420,7 @@ impl Engine {
             media_backed_up: std::fs::read_to_string(paths.root.join("media-backed-up.txt"))
                 .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
                 .unwrap_or_default(),
+            media_unopenable: HashSet::new(),
             media_upload_progress: std::fs::read_to_string(paths.root.join("media-upload-progress.txt"))
                 .map(|t| {
                     t.lines()
@@ -514,6 +520,7 @@ impl Engine {
             media_backed_up: std::fs::read_to_string(paths.root.join("media-backed-up.txt"))
                 .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
                 .unwrap_or_default(),
+            media_unopenable: HashSet::new(),
             media_upload_progress: std::fs::read_to_string(paths.root.join("media-upload-progress.txt"))
                 .map(|t| {
                     t.lines()
@@ -3701,15 +3708,31 @@ impl Engine {
                 }
             },
         };
-        let mut urls = Vec::new();
-        {
+        // A configured public URL wins OUTRIGHT — the LAN address is not appended to it. The operator
+        // has said how members reach this box; adding `192.168.x` behind that only gives every remote
+        // member something to try and time out on, which is precisely the failure the CLI relay never
+        // had: it announces nothing unless told, so callers go straight to the path that works.
+        //
+        // With no public URL we still announce the LAN address, because a member on the SAME network
+        // should use it — that is the fast local path and it genuinely works. Remote members discard it
+        // on receipt (`relay_http_reachable` keeps a private address only when we are on that /24), so
+        // the useless case is filtered by the side that can actually tell.
+        let public_url = {
             let p = self.prefs.lock().unwrap();
             if p.relay_public_url.starts_with("http") {
-                urls.push(p.relay_public_url.trim_end_matches('/').to_string());
+                Some(p.relay_public_url.trim_end_matches('/').to_string())
+            } else {
+                None
             }
-        }
-        if let Some(ip) = Self::primary_lan_ip() {
-            urls.push(format!("http://{ip}:{port}"));
+        };
+        let mut urls = Vec::new();
+        match public_url {
+            Some(u) => urls.push(u),
+            None => {
+                if let Some(ip) = Self::primary_lan_ip() {
+                    urls.push(format!("http://{ip}:{port}"));
+                }
+            }
         }
         log::info!("relay http on :{port} urls={urls:?}");
         if urls.is_empty() {
@@ -3718,6 +3741,58 @@ impl Engine {
         let mut p = self.prefs.lock().unwrap();
         if p.set_relay_http(node_hex, urls, token) {
             let _ = p.save(&self.paths);
+        }
+    }
+
+    /// A relay's HTTP interface as seen FROM HERE — `None` means "iroh-only", which is the honest
+    /// answer rather than a fast path that cannot work.
+    ///
+    /// PRIVATE addresses are dropped unless we are on that subnet ourselves. A relay hosted inside the
+    /// app announces every LAN IPv4 it has, which is right for a member on the same network and
+    /// useless to everyone else — a `192.168.4.x` URL cannot be reached from a `10.0.0.x` network,
+    /// ever. Those URLs are tried FIRST anyway (HTTP is the preferred media path), so every remote
+    /// member burned a connect attempt and a timeout per operation on an address that could never
+    /// work, then fell through to iroh in a worse state. In one 20-minute field window every single
+    /// media failure was this.
+    ///
+    /// It is also why the Dockerised NAS relay behaved better than the in-app relays: it announces no
+    /// HTTP interface at all, so callers go straight to the path that works. iOS
+    /// `RelayMailboxStore.httpInterface` parity.
+    fn relay_http_reachable(&self, hex: &str) -> Option<(Vec<String>, String)> {
+        let (urls, token) = self.prefs.lock().unwrap().relay_http(hex)?;
+        let usable: Vec<String> = urls.into_iter().filter(|u| Self::url_plausibly_reachable(u)).collect();
+        if usable.is_empty() {
+            return None;
+        }
+        Some((usable, token))
+    }
+
+    /// Is this URL worth trying from where we are? Public hosts always; a private address only when
+    /// our own interface sits on the same /24. Unlike Apple/Android (which enumerate every interface)
+    /// std gives us only the route-to-internet address, so a machine on several private subnets keeps
+    /// just the one — under-claiming, which costs at most an iroh fallback rather than a timeout.
+    fn url_plausibly_reachable(url: &str) -> bool {
+        let host = match url.split("://").nth(1).and_then(|r| r.split('/').next()) {
+            Some(h) => h.rsplit_once(':').map(|(h, _)| h).unwrap_or(h).to_string(),
+            None => return false,
+        };
+        let parts: Vec<u8> = host.split('.').filter_map(|p| p.parse::<u8>().ok()).collect();
+        if parts.len() != 4 || host.split('.').count() != 4 {
+            return true; // a hostname/domain — assume routable
+        }
+        let is_private = parts[0] == 10
+            || (parts[0] == 172 && (16..=31).contains(&parts[1]))
+            || (parts[0] == 192 && parts[1] == 168);
+        if !is_private {
+            return true;
+        }
+        match Self::primary_lan_ip() {
+            Some(ip) => {
+                let ours: Vec<&str> = ip.split('.').take(3).collect();
+                let theirs: Vec<String> = parts.iter().take(3).map(|p| p.to_string()).collect();
+                ours == theirs
+            }
+            None => false,
         }
     }
 
@@ -3962,7 +4037,7 @@ impl Engine {
                 }
             }
             // Plain-HTTP interface first (the reliable cross-NAT path), else the iroh dial.
-            let http_iface = self.prefs.lock().unwrap().relay_http(&node_hex);
+            let http_iface = self.relay_http_reachable(&node_hex);
             if let Some((urls, token)) = http_iface {
                 let mut done = false;
                 for base in urls.iter().filter(|u| !self.http_url_bad(u)) {
@@ -4089,7 +4164,7 @@ impl Engine {
             if hosted.as_deref() == Some(node_hex.as_str()) {
                 continue;
             }
-            let http_iface = self.prefs.lock().unwrap().relay_http(&node_hex);
+            let http_iface = self.relay_http_reachable(&node_hex);
             if let Some((urls, token)) = http_iface {
                 for base in urls.iter().filter(|u| !self.http_url_bad(u)) {
                     match self.http_get(base, &token, &key).await {
@@ -5013,6 +5088,10 @@ impl Engine {
 
     pub fn request_missing_media(self: &Arc<Self>) {
         let my_hex = self.node_id_hex();
+        // Refs whose relay copy was found and could not be opened (see `accept_fetched_blob`). Fetching
+        // them again this session just re-downloads the same unopenable bytes; only the author's
+        // re-seal can fix them, and the set is dropped on restart so a repair is picked up.
+        let unopenable = self.dyn_state.lock().unwrap().media_unopenable.clone();
         let mut missing: Vec<(String, String)> = vec![]; // (ref, circleId)
         for c in self.social.circles() {
             let feed = self.social.feed(c.id.clone(), now_ms(), None);
@@ -5023,13 +5102,13 @@ impl Engine {
                 // refetching them would silently undo the space the user just freed — they re-download
                 // only on an explicit "Download" tap (media_download clears the eviction first).
                 for r in item.media {
-                    if !LocalMedia::is_synthetic(&r) && !self.media.has(&r) && !self.evicted_contains(&r) && !missing.iter().any(|(rr, _)| rr == &r) {
+                    if !LocalMedia::is_synthetic(&r) && !self.media.has(&r) && !self.evicted_contains(&r) && !unopenable.contains(&r) && !missing.iter().any(|(rr, _)| rr == &r) {
                         missing.push((r, c.id.clone()));
                     }
                 }
                 for cm in item.comments {
                     for r in cm.media {
-                        if !LocalMedia::is_synthetic(&r) && !self.media.has(&r) && !self.evicted_contains(&r) && !missing.iter().any(|(rr, _)| rr == &r) {
+                        if !LocalMedia::is_synthetic(&r) && !self.media.has(&r) && !self.evicted_contains(&r) && !unopenable.contains(&r) && !missing.iter().any(|(rr, _)| rr == &r) {
                             missing.push((r, c.id.clone()));
                         }
                     }
@@ -5263,7 +5342,7 @@ impl Engine {
             // Relay HTTP interface — a reachable relay is authoritative (the iroh path serves the
             // SAME store): hit → ledger, 404 → upload over HTTP; only unreachable falls to the dial.
             // Bind out of the lock FIRST so the MutexGuard is dropped before any `.await` below.
-            let http_iface = self.prefs.lock().unwrap().relay_http(&node_hex);
+            let http_iface = self.relay_http_reachable(&node_hex);
             if let Some((urls, token)) = http_iface {
                 if force {
                     // Overwrite over the first good HTTP base without asking whether it's held.
@@ -5499,7 +5578,7 @@ impl Engine {
             if node_hex.starts_with("s3:") { continue; }
             // Relay HTTP interface — the DEFAULT cross-NAT path. Bind out of the lock FIRST so the
             // MutexGuard is dropped before any `.await` below (a guard held across await isn't Send).
-            let http_iface = self.prefs.lock().unwrap().relay_http(&node_hex);
+            let http_iface = self.relay_http_reachable(&node_hex);
             if let Some((urls, token)) = http_iface {
                 let mut http_miss = false;
                 for base in urls.iter().filter(|u| !self.http_url_bad(u)) {
@@ -5586,9 +5665,72 @@ impl Engine {
     /// permanently unreachable while fresh media (author still around) looked fine.
     async fn fetch_media_healing(self: &Arc<Self>, circle_id: &str, reference: &str) -> bool {
         if self.fetch_media_from_relay(circle_id, reference).await {
+            return self.accept_fetched_blob(reference);
+        }
+        if self.heal_forbidden_relays().await && self.fetch_media_from_relay(circle_id, reference).await {
+            return self.accept_fetched_blob(reference);
+        }
+        false
+    }
+
+    /// Gate a just-fetched sealed blob on it actually OPENING before we call the fetch a success.
+    ///
+    /// A relay serves opaque bytes, so "the GET returned 200" is not "the media arrived". When the
+    /// bytes are there and cannot be decrypted for ANY of our circles, the stored copy is BAD, not
+    /// missing — and until now that was a permanent, silent dead end on this platform: the unopenable
+    /// blob was written to disk, `LocalMedia::has` began answering true, the ref dropped out of
+    /// `request_missing_media`, and the post kept a broken placeholder forever with nothing logged.
+    ///
+    /// The most likely way a blob gets into this state is a resumed chunked upload that stitched
+    /// windows from two DIFFERENT seals: sealing is not byte-stable (per-recipient key material plus a
+    /// fresh nonce), so the result reassembles to exactly the right length and decrypts to nothing.
+    /// That is fixed at the source now (a seal is reused across retries), but blobs written during the
+    /// window are still out there.
+    ///
+    /// So: say what actually happened, drop the bad bytes rather than let them masquerade as held
+    /// media, and remember the ref for this session so the 20-second sweep stops re-downloading the
+    /// same unopenable blob every cycle. Only the AUTHOR can really repair it — they still hold the
+    /// plaintext and their forced re-seal (`maybe_reseal_own_media`) overwrites the stored copy — and
+    /// because the skip is in-session only, a repaired blob is picked up on the next run.
+    /// iOS `SharedStore.restore`'s "found … but OPEN FAILED" branch.
+    fn accept_fetched_blob(self: &Arc<Self>, reference: &str) -> bool {
+        let Some(path) = self.media.sealed_path(reference) else { return false };
+        let circles = self.social.circles();
+        if circles.is_empty() {
+            return true; // nothing to judge it against — under-claiming corruption is the safe direction
+        }
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        // Above ~64 MB decrypt file→file (native, streaming) rather than pulling the blob — and a copy
+        // of it per circle — into RAM. "Too big to check in memory" must never become "declared
+        // corrupt": that would delete perfectly good video.
+        let opened = if size > 64 * 1024 * 1024 {
+            let probe = path.with_extension("openprobe");
+            let ok = circles.iter().any(|c| {
+                self.social.open_circle_media_file(
+                    c.id.clone(),
+                    path.to_string_lossy().into_owned(),
+                    probe.to_string_lossy().into_owned(),
+                )
+            });
+            let _ = std::fs::remove_file(&probe);
+            ok
+        } else {
+            let Some(stored) = self.media.raw_sealed(reference) else { return false };
+            circles
+                .iter()
+                .any(|c| self.social.open_circle_media(c.id.clone(), stored.clone()).is_some())
+        };
+        if opened {
             return true;
         }
-        self.heal_forbidden_relays().await && self.fetch_media_from_relay(circle_id, reference).await
+        let short = reference.chars().take(12).collect::<String>();
+        log::warn!(
+            "media restore {short}: found ({size}B) but OPEN FAILED for all {} circles — the stored copy is bad, not missing; dropping it and not re-fetching this session",
+            circles.len()
+        );
+        self.media.delete(reference);
+        self.dyn_state.lock().unwrap().media_unopenable.insert(reference.to_string());
+        false
     }
 
     /// Ask `targets` for `reference`: frame 33 with our bitmap when we hold a partial of it, else the

@@ -26,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddReaction
 import androidx.compose.material.icons.filled.ArrowCircleUp
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
@@ -1794,22 +1795,48 @@ fun PostCard(
                 color = HavenTheme.textSecondary, fontSize = 12.sp,
             )
             // Upload state for your OWN media posts, shown whenever the circle has a relay to back up
-            // to: ↑ while the blob is still uploading, ✓ once every blob is confirmed on at least one
-            // relay. This is the "did my story actually reach a relay?" signal — so the author keeps
-            // Haven open a moment until it lands instead of assuming it broke. Mirrors the iOS indicator.
+            // to: ↑ while the blob is still uploading, ✓ once every blob is confirmed on a relay
+            // SOMEONE ELSE can read. This is the "did my story actually reach a relay?" signal — so the
+            // author keeps Haven open a moment until it lands instead of assuming it broke.
+            //
+            // "Backed up" must mean a relay someone else can read. Writing to our own in-process relay
+            // is a local file copy that cannot fail, so counting it showed a confident tick on every
+            // post while friends could fetch none of them — the single biggest reason a delivery
+            // failure stayed invisible for hours. Landing ONLY on our own relay is neither an error nor
+            // safety, so it gets its own state rather than being folded into either. iOS parity
+            // (MediaBackupLedger.hasAnyRemote + the FeedView indicator).
             run {
                 val blobs = item.media.filter { !com.blaineam.haven.core.LocalMedia.isSynthetic(it) }
                 if (item.isMe && !item.unsent && blobs.isNotEmpty() && HavenNet.circleHasRelay(circleId)) {
                     var tick by remember(item.id) { mutableStateOf(0) }
-                    val backed = remember(tick, item.id) { blobs.all { HavenNet.isMediaBackedUpAny(it) } }
+                    val ownRelay = remember(tick, item.id) { HavenNet.ownHostedRelayHex() }
+                    val backed = remember(tick, item.id) {
+                        blobs.all { HavenNet.isMediaBackedUpRemote(it, ownRelay) }
+                    }
+                    // Reached OUR relay and nowhere else: not an error, not safe either. Says so.
+                    val localOnly = remember(tick, item.id) {
+                        !backed && blobs.all { HavenNet.isMediaBackedUpAny(it) }
+                    }
                     LaunchedEffect(item.id, backed) {
                         while (!backed) { kotlinx.coroutines.delay(2000); tick++ }
                     }
+                    val icon = when {
+                        backed -> androidx.compose.material.icons.Icons.Filled.CheckCircle
+                        localOnly -> androidx.compose.material.icons.Icons.Filled.Warning
+                        else -> androidx.compose.material.icons.Icons.Filled.ArrowCircleUp
+                    }
+                    val label = when {
+                        backed -> "Backed up to a relay others can read"
+                        localOnly -> "Only on this device's own relay — nobody else can fetch it yet"
+                        else -> "Uploading to a relay…"
+                    }
                     Icon(
-                        if (backed) androidx.compose.material.icons.Icons.Filled.CheckCircle
-                        else androidx.compose.material.icons.Icons.Filled.ArrowCircleUp,
-                        if (backed) "Backed up to a relay" else "Uploading to a relay…",
-                        tint = if (backed) HavenTheme.pink else HavenTheme.textSecondary,
+                        icon, label,
+                        tint = when {
+                            backed -> HavenTheme.pink
+                            localOnly -> HavenTheme.amber
+                            else -> HavenTheme.textSecondary
+                        },
                         modifier = Modifier.padding(start = 6.dp).size(16.dp),
                     )
                 }

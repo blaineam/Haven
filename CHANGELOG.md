@@ -15,6 +15,25 @@ current default.
 
 ### Fixed
 
+- **Android and Windows/Linux desktop kept trying to reach a relay at an address that could not
+  work.** A relay hosted inside the app announced every local network address it had. To someone on
+  the same Wi-Fi those are the fast path; to everyone else a `192.168.4.x` address is simply
+  unreachable — and because that path is tried *first* for photos and videos, every remote member
+  paid a connection attempt and a timeout on it, per operation, before falling back to the slower
+  route that works. Addresses on a network we aren't on are now discarded when they arrive, and a
+  relay with a configured public address advertises only that, instead of appending local addresses
+  behind it. (Apple already had this fix.)
+- **A photo could stay broken forever on Android and desktop once a bad copy reached a relay.** If a
+  relay held bytes that arrived but could not be decrypted, the app stored them anyway, decided it
+  now had the media, and stopped asking — so the post kept an empty placeholder with nothing said
+  about why. It now checks that a downloaded blob actually opens, says plainly when it doesn't,
+  drops the bad copy rather than counting it as the media, and stops re-downloading the same
+  unopenable bytes. The author's device still repairs it by re-uploading, and that repair is picked
+  up on the next run.
+- **Android's "backed up" tick counted this device's own relay.** Copying media to a relay running
+  inside your own app is a local file copy that cannot fail, so posts showed a confident tick while
+  nobody else could fetch them. It now means a relay someone else can read, with a distinct warning
+  state for media that has only reached this device's own relay. (Apple parity.)
 - **A relay was frozen to whatever circles its link said on the day you set it up.** It read the
   link once at startup and refused everything else for the rest of its life — including every DM
   conversation, which is created the first time two people message and so can never be in a link

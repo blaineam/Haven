@@ -222,6 +222,13 @@ impl LocalMedia {
         Self::checked(reference, stored)
     }
 
+    /// The on-disk path of the at-rest SEALED blob for a ref, when we hold it. For callers that must
+    /// work off the file rather than read it into RAM (a several-hundred-MB video).
+    pub fn sealed_path(&self, reference: &str) -> Option<PathBuf> {
+        let p = self.dir.join(bare_id(reference));
+        if p.exists() { Some(p) } else { None }
+    }
+
     /// The at-rest sealed blob for a ref — uploaded to the relay verbatim.
     pub fn raw_sealed(&self, reference: &str) -> Option<Vec<u8>> {
         fs::read(self.dir.join(bare_id(reference))).ok()

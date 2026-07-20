@@ -884,6 +884,18 @@ enum RelayClients {
         cache[nodeHex] = c
         return c
     }
-    /// Drop a relay's cached connection (after a failure, or when forgetting it).
+    /// Drop a relay's cached client. ONLY for a DELIBERATE removal — never for a failed op.
+    ///
+    /// Discarding it on a timeout was self-reinforcing: the op times out after 30s, the client is
+    /// thrown away, the next attempt builds a fresh one, that dials COLD — starting on the DERP relay
+    /// path, because no direct path is punched yet — times out in turn, and is thrown away again. The
+    /// connection is destroyed by the very failure it needs to survive in order to fix itself, so it
+    /// never lives long enough for iroh to promote it to a direct path. Blob traffic then stays pinned
+    /// to a relay route that drops its datagrams cross-NAT, which is why the mailbox — and therefore
+    /// every offline delivery — was dead between networks while peer-to-peer kept working.
+    ///
+    /// Keeping the client costs nothing: `BlobClient::conn()` re-dials by itself if the connection has
+    /// genuinely dropped, and `RelayHealth` backoff still throttles how often we try a sick relay.
+    /// (Same fix as e91ee62 on the relay-to-relay mesh tick; this is the app-side half.)
     static func forget(_ nodeHex: String) { cache[nodeHex] = nil }
 }

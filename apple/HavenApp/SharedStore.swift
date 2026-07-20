@@ -541,7 +541,7 @@ enum SharedStore {
                     }
                     catch {
                         HavenLog.sync("backup blob-dial FAIL ref=\(ref) relay=\(node.prefix(8)) size=\(sealedSize): \(error.localizedDescription)")
-                        RelayHealth.shared.recordFailure(node); RelayClients.forget(node)
+                        RelayHealth.shared.recordFailure(node)   // backoff still applies; the CLIENT is kept — see below
                     }
                 }
             case .dial(let c):
@@ -553,7 +553,7 @@ enum SharedStore {
                 }
                 catch {
                     HavenLog.sync("backup blob-dial FAIL ref=\(ref) relay=\(node.prefix(8)) size=\(sealedSize): \(error.localizedDescription)")
-                    RelayHealth.shared.recordFailure(node); RelayClients.forget(node)
+                    RelayHealth.shared.recordFailure(node)   // backoff still applies; the CLIENT is kept — see below
                 }
             }
         }
@@ -1148,7 +1148,7 @@ enum SharedStore {
                 guard let c = await RelayClients.client(node) else { continue }
                 if await c.has(key: key) { RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node); landed = true; continue }
                 do { try await c.put(key: key, data: env); RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node); landed = true }
-                catch { RelayHealth.shared.recordFailure(node); RelayClients.forget(node) }
+                catch { RelayHealth.shared.recordFailure(node) }   // backoff applies; the CLIENT is kept (RelayClients.forget)
             }
             if landed { markSeen(key); FeedStore.shared.markRelay(true); return true }
             FeedStore.shared.markRelay(false); return false

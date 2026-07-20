@@ -596,7 +596,11 @@ final class MediaStore: ObservableObject {
         guard let items = try? fm.contentsOfDirectory(
             at: storageDir,
             includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
-            options: [.skipsHiddenFiles]) else { return (0, 0) }
+            // NOT skipsHiddenFiles: the upload seals are `.seal-<ref>.tmp`, and a leading dot meant
+            // no sweep in the app ever saw them. One 642 MB seal sat on a device for two days that
+            // way. They matter more now that a FAILED upload deliberately keeps its seal so the retry
+            // resumes against identical bytes — without a sweep that is an unbounded pile.
+            options: []) else { return (0, 0) }
         let cutoff = Date().addingTimeInterval(-graceSeconds)
         var bytes: Int64 = 0
         var files = 0
@@ -643,7 +647,19 @@ final class MediaStore: ObservableObject {
         var files = 0
         for url in items {
             let name = url.lastPathComponent
-            guard name.hasPrefix("mint_") || name.hasPrefix("incoming_") else { continue }
+            // `.seal-` gets a much longer grace than produce/reassembly scratch: a seal is kept ON
+            // PURPOSE between upload attempts (see SharedStore.backup), and `backup` itself remakes
+            // one older than 24h. Reclaim past that, so an abandoned upload can't hoard its seal.
+            let isSeal = name.hasPrefix(".seal-")
+            guard isSeal || name.hasPrefix("mint_") || name.hasPrefix("incoming_") else { continue }
+            if isSeal {
+                let vals = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+                if let m = vals?.contentModificationDate, Date().timeIntervalSince(m) < 24 * 3600 { continue }
+                bytes += Int64(vals?.fileSize ?? 0)
+                files += 1
+                try? fm.removeItem(at: url)
+                continue
+            }
             if let progressed = live[name], progressed > abandoned { continue }   // live reassembly
             let vals = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
             if let m = vals?.contentModificationDate, m > cutoff { continue }   // still being written
@@ -662,8 +678,8 @@ final class MediaStore: ObservableObject {
         // Bake EXIF orientation into the pixels: Android's BitmapFactory ignores the orientation tag,
         // so a portrait iPhone photo arrives sideways unless we normalize it to .up here.
         // Auto-optimize → 2048px JPEG @ 70% (small + universally compatible). Off → original quality.
-        let img = Self.normalizedUp(optimize ? Self.downscale(image, maxDimension: 2048) : image)
-        let quality: CGFloat = optimize ? 0.70 : 0.95
+        let img = Self.normalizedUp(optimize ? Self.downscale(image, maxDimension: Self.optimizedImageMaxDimension) : image)
+        let quality: CGFloat = optimize ? Self.optimizedImageQuality : 0.95
         // The ref is minted from the ENCODED bytes we actually store and send — the same bytes a
         // recipient will hash — so it has to be produced before the ref exists.
         guard let data = img.jpegData(compressionQuality: quality) else {
@@ -699,7 +715,7 @@ final class MediaStore: ObservableObject {
             // good story/post, and it is enormously better than uploading the original.
             if !ok {
                 try? FileManager.default.removeItem(at: scratch)
-                ok = await Self.optimizeVideo(src, to: scratch, preset: AVAssetExportPreset1280x720)
+                ok = await Self.optimizeVideo(src, to: scratch, preset: AVAssetExportPreset960x540)
                 HavenLog.sync("video optimize: 1080p export failed, 720p retry \(ok ? "succeeded" : "ALSO FAILED")")
             }
         }
@@ -757,6 +773,14 @@ final class MediaStore: ObservableObject {
         }
         return export.status == .completed
     }
+
+    /// What "auto-optimize" actually targets for a still.
+    ///
+    /// Was 2048px @ 0.70. A phone screen is ~1200px wide and these are looked at in a feed, so 2048
+    /// bought resolution nobody sees and made every photo roughly twice the bytes it needed. Cut to a
+    /// size that is still comfortably sharp full-screen on any device.
+    static let optimizedImageMaxDimension: CGFloat = 1600
+    static let optimizedImageQuality: CGFloat = 0.62
 
     static let storySlideMax: Double = 15.0   // max seconds per story slide
     static let storyMaxSlides = 5             // a long video splits into at most this many
@@ -871,8 +895,8 @@ final class MediaStore: ObservableObject {
     /// `addImage`, minus the orientation normalize (the source ref was already normalized).
     private func storeFiltered(_ image: PlatformImage) -> String? {
         let optimize = CircleSettingsStore.shared.autoOptimize(FeedStore.shared.activeCircleId)
-        let img = optimize ? Self.downscale(image, maxDimension: 2048) : image
-        let quality: CGFloat = optimize ? 0.70 : 0.95
+        let img = optimize ? Self.downscale(image, maxDimension: Self.optimizedImageMaxDimension) : image
+        let quality: CGFloat = optimize ? Self.optimizedImageQuality : 0.95
         guard let data = img.jpegData(compressionQuality: quality) else { return nil }
         let ref = Self.contentRef(.image, data)
         guard let url = fileURL(ref) else { return nil }
@@ -950,7 +974,7 @@ final class MediaStore: ObservableObject {
     }
 
     static func optimizeVideo(_ src: URL, to dst: URL,
-                              preset: String = AVAssetExportPreset1920x1080) async -> Bool {
+                              preset: String = AVAssetExportPreset1280x720) async -> Bool {
         let asset = AVURLAsset(url: src)
         guard let export = AVAssetExportSession(asset: asset, presetName: preset) else {
             return false
@@ -977,7 +1001,12 @@ final class MediaStore: ObservableObject {
             let dw = abs(disp.width), dh = abs(disp.height)
             // Clamp to the PRESET's box, not a hardcoded 1920x1080 — otherwise a 720p retry renders at
             // 1080p and the fallback that exists to shrink a too-big export doesn't actually shrink it.
-            let box: (CGFloat, CGFloat) = preset == AVAssetExportPreset1280x720 ? (1280, 720) : (1920, 1080)
+            let box: (CGFloat, CGFloat)
+            switch preset {
+            case AVAssetExportPreset960x540:  box = (960, 540)
+            case AVAssetExportPreset1280x720: box = (1280, 720)
+            default:                          box = (1920, 1080)
+            }
             let fit = dw > 0 && dh > 0 ? min(1, min(box.0 / max(dw, dh), box.1 / min(dw, dh))) : 1
             func even(_ v: CGFloat) -> CGFloat { let n = (v * fit).rounded(.down); return max(2, n - n.truncatingRemainder(dividingBy: 2)) }
             let renderW = even(dw), renderH = even(dh)

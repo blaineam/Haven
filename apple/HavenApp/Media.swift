@@ -686,10 +686,22 @@ final class MediaStore: ObservableObject {
         let scratch = scratchURL("mp4")
         try? FileManager.default.removeItem(at: scratch)
         var ok = false
-        if CircleSettingsStore.shared.autoOptimize(FeedStore.shared.activeCircleId) {
+        let wantOptimize = CircleSettingsStore.shared.autoOptimize(FeedStore.shared.activeCircleId)
+        if wantOptimize {
             // Auto-optimize (default): re-encode to 1080p H.264 with a faststart moov atom — small and
             // universally playable, including on Androids that can't decode the iPhone's native HEVC.
             ok = await Self.optimizeVideo(src, to: scratch)
+            // A failed 1080p export used to fall straight through to the passthrough remux below —
+            // which keeps the ORIGINAL resolution and bitrate. So with auto-optimize ON and an export
+            // that failed for any ordinary reason (app backgrounded mid-export, low disk, a codec
+            // AVFoundation won't take), we silently shipped a 600 MB 4K clip while the user believed
+            // it was being shrunk. Try a smaller preset before giving up: 720p is still a perfectly
+            // good story/post, and it is enormously better than uploading the original.
+            if !ok {
+                try? FileManager.default.removeItem(at: scratch)
+                ok = await Self.optimizeVideo(src, to: scratch, preset: AVAssetExportPreset1280x720)
+                HavenLog.sync("video optimize: 1080p export failed, 720p retry \(ok ? "succeeded" : "ALSO FAILED")")
+            }
         }
         // Auto-optimize OFF: share in the ORIGINAL format + quality (no transcode). Still do a lossless
         // passthrough remux to strip GPS/device metadata AND move the moov atom to the front (faststart),
@@ -709,8 +721,19 @@ final class MediaStore: ObservableObject {
             try? FileManager.default.copyItem(at: src, to: scratch)
         }
         guard let ref = adoptProduced(.video, from: scratch), let dst = fileURL(ref) else {
-            return "vid_\(UUID().uuidString)"   // export produced nothing addressable
+            // A ref minted from a UUID rather than the bytes names a file that does not exist. The post
+            // that carries it can never upload (nothing to send), never render (no video), and pins its
+            // upload indicator forever — a ghost post that looks like a stuck transfer. Keep returning
+            // one only because callers expect a String, but say so loudly: this is never normal.
+            HavenLog.sync("video add: export produced NOTHING addressable — this post will have no playable video")
+            return "vid_\(UUID().uuidString)"
         }
+        // What actually shipped. Auto-optimize failing quietly and passing the original through is the
+        // difference between a 20 MB upload and a 600 MB one, and until now nothing recorded which
+        // happened — the only visible symptom was an upload that never finished.
+        let outBytes = (try? dst.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        let inBytes = (try? src.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        HavenLog.sync("video add: optimize=\(wantOptimize) \(inBytes / 1_048_576)MB → \(outBytes / 1_048_576)MB ref=\(ref.prefix(12))")
         cachePut(ref, MediaItem(id: ref, kind: .video, image: Self.poster(for: dst), videoURL: dst))
         return ref
     }
@@ -926,9 +949,10 @@ final class MediaStore: ObservableObject {
         return codec == kCMVideoCodecType_HEVC || codec == kCMVideoCodecType_HEVCWithAlpha
     }
 
-    static func optimizeVideo(_ src: URL, to dst: URL) async -> Bool {
+    static func optimizeVideo(_ src: URL, to dst: URL,
+                              preset: String = AVAssetExportPreset1920x1080) async -> Bool {
         let asset = AVURLAsset(url: src)
-        guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPreset1920x1080) else {
+        guard let export = AVAssetExportSession(asset: asset, presetName: preset) else {
             return false
         }
         export.outputURL = dst
@@ -951,7 +975,10 @@ final class MediaStore: ObservableObject {
             // (already display-oriented by the composition) to that renderSize.
             let disp = natural.applying(xf)
             let dw = abs(disp.width), dh = abs(disp.height)
-            let fit = dw > 0 && dh > 0 ? min(1, min(1920 / max(dw, dh), 1080 / min(dw, dh))) : 1
+            // Clamp to the PRESET's box, not a hardcoded 1920x1080 — otherwise a 720p retry renders at
+            // 1080p and the fallback that exists to shrink a too-big export doesn't actually shrink it.
+            let box: (CGFloat, CGFloat) = preset == AVAssetExportPreset1280x720 ? (1280, 720) : (1920, 1080)
+            let fit = dw > 0 && dh > 0 ? min(1, min(box.0 / max(dw, dh), box.1 / min(dw, dh))) : 1
             func even(_ v: CGFloat) -> CGFloat { let n = (v * fit).rounded(.down); return max(2, n - n.truncatingRemainder(dividingBy: 2)) }
             let renderW = even(dw), renderH = even(dh)
             let comp = AVMutableVideoComposition(asset: asset) { request in

@@ -455,6 +455,9 @@ enum SharedStore {
             // ledger) or was unreachable/backing off — the file is never read or sealed this pass.
             if !landed { HavenLog.sync("backup NO-DEST ref=\(ref)"); MediaBackupBackoff.recordStalled(ref) }
             else { MediaBackupBackoff.recordLanded(ref) }
+        // The ring's job is done the moment the ledger can answer; leaving the entry behind
+        // would keep a finished upload showing as in-flight.
+        if landed { MediaUploadProgress.shared.finish(ref) }
             return landed
         }
 
@@ -543,6 +546,9 @@ enum SharedStore {
         }
         if !landed { HavenLog.sync("backup NO-DEST ref=\(ref)"); MediaBackupBackoff.recordStalled(ref) }
         else { MediaBackupBackoff.recordLanded(ref) }
+        // The ring's job is done the moment the ledger can answer; leaving the entry behind
+        // would keep a finished upload showing as in-flight.
+        if landed { MediaUploadProgress.shared.finish(ref) }
         return landed
     }
 
@@ -747,11 +753,17 @@ enum SharedStore {
             guard let fh = try? FileHandle(forReadingFrom: sealedURL) else { throw URLError(.cannotOpenFile) }
             defer { try? fh.close() }
             var sizes: [Int] = []
+            // The upload already moves in 8 MB windows, so "how far along is this" was sitting here
+            // unused while the UI could only say "pending" forever. Report it: a 600 MB video is 75
+            // windows, and a post stuck at 3/75 is a visibly different thing from one at 74/75.
+            let windows = max(1, Int(ceil(Double(size) / Double(mediaChunkBytes))))
+            await MediaUploadProgress.shared.begin(ref, windows: windows)
             while true {
                 let slice = (try? fh.read(upToCount: mediaChunkBytes)) ?? nil
                 guard let slice, !slice.isEmpty else { break }
                 try await put(chunkKey(ref, sizes.count), slice)
                 sizes.append(slice.count)
+                await MediaUploadProgress.shared.advance(ref, done: sizes.count)
             }
             try await put(key(ref), makeManifest(sizes: sizes))
         } else {

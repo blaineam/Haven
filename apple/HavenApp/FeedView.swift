@@ -5469,13 +5469,39 @@ private struct KillHorizontalScroller: NSViewRepresentable {
             // keep Haven open a moment until it lands, instead of assuming it's broken and bailing.
             if item.isMe && !item.unsent, !item.media.isEmpty,
                !(RelayMailboxStore.shared.relays(forCircle: feed.activeCircleId).isEmpty) {
-                TimelineView(.periodic(from: .now, by: 2.0)) { _ in
+                TimelineView(.periodic(from: .now, by: 1.0)) { _ in
                     let blobs = item.media.filter { !MediaStore.isSynthetic($0) }
                     let backed = !blobs.isEmpty && blobs.allSatisfy { MediaBackupLedger.hasAny($0) }
-                    Image(systemName: backed ? "checkmark.icloud.fill" : "arrow.up.circle")
-                        .font(.caption2)
-                        .foregroundStyle(backed ? AnyShapeStyle(HavenTheme.pink) : AnyShapeStyle(Color.secondary))
-                        .help(backed ? "Backed up to a relay" : "Uploading to a relay…")
+                    let progress = MediaUploadProgress.shared.fraction(for: blobs)
+                    let stuck = MediaUploadProgress.shared.looksStuck(blobs)
+                    if backed {
+                        Image(systemName: "checkmark.icloud.fill")
+                            .font(.caption2).foregroundStyle(HavenTheme.pink)
+                            .help("Backed up to a relay")
+                    } else if let progress {
+                        // A real fraction, because a big video genuinely takes minutes and a motionless
+                        // arrow made "slow" and "broken" look identical. Determinate ring + percentage.
+                        ZStack {
+                            Circle().stroke(Color.secondary.opacity(0.25), lineWidth: 2)
+                            Circle().trim(from: 0, to: max(0.02, progress))
+                                .stroke(stuck ? Color.orange : HavenTheme.pink,
+                                        style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                                .rotationEffect(.degrees(-90))
+                        }
+                        .frame(width: 12, height: 12)
+                        .help(stuck
+                              ? "Still trying to upload — it has restarted several times"
+                              : "Uploading to a relay… \(Int(progress * 100))%")
+                    } else {
+                        // Queued but no window has been written yet (or the blob is small enough to go
+                        // in one shot). Orange once it has restarted repeatedly: the queue never gives
+                        // up, so without this an upload that can never succeed looks like one about to.
+                        Image(systemName: stuck ? "exclamationmark.icloud" : "arrow.up.circle")
+                            .font(.caption2)
+                            .foregroundStyle(stuck ? AnyShapeStyle(Color.orange) : AnyShapeStyle(Color.secondary))
+                            .help(stuck ? "Still trying to upload — it has restarted several times"
+                                        : "Waiting to upload to a relay…")
+                    }
                 }
             }
             Spacer()

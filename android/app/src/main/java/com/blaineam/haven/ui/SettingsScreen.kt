@@ -57,7 +57,10 @@ import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Smartphone
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import com.blaineam.haven.core.MediaLimits
+import com.blaineam.haven.core.MediaReoptimizer
 import com.blaineam.haven.core.PinnedMediaStore
 import com.blaineam.haven.core.DeviceCredentialStore
 import com.blaineam.haven.core.DeviceRosterManager
@@ -467,6 +470,98 @@ private fun MediaCleanupCard(onManageMedia: () -> Unit) {
             Spacer(Modifier.height(4.dp))
             Text(it, color = HavenTheme.textSecondary, fontSize = 12.sp)
         }
+
+        // Re-optimize media I already shared. Sits ALONGSIDE "Clean up unused media", never instead
+        // of it — they solve opposite halves of the problem: cleanup frees bytes on THIS device only,
+        // re-optimize shrinks what everyone in the circle is holding. iOS briefly lost the cleanup
+        // control when this row took its slot; both belong here.
+        Spacer(Modifier.height(10.dp))
+        ReoptimizeMediaRow()
+
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Clean up unused media removes only media no post, message or scheduled send references " +
+                "anymore — this device only, and it also happens on its own each week. Re-optimize " +
+                "re-encodes photos and videos you shared before Haven learned to compress them properly " +
+                "(or shared with auto-optimize off) and quietly re-shares the smaller copy, so everyone " +
+                "in the circle gets the space back — your captions, comments and timestamps are untouched.",
+            color = HavenTheme.textSecondary, fontSize = 11.sp,
+        )
+    }
+}
+
+/**
+ * Settings ▸ Storage's re-optimize action. TWO TAPS BY DESIGN: the first measures and TELLS you what
+ * it found, the second commits. A button that silently re-encoded a gigabyte and re-published a year
+ * of posts on one tap would be the wrong shape of thing entirely.
+ *
+ * The Android counterpart of iOS `ReoptimizeMediaRow`. Reads [MediaReoptimizer]'s state directly —
+ * the object outlives this composable, so a run keeps going (and keeps reporting) if the user
+ * navigates away and comes back.
+ */
+@Composable
+private fun ReoptimizeMediaRow() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val scanning = MediaReoptimizer.scanning.value
+    val running = MediaReoptimizer.running.value
+    val candidates = MediaReoptimizer.candidates.value
+    val busy = scanning || running
+
+    val title = when {
+        scanning -> "Checking your shared media…"
+        running -> "Re-optimizing ${minOf(MediaReoptimizer.doneCount.intValue + 1, MediaReoptimizer.batchCount.intValue)} " +
+            "of ${MediaReoptimizer.batchCount.intValue}… (${MediaReoptimizer.currentLabel.value})"
+        candidates.isEmpty() -> "Re-optimize media I already shared"
+        else -> {
+            val n = minOf(candidates.size, MediaReoptimizer.BATCH_LIMIT)
+            "Shrink & re-share $n item${if (n == 1) "" else "s"}"
+        }
+    }
+
+    Row(Modifier.fillMaxWidth()
+        .clip(RoundedCornerShape(10.dp))
+        .clickable(enabled = !busy) {
+            scope.launch {
+                if (MediaReoptimizer.candidates.value.isEmpty()) MediaReoptimizer.scan()
+                else MediaReoptimizer.run()
+            }
+        }
+        .padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(title, color = if (busy) HavenTheme.textSecondary else HavenTheme.pink,
+            fontWeight = FontWeight.Medium, fontSize = 14.sp, modifier = Modifier.weight(1f))
+        if (busy) CircularProgressIndicator(Modifier.size(16.dp), color = HavenTheme.textSecondary, strokeWidth = 2.dp)
+    }
+
+    if (running) {
+        Text("Stop after this one", color = HavenTheme.textSecondary, fontSize = 12.sp,
+            modifier = Modifier.clip(RoundedCornerShape(10.dp))
+                .clickable { MediaReoptimizer.cancel() }.padding(vertical = 6.dp))
+    }
+
+    MediaReoptimizer.lastWarning.value?.let {
+        Spacer(Modifier.height(4.dp))
+        Text(it, color = HavenTheme.pink, fontSize = 12.sp)
+    }
+    val summary = MediaReoptimizer.lastSummary.value
+    if (summary != null && !running) {
+        Spacer(Modifier.height(4.dp))
+        Text(summary, color = HavenTheme.textSecondary, fontSize = 12.sp)
+    }
+    if (candidates.isNotEmpty() && !running) {
+        val total = candidates.size
+        val batch = minOf(total, MediaReoptimizer.BATCH_LIMIT)
+        val legacy = candidates.count { it.legacyByAge }
+        val size = android.text.format.Formatter.formatFileSize(context, MediaReoptimizer.pendingBytes)
+        var s = "$total item${if (total == 1) "" else "s"} · $size currently on every member's device"
+        if (legacy > 0) s += " · $legacy shared before Haven learned to compress"
+        if (batch < total) s += ". This run does the $batch largest; tap again for the rest."
+        Spacer(Modifier.height(4.dp))
+        Text(s, color = HavenTheme.textSecondary, fontSize = 11.sp)
+    } else if (MediaReoptimizer.hasScanned.value && !busy && summary == null) {
+        Spacer(Modifier.height(4.dp))
+        Text("Everything you've shared is already as small as it can be.",
+            color = HavenTheme.textSecondary, fontSize = 11.sp)
     }
 }
 

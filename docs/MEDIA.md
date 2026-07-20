@@ -172,6 +172,55 @@ Stories/trim/mute/filter video exports on Apple all go through `AVAssetExportSes
 - Cross-device transfer: blobs > 256 MB move as 8 MB chunks (`HVCHUNK1` manifest); see the chunked-media
   notes.
 
+## Shipped: "Re-optimize media I already shared" (Apple, Android)
+
+Settings ▸ Storage. Everything above only ever applied to the *next* thing you post; this is the
+lever for what is already out there. Apple `MediaReoptimize.swift` + `MediaOptimizationTarget.swift`;
+Android `MediaReoptimizer.kt` + `MediaOptimizationTarget.kt`. Read Apple's header comment first — it
+is the spec, including why the two obvious alternatives are wrong.
+
+The constraint is the same one the deferred section below runs into: **a ref is `sha256(plaintext)`**,
+so re-encoding produces a NEW address and there is no way to shrink a blob in place. The three
+options were an alias table (rejected: whoever controls the table controls what a signed post shows),
+keeping both copies (rejected: nothing can ever be swept, so the saving is imaginary), and **editing
+the post** to name the new ref — which is what shipped. An Edit already carries a full media array,
+keeps the item's id, author, thread position and original timestamp, and is author-signed.
+
+Consequences that are load-bearing rather than incidental:
+
+- **Only your own posts and comments are eligible.** An Edit is signed by the author; the reducer
+  (`haven-p2p/src/social.rs`) drops one whose signer isn't the item's author. So this shrinks what
+  you put *into* your circles. Media others sent you is the deferred feature below.
+- **The old blob is not deleted here.** A member who is offline still holds the pre-edit post naming
+  the old ref; deleting the bytes hands them a permanently broken post. The old copy retires through
+  the weekly orphan sweep, which already skips anything a live event references.
+- **Nothing notifies or reorders.** Apple broadcasts with a `silent` flag so no push banner is
+  sealed. Android's author path sends no push at all, and the recipient's `notifyInbound` is gated on
+  a <10-minute-old newest inbound item that hasn't already been notified under its (unchanged) event
+  id — so a re-shared old post cannot raise a banner there either.
+- **Never keep a re-encode that isn't smaller.** `requiredShrinkFactor` / `keepsNewEncode` (0.90)
+  compares the real output against the real source. The bitrate target is not a ceiling on the
+  source, so an already-lean clip inflates; the original is kept and the ref added to a persisted,
+  bounded skip set so it is never offered again.
+- **Bounded by construction.** No timer, no launch hook, no background scheduling — a button is the
+  only caller. 25 items per tap, cancellable between items, one encode in flight, and a disk-headroom
+  refusal before each item.
+- **Convergence is the safety property.** The probe's ceilings carry headroom over the encoder's
+  nominal rates so the encoder's *own* output re-probes as at-target; otherwise the scan re-offers
+  what the last run produced, forever. Measured on device (`MediaReoptimizeInstrumentedTest`):
+  12170 kbps in → 4822 kbps out against a 6016 kbps trigger; a 3000px q95 still, 5.4 MB → 259 KB.
+
+Android-only divergences:
+
+- **Probing costs a decrypt**, because Android keeps media sealed at rest while Apple keeps it
+  plaintext. The interest floor is applied to the sealed file length first (free), videos decrypt
+  off-heap via `openCircleMediaFile`, and a plaintext cache the scan *created* is deleted again.
+- **A swap only applies in the circle its new blob was sealed to.** `LocalMedia.store` seals to one
+  circle and there is one file per ref, so rewriting a second circle's post to the same new ref would
+  leave that circle naming a blob the device cannot open. The other circle keeps the old ref.
+- **Audio is never a candidate.** Android has no audio-file import path, so every `aud_` ref it
+  authored came from the recorder at 64 kbps mono AAC — provably already at target.
+
 ## Deferred: "Optimize media from others" (recompress-on-receive)
 
 Not yet shipped. The intent is an anti-abuse control (default ON) that recompresses media **received**

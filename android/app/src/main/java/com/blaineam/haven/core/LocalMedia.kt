@@ -115,6 +115,20 @@ object LocalMedia {
     fun isVideo(ref: String): Boolean = ref.startsWith("vid_") || ref.startsWith("v:")
     fun isAudio(ref: String): Boolean = ref.startsWith("aud_")
 
+    /** Does a decrypted playback cache ALREADY exist for [ref]? Used by the re-optimize pass to tell
+     *  a cache it may reuse from one it is about to create (and must therefore clean up again). */
+    fun hasPlainCache(ref: String, ext: String): Boolean = plainCacheFile(ref, ext).exists()
+
+    /** Drop the decrypted playback cache for [ref]. The sealed blob is untouched; the next read
+     *  simply decrypts again. The re-optimize pass calls this after probing/encoding a video it had
+     *  to decrypt, so scanning a 1.3 GB library never leaves 1.3 GB of plaintext behind it. */
+    fun dropPlainCache(ref: String, ext: String) {
+        runCatching { plainCacheFile(ref, ext).delete() }
+    }
+
+    /** Free space on the volume holding the media store, for the re-optimize pass's headroom check. */
+    fun usableSpaceBytes(): Long = runCatching { dir.usableSpace }.getOrDefault(0L)
+
     // ---- Memory guard (low-heap devices) --------------------------------------------------------
     // Decrypt (openCircleMedia) is all-in-RAM: it takes the whole sealed blob and returns the whole
     // plaintext, so peak memory is ~2× the media size. On a low-heap phone (e.g. the Nokia 6.1's
@@ -829,7 +843,16 @@ object LocalMedia {
  * Historical note: this used to hand the picker's raw bytes straight to [LocalMedia.store], so a clip
  * recorded with location on carried its capture coordinates to everyone in the circle.
  */
-fun readVideoBytes(context: Context, uri: Uri, maxBytes: Int = MediaTargets.MAX_VIDEO_BYTES): ByteArray? {
+fun readVideoBytes(
+    context: Context,
+    uri: Uri,
+    maxBytes: Int = MediaTargets.MAX_VIDEO_BYTES,
+    // [MediaReoptimizer] re-encodes media I ALREADY shared, which by definition may have been shared
+    // with the circle's optimize setting OFF — so it must not consult that setting again. It goes
+    // through THIS function rather than a parallel encoder precisely so that when the targets change
+    // again, old media follows automatically. Apple's `addVideo(forceOptimize:)` is the same lever.
+    forceOptimize: Boolean = false,
+): ByteArray? {
     // HARD LIMIT first, before any work: no amount of encoding makes a feature film reasonable to
     // hand a circle, and every member pays to store and move whatever this produces.
     //
@@ -851,7 +874,8 @@ fun readVideoBytes(context: Context, uri: Uri, maxBytes: Int = MediaTargets.MAX_
     }
     // Optimize per the active circle's override (falls back to the app-wide default), same as photos
     // ([loadAndDownscale]) — media is picked while composing for that circle.
-    val optimize = runCatching { CircleSettings.optimize(HavenNet.activeCircle.value) }.getOrDefault(true)
+    val optimize = forceOptimize ||
+        runCatching { CircleSettings.optimize(HavenNet.activeCircle.value) }.getOrDefault(true)
     // Source size, for the anti-inflation check below. Null when it can't be determined.
     val srcBytes = runCatching {
         context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length }
@@ -1183,10 +1207,22 @@ fun loadAndDownscale(
         MediaTargets.STILL_LONG_EDGE else MediaTargets.STILL_LONG_EDGE_UNOPTIMIZED,
     quality: Int = if (CircleSettings.optimize(HavenNet.activeCircle.value))
         MediaTargets.STILL_JPEG_QUALITY else MediaTargets.STILL_JPEG_QUALITY_UNOPTIMIZED,
-): ByteArray? = runCatching {
-    val raw = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+): ByteArray? {
+    val raw = runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
         ?: return null.also { android.util.Log.w("LocalMedia", "openInputStream null for $uri") }
+    return downscaleJpeg(raw, maxDim, quality)
+}
 
+/**
+ * The producer half of [loadAndDownscale], on bytes already in hand.
+ *
+ * Split out for [MediaReoptimizer]: a stored blob is decrypted to a ByteArray, never to a content
+ * URI, and round-tripping it through a temp file purely to satisfy a `Uri` parameter would be a
+ * second copy of a photo for no reason. Both callers share ONE encoder, so a still re-optimized today
+ * is byte-for-byte what the composer would produce for the same source — which is what makes the
+ * probe's "already at target" verdict trustworthy on the second pass.
+ */
+fun downscaleJpeg(raw: ByteArray, maxDim: Int, quality: Int): ByteArray? = runCatching {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeByteArray(raw, 0, raw.size, bounds)
     val longest = max(bounds.outWidth, bounds.outHeight).coerceAtLeast(1)
@@ -1195,7 +1231,7 @@ fun loadAndDownscale(
 
     val opts = BitmapFactory.Options().apply { inSampleSize = sample }
     var bmp = BitmapFactory.decodeByteArray(raw, 0, raw.size, opts)
-        ?: return null.also { android.util.Log.w("LocalMedia", "decode failed for $uri") }
+        ?: return null.also { android.util.Log.w("LocalMedia", "image decode failed (${raw.size}B)") }
 
     // Downscale the rest of the way if still over the cap.
     if (max(bmp.width, bmp.height) > maxDim) {
@@ -1219,7 +1255,7 @@ fun loadAndDownscale(
     }
 
     ByteArrayOutputStream().also { bmp.compress(Bitmap.CompressFormat.JPEG, quality, it) }.toByteArray()
-}.getOrElse { android.util.Log.e("LocalMedia", "loadAndDownscale failed", it); null }
+}.getOrElse { android.util.Log.e("LocalMedia", "downscaleJpeg failed", it); null }
 
 /**
  * A picked photo as a base64 JPEG ready for [ProfileStore.setAvatar] — null if the decode failed.

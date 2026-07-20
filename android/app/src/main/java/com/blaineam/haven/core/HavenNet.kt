@@ -267,6 +267,10 @@ object HavenNet : InboundListener {
         EvictedMediaStore.init(appContext)  // deliberately-removed refs (no auto-refetch)
         MediaWantedStore.init(appContext)   // refs whose author we asked to put back (frames 31/32)
         MediaLimits.init(appContext)        // local age/size caps
+        // Persisted don't-retry set ONLY. Deliberately starts nothing: the re-optimize pass has no
+        // timer, no launch hook and no WorkManager job — a button is its only caller (see the
+        // BOUNDING note in MediaReoptimizer).
+        MediaReoptimizer.init(appContext)
         ReassemblyStore.init(appContext)    // half-finished media transfers, so they resume not restart
         restoreReassemblies()
         restoreState()
@@ -2129,6 +2133,82 @@ object HavenNet : InboundListener {
             social.edit(circleId, postId, body, emptyList(), null, false, nowMs())
         }.getOrNull() ?: return
         afterAuthor(circleId, env)
+    }
+
+    // ---- Re-optimize media I already shared ----------------------------------------------------
+    //
+    // These two live here rather than in MediaReoptimizer.kt only because `social`, `afterAuthor` and
+    // `enqueueBackup` are private to this object. Everything else about the feature — deciding what
+    // needs rewriting, encoding it, driving the UI — is in that file. iOS parity:
+    // FeedStore.reoptimizeTargets / applyReoptimized.
+
+    /**
+     * Every post and comment I AUTHORED that carries real media, across every circle including DMs.
+     *
+     * AUTHORED, because re-optimizing means re-publishing: [applyReoptimized] writes an Edit event,
+     * and an Edit is signed by the author and rejected by the reducer unless the signer matches
+     * (`haven-p2p/src/social.rs`: `if it.author == e.author`). I cannot re-point someone else's post
+     * at new bytes and must not be able to. So this shrinks what I put INTO my circles; media others
+     * sent me is left exactly as it arrived — the local caps and the orphan sweep are the answer there.
+     *
+     * Stories are excluded: they expire on their own, so rewriting one spends an encode and a
+     * re-upload on bytes that are about to be dropped anyway. Unsent (retracted) items too.
+     *
+     * Blocking (feed() re-opens every envelope) — call off the main thread.
+     */
+    fun reoptimizeTargets(): List<MediaReoptimizer.Target> {
+        if (!ready) return emptyList()
+        val out = ArrayList<MediaReoptimizer.Target>()
+        val now = nowMs()
+        for (c in runCatching { social.circles() }.getOrDefault(emptyList())) {
+            // viewerRetentionSecs null: retention hides old posts from MY feed, but they are still
+            // live on everyone else's devices and still costing them the old bytes.
+            for (item in runCatching { social.feed(c.id, now, null) }.getOrDefault(emptyList())) {
+                if (item.isMe && !item.unsent && !item.story && item.media.isNotEmpty()) {
+                    out.add(MediaReoptimizer.Target(c.id, item.id, item.body, item.media,
+                        item.music, item.muteVideo, item.createdAt.toLong()))
+                }
+                for (cm in item.comments) {
+                    if (cm.isMe && !cm.unsent && cm.media.isNotEmpty()) {
+                        out.add(MediaReoptimizer.Target(c.id, cm.id, cm.body, cm.media,
+                            null, false, cm.createdAt.toLong()))
+                    }
+                }
+            }
+        }
+        return out
+    }
+
+    /**
+     * Re-point one of my posts/comments at the newly-encoded refs and re-share it.
+     *
+     * This is an ordinary Edit — the same event the edit sheet writes when you change a caption. The
+     * reducer keeps the item's id, author, thread position and ORIGINAL createdAt and touches only
+     * body/media/music, so nobody's feed reorders. The new blob is then queued for the relay exactly
+     * as a fresh post's would be, so members who are offline right now still find it waiting.
+     *
+     * NOT SILENT-FLAGGED, because on Android there is nothing to flag: unlike iOS, the author path
+     * ([afterAuthor]) sends no push and seals no banner — the *recipient* decides, in [notifyInbound],
+     * which is gated on the circle's newest INBOUND item being under 10 minutes old AND not already
+     * notified under its (unchanged) event id. A re-shared old post satisfies neither, so it cannot
+     * raise a banner. Marking it on the wire would mean a new frame or a new field, which this feature
+     * is explicitly not allowed to invent.
+     *
+     * Deliberately does NOT delete the old blob. A member who is offline right now still holds the
+     * PRE-edit post naming the old ref; deleting the bytes hands them a permanently broken post. The
+     * old bytes retire the ordinary way, via the weekly orphan sweep ([cleanupUnusedMedia]), which
+     * already skips anything a live event references and gives partials a grace window. The saving
+     * lands slightly later; nothing breaks in the gap.
+     */
+    fun applyReoptimized(target: MediaReoptimizer.Target, media: List<String>): Boolean {
+        if (!ready) return false
+        val env = runCatching {
+            social.edit(target.circleId, target.eventId, target.body, media,
+                target.music, target.muteVideo, nowMs())
+        }.getOrNull() ?: return false
+        afterAuthor(target.circleId, env)
+        media.forEach { enqueueBackup(target.circleId, it) }
+        return true
     }
 
     /** Unsend (delete) your own post; broadcasts the unsend event. */

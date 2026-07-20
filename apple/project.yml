@@ -299,6 +299,25 @@ targets:
         "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
 
+  # Pure-logic unit tests. Deliberately host-LESS and FFI-less: the only app source it compiles is
+  # MediaUploadPlan.swift, so `xcodebuild test -scheme HavenLogicTests -destination 'platform=macOS'`
+  # runs on the host Mac in seconds with no simulator, no signed host app, and no HavenFFI. The rule
+  # it covers (when a chunked upload may skip a window it did not write) is the one whose failure
+  # mode is a permanently corrupt, content-addressed blob — it needs a test that runs cheaply enough
+  # that people actually run it. Add pure-logic files here as they appear.
+  HavenLogicTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: HavenApp/MediaUploadPlan.swift
+      - path: HavenLogicTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith.logictests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGNING_ALLOWED: NO
+
   HavenUITests:
     type: bundle.ui-testing
     platform: iOS
@@ -364,6 +383,13 @@ schemes:
     test:
       targets:
         - HavenUITests
+  HavenLogicTests:
+    build:
+      targets:
+        HavenLogicTests: [test]
+    test:
+      targets:
+        - HavenLogicTests
   HavenMac:
     build:
       targets:

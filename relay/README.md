@@ -64,6 +64,29 @@ next login after step 2 (or run step 2 now and it starts immediately). Remove th
 any time with `haven-relay service uninstall`. The auto-start command carries through your
 `--data` path, so a custom storage location survives reboots.
 
+### Updating an existing relay
+
+Re-run the same install line — it always fetches the latest release — then **restart the
+service**, because replacing the binary does not replace the running process:
+
+```sh
+curl -fsSL https://wemiller.com/apps/haven/relay/install.sh | sh   # (add the same --store you used)
+
+# then, whichever way it starts on your box:
+systemctl --user restart haven-relay                        # Linux, systemd user unit
+launchctl kickstart -k gui/$(id -u)/com.haven.relay         # macOS, launchd agent
+docker compose pull && docker compose up -d                 # Docker / NAS
+haven-relay run                                             # anything else: stop it, then this
+```
+
+Your identity, circle link and sealed store all live in the data dir and are untouched by an
+upgrade — the relay comes back with the same node id, so nobody has to re-add it.
+
+> A relay is worth updating when the *protocol* changes, not just the apps. For example a relay
+> older than 1.1.2 authorizes only the ONE circle its link granted, so if you set it as the
+> default relay for every circle it will serve one and refuse the rest — which looks exactly
+> like "my media isn't on any relay".
+
 On first run it prints a **QR + the link** (so you can re-add the relay in the app any
 time), **persists its identity** so its node id is stable across restarts, and **persists
 the circle link** so `haven-relay run` (zero-arg) just works. Reprint the link/QR any

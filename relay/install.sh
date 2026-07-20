@@ -72,9 +72,24 @@ install_relay() {
   mkdir -p "$PREFIX"
   URL="https://github.com/${REPO}/releases/latest/download/haven-relay-${TARGET}"
   echo "▸ Downloading haven-relay ($TARGET)…"
-  if curl -fsSL "$URL" -o "$PREFIX/haven-relay"; then
-    chmod +x "$PREFIX/haven-relay"
+  # Download beside the target and RENAME into place, rather than writing over it.
+  #
+  # This is also the upgrade path: re-running the installer on a box where the relay is already
+  # running used to fail, because writing over a RUNNING executable returns ETXTBSY ("text file
+  # busy") on Linux — and the error below then blamed a missing release asset, which sent people
+  # looking in entirely the wrong place. rename(2) swaps the directory entry instead of touching
+  # the running inode, so it succeeds while the old binary keeps serving until it is restarted.
+  if curl -fsSL "$URL" -o "$PREFIX/haven-relay.new"; then
+    chmod +x "$PREFIX/haven-relay.new"
+    UPGRADE=0
+    [ -e "$PREFIX/haven-relay" ] && UPGRADE=1
+    mv -f "$PREFIX/haven-relay.new" "$PREFIX/haven-relay"
+    if [ "$UPGRADE" = 1 ]; then
+      echo "▸ Replaced an existing haven-relay — it keeps running the OLD binary until restarted."
+      RESTART_HINT=1
+    fi
   else
+    rm -f "$PREFIX/haven-relay.new"
     echo "✗ Could not download a prebuilt binary (no release asset yet for $TARGET?)."
     echo "  Build from source instead:"
     echo "      git clone https://github.com/${REPO} && cd haven/core"
@@ -120,6 +135,15 @@ install_relay() {
   echo
   echo "  • Restart manually any time:   haven-relay run $DATA_ARG"
   echo "  • Remove the auto-start:       haven-relay service uninstall"
+  if [ "${RESTART_HINT:-0}" = 1 ]; then
+    echo
+    echo "  ⚠ UPGRADE: the new binary is installed but the OLD one is still running."
+    echo "    Restart it to pick this up — your identity, link and store are untouched:"
+    echo "      Linux (systemd user unit):  systemctl --user restart haven-relay"
+    echo "      macOS (launchd agent):      launchctl kickstart -k gui/\$(id -u)/com.haven.relay"
+    echo "      Docker:                     docker compose pull && docker compose up -d"
+    echo "      Anything else:              stop it, then  haven-relay run $DATA_ARG"
+  fi
   echo
   echo "The relay only ever moves ciphertext. It cannot read your circle's content."
   echo "═══════════════════════════════════════════════════════════════"

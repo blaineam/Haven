@@ -670,11 +670,15 @@ final class MediaStore: ObservableObject {
         return (bytes, files)
     }
 
+    /// `forceOptimize` ignores the circle's auto-optimize setting. Used by the re-optimize run, whose
+    /// entire premise is that the setting was OFF (or the old encoder was in place) when these bytes
+    /// were first shared — honouring it there would make the button a no-op for exactly the media it
+    /// exists to fix.
     @discardableResult
-    func addImage(_ image: PlatformImage) -> String {
+    func addImage(_ image: PlatformImage, forceOptimize: Bool = false) -> String {
         // Optimize: downscale very large photos + compress, so they're light to send —
         // but keep it high-res (longest edge up to 2560, well above 1080p).
-        let optimize = CircleSettingsStore.shared.autoOptimize(FeedStore.shared.activeCircleId)
+        let optimize = forceOptimize || CircleSettingsStore.shared.autoOptimize(FeedStore.shared.activeCircleId)
         // Bake EXIF orientation into the pixels: Android's BitmapFactory ignores the orientation tag,
         // so a portrait iPhone photo arrives sideways unless we normalize it to .up here.
         // Auto-optimize → 2048px JPEG @ 70% (small + universally compatible). Off → original quality.
@@ -695,8 +699,12 @@ final class MediaStore: ObservableObject {
 
     /// Async because optimizing transcodes the video (AVAssetExportSession). Without
     /// this, full-size originals (often 50–200MB) are too big to seal + send P2P.
+    ///
+    /// `forceOptimize` is the re-optimize run re-driving media it ALREADY shared through this exact
+    /// path — same encoder, same fallback ladder, same content-addressing. One implementation, so a
+    /// future change to how Haven compresses automatically reaches old media too.
     @discardableResult
-    func addVideo(url src: URL) async -> String {
+    func addVideo(url src: URL, forceOptimize: Bool = false) async -> String {
         // Transcode into scratch first: the ref is the digest of the FINAL bytes, so it can only be
         // known once the export has produced them.
         let scratch = scratchURL("mp4")
@@ -708,11 +716,16 @@ final class MediaStore: ObservableObject {
         defer { MediaProcessing.shared.end() }
         // HARD LIMIT first: no amount of encoding makes a feature film reasonable to hand a circle,
         // and every member pays to store and move whatever this produces.
-        if let dur = try? await AVURLAsset(url: src).load(.duration), dur.seconds > Self.maxVideoSeconds {
+        //
+        // Not applied when re-optimizing: that clip is ALREADY shared and already costing the circle
+        // its full size. Refusing to shrink it because it is long leaves everyone paying the larger
+        // bill — the limit governs what you may newly hand a circle, not what you may improve.
+        if !forceOptimize, let dur = try? await AVURLAsset(url: src).load(.duration),
+           dur.seconds > Self.maxVideoSeconds {
             HavenLog.sync("video add: REJECTED — \(Int(dur.seconds))s exceeds the \(Int(Self.maxVideoSeconds))s limit")
             return ""
         }
-        let wantOptimize = CircleSettingsStore.shared.autoOptimize(FeedStore.shared.activeCircleId)
+        let wantOptimize = forceOptimize || CircleSettingsStore.shared.autoOptimize(FeedStore.shared.activeCircleId)
         if wantOptimize {
             // Bitrate-controlled H.264 first — the only path that actually targets a SIZE. The preset
             // exports below cap dimensions and choose their own (much higher) bitrate, so they stay as
@@ -804,8 +817,14 @@ final class MediaStore: ObservableObject {
     /// Was 2048px @ 0.70. A phone screen is ~1200px wide and these are looked at in a feed, so 2048
     /// bought resolution nobody sees and made every photo roughly twice the bytes it needed. Cut to a
     /// size that is still comfortably sharp full-screen on any device.
-    static let optimizedImageMaxDimension: CGFloat = 1600
-    static let optimizedImageQuality: CGFloat = 0.62
+    ///
+    /// The numbers themselves live in `MediaOptimizationTarget` because two things now depend on
+    /// them: this producer, and the probe that decides whether ALREADY-SHARED media needs rewriting.
+    /// If those two ever held different values the re-optimize run would either re-encode its own
+    /// output forever (probe stricter than producer) or never fire at all (looser). One definition,
+    /// aliased here so every existing call site reads the same.
+    static let optimizedImageMaxDimension = MediaOptimizationTarget.imageMaxDimension
+    static let optimizedImageQuality = MediaOptimizationTarget.imageQuality
 
     static let storySlideMax: Double = 15.0   // max seconds per story slide
     static let storyMaxSlides = 5             // a long video splits into at most this many

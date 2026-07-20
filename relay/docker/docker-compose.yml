@@ -35,8 +35,13 @@ services:
     container_name: haven-relay
     restart: unless-stopped
     environment:
-      # First run attaches to your circle from this; later runs reuse the saved link.
+      # FIRST run only. Once a link is saved in /data this value is IGNORED (the entrypoint says so
+      # in the log). It used to be re-applied on every start, which silently reverted a relay you
+      # had re-linked by hand the next time the container restarted.
       HAVEN_RELAY_LINK: ${HAVEN_RELAY_LINK:-}
+      # Set to 1 for ONE start to deliberately overwrite the saved link with HAVEN_RELAY_LINK
+      # (e.g. pairing this relay with a different account). Leave unset otherwise.
+      HAVEN_RELAY_LINK_FORCE: ${HAVEN_RELAY_LINK_FORCE:-}
       # Optional but RECOMMENDED for a rock-stable node id: pin the identity seed (64 hex chars,
       # `openssl rand -hex 32`). With it set, the relay keeps the SAME node id across restarts and
       # image rebuilds even if the /data volume is lost or recreated — so your circle never has to

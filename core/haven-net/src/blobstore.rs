@@ -14,7 +14,22 @@
 //!   LIST <prefix>       → newline-joined keys under prefix → reply: OK <len> <bytes>
 //!   TOUCH <prefix> + keys → refresh liveness of the listed keys → reply: OK [+ missing keys]
 //!   AGES <prefix>       → "<age-secs> <key>" lines under prefix (for age-aware mesh sync)
+//!   ENROLL haven/enroll/<circle> + members → teach the relay a circle it wasn't linked for
 //! ```
+//!
+//! ## Why ENROLL exists (the frozen-relay incident)
+//!
+//! A relay used to learn its circles EXACTLY ONCE, from the link the operator pasted at startup —
+//! `authorized 1 circle(s) from the link`, forever. Every circle created afterwards (above all the
+//! `dm:` circles, which are minted on demand the first time two people message) was answered with
+//! `ERR forbidden`, so those circles had **no store-and-forward at all**: a DM only landed if both
+//! devices happened to be online simultaneously, which the user experienced as "received DMs only
+//! show up on one of my devices". Re-pasting a fresh link was the only cure, and it was undone on
+//! the next container restart (see `relay/docker/entrypoint.sh`).
+//!
+//! ENROLL turns the link into a *pairing handshake* rather than a frozen policy: once a member is
+//! trusted, that member can keep teaching the relay which circles it belongs to. See
+//! [`RelayAuth::learn`] for the authorization rule and why it is drawn where it is.
 //!
 //! ## Mailbox garbage collection (TOUCH + TTL)
 //!
@@ -109,6 +124,10 @@ where
 }
 /// Hard cap on a key length (keys are short content-addressed paths).
 const MAX_KEY: usize = 512;
+
+/// Cap on an ENROLL body — 256 members × 65 bytes, rounded up. Sized from `MAX_ENROLL_MEMBERS` so
+/// an over-long body is rejected before it is buffered, not after.
+const MAX_ENROLL_BODY: u64 = 24 * 1024;
 /// Hard cap on a TOUCH request body (newline-joined keys — thousands of refs fit easily).
 const MAX_TOUCH_BODY: u64 = 256 * 1024;
 
@@ -216,6 +235,17 @@ pub(crate) const VERB_LIST: u8 = b'L';
 pub(crate) const VERB_TOUCH: u8 = b'T';
 /// LIST with idle ages ("<age-secs> <key>" lines) — for age-preserving mesh sync.
 pub(crate) const VERB_AGES: u8 = b'A';
+/// Teach the relay an ADDITIONAL circle + members (key = `haven/enroll/<circle>`, body =
+/// newline-joined member node hexes). Reply `OK` | `ERR …`. An older relay binary does not know
+/// this verb and answers `ERR verb`, which is exactly the "degrade to today's behaviour" path a
+/// new client needs — so callers must treat any error here as non-fatal.
+///
+/// Iroh-only, deliberately: the HTTP transport ([`crate::httprelay`]) has a closed set of routes
+/// (`/k/`, `/l/`, `/t/`) and none of them map to this verb, so it cannot widen a relay's policy.
+/// Every client already speaks iroh (that is how it learned the relay's node id), and keeping a
+/// policy-mutating op on the QUIC-authenticated path means the caller's identity is the endpoint
+/// key itself rather than a per-request signature over a shared token.
+pub(crate) const VERB_ENROLL: u8 = b'E';
 
 /// Sentinel returned by GET when the key is absent. Chosen to be distinguishable from a
 /// stored blob: it begins with a NUL and is exactly these 5 bytes.
@@ -422,7 +452,128 @@ impl RelayAuth {
     pub(crate) fn deauthorize(&mut self, circle_id: &str) {
         self.members.remove(circle_id);
     }
+
+    /// True if `peer` is a member of at least ONE circle this relay serves — the "already paired"
+    /// predicate. Same test `blob_forbidden` uses to let a caller past the front door.
+    /// Union `members` into `circle_id` with NO caller checks — for replaying grants this relay
+    /// already accepted (see [`rehydrate_learned_grants`]). Never call this on wire input; wire
+    /// input goes through [`Self::learn`], which is where the authorization rule lives.
+    pub(crate) fn merge_members(&mut self, circle_id: &str, members: &[String]) {
+        let set = self.members.entry(circle_id.to_string()).or_default();
+        for m in members {
+            set.insert(m.clone());
+        }
+    }
+
+    pub(crate) fn is_known(&self, peer: &str) -> bool {
+        self.members.values().any(|m| m.contains(peer))
+    }
+
+    /// True if `peer` is a member of THIS specific circle.
+    pub(crate) fn is_member_of(&self, circle_id: &str, peer: &str) -> bool {
+        self.members.get(circle_id).map(|m| m.contains(peer)).unwrap_or(false)
+    }
+
+    pub(crate) fn knows_circle(&self, circle_id: &str) -> bool {
+        self.members.contains_key(circle_id)
+    }
+
+    /// Number of circles currently authorized (link + learned) — bound-checking and operator output.
+    pub(crate) fn circle_count(&self) -> usize {
+        self.members.len()
+    }
+
+    /// LEARN a circle from a member instead of from the operator's link — the write half of the
+    /// pairing handshake. Returns the circle's resulting member set (to persist) or `None` if the
+    /// request is refused.
+    ///
+    /// ## The authorization rule, and why it is drawn here
+    ///
+    /// An arbitrary caller must never be able to enroll a circle, or every relay on the internet
+    /// becomes free storage for strangers: the relay stores opaque sealed bytes, so "a circle" is
+    /// nothing but a directory it will hold and serve for whoever it names. The trust anchor is
+    /// therefore the one the operator already established by pasting the link:
+    ///
+    ///   1. **The caller must already be a member of some circle this relay serves.** This is the
+    ///      *pairing* — it means the operator (or a circle they authorized) deliberately handed this
+    ///      node the relay. A caller who fails this is refused before we ever get here
+    ///      (`blob_forbidden`), so a stranger cannot enroll anything, ever.
+    ///   2. **The caller must include ITSELF in the members it enrolls.** Without this, a trusted
+    ///      member could point the relay at a circle of pure strangers and walk away — the relay
+    ///      would then be serving people it has no relationship with, which is exactly the "free
+    ///      storage for strangers" failure with one extra hop. Requiring self-inclusion keeps every
+    ///      learned circle anchored to a node the operator already serves, and makes the co-members
+    ///      *that member's own circle* — precisely who the operator meant to help.
+    ///   3. **Enrolling into a circle the relay ALREADY knows requires membership OF THAT CIRCLE.**
+    ///      This is the escalation guard. Without it, a member of circle A could insert themselves
+    ///      (or friends) into circle B — including a circle the OPERATOR granted by link — and read
+    ///      its mailbox. A new circle may be created freely by a trusted caller; an existing one may
+    ///      only be *extended*, and only from the inside.
+    ///
+    /// Learning is **additive**: members are unioned in, never replaced. `authorize()` replaces a
+    /// circle's set (it is the operator's authority speaking), so if learning replaced too, one
+    /// device's partial view of a roster would silently evict everybody else — and, worse, a member
+    /// could evict the operator's own link grant. Additive-only means the worst a misbehaving member
+    /// can do is name people the relay then also serves, bounded by the caps below.
+    pub(crate) fn learn(&mut self, circle_id: &str, peer: &str, members: &[String]) -> Option<Vec<String>> {
+        // (1) pairing. `blob_forbidden` already refuses an unpaired caller before the body is read,
+        // but this function IS the rule, so it re-checks: a future call site that forgets the front
+        // door must not be able to open the relay to strangers. Fails closed on an empty map — a
+        // relay that has been told about nobody can be taught by nobody.
+        if !self.is_known(peer) {
+            return None;
+        }
+        if circle_id.is_empty() || circle_id.len() > MAX_CIRCLE_ID {
+            return None;
+        }
+        // (2) self-inclusion. The caller names itself or the request is meaningless.
+        if !members.iter().any(|m| m == peer) {
+            return None;
+        }
+        if members.len() > MAX_ENROLL_MEMBERS {
+            return None;
+        }
+        for m in members {
+            if m.len() != 64 || !m.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+        }
+        if self.knows_circle(circle_id) {
+            // (3) extend from the inside only.
+            if !self.is_member_of(circle_id, peer) {
+                return None;
+            }
+        } else {
+            // A brand-new circle costs a map entry that lives until restart, so cap how many a
+            // relay will accept. Without a cap, one trusted-but-compromised member could mint
+            // circles in a loop and grow the auth map (and the persisted file) without bound.
+            if self.circle_count() >= MAX_LEARNED_CIRCLES {
+                return None;
+            }
+        }
+        let set = self.members.entry(circle_id.to_string()).or_default();
+        for m in members {
+            if set.len() >= MAX_CIRCLE_MEMBERS && !set.contains(m) {
+                continue; // same reasoning as MAX_LEARNED_CIRCLES, per circle
+            }
+            set.insert(m.clone());
+        }
+        let mut out: Vec<String> = set.iter().cloned().collect();
+        out.sort();
+        Some(out)
+    }
 }
+
+/// Longest circle tag a relay will learn. Circle ids are opaque labels the apps mint
+/// (`c1ABC…`, `dm:<a>-<b>`); a pathological one would only bloat the persisted grants file.
+const MAX_CIRCLE_ID: usize = 128;
+/// Most member ids one ENROLL may carry.
+const MAX_ENROLL_MEMBERS: usize = 256;
+/// Most members one learned circle may accumulate across many ENROLLs.
+const MAX_CIRCLE_MEMBERS: usize = 1024;
+/// Most circles a relay will hold in its auth map at all (link grants included). A relay serving a
+/// household is nowhere near this; a member trying to mint circles in a loop hits it immediately.
+const MAX_LEARNED_CIRCLES: usize = 1024;
 
 /// Store a sealed blob into a relay root directly (the in-process host's OWN events — NO iroh
 /// self-connection). Atomic temp+rename, mirrors the PUT path in `handle_request`.
@@ -877,6 +1028,11 @@ fn is_broad_prefix(key: &str) -> bool {
 /// the trust comes from the signature check in [`verify_devroster`], never from the write gate — so
 /// EVERY transport must verify the body before storing it (see [`verify_devroster_put`]).
 pub(crate) const DEVROSTER_PREFIX: &str = "haven/devroster/";
+
+/// Key prefix for the ENROLL control op: `haven/enroll/<circle>`. Nothing is ever STORED under it —
+/// it is a control channel that happens to ride the same header shape as the storage verbs, so it
+/// inherits `handle_request`'s namespace gate for free instead of inventing a second one.
+pub(crate) const ENROLL_PREFIX: &str = "haven/enroll/";
 /// Tag byte on the self-sync roster wire (mirror of haven-ffi `TAG_DEVICE_ROSTER`).
 const TAG_DEVICE_ROSTER: u8 = 0x04;
 
@@ -987,6 +1143,90 @@ pub(crate) fn rehydrate_device_rosters(root: &Path, auth: &Arc<Mutex<RelayAuth>>
     }
 }
 
+// --- learned circle grants (the pairing handshake's persistent half) --------------------------
+
+/// Where a relay remembers the circles its MEMBERS taught it (as opposed to the ones its operator
+/// pasted in a link).
+///
+/// Deliberately at the store ROOT and **not** under `haven/`: keys under `haven/` are LISTable by
+/// sibling relays and mesh-replicate between them, so a grants file living there would let one
+/// relay in a mesh inject circles into every other relay's policy. Membership must only ever be
+/// widened by a member that authenticated to THIS relay. It is also outside the namespace
+/// `blob_forbidden` gates, so no member can read or overwrite it over the wire either.
+const LEARNED_GRANTS_FILE: &str = "enrolled-circles.json";
+
+fn learned_grants_path(root: &Path) -> PathBuf {
+    root.join(LEARNED_GRANTS_FILE)
+}
+
+/// Read the persisted learned grants: `(circle, members)` pairs. Best-effort — a missing or corrupt
+/// file simply means "nothing learned yet", never a startup failure. A relay that cannot read its
+/// learned grants must still serve everything its LINK grants.
+pub fn load_learned_grants(root: &Path) -> Vec<(String, Vec<String>)> {
+    let Ok(bytes) = std::fs::read(learned_grants_path(root)) else { return Vec::new() };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return Vec::new() };
+    let Some(arr) = v.get("grants").and_then(|g| g.as_array()) else { return Vec::new() };
+    let mut out = Vec::new();
+    for g in arr {
+        let Some(circle) = g.get("c").and_then(|c| c.as_str()) else { continue };
+        let Some(ms) = g.get("m").and_then(|m| m.as_array()) else { continue };
+        // Re-validate on the way IN as well as on the way out. The file is ours, but a relay that
+        // trusts its own disk blindly would turn a corrupted byte into an authorized node id.
+        let members: Vec<String> = ms
+            .iter()
+            .filter_map(|m| m.as_str())
+            .filter(|m| m.len() == 64 && m.bytes().all(|b| b.is_ascii_hexdigit()))
+            .map(String::from)
+            .collect();
+        if circle.is_empty() || circle.len() > MAX_CIRCLE_ID || members.is_empty() {
+            continue;
+        }
+        out.push((circle.to_string(), members));
+    }
+    out
+}
+
+/// Persist one learned grant (upserting the circle's full member set). Atomic temp+rename so a
+/// crash mid-write can never leave a half-written policy file that reads as "no grants".
+pub fn save_learned_grant(root: &Path, circle: &str, members: &[String]) {
+    let mut grants = load_learned_grants(root);
+    match grants.iter_mut().find(|(c, _)| c == circle) {
+        Some(entry) => entry.1 = members.to_vec(),
+        None => grants.push((circle.to_string(), members.to_vec())),
+    }
+    let doc = serde_json::json!({
+        "v": 1,
+        "grants": grants
+            .iter()
+            .map(|(c, m)| serde_json::json!({ "c": c, "m": m }))
+            .collect::<Vec<_>>(),
+    });
+    let Ok(bytes) = serde_json::to_vec(&doc) else { return };
+    let path = learned_grants_path(root);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("part");
+    if std::fs::write(&tmp, &bytes).and_then(|_| std::fs::rename(&tmp, &path)).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// MERGE the persisted learned grants back into `auth`. Called after the link grants are applied,
+/// never instead of them: `authorize()` REPLACES a circle's member set, so a learned expansion of a
+/// link circle would be silently dropped on every restart (and on every reconfigure) if we did not
+/// re-union it here. Same shape, and the same reason, as [`rehydrate_device_rosters`].
+pub(crate) fn rehydrate_learned_grants(root: &Path, auth: &Arc<Mutex<RelayAuth>>) {
+    let grants = load_learned_grants(root);
+    if grants.is_empty() {
+        return;
+    }
+    let mut a = auth.lock().unwrap();
+    for (circle, members) in grants {
+        a.merge_members(&circle, &members);
+    }
+}
+
 /// Authorization for one `haven/` blob op. Returns true if `peer` may NOT touch `key`.
 ///
 /// Shared by BOTH transports: the iroh path passes the QUIC-verified `conn.remote_id()`, the HTTP
@@ -1021,9 +1261,17 @@ pub(crate) fn blob_forbidden(auth: &Arc<Mutex<RelayAuth>>, peer: &str, verb: u8,
     // Everything below requires the caller to be a member of SOME circle this relay serves. This
     // is the check that was entirely absent on the HTTP transport, and it is what a shared bearer
     // token can never establish: the token says "someone gave me a secret", not "I am Alice".
-    let known = a.members.values().any(|m| m.contains(peer));
+    let known = a.is_known(peer);
     if !known {
         return true;
+    }
+    // ENROLL — the second half of the pairing handshake. Being *already served by this relay* is the
+    // entire front-door test, and a stranger can never satisfy it: `known` is false for them and we
+    // returned deny one line above. The substantive rules (the caller must name itself, may not
+    // escalate into a circle it isn't in, and is bounded by per-relay caps) need the request BODY,
+    // so they live in `RelayAuth::learn` rather than here.
+    if verb == VERB_ENROLL {
+        return !key.starts_with(ENROLL_PREFIX) || key.len() <= ENROLL_PREFIX.len();
     }
     if (verb == VERB_LIST || verb == VERB_AGES || verb == VERB_TOUCH) && is_broad_prefix(key) {
         return true; // a non-relay may not enumerate (or keep-alive) across circles
@@ -1261,6 +1509,39 @@ pub(crate) async fn handle_request(
             let _ = send.write_all(body.as_bytes()).await;
             let _ = send.finish();
         }
+        VERB_ENROLL => {
+            // Body = newline-joined member node hexes for `haven/enroll/<circle>`. Nothing is
+            // written to the store: this only widens the in-memory policy and appends to the
+            // learned-grants file, so a relay's disk can't be filled through this verb.
+            let blen = recv.read_u64().await.ah()?;
+            if blen > MAX_ENROLL_BODY {
+                let _ = send.write_all(b"ERR too big").await;
+                let _ = send.finish();
+                return Ok(());
+            }
+            let mut body = vec![0u8; blen as usize];
+            recv.read_exact(&mut body).await.ah()?;
+            let circle = key.strip_prefix(ENROLL_PREFIX).unwrap_or("").to_string();
+            let members: Vec<String> = String::from_utf8_lossy(&body)
+                .lines()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            // `learn` holds the authorization rule and returns the circle's resulting member set
+            // only when it accepted. Persist EXACTLY what it accepted — never the raw request —
+            // so the file can only ever contain grants that passed the gate.
+            let learned = auth.lock().unwrap().learn(&circle, &peer, &members);
+            match learned {
+                Some(set) => {
+                    save_learned_grant(&root, &circle, &set);
+                    let _ = send.write_all(b"OK").await;
+                }
+                None => {
+                    let _ = send.write_all(b"ERR forbidden").await;
+                }
+            }
+            let _ = send.finish();
+        }
         _ => {
             let _ = send.write_all(b"ERR verb").await;
             let _ = send.finish();
@@ -1317,6 +1598,10 @@ pub struct BlobClient {
     /// hole-punch machinery. That is why the phone ran hot. Failing fast during the cooldown also
     /// stops a doomed op from occupying its caller for the full 12s dial timeout.
     last_dial_fail: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    /// Circles we have already tried to ENROLL with this relay, so a relay that refuses (or an OLD
+    /// relay that answers `ERR verb`) costs one extra round trip per circle per process — not one on
+    /// every mailbox op forever.
+    enrolled: Arc<std::sync::Mutex<HashSet<String>>>,
 }
 
 /// How long to stop re-dialling a peer whose last dial failed.
@@ -1347,7 +1632,7 @@ impl BlobClient {
         if endpoint.id() == dest.id {
             anyhow::bail!("refusing to dial our own node id (blob self-connect guard)");
         }
-        Ok(Self { endpoint, dest, conn: Arc::new(tokio::sync::Mutex::new(None)), owns_endpoint: true, last_dial_fail: Arc::new(std::sync::Mutex::new(None)) })
+        Ok(Self { endpoint, dest, conn: Arc::new(tokio::sync::Mutex::new(None)), owns_endpoint: true, last_dial_fail: Arc::new(std::sync::Mutex::new(None)), enrolled: Arc::new(std::sync::Mutex::new(HashSet::new())) })
     }
 
     /// Reuse an EXISTING, warm endpoint (the messaging node's) instead of binding a fresh one. The
@@ -1359,7 +1644,7 @@ impl BlobClient {
         if endpoint.id() == dest.id {
             anyhow::bail!("refusing to dial our own node id (blob self-connect guard)");
         }
-        Ok(Self { endpoint, dest, conn: Arc::new(tokio::sync::Mutex::new(None)), owns_endpoint: false, last_dial_fail: Arc::new(std::sync::Mutex::new(None)) })
+        Ok(Self { endpoint, dest, conn: Arc::new(tokio::sync::Mutex::new(None)), owns_endpoint: false, last_dial_fail: Arc::new(std::sync::Mutex::new(None)), enrolled: Arc::new(std::sync::Mutex::new(HashSet::new())) })
     }
 
     /// Return the ONE warm connection to `dest`, reusing it if still open, else dialing (and caching) a
@@ -1396,11 +1681,87 @@ impl BlobClient {
         }
     }
 
+    /// Our own node id as hex — what an ENROLL must name (the self-inclusion rule).
+    pub fn my_node_hex(&self) -> String {
+        hex(self.endpoint.id().as_bytes())
+    }
+
+    /// Teach this relay a circle + members — the client half of the pairing handshake. The relay
+    /// applies [`RelayAuth::learn`]'s rule: we must already be one of its members, we must name
+    /// OURSELVES in `members`, and we may only extend a circle we are already in.
+    ///
+    /// Failure is informational, never fatal. An OLDER relay has no ENROLL verb and answers
+    /// `ERR verb` — that is exactly the "new client, old relay" degrade path, and the caller simply
+    /// keeps using whatever the relay's link already authorized, as it did before this verb existed.
+    pub async fn enroll(&self, circle: &str, members: &[String]) -> Result<()> {
+        let key = format!("{ENROLL_PREFIX}{circle}");
+        let body = members.join("\n");
+        if body.len() as u64 > MAX_ENROLL_BODY {
+            bail!("enroll member list too large");
+        }
+        with_timeout("enroll", async {
+            let conn = self.conn().await?;
+            let (mut send, mut recv) = conn.open_bi().await.ah()?;
+            write_header(&mut send, VERB_ENROLL, &key).await?;
+            send.write_u64(body.len() as u64).await.ah()?;
+            send.write_all(body.as_bytes()).await.ah()?;
+            send.finish().ah()?;
+            let reply = recv.read_to_end(64).await.ah()?;
+            if reply == b"OK" {
+                Ok(())
+            } else {
+                bail!("enroll refused: {}", String::from_utf8_lossy(&reply))
+            }
+        })
+        .await
+    }
+
+    /// A mailbox op was refused. Before giving up, teach the relay this key's circle (naming only
+    /// OURSELVES, which is all a transport-layer client can honestly assert) and report whether it
+    /// is worth retrying.
+    ///
+    /// This is the self-healing path for the frozen-relay incident: a relay learned its circles once,
+    /// from the operator's link, so every circle created afterwards — above all the `dm:` circles,
+    /// which are minted the first time two people message — was refused forever and had NO
+    /// store-and-forward. A DM then only arrived if both devices were online at the same moment.
+    ///
+    /// At most one attempt per circle per process (see `enrolled`), so an old relay that answers
+    /// `ERR verb`, or one that legitimately refuses, costs one round trip rather than one per op.
+    async fn recover_forbidden(&self, key: &str) -> bool {
+        let Some(circle) = mailbox_circle(key) else { return false };
+        let circle = circle.to_string();
+        {
+            let mut seen = match self.enrolled.lock() {
+                Ok(g) => g,
+                Err(_) => return false,
+            };
+            if !seen.insert(circle.clone()) {
+                return false;
+            }
+        }
+        let me = self.my_node_hex();
+        self.enroll(&circle, std::slice::from_ref(&me)).await.is_ok()
+    }
+
     /// Store a (sealed) blob at `key`. The relay stores it verbatim.
+    ///
+    /// If the relay refuses because it has never heard of this key's circle, teach it (ENROLL) and
+    /// retry ONCE — see [`Self::recover_forbidden`]. That retry is the whole point of the pairing
+    /// handshake: before it, a circle minted after the operator pasted their link was `ERR forbidden`
+    /// forever and had no store-and-forward at all.
     pub async fn put(&self, key: &str, body: &[u8]) -> Result<()> {
         if body.len() as u64 > MAX_BLOB {
             bail!("blob too large");
         }
+        match self.put_once(key, body).await {
+            Err(e) if is_forbidden(&e) && self.recover_forbidden(key).await => {
+                self.put_once(key, body).await
+            }
+            other => other,
+        }
+    }
+
+    async fn put_once(&self, key: &str, body: &[u8]) -> Result<()> {
         with_timeout("put", async {
             let conn = self.conn().await?;
             let (mut send, mut recv) = conn.open_bi().await.ah()?;
@@ -1454,6 +1815,15 @@ impl BlobClient {
     /// so mailbox GC keeps them; returns the keys the relay does NOT hold — the caller
     /// re-PUTs those (refresh doubles as repair). One request for the whole batch.
     pub async fn touch(&self, prefix: &str, keys: &[String]) -> Result<Vec<String>> {
+        match self.touch_once(prefix, keys).await {
+            Err(e) if is_forbidden(&e) && self.recover_forbidden(prefix).await => {
+                self.touch_once(prefix, keys).await
+            }
+            other => other,
+        }
+    }
+
+    async fn touch_once(&self, prefix: &str, keys: &[String]) -> Result<Vec<String>> {
         let body = keys.join("\n");
         if body.len() as u64 > MAX_TOUCH_BODY {
             bail!("touch batch too large");
@@ -1504,6 +1874,15 @@ impl BlobClient {
     /// List stored keys under `prefix` (e.g. a circle's mailbox path). Used to poll the
     /// mailbox for new sealed posts.
     pub async fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        match self.list_once(prefix).await {
+            Err(e) if is_forbidden(&e) && self.recover_forbidden(prefix).await => {
+                self.list_once(prefix).await
+            }
+            other => other,
+        }
+    }
+
+    async fn list_once(&self, prefix: &str) -> Result<Vec<String>> {
         with_timeout("list", async {
             let conn = self.conn().await?;
             let (mut send, mut recv) = conn.open_bi().await.ah()?;
@@ -1514,7 +1893,16 @@ impl BlobClient {
             if bytes.is_empty() {
                 return Ok(Vec::new());
             }
-            Ok(String::from_utf8_lossy(&bytes).lines().map(|s| s.to_string()).collect())
+            let text = String::from_utf8_lossy(&bytes);
+            // An error reply is NOT a key list. Before this check `list` handed the caller
+            // `["ERR forbidden"]` as though the relay held a blob by that name, which is how a
+            // refusal could look like an empty-but-healthy mailbox instead of a policy problem.
+            // Store keys always begin with the `haven/` (or `self/`) namespace, so no real listing
+            // can collide with this.
+            if text.starts_with("ERR ") {
+                bail!("list failed: {}", text.lines().next().unwrap_or("ERR"));
+            }
+            Ok(text.lines().map(|s| s.to_string()).collect())
         })
         .await
     }
@@ -1529,6 +1917,13 @@ impl BlobClient {
             self.endpoint.close().await;
         }
     }
+}
+
+/// Did the relay refuse this op on policy grounds (rather than fail on transport)? Only a policy
+/// refusal is worth answering with an ENROLL — a timeout or a dead connection must not be turned
+/// into a retry storm.
+fn is_forbidden(e: &anyhow::Error) -> bool {
+    e.to_string().contains("ERR forbidden")
 }
 
 async fn write_header(send: &mut iroh::endpoint::SendStream, verb: u8, key: &str) -> Result<()> {
@@ -1907,5 +2302,155 @@ mod tests {
         // DMs are keyed by participant, never authorize()d, so they gate on known-membership.
         assert!(!blob_forbidden(&auth, &member, VERB_GET, "haven/mailbox/dm:a-b/x"));
         assert!(blob_forbidden(&auth, &stranger, VERB_GET, "haven/mailbox/dm:a-b/x"));
+
+        // ENROLL's front door: a member the relay already serves may reach the verb; a stranger
+        // never does. This is the ONLY thing standing between "a relay learns its user's circles"
+        // and "any relay on the internet is free storage for anybody who learns its node id".
+        let ekey = "haven/enroll/dm:a-b";
+        assert!(!blob_forbidden(&auth, &member, VERB_ENROLL, ekey));
+        assert!(blob_forbidden(&auth, &stranger, VERB_ENROLL, ekey), "an unpaired caller may not enroll");
+        // …and the key must actually name a circle.
+        assert!(blob_forbidden(&auth, &member, VERB_ENROLL, ENROLL_PREFIX));
+        assert!(blob_forbidden(&auth, &member, VERB_ENROLL, "haven/mailbox/fam/x"));
+    }
+
+    // ---- the pairing handshake: learning circles after the link ----------------------------
+
+    fn learn_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("haven-learn-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The authorization rule, clause by clause. Each rejected case here is a way the relay would
+    /// otherwise become storage for people its operator never agreed to serve.
+    #[test]
+    fn learn_enforces_the_pairing_rule() {
+        let mut auth = RelayAuth::default();
+        let alice = "aa".repeat(32);
+        let bob = "bb".repeat(32);
+        let mallory = "cc".repeat(32);
+        auth.authorize("default", vec![alice.clone()], vec![]);
+        // Mallory is a legitimate user of this relay too — she is in a circle of her own. That is
+        // what makes her the interesting attacker: she is PAIRED, so clause (1) doesn't stop her.
+        auth.authorize("mal", vec![mallory.clone()], vec![]);
+
+        // (1) an UNPAIRED caller is refused even though the wire gate would have caught them first.
+        let nobody = "dd".repeat(32);
+        assert!(auth.learn("free-storage", &nobody, &[nobody.clone()]).is_none());
+        assert!(!auth.knows_circle("free-storage"));
+
+        // (2) the enroller must name ITSELF — otherwise a trusted member could point the relay at a
+        // circle of pure strangers and walk away.
+        assert!(auth.learn("dm:a-b", &alice, &[bob.clone()]).is_none());
+
+        // A NEW circle, anchored by the caller: accepted, and co-members come along.
+        let set = auth.learn("dm:a-b", &alice, &[alice.clone(), bob.clone()]).expect("new circle");
+        assert_eq!(set.len(), 2);
+        assert!(auth.is_member_of("dm:a-b", &bob));
+
+        // (3) an EXISTING circle may only be extended from the inside. Mallory is known to this
+        // relay (we add her to a circle of her own below) but is not in dm:a-b, so she may not
+        // insert herself into it — that would be reading someone else's mailbox by declaration.
+        assert!(auth.learn("dm:a-b", &mallory, &[mallory.clone()]).is_none());
+        assert!(!auth.is_member_of("dm:a-b", &mallory));
+        // Nor may she extend the OPERATOR'S link-granted circle.
+        assert!(auth.learn("default", &mallory, &[mallory.clone()]).is_none());
+        assert!(!auth.is_member_of("default", &mallory));
+
+        // A member of the circle may extend it, and learning is ADDITIVE — the operator's link
+        // grant is never evicted by one device's partial view of the roster.
+        assert!(auth.learn("default", &alice, &[alice.clone(), bob.clone()]).is_some());
+        assert!(auth.is_member_of("default", &alice));
+        assert!(auth.is_member_of("default", &bob));
+
+        // Malformed ids and empty tags are refused outright.
+        assert!(auth.learn("", &alice, &[alice.clone()]).is_none());
+        assert!(auth.learn("x", &alice, &[alice.clone(), "nothex".into()]).is_none());
+        assert!(auth.learn("x", &alice, &[alice.clone(), "aa".repeat(40)]).is_none());
+    }
+
+    /// A relay may not be minted into unbounded circles by one compromised-but-trusted member.
+    #[test]
+    fn learn_is_capped() {
+        let mut auth = RelayAuth::default();
+        let alice = "aa".repeat(32);
+        auth.authorize("default", vec![alice.clone()], vec![]);
+        let mut accepted = 0;
+        for i in 0..(MAX_LEARNED_CIRCLES + 50) {
+            if auth.learn(&format!("c{i}"), &alice, &[alice.clone()]).is_some() {
+                accepted += 1;
+            }
+        }
+        assert!(accepted < MAX_LEARNED_CIRCLES + 50, "circle minting must hit a cap");
+        assert!(auth.circle_count() <= MAX_LEARNED_CIRCLES);
+        // An over-long member list is refused rather than truncated silently.
+        let many: Vec<String> =
+            std::iter::once(alice.clone()).chain((0..MAX_ENROLL_MEMBERS).map(|i| format!("{:064x}", i))).collect();
+        assert!(auth.learn("big", &alice, &many).is_none());
+    }
+
+    /// A learned circle must survive a restart, and must MERGE with (never be replaced by) the
+    /// operator's link grants. A relay that forgot what it learned on every restart is the frozen
+    /// relay again — and the Docker footgun re-applied the link on every container start.
+    #[test]
+    fn learned_grants_persist_and_merge_with_link_grants() {
+        let dir = learn_dir("persist");
+        let alice = "aa".repeat(32);
+        let bob = "bb".repeat(32);
+
+        // --- run 1: link grants "default", alice teaches it a new DM circle -------------
+        let auth1: Arc<Mutex<RelayAuth>> = Arc::new(Mutex::new(RelayAuth::default()));
+        auth1.lock().unwrap().authorize("default", vec![alice.clone()], vec![]);
+        let set = auth1.lock().unwrap().learn("dm:a-b", &alice, &[alice.clone(), bob.clone()]).unwrap();
+        save_learned_grant(&dir, "dm:a-b", &set);
+        // alice also widens the link circle to bob (she is in it, so she may).
+        let set2 = auth1.lock().unwrap().learn("default", &alice, &[alice.clone(), bob.clone()]).unwrap();
+        save_learned_grant(&dir, "default", &set2);
+
+        // --- run 2: fresh process, link re-applied verbatim (the Docker case) ----------
+        let auth2: Arc<Mutex<RelayAuth>> = Arc::new(Mutex::new(RelayAuth::default()));
+        auth2.lock().unwrap().authorize("default", vec![alice.clone()], vec![]);
+        // Before the merge the restart has thrown bob out of "default" and forgotten dm:a-b —
+        // exactly the regression this replay exists to prevent.
+        assert!(!auth2.lock().unwrap().is_member_of("default", &bob));
+        assert!(!auth2.lock().unwrap().knows_circle("dm:a-b"));
+        rehydrate_learned_grants(&dir, &auth2);
+        assert!(auth2.lock().unwrap().knows_circle("dm:a-b"), "learned circle survives restart");
+        assert!(auth2.lock().unwrap().is_member_of("dm:a-b", &bob));
+        assert!(auth2.lock().unwrap().is_member_of("default", &bob), "learned members merge into a link circle");
+        assert!(auth2.lock().unwrap().is_member_of("default", &alice), "the link grant itself survives");
+
+        // The grants file lives OUTSIDE `haven/`, so members can't read it and mesh sync can't
+        // replicate one relay's policy into another's.
+        assert!(dir.join(LEARNED_GRANTS_FILE).is_file());
+        assert!(!dir.join("haven").join(LEARNED_GRANTS_FILE).exists());
+        let mut keys = Vec::new();
+        collect_keys(&dir, &dir.join("haven"), &mut keys);
+        assert!(keys.is_empty(), "the grants file must not be enumerable as a store key");
+
+        // A corrupt file degrades to "nothing learned", never to a startup failure.
+        std::fs::write(dir.join(LEARNED_GRANTS_FILE), b"{ not json").unwrap();
+        assert!(load_learned_grants(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Only what `learn` ACCEPTED may reach the file — the persisted policy can never be wider than
+    /// the live one, or a restart would grant what the gate refused.
+    #[test]
+    fn only_accepted_grants_are_persisted() {
+        let dir = learn_dir("accepted");
+        let alice = "aa".repeat(32);
+        let mallory = "cc".repeat(32);
+        let mut auth = RelayAuth::default();
+        auth.authorize("default", vec![alice.clone()], vec![]);
+        // mallory has never been served by this relay → refused, so nothing is written. The handler
+        // only calls `save_learned_grant` with the set `learn` RETURNED, so a refusal cannot leave a
+        // grant behind that a restart would then honour.
+        assert!(auth.learn("mal", &mallory, &[mallory.clone()]).is_none());
+        assert!(load_learned_grants(&dir).is_empty(), "a refused enroll persists nothing");
+        assert!(!auth.knows_circle("mal"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

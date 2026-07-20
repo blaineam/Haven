@@ -13,6 +13,22 @@ Exploratory work on outliving the infrastructure Haven doesn't own. **Nothing he
 behavior** — the discovery layer is behind a flag that defaults to off, and the push relay keeps its
 current default.
 
+### Fixed
+
+- **A relay was frozen to whatever circles its link said on the day you set it up.** It read the
+  link once at startup and refused everything else for the rest of its life — including every DM
+  conversation, which is created the first time two people message and so can never be in a link
+  pasted beforehand. Those conversations therefore had no relay holding messages for later at all:
+  a DM only arrived if both devices happened to be awake at the same moment, which looked like
+  "received DMs only show up on one of my devices". The link is now a one-time **pairing**: once a
+  relay is serving you, your app tells it about new circles as you use them, and it remembers them
+  across restarts. Nothing to re-paste.
+- **A relay in Docker silently reverted itself on every restart.** `HAVEN_RELAY_LINK` in `.env` was
+  re-applied each time the container came up, and it overwrites the saved link — so re-linking a
+  relay by hand worked until the next restart quietly undid it, with nothing in the log to say so.
+  The link is now applied only on a relay's first run; later starts keep the saved one and say so.
+  Set `HAVEN_RELAY_LINK_FORCE=1` for one start to re-link on purpose.
+
 ### Added
 
 - **You can now shrink media you already shared, for everyone (Apple).** The compression rewrite only

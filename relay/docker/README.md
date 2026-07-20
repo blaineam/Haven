@@ -41,6 +41,46 @@ Every later start is just `docker compose up -d` — the link and identity live 
 `haven-relay-data` volume, so the container stays the **same** relay across restarts and updates.
 Don't delete that volume unless you want a brand-new relay identity.
 
+## The link is a one-time pairing, not a standing configuration
+
+`HAVEN_RELAY_LINK` is applied **only on the first run**, while no link is saved in `/data` yet. On
+every later start the entrypoint ignores it and says so in the log.
+
+That is a deliberate change. `--link` persists, so re-applying the env value on every start silently
+overwrote the relay's saved link — a user who re-linked their relay by hand, verified it worked, and
+then restarted the container for an unrelated reason was quietly reverted to the stale link in
+`.env`, with nothing in the log to explain it.
+
+It is also no longer something you need to keep current: **a relay learns circles from the members
+it is already paired with.** A circle created after you pasted the link — above all a new DM, which
+is created the first time two people message — is registered by the member's own app the first time
+it uses that relay, and the grant is saved in `/data` so it survives restarts. You do not re-paste a
+link to add a circle.
+
+To deliberately re-link (say, pairing this box with a different account):
+
+```sh
+HAVEN_RELAY_LINK_FORCE=1 docker compose up -d   # one start, overwrites the saved link
+# or
+docker compose exec haven-relay rm /data/link.json && docker compose up -d
+```
+
+The startup log shows what the relay is serving:
+
+```
+  circles    : 1
+  learned 3 additional circle(s) from paired members:
+    · dm:1a2b3c4d-5e6f7a8b (2 members)
+    …
+  serving 4 circle(s): 1 from the link + 3 learned.
+```
+
+> **Relays built before this change** cannot learn: they authorize only what their link granted, at
+> startup, forever. (`haven-relay version` ≤ 1.1.4, or a startup log that says
+> `authorized N circle(s) from the link` with no `serving …` line after it.) On such a relay every circle created after the link was pasted answers `ERR forbidden` —
+> including every DM circle, which is why DMs had no store-and-forward and only arrived when both
+> devices happened to be online at once. Rebuild to fix it.
+
 ## If members reach this relay over the internet, set `HAVEN_RELAY_HTTP_URL`
 
 **Media cannot cross NAT without it.** The plain-HTTP interface is not an optimisation — it is the

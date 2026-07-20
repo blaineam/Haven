@@ -75,6 +75,44 @@ relay). The pieces:
    the desktop engine auto-syncs its hosted relay from every adopted sibling (health-aware, so a
    down peer is skipped). Every official client can be a full mesh node, not just the CLI.
 
+### Learning circles after the link — the ENROLL op (implemented)
+
+A relay used to read its circle list **once**, from the link the operator pasted, and never change
+it: `authorized 1 circle(s) from the link`, then `ERR forbidden` on everything else forever. Any
+circle created afterwards was unservable, and `dm:` circles are *always* created afterwards — they
+are minted the first time two people message. So DM conversations had **no store-and-forward at
+all**: a message landed only if both devices were online simultaneously, reported as "received DMs
+only show up on one of my devices". The only fix was re-pasting a link, which the Docker entrypoint
+then reverted on the next container start (`HAVEN_RELAY_LINK` was re-applied every run and `--link`
+persists).
+
+The link is now a **pairing handshake**, not a policy. After it, the relay and its members talk both
+ways: `ENROLL haven/enroll/<circle>` + a newline-joined member list widens the relay's authorization
+at runtime. The rule (`RelayAuth::learn`, with the reasoning in comments):
+
+1. **The caller must already be a member of some circle this relay serves.** This is the pairing —
+   the operator's link is what established it. Anyone else is refused by `blob_forbidden` before the
+   body is read, so an arbitrary node cannot enroll anything and a relay never becomes free storage
+   for strangers.
+2. **The caller must name ITSELF** among the members. Otherwise a trusted member could aim the relay
+   at a circle of pure strangers and walk away. Self-inclusion keeps every learned circle anchored to
+   a node the operator already serves.
+3. **An existing circle may only be extended from the inside** — the caller must already be in *that*
+   circle. Without this, a member of one circle could insert themselves into another (including an
+   operator-granted one) and read its mailbox.
+
+Learning is **additive** (union, never replace) and bounded (1024 circles, 1024 members/circle, 256
+per request). Accepted grants persist to `<data-dir>/enrolled-circles.json` — deliberately *outside*
+the `haven/` namespace so members can't read it and mesh sync can't replicate one relay's policy into
+another's — and are re-merged **on top of** the link grants at every startup and reconfigure
+(`rehydrate_learned_grants`), because `authorize()` replaces a circle's member set.
+
+Compatible both directions: an older relay answers `ERR verb` and the client carries on with whatever
+the link authorized (today's behaviour); an older client never sends ENROLL and is unaffected. On the
+client side `put`/`list`/`touch` answer a policy refusal by enrolling themselves into that key's
+circle and retrying once, at most once per circle per process. ENROLL is iroh-only: the HTTP twin has
+a closed route set and cannot widen a relay's policy.
+
 ### Mailbox garbage collection — TOUCH + TTL + age-preserving sync (implemented)
 
 Before deterministic event sealing (see [`GROUP-KEYING.md`](GROUP-KEYING.md)), every backfill

@@ -3215,7 +3215,7 @@ object HavenNet : InboundListener {
     // chunks IN ORDER and appends to a temp file on disk (streaming — never the whole blob in RAM).
     // Small media (<= one chunk) stays a single sealed blob (no manifest) for back-compat. The format is
     // BYTE-IDENTICAL to iOS/macOS + desktop (same 8 MB size, key scheme, and manifest bytes).
-    private val mediaChunkBytes = 8 * 1024 * 1024   // 8 MB — under MAX_BLOB, memory-safe
+    private val mediaChunkBytes = MediaUploadPlan.CHUNK_BYTES   // 8 MB — under MAX_BLOB, memory-safe
     // 9-byte ASCII magic marking a manifest. A sealed envelope is JSON starting with '{', so no collision.
     private val manifestMagic = "HVCHUNK1\n".toByteArray(Charsets.US_ASCII)
 
@@ -3837,20 +3837,35 @@ object HavenNet : InboundListener {
         } finally { c.disconnect() }
     }
 
-    /** PUT one media blob (chunked wire format) to a relay's HTTP interface. Three-way — see [relayHttpPut]. */
-    private fun httpUploadMedia(e: RelayEntry, ref: String, key: String, blob: ByteArray, chunked: Boolean): Result<Unit> {
+    /** PUT one media blob (chunked wire format) to a relay's HTTP interface. Three-way — see [relayHttpPut].
+     *  [sealFp] identifies the bytes being sent, so an interrupted upload can resume against them and
+     *  only against them; see [MediaUploadPlan] for why "the relay already has window i" is not on its
+     *  own a reason to skip it. */
+    private suspend fun httpUploadMedia(e: RelayEntry, nodeHex: String, ref: String, key: String, blob: ByteArray,
+                                        chunked: Boolean, sealFp: String = "", force: Boolean = false): Result<Unit> {
         var last: Result<Unit> = Result.failure(java.io.IOException("relay has no usable HTTP interface"))
         for (base in httpUrlsFor(e)) {
             val r = if (chunked) {
+                val ranges = chunkOffsets(blob.size)
+                // A relay already holding the leading windows of an attempt that got cut short is asked
+                // rather than re-sent. The manifest is still written at the end — it is what makes the
+                // blob readable, and an interrupted attempt never got that far.
+                val skip = resumeSkip(nodeHex, ref, sealFp, ranges.size, force) { i ->
+                    relayHttpGet(base, e.httpToken, mediaChunkKey(ref, i)).getOrNull() != null
+                }
                 val sizes = ArrayList<Int>()
                 var acc: Result<Unit> = Result.success(Unit)
-                for ((i, range) in chunkOffsets(blob.size).withIndex()) {
+                for ((i, range) in ranges.withIndex()) {
                     val (from, to) = range
-                    acc = relayHttpPut(base, e.httpToken, mediaChunkKey(ref, i), blob.copyOfRange(from, to))
-                    if (acc.isFailure) break
+                    if (i >= skip) {
+                        acc = relayHttpPut(base, e.httpToken, mediaChunkKey(ref, i), blob.copyOfRange(from, to))
+                        if (acc.isFailure) break
+                    }
                     sizes.add(to - from)
+                    recordUploaded(nodeHex, ref, sealFp, i + 1)
                 }
-                if (acc.isFailure) acc else relayHttpPut(base, e.httpToken, key, makeManifest(sizes))
+                if (acc.isFailure) acc
+                else relayHttpPut(base, e.httpToken, key, makeManifest(sizes)).onSuccess { clearUploaded(nodeHex, ref) }
             } else {
                 relayHttpPut(base, e.httpToken, key, blob)
             }
@@ -3979,13 +3994,28 @@ object HavenNet : InboundListener {
         // ---- Read the sealed blob, now known to be needed by at least one reachable destination.
         val blob = LocalMedia.rawSealed(ref) ?: return landed
         val chunked = blob.size > mediaChunkBytes
+        val ranges = chunkOffsets(blob.size)
+        val sizes = ranges.map { it.second - it.first }
+        // Identity of the exact bytes being uploaded. A destination's stored windows may only be
+        // skipped if WE put them there from THESE bytes: the at-rest blob for a ref is not immutable
+        // (re-storing the same plaintext, or repairing a blob that won't decrypt, re-seals it under
+        // the same ref with a fresh nonce and usually an identical length), and another device of this
+        // account may have uploaded the same ref from a seal of its own. Splicing across two seals
+        // yields a blob of exactly the right length that decrypts to nothing — silently, and
+        // permanently, since the key is content-addressed and write-once. See MediaUploadPlan.
+        val fp = if (chunked) MediaUploadPlan.sealFingerprint(blob) else ""
         for ((nodeHex, cfg) in uploadS3) {
             runCatching {
                 if (chunked) {
-                    val sizes = chunkOffsets(blob.size).mapIndexed { i, (from, to) ->
-                        uniffi.haven_ffi.s3Put(cfg, mediaChunkKey(ref, i), blob.copyOfRange(from, to)); to - from
+                    val skip = resumeSkip(nodeHex, ref, fp, ranges.size, force) { i ->
+                        uniffi.haven_ffi.s3Get(cfg, mediaChunkKey(ref, i)) != null
+                    }
+                    for ((i, r) in ranges.withIndex()) {
+                        if (i >= skip) uniffi.haven_ffi.s3Put(cfg, mediaChunkKey(ref, i), blob.copyOfRange(r.first, r.second))
+                        recordUploaded(nodeHex, ref, fp, i + 1)
                     }
                     uniffi.haven_ffi.s3Put(cfg, key, makeManifest(sizes))
+                    clearUploaded(nodeHex, ref)
                 } else {
                     uniffi.haven_ffi.s3Put(cfg, key, blob)
                 }
@@ -3996,10 +4026,15 @@ object HavenNet : InboundListener {
         for (nodeHex in uploadLocal) {
             runCatching {
                 if (chunked) {
-                    val sizes = chunkOffsets(blob.size).mapIndexed { i, (from, to) ->
-                        relayHost?.localPut(mediaChunkKey(ref, i), blob.copyOfRange(from, to)); to - from
+                    val skip = resumeSkip(nodeHex, ref, fp, ranges.size, force) { i ->
+                        relayHost?.localGet(mediaChunkKey(ref, i)) != null
+                    }
+                    for ((i, r) in ranges.withIndex()) {
+                        if (i >= skip) relayHost?.localPut(mediaChunkKey(ref, i), blob.copyOfRange(r.first, r.second))
+                        recordUploaded(nodeHex, ref, fp, i + 1)
                     }
                     relayHost?.localPut(key, makeManifest(sizes))
+                    clearUploaded(nodeHex, ref)
                 } else {
                     relayHost?.localPut(key, blob)
                 }
@@ -4008,7 +4043,7 @@ object HavenNet : InboundListener {
         // Relay HTTP interface — the DEFAULT cross-NAT path. Success = done for this relay
         // (the iroh path serves the same store); a mid-upload failure falls back to the iroh put.
         for ((nodeHex, entry) in uploadHttp) {
-            val r = httpUploadMedia(entry, ref, key, blob, chunked)
+            val r = httpUploadMedia(entry, nodeHex, ref, key, blob, chunked, fp, force)
             if (r.isSuccess) {
                 markRelaySeen(nodeHex); markBackedUp(nodeHex, ref); landed = true
                 android.util.Log.i("MediaSync", "HTTP uploaded ref=$ref to ${nodeHex.take(8)}")
@@ -4026,10 +4061,14 @@ object HavenNet : InboundListener {
         for ((nodeHex, client) in uploadDial) {
             runCatching {
                 if (chunked) {
-                    val sizes = chunkOffsets(blob.size).mapIndexed { i, (from, to) ->
-                        client.put(mediaChunkKey(ref, i), blob.copyOfRange(from, to)); to - from
+                    // `has` is an exact, cheap existence check here — no download, unlike the S3/HTTP probes.
+                    val skip = resumeSkip(nodeHex, ref, fp, ranges.size, force) { i -> client.has(mediaChunkKey(ref, i)) }
+                    for ((i, r) in ranges.withIndex()) {
+                        if (i >= skip) client.put(mediaChunkKey(ref, i), blob.copyOfRange(r.first, r.second))
+                        recordUploaded(nodeHex, ref, fp, i + 1)
                     }
                     client.put(key, makeManifest(sizes))
+                    clearUploaded(nodeHex, ref)
                 } else {
                     client.put(key, blob)
                 }
@@ -4041,11 +4080,96 @@ object HavenNet : InboundListener {
     }
 
     /** Byte ranges of each 8 MB chunk over a blob of [size] bytes: list of (from, toExclusive). */
-    private fun chunkOffsets(size: Int): List<Pair<Int, Int>> {
-        val out = ArrayList<Pair<Int, Int>>()
-        var off = 0
-        while (off < size) { val end = minOf(off + mediaChunkBytes, size); out.add(off to end); off = end }
-        return out
+    private fun chunkOffsets(size: Int): List<Pair<Int, Int>> = MediaUploadPlan.windows(size)
+
+    // ---- Resumable chunked upload (iOS SharedStore.putMediaFile parity) --------------------------
+    //
+    // Ask a destination which leading windows it already holds and send only the rest, so an upload
+    // that keeps getting interrupted CONVERGES instead of restarting at window 0 forever. The two
+    // halves of that decision — the prefix scan and the seal-fingerprint guard that keeps it from
+    // silently corrupting the blob — live in [MediaUploadPlan]; read the trap described there before
+    // touching any of this.
+
+    /**
+     * How far a chunked upload of a ref got on ONE destination, and from WHICH sealed bytes:
+     * `"<node>|<ref>"` -> `"<sha256 of the seal>:<windows written>"`.
+     *
+     * Per DESTINATION, not per ref, because progress is per destination — and the fingerprint travels
+     * with it because windows written from a different seal must never be counted (see
+     * [MediaUploadPlan]). Persisted because the interruption this feature exists for is the app being
+     * KILLED; an in-memory record would be empty exactly when the decision gets made.
+     *
+     * Written after each window, which is nothing beside the 8 MB PUT it follows. Losing the last
+     * write or two to a kill is harmless in the only direction that matters: it UNDERSTATES progress,
+     * costing a re-sent window, and can never overstate it.
+     */
+    private val uploadProgress = HashMap<String, String>()
+    private var uploadProgressLoaded = false
+    private fun uploadPrefs() = appContext.getSharedPreferences("haven.mediabackup", Context.MODE_PRIVATE)
+    private fun ensureUploadProgress() {
+        if (uploadProgressLoaded) return
+        runCatching {
+            for (e in uploadPrefs().getStringSet("resume", emptySet()) ?: emptySet()) {
+                val i = e.lastIndexOf('=')
+                if (i > 0) uploadProgress[e.substring(0, i)] = e.substring(i + 1)
+            }
+        }
+        uploadProgressLoaded = true
+    }
+    /** (fingerprint, windows) this destination was last given for [ref], or null if we have no record. */
+    private fun uploadedSoFar(node: String, ref: String): Pair<String, Int>? {
+        ensureUploadProgress()
+        val v = uploadProgress["$node|$ref"] ?: return null
+        val i = v.lastIndexOf(':')
+        if (i <= 0) return null
+        return v.substring(0, i) to (v.substring(i + 1).toIntOrNull() ?: return null)
+    }
+    private fun recordUploaded(node: String, ref: String, fp: String, windows: Int) {
+        ensureUploadProgress()
+        if (uploadProgress.put("$node|$ref", "$fp:$windows") == "$fp:$windows") return
+        // Bounded like every other durable record here. Eviction only costs a full re-upload of a
+        // long-idle ref (the safe direction — see MediaUploadPlan), never correctness.
+        while (uploadProgress.size > 2_000) { val it = uploadProgress.keys.iterator(); it.next(); it.remove() }
+        runCatching {
+            uploadPrefs().edit()
+                .putStringSet("resume", uploadProgress.entries.map { "${it.key}=${it.value}" }.toHashSet()).apply()
+        }
+    }
+    /** A finished upload needs no resume record; drop it rather than let it age out of the cap. */
+    private fun clearUploaded(node: String, ref: String) {
+        ensureUploadProgress()
+        if (uploadProgress.remove("$node|$ref") == null) return
+        runCatching {
+            uploadPrefs().edit()
+                .putStringSet("resume", uploadProgress.entries.map { "${it.key}=${it.value}" }.toHashSet()).apply()
+        }
+    }
+
+    /**
+     * How many leading windows to SKIP for one destination: the ones we ourselves wrote there from
+     * these exact sealed bytes ([MediaUploadPlan.trustedPrefix]) AND that it still holds. The probe is
+     * the second half — a relay may have swept the chunks since — and it stops at the first miss, so
+     * with no prior progress this costs ONE probe. That is what makes it affordable on destinations
+     * (S3, a relay's HTTP interface) whose only existence check is a full GET.
+     *
+     * A probe that THROWS counts as a miss: an unreachable destination must re-send, never skip.
+     */
+    private suspend fun resumeSkip(node: String, ref: String, fp: String, total: Int, force: Boolean,
+                                   held: suspend (Int) -> Boolean): Int {
+        val prior = uploadedSoFar(node, ref)
+        val trusted = MediaUploadPlan.trustedPrefix(force, prior?.first, fp, prior?.second ?: 0, total)
+        if (trusted == 0) return 0
+        val probed = ArrayList<Boolean>()
+        for (i in 0 until trusted) {
+            val h = runCatching { held(i) }.getOrDefault(false)
+            probed.add(h)
+            if (!h) break
+        }
+        val skip = MediaUploadPlan.skipCount(probed)
+        if (skip > 0) {
+            android.util.Log.i("MediaSync", "resumed upload to ${node.take(8)}: $skip/$total windows already stored")
+        }
+        return skip
     }
 
     private suspend fun fetchMediaFromRelay(circleId: String, ref: String): Boolean {

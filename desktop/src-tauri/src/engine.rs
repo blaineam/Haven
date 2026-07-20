@@ -98,6 +98,17 @@ struct DynState {
     /// already held. iOS `MediaBackupLedger` / Android `backedUp` parity.
     media_backed_up: HashSet<String>,
     media_backed_up_dirty: bool,
+    /// How far a chunked upload of a ref got on ONE destination, and from WHICH sealed bytes:
+    /// `"<dest>|<ref>"` -> `"<sha256 of the seal>:<windows written>"`. PERSISTED to
+    /// `media-upload-progress.txt`.
+    ///
+    /// Per DESTINATION, not per ref, because progress is per destination — and the fingerprint travels
+    /// with it because windows written from a DIFFERENT seal must never be counted. This is what makes
+    /// a resumed chunked upload safe: see `mediaresume::trusted_prefix` for the silent corruption a
+    /// bare "does the relay hold window i?" probe would cause. Persisted because the interruption
+    /// resume exists for is the process being KILLED — an in-memory record would be empty exactly when
+    /// the decision gets made.
+    media_upload_progress: HashMap<String, String>,
     /// ref -> when we last re-uploaded it for a frame-31 ask, and the refs an upload is in flight
     /// for. Serving one full-blob upload per inbound frame with no bound is a bandwidth amplifier a
     /// circle member could aim at us; these bound it. In-memory on purpose — the cooldown is about
@@ -251,7 +262,7 @@ enum RelayErr {
 const MEDIA_CHUNK_SIZE: usize = 32 * 1024;
 /// Relay/S3 media chunk size — 8 MB, well under blobstore's MAX_BLOB (256 MB) and memory-safe.
 /// (Distinct from MEDIA_CHUNK_SIZE above, which is the peer-to-peer iroh frame chunk.)
-const MEDIA_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+const MEDIA_CHUNK_BYTES: usize = crate::mediaresume::UPLOAD_CHUNK_BYTES;
 /// 9-byte ASCII magic marking a chunk manifest blob. A sealed envelope is JSON starting with '{',
 /// so it can never collide. Must be byte-identical across iOS/macOS + Android.
 const MEDIA_MANIFEST_MAGIC: &[u8] = b"HVCHUNK1\n";
@@ -404,6 +415,14 @@ impl Engine {
             media_backed_up: std::fs::read_to_string(paths.root.join("media-backed-up.txt"))
                 .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
                 .unwrap_or_default(),
+            media_upload_progress: std::fs::read_to_string(paths.root.join("media-upload-progress.txt"))
+                .map(|t| {
+                    t.lines()
+                        .filter_map(|l| l.split_once('\t'))
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
             // Pick half-finished media transfers back up rather than restarting them. `load` prunes
             // as it reads (expired, or part file gone), so nothing here can resume into bytes that
             // aren't there.
@@ -494,6 +513,14 @@ impl Engine {
                 .unwrap_or_default(),
             media_backed_up: std::fs::read_to_string(paths.root.join("media-backed-up.txt"))
                 .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
+                .unwrap_or_default(),
+            media_upload_progress: std::fs::read_to_string(paths.root.join("media-upload-progress.txt"))
+                .map(|t| {
+                    t.lines()
+                        .filter_map(|l| l.split_once('\t'))
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect()
+                })
                 .unwrap_or_default(),
             // Pick half-finished media transfers back up rather than restarting them. `load` prunes
             // as it reads (expired, or part file gone), so nothing here can resume into bytes that
@@ -4435,7 +4462,13 @@ impl Engine {
         // endpoint instead of RelayClient::connect binding a fresh endpoint per client — the cold
         // endpoint restarts DERP discovery every time, which is exactly the cross-NAT 30s timeout
         // while messaging on the same relay path works.
-        let warm = self.node.lock().unwrap().clone().and_then(|n| n.relay_client(node_hex.to_string()).ok());
+        // Clone the node OUT of the lock before awaiting: `relay_client` is async, and holding a
+        // std::sync MutexGuard across an await point is what makes the future non-Send.
+        let node = self.node.lock().unwrap().clone();
+        let warm = match node {
+            Some(n) => n.relay_client(node_hex.to_string()).await.ok(),
+            None => None,
+        };
         let res = match warm {
             Some(c) => Ok(c),
             // No messaging node yet → cold connect under the DEVICE seed (never the account seed:
@@ -4512,6 +4545,96 @@ impl Engine {
         };
         let _ = std::fs::write(self.paths.root.join("media-backed-up.txt"), snapshot);
     }
+    /// How many leading windows to SKIP for one destination: the ones we ourselves wrote there from
+    /// these exact sealed bytes (`mediaresume::trusted_prefix`) AND that it still holds. The probe is
+    /// the second half — a relay may have swept the chunks since — and it stops at the first miss, so
+    /// with no prior progress it costs at most ONE probe. That is what makes probing affordable on
+    /// destinations (S3, a relay's HTTP interface) whose only existence check is a full GET.
+    async fn resume_skip<F, Fut>(
+        &self,
+        dest: &str,
+        reference: &str,
+        fingerprint: &str,
+        total: usize,
+        force: bool,
+        mut held: F,
+    ) -> usize
+    where
+        F: FnMut(usize) -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        let prior = self.media_upload_progress(dest, reference);
+        let trusted = crate::mediaresume::trusted_prefix(
+            force,
+            prior.as_ref().map(|(fp, _)| fp.as_str()),
+            fingerprint,
+            prior.as_ref().map(|(_, n)| *n).unwrap_or(0),
+            total,
+        );
+        if trusted == 0 {
+            return 0;
+        }
+        let mut probed = Vec::new();
+        for i in 0..trusted {
+            let h = held(i).await;
+            probed.push(h);
+            if !h {
+                break;
+            }
+        }
+        let skip = crate::mediaresume::upload_skip_count(&probed);
+        if skip > 0 {
+            log::info!("resumed upload to {}: {skip}/{total} windows already stored", &dest[..8.min(dest.len())]);
+        }
+        skip
+    }
+
+    /// `(fingerprint, windows)` this destination was last given for `reference`, or `None` if we have
+    /// no record — which safely means "re-send everything".
+    fn media_upload_progress(&self, dest: &str, reference: &str) -> Option<(String, usize)> {
+        let st = self.dyn_state.lock().unwrap();
+        let v = st.media_upload_progress.get(&format!("{dest}|{reference}"))?;
+        let (fp, n) = v.rsplit_once(':')?;
+        Some((fp.to_string(), n.parse().ok()?))
+    }
+
+    /// Remember that `windows` leading windows of THESE sealed bytes are now on `dest`. Written after
+    /// each window — nothing beside the 8 MB PUT it follows. Losing the last write or two to a kill is
+    /// harmless in the only direction that matters: it UNDERSTATES progress, costing a re-sent window,
+    /// and can never overstate it. `windows == 0` clears the record (a finished upload needs none).
+    fn record_media_upload_progress(&self, dest: &str, reference: &str, fingerprint: &str, windows: usize) {
+        let snapshot = {
+            let mut st = self.dyn_state.lock().unwrap();
+            let k = format!("{dest}|{reference}");
+            if windows == 0 {
+                if st.media_upload_progress.remove(&k).is_none() {
+                    return;
+                }
+            } else {
+                let v = format!("{fingerprint}:{windows}");
+                if st.media_upload_progress.get(&k) == Some(&v) {
+                    return;
+                }
+                st.media_upload_progress.insert(k, v);
+            }
+            // Bounded like every other durable record here. Eviction only costs a full re-upload of a
+            // long-idle ref (the safe direction), never correctness.
+            while st.media_upload_progress.len() > 2_000 {
+                let victim = match st.media_upload_progress.keys().next() {
+                    Some(k) => k.clone(),
+                    None => break,
+                };
+                st.media_upload_progress.remove(&victim);
+            }
+            st.media_upload_progress
+                .iter()
+                .map(|(k, v)| format!("{k}\t{v}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let _ = std::fs::write(self.paths.root.join("media-upload-progress.txt"), snapshot);
+    }
+
     /// Forget a destination's media confirmations (relay forgotten/erased) so we re-mirror to it
     /// if it ever comes back. iOS `MediaBackupLedger.forgetDest` parity.
     fn forget_media_backed_up(&self, dest: &str) {
@@ -5193,6 +5316,15 @@ impl Engine {
         // ---- Read the sealed blob, now known to be needed by at least one reachable destination.
         let Some(blob) = self.media.raw_sealed(reference) else { return landed };
         let chunked = blob.len() > MEDIA_CHUNK_BYTES;
+        // Identity of the exact bytes being uploaded. A destination's stored windows may only be
+        // skipped if WE put them there from THESE bytes: the at-rest blob for a ref is not immutable
+        // (re-storing the same plaintext, or repairing a blob that won't decrypt, re-seals it under the
+        // same ref with a fresh nonce and usually an identical length), and another device of this
+        // account may have uploaded the same ref from a seal of its own. Splicing across two seals
+        // yields a blob of exactly the right length that decrypts to nothing — silently, and
+        // permanently, since the key is content-addressed and write-once. See `mediaresume`.
+        let seal_fp = if chunked { crate::mediaresume::seal_fingerprint(&blob) } else { String::new() };
+        let window_count = crate::mediaresume::upload_windows(blob.len(), MEDIA_CHUNK_BYTES).len();
         // S3/HTTP bucket FIRST — the DEFAULT media transport. Plain HTTPS traverses any NAT, whereas
         // the iroh blob ALPN (haven/blob/1) drops its outbound datagrams over a pure-relay cross-NAT
         // path (noq/iroh fork bug): blob transfers that must cross a NAT stall and die even while
@@ -5202,11 +5334,29 @@ impl Engine {
                 let ok = if chunked {
                     let mut sizes = Vec::new();
                     let mut all = true;
+                    // Borrowed, not moved: `async move` on the probe closure would swallow the client
+                    // the upload loop below still needs.
+                    let s3_ref = &s3;
+                    let skip = self
+                        .resume_skip("s3", reference, &seal_fp, window_count, force, |i| async move {
+                            s3_ref.get(&Self::media_chunk_key(reference, i)).await.ok().flatten().is_some()
+                        })
+                        .await;
                     for (i, slice) in blob.chunks(MEDIA_CHUNK_BYTES).enumerate() {
-                        if s3.put(&Self::media_chunk_key(reference, i), slice).await.is_err() { all = false; break; }
+                        if i >= skip
+                            && s3.put(&Self::media_chunk_key(reference, i), slice).await.is_err()
+                        {
+                            all = false;
+                            break;
+                        }
                         sizes.push(slice.len());
+                        self.record_media_upload_progress("s3", reference, &seal_fp, i + 1);
                     }
-                    all && s3.put(&key, &Self::make_manifest(&sizes)).await.is_ok()
+                    let done = all && s3.put(&key, &Self::make_manifest(&sizes)).await.is_ok();
+                    if done {
+                        self.record_media_upload_progress("s3", reference, &seal_fp, 0);
+                    }
+                    done
                 } else {
                     s3.put(&key, &blob).await.is_ok()
                 };
@@ -5220,15 +5370,38 @@ impl Engine {
             let res = if chunked {
                 let mut sizes = Vec::new();
                 let mut acc = Ok(());
+                // A relay already holding a leading run of windows (an earlier attempt that was cut
+                // short) is asked rather than re-sent: `<ref>.p/<i>` is content-addressed, so the bytes
+                // up there are already ours. The manifest is still written at the end — it is what makes
+                // the blob readable, and an interrupted attempt never got that far.
+                let (base_ref, token_ref) = (&base, &token);
+                let skip = self
+                    .resume_skip(&node_hex, reference, &seal_fp, window_count, force, |i| async move {
+                        self.http_get(base_ref, token_ref, &Self::media_chunk_key(reference, i))
+                            .await
+                            .ok()
+                            .flatten()
+                            .is_some()
+                    })
+                    .await;
                 for (i, slice) in blob.chunks(MEDIA_CHUNK_BYTES).enumerate() {
-                    acc = self.http_put(&base, &token, &Self::media_chunk_key(reference, i), slice.to_vec()).await;
-                    if acc.is_err() {
-                        break;
+                    if i >= skip {
+                        acc = self.http_put(&base, &token, &Self::media_chunk_key(reference, i), slice.to_vec()).await;
+                        if acc.is_err() {
+                            break;
+                        }
                     }
                     sizes.push(slice.len());
+                    self.record_media_upload_progress(&node_hex, reference, &seal_fp, i + 1);
                 }
                 match acc {
-                    Ok(()) => self.http_put(&base, &token, &key, Self::make_manifest(&sizes)).await,
+                    Ok(()) => {
+                        let r = self.http_put(&base, &token, &key, Self::make_manifest(&sizes)).await;
+                        if r.is_ok() {
+                            self.record_media_upload_progress(&node_hex, reference, &seal_fp, 0);
+                        }
+                        r
+                    }
                     Err(e) => Err(e),
                 }
             } else {
@@ -5259,11 +5432,23 @@ impl Engine {
             let res: Result<(), ()> = async {
                 if chunked {
                     let mut sizes = Vec::new();
+                    // `has` is an exact, cheap existence check here — no download, unlike the S3/HTTP probes.
+                    let client_ref = &client;
+                    let skip = self
+                        .resume_skip(&node_hex, reference, &seal_fp, window_count, force, |i| async move {
+                            client_ref.has(Self::media_chunk_key(reference, i)).await
+                        })
+                        .await;
                     for (i, slice) in blob.chunks(MEDIA_CHUNK_BYTES).enumerate() {
-                        client.put(Self::media_chunk_key(reference, i), slice.to_vec()).await.map_err(|_| ())?;
+                        if i >= skip {
+                            client.put(Self::media_chunk_key(reference, i), slice.to_vec()).await.map_err(|_| ())?;
+                        }
                         sizes.push(slice.len());
+                        self.record_media_upload_progress(&node_hex, reference, &seal_fp, i + 1);
                     }
-                    client.put(key.clone(), Self::make_manifest(&sizes)).await.map_err(|_| ())
+                    client.put(key.clone(), Self::make_manifest(&sizes)).await.map_err(|_| ())?;
+                    self.record_media_upload_progress(&node_hex, reference, &seal_fp, 0);
+                    Ok(())
                 } else {
                     client.put(key.clone(), blob.clone()).await.map_err(|_| ())
                 }

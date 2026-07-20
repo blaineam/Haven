@@ -1,6 +1,6 @@
-1.1.3 — relays that behave:
-• Big photos and videos pick up where they left off instead of restarting from scratch.
-• Receiving a large video no longer loads the whole thing into memory, so size limits are gone.
-• Sending keeps pace with your connection rather than queueing the entire file at once.
-• Fixed media that never arrived because the same transfer kept starting over.
-• Setting a relay as your default now serves every circle, not just one.
+1.1.4 — media that crosses networks:
+• Photos and videos now transfer between people on different networks, not just the same one.
+• Media sent in a conversation actually arrives, instead of waiting to be asked for.
+• Big items resume where they left off instead of restarting from scratch.
+• Receiving a large video no longer loads the whole thing into memory.
+• Hosting a relay no longer makes the app crawl.

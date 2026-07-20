@@ -3,7 +3,7 @@ name = "haven-relay"
 # Tracks the RELEASE this binary ships in, so `haven-relay version` answers the question an
 # operator actually has ("is my NAS running something older than the fix?"). 0.0.1 would have been
 # technically true and completely useless.
-version = "1.1.3"
+version = "1.1.4"
 edition = "2021"
 publish = false
 description = "Haven easy circle relay: an always-on, single-binary connection relay + media store-and-forward that links to a circle and only ever moves ciphertext."

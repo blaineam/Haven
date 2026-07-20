@@ -31,6 +31,27 @@ current default.
 - `docs/SUCCESSION.md` — whether Haven could outlive its author, what a successor could and couldn't
   legally do with the source, and a checklist. Not legal advice.
 
+## [1.1.4]
+
+### Fixed
+
+- **Photos and videos wouldn't move between people on different networks.** Messages and posts
+  arrived normally, but the media attached to them never did — uploads sat on an arrow forever and
+  downloads never started. The cause was a connection to your relay being torn down and rebuilt every
+  twenty seconds, which never left it long enough to find a direct route between the two devices.
+  Everything was left crawling through a fallback path that can't actually carry media. It now keeps
+  that connection open, so the direct route gets established and media moves. This needs no
+  port-forwarding, no public address and no configuration — the same as it always should have.
+
+- **Media shared in a conversation didn't arrive.** A photo or video sent in a DM was only ever
+  fetched if it happened to be pushed while both people were online. Nothing asked for it otherwise,
+  so it could sit complete on a relay while the recipient's app never requested it — including on
+  your own other devices.
+
+- **Hosting a relay made the app crawl.** Two more paths where the relay's file reads happened on the
+  thread drawing the screen: listing the mailbox and filtering it. Worst on machines with a real
+  history behind them.
+
 ## [1.1.3]
 
 ### Fixed

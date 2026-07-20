@@ -63,7 +63,13 @@ struct AudioRecorderView: View {
 
                 Button {
                     if rec.isRecording {
-                        if let u = rec.stop() { onDone(MediaStore.shared.addAudio(url: u)); dismiss() }
+                        if let u = rec.stop() {
+                            Task { @MainActor in
+                                let r = await MediaStore.shared.addAudio(url: u)
+                                if !r.isEmpty { onDone(r) }
+                                dismiss()
+                            }
+                        }
                     } else {
                         AVAudioApplication.requestRecordPermission { _ in }
                         rec.start()

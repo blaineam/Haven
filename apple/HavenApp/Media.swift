@@ -1055,10 +1055,21 @@ final class MediaStore: ObservableObject {
 
     /// Audio reuses `videoURL` as the file URL.
     @discardableResult
-    func addAudio(url src: URL) -> String {
+    func addAudio(url src: URL) async -> String {
+        MediaProcessing.shared.begin("recording")
+        defer { MediaProcessing.shared.end() }
         let scratch = scratchURL("m4a")
         try? FileManager.default.removeItem(at: scratch)
-        try? FileManager.default.copyItem(at: src, to: scratch)
+        // Re-encode to AAC rather than shipping whatever arrived. An in-app voice note is already
+        // AAC so this is near-neutral, but anything shared IN can be WAV/AIFF/ALAC — uncompressed or
+        // lossless, i.e. tens of megabytes of speech. Verified on real recordings before wiring:
+        // 0.12 MB → 0.10 MB and 0.07 MB → 0.02 MB, duration exact.
+        if !(await VideoEncoder.encodeAudio(src, to: scratch)) {
+            // Falls back to the verbatim copy, so an asset AVFoundation can't read is still sendable.
+            HavenLog.sync("audio add: AAC encode failed — keeping the original")
+            try? FileManager.default.removeItem(at: scratch)
+            try? FileManager.default.copyItem(at: src, to: scratch)
+        }
         guard let ref = adoptProduced(.audio, from: scratch), let dst = fileURL(ref) else {
             return "aud_\(UUID().uuidString)"
         }

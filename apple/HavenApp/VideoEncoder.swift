@@ -120,6 +120,60 @@ enum VideoEncoder {
         return writer.status == .completed
     }
 
+    /// Target for audio-only files. Speech-friendly and a fraction of an uncompressed source.
+    static let standaloneAudioBitrate = 96_000
+
+    /// Re-encode an audio FILE to AAC in an .m4a.
+    ///
+    /// `addAudio` was a straight `copyItem` — whatever the recorder or the sender's file happened to
+    /// be, shipped verbatim. Fine for an in-app voice note (already AAC) and terrible for anything
+    /// shared in: WAV/AIFF/ALAC are uncompressed or losslessly compressed, so a few minutes is tens of
+    /// megabytes for speech nobody needs at that fidelity.
+    ///
+    /// Single track, so unlike the video path there is no second output to interleave with and the
+    /// deadlock that bug had cannot arise. Channel count is PRESERVED (capped at stereo) — forcing a
+    /// mono voice note to stereo would double it for nothing.
+    static func encodeAudio(_ src: URL, to dst: URL) async -> Bool {
+        try? FileManager.default.removeItem(at: dst)
+        let asset = AVURLAsset(url: src)
+        guard let track = (try? await asset.loadTracks(withMediaType: .audio))?.first,
+              let reader = try? AVAssetReader(asset: asset),
+              let writer = try? AVAssetWriter(outputURL: dst, fileType: .m4a)
+        else { return false }
+
+        var channels = 2
+        if let desc = (try? await track.load(.formatDescriptions))?.first,
+           let basic = CMAudioFormatDescriptionGetStreamBasicDescription(desc) {
+            channels = min(2, max(1, Int(basic.pointee.mChannelsPerFrame)))
+        }
+
+        let out = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+        ])
+        out.alwaysCopiesSampleData = false
+        let input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVNumberOfChannelsKey: channels,
+            AVSampleRateKey: 44_100,
+            AVEncoderBitRateKey: standaloneAudioBitrate,
+        ])
+        input.expectsMediaDataInRealTime = false
+        guard reader.canAdd(out), writer.canAdd(input) else { return false }
+        reader.add(out); writer.add(input)
+
+        writer.shouldOptimizeForNetworkUse = true
+        guard reader.startReading(), writer.startWriting() else { return false }
+        writer.startSession(atSourceTime: .zero)
+        await pump(input, out, reader: reader, label: "audio-only")
+        guard reader.status != .failed else { writer.cancelWriting(); return false }
+        await writer.finishWriting()
+        return writer.status == .completed
+    }
+
     /// Feed one writer input from one reader output until it runs dry.
     ///
     /// `requestMediaDataWhenReady` re-invokes its block whenever the input drains, so the block can

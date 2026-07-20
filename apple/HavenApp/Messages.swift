@@ -400,6 +400,9 @@ struct DMThreadView: View {
     /// attachment row) and whichever thread. A fixed guess (76) was close enough for short 1:1 threads but
     /// left the last message sitting too low behind the composer on longer group threads.
     @State private var composerHeight: CGFloat = 76
+    /// Is the newest message currently on screen? Drives whether an arriving message scrolls into
+    /// view. Starts true because a thread opens pinned to the bottom.
+    @State private var atBottom = true
 
     /// A GROUP DM has more than one OTHER participant — then each incoming message needs a sender name so
     /// the group knows who said what (a 1:1 DM doesn't).
@@ -430,6 +433,12 @@ struct DMThreadView: View {
                         ForEach(ordered, id: \.id) { m in
                             bubble(m).id(m.id)
                         }
+                        // Zero-height marker that exists only to report whether the BOTTOM of the
+                        // thread is on screen. Used to decide whether an arriving message should
+                        // scroll into view or be left alone — see onChange(of: ordered.count).
+                        Color.clear.frame(height: 1)
+                            .onAppear { atBottom = true }
+                            .onDisappear { atBottom = false }
                     }
                     .padding(16)
                 }
@@ -446,7 +455,13 @@ struct DMThreadView: View {
                 // postTick only moves for OUR OWN send/edit/delete — nothing bumps it on receive — so
                 // watching it alone meant a picture arriving while you were looking at the thread was
                 // fetched by nothing. Watch the message count, which does move when one lands.
-                .onChange(of: ordered.count) { fetchMissingThreadMedia() }
+                .onChange(of: ordered.count) {
+                    fetchMissingThreadMedia()
+                    // A message arriving while you are reading should be READABLE without you having
+                    // to scroll for it — but only if you were at the bottom already. Yanking someone
+                    // back down while they are reading history is worse than making them scroll.
+                    if atBottom { scrollToBottom(proxy) }
+                }
                 .onChange(of: store.items.count) { scrollToBottom(proxy) }
                 // Ask for anything this thread references and we don't hold — on open, and again when
                 // a new message lands. Nothing else ever does this for DMs (see fetchMissingThreadMedia).

@@ -7,6 +7,30 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+Exploratory work on outliving the infrastructure Haven doesn't own. **Nothing here changes shipped
+behavior** — the discovery layer is behind a flag that defaults to off, and the push relay keeps its
+current default.
+
+### Added
+
+- **Haven's own relays can answer "where is node X".** Today every connection bootstraps through
+  Number Zero's public DNS and relay fleet; if those stop, installs that can't hole-punch stop
+  connecting. A node can now publish a short, signed record of where it can be reached to a relay it
+  already trusts with its sealed mailbox. The relay is a shelf, not an authority: the record is
+  signed by the node itself, so a hostile or seized relay can refuse to answer, but it cannot send
+  you to the wrong person. Number Zero stays wired in as a fallback rather than the only path.
+- **The push relay is no longer welded in at build time (Apple).** It can be pointed at a different
+  server, or switched off entirely, on an already-installed app. With it off, Haven checks for
+  messages when you open it and opportunistically in the background — slower, but nothing is lost.
+- `docs/DECENTRALIZED-DISCOVERY.md` — the design, a full audit of every third-party dependency in
+  the connection path, and the threat model.
+- `docs/NOTIFICATIONS-FALLBACK.md` — how notifications work with no push server, and an honest
+  account of what iOS will and won't deliver.
+- `docs/SUCCESSION.md` — whether Haven could outlive its author, what a successor could and couldn't
+  legally do with the source, and a checklist. Not legal advice.
+
 ## [1.1.3]
 
 ### Fixed

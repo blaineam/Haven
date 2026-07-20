@@ -330,7 +330,20 @@ async fn handle_conn(
                 // did NOT, so a self-minted key could rename garbage over any account's roster over
                 // plain HTTP (audit R6). Verify (with rollback defense) before storing, and expand
                 // membership from the verified device ids just like the iroh path does.
-                if let Some(acct) = key.strip_prefix(DEVROSTER_PREFIX) {
+                // A discovery record is un-gated by membership for the same reason and with the
+                // same obligation: verify the body's SELF-signature (and its rollback defense)
+                // before storing, or a self-minted key could shelve a forged address under any
+                // node id. `verify_discovery_put` binds the record to the key and refuses a lower
+                // `seq` than we already hold.
+                if let Some(node) = crate::discovery::discovery_node(&key).map(str::to_string) {
+                    match crate::discovery::verify_discovery_put(root, &node, &body) {
+                        Some(_) => match local_put(root, &key, &body) {
+                            Ok(()) => respond(&mut w, 200, "OK", keep_alive, b"OK").await?,
+                            Err(_) => respond(&mut w, 500, "write failed", keep_alive, b"").await?,
+                        },
+                        None => respond(&mut w, 403, "forbidden", keep_alive, b"").await?,
+                    }
+                } else if let Some(acct) = key.strip_prefix(DEVROSTER_PREFIX) {
                     match verify_devroster_put(root, acct, &body) {
                         Some((account, devices)) => match local_put(root, &key, &body) {
                             Ok(()) => {

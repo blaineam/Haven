@@ -528,6 +528,15 @@ enum SharedStore {
               let sealedSize = (try? FileManager.default.attributesOfItem(atPath: sealedURL.path)[.size] as? Int) ?? nil
         else { HavenLog.sync("backup SEAL-FAIL ref=\(ref)"); MediaBackupBackoff.recordStalled(ref); return false }
         let chunked = sealedSize > mediaChunkBytes
+        // Identity of the exact bytes about to be uploaded. A destination's stored windows may only be
+        // skipped if WE put them there from THESE bytes — the at-rest seal for a ref is not immutable
+        // (a fresh nonce per seal, plus per-recipient key material that moves as rosters arrive), and
+        // another device of this account may have uploaded the same ref from a seal of its own. Only
+        // needed for the chunked path; a small blob is one whole PUT with nothing to resume.
+        // Streamed and off the main actor: this is a hash of hundreds of MB.
+        let sealFp: String = chunked
+            ? await Task.detached(priority: .utility) { MediaUploadPlan.sealFingerprint(fileURL: sealedURL) ?? "" }.value
+            : ""
         HavenLog.sync("backup ref=\(ref) size=\(sealedSize) chunked=\(chunked) dests=\(uploads.count + (s3Needs ? 1 : 0)) s3=\(s3Needs)")
 
         // 1) S3/HTTP bucket FIRST — the DEFAULT media transport. Plain HTTPS traverses any NAT,
@@ -536,7 +545,11 @@ enum SharedStore {
         //    stall and die while messaging on the same relay path works.
         if s3Needs, let s3 {
             do {
-                try await putMediaFile(ref: ref, sealedURL: sealedURL, size: sealedSize) { try await s3.putObject(key: $0, data: $1) }
+                try await putMediaFile(ref: ref, dest: "s3", sealedURL: sealedURL, size: sealedSize,
+                                       sealFp: sealFp, force: force,
+                                       exists: { await s3.headObjectExists(key: $0) == true }) {
+                    try await s3.putObject(key: $0, data: $1)
+                }
                 HavenLog.sync("backup s3-put OK ref=\(ref) size=\(sealedSize) chunked=\(chunked)")
                 MediaBackupLedger.mark("s3", ref); landed = true
             }
@@ -548,13 +561,15 @@ enum SharedStore {
             switch route {
             case .ownRelay:
                 // Our OWN hosted relay: store directly in the local mailbox (no iroh self-dial).
-                try? await putMediaFile(ref: ref, sealedURL: sealedURL, size: sealedSize,
+                try? await putMediaFile(ref: ref, dest: node, sealedURL: sealedURL, size: sealedSize,
+                                        sealFp: sealFp, force: force,
                                         exists: { RelayHost.shared.localHas($0) }) { _ = RelayHost.shared.localPut($0, $1) }
                 MediaBackupLedger.mark(node, ref); landed = true
             case .http(let base, let token):
                 do {
                     try await putMediaFile(
-                        ref: ref, sealedURL: sealedURL, size: sealedSize,
+                        ref: ref, dest: node, sealedURL: sealedURL, size: sealedSize,
+                        sealFp: sealFp, force: force,
                         exists: { k in
                             if case .success(let d) = await httpGet(base, token, k), let d, !d.isEmpty { return true }
                             return false
@@ -577,7 +592,10 @@ enum SharedStore {
                     // The HTTP interface died mid-upload — fall back to the iroh dial (same store).
                     guard let c = await RelayClients.client(node) else { continue }
                     do {
-                        try await putMediaFile(ref: ref, sealedURL: sealedURL, size: sealedSize) { try await c.put(key: $0, data: $1) }
+                        try await putMediaFile(ref: ref, dest: node, sealedURL: sealedURL, size: sealedSize,
+                                               sealFp: sealFp, force: force,
+                                               // `has` is an exact, cheap existence check here — no download.
+                                               exists: { await c.has(key: $0) }) { try await c.put(key: $0, data: $1) }
                         RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
                         HavenLog.sync("backup blob-dial OK ref=\(ref) relay=\(node.prefix(8)) size=\(sealedSize) — cross-NAT blob path WORKS")
                         MediaBackupLedger.mark(node, ref); landed = true
@@ -589,7 +607,10 @@ enum SharedStore {
                 }
             case .dial(let c):
                 do {
-                    try await putMediaFile(ref: ref, sealedURL: sealedURL, size: sealedSize) { try await c.put(key: $0, data: $1) }
+                    try await putMediaFile(ref: ref, dest: node, sealedURL: sealedURL, size: sealedSize,
+                                           sealFp: sealFp, force: force,
+                                           // `has` is an exact, cheap existence check here — no download.
+                                           exists: { await c.has(key: $0) }) { try await c.put(key: $0, data: $1) }
                     RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
                     HavenLog.sync("backup blob-dial OK ref=\(ref) relay=\(node.prefix(8)) size=\(sealedSize) — cross-NAT blob path WORKS")
                     MediaBackupLedger.mark(node, ref); landed = true
@@ -826,39 +847,67 @@ enum SharedStore {
     /// again at window 0 next time. It never converges: the blob is simply larger than what one
     /// uninterrupted session can push, and no amount of retrying fixes that when every retry throws away
     /// the progress. That is the difference between "slow" and "never", and it is why an upload could sit
-    /// on the same indicator for hours. Chunk keys are content-addressed and idempotent, so skipping the
-    /// ones already stored is always safe.
-    private static func putMediaFile(ref: String, sealedURL: URL, size: Int,
+    /// on the same indicator for hours.
+    ///
+    /// `exists` alone is NOT enough to make that safe, and this is the correctness half. "The
+    /// destination holds window i" does not mean "window i was sliced from THESE bytes": sealing is not
+    /// byte-stable, so a seal replaced part-way through an upload — or, routinely, ANOTHER DEVICE OF
+    /// THIS ACCOUNT uploading the same ref from its own seal — leaves windows that all probe present
+    /// and belong to a different envelope. Splicing them produces a blob of exactly the right length
+    /// that decrypts to nothing. So `dest`/`sealFp` gate the probe: only the leading windows WE wrote
+    /// to THIS destination from THESE bytes may be asked about at all. See `MediaUploadPlan`, and its
+    /// Android (`MediaUploadPlan.kt`) and desktop (`mediaresume.rs`) twins.
+    private static func putMediaFile(ref: String, dest: String, sealedURL: URL, size: Int,
+                                     sealFp: String = "", force: Bool = false,
                                      exists: ((String) async -> Bool)? = nil,
                                      put: (String, Data) async throws -> Void) async throws {
         if size > mediaChunkBytes {
             guard let fh = try? FileHandle(forReadingFrom: sealedURL) else { throw URLError(.cannotOpenFile) }
             defer { try? fh.close() }
-            var sizes: [Int] = []
-            var skipped = 0
+            let ranges = MediaUploadPlan.windows(size: size)
             // The upload already moves in 8 MB windows, so "how far along is this" was sitting here
             // unused while the UI could only say "pending" forever. Report it: a 600 MB video is 75
             // windows, and a post stuck at 3/75 is a visibly different thing from one at 74/75.
-            let windows = max(1, Int(ceil(Double(size) / Double(mediaChunkBytes))))
-            await MediaUploadProgress.shared.begin(ref, windows: windows)
-            while true {
-                let slice = (try? fh.read(upToCount: mediaChunkBytes)) ?? nil
-                guard let slice, !slice.isEmpty else { break }
-                let ck = chunkKey(ref, sizes.count)
-                // Already on this relay from an earlier, interrupted attempt — the manifest still has to
-                // be written at the end, but these bytes never need to cross the wire again.
-                if let exists, await exists(ck) {
-                    skipped += 1
+            await MediaUploadProgress.shared.begin(ref, windows: max(1, ranges.count))
+            // How many leading windows may be skipped: capped by our own high-water mark for this
+            // destination under this exact fingerprint, then confirmed by the probe (a relay may have
+            // swept the chunks since). Both must agree; with no record the probe is never consulted.
+            let skip: Int
+            if let exists, !sealFp.isEmpty {
+                skip = await MediaUploadPlan.resumeSkip(
+                    force: force, recorded: MediaUploadResume.progress(dest: dest, ref: ref),
+                    currentFp: sealFp, total: ranges.count, probe: { await exists(chunkKey(ref, $0)) })
+            } else {
+                skip = 0
+            }
+            var sizes: [Int] = []
+            for (i, range) in ranges.enumerated() {
+                let length = range.1 - range.0
+                if i < skip {
+                    // Already on this destination, from these exact bytes — the manifest still has to be
+                    // written at the end, but these bytes never need to cross the wire again. Not read
+                    // from disk either: nothing here needs the slice.
+                    sizes.append(length)
                 } else {
-                    try await put(ck, slice)
+                    try fh.seek(toOffset: UInt64(range.0))
+                    guard let slice = (try? fh.read(upToCount: length)) ?? nil, slice.count == length else {
+                        throw URLError(.cannotOpenFile)
+                    }
+                    try await put(chunkKey(ref, i), slice)
+                    sizes.append(slice.count)
                 }
-                sizes.append(slice.count)
+                // Recorded AFTER the window is on the far side, never before: understating progress
+                // costs a re-sent window, overstating it corrupts the blob.
+                if !sealFp.isEmpty { MediaUploadResume.record(dest: dest, ref: ref, fp: sealFp, windows: i + 1) }
                 await MediaUploadProgress.shared.advance(ref, done: sizes.count)
             }
-            if skipped > 0 {
-                HavenLog.sync("backup ref=\(ref.prefix(12)): resumed, \(skipped)/\(sizes.count) windows already on the relay")
+            if skip > 0 {
+                HavenLog.sync("backup ref=\(ref.prefix(12)): resumed on \(dest.prefix(8)), \(skip)/\(sizes.count) windows already stored from these bytes")
             }
             try await put(key(ref), makeManifest(sizes: sizes))
+            // The manifest is what makes the blob readable, so its write is the moment the upload is
+            // done. Nothing left to resume.
+            MediaUploadResume.clear(dest: dest, ref: ref)
         } else {
             // Small (≤ one window): reading it whole is memory-safe.
             let whole = (try? Data(contentsOf: sealedURL)) ?? Data()

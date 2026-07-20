@@ -713,9 +713,12 @@ final class MediaStore: ObservableObject {
             // Bitrate-controlled H.264 first — the only path that actually targets a SIZE. The preset
             // exports below cap dimensions and choose their own (much higher) bitrate, so they stay as
             // fallbacks for anything AVAssetWriter can't handle rather than the normal route.
-            ok = await Self.encodeVideo(src, to: scratch)
+            // VERIFIED against real library videos before shipping — 305.7 MB → 37.7 MB, 191.5 → 47.0,
+            // 179.9 → 22.4, every one H.264 with audio and duration intact and portrait baked upright.
+            // The first cut of this was wired in unrun and deadlocked on any clip with sound.
+            ok = await VideoEncoder.encode(src, to: scratch)
             if ok {
-                HavenLog.sync("video add: encoded 1080p H.264 @ \(Self.videoTargetBitrate / 1_000_000)Mbps")
+                HavenLog.sync("video add: encoded 1080p H.264 @ \(VideoEncoder.videoBitrate / 1_000_000)Mbps")
             } else {
                 try? FileManager.default.removeItem(at: scratch)
                 HavenLog.sync("video add: bitrate encode FAILED — falling back to the preset export")
@@ -994,123 +997,6 @@ final class MediaStore: ObservableObject {
     /// Longest video Haven will accept. Not a technical limit — a product one: without it a person
     /// can hand their circle a feature film, and every member's device pays to store and move it.
     static let maxVideoSeconds: Double = 15 * 60
-
-    /// Target bitrate for the shared copy, in bits per second.
-    ///
-    /// This is the number that was missing. `AVAssetExportSession` presets cap DIMENSIONS and pick
-    /// their own bitrate, and for 1080p that is roughly 8 Mbps — archival, not something to send over
-    /// a network. So "auto-optimize" faithfully downscaled 4K to 1080p, transcoded HEVC to H.264,
-    /// stripped the metadata, and still produced a 320 MB clip. 1080p at 4.5 Mbps is visually fine for
-    /// a phone feed and roughly a third of the bytes; audio at 128 kbps AAC is transparent for speech
-    /// and usually far leaner than the camera's original track.
-    static let videoTargetBitrate = 4_500_000
-    static let audioTargetBitrate = 128_000
-
-    /// Re-encode to a 1080p H.264 MP4 at an EXPLICIT bitrate, with a fast-start moov atom.
-    ///
-    /// Uses AVAssetWriter rather than AVAssetExportSession because a preset gives no way to ask for a
-    /// bitrate, and the bitrate is the whole point. H.264 (not HEVC) so Android can decode it;
-    /// `shouldOptimizeForNetworkUse` puts the moov atom up front so playback starts before the file
-    /// finishes arriving. Rotation is BAKED into the pixels via a video composition — Android ignores
-    /// the transform tag, so a portrait iPhone clip would otherwise arrive sideways.
-    ///
-    /// Returns false on any failure; the caller falls back to the preset export and then to a
-    /// passthrough remux, so a video that this cannot handle is still shareable.
-    static func encodeVideo(_ src: URL, to dst: URL, maxDimension: CGFloat = 1920) async -> Bool {
-        let asset = AVURLAsset(url: src)
-        guard let vTrack = try? await asset.loadTracks(withMediaType: .video).first,
-              let natural = try? await vTrack.load(.naturalSize),
-              let xf = try? await vTrack.load(.preferredTransform),
-              let reader = try? AVAssetReader(asset: asset),
-              let writer = try? AVAssetWriter(outputURL: dst, fileType: .mp4)
-        else { return false }
-
-        // Display-oriented size, fitted inside the box, even dimensions (H.264 requires it).
-        let disp = natural.applying(xf)
-        let dw = abs(disp.width), dh = abs(disp.height)
-        guard dw > 0, dh > 0 else { return false }
-        let fit = min(1, min(maxDimension / max(dw, dh), (maxDimension * 9 / 16) / min(dw, dh)))
-        func even(_ v: CGFloat) -> CGFloat { let n = (v * fit).rounded(.down); return max(2, n - n.truncatingRemainder(dividingBy: 2)) }
-        let outW = even(dw), outH = even(dh)
-
-        // Bake the rotation: the composition renders each frame already display-oriented, so the
-        // output needs no transform of its own.
-        let comp = AVMutableVideoComposition(asset: asset) { request in
-            let img = request.sourceImage
-            let s = min(outW / img.extent.width, outH / img.extent.height)
-            request.finish(with: img.transformed(by: CGAffineTransform(scaleX: s, y: s)), context: nil)
-        }
-        comp.renderSize = CGSize(width: outW, height: outH)
-
-        let vOut = AVAssetReaderVideoCompositionOutput(
-            videoTracks: (try? await asset.loadTracks(withMediaType: .video)) ?? [],
-            videoSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
-        vOut.videoComposition = comp
-        vOut.alwaysCopiesSampleData = false
-        guard reader.canAdd(vOut) else { return false }
-        reader.add(vOut)
-
-        let vIn = AVAssetWriterInput(mediaType: .video, outputSettings: [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: outW,
-            AVVideoHeightKey: outH,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: videoTargetBitrate,
-                AVVideoMaxKeyFrameIntervalKey: 60,
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
-                AVVideoAllowFrameReorderingKey: true,
-            ],
-        ])
-        vIn.expectsMediaDataInRealTime = false
-        guard writer.canAdd(vIn) else { return false }
-        writer.add(vIn)
-
-        // Audio: re-encode to AAC at a sane rate. Absent on a silent clip, which is fine.
-        var aOut: AVAssetReaderTrackOutput?
-        var aIn: AVAssetWriterInput?
-        if let aTrack = (try? await asset.loadTracks(withMediaType: .audio))?.first {
-            let o = AVAssetReaderTrackOutput(track: aTrack, outputSettings: [
-                AVFormatIDKey: kAudioFormatLinearPCM,
-                AVLinearPCMBitDepthKey: 16,
-                AVLinearPCMIsFloatKey: false,
-                AVLinearPCMIsBigEndianKey: false,
-                AVLinearPCMIsNonInterleaved: false,
-            ])
-            o.alwaysCopiesSampleData = false
-            let i = AVAssetWriterInput(mediaType: .audio, outputSettings: [
-                AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVNumberOfChannelsKey: 2,
-                AVSampleRateKey: 44_100,
-                AVEncoderBitRateKey: audioTargetBitrate,
-            ])
-            i.expectsMediaDataInRealTime = false
-            if reader.canAdd(o), writer.canAdd(i) { reader.add(o); writer.add(i); aOut = o; aIn = i }
-        }
-
-        writer.shouldOptimizeForNetworkUse = true   // moov atom first — playback starts while it streams
-        guard reader.startReading(), writer.startWriting() else { return false }
-        writer.startSession(atSourceTime: .zero)
-
-        // Pump each track on its own queue; finish only when both are drained.
-        func pump(_ input: AVAssetWriterInput, _ output: AVAssetReaderOutput, _ label: String) async {
-            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
-                input.requestMediaDataWhenReady(on: DispatchQueue(label: "haven.encode.\(label)")) {
-                    while input.isReadyForMoreMediaData {
-                        guard reader.status == .reading, let buf = output.copyNextSampleBuffer() else {
-                            input.markAsFinished(); c.resume(); return
-                        }
-                        if !input.append(buf) { input.markAsFinished(); c.resume(); return }
-                    }
-                }
-            }
-        }
-        await pump(vIn, vOut, "video")
-        if let aIn, let aOut { await pump(aIn, aOut, "audio") }
-
-        guard reader.status != .failed else { writer.cancelWriting(); return false }
-        await writer.finishWriting()
-        return writer.status == .completed
-    }
 
     static func optimizeVideo(_ src: URL, to dst: URL,
                               preset: String = AVAssetExportPreset1920x1080) async -> Bool {

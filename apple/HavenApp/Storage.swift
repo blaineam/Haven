@@ -260,9 +260,9 @@ struct RelayFrontDoorControls: View {
     private var help: String {
         switch tunnel.frontDoorMode {
         case "manual":
-            return "Manual: you run cloudflared, Caddy, nginx, Tailscale Funnel, etc. against http://127.0.0.1:8674 (media) and optionally :3340 (DERP fabric). Haven only announces the HTTPS URL(s) — works even if free Cloudflare tunnels are blocked."
+            return "Manual: point your proxy at http://127.0.0.1:8675 (path router: media + DERP) or :8674/:3340 separately. Haven only announces the HTTPS URL(s) — works even if free Cloudflare tunnels are blocked."
         case "bundled":
-            return "Custom domain: paste media domain + Zero Trust install token. CF public hostname → http://127.0.0.1:8674. For fabric, path-route DERP on the same host or set a sibling DERP URL → :3340."
+            return "Custom domain: paste media domain + Zero Trust install token. CF origin → http://127.0.0.1:8675 (path router fronts media + DERP). Optional sibling DERP URL if you dual-route without the path router."
         default:
             return "Auto: free ephemeral trycloudflare.com for media + a second free tunnel for DERP fabric. Hostnames change on restart — use Custom domain or Manual for stable always-on."
         }
@@ -308,7 +308,7 @@ struct RelayFrontDoorControls: View {
             ))
             .autocorrectionDisabled().havenAutocap(.never)
             .textContentType(.URL)
-            Text("Leave DERP empty to reuse the media URL (path-route :3340 on the same host). Sibling hostname example: https://derp.example.com → http://127.0.0.1:3340.")
+            Text("Leave DERP empty to reuse the media URL (path router unifies both on :8675). Sibling hostname example: https://derp.example.com → http://127.0.0.1:3340.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)

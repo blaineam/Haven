@@ -10,10 +10,11 @@ This is the **happy path** for a home/NAS box that should be the circle’s tran
 
 When members paste the relay’s **interface JSON** (or learn it via frame 19), apps use:
 
-- **Haven DERP only** for iroh (n0 off)
-- **Circle TURN** for WebRTC ICE (Google STUN off)
+- **Haven DERP only** for iroh (n0 off) — live messaging + **call signaling** hairpin over HTTPS fabric
+- **Circle TURN** for WebRTC *media* ICE when UDP 3478 is reachable
+- **Google STUN** for server-reflexive ICE when TURN is not announced (free CF cannot front UDP TURN)
 
-n0 / Google STUN remain only if no Haven fabric is set up.
+n0 remains only if no Haven DERP is known.
 
 ---
 
@@ -64,10 +65,12 @@ HAVEN_RELAY_SEED=PASTE_64_HEX_FROM_openssl_rand_-hex_32
 # HAVEN_RELAY_HTTP_URL=http://192.168.1.50:8674
 HAVEN_RELAY_HTTP_URL=https://relay.example.com
 
-# Fabric (DERP + TURN) — public hostnames/IPs members use
-# DERP is HTTP(S) to your proxy → container :3340
-HAVEN_RELAY_DERP_URL=https://derp.example.com
-# TURN is UDP — public IP or hostname:3478
+# Fabric (DERP + TURN)
+# Prefer ONE public origin via path router (haven-relay listens on :8675 for CF/proxy):
+#   leave DERP empty so it reuses HAVEN_RELAY_HTTP_URL (same host, /relay → fabric).
+# Sibling hostname only if you dual-route without path router:
+# HAVEN_RELAY_DERP_URL=https://derp.example.com
+# TURN is UDP — public IP or hostname:3478 (not over free Cloudflare)
 HAVEN_RELAY_TURN_URL=turn:203.0.113.10:3478
 HAVEN_RELAY_TURN_PUBLIC_IP=203.0.113.10
 

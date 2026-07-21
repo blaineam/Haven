@@ -67,8 +67,8 @@ final class WebRTCCall: NSObject {
 
     override init() {
         let config = RTCConfiguration()
-        // Haven-first ICE: circle TURN when fabric + TURN known; else host-only if fabric;
-        // Google STUN only when no fabric (see HavenFabric.iceServersFromDefaults).
+        // Haven-first ICE: circle TURN when known; fabric without TURN → host-only (no Google);
+        // no fabric → Google STUN fallback. Media may use /webrtc/hairpin when ICE fails.
         let iceDicts = HavenFabric.iceServersFromDefaults()
         config.iceServers = iceDicts.compactMap { d -> RTCIceServer? in
             let urls = d["urls"] as? [String] ?? []

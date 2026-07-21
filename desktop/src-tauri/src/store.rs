@@ -127,7 +127,7 @@ pub struct RelayEntry {
     #[serde(default)]
     pub derp_url: String,
     /// Public TURN URLs for WebRTC ICE (`turn:host:port`). When fabric is active and non-empty,
-    /// clients use these instead of empty ICE / Google STUN.
+    /// clients use these for WebRTC media ICE (else STUN for srflx).
     #[serde(default)]
     pub turn_urls: Vec<String>,
     /// TURN username (default `haven`).

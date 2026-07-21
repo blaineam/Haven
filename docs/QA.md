@@ -58,8 +58,36 @@ npm link`), it's just `soren run Haven`.
 | `android` | gradle | `testDebugUnitTest` always; `connectedDebugAndroidTest` after reusing/booting the `haven_phone` AVD (skipped, never hung, if it can't boot) | JDK 17, Android SDK/NDK, the Rust `.so` from `android/build-rust.sh` |
 | `desktop` | cargo | the Tauri Rust side (`desktop/src-tauri`) | Rust + (Linux) the WebKitGTK build deps |
 | `desktop-ui` | node-check | `desktop/ui/app.js` syntax gate | node |
+| `fabric` | cargo | Path proxy + WebSocket hairpin + Haven-first DERP policy (`haven-net` integration) | Rust |
 | `vm-linux` | utm | **launches** the `haven-linux` UTM VM and confirms it reaches `started` (reuses an already-running VM) | UTM + the VM present |
 | `vm-windows` | utm | **launches** the `Windows` UTM VM and confirms `started` | UTM + the VM present |
+
+### Multi-device fabric (Mac + iOS Simulator + Android Emulator)
+
+Automated **server-side** fabric gates (no device farm required):
+
+```sh
+cargo test -p haven-net --test path_proxy_hairpin
+Scripts/fabric-multi-device-qa.sh
+node ../_shared/soren/soren.mjs run Haven fabric
+```
+
+Platform unit tests lock ICE policy (no Google STUN when fabric is on):
+
+- Android: `FabricIcePolicyTest` (runs under `soren run Haven android` unit leg)
+- Apple: `HavenFabricTests` (under `HavenLogicTests` / iOS sim)
+
+**Pointing clients at the Mac host’s path proxy** (when hosting a relay on the Mac):
+
+| Client | Path-proxy base |
+|---|---|
+| iOS Simulator | `http://127.0.0.1:8675` (same machine) |
+| Android Emulator | `http://10.0.2.2:8675` (host loopback from AVD) |
+| Physical device | `http://<Mac-LAN-IP>:8675` |
+
+Probe: `curl -s http://127.0.0.1:8675/_haven`. Hairpin: `wss://…/webrtc/hairpin`.
+
+End-to-end “two apps call through fabric” still needs each app build installed on sim/emu/Mac with the circle relay hosted; the automated gate proves the **fabric plane** (policy + path proxy + hairpin) every CI run.
 
 `soren migrate Haven` runs `migrate` + `core` (both carry the migration harness).
 Locally verified: `soren run Haven core` → **182 passed, 0 failed**.

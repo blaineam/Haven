@@ -23,6 +23,8 @@ blake3 = "1"
 # Embedded circle TURN for WebRTC ICE (own UDP socket — not a second iroh Endpoint).
 turn = "0.17"
 webrtc-util = { version = "0.17", default-features = false, features = ["conn", "vnet"] }
+# WebSocket accept key (RFC 6455) for the path-proxy call hairpin.
+sha1 = "0.10"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

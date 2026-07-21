@@ -26,9 +26,11 @@ pub mod discovery;
 pub mod endpoint_builder;
 pub mod httprelay;
 pub mod livedelivery;
+pub mod path_router;
 pub mod relay;
 pub mod s3tunnel;
 pub mod turn;
+pub mod ws_hairpin;
 
 pub use derp::{DerpConfig, DerpServer, DEFAULT_DERP_BIND};
 pub use endpoint_builder::{
@@ -36,6 +38,10 @@ pub use endpoint_builder::{
     haven_endpoint_builder, haven_fabric_active, merge_derp_urls, set_endpoint_policy,
     EndpointPolicy,
 };
+pub use path_router::{
+    classify_path, PathRouter, PathRouterConfig, RouteKind, DEFAULT_PATH_ROUTER_BIND,
+};
+pub use ws_hairpin::HairpinHub;
 pub use turn::{
     host_from_http_url, parse_turn_urls, suggest_turn_urls, turn_url, TurnConfig, TurnServer,
     DEFAULT_TURN_BIND, DEFAULT_TURN_REALM, DEFAULT_TURN_USER,

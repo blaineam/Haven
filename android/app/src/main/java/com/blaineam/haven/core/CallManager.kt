@@ -100,12 +100,13 @@ object CallManager {
     private val endedSessions = HashMap<String, Long>()
 
     /**
-     * Haven-first ICE. Google STUN only when no circle fabric (DERP URLs) is known —
-     * parity with Apple [HavenFabric]. Prefs `haven.fabric.derpUrls` + `turnUrls`/`turnUser`/`turnPass`.
+     * Haven-first ICE — parity with Apple [HavenFabric].
+     * Prefs `haven.fabric.derpUrls` + `turnUrls`/`turnUser`/`turnPass`.
      *
-     * Fabric + TURN known → circle TURN with credentials.
-     * Fabric without TURN → empty (host candidates only; no Google).
-     * No fabric → Google STUN.
+     * Fabric + TURN → circle TURN.
+     * Fabric without TURN → empty (host + WebSocket hairpin; **no Google STUN**).
+     * No fabric → Google STUN as fallback only.
+     * Call *signaling* rides sealed iroh over fabric DERP / direct QUIC.
      */
     private fun iceServers(): List<PeerConnection.IceServer> {
         val prefs = appContext.getSharedPreferences("haven.fabric", android.content.Context.MODE_PRIVATE)
@@ -113,22 +114,19 @@ object CallManager {
         val turn = prefs.getStringSet("turnUrls", emptySet()).orEmpty()
         val user = prefs.getString("turnUser", "") ?: ""
         val pass = prefs.getString("turnPass", "") ?: ""
-        if (derp.isNotEmpty() || turn.isNotEmpty()) {
-            if (turn.isNotEmpty() && user.isNotEmpty() && pass.isNotEmpty()) {
-                return listOf(
-                    PeerConnection.IceServer.builder(turn.toList())
-                        .setUsername(user)
-                        .setPassword(pass)
-                        .createIceServer(),
-                )
-            }
-            // Fabric present without usable TURN — host candidates only (no Google).
-            return emptyList()
+        val policy = FabricIcePolicy.resolve(derp, turn, user, pass)
+        if (policy.turnUrls.isNotEmpty()) {
+            return listOf(
+                PeerConnection.IceServer.builder(policy.turnUrls)
+                    .setUsername(policy.turnUser)
+                    .setPassword(policy.turnPass)
+                    .createIceServer(),
+            )
         }
-        return listOf(
-            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
-            PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer(),
-        )
+        if (policy.hostOnly) return emptyList()
+        return FabricIcePolicy.googleStunUrls.map {
+            PeerConnection.IceServer.builder(it).createIceServer()
+        }
     }
 
     fun init(context: Context, myNodeHex: String) {

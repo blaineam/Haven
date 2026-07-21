@@ -810,6 +810,61 @@ impl DerpServerHandle {
     }
 }
 
+/// Local path-based reverse proxy: one public origin → media mailbox + iroh DERP by path.
+///
+/// `/relay`, `/derp`, `/ping` → DERP backend; everything else → media. Used so free trycloudflare
+/// and single-hostname named tunnels front both roles without a second cloudflared process.
+#[derive(uniffi::Object)]
+pub struct PathRouterHandle {
+    local_addr: String,
+    local_port: u16,
+    _router: haven_net::PathRouter,
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl PathRouterHandle {
+    /// Bind `bind` (e.g. `127.0.0.1:8675`) and proxy to media/derp host:port backends.
+    /// Also serves `/webrtc/hairpin` WebSocket call-media hairpin (free Cloudflare OK).
+    /// `http_token` optional: if join JSON includes `token`, it must match.
+    #[uniffi::constructor]
+    pub async fn spawn(
+        bind: String,
+        media_backend: String,
+        derp_backend: String,
+        http_token: String,
+    ) -> Result<Arc<Self>, HavenError> {
+        let cfg = haven_net::PathRouterConfig {
+            bind,
+            media_backend,
+            derp_backend,
+            http_token,
+        };
+        let router = haven_net::PathRouter::spawn(&cfg)
+            .await
+            .map_err(|e| HavenError::Invalid {
+                msg: format!("path router spawn: {e}"),
+            })?
+            .ok_or_else(|| HavenError::Invalid {
+                msg: "path router disabled".into(),
+            })?;
+        let local_addr = router.local_addr.to_string();
+        let local_port = router.local_port();
+        Ok(Arc::new(Self {
+            local_addr,
+            local_port,
+            _router: router,
+        }))
+    }
+
+    pub fn local_addr(&self) -> String {
+        self.local_addr.clone()
+    }
+
+    pub fn local_port(&self) -> u16 {
+        self.local_port
+    }
+}
+
 // ===== Live social demo =====
 //
 // A local, on-device demonstration of the social engine: every post / comment /

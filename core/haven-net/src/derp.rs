@@ -13,9 +13,9 @@
 //! ## Front door
 //!
 //! Listens on plain HTTP (default `127.0.0.1:3340`). Cloudflare / Manual terminates TLS and
-//! reverse-proxies to this bind — same pattern as the `:8674` media mailbox. Prefer a stable
-//! hostname for production. Free trycloudflare needs a **second** tunnel process (one origin
-//! per cloudflared quick tunnel) so media and DERP each get their own `*.trycloudflare.com`.
+//! reverse-proxies to this bind — usually via the local **path router** (`:8675`) so one public
+//! origin fronts media + DERP (`/relay` → here). Prefer a stable hostname for production.
+//! Sibling-hostname mode still supports a dedicated DERP front door without the path router.
 
 use std::net::SocketAddr;
 

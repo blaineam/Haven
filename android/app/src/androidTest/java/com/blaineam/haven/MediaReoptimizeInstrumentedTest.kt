@@ -178,6 +178,7 @@ class MediaReoptimizeInstrumentedTest {
             com.blaineam.haven.core.MediaReoptimizer.candidates.value = listOf(
                 com.blaineam.haven.core.MediaReoptimizer.Candidate(
                     ref = "vid_never_encoded", circleId = "c",
+                    work = com.blaineam.haven.core.MediaReoptimizer.Work.REENCODE,
                     shape = MediaOptimizationTarget.Shape(
                         Long.MAX_VALUE / 4, 3840, "video/hevc", 38_000_000, 30.0, "test"),
                     firstSharedMs = 0, legacyByAge = true,

@@ -82,6 +82,9 @@ pub struct Config {
     pub derp_bind: String,
     /// Public HTTPS URL for DERP (defaults to the media `http_url` / tunnel URL when empty).
     pub derp_url: Option<String>,
+    /// Path proxy bind — single origin that routes by path to media + fabric.
+    /// Default `127.0.0.1:8675`. `None` = disabled (`--no-proxy`).
+    pub proxy_bind: Option<String>,
     /// Embed circle TURN for WebRTC ICE (default ON for local-disk). Own UDP socket.
     pub turn_enabled: bool,
     /// Local UDP bind for TURN (default 0.0.0.0:3478).
@@ -134,6 +137,9 @@ struct FileConfig {
     derp_bind: Option<String>,
     #[serde(default)]
     derp_url: Option<String>,
+    /// Path proxy bind (`127.0.0.1:8675` default; `"off"` disables).
+    #[serde(default)]
+    proxy_bind: Option<String>,
     /// Embed TURN for WebRTC (default true for local storage).
     #[serde(default)]
     turn: Option<bool>,
@@ -262,6 +268,17 @@ impl Config {
             arg_value(args, "--derp-bind").unwrap_or_else(|| "127.0.0.1:3340".to_string());
         let derp_url = arg_value(args, "--derp-url");
 
+        // Path proxy: single origin that routes by path (media / fabric / status).
+        // Default ON whenever HTTP is on. `--no-proxy` disables; `--proxy-bind` overrides.
+        let proxy_bind = if args.iter().any(|a| a == "--no-proxy") || http_bind.is_none() {
+            None
+        } else {
+            Some(
+                arg_value(args, "--proxy-bind")
+                    .unwrap_or_else(|| haven_net::DEFAULT_PATH_ROUTER_BIND.to_string()),
+            )
+        };
+
         // Circle TURN (WebRTC ICE): default ON for local-disk. Own UDP socket (not a second Endpoint).
         let turn_enabled = if args.iter().any(|a| a == "--no-turn") {
             false
@@ -286,7 +303,7 @@ impl Config {
         Ok(Self {
             link, data_dir, seed, backend, s3_port, rclone_bin, rclone_config, peers,
             http_bind, http_url, auto_tunnel, tunnel_token, http_token, retention,
-            derp_enabled, derp_bind, derp_url,
+            derp_enabled, derp_bind, derp_url, proxy_bind,
             turn_enabled, turn_bind, turn_public_ip, turn_urls, turn_token,
         })
     }
@@ -330,6 +347,12 @@ impl Config {
         let derp_enabled = fc.derp.unwrap_or(matches!(&backend, StoreBackend::Local));
         let derp_bind = fc.derp_bind.unwrap_or_else(|| "127.0.0.1:3340".to_string());
         let derp_url = fc.derp_url.filter(|u| !u.trim().is_empty());
+        let proxy_bind = match fc.proxy_bind.as_deref() {
+            Some("off") | Some("none") => None,
+            Some(b) => Some(b.to_string()),
+            None if http_bind.is_some() => Some(haven_net::DEFAULT_PATH_ROUTER_BIND.to_string()),
+            None => None,
+        };
         let turn_enabled = fc.turn.unwrap_or(matches!(&backend, StoreBackend::Local));
         let turn_bind = fc.turn_bind.unwrap_or_else(|| "0.0.0.0:3478".to_string());
         let turn_public_ip = fc.turn_public_ip.filter(|u| !u.trim().is_empty());
@@ -367,6 +390,7 @@ impl Config {
             derp_enabled,
             derp_bind,
             derp_url,
+            proxy_bind,
             turn_enabled,
             turn_bind,
             turn_public_ip,

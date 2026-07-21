@@ -1,7 +1,7 @@
 //! Embedded **TURN** role for circle WebRTC ICE (Haven fabric).
 //!
 //! When a circle hosts a Haven relay/fabric, peers prefer **circle TURN** for cross-NAT
-//! calls instead of empty ICE or Google STUN. This is a separate UDP socket from iroh —
+//! calls instead of STUN-only ICE. This is a separate UDP socket from iroh —
 //! **not** a second `Endpoint` under the host's node key (same-key scar).
 //!
 //! ## Auth

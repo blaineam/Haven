@@ -21,18 +21,69 @@ who can still reach that relay's public front door.
 
 | Fabric known? | iroh `RelayMap` | WebRTC ICE |
 |---|---|---|
-| No Haven DERP URL | n0 public fleet | Google STUN |
-| ≥1 Haven DERP, no TURN | **Haven only** (n0 off) | **Host candidates only** (empty ICE; no Google) |
-| ≥1 Haven DERP **and** TURN URLs | **Haven only** | **Circle TURN** (`turn:…` + username/password from announce) |
+| No Haven DERP URL | n0 public fleet (**fallback only**) | Google STUN (**fallback only**) |
+| ≥1 Haven DERP, no TURN | **Haven only** (n0 **off** — not first path) | **Host only** (no Google); media may use **WSS hairpin** `/webrtc/hairpin` |
+| ≥1 Haven DERP **and** TURN URLs | **Haven only** | **Circle TURN** only (`turn:…` + creds) |
 
 ### WebRTC when fabric is active (read this)
 
 - Live **messaging** rides iroh QUIC; with fabric active it uses circle DERP instead of n0.
-- **Calls** are a separate WebRTC path. With circle TURN, cross-NAT calls use the host’s UDP TURN.
-- Without TURN URLs (fabric but TURN not announced / not reachable): host candidates only — LAN still works.
-- We **do not** silently re-add Google STUN when fabric is present (no-Google product rule).
+- **Call signaling** (SDP/ICE JSON) is sealed over the same iroh path — it **hairpins** through the
+  HTTPS fabric (`/relay` WebSocket) when direct QUIC fails. Signaling does **not** use STUN/TURN.
+- **Call media** is WebRTC DTLS-SRTP when ICE works. With circle TURN, hard-NAT media uses UDP TURN.
+- Without TURN (fabric active): **no Google STUN** — host candidates + path-proxy **WebSocket hairpin**
+  (works over free CF). Desktop falls back to PCM over hairpin if ICE fails.
+- n0 / Google are **never first path** when a circle Haven relay fabric is known.
 
-Surfaces: Apple `HavenFabric.iceServersFromDefaults()`, Android `CallManager.iceServers()`, desktop `iceServers()` in `ui/app.js` (`__havenFabricTurn`).
+Surfaces: Apple `HavenFabric.iceServersFromDefaults()`, Android `FabricIcePolicy` / `CallManager`,
+desktop `iceServers()` in `ui/app.js`.
+
+### Multi-device automated QA
+
+```sh
+# Server + policy (Mac CI / laptop)
+cargo test -p haven-net --test path_proxy_hairpin
+Scripts/fabric-multi-device-qa.sh
+node ../_shared/soren/soren.mjs run Haven fabric   # also in release requireGreen
+```
+
+Point **iOS Simulator** at `127.0.0.1`, **Android Emulator** at `10.0.2.2` (host), physical
+devices at the Mac LAN IP, using the path-proxy origin (`/_haven`, `/webrtc/hairpin`).
+
+### Path proxy (single public origin)
+
+When HTTP is on and there is **no sibling** `--derp-url` / `relay_derp_url`, `haven-relay` starts a
+local **path proxy** (default `127.0.0.1:8675`) that routes by path:
+
+| Kind | Paths | Backend |
+|---|---|---|
+| **Media** | `/k/*`, `/l/*`, `/t/*` | mailbox HTTP (`:8674`) |
+| **Fabric** | `/relay`, `/derp`, `/ping` (+ subpaths) | iroh DERP (`:3340`) |
+| **Hairpin** | `/webrtc`, `/webrtc/hairpin` | **WebSocket** call-media bipipe (local) |
+| **Status** | `/`, `/_haven`, `/_haven/*` | proxy-local JSON route table |
+| (unknown) | anything else | `404` with path hints |
+
+Flags: `--proxy-bind <addr>`, `--no-proxy`. Probe: `GET http://127.0.0.1:8675/_haven`.
+
+One cloudflared process (free or named) points at the proxy port. Media public URL and DERP public
+URL are the **same** HTTPS host — call signaling hairpins over `/relay`. Sibling hostname mode
+(`--derp-url` ≠ media URL) skips the proxy and uses dual-origin. See [`CLOUDFLARE-TUNNEL.md`](CLOUDFLARE-TUNNEL.md).
+
+### WebSocket call-media hairpin (free CF)
+
+UDP TURN cannot ride free trycloudflare. The path proxy exposes a **WebSocket hairpin** that **does**:
+
+```text
+wss://<fabric-host>/webrtc/hairpin
+```
+
+1. Client opens WebSocket (works through free CF HTTP tunnels).
+2. First text frame: `{"v":1,"session":"<callSessionId>","peer":"<myHex>","remote":"<otherHex>"}`.
+3. Server pairs both sides (90s wait); then bipipes **binary** frames opaquely.
+4. Desktop: opens hairpin during mesh; if WebRTC ICE fails, falls back to PCM audio over the hairpin.
+5. Apple: opens hairpin during mesh (connection ready; media fallback can ride the same binary path).
+
+This is **not** stock WebRTC RTP-over-WS — it is a Haven TCP/TLS media pipe for when ICE/TURN cannot path.
 
 ## R0 (done)
 
@@ -57,8 +108,8 @@ haven-relay run --link <code> --http-url https://relay.example.com --derp-url ht
 # → paste the printed {"node","urls","token","derp"} into Haven Storage → Connect external relay
 ```
 
-Point the tunnel/proxy so media reaches `:8674` and DERP reaches `:3340` (path rules or sibling
-hostnames). Free trycloudflare is one origin per process — auto mode spins **two** tunnels.
+Default: path router unifies both on one origin (tunnel → `:8675`). Optional sibling `--derp-url`
+keeps dual-origin. Free trycloudflare then needs only **one** process when path-routed.
 
 ## R2 — gossip the map (done on clients)
 
@@ -120,11 +171,11 @@ hot-add; RelayMap cannot). Shipping posture:
 In-app host embeds the same **iroh-relay** role as the CLI (`haven_net::DerpServer` /
 FFI `DerpServerHandle`):
 
-| Front door | Media | DERP fabric |
-|---|---|---|
-| **Auto (free trycloudflare)** | Quick tunnel → `:8674` | **Second** quick tunnel → `:3340` (one origin per process) |
-| **Manual / named** | Operator URL → `:8674` | Dedicated DERP URL pref if set; else same public host (must path-route `:3340`) |
-| **LAN only** | LAN IPs | Local bind only until a public URL exists |
+| Front door | Media + DERP |
+|---|---|
+| **Auto (free trycloudflare)** | One quick tunnel → path router `:8675` (media + DERP by path). Dual free tunnel only if path router fails or sibling DERP URL is set. |
+| **Manual / named** | Origin → path router `:8675` when no sibling DERP URL; else media `:8674` + dedicated DERP host |
+| **LAN only** | Media `:8674` / DERP `:3340` (or path router) until a public URL exists |
 
 ### Dedicated DERP URL pref (named dual-role)
 
@@ -164,5 +215,6 @@ Stop hosting drops both cloudflared children + the DERP server.
 - TURN server ≠ second endpoint under node key (own UDP socket only)  
 - All binds through `haven_endpoint_builder`  
 - Discovery answers are hints; QUIC identity is end-to-end  
-- WebRTC does not re-add Google when fabric is active  
+- WebRTC uses circle TURN when known; otherwise STUN for srflx only (not a messaging dependency)  
+
 

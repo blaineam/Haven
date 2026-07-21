@@ -685,6 +685,8 @@ final class CallManager: NSObject, ObservableObject {
         UIApplication.shared.isIdleTimerDisabled = true
         #endif
         configureAudioSession()
+        // TCP/WSS media hairpin via path proxy (works over free Cloudflare) — pairs while ICE runs.
+        CallHairpin.shared.openForRoster(sessionId: sessionId, me: myHex, others: invitees())
         for p in invitees() { connectPeerIfNeeded(p) }
         startSpeakerDetection()
     }
@@ -1219,6 +1221,7 @@ final class CallManager: NSObject, ObservableObject {
         CallTones.shared.stop()
         stopInAppRinging()
         stopSpeakerDetection()
+        CallHairpin.shared.closeAll()
         #if !os(macOS)
         UIApplication.shared.isIdleTimerDisabled = false
         #endif

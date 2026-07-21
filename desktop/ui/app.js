@@ -4349,29 +4349,166 @@ const line = (label, ok) => el("div", { class: "row" }, el("span", { style: "fle
 // participant opens one RTCPeerConnection to every other (full mesh, no SFU). 1:1 is a
 // 2-person group. The lexicographically smaller hex offers (glare-free). SDP/ICE ride the
 // sealed iroh channel via the call_signal command; media is DTLS-SRTP in the WebView.
-// Haven-first ICE: Google STUN only when no circle fabric DERP URLs are known
-// (window.__havenFabricDerp from prefs / relay announce). Parity with Apple HavenFabric.
-// When fabric is active AND circle TURN is known (__havenFabricTurn), use those URLs + creds.
-// Fabric without TURN → host candidates only (no Google). Live messaging still uses iroh + DERP.
+// Haven-first ICE — parity with Apple HavenFabric / Android CallManager.
+// Fabric + circle TURN → TURN only. Fabric without TURN → empty ICE (host + WSS hairpin;
+// no Google STUN). No fabric → Google STUN as fallback only. Signaling uses iroh/fabric DERP.
 function iceServers() {
   const derp = (window.__havenFabricDerp && window.__havenFabricDerp.length)
     ? window.__havenFabricDerp
     : [];
   const turn = window.__havenFabricTurn || {};
   const turnUrls = Array.isArray(turn.urls) ? turn.urls.filter(Boolean) : [];
+  if (turnUrls.length > 0 && turn.user && turn.pass) {
+    return [{
+      urls: turnUrls,
+      username: turn.user,
+      credential: turn.pass,
+    }];
+  }
   if (derp.length > 0 || turnUrls.length > 0) {
-    if (turnUrls.length > 0 && turn.user && turn.pass) {
-      return [{
-        urls: turnUrls,
-        username: turn.user,
-        credential: turn.pass,
-      }];
-    }
-    // Fabric known but no TURN yet — host candidates only (no Google).
-    return [];
+    return []; // fabric on — never Google as first path
   }
   return [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
 }
+
+// ---- WebSocket call-media hairpin (path proxy /webrtc/hairpin) ----------------------------
+// Free Cloudflare tunnels carry HTTPS + WebSocket, not UDP TURN. When the circle fabric has a
+// public HTTPS origin (same host as DERP after path-proxy), open a WSS hairpin per peer so
+// media can bipipe over TCP/TLS. Binary frames are opaque; v1 uses a tiny PCM audio bridge
+// when WebRTC ICE fails for that peer.
+function fabricPublicBase() {
+  const derp = (window.__havenFabricDerp && window.__havenFabricDerp[0]) || "";
+  const u = (derp || "").trim().replace(/\/$/, "");
+  if (u.startsWith("https://") || u.startsWith("http://")) return u;
+  return "";
+}
+function hairpinWsUrl() {
+  const base = fabricPublicBase();
+  if (!base) return "";
+  try {
+    const u = new URL(base);
+    u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+    u.pathname = "/webrtc/hairpin";
+    u.search = "";
+    u.hash = "";
+    return u.toString();
+  } catch (_) {
+    return "";
+  }
+}
+const hairpin = {
+  /// peerHex → { ws, paired, usingMedia, audioCtx, processor, remoteGain, playQueue }
+  byPeer: new Map(),
+};
+function closeHairpinAll() {
+  for (const [, h] of hairpin.byPeer) {
+    try { h.ws && h.ws.close(); } catch (_) {}
+    try { h.processor && h.processor.disconnect(); } catch (_) {}
+    try { h.audioCtx && h.audioCtx.close(); } catch (_) {}
+  }
+  hairpin.byPeer.clear();
+}
+function openHairpinForPeer(peer) {
+  if (!call.session || !call.me || !peer || peer === call.me) return;
+  if (hairpin.byPeer.has(peer)) return;
+  const url = hairpinWsUrl();
+  if (!url) return;
+  let ws;
+  try { ws = new WebSocket(url); } catch (e) {
+    console.warn("hairpin open failed", e);
+    return;
+  }
+  ws.binaryType = "arraybuffer";
+  const slot = { ws, paired: false, usingMedia: false, audioCtx: null, processor: null, remoteGain: null };
+  hairpin.byPeer.set(peer, slot);
+  ws.onopen = () => {
+    ws.send(JSON.stringify({
+      v: 1,
+      session: call.session,
+      peer: call.me,
+      remote: peer,
+    }));
+  };
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === "string") {
+      try {
+        const j = JSON.parse(ev.data);
+        if (j.paired || (j.ok && !j.waiting)) {
+          slot.paired = true;
+          console.info("hairpin paired", peer);
+        }
+        if (j.err) console.warn("hairpin", peer, j.err);
+      } catch (_) {}
+      return;
+    }
+    // Binary: PCM s16le mono 16kHz packets from peer (media fallback).
+    if (slot.usingMedia && ev.data instanceof ArrayBuffer) {
+      hairpinPlayPcm(slot, ev.data);
+    }
+  };
+  ws.onclose = () => {
+    if (hairpin.byPeer.get(peer) === slot) hairpin.byPeer.delete(peer);
+  };
+  ws.onerror = () => {};
+}
+function ensureHairpins() {
+  invitees().forEach(openHairpinForPeer);
+}
+/** Start PCM media over hairpin for a peer whose WebRTC ICE failed. */
+async function hairpinStartMedia(peer) {
+  const slot = hairpin.byPeer.get(peer);
+  if (!slot || !slot.paired || slot.usingMedia || !call.localStream) return;
+  slot.usingMedia = true;
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    slot.audioCtx = ctx;
+    const src = ctx.createMediaStreamSource(call.localStream);
+    // ScriptProcessor is deprecated but widely available in Tauri webview; keep buffer small.
+    const proc = ctx.createScriptProcessor(2048, 1, 1);
+    slot.processor = proc;
+    proc.onaudioprocess = (e) => {
+      if (!slot.usingMedia || !slot.ws || slot.ws.readyState !== 1) return;
+      const input = e.inputBuffer.getChannelData(0);
+      const pcm = new Int16Array(input.length);
+      for (let i = 0; i < input.length; i++) {
+        const s = Math.max(-1, Math.min(1, input[i]));
+        pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+      try { slot.ws.send(pcm.buffer); } catch (_) {}
+    };
+    src.connect(proc);
+    proc.connect(ctx.destination); // keep processor alive (output is near-silent if we zero? we don't mute)
+    // Avoid local echo: disconnect from destination, connect to a zero-gain node instead.
+    proc.disconnect();
+    const mute = ctx.createGain();
+    mute.gain.value = 0;
+    proc.connect(mute);
+    mute.connect(ctx.destination);
+    slot.remoteGain = ctx.createGain();
+    slot.remoteGain.connect(ctx.destination);
+    console.info("hairpin media fallback on", peer);
+    toast("Call media via fabric tunnel (TCP hairpin)");
+  } catch (e) {
+    console.warn("hairpin media start failed", e);
+    slot.usingMedia = false;
+  }
+}
+function hairpinPlayPcm(slot, ab) {
+  try {
+    if (!slot.audioCtx || !slot.remoteGain) return;
+    const pcm = new Int16Array(ab);
+    if (!pcm.length) return;
+    const f32 = new Float32Array(pcm.length);
+    for (let i = 0; i < pcm.length; i++) f32[i] = pcm[i] / (pcm[i] < 0 ? 0x8000 : 0x7fff);
+    const buf = slot.audioCtx.createBuffer(1, f32.length, 16000);
+    buf.copyToChannel(f32, 0);
+    const src = slot.audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(slot.remoteGain);
+    src.start();
+  } catch (_) {}
+}
+
 const call = {
   session: "", me: "", name: "", roster: new Set(), pcs: new Map(),
   localStream: null, micOn: true, camOn: true,
@@ -4539,6 +4676,7 @@ async function startMesh() {
     call.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false }).catch(() => null);
   }
   call.connecting = call.connecting && !call.inCall;
+  ensureHairpins(); // TCP/WSS media path through free CF path proxy (pairs while ICE runs)
   invitees().forEach(connectPeerIfNeeded);
   renderCallOverlay();
 }
@@ -4551,12 +4689,20 @@ function pcFor(peer) {
     if (e.candidate) invoke("call_signal", { kind: "ice", sessionId: call.session, to: peer, json: JSON.stringify({ c: e.candidate.candidate, m: e.candidate.sdpMLineIndex, i: e.candidate.sdpMid }) });
   };
   pc.ontrack = (e) => { call.remote = call.remote || {}; call.remote[peer] = e.streams[0]; renderCallOverlay(); };
-  pc.onconnectionstatechange = () => { if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {} };
+  pc.onconnectionstatechange = () => {
+    const st = pc.connectionState;
+    // When ICE cannot path, fall back to path-proxy WebSocket hairpin (works over free CF).
+    if (st === "failed" || st === "disconnected") {
+      openHairpinForPeer(peer);
+      hairpinStartMedia(peer);
+    }
+  };
   call.pcs.set(peer, pc);
   return pc;
 }
 
 async function connectPeerIfNeeded(peer) {
+  openHairpinForPeer(peer);
   const pc = pcFor(peer);
   if (call.me < peer && call.localStream) {
     const offer = await pc.createOffer();
@@ -4663,6 +4809,7 @@ function teardownCall() {
     }
   }
   clearTimeout(call.ringTimer); call.ringTimer = null;
+  closeHairpinAll();
   if (call.screenStream) { call.screenStream.getTracks().forEach((t) => t.stop()); call.screenStream = null; }
   call.screenOn = false; call.camTrack = null; call.camOff = {};
   call.pcs.forEach((pc) => pc.close()); call.pcs.clear();
@@ -5103,7 +5250,7 @@ async function boot() {
     if (state.view === "you" && ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA") && $("#view-you").contains(ae)) return;
     await render();
   });
-  // Haven fabric: circle-hosted DERP (+ TURN for WebRTC ICE). Google STUN only when fabric empty.
+  // Haven fabric: circle-hosted DERP (+ TURN for WebRTC media; else STUN). Signaling uses fabric.
   // rebindPending: soft rebind in progress (Engine stops + restarts HavenNode onto Haven RelayMap).
   listen("haven-fabric", (e) => {
     const urls = (e.payload && e.payload.derpUrls) || [];

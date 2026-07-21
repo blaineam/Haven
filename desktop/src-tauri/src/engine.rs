@@ -252,13 +252,15 @@ pub struct Engine {
     app: StdMutex<Option<AppHandle>>,
     node: StdMutex<Option<Arc<HavenNode>>>,
     relay_host: StdMutex<Option<Arc<RelayServerHandle>>>,
-    /// Live cloudflared process (quick or named) for the **media** HTTP mailbox. Dropped when
-    /// hosting stops. Manual front door never sets this — operator runs the tunnel externally.
+    /// Live cloudflared process (quick or named) for the **public front door** (media, or
+    /// path-router when fabric is unified). Dropped when hosting stops. Manual never sets this.
     quick_tunnel: StdMutex<Option<haven_net::cfquicktunnel::QuickTunnel>>,
-    /// Second free trycloudflare (or none) for the embedded DERP fabric bind.
+    /// Second free trycloudflare only when dual-origin DERP (sibling hostname / path-router off).
     derp_tunnel: StdMutex<Option<haven_net::cfquicktunnel::QuickTunnel>>,
     /// Embedded iroh-relay (DERP) — separate listen socket; drop stops the fabric role.
     derp_server: StdMutex<Option<haven_net::DerpServer>>,
+    /// Local path router: one origin → media + DERP by path (`/relay` → fabric).
+    path_router: StdMutex<Option<haven_net::PathRouter>>,
     /// Embedded circle TURN for WebRTC ICE — own UDP socket (not a second Endpoint).
     turn_server: StdMutex<Option<haven_net::TurnServer>>,
     prefs: StdMutex<Prefs>,
@@ -519,6 +521,7 @@ impl Engine {
             quick_tunnel: StdMutex::new(None),
             derp_tunnel: StdMutex::new(None),
             derp_server: StdMutex::new(None),
+            path_router: StdMutex::new(None),
             turn_server: StdMutex::new(None),
             prefs: StdMutex::new(prefs),
             dyn_state: StdMutex::new(dyn_state),
@@ -624,6 +627,7 @@ impl Engine {
             quick_tunnel: StdMutex::new(None),
             derp_tunnel: StdMutex::new(None),
             derp_server: StdMutex::new(None),
+            path_router: StdMutex::new(None),
             turn_server: StdMutex::new(None),
             prefs: StdMutex::new(prefs),
             dyn_state: StdMutex::new(dyn_state),
@@ -4195,7 +4199,7 @@ impl Engine {
         // should use it — that is the fast local path and it genuinely works. Remote members discard it
         // on receipt (`relay_http_reachable` keeps a private address only when we are on that /24), so
         // the useless case is filtered by the side that can actually tell.
-        let (mode, configured_public, tunnel_token, auto_tunnel) = {
+        let (mode, configured_public, tunnel_token, auto_tunnel, configured_derp) = {
             let p = self.prefs.lock().unwrap();
             let mode = p.front_door_mode();
             let pub_url = p.relay_public_url.trim();
@@ -4206,26 +4210,80 @@ impl Engine {
             };
             let tok = p.relay_cf_tunnel_token.trim().to_string();
             let tok = if tok.is_empty() { None } else { Some(tok) };
-            (mode, pub_url, tok, p.auto_tunnel())
+            let d = p.relay_derp_url.trim().trim_end_matches('/').to_string();
+            let derp = if d.is_empty() { None } else { Some(d) };
+            (mode, pub_url, tok, p.auto_tunnel(), derp)
         };
+
+        // Start DERP first so the path router can unify media + fabric on one public origin.
+        let derp_local = self.spawn_desktop_derp_local().await;
+
+        // Sibling hostname = dedicated derp URL that differs from media public URL.
+        let sibling_derp: Option<String> = configured_derp.as_ref().and_then(|d| {
+            let is_sibling = configured_public
+                .as_ref()
+                .map(|m| m != d)
+                .unwrap_or(true);
+            if is_sibling {
+                Some(d.clone())
+            } else {
+                None
+            }
+        });
+        let mut front_port = port;
+        let mut path_routed = false;
+        if let Some(dport) = derp_local {
+            if sibling_derp.is_none() {
+                let rcfg = haven_net::PathRouterConfig {
+                    bind: haven_net::DEFAULT_PATH_ROUTER_BIND.into(),
+                    media_backend: format!("127.0.0.1:{port}"),
+                    derp_backend: format!("127.0.0.1:{dport}"),
+                    http_token: token.clone(),
+                };
+                match haven_net::PathRouter::spawn(&rcfg).await {
+                    Ok(Some(router)) => {
+                        front_port = router.local_port();
+                        path_routed = true;
+                        log::info!(
+                            "path router on {} — single origin media+DERP",
+                            router.local_addr
+                        );
+                        *self.path_router.lock().unwrap() = Some(router);
+                    }
+                    Ok(None) => {}
+                    Err(e) => log::warn!("path router failed: {e:#}"),
+                }
+            }
+        }
+
         let mut urls = Vec::new();
-        let mut media_was_quick = false;
-        // Manual = announce-only (operator's tunnel/proxy). Bundled/Auto may spawn cloudflared.
+        // Manual = announce-only. Bundled/Auto may spawn cloudflared → path router when unified.
         match Self::start_desktop_front_door(
-            port,
+            front_port,
             mode,
             configured_public.as_deref(),
             tunnel_token.as_deref(),
             auto_tunnel,
         ) {
             Ok(DeskFrontDoor::Spawned(t)) => {
-                log::info!("relay {} tunnel (media): {}", t.kind, t.public_url);
-                media_was_quick = t.kind == "quick";
+                log::info!(
+                    "relay {} tunnel{}: {}",
+                    t.kind,
+                    if path_routed { " (media+DERP path router)" } else { " (media)" },
+                    t.public_url
+                );
                 urls.push(t.public_url.clone());
                 *self.quick_tunnel.lock().unwrap() = Some(t);
             }
             Ok(DeskFrontDoor::AnnounceOnly(u)) => {
-                log::info!("relay manual front door (no cloudflared): {u}");
+                log::info!(
+                    "relay manual front door (no cloudflared): {u}{}",
+                    if path_routed {
+                        format!(" — point proxy at http://127.0.0.1:{front_port}")
+                    } else {
+                        String::new()
+                    }
+                );
                 urls.push(u);
             }
             Ok(DeskFrontDoor::LanOnly) => {
@@ -4235,7 +4293,6 @@ impl Engine {
             }
             Err(e) => {
                 log::warn!("relay front door unavailable: {e}");
-                // Manual URL still announced if we have one (operator's external path).
                 if let Some(u) = configured_public {
                     if let Ok(n) = haven_net::cfquicktunnel::normalize_public_url(&u) {
                         urls.push(n);
@@ -4247,17 +4304,16 @@ impl Engine {
                 }
             }
         }
-        log::info!("relay http on :{port} urls={urls:?}");
+        log::info!("relay http on :{port} front=:{front_port} path_routed={path_routed} urls={urls:?}");
 
-        // Haven fabric: embed iroh-relay (separate socket — not a second Endpoint under our key).
-        // Dedicated `relay_derp_url` pref wins (sibling hostname / dual-role named tunnel).
-        let configured_derp = {
-            let p = self.prefs.lock().unwrap();
-            let d = p.relay_derp_url.trim().trim_end_matches('/').to_string();
-            if d.is_empty() { None } else { Some(d) }
-        };
+        // Resolve public DERP URL (single-origin shares media URL so call signaling hairpins).
         let derp_url = self
-            .start_desktop_derp(media_was_quick, urls.first().cloned(), configured_derp)
+            .finalize_desktop_derp_public(
+                path_routed,
+                urls.first().cloned(),
+                configured_derp,
+                sibling_derp,
+            )
             .await;
 
         let turn_info = self.start_desktop_turn(&urls).await;
@@ -4322,55 +4378,71 @@ impl Engine {
         }
     }
 
-    /// Start embedded DERP and, for free auto front door, a **second** trycloudflare origin.
-    /// Named/manual: explicit `relay_derp_url` pref wins; else reuse media public URL
-    /// (operator path-routes or uses one dual-role host).
-    async fn start_desktop_derp(
-        self: &Arc<Self>,
-        media_was_quick: bool,
-        media_public: Option<String>,
-        configured_derp: Option<String>,
-    ) -> Option<String> {
-        // Prefer dedicated DERP URL. Free quick still needs a second tunnel unless the operator
-        // already set a stable derp URL (named dual-role while media stays ephemeral is rare but valid).
-        let initial_public = if let Some(d) = configured_derp.clone() {
-            d
-        } else if media_was_quick {
-            String::new()
-        } else {
-            media_public.clone().unwrap_or_default()
-        };
+    /// Bind local iroh-relay only; public URL is filled after the front door / path router is up.
+    async fn spawn_desktop_derp_local(self: &Arc<Self>) -> Option<u16> {
         let dcfg = haven_net::DerpConfig {
             enabled: true,
             bind: haven_net::DEFAULT_DERP_BIND.into(),
-            public_url: initial_public,
+            public_url: String::new(),
         };
-        let mut srv = match haven_net::DerpServer::spawn(&dcfg).await {
-            Ok(Some(s)) => s,
-            Ok(None) => return None,
+        match haven_net::DerpServer::spawn(&dcfg).await {
+            Ok(Some(srv)) => {
+                let port = srv.local_port();
+                log::info!("iroh DERP fabric on {}", srv.local_addr);
+                *self.derp_server.lock().unwrap() = Some(srv);
+                Some(port)
+            }
+            Ok(None) => None,
             Err(e) => {
                 log::warn!("iroh DERP failed to start: {e:#}");
-                return None;
+                None
             }
+        }
+    }
+
+    /// Set public DERP URL for frame-19: path-routed single origin shares media URL (call hairpin);
+    /// sibling hostname uses configured URL; free dual-origin only when path router is off.
+    async fn finalize_desktop_derp_public(
+        self: &Arc<Self>,
+        path_routed: bool,
+        media_public: Option<String>,
+        configured_derp: Option<String>,
+        sibling_derp: Option<String>,
+    ) -> Option<String> {
+        let mut guard = self.derp_server.lock().unwrap();
+        let Some(srv) = guard.as_mut() else {
+            return None;
         };
-        // Second free tunnel only when we still lack a public DERP URL.
-        if media_was_quick && srv.public_url.is_empty() {
-            match Self::start_desktop_derp_quick_tunnel(srv.local_port()) {
-                Ok(t) => {
-                    log::info!("relay quick tunnel (DERP fabric): {}", t.public_url);
-                    srv.public_url = t.public_url.clone();
-                    *self.derp_tunnel.lock().unwrap() = Some(t);
-                }
-                Err(e) => {
-                    log::warn!("DERP quick tunnel failed: {e:#}");
-                }
+        if let Some(sib) = sibling_derp {
+            srv.public_url = sib;
+        } else if path_routed {
+            if let Some(u) = media_public {
+                srv.public_url = u;
+            }
+        } else if let Some(d) = configured_derp {
+            srv.public_url = d;
+        } else if let Some(u) = media_public.clone() {
+            if !u.contains("trycloudflare") {
+                srv.public_url = u;
             }
         }
         if srv.public_url.is_empty() {
-            if let Some(d) = configured_derp {
-                srv.public_url = d;
-            } else if let Some(u) = media_public {
-                srv.public_url = u;
+            let port = srv.local_port();
+            drop(guard);
+            match Self::start_desktop_derp_quick_tunnel(port) {
+                Ok(t) => {
+                    log::info!("relay quick tunnel (DERP dual-origin): {}", t.public_url);
+                    let url = t.public_url.clone();
+                    *self.derp_tunnel.lock().unwrap() = Some(t);
+                    if let Some(srv) = self.derp_server.lock().unwrap().as_mut() {
+                        srv.public_url = url.clone();
+                    }
+                    return Some(url);
+                }
+                Err(e) => {
+                    log::warn!("DERP quick tunnel failed: {e:#}");
+                    return None;
+                }
             }
         }
         let out = if srv.public_url.is_empty() {
@@ -4378,7 +4450,13 @@ impl Engine {
         } else {
             Some(srv.public_url.clone())
         };
-        *self.derp_server.lock().unwrap() = Some(srv);
+        if path_routed {
+            if let Some(ref u) = out {
+                log::info!(
+                    "DERP public={u} (single-tunnel fabric — call signaling hairpins over HTTPS /relay)"
+                );
+            }
+        }
         out
     }
 
@@ -4892,6 +4970,7 @@ impl Engine {
         *self.quick_tunnel.lock().unwrap() = None;
         *self.derp_tunnel.lock().unwrap() = None;
         *self.derp_server.lock().unwrap() = None;
+        *self.path_router.lock().unwrap() = None;
         *self.turn_server.lock().unwrap() = None;
         self.dyn_state.lock().unwrap().hosting = false;
         self.emit_changed();

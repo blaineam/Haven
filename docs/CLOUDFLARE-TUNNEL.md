@@ -99,7 +99,8 @@ peer A ──QUIC direct──► peer B          (still preferred when it works
 **Client side** (on `feature/iroh-relay-gossip`): when frame 19 carries a `derp` URL (or the
 operator pastes `haven-relay`'s interface JSON), clients call `apply_derp_urls` and build
 `RelayMode::Custom` — **n0 is disabled** for that process until no Haven DERP remains.
-WebRTC likewise drops Google STUN when fabric is active. See [`IROH-RELAY-GOSSIP.md`](IROH-RELAY-GOSSIP.md).
+WebRTC uses circle TURN when known, else Google STUN for server-reflexive candidates (call
+*signaling* still rides iroh fabric). See [`IROH-RELAY-GOSSIP.md`](IROH-RELAY-GOSSIP.md).
 
 **Why this works with Cloudflare (and what it still is not)**
 
@@ -126,24 +127,34 @@ WebRTC likewise drops Google STUN when fabric is active. See [`IROH-RELAY-GOSSIP
    `haven_endpoint_builder()`, shared `haven_net::DerpServer`, CLI + desktop + Mac host,
    dual free tunnels, frame-19 `derp`, Haven-first map + WebRTC policy. Scar guard: DERP is a
    **server socket other nodes connect to**, not a second iroh *endpoint under the node key*.
-5. **Named tunnel dual role** — media and DERP are **two local services**. Configure them
-   explicitly so the public front door reaches both:
+5. **Path proxy (recommended)** — `haven-relay` / in-app host start a **path proxy** on
+   `http://127.0.0.1:8675` that routes by path (not “everything else → media”):
 
-   | Role | Local | Typical public |
+   | Kind | Public path | Local backend |
    |---|---|---|
-   | Media mailbox | `http://127.0.0.1:8674` | `https://relay.example.com` |
-   | DERP fabric | `http://127.0.0.1:3340` | same host (path/ingress rules) **or** sibling `https://derp.example.com` |
+   | Media | `/k/*`, `/l/*`, `/t/*` | `http://127.0.0.1:8674` |
+   | Fabric | `/relay`, `/derp`, `/ping` | `http://127.0.0.1:3340` (live + call-signaling) |
+   | Hairpin | `/webrtc/hairpin` (WebSocket) | proxy-local bipipe — **call media over free CF** |
+   | Status | `/`, `/_haven` | proxy-local JSON |
+   | — | anything else | `404` |
+
+   Point **one** cloudflared origin (free quick or named) at `http://127.0.0.1:8675`. Media URL and
+   DERP URL are the **same** HTTPS hostname. Probe: `curl https://relay.example.com/_haven`.
+
+   **WebSocket hairpin** is the TCP-only call-media path when UDP TURN cannot be opened: free CF
+   tunnels upgrade WSS fine. Clients join with a JSON session/peer pair, then send opaque binary
+   (desktop falls back to PCM audio if ICE fails).
 
    **Zero Trust dashboard (named / bundled):**
-   1. Public hostname A → service `http://127.0.0.1:8674` (media).
-   2. Either add path/service rules on hostname A for the iroh-relay paths, **or** add hostname B
-      → service `http://127.0.0.1:3340` (DERP).
-   3. In Haven: set **Media public URL** to A; set **DERP fabric URL**
-      (`haven.relay.derpURL` / desktop `relay_derp_url` / CLI `--derp-url`) to B when using a
-      sibling host. Leave DERP empty only if A path-routes to both ports correctly.
+   1. Public hostname A → service **`http://127.0.0.1:8675`** (path proxy).
+   2. Leave **DERP fabric URL** empty so Haven reuses A for fabric (frame 19 `derp` = media URL).
 
-   **If media and DERP share one hostname without path rules, DERP will not work** — use free dual
-   tunnels (auto mode) or two hostnames / correct ingress.
+   **Optional sibling hostname** (dual origin, path proxy off via sibling `--derp-url`):
+   1. Hostname A → `http://127.0.0.1:8674` (media only).
+   2. Hostname B → `http://127.0.0.1:3340` (DERP).
+   3. Set **DERP fabric URL** / `--derp-url` to B.
+
+   CLI: `--proxy-bind 127.0.0.1:8675` (default), `--no-proxy` to disable.
 6. **Scale** — fine for a family/circle home host; not a global free tier for strangers.
 
 | Goal | CF media tunnel only | CF + embedded iroh-relay (this branch) |
@@ -156,7 +167,7 @@ WebRTC likewise drops Google STUN when fabric is active. See [`IROH-RELAY-GOSSIP
 **Bottom line:** Haven embeds open-source iroh-relay behind cloudflared/Manual. Free auto
 uses **two** quick tunnels (media + DERP). Named/Manual should dual-route or use sibling
 hostnames and the dedicated DERP URL pref when hosts differ. Cloudflare still does **not**
-replace iroh. WebRTC ICE stays Google-free when fabric is active (host candidates only until
+replace iroh. WebRTC ICE prefers circle TURN when fabric is active (else STUN for srflx until
 Haven TURN); see [`IROH-RELAY-GOSSIP.md`](IROH-RELAY-GOSSIP.md#webrtc-when-fabric-is-active-read-this).
 
 ---

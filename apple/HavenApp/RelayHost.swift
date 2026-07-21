@@ -28,6 +28,8 @@ final class RelayHost: ObservableObject {
     private var handle: RelayServerHandle?
     /// Embedded iroh-relay (DERP) fabric — desktop-class hosts only; held while hosting.
     private var derpHandle: DerpServerHandle?
+    /// Single-origin path router (media + DERP by path) — tunnel targets this port when set.
+    private var pathRouterHandle: PathRouterHandle?
     /// The same handle, reachable OFF the main actor.
     ///
     /// RelayHost is @MainActor, so every local-store accessor below used to force its caller onto the
@@ -196,69 +198,117 @@ final class RelayHost: ObservableObject {
             do { port = try await h.serveHttp(bind: "0.0.0.0:8674", token: token) }
             catch { port = try? await h.serveHttp(bind: "0.0.0.0:0", token: token) }   // port taken → ephemeral
             guard let self, let port else { HavenLog.relay("relay http serve FAILED"); return }
-            var urls = Self.reachableHttpUrls(port: port)
-            var mediaWasQuick = false
-            // Desktop-class hosts: if the operator didn't set a stable public URL, open a free
-            // Cloudflare Quick Tunnel so remote members can fetch media without port-forwarding.
-            // Ephemeral hostname; killed when hosting stops. iOS skips (no helper binary).
-            // Front door: manual (announce-only), bundled token, or free quick — see CloudflaredTunnel.
+
+            // Tunnel targets this port (path router when fabric is unified, else media).
+            var frontPort = port
+            var pathRouted = false
+
             #if os(macOS)
-            let fd = await CloudflaredTunnel.shared.apply(port: port)
+            // Start DERP before the front door so a single-origin path router can front both.
+            let configuredDerp = (UserDefaults.standard.string(forKey: "haven.relay.derpURL") ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let mediaPublicPref = (UserDefaults.standard.string(forKey: "haven.relay.publicURL") ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let siblingDerp = !configuredDerp.isEmpty
+                && (mediaPublicPref.isEmpty || configuredDerp != mediaPublicPref)
+            var derpLocalPort: UInt16?
+            do {
+                let derp = try await DerpServerHandle.spawn(bind: "127.0.0.1:3340", publicUrl: "")
+                self.derpHandle = derp
+                derpLocalPort = derp.localPort()
+                HavenLog.relay("relay DERP fabric local=\(derp.localAddr())")
+            } catch {
+                HavenLog.relay("relay DERP failed: \(error.localizedDescription)")
+            }
+            if let dport = derpLocalPort, !siblingDerp {
+                do {
+                    let router = try await PathRouterHandle.spawn(
+                        bind: "127.0.0.1:8675",
+                        mediaBackend: "127.0.0.1:\(port)",
+                        derpBackend: "127.0.0.1:\(dport)",
+                        httpToken: token
+                    )
+                    self.pathRouterHandle = router
+                    frontPort = router.localPort()
+                    pathRouted = true
+                    HavenLog.relay(
+                        "path router on \(router.localAddr()) — single origin media+DERP"
+                    )
+                } catch {
+                    HavenLog.relay("path router failed: \(error.localizedDescription)")
+                }
+            }
+            #endif
+
+            var urls = Self.reachableHttpUrls(port: port)
+            // Desktop-class hosts: free / named / manual front door — see CloudflaredTunnel.
+            #if os(macOS)
+            let fd = await CloudflaredTunnel.shared.apply(port: frontPort)
             if let u = fd.announceURL {
                 urls = [u] + urls.filter { $0 != u }
-                mediaWasQuick = fd.spawnedConnector && u.contains("trycloudflare")
                 HavenLog.relay(
                     "relay front door \(CloudflaredTunnel.shared.frontDoorMode)"
                         + (fd.spawnedConnector ? " (cloudflared)" : " (announce-only)")
+                        + (pathRouted ? " path-router" : "")
                         + " \(u)"
                 )
             }
             #endif
-            HavenLog.relay("relay http on :\(port) urls=\(urls.joined(separator: " "))")
+            HavenLog.relay(
+                "relay http on :\(port) front=:\(frontPort) pathRouted=\(pathRouted) urls=\(urls.joined(separator: " "))"
+            )
             guard !urls.isEmpty, !self.nodeId.isEmpty else { return }
             RelayMailboxStore.shared.setHttpInterface(self.nodeId, urls: urls, token: token)
-            // Haven fabric: embed iroh-relay in-process (macOS). Free auto → second trycloudflare
-            // for the DERP port; named/manual reuse the media HTTPS host (path-route :3340).
+
             #if os(macOS)
-            await self.startDerpFabric(mediaUrls: urls, mediaWasQuick: mediaWasQuick)
+            // Public DERP: single-origin shares media URL (call signaling hairpins over /relay);
+            // sibling hostname uses configured URL; dual free tunnel only when path router is off.
+            await self.finalizeDerpPublic(
+                mediaUrls: urls,
+                pathRouted: pathRouted,
+                configuredDerp: configuredDerp,
+                siblingDerp: siblingDerp
+            )
             #endif
             FeedStore.shared.reannounceOwnRelay()   // re-announce WITH the http interface attached
         }
     }
 
     #if os(macOS)
-    /// Start embedded DERP + optional second free tunnel; record `derp` on our RelayEntry.
-    ///
-    /// Public URL priority:
-    /// 1. `haven.relay.derpURL` — dedicated fabric front door (sibling host / path-routed `:3340`)
-    /// 2. Free auto: second trycloudflare → local DERP bind
-    /// 3. Named/manual media URL (non-trycloudflare) when operator dual-routes one hostname
-    private func startDerpFabric(mediaUrls: [String], mediaWasQuick: Bool) async {
-        do {
-            let configured = (UserDefaults.standard.string(forKey: "haven.relay.derpURL") ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            let seedPublic = configured.isEmpty ? "" : configured
-            let derp = try await DerpServerHandle.spawn(bind: "127.0.0.1:3340", publicUrl: seedPublic)
-            self.derpHandle = derp
-            var derpPublic: String? = seedPublic.isEmpty ? nil : seedPublic
-            if derpPublic == nil, mediaWasQuick {
-                derpPublic = await CloudflaredTunnel.shared.startQuickDerp(port: derp.localPort())
-            }
-            if derpPublic == nil {
-                // Named/manual: same host if operator path-routes, or a non-trycloudflare media URL.
-                derpPublic = mediaUrls.first(where: {
-                    $0.hasPrefix("https://") && !$0.contains("trycloudflare")
-                })
-            }
-            if let d = derpPublic, !d.isEmpty {
-                RelayMailboxStore.shared.setDerpUrl(self.nodeId, url: d)
-                HavenLog.relay("relay DERP fabric public=\(d) local=\(derp.localAddr())")
-            } else {
-                HavenLog.relay("relay DERP listening on \(derp.localAddr()) — no public URL yet")
-            }
-        } catch {
-            HavenLog.relay("relay DERP failed: \(error.localizedDescription)")
+    /// Record public DERP URL on our RelayEntry after the front door is known.
+    private func finalizeDerpPublic(
+        mediaUrls: [String],
+        pathRouted: Bool,
+        configuredDerp: String,
+        siblingDerp: Bool
+    ) async {
+        guard derpHandle != nil else { return }
+        var derpPublic: String?
+        if siblingDerp {
+            derpPublic = configuredDerp
+        } else if pathRouted {
+            // Same public origin as media — HTTPS fabric for live frames + call signaling.
+            derpPublic = mediaUrls.first
+        } else if !configuredDerp.isEmpty {
+            derpPublic = configuredDerp
+        } else if let u = mediaUrls.first(where: {
+            $0.hasPrefix("https://") && !$0.contains("trycloudflare")
+        }) {
+            derpPublic = u
+        } else if let port = derpHandle?.localPort() {
+            // Dual free tunnel fallback when path router failed.
+            derpPublic = await CloudflaredTunnel.shared.startQuickDerp(port: port)
+        }
+        if let d = derpPublic, !d.isEmpty {
+            RelayMailboxStore.shared.setDerpUrl(self.nodeId, url: d)
+            HavenLog.relay(
+                "relay DERP fabric public=\(d)"
+                    + (pathRouted ? " (single-tunnel hairpin)" : "")
+            )
+        } else {
+            HavenLog.relay("relay DERP listening — no public URL yet")
         }
     }
     #endif
@@ -343,6 +393,7 @@ final class RelayHost: ObservableObject {
     private func stop() {
         #if os(macOS)
         CloudflaredTunnel.shared.stop()
+        pathRouterHandle = nil  // drops unified media+DERP front door
         derpHandle = nil   // drops embedded iroh-relay
         #endif
         handle?.disable()      // detach the relay from the node's endpoint
@@ -490,7 +541,7 @@ struct RelayEntry: Codable, Identifiable, Equatable {
     /// prefer it over n0 for NAT fallback. Empty = use n0 (or another relay's DERP).
     var derpUrl: String?
     /// Public TURN URLs for WebRTC ICE (`turn:host:port`). When fabric is active and non-empty,
-    /// clients use these instead of empty ICE / Google STUN.
+    /// clients use these for WebRTC media ICE (else STUN for srflx).
     var turnUrls: [String]?
     /// TURN username (default `haven`).
     var turnUser: String?

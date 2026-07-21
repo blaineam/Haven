@@ -9,11 +9,32 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-Exploratory work on outliving the infrastructure Haven doesn't own. **Nothing here changes shipped
-behavior** — the discovery layer is behind a flag that defaults to off, and the push relay keeps its
-current default.
-
 ### Added
+
+- **Video posters ship with every video.** Attaching a video always cuts a compressed JPEG still and
+  publishes it alongside the playable clip (`poster:<video>:<image>` marker). Super data saver and
+  Places can render the card without downloading the video bytes.
+- **Also send original.** Settings ▸ Also send original (or auto-optimize off) keeps the camera file
+  as an `orig:` companion next to the optimized playable. Recipients see **Show original** in the
+  post menu only when that companion exists.
+- **File / folder attachments.** Posts and DMs accept arbitrary files and folders via Files… — they
+  are zipped into a `file_` content-addressed blob and shared like any other media.
+- **Super data saver** (Settings). No autoplay of video or attached music; feed prefetches posters /
+  images / audio / files only; videos download when you tap play.
+- **Public relay URL field** on the in-app relay toggle. Point friends at a Tailscale MagicDNS name
+  or free tunnel to `:8674` so the plain-HTTP media path works without leaning on iroh for blobs.
+
+### Fixed
+
+- **DM push inbox no longer leaves sibling devices with a banner and an empty thread.** Inline push
+  events now fan out to the user's other online devices, fetch DM media, recompute DM badges, and
+  still pull the mailbox for anything that didn't fit in the push payload.
+- **Backup / "which relays hold this" sheet is a half-sheet on iOS** (medium detent), not a full-cover
+  sheet — for both feed posts and DMs.
+- **Device heat under thermal pressure.** Sync/poll cadence stretches further when the device is warm
+  (or super data saver is on), on top of the existing idle multipliers.
+
+### Added (prior unreleased)
 
 - **"Re-optimize media I already shared" now works on Windows/Linux/macOS desktop** (Settings ▸
   Advanced ▸ Storage), alongside "Clean up unused media". The compression work above only ever

@@ -254,13 +254,28 @@ struct CircleMailboxSection: View {
             if relay.serving && !relay.nodeId.isEmpty {
                 Label("This device is relaying · \(String(relay.nodeId.prefix(8)))…", systemImage: "checkmark.circle.fill")
                     .font(.caption).foregroundStyle(.green)
+                // Friends outside your LAN can only hit the plain-HTTP media path if this device
+                // has a reachable URL (Tailscale MagicDNS, a reverse proxy, a free tunnel, etc.).
+                // Without it the iroh blob path is the only cross-NAT option and is less reliable.
+                TextField("Public relay URL (optional)", text: Binding(
+                    get: { UserDefaults.standard.string(forKey: "haven.relay.publicURL") ?? "" },
+                    set: { v in
+                        let t = v.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if t.isEmpty { UserDefaults.standard.removeObject(forKey: "haven.relay.publicURL") }
+                        else { UserDefaults.standard.set(t, forKey: "haven.relay.publicURL") }
+                        // Re-announce so peers learn the new URL without a restart.
+                        if relay.serving { FeedStore.shared.reannounceOwnRelay() }
+                    }
+                ))
+                .autocorrectionDisabled().havenAutocap(.never)
+                .font(.caption)
             } else if relay.enabled {
                 Label("Starting…", systemImage: "clock").font(.caption).foregroundStyle(.secondary)
             }
         } header: {
             Text("Relay")
         } footer: {
-            Text("Where this circle's sealed posts & media live so they reach people who were offline. Leave a device on as the relay (easy), or point at an external relay / your own S3 bucket under Advanced.")
+            Text("Where this circle's sealed posts & media live so they reach people who were offline. Leave a device on as the relay (easy), or point at an external relay / your own S3 bucket under Advanced. A Public relay URL (e.g. your Tailscale MagicDNS name or a free tunnel to port 8674) lets friends fetch media over plain HTTP without needing the iroh path — preferred when you can set one up without third-party infrastructure.")
                 .fixedSize(horizontal: false, vertical: true)
         }
         RelayPoolSection(circleId: circleId)

@@ -154,11 +154,23 @@ final class FeedStore: ObservableObject {
     private var nextSyncDueMs: UInt64 = 0
     private var nextPollDueMs: UInt64 = 0
     /// Base cadences and the idle multipliers. Idle <3min = base; <15min = ×3; else ×6.
+    /// Thermal pressure and super data saver stretch further so a warm phone (or one the user
+    /// asked to go easy on the radio) isn't also blasting hello+roster at the tight cadence.
     private func adaptiveInterval(base: UInt64) -> UInt64 {
         let idle = now() &- lastActivityMs
-        if idle < 180_000 { return base }
-        if idle < 900_000 { return base * 3 }
-        return base * 6
+        var mult: UInt64
+        if idle < 180_000 { mult = 1 }
+        else if idle < 900_000 { mult = 3 }
+        else { mult = 6 }
+        #if os(iOS)
+        switch ProcessInfo.processInfo.thermalState {
+        case .serious, .critical: mult *= 2
+        case .fair: mult = (mult * 3) / 2
+        default: break
+        }
+        #endif
+        if SettingsStore.shared.superDataSaver { mult = (mult * 3) / 2 }
+        return base * max(1, mult)
     }
     /// Mark "something is happening" → snap both timers back to their tight base cadence immediately.
     func bumpActivity() {
@@ -2091,8 +2103,12 @@ final class FeedStore: ObservableObject {
     @MainActor func requestMissingDMMedia(_ circleId: String) {
         let recent = messages(in: circleId).sorted { $0.createdAt > $1.createdAt }.prefix(8)
         var budget = 4
+        let dataSaver = SettingsStore.shared.superDataSaver
         for item in recent {
-            for ref in item.media where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref) {
+            let candidates = dataSaver
+                ? MediaVariants.dataSaverPrefetchRefs(item.media)
+                : item.media.filter { !MediaStore.isSynthetic($0) }
+            for ref in candidates where !MediaStore.shared.has(ref) {
                 guard budget > 0 else { return }
                 budget -= 1
                 requestMedia(ref, circleId: circleId)
@@ -2103,6 +2119,12 @@ final class FeedStore: ObservableObject {
     /// Drain events that arrived inline in a push (stashed by the NSE) and ingest them — silent
     /// sync with no mailbox round-trip. We don't carry the circle id in cleartext, so we try each
     /// circle until one opens the envelope (a wrong circle just ignores it).
+    ///
+    /// Mirrors `pullMailbox`'s post-ingest work: DM badges, DM media fetch, and live fan-out to the
+    /// user's other devices. The old path only bumped the *feed* unseen counter and scanned the
+    /// active circle's feed for missing media — so a DM that arrived inline as a push notified
+    /// every device, landed on the one that opened the envelope, and left siblings with a banner
+    /// and an empty thread (and never asked the mailbox for the attached photo).
     func ingestPushInbox() {
         guard let social else { return }
         let envs = SharedInbox.drain()
@@ -2111,17 +2133,37 @@ final class FeedStore: ObservableObject {
         // Trying every circle per envelope multiplies the receive() crypto — run the whole batch
         // off-main and apply the result in one main-actor hop (same shape as pullMailbox).
         Task.detached(priority: .utility) { [weak self] in
-            var ingested: [String] = []
+            var ingested: [(circleId: String, envelope: Data)] = []
             for env in envs {
                 for cid in ids where (try? social.receive(circleId: cid, envelope: env)) == true {
-                    ingested.append(cid); break
+                    ingested.append((cid, env)); break
                 }
             }
             guard !ingested.isEmpty else { return }
             await MainActor.run {
                 guard let self else { return }
-                for cid in ingested { self.notifyNewest(in: cid); self.bumpUnseen(cid) }
+                var dmCircles = Set<String>()
+                for (cid, env) in ingested {
+                    self.notifyNewest(in: cid)
+                    if cid.hasPrefix("dm:") {
+                        dmCircles.insert(cid)
+                    } else {
+                        self.bumpUnseen(cid)
+                    }
+                    // Fan out to my other online devices — same contract as handleEvent. The push
+                    // worker delivers to every device token, but the *event body* only rides the
+                    // push when it fits under ~3900 bytes; larger DMs notify every device and only
+                    // inline on none of them. Live-delivering the sealed envelope we just opened
+                    // is what makes "I got the banner on my phone AND my Mac shows the message"
+                    // true when both are awake. Mailbox poll still covers the asleep case.
+                    self.liveDeliverToMyDevices(1, self.eventPayload(cid, env))
+                }
+                if !dmCircles.isEmpty { self.recomputeUnreadDMs() }
                 self.persist(); self.refresh(); self.requestMissingMedia()
+                for cid in dmCircles { self.requestMissingDMMedia(cid) }
+                // Also pull the mailbox — the push may have been one of several, and siblings that
+                // only got a banner (no inline body) still need the store-and-forward path.
+                self.pollMailboxNow()
             }
         }
     }
@@ -3338,9 +3380,22 @@ final class FeedStore: ObservableObject {
         // Skip refs the user DELIBERATELY evicted (cleanup screen / local-limit sweep). Auto-refetching
         // them would silently undo the space the user just freed — they re-download only on an explicit
         // "Download" tap (downloadEvicted clears the eviction first). Still fetch media never seen yet.
+        let dataSaver = SettingsStore.shared.superDataSaver
         for item in items {
-            for ref in item.media where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref) && !EvictedMediaStore.shared.contains(ref) { missing.insert(ref) }
-            for c in item.comments { for ref in c.media where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref) && !EvictedMediaStore.shared.contains(ref) { missing.insert(ref) } }
+            // Super data saver: only prefetch posters/images/audio/files — never full videos or
+            // original companions. Videos download when the user taps play; originals via the menu.
+            let candidates: [String] = dataSaver
+                ? MediaVariants.dataSaverPrefetchRefs(item.media)
+                : item.media
+            for ref in candidates where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref) && !EvictedMediaStore.shared.contains(ref) {
+                missing.insert(ref)
+            }
+            for c in item.comments {
+                let cands: [String] = dataSaver ? MediaVariants.dataSaverPrefetchRefs(c.media) : c.media
+                for ref in cands where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref) && !EvictedMediaStore.shared.contains(ref) {
+                    missing.insert(ref)
+                }
+            }
         }
         let circleIds = circles.map { $0.id }
         SyncMetrics.shared.nbMediaPending = missing.count
@@ -4326,9 +4381,13 @@ struct FeedView: View {
                 SchedulePicker(circleId: store.activeCircleId, isDM: false) { date in scheduleCurrentPost(at: date) }.macSheetFrame()
             }
             .fileImporter(isPresented: $showFilesImporter,
-                          allowedContentTypes: [.image, .movie], allowsMultipleSelection: true) { result in
+                          allowedContentTypes: [.image, .movie, .item, .data, .archive, .folder],
+                          allowsMultipleSelection: true) { result in
                 guard case let .success(urls) = result else { return }
-                importFiles(urls)
+                Task { @MainActor in
+                    let refs = await MediaImport.importURLs(urls)
+                    if !refs.isEmpty { attachedMedia.append(contentsOf: refs) }
+                }
             }
             .confirmationDialog("This media may be sensitive",
                                 isPresented: Binding(get: { pendingSensitive != nil },
@@ -4569,12 +4628,11 @@ struct FeedView: View {
                     let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("drop_\(UUID().uuidString).\(ext)")
                     try? FileManager.default.copyItem(at: url, to: tmp)
                     Task { @MainActor in
-                        let ref = await MediaStore.shared.addVideo(url: tmp)
-                        // `addVideo` returns "" when it REFUSES the clip (over the 15-minute limit).
-                        // Appending that would attach an empty ref: a post carrying an attachment
-                        // with no bytes behind it, which can never upload or render.
-                        guard !ref.isEmpty else { return }
-                        attachedMedia.append(ref)
+                        let bundle = await MediaStore.shared.prepareVideo(url: tmp)
+                        // prepareVideo returns empty mediaRefs when it REFUSES the clip (over the
+                        // 15-minute limit). Appending nothing is correct — never attach an empty ref.
+                        guard !bundle.isEmpty else { return }
+                        attachedMedia.append(contentsOf: bundle.mediaRefs)
                     }
                 }
             } else if p.canLoadObject(ofClass: PlatformImage.self) {
@@ -4588,41 +4646,37 @@ struct FeedView: View {
         return handled
     }
 
-    /// Ingest files chosen from the Files app. Each URL is security-scoped, so access must be opened
-    /// around the read and the bytes copied into MediaStore before the scope closes.
-    private func importFiles(_ urls: [URL]) {
-        for url in urls {
-            let scoped = url.startAccessingSecurityScopedResource()
-            let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType
-            if let type, type.conforms(to: .movie) {
-                let ext = url.pathExtension.isEmpty ? "mov" : url.pathExtension
-                let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("files_\(UUID().uuidString).\(ext)")
-                try? FileManager.default.copyItem(at: url, to: tmp)
-                if scoped { url.stopAccessingSecurityScopedResource() }
-                Task { @MainActor in
-                    // "" means REFUSED (over the 15-minute limit) — never attach an empty ref.
-                    let ref = await MediaStore.shared.addVideo(url: tmp)
-                    if !ref.isEmpty { attachedMedia.append(ref) }
-                }
-            } else if let data = try? Data(contentsOf: url), let img = PlatformImage(data: data) {
-                if scoped { url.stopAccessingSecurityScopedResource() }
-                attachedMedia.append(MediaStore.shared.addImage(img))
-            } else if scoped {
-                url.stopAccessingSecurityScopedResource()
-            }
-        }
-    }
-
     private var attachmentTray: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                ForEach(attachedMedia, id: \.self) { ref in
+                // Hide synthetic markers and original companions from the tray — they ride with
+                // the playable ref and would just look like duplicate chips.
+                ForEach(MediaVariants.displayRefs(attachedMedia), id: \.self) { ref in
                     if let m = MediaStore.shared.item(ref), let img = MediaStore.shared.thumbnail(ref, maxDimension: 160) {
                         ZStack(alignment: .topTrailing) {
                             Image(platformImage: img).resizable().scaledToFill()
                                 .frame(width: 56, height: 56).clipShape(RoundedRectangle(cornerRadius: 10))
                                 .overlay(alignment: .bottomLeading) {
                                     if m.kind == .video { videoEditMenu(ref) }
+                                }
+                            removeChip {
+                                // Drop the playable AND any poster/original companions tied to it.
+                                attachedMedia.removeAll { r in
+                                    if r == ref { return true }
+                                    if let p = MediaVariants.parsePoster(r), p.video == ref || p.poster == ref { return true }
+                                    if let o = MediaVariants.parseOriginal(r), o.optimized == ref || o.original == ref { return true }
+                                    if MediaVariants.poster(for: ref, in: attachedMedia) == r { return true }
+                                    if MediaVariants.original(for: ref, in: attachedMedia) == r { return true }
+                                    return false
+                                }
+                            }
+                        }
+                    } else if MediaKind(ref: ref) == .file {
+                        ZStack(alignment: .topTrailing) {
+                            RoundedRectangle(cornerRadius: 10).fill(Color(.tertiarySystemFill))
+                                .frame(width: 56, height: 56)
+                                .overlay {
+                                    Image(systemName: "doc.zipper").font(.title3).foregroundStyle(.secondary)
                                 }
                             removeChip { attachedMedia.removeAll { $0 == ref } }
                         }
@@ -4987,7 +5041,11 @@ struct PostCard: View {
     /// A shared location is encoded as a synthetic `geo:` ref inside `media` (index 0). It is NOT real
     /// media, so it must be drawn as a map and kept OUT of the photo grid / zoom viewer — otherwise it
     /// degrades to a forever-spinner tile (MediaStore has no file for it).
-    private var realMedia: [String] { item.media.filter { SharedLocation.parse($0) == nil } }
+    /// Media slides the card actually renders. Drops location pins, synthetic markers, and
+    /// original companions (those only surface via "Show original").
+    private var realMedia: [String] {
+        MediaVariants.displayRefs(item.media).filter { SharedLocation.parse($0) == nil }
+    }
 
     /// A full-width media page's height: as tall as the media needs, capped. A page WIDER than the media's
     /// own shape is the point — the exposed strip either side is where the blurred backdrop shows.
@@ -5245,17 +5303,41 @@ struct PostCard: View {
         // Decide from the REF + a cheap file check, never `item(ref)`: that decodes the bitmap / generates
         // the video poster ON THE MAIN THREAD on a cache miss, and this runs for every page of every media
         // post — a 3-video carousel paid three decodes per layout pass, which is the carousel/grid jitter.
-        if MediaStore.shared.hasLocalFile(ref) {
+        let dataSaver = SettingsStore.shared.superDataSaver
+        let hasVideo = MediaStore.shared.hasLocalFile(ref)
+        // Super data saver + video not yet downloaded: show the poster still (if we have one) with a
+        // play affordance. Tapping play requests the video bytes and only then builds an AVPlayer.
+        if dataSaver, MediaKind(ref: ref) == .video, !hasVideo {
+            let poster = MediaVariants.poster(for: ref, in: item.media)
+            ZStack {
+                if let poster, MediaStore.shared.hasLocalFile(poster) {
+                    FeedImage(ref: poster, maxDimension: 1200, contentMode: .fit) { mediaLoadingPlaceholder(ref) }
+                } else {
+                    mediaLoadingPlaceholder(ref)
+                }
+                Image(systemName: "play.circle.fill").font(.system(size: 56))
+                    .foregroundStyle(.white.opacity(0.92)).shadow(radius: 6)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                // Explicit play → download the video (and only the video).
+                feed.requestMedia(ref, circleId: feed.activeCircleId)
+            }
+            .background { pageBackdrop(poster ?? ref, containerAspect: containerAspect) }
+        } else if hasVideo {
             if MediaKind(ref: ref) == .video, let url = MediaStore.shared.storagePath(for: ref) {
+                // Data saver with local video: still don't autoplay — GestureVideoPlayer starts paused
+                // when superDataSaver is on via playVisibleVideo; the user taps to start.
                 let player = playerFor(ref, url)
-                // The player owns its gestures: tap → mute, double-tap → heart,
-                // hold → pause, horizontal drag → scrub. Letterboxed, loops continuously.
                 GestureVideoPlayer(player: player,
                                    onTap: { togglePostMute() },
                                    onDoubleTap: { heartIt() },
                                    inCarousel: inCarousel,
                                    onScrubbing: onScrubbing)
                     .background { pageBackdrop(ref, containerAspect: containerAspect) }
+            } else if MediaKind(ref: ref) == .file {
+                fileAttachmentPage(ref)
             } else {
                 // Non-video → a ~1200px thumbnail (not the 2560px original) via the self-loading `FeedImage`:
                 // it decodes OFF the main thread and swaps into only itself, so a fast flick never hitches on
@@ -5269,6 +5351,23 @@ struct PostCard: View {
             // Referenced but not here yet — it's still coming from the sender / mailbox.
             mediaLoadingPlaceholder(ref)
         }
+    }
+
+    /// A `file_` zip attachment: document chip with share/save affordance.
+    @ViewBuilder private func fileAttachmentPage(_ ref: String) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: "doc.zipper").font(.system(size: 44)).foregroundStyle(HavenTheme.pink)
+            Text("File attachment").font(.subheadline.weight(.semibold))
+            if let url = MediaStore.shared.storagePath(for: ref) {
+                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+                Text(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))
+                    .font(.caption).foregroundStyle(.secondary)
+                ShareLink(item: url) { Label("Share file", systemImage: "square.and.arrow.up") }
+                    .buttonStyle(GlassPillButtonStyle(tint: HavenTheme.pink))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
     }
 
     /// True when this page's media can't fill a `containerAspect`-shaped page — it letterboxes, exposing
@@ -5537,8 +5636,12 @@ private struct KillHorizontalScroller: NSViewRepresentable {
     /// plays its song + the visible carousel video; an inactive post pauses everything.
     private func syncPlayback() {
         if isActive {
-            audio.start(postId: item.id, track: item.music, video: primaryVideoPlayer, muteVideo: item.muteVideo)
-            audio.ensureMusicPlaying()   // resume the song if a video had paused it
+            // Super data saver: no autoplay of attached music either — only the poster still loads.
+            let track = SettingsStore.shared.superDataSaver ? nil : item.music
+            audio.start(postId: item.id, track: track, video: primaryVideoPlayer, muteVideo: item.muteVideo)
+            if !SettingsStore.shared.superDataSaver {
+                audio.ensureMusicPlaying()   // resume the song if a video had paused it
+            }
             playVisibleVideo()
         } else {
             pauseVideos()
@@ -5559,6 +5662,12 @@ private struct KillHorizontalScroller: NSViewRepresentable {
 
     private func playVisibleVideo() {
         guard isActive else { return }
+        // Super data saver: never autoplay. The still (poster) is already on screen; the user
+        // taps play when they want the bytes + the decode heat.
+        if SettingsStore.shared.superDataSaver {
+            for (_, player) in players { player.pause() }
+            return
+        }
         let visibleRef: String? = item.media.isEmpty
             ? nil
             : item.media[min(max(currentPage, 0), item.media.count - 1)]
@@ -5686,6 +5795,10 @@ private struct KillHorizontalScroller: NSViewRepresentable {
                     BackupDetailView(refs: item.media.filter { !MediaStore.isSynthetic($0) },
                                      circleId: feed.activeCircleId)
                         .macSheetFrame()
+                        #if os(iOS)
+                        .presentationDetents([.medium, .large])
+                        .presentationDragIndicator(.visible)
+                        #endif
                 }
             }
             Spacer()
@@ -5741,6 +5854,32 @@ private struct KillHorizontalScroller: NSViewRepresentable {
                     if item.isMe {
                         Button { showEdit = true } label: { Label("Edit", systemImage: "pencil") }
                         Button(role: .destructive) { onUnsend() } label: { Label("Unsend", systemImage: "arrow.uturn.backward") }
+                    }
+                    // "Show original" only when the author actually sent an uncompressed companion.
+                    // Hidden otherwise so the menu never offers a dead download.
+                    let originalRefs = MediaVariants.allOriginals(in: item.media)
+                        .filter { !MediaStore.shared.has($0) }
+                    if !originalRefs.isEmpty {
+                        Button {
+                            for r in originalRefs {
+                                feed.requestMedia(r, circleId: feed.activeCircleId)
+                            }
+                        } label: {
+                            Label("Show original", systemImage: "arrow.down.circle")
+                        }
+                    } else if MediaVariants.allOriginals(in: item.media).contains(where: { MediaStore.shared.has($0) }) {
+                        // Original already on disk — nothing to download; still surface so the user
+                        // knows it's available (opens the zoom viewer on the original if present).
+                        Button {
+                            // Prefer opening the first available original in the media zoom path.
+                            if let first = MediaVariants.allOriginals(in: item.media).first(where: { MediaStore.shared.has($0) }) {
+                                // Nudge a refresh so any view observing the store re-reads the item.
+                                feed.scheduleRefresh()
+                                _ = first
+                            }
+                        } label: {
+                            Label("Original available", systemImage: "checkmark.circle")
+                        }
                     }
                     // Keep the post's photos/videos on THIS device so no cleanup (orphan sweep, age/size
                     // limit, or the Manage-media screen) ever removes their bytes. Pins every real media
@@ -5975,6 +6114,10 @@ private struct KillHorizontalScroller: NSViewRepresentable {
                         }
                     case .image:
                         if let img = m.image { thumb(img) }
+                    case .file:
+                        Image(systemName: "doc.zipper")
+                            .frame(width: 56, height: 56)
+                            .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 8))
                     }
                 }
             }

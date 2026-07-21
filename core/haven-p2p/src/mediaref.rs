@@ -54,6 +54,9 @@ pub enum MediaKind {
     Image,
     Video,
     Audio,
+    /// Zipped file/folder attachment (posts + DMs). Always a `.zip` on disk; the archive is the
+    /// content-addressed unit so a folder ships as one blob.
+    File,
 }
 
 impl MediaKind {
@@ -63,6 +66,7 @@ impl MediaKind {
             MediaKind::Image => "img_",
             MediaKind::Video => "vid_",
             MediaKind::Audio => "aud_",
+            MediaKind::File => "file_",
         }
     }
 
@@ -74,6 +78,8 @@ impl MediaKind {
             Some(MediaKind::Video)
         } else if reference.starts_with("aud_") || reference.starts_with("a:") {
             Some(MediaKind::Audio)
+        } else if reference.starts_with("file_") {
+            Some(MediaKind::File)
         } else {
             None
         }
@@ -82,7 +88,7 @@ impl MediaKind {
 
 /// Every kind prefix we have ever minted, modern and legacy. The single-letter schemes are what the
 /// desktop store still writes (`v:`/`a:`, bare for images) and what early Android/iOS media carries.
-const PREFIXES: [&str; 6] = ["img_", "vid_", "aud_", "v:", "i:", "a:"];
+const PREFIXES: [&str; 7] = ["img_", "vid_", "aud_", "file_", "v:", "i:", "a:"];
 
 /// The ref with its kind prefix stripped — the content hash, for a content-addressed ref.
 ///
@@ -211,6 +217,8 @@ mod tests {
     fn verifiable_only_for_content_addresses() {
         assert!(is_verifiable(&mint(MediaKind::Image, b"x")));
         assert!(is_verifiable(&mint(MediaKind::Video, b"x")));
+        assert!(is_verifiable(&mint(MediaKind::File, b"zip-bytes")));
+        assert!(mint(MediaKind::File, b"zip-bytes").starts_with("file_"));
         // Desktop's legacy single-letter scheme is a content address too.
         assert!(is_verifiable(&format!("v:{}", sha256_hex(b"x"))));
         // ...and so is a kindless bare hash (the pre-parity Android/desktop scheme).
@@ -221,6 +229,9 @@ mod tests {
         assert!(!is_verifiable("geo:37.7,-122.4,Ocean Beach"));
         assert!(is_synthetic("geo:37.7,-122.4,Ocean Beach"));
         assert!(!is_synthetic("v:abc"));
+        // Poster/original markers are multi-char schemes → synthetic, not fetchable.
+        assert!(is_synthetic("poster:vid_abc:img_def"));
+        assert!(is_synthetic("orig:vid_opt:vid_orig"));
     }
 
     #[test]

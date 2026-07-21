@@ -45,21 +45,23 @@ struct MediaPicker: UIViewControllerRepresentable {
             // regression). Results are recorded in selection order and delivered once the last finishes.
             guard !providers.isEmpty else { parent.dismiss(); return }
             let total = providers.count
-            var slots = [String?](repeating: nil, count: total)
+            // Each slot may expand to several refs (a video yields poster + playable + optional
+            // original + synthetic markers). Flatten in selection order when the last finishes.
+            var slots = [[String]](repeating: [], count: total)
             var remaining = total
             let lock = NSLock()
-            func record(_ index: Int, _ ref: String?) {
+            func record(_ index: Int, _ refs: [String]) {
                 lock.lock()
-                slots[index] = ref
+                slots[index] = refs
                 remaining -= 1
                 let done = remaining == 0
                 lock.unlock()
                 guard done else { return }
-                let refs = slots.compactMap { $0 }
-                DispatchQueue.main.async { if !refs.isEmpty { onPicked(refs) } }
+                let flat = slots.flatMap { $0 }
+                DispatchQueue.main.async { if !flat.isEmpty { onPicked(flat) } }
             }
             for (i, provider) in providers.enumerated() {
-                Coordinator.loadRef(from: provider) { ref in record(i, ref) }
+                Coordinator.loadRefs(from: provider) { refs in record(i, refs) }
             }
             parent.dismiss()
         }
@@ -68,9 +70,10 @@ struct MediaPicker: UIViewControllerRepresentable {
         /// them all into memory at once (a past OOM). The lightweight data/file transfers still overlap.
         private static let decodeQueue = DispatchQueue(label: "haven.mediapicker.decode")
 
-        /// Load one picker item to a stored media ref via completion handlers, so the transfer is
-        /// initiated synchronously (connection still live) and survives the picker's dismissal.
-        private static func loadRef(from provider: NSItemProvider, completion: @escaping (String?) -> Void) {
+        /// Load one picker item to one or more stored media refs via completion handlers, so the
+        /// transfer is initiated synchronously (connection still live) and survives the picker's
+        /// dismissal. Videos return a bundle (poster + optimized + optional original).
+        private static func loadRefs(from provider: NSItemProvider, completion: @escaping ([String]) -> Void) {
             if provider.canLoadObject(ofClass: PlatformImage.self) {
                 // Load the raw data (not just a decoded image) so we can read the EXIF GPS before the
                 // bytes are re-encoded (which strips it). The coord stays on-device.
@@ -81,31 +84,31 @@ struct MediaPicker: UIViewControllerRepresentable {
                             DispatchQueue.main.async {
                                 let ref = MediaStore.shared.addImage(img)
                                 if let coord { MediaStore.shared.setLocation(coord, for: ref) }
-                                completion(ref)
+                                completion([ref])
                             }
                         } else {
                             // Fallback: some providers only vend a decoded image (no GPS available then).
                             provider.loadObject(ofClass: PlatformImage.self) { obj, _ in
-                                guard let img = obj as? PlatformImage else { completion(nil); return }
-                                DispatchQueue.main.async { completion(MediaStore.shared.addImage(img)) }
+                                guard let img = obj as? PlatformImage else { completion([]); return }
+                                DispatchQueue.main.async { completion([MediaStore.shared.addImage(img)]) }
                             }
                         }
                     }
                 }
             } else if provider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
                 provider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) { url, _ in
-                    guard let url else { completion(nil); return }
+                    guard let url else { completion([]); return }
                     // Copy out of the temporary location before it's reclaimed.
                     let dest = FileManager.default.temporaryDirectory
                         .appendingPathComponent(UUID().uuidString + "." + url.pathExtension)
                     try? FileManager.default.copyItem(at: url, to: dest)
                     Task { @MainActor in
-                        let r = await MediaStore.shared.addVideo(url: dest)
-                        if !r.isEmpty { completion(r) }   // "" = refused (over the length limit)
+                        let bundle = await MediaStore.shared.prepareVideo(url: dest)
+                        completion(bundle.isEmpty ? [] : bundle.mediaRefs)
                     }
                 }
             } else {
-                completion(nil)
+                completion([])
             }
         }
     }
@@ -160,8 +163,8 @@ struct MediaPicker: NSViewControllerRepresentable {
                             }
                         }
                         if let dest {
-                            let r = await MediaStore.shared.addVideo(url: dest)
-                            if !r.isEmpty { refs.append(r) }   // "" = refused (over the length limit)
+                            let bundle = await MediaStore.shared.prepareVideo(url: dest)
+                            if !bundle.isEmpty { refs.append(contentsOf: bundle.mediaRefs) }
                         }
                     } else if provider.canLoadObject(ofClass: PlatformImage.self) {
                         let img: PlatformImage? = await withCheckedContinuation { cont in
@@ -177,7 +180,8 @@ struct MediaPicker: NSViewControllerRepresentable {
     }
 }
 
-/// macOS file-browser picker (the "Files…" attach option) — pick photos/videos from anywhere on disk.
+/// macOS file-browser picker (the "Files…" attach option) — photos, videos, arbitrary files, and
+/// folders (folders are zipped). Same surface as the iOS Files importer.
 struct FilePicker: View {
     var onPicked: ([String]) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -187,28 +191,16 @@ struct FilePicker: View {
             .onAppear {
                 DispatchQueue.main.async {
                     let panel = NSOpenPanel()
-                    panel.allowedContentTypes = [.image, .movie]
+                    panel.allowedContentTypes = [.image, .movie, .item, .data, .archive]
                     panel.allowsMultipleSelection = true
-                    panel.canChooseDirectories = false
+                    panel.canChooseDirectories = true
                     panel.canChooseFiles = true
-                    panel.message = "Choose photos or videos to share"
+                    panel.message = "Choose photos, videos, files, or folders to share"
                     panel.prompt = "Add"
                     guard panel.runModal() == .OK else { dismiss(); return }
                     let urls = panel.urls
                     Task { @MainActor in
-                        var refs: [String] = []
-                        for url in urls {
-                            let scoped = url.startAccessingSecurityScopedResource()
-                            let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType
-                            if let type, type.conforms(to: .movie) {
-                                let r = await MediaStore.shared.addVideo(url: url)
-                                if !r.isEmpty { refs.append(r) }   // "" = refused (over the length limit)
-                            } else if let img = PlatformImage(contentsOf: url) {
-                                refs.append(MediaStore.shared.addImage(img))
-                            }
-                            if scoped { url.stopAccessingSecurityScopedResource() }
-                        }
-                        onPicked(refs)
+                        onPicked(await MediaImport.importURLs(urls))
                         dismiss()
                     }
                 }
@@ -217,3 +209,52 @@ struct FilePicker: View {
 }
 
 #endif
+
+/// Shared import path for Files-app / NSOpenPanel picks: images, videos (with poster/original
+/// bundle), and everything else as a zipped `file_` attachment (folders included).
+@MainActor
+enum MediaImport {
+    static func importURLs(_ urls: [URL]) async -> [String] {
+        var refs: [String] = []
+        // Non-media files/folders are batched into ONE zip so attaching a folder + a PDF doesn't
+        // produce two separate posts' worth of blobs when the user meant "these things".
+        var archiveBatch: [URL] = []
+        for url in urls {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            var isDir: ObjCBool = false
+            FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+            if isDir.boolValue {
+                archiveBatch.append(url)
+                continue
+            }
+            let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType
+            if let type, type.conforms(to: .movie) {
+                let bundle = await MediaStore.shared.prepareVideo(url: url)
+                if !bundle.isEmpty { refs.append(contentsOf: bundle.mediaRefs) }
+            } else if let type, type.conforms(to: .image), let img = Self.loadImage(url) {
+                refs.append(MediaStore.shared.addImage(img))
+            } else {
+                // Not an image/movie — zip it (and any siblings in the batch).
+                archiveBatch.append(url)
+            }
+        }
+        if !archiveBatch.isEmpty {
+            let name = archiveBatch.count == 1
+                ? archiveBatch[0].deletingPathExtension().lastPathComponent
+                : "files"
+            let ref = MediaStore.shared.addFileArchive(urls: archiveBatch, name: name)
+            if !ref.isEmpty { refs.append(ref) }
+        }
+        return refs
+    }
+
+    private static func loadImage(_ url: URL) -> PlatformImage? {
+        #if os(macOS)
+        return PlatformImage(contentsOf: url)
+        #else
+        if let data = try? Data(contentsOf: url) { return PlatformImage(data: data) }
+        return PlatformImage(contentsOfFile: url.path)
+        #endif
+    }
+}

@@ -290,6 +290,10 @@ final class MediaReoptimizer: ObservableObject {
                 guard let img = MediaStore.shared.item(candidate.ref)?.image else { return nil }
                 return MediaStore.shared.addImage(img, forceOptimize: true)
             }
+        case .file:
+            // Zip attachments are already the user's chosen archive — re-encoding them is
+            // meaningless. Skip so re-optimize never invents a second copy of a file blob.
+            return nil
         }
     }
 

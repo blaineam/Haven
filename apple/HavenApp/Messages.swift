@@ -530,16 +530,47 @@ struct DMThreadView: View {
             ReactionPicker { e in store.reactMessage(in: circleId, t.id, e) }
         }
         .sheet(item: $backupDetailRefs) { b in
-            BackupDetailView(refs: b.refs, circleId: circleId).macSheetFrame()
+            BackupDetailView(refs: b.refs, circleId: circleId)
+                .macSheetFrame()
+                #if os(iOS)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+                #endif
         }
     }
 
     @ViewBuilder private func dmMedia(_ m: FeedItemFfi) -> some View {
-        let audio = m.media.filter { MediaKind(ref: $0) == .audio }
-        let visual = m.media.filter { MediaKind(ref: $0) != .audio }
+        // Drop synthetic markers + original companions from the bubble; display only playable media.
+        let display = MediaVariants.displayRefs(m.media)
+        let audio = display.filter { MediaKind(ref: $0) == .audio }
+        let files = display.filter { MediaKind(ref: $0) == .file }
+        let visual = display.filter {
+            let k = MediaKind(ref: $0); return k != .audio && k != .file
+        }
         VStack(alignment: m.isMe ? .trailing : .leading, spacing: 4) {
             ForEach(audio, id: \.self) { ref in
                 if let url = MediaStore.shared.storagePath(for: ref) { AudioPlayerPill(url: url) }
+            }
+            ForEach(files, id: \.self) { ref in
+                if let url = MediaStore.shared.storagePath(for: ref) {
+                    ShareLink(item: url) {
+                        Label("File", systemImage: "doc.zipper")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 12).padding(.vertical, 8)
+                            .background(Color(.secondarySystemFill), in: Capsule())
+                    }
+                } else {
+                    // Super data saver / not yet fetched — tap to pull.
+                    Button {
+                        store.requestMedia(ref, circleId: circleId)
+                    } label: {
+                        Label("Download file", systemImage: "arrow.down.doc")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 12).padding(.vertical, 8)
+                            .background(Color(.secondarySystemFill), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
             }
             if !visual.isEmpty { dmVisualMedia(visual, isMe: m.isMe) }
         }
@@ -834,8 +865,12 @@ struct DMThreadView: View {
     /// storm on a long history.
     private func fetchMissingThreadMedia() {
         var budget = 6
+        let dataSaver = SettingsStore.shared.superDataSaver
         for item in ordered.reversed() {
-            for ref in item.media where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref) {
+            let candidates = dataSaver
+                ? MediaVariants.dataSaverPrefetchRefs(item.media)
+                : item.media.filter { !MediaStore.isSynthetic($0) }
+            for ref in candidates where !MediaStore.shared.has(ref) {
                 guard budget > 0 else { return }
                 budget -= 1
                 store.requestMedia(ref, circleId: circleId)

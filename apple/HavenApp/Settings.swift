@@ -16,6 +16,16 @@ final class SettingsStore: ObservableObject {
     /// Default for saving media OTHERS send you to Photos.
     @Published var saveOthersToPhotos: Bool { didSet { d.set(saveOthersToPhotos, forKey: kSaveOthers); stamp(kSaveOthers) } }
     @Published var autoOptimize: Bool { didSet { d.set(autoOptimize, forKey: kOpt); stamp(kOpt) } }
+    /// Super data saver — DEVICE-LOCAL. When on, the feed and Places load poster stills only,
+    /// never autoplay video or attached music, and only download a video after an explicit tap.
+    /// "Show original" in a post's menu downloads the uncompressed companion if the author sent one.
+    /// Not synced: data saver is about *this* device's radio and storage, not the account.
+    @Published var superDataSaver: Bool { didSet { d.set(superDataSaver, forKey: kDataSaver) } }
+    /// When composing, also upload the uncompressed original beside the optimized copy.
+    /// Independent of `autoOptimize`: optimize still produces the small playable version; this
+    /// just keeps the camera original available via "Show original" for recipients who want it.
+    /// DEVICE-LOCAL (a preference about what *this* device is willing to upload).
+    @Published var sendOriginal: Bool { didSet { d.set(sendOriginal, forKey: kSendOriginal) } }
     /// Auto-delete posts older than this many days (0 = keep forever).
     @Published var retentionDays: Int { didSet { d.set(retentionDays, forKey: kRet); stamp(kRet) } }
 
@@ -75,6 +85,8 @@ final class SettingsStore: ObservableObject {
     private let kSave = "haven.saveToPhotos"
     private let kSaveOthers = "haven.saveOthersToPhotos"
     private let kOpt = "haven.autoOptimize"
+    private let kDataSaver = "haven.superDataSaver"
+    private let kSendOriginal = "haven.sendOriginal"
     private let kRet = "haven.retentionDays"
     private let kKeepMine = "haven.keepMyPosts"
     private let kSilent = "haven.silent"
@@ -86,6 +98,8 @@ final class SettingsStore: ObservableObject {
         saveToPhotos = d.object(forKey: kSave) as? Bool ?? true   // default ON
         saveOthersToPhotos = d.object(forKey: kSaveOthers) as? Bool ?? false   // default OFF — only my own posts auto-save
         autoOptimize = d.object(forKey: kOpt) as? Bool ?? true
+        superDataSaver = d.object(forKey: kDataSaver) as? Bool ?? false
+        sendOriginal = d.object(forKey: kSendOriginal) as? Bool ?? false
         retentionDays = d.object(forKey: kRet) as? Int ?? 0       // default forever
         keepMyPosts = d.object(forKey: kKeepMine) as? Bool ?? true   // default: always keep my own archive
         #if os(macOS)
@@ -205,8 +219,12 @@ struct SettingsView: View {
                 Section {
                     Toggle("Auto-optimize media", isOn: $settings.autoOptimize)
                         .tint(HavenTheme.pink)
+                    Toggle("Also send original", isOn: $settings.sendOriginal)
+                        .tint(HavenTheme.pink)
+                    Toggle("Super data saver", isOn: $settings.superDataSaver)
+                        .tint(HavenTheme.pink)
                 } footer: {
-                    Text("Share smaller, optimized photos and videos by default. Turn off to send pristine originals. Per-circle override available.")
+                    Text("Auto-optimize shares a smaller photo/video by default (always strips location). “Also send original” keeps the camera file beside it so recipients can open the full-size copy from the post menu. Super data saver never autoplays video or music, loads poster stills only, and downloads a video only when you tap play. Per-circle override available for optimize.")
                 }
                 Section {
                     Picker("Auto-delete old posts", selection: $settings.retentionDays) {

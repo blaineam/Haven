@@ -28,7 +28,7 @@ enum MediaSaver {
                     if let url = videoURL { PHAssetCreationRequest.creationRequestForAssetFromVideo(atFileURL: url) }
                 case .image:
                     if let url = imageURL { PHAssetCreationRequest.creationRequestForAssetFromImage(atFileURL: url) }
-                case .audio:
+                case .audio, .file:
                     break
                 }
             } completionHandler: { _, _ in }
@@ -203,12 +203,13 @@ extension AVAssetExportSession {
 }
 
 enum MediaKind: String {
-    case image, video, audio
+    case image, video, audio, file
     var ext: String {
         switch self {
         case .image: return "jpg"
         case .video: return "mp4"
         case .audio: return "m4a"
+        case .file:  return "zip"
         }
     }
     /// The kind is encoded in the ref prefix so a recipient knows how to render it. Matches
@@ -218,6 +219,7 @@ enum MediaKind: String {
         case .image: return "img_"
         case .video: return "vid_"
         case .audio: return "aud_"
+        case .file:  return "file_"
         }
     }
     /// The kind is encoded in the ref prefix so a recipient knows how to render it.
@@ -225,6 +227,7 @@ enum MediaKind: String {
         if ref.hasPrefix("img_") { self = .image }
         else if ref.hasPrefix("vid_") { self = .video }
         else if ref.hasPrefix("aud_") { self = .audio }
+        else if ref.hasPrefix("file_") { self = .file }
         else { return nil }
     }
 }
@@ -374,7 +377,7 @@ final class MediaStore: ObservableObject {
     /// it's kind-blind, so `img_X` and `vid_X` reduce to the same string (`fileURL` keeps the whole
     /// ref, kind included, which is what stops a photo and a video sharing one file).
     nonisolated static func bareId(_ ref: String) -> String {
-        for p in ["img_", "vid_", "aud_", "v:", "i:", "a:"] where ref.hasPrefix(p) {
+        for p in ["img_", "vid_", "aud_", "file_", "v:", "i:", "a:"] where ref.hasPrefix(p) {
             return String(ref.dropFirst(p.count))
         }
         return ref
@@ -556,6 +559,7 @@ final class MediaStore: ObservableObject {
         if ref.hasPrefix("v:") { out.insert("vid_\(id)") }
         if ref.hasPrefix("i:") { out.insert("img_\(id)") }
         if ref.hasPrefix("a:") { out.insert("aud_\(id)") }
+        if ref.hasPrefix("file_") { out.insert("file_\(id)") }
         return out
     }
 
@@ -568,7 +572,7 @@ final class MediaStore: ObservableObject {
         let fm = FileManager.default
         var freed: Int64 = 0
         for stem in Self.storedStems(for: ref) {
-            for ext in ["jpg", "mp4", "m4a"] {
+            for ext in ["jpg", "mp4", "m4a", "zip"] {
                 let url = dir.appendingPathComponent("\(stem).\(ext)")
                 guard fm.fileExists(atPath: url.path) else { continue }
                 if let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize {
@@ -703,8 +707,35 @@ final class MediaStore: ObservableObject {
     /// `forceOptimize` is the re-optimize run re-driving media it ALREADY shared through this exact
     /// path — same encoder, same fallback ladder, same content-addressing. One implementation, so a
     /// future change to how Haven compresses automatically reaches old media too.
+    ///
+    /// Always cuts a poster still (uploaded as a separate `img_` so super-data-saver clients can
+    /// render the card without the video bytes). When auto-optimize is on (default) the playable
+    /// ref is the compressed copy; when the user also wants the camera original (`sendOriginal` or
+    /// auto-optimize OFF), that rides alongside as an `orig:` companion — see `MediaVariants`.
     @discardableResult
     func addVideo(url src: URL, forceOptimize: Bool = false) async -> String {
+        let bundle = await prepareVideo(url: src, forceOptimize: forceOptimize)
+        return bundle.videoRef
+    }
+
+    /// Full video attach result: playable ref + optional poster/original + the media-array slice
+    /// (including synthetic markers) a post or DM should publish. Prefer this over `addVideo` at
+    /// compose time so the poster and original companions actually leave the device.
+    struct PreparedVideo: Sendable {
+        /// Playable optimized (or passthrough) video ref. Empty when the clip was refused.
+        let videoRef: String
+        let posterRef: String?
+        let originalRef: String?
+        /// Ready-to-append media list: poster, video, original, and the synthetic pairing markers.
+        let mediaRefs: [String]
+        var isEmpty: Bool { videoRef.isEmpty }
+    }
+
+    /// Encode + poster + optional original for a freshly attached video. See `addVideo` for the
+    /// encoder ladder; this is the compose-time entry point that returns everything the post needs.
+    func prepareVideo(url src: URL, forceOptimize: Bool = false,
+                      alsoOriginal: Bool? = nil) async -> PreparedVideo {
+        let empty = PreparedVideo(videoRef: "", posterRef: nil, originalRef: nil, mediaRefs: [])
         // Transcode into scratch first: the ref is the digest of the FINAL bytes, so it can only be
         // known once the export has produced them.
         let scratch = scratchURL("mp4")
@@ -723,25 +754,24 @@ final class MediaStore: ObservableObject {
         if !forceOptimize, let dur = try? await AVURLAsset(url: src).load(.duration),
            dur.seconds > Self.maxVideoSeconds {
             HavenLog.sync("video add: REJECTED — \(Int(dur.seconds))s exceeds the \(Int(Self.maxVideoSeconds))s limit")
-            return ""
+            return empty
         }
         let wantOptimize = forceOptimize || CircleSettingsStore.shared.autoOptimize(FeedStore.shared.activeCircleId)
-        if wantOptimize {
-            // Bitrate-controlled H.264 first — the only path that actually targets a SIZE. The preset
-            // exports below cap dimensions and choose their own (much higher) bitrate, so they stay as
-            // fallbacks for anything AVAssetWriter can't handle rather than the normal route.
-            // VERIFIED against real library videos before shipping — 305.7 MB → 37.7 MB, 191.5 → 47.0,
-            // 179.9 → 22.4, every one H.264 with audio and duration intact and portrait baked upright.
-            // The first cut of this was wired in unrun and deadlocked on any clip with sound.
-            ok = await VideoEncoder.encode(src, to: scratch)
-            if ok {
-                HavenLog.sync("video add: encoded 1080p H.264 @ \(VideoEncoder.videoBitrate / 1_000_000)Mbps")
-            } else {
-                try? FileManager.default.removeItem(at: scratch)
-                HavenLog.sync("video add: bitrate encode FAILED — falling back to the preset export")
-            }
+        // Always try to produce an optimized playable when possible. Auto-optimize OFF used to skip
+        // the encoder entirely and ship the camera file as the only ref — recipients on data saver
+        // then had no small copy, and "show original" had nothing to distinguish. Now the small copy
+        // is the playable ref; the camera file rides as an optional companion.
+        // Bitrate-controlled H.264 first — the only path that actually targets a SIZE. The preset
+        // exports below cap dimensions and choose their own (much higher) bitrate, so they stay as
+        // fallbacks for anything AVAssetWriter can't handle rather than the normal route.
+        ok = await VideoEncoder.encode(src, to: scratch)
+        if ok {
+            HavenLog.sync("video add: encoded 1080p H.264 @ \(VideoEncoder.videoBitrate / 1_000_000)Mbps")
+        } else {
+            try? FileManager.default.removeItem(at: scratch)
+            HavenLog.sync("video add: bitrate encode FAILED — falling back to the preset export")
         }
-        if wantOptimize, !ok {
+        if !ok {
             // Auto-optimize (default): re-encode to 1080p H.264 with a faststart moov atom — small and
             // universally playable, including on Androids that can't decode the iPhone's native HEVC.
             ok = await Self.optimizeVideo(src, to: scratch)
@@ -757,11 +787,9 @@ final class MediaStore: ObservableObject {
                 HavenLog.sync("video optimize: 1080p export failed, 720p retry \(ok ? "succeeded" : "ALSO FAILED")")
             }
         }
-        // Auto-optimize OFF: share in the ORIGINAL format + quality (no transcode). Still do a lossless
-        // passthrough remux to strip GPS/device metadata AND move the moov atom to the front (faststart),
-        // so playback starts fast — neither changes the codec or quality. Falls back to a raw copy.
-        // (Note: with optimize off, an HEVC source stays HEVC, so it may not play on HEVC-less devices —
-        //  that's the explicit trade for "original quality as-is".)
+        // Encoder failed entirely: share in the ORIGINAL format + quality (no transcode). Still do a
+        // lossless passthrough remux to strip GPS/device metadata AND move the moov atom to the front
+        // (faststart), so playback starts fast — neither changes the codec or quality.
         if !ok {
             try? FileManager.default.removeItem(at: scratch)
             ok = await Self.stripVideoMetadata(src, to: scratch)
@@ -777,10 +805,9 @@ final class MediaStore: ObservableObject {
         guard let ref = adoptProduced(.video, from: scratch), let dst = fileURL(ref) else {
             // A ref minted from a UUID rather than the bytes names a file that does not exist. The post
             // that carries it can never upload (nothing to send), never render (no video), and pins its
-            // upload indicator forever — a ghost post that looks like a stuck transfer. Keep returning
-            // one only because callers expect a String, but say so loudly: this is never normal.
+            // upload indicator forever — a ghost post that looks like a stuck transfer.
             HavenLog.sync("video add: export produced NOTHING addressable — this post will have no playable video")
-            return "vid_\(UUID().uuidString)"
+            return empty
         }
         // What actually shipped. Auto-optimize failing quietly and passing the original through is the
         // difference between a 20 MB upload and a 600 MB one, and until now nothing recorded which
@@ -788,8 +815,81 @@ final class MediaStore: ObservableObject {
         let outBytes = (try? dst.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         let inBytes = (try? src.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         HavenLog.sync("video add: optimize=\(wantOptimize) \(inBytes / 1_048_576)MB → \(outBytes / 1_048_576)MB ref=\(ref.prefix(12))")
-        cachePut(ref, MediaItem(id: ref, kind: .video, image: Self.poster(for: dst), videoURL: dst))
+        let posterImage = Self.poster(for: dst)
+        cachePut(ref, MediaItem(id: ref, kind: .video, image: posterImage, videoURL: dst))
+
+        // Always cut a poster JPEG from the playable file and store it as its own content-addressed
+        // image. Super data saver (and Places) can then render the still without downloading the
+        // video; the marker ties them together for "which poster goes with this video".
+        var posterRef: String? = nil
+        if let posterImage {
+            posterRef = addImage(posterImage, forceOptimize: true)
+        }
+
+        // Keep the camera original when the user asked for it, or when auto-optimize is off (they
+        // explicitly want the pristine file available). Strip metadata first so GPS never rides
+        // along. Skip when the "optimized" ref is already the same bytes (encode failed → passthrough).
+        let wantOriginal = alsoOriginal
+            ?? (SettingsStore.shared.sendOriginal || !wantOptimize)
+        var originalRef: String? = nil
+        if wantOriginal, !forceOptimize {
+            let origScratch = scratchURL("mp4")
+            try? FileManager.default.removeItem(at: origScratch)
+            var origOk = await Self.stripVideoMetadata(src, to: origScratch)
+            if !origOk {
+                try? FileManager.default.removeItem(at: origScratch)
+                try? FileManager.default.copyItem(at: src, to: origScratch)
+                origOk = FileManager.default.fileExists(atPath: origScratch.path)
+            }
+            if origOk, let oRef = adoptProduced(.video, from: origScratch), oRef != ref,
+               let oDst = fileURL(oRef) {
+                cachePut(oRef, MediaItem(id: oRef, kind: .video, image: Self.poster(for: oDst), videoURL: oDst))
+                originalRef = oRef
+                HavenLog.sync("video add: original companion ref=\(oRef.prefix(12))")
+            } else {
+                try? FileManager.default.removeItem(at: origScratch)
+            }
+        }
+
+        let mediaRefs = MediaVariants.composeVideoMedia(poster: posterRef, optimized: ref, original: originalRef)
+        return PreparedVideo(videoRef: ref, posterRef: posterRef, originalRef: originalRef, mediaRefs: mediaRefs)
+    }
+
+    /// Zip one or more files/folders into a `file_` media ref for posts and DMs.
+    @discardableResult
+    func addFileArchive(urls: [URL], name: String = "attachment") -> String {
+        guard let zipURL = FileArchive.zip(urls, preferredName: name) else {
+            HavenLog.sync("file add: zip failed or empty")
+            return ""
+        }
+        defer { try? FileManager.default.removeItem(at: zipURL) }
+        guard let ref = adoptProduced(.file, from: zipURL) else {
+            // adoptProduced moves the file; if it failed the defer still cleans the temp.
+            HavenLog.sync("file add: adopt failed")
+            return ""
+        }
+        // Re-point: adoptProduced moved zipURL → storage; cache a file shell (no image/video).
+        if let dst = fileURL(ref) {
+            cachePut(ref, MediaItem(id: ref, kind: .file, image: nil, videoURL: dst))
+        }
+        HavenLog.sync("file add: ref=\(ref.prefix(12))")
         return ref
+    }
+
+    /// Single-file convenience (already a zip, or any blob we store as `file_`).
+    @discardableResult
+    func addFile(url src: URL) -> String {
+        // If it's already a zip, store as-is; otherwise wrap the single file in a zip so the
+        // on-disk extension and the MediaKind stay consistent for every recipient.
+        if src.pathExtension.lowercased() == "zip" {
+            let scratch = scratchURL("zip")
+            try? FileManager.default.removeItem(at: scratch)
+            do { try FileManager.default.copyItem(at: src, to: scratch) } catch { return "" }
+            guard let ref = adoptProduced(.file, from: scratch), let dst = fileURL(ref) else { return "" }
+            cachePut(ref, MediaItem(id: ref, kind: .file, image: nil, videoURL: dst))
+            return ref
+        }
+        return addFileArchive(urls: [src], name: src.deletingPathExtension().lastPathComponent)
     }
 
     /// Remux a video to drop its metadata (location, device, timestamps) without re-encoding.
@@ -930,7 +1030,7 @@ final class MediaStore: ObservableObject {
             return storeFiltered(filtered) ?? ref
         case .video:
             return await filteredVideo(ref, filter: filter) ?? ref
-        case .audio:
+        case .audio, .file:
             return ref
         }
     }
@@ -1140,6 +1240,7 @@ final class MediaStore: ObservableObject {
         case .image: cachePut(ref, MediaItem(id: ref, kind: .image, image: PlatformImage(data: bytes), videoURL: nil))
         case .video: cachePut(ref, MediaItem(id: ref, kind: .video, image: Self.poster(for: url), videoURL: url))
         case .audio: cachePut(ref, MediaItem(id: ref, kind: .audio, image: nil, videoURL: url))
+        case .file:  cachePut(ref, MediaItem(id: ref, kind: .file, image: nil, videoURL: url))
         }
         return true
     }
@@ -1478,6 +1579,9 @@ final class MediaStore: ObservableObject {
             return MediaItem(id: ref, kind: .video, image: nil, videoURL: url)   // not cached (would shadow the real poster)
         case .audio:
             let item = MediaItem(id: ref, kind: .audio, image: nil, videoURL: url)
+            cachePut(ref, item); return item
+        case .file:
+            let item = MediaItem(id: ref, kind: .file, image: nil, videoURL: url)
             cachePut(ref, item); return item
         }
     }

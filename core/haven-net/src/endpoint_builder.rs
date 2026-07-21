@@ -96,8 +96,14 @@ impl EndpointPolicy {
 }
 
 /// Global policy slot. Apps / tests set this **before** the first endpoint bind.
-/// Default = n0-only. Not a runtime hot-reload of existing endpoints (iroh binds map at
-/// construct time); a full rebind is still required to apply a new map today.
+///
+/// **Bind-time limit (honest):** iroh takes `RelayMode` / `RelayMap` when the `Endpoint` is
+/// constructed. Calling [`apply_derp_urls`] after `HavenNode` / `Node::spawn` has already bound
+/// does **not** retarget that live endpoint's DERP map — only the **next**
+/// [`haven_endpoint_builder`]`.bind()` (process restart, cold secondary bind, or a future soft
+/// rebind) picks up the new map. Discovery (`AddressLookup`) can hot-add; RelayMap cannot today.
+/// We still apply process-wide policy as soon as derp URLs are learned so (1) late binds and
+/// (2) the next `Node::start` after prefs load are Haven-first without an architecture rewrite.
 static POLICY: std::sync::RwLock<EndpointPolicy> = std::sync::RwLock::new(EndpointPolicy {
     use_n0_relays: true,
     custom_derp_urls: Vec::new(),
@@ -123,11 +129,19 @@ pub fn endpoint_policy() -> EndpointPolicy {
 /// bind site shares the same scar-fix (cross-NAT multipath negotiation).
 pub fn haven_endpoint_builder() -> Builder {
     let policy = endpoint_policy();
+    // Multipath must stay ON (iroh path manager assumes it) but 16 concurrent paths made
+    // hole-punch / path-probe UDP explode on phones — field log: ~350k UDP packets + ~0.5GB
+    // in ~5 minutes, phone heat + multi-% battery burn. Cap aggressively on mobile; desktop
+    // still gets more headroom for multi-homed home relays.
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    let max_mp = 4u32;
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    let max_mp = 8u32;
     Endpoint::builder(N0)
         .relay_mode(policy.relay_mode())
         .transport_config(
             QuicTransportConfig::builder()
-                .max_concurrent_multipath_paths(16)
+                .max_concurrent_multipath_paths(max_mp)
                 .build(),
         )
 }
@@ -162,9 +176,21 @@ pub fn apply_book_to_policy(book: &crate::discovery::RelayBook, _prefer_custom: 
 
 /// Install known Haven DERP HTTPS URLs as the process-wide fabric policy.
 /// Empty → n0 only. Non-empty → Haven only (no n0).
+///
+/// Call **before** [`haven_endpoint_builder`] / `Node::spawn` / `HavenNode::start` whenever
+/// possible. Safe to call again after learn (frame 19 / adopt) so subsequent binds are Haven-first;
+/// does not rebind already-live endpoints (see module docs on the process policy slot).
 pub fn apply_derp_urls(urls: Vec<String>) {
+    let mut cleaned: Vec<String> = urls
+        .into_iter()
+        .map(|u| u.trim().trim_end_matches('/').to_string())
+        .filter(|u| !u.is_empty())
+        .collect();
+    cleaned.sort();
+    cleaned.dedup();
+
     let mut p = EndpointPolicy::default();
-    if urls.is_empty() {
+    if cleaned.is_empty() {
         // No circle-hosted DERP: keep stock n0.
         p.use_n0_relays = true;
         p.prefer_custom_relays = false;
@@ -172,15 +198,42 @@ pub fn apply_derp_urls(urls: Vec<String>) {
     } else {
         p.use_n0_relays = false;
         p.prefer_custom_relays = true;
-        p.custom_derp_urls = urls;
+        p.custom_derp_urls = cleaned;
     }
     set_endpoint_policy(p);
+}
+
+/// Union extra DERP HTTPS URLs into the process fabric (e.g. one discovery `AddrRecord` hint)
+/// without dropping URLs already known from the circle relay book.
+pub fn merge_derp_urls(extra: impl IntoIterator<Item = String>) {
+    let mut all = if haven_fabric_active() {
+        endpoint_policy().custom_derp_urls
+    } else {
+        Vec::new()
+    };
+    for u in extra {
+        let t = u.trim().trim_end_matches('/').to_string();
+        if !t.is_empty() && !all.iter().any(|x| x == &t) {
+            all.push(t);
+        }
+    }
+    apply_derp_urls(all);
 }
 
 /// True when at least one Haven DERP URL is active (n0 is not the sole fabric).
 pub fn haven_fabric_active() -> bool {
     let p = endpoint_policy();
     p.prefer_custom_relays && !p.custom_derp_urls.is_empty()
+}
+
+/// Snapshot of active custom DERP URLs (empty when fabric is off / n0-only).
+pub fn active_derp_urls() -> Vec<String> {
+    let p = endpoint_policy();
+    if p.prefer_custom_relays {
+        p.custom_derp_urls
+    } else {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
@@ -222,10 +275,32 @@ mod tests {
         assert!(!p.use_n0_relays);
         assert!(p.prefer_custom_relays);
         assert!(haven_fabric_active());
+        assert_eq!(active_derp_urls(), vec!["https://relay.example.com".to_string()]);
         // Reset so other tests see defaults.
         apply_derp_urls(vec![]);
         assert!(!haven_fabric_active());
         assert!(endpoint_policy().use_n0_relays);
+        assert!(active_derp_urls().is_empty());
+    }
+
+    #[test]
+    fn merge_derp_urls_unions_without_dropping() {
+        apply_derp_urls(vec!["https://a.example.com".into()]);
+        merge_derp_urls(vec!["https://b.example.com".into(), "https://a.example.com/".into()]);
+        let urls = active_derp_urls();
+        assert_eq!(urls, vec!["https://a.example.com".to_string(), "https://b.example.com".to_string()]);
+        apply_derp_urls(vec![]);
+    }
+
+    #[test]
+    fn apply_derp_urls_trims_and_dedups() {
+        apply_derp_urls(vec![
+            " https://x.example.com/ ".into(),
+            "https://x.example.com".into(),
+            "".into(),
+        ]);
+        assert_eq!(active_derp_urls(), vec!["https://x.example.com".to_string()]);
+        apply_derp_urls(vec![]);
     }
 
     #[test]

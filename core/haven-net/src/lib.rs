@@ -31,8 +31,9 @@ pub mod s3tunnel;
 
 pub use derp::{DerpConfig, DerpServer, DEFAULT_DERP_BIND};
 pub use endpoint_builder::{
-    apply_book_to_policy, apply_derp_urls, derp_urls_from_book, endpoint_policy,
-    haven_endpoint_builder, haven_fabric_active, set_endpoint_policy, EndpointPolicy,
+    active_derp_urls, apply_book_to_policy, apply_derp_urls, derp_urls_from_book, endpoint_policy,
+    haven_endpoint_builder, haven_fabric_active, merge_derp_urls, set_endpoint_policy,
+    EndpointPolicy,
 };
 
 const ALPN: &[u8] = b"haven/social/0";
@@ -531,7 +532,13 @@ impl Node {
                 let mut gate = lock(&self.dial_gate);
                 let g = gate.entry(id).or_insert(DialGate { fails: 0, until: std::time::Instant::now() });
                 g.fails = g.fails.saturating_add(1);
-                let secs = (30u64 << (g.fails.min(5) - 1)).min(600); // 30s, 60s, … capped at 10min
+                // Start higher on mobile: a 20s app sync tick used to re-arm dials as soon as
+                // the 30s floor expired, keeping a permanent fog of doomed handshakes (UDP
+                // path churn → heat + battery). Floor 60s, double to 15min.
+                #[cfg(any(target_os = "ios", target_os = "android"))]
+                let secs = (60u64 << (g.fails.min(5) - 1)).min(900);
+                #[cfg(not(any(target_os = "ios", target_os = "android")))]
+                let secs = (30u64 << (g.fails.min(5) - 1)).min(600); // 30s … 10min
                 g.until = std::time::Instant::now() + std::time::Duration::from_secs(secs);
                 if gate.len() > 512 {
                     // Bound the map (stale entries for ids we no longer dial).

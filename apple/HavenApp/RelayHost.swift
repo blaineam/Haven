@@ -113,9 +113,14 @@ final class RelayHost: ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in self?.start() }
             return
         }
-        // Keep the device awake while relaying: screen-on on iOS (relaying stops when the app
-        // suspends), system-sleep prevention on Mac (the display may sleep; the app keeps serving).
+        // Mac: prevent system sleep so a laptop left closed as a relay keeps serving.
+        // iPhone/iPad: NEVER pin the idle timer — keeping the screen awake for hosting was a
+        // major battery/heat source (user field: multi-% drain in minutes while "just open").
+        // iOS already suspends background work when the screen dims; that's the right trade-off
+        // for a phone. Desktop-class is the always-on path.
+        #if os(macOS)
         PlatformIdle.disabled = true
+        #endif
         let h = RelayServerHandle.attachWithLimits(node: node, dir: storeDir,
                                                    mediaMaxAgeDays: UInt32(max(0, mediaMaxAgeDays)),
                                                    mediaMaxBytes: mediaMaxBytes)
@@ -709,12 +714,16 @@ final class RelayMailboxStore: ObservableObject {
         }.sorted()
     }
 
-    /// Push known DERP URLs into the process fabric policy via UserDefaults for the FFI/Rust node
-    /// to read on next spawn; also records for WebRTC. Full hot-rebind of iroh endpoints is later.
+    /// Push known DERP URLs into the process fabric policy (Rust `apply_derp_urls`) for the **next**
+    /// `HavenNode.start` bind, and into UserDefaults / `HavenFabric` for WebRTC ICE. iroh binds
+    /// `RelayMap` at endpoint construct time — this does not hot-rebind a live node.
     static func refreshHavenFabric() {
         let urls = shared.allDerpUrls()
         UserDefaults.standard.set(urls, forKey: "haven.fabric.derpUrls")
         HavenFabric.shared.update(derpUrls: urls)
+        // Process-wide Rust EndpointPolicy (Haven-first when non-empty). Safe no-op shape if
+        // bindings lag a host rebuild — symbol lands with the next xcframework.
+        applyDerpUrls(urls: urls)
     }
 
     /// The relay's HTTP interface (urls + token), or nil for an iroh-only relay.

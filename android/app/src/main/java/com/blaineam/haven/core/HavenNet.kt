@@ -450,6 +450,10 @@ object HavenNet : InboundListener {
         runCatching { uniffi.haven_ffi.initLogging(appContext.filesDir.path) }
         scope.launch {
             try {
+                // Fabric before bind: prefs may already know circle DERP from a prior session.
+                // apply_derp_urls is process-wide and only affects this HavenNode if set before start
+                // (iroh RelayMap is construct-time).
+                refreshHavenFabric()
                 // TRANSPORT = per-DEVICE seed → unique per-device relay/node id (never the account id). The
                 // self-connect leak is defended at the haven-net core (Node refuses to dial our own node id).
                 node = HavenNode.start(DeviceKeyStore.deviceAccount().secretSeed(), this@HavenNet)
@@ -1788,6 +1792,8 @@ object HavenNet : InboundListener {
      *  the mailbox/relay, and a freshly-added contact is back-filled directly by acceptContact. */
     private var lastHistoryResendMs: Long = 0
     private var lastMediaBackfillMs: Long = 0
+    /** Last frame-19 re-announce. Must not ride every sync tick (radio + seal cost → heat). */
+    private var lastRelayReannounceMs: Long = 0
     /** Last own-device catch-up sweep. Throttled hard (5 min): it re-seals every envelope it sends,
      *  so it must NOT ride the sync tick. See the sweep in [syncWithContacts] for why it exists. */
     private var lastOwnDeviceCatchupMs: Long = 0
@@ -1893,7 +1899,12 @@ object HavenNet : InboundListener {
                 }
             }
         }
-        reannounceOwnRelay()   // frame 19 was a one-shot at relay start; re-emit so peers reliably learn it
+        // Throttle frame-19 re-announce to ~3 min (parity with iOS heat fix). Fresh peers still get
+        // it on nearby connect / adopt; this is only the periodic safety net.
+        if (nowMs - lastRelayReannounceMs > 180_000) {
+            lastRelayReannounceMs = nowMs
+            reannounceOwnRelay()
+        }
         // Push MY media up to every circle relay periodically (idempotent — skips blobs already present),
         // so a sibling reading the relay finds it. The nearby chunk path is unreliable; the relay is durable.
         if (nowMs - lastMediaBackfillMs > 120_000) {
@@ -4994,8 +5005,9 @@ object HavenNet : InboundListener {
     }
 
     /**
-     * Push live DERP URLs into SharedPreferences so [CallManager] ICE (and any future Rust
-     * endpoint policy) can prefer Haven fabric over Google STUN / n0.
+     * Push live DERP URLs into SharedPreferences for [CallManager] ICE **and** into the Rust
+     * process policy via [uniffi.haven_ffi.applyDerpUrls] so the next [HavenNode.start] bind is
+     * Haven-first. Does not hot-rebind a live node (iroh RelayMap is construct-time).
      */
     private fun refreshHavenFabric() {
         if (!this::appContext.isInitialized) return
@@ -5007,6 +5019,8 @@ object HavenNet : InboundListener {
             .edit()
             .putStringSet("derpUrls", urls)
             .apply()
+        // Sorted list for stable policy; empty → n0 only.
+        runCatching { uniffi.haven_ffi.applyDerpUrls(urls.toList().sorted()) }
     }
 
     private fun saveRelayNodes() {

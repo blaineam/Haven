@@ -153,19 +153,31 @@ final class FeedStore: ObservableObject {
     private var lastActivityMs: UInt64 = 0
     private var nextSyncDueMs: UInt64 = 0
     private var nextPollDueMs: UInt64 = 0
+    /// Last time we re-announced circle relays (frame 19). Must NOT ride every sync tick —
+    /// sealing + fan-out to every member is real radio work and kept phones hot.
+    private var lastRelayReannounceMs: UInt64 = 0
     /// Base cadences and the idle multipliers. Idle <3min = base; <15min = ×3; else ×6.
     /// Thermal pressure and super data saver stretch further so a warm phone (or one the user
     /// asked to go easy on the radio) isn't also blasting hello+roster at the tight cadence.
+    ///
+    /// iOS starts stretching sooner (60s / 5min) — field log: hundreds of MB of UDP in minutes
+    /// while the app was merely open and "idle" by user perception but still at base cadence.
     private func adaptiveInterval(base: UInt64) -> UInt64 {
         let idle = now() &- lastActivityMs
         var mult: UInt64
+        #if os(iOS)
+        if idle < 60_000 { mult = 1 }
+        else if idle < 300_000 { mult = 3 }
+        else { mult = 8 }
+        #else
         if idle < 180_000 { mult = 1 }
         else if idle < 900_000 { mult = 3 }
         else { mult = 6 }
+        #endif
         #if os(iOS)
         switch ProcessInfo.processInfo.thermalState {
-        case .serious, .critical: mult *= 2
-        case .fair: mult = (mult * 3) / 2
+        case .serious, .critical: mult *= 3
+        case .fair: mult *= 2
         default: break
         }
         #endif
@@ -363,11 +375,18 @@ final class FeedStore: ObservableObject {
         mailboxTimer?.invalidate()
         pollMailboxNow()
         // 10s heartbeat, but the actual poll only runs when due (30s base, stretching when idle).
-        mailboxTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+        #if os(iOS)
+        let pollHeartbeat: TimeInterval = 15
+        let pollBaseMs: UInt64 = 45_000
+        #else
+        let pollHeartbeat: TimeInterval = 10
+        let pollBaseMs: UInt64 = 30_000
+        #endif
+        mailboxTimer = Timer.scheduledTimer(withTimeInterval: pollHeartbeat, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 guard self.now() >= self.nextPollDueMs else { return }
-                self.nextPollDueMs = self.now() + self.adaptiveInterval(base: 30_000)
+                self.nextPollDueMs = self.now() + self.adaptiveInterval(base: pollBaseMs)
                 self.pollMailboxNow()
                 self.dailyMailboxRefreshIfDue()   // long-lived sessions refresh without a relaunch
             }
@@ -1252,6 +1271,10 @@ final class FeedStore: ObservableObject {
                     initLogging(dir: dir.path)
                 }
                 let deviceSeed = DeviceKeyStore.deviceAccount().secretSeed()
+                // Fabric before bind: prefs/UserDefaults may already know circle DERP from a prior
+                // session. apply_derp_urls is process-wide and only affects this HavenNode if set
+                // before start (iroh RelayMap is construct-time).
+                RelayMailboxStore.refreshHavenFabric()
                 let n = try await HavenNode.start(accountSeed: deviceSeed, listener: bridge)
                 self.node = n
                 self.internetReady = true
@@ -1333,11 +1356,20 @@ final class FeedStore: ObservableObject {
         // 10s heartbeat, but the expensive fan-out (hello+roster to every contact, relay re-announce,
         // mesh dials) only runs when due — 20s base, stretching to 60s/120s as the app sits idle. This
         // is the primary device-heat fix: an open-but-idle phone no longer blasts the radio every 20s.
-        syncTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+        // Heartbeat: 15s on iOS (was 10) so idle phones wake the main actor less often; due-gate
+        // still decides when expensive work runs (base 30s on iOS, 20s elsewhere).
+        #if os(iOS)
+        let syncHeartbeat: TimeInterval = 15
+        let syncBaseMs: UInt64 = 30_000
+        #else
+        let syncHeartbeat: TimeInterval = 10
+        let syncBaseMs: UInt64 = 20_000
+        #endif
+        syncTimer = Timer.scheduledTimer(withTimeInterval: syncHeartbeat, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 guard self.now() >= self.nextSyncDueMs else { return }
-                self.nextSyncDueMs = self.now() + self.adaptiveInterval(base: 20_000)
+                self.nextSyncDueMs = self.now() + self.adaptiveInterval(base: syncBaseMs)
                 self.syncWithContacts()
                 // Persistently retry any media an interrupted nearby/iroh transfer left incomplete —
                 // re-request direct from contacts AND pull from the circle relay if one exists.
@@ -1827,7 +1859,14 @@ final class FeedStore: ObservableObject {
                 }
             }
         }
-        reannounceOwnRelay()   // frame 19 was a one-shot at relay start; re-emit so peers reliably learn it
+        // Frame-19 re-announce: throttle hard. Every sync tick used to seal + fan-out relay ids to
+        // every member (iroh + nearby + mesh), which kept the radio warm even when nothing changed.
+        // 3 min is enough for peers who missed the host-start one-shot; fresh peers still get it
+        // on nearby connect / adopt.
+        if nowMs &- lastRelayReannounceMs > 180_000 {
+            lastRelayReannounceMs = nowMs
+            reannounceOwnRelay()
+        }
         // Push MY media up to every circle relay periodically. The nearby request/response (frame 3→5) was
         // unreliable (0 chunks served), so instead each device durably mirrors its own media to the relays
         // it knows — including a sibling's hosted relay — and the other side reads it locally via poll OWN.

@@ -90,6 +90,13 @@ struct StorageSettingsView: View {
                         Text("With this on, Haven relays invisibly in the background: close the window and it keeps serving your circle with no dock icon (launch Haven again to reopen it). At login it starts hidden — launch it a second time to open the window, like the first time.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                    // Mac: front-door controls (bundled cloudflared / custom domain / manual).
+                    // Without this, Auto is invisible and users never see stable-domain options.
+                    #if os(macOS)
+                    if relay.enabled {
+                        RelayFrontDoorControls()
+                    }
+                    #endif
                 } header: {
                     Text("Circle relay")
                 } footer: {
@@ -238,23 +245,73 @@ struct RelayPoolSection: View {
     }
 }
 
-/// Mailbox controls surfaced DIRECTLY in a circle's settings (previously buried two taps deep under a
-/// generic "Mailbox & storage" link, so the relay toggle was hard to find). Shows the "be this circle's
-/// mailbox" toggle + the circle's relay pool, with a link to advanced (external relay / S3 bucket).
-struct CircleMailboxSection: View {
-    let circleId: String
+/// Public HTTPS front door for the in-app relay (Mac only in practice — cloudflared is bundled
+/// for HavenMac). Shared by Storage settings and the Relays hub so the controls are never buried
+/// in a view that nothing navigates to.
+///
+/// Modes (see docs/CLOUDFLARE-TUNNEL.md):
+/// - **auto** — free `*.trycloudflare.com` when the relay starts (hostname changes on restart)
+/// - **bundled** — Haven runs cloudflared with your Zero Trust install token + custom domain
+/// - **manual** — you run any tunnel/proxy; Haven only announces the URL
+struct RelayFrontDoorControls: View {
+    @ObservedObject private var tunnel = CloudflaredTunnel.shared
     @ObservedObject private var relay = RelayHost.shared
 
-    private var frontDoorHelp: String {
-        switch CloudflaredTunnel.shared.frontDoorMode {
+    private var help: String {
+        switch tunnel.frontDoorMode {
         case "manual":
             return "Manual: you run cloudflared, Caddy, nginx, Tailscale Funnel, etc. against http://127.0.0.1:8674. Haven only announces the HTTPS URL — works even if free Cloudflare tunnels are blocked."
         case "bundled":
-            return "Bundled: paste domain + Zero Trust install token. In Cloudflare, set the public hostname service to http://127.0.0.1:8674."
+            return "Custom domain: paste domain + Zero Trust install token. In the Cloudflare dashboard, set the public hostname service to http://127.0.0.1:8674."
         default:
-            return "Auto: free ephemeral trycloudflare.com when no custom domain is set. Prefer Manual or Bundled for a stable hostname."
+            return "Auto: free ephemeral trycloudflare.com when the relay starts. Hostname changes if cloudflared restarts — use Custom domain or Manual for a stable always-on relay."
         }
     }
+
+    var body: some View {
+        Picker("Public front door", selection: Binding(
+            get: { tunnel.frontDoorMode },
+            set: { tunnel.frontDoorMode = $0 }
+        )) {
+            Text("Free trycloudflare (auto)").tag("auto")
+            Text("Custom domain (Haven runs cloudflared)").tag("bundled")
+            Text("Manual / external tunnel").tag("manual")
+        }
+        if tunnel.frontDoorMode != "auto" {
+            TextField("Public URL (https://relay.example.com)", text: Binding(
+                get: { tunnel.configuredPublicURL },
+                set: { v in
+                    tunnel.configuredPublicURL = v
+                    if relay.serving { FeedStore.shared.reannounceOwnRelay() }
+                }
+            ))
+            .autocorrectionDisabled().havenAutocap(.never)
+            .textContentType(.URL)
+        }
+        if tunnel.frontDoorMode == "bundled" {
+            SecureField("Cloudflare tunnel install token", text: Binding(
+                get: { tunnel.tunnelToken },
+                set: { tunnel.tunnelToken = $0 }
+            ))
+        }
+        if let live = tunnel.publicURL, !live.isEmpty, tunnel.frontDoorMode == "auto" {
+            Label("Live: \(live)", systemImage: "link")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+        Text(help)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// Mailbox controls for a circle's settings. Prefer wiring this from circle settings when
+/// per-circle hosting is shown; Mac global path uses StorageSettingsView + RelaysView.
+struct CircleMailboxSection: View {
+    let circleId: String
+    @ObservedObject private var relay = RelayHost.shared
 
     var body: some View {
         Section {
@@ -269,37 +326,9 @@ struct CircleMailboxSection: View {
                 Label("Starting…", systemImage: "clock").font(.caption).foregroundStyle(.secondary)
             }
             #if os(macOS)
-            // Three first-class modes — Manual survives if free/token Cloudflare paths go away.
-            Picker("Front door", selection: Binding(
-                get: { CloudflaredTunnel.shared.frontDoorMode },
-                set: { CloudflaredTunnel.shared.frontDoorMode = $0 }
-            )) {
-                Text("Free trycloudflare").tag("auto")
-                Text("Custom domain (Haven runs cloudflared)").tag("bundled")
-                Text("Manual / external tunnel").tag("manual")
+            if relay.enabled {
+                RelayFrontDoorControls()
             }
-            .font(.caption)
-            TextField("Public URL (https://relay.example.com)", text: Binding(
-                get: { CloudflaredTunnel.shared.configuredPublicURL },
-                set: { v in
-                    CloudflaredTunnel.shared.configuredPublicURL = v
-                    if relay.serving { FeedStore.shared.reannounceOwnRelay() }
-                }
-            ))
-            .autocorrectionDisabled().havenAutocap(.never)
-            .font(.caption)
-            .textContentType(.URL)
-            if CloudflaredTunnel.shared.frontDoorMode == "bundled" {
-                SecureField("Cloudflare tunnel install token", text: Binding(
-                    get: { CloudflaredTunnel.shared.tunnelToken },
-                    set: { CloudflaredTunnel.shared.tunnelToken = $0 }
-                ))
-                .font(.caption)
-            }
-            Text(frontDoorHelp)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
             #else
             // iOS: announce-only public URL (no helper binary).
             if relay.serving && !relay.nodeId.isEmpty {
@@ -565,8 +594,16 @@ struct RelaysView: View {
                         Label("Starting…", systemImage: "clock").font(.caption).foregroundStyle(.secondary)
                     }
                     RelayRetentionControls()
+                    // Mac hosts need front-door controls here too — this is the path Circle settings
+                    // → Manage relays opens, and Storage was previously the only place that had
+                    // the toggle without the Cloudflare/Manual settings.
+                    #if os(macOS)
+                    if relay.enabled {
+                        RelayFrontDoorControls()
+                    }
+                    #endif
                 } header: { Text("This device") }
-                footer: { Text("Turn this device into an always-available relay — sealed (unreadable) posts and media live here and re-serve to your circles when someone's been offline. A Mac left running is ideal; on iPhone it serves while Haven is open.") }
+                footer: { Text("Turn this device into an always-available relay — sealed (unreadable) posts and media live here and re-serve to your circles when someone's been offline. A Mac left running is ideal; on iPhone it serves while Haven is open. On Mac, pick a public front door below when the relay is on (free trycloudflare, custom domain, or your own tunnel).") }
 
                 if entries.isEmpty {
                     Section { Text("No relays configured yet. Add one below, or flip the toggle above to use this device.").font(.caption).foregroundStyle(.secondary) }

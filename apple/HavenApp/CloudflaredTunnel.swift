@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 /// macOS helper: spawn the bundled (or PATH) `cloudflared` binary as either
 /// - a free **Quick Tunnel** (`*.trycloudflare.com`), or
@@ -8,7 +9,7 @@ import Foundation
 /// team identity as HavenMac. The binary is Apache-2.0 (Cloudflare). iOS has no helper-exec path —
 /// this type is a no-op there.
 @MainActor
-final class CloudflaredTunnel {
+final class CloudflaredTunnel: ObservableObject {
     static let shared = CloudflaredTunnel()
 
     // Foundation.Process (subprocess spawn) exists on macOS only — never declare it on iOS
@@ -16,7 +17,8 @@ final class CloudflaredTunnel {
     #if os(macOS)
     private var process: Process?
     #endif
-    private(set) var publicURL: String?
+    /// Live public URL from a spawned tunnel (trycloudflare or named). Settings UI shows this.
+    @Published private(set) var publicURL: String?
 
     /// Front-door policy: `auto` | `manual` | `bundled` (see docs/CLOUDFLARE-TUNNEL.md).
     /// Manual is first-class: operator runs any tunnel/proxy; Haven only announces the URL.
@@ -39,6 +41,7 @@ final class CloudflaredTunnel {
             )
             // Keep autoTunnel in sync for older readers.
             autoEnabled = (frontDoorMode == "auto")
+            objectWillChange.send()
         }
     }
 
@@ -48,7 +51,10 @@ final class CloudflaredTunnel {
             if UserDefaults.standard.object(forKey: "haven.relay.autoTunnel") == nil { return true }
             return UserDefaults.standard.bool(forKey: "haven.relay.autoTunnel")
         }
-        set { UserDefaults.standard.set(newValue, forKey: "haven.relay.autoTunnel") }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "haven.relay.autoTunnel")
+            objectWillChange.send()
+        }
     }
 
     /// Custom domain the circle should use (e.g. `https://relay.example.com`).
@@ -61,6 +67,7 @@ final class CloudflaredTunnel {
             let t = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
             if t.isEmpty { UserDefaults.standard.removeObject(forKey: "haven.relay.publicURL") }
             else { UserDefaults.standard.set(t, forKey: "haven.relay.publicURL") }
+            objectWillChange.send()
         }
     }
 
@@ -75,6 +82,7 @@ final class CloudflaredTunnel {
             let t = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
             if t.isEmpty { UserDefaults.standard.removeObject(forKey: "haven.relay.cfTunnelToken") }
             else { UserDefaults.standard.set(t, forKey: "haven.relay.cfTunnelToken") }
+            objectWillChange.send()
         }
     }
 

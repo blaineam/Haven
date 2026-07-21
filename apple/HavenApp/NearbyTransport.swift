@@ -60,6 +60,35 @@ final class NearbyTransport: NSObject {
     func start() {
         advertiser.startAdvertisingPeer()
         browser.startBrowsingForPeers()
+        #if os(iOS)
+        // iPhone heat: Multipeer discovery is expensive (BLE + peer Wi‑Fi). After a short window,
+        // if nobody is connected, pause BOTH advertise and browse until something reconnects or
+        // the app calls `nudgeDiscovery()`. Always-on discovery was a top field heat source.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 90) { [weak self] in
+            guard let self else { return }
+            if self.cachedPeers.isEmpty {
+                self.advertiser.stopAdvertisingPeer()
+                self.browser.stopBrowsingForPeers()
+            }
+        }
+        #endif
+    }
+
+    /// Re-open nearby discovery briefly (e.g. after user activity / open Storage).
+    func nudgeDiscovery() {
+        advertiser.startAdvertisingPeer()
+        if cachedPeers.isEmpty {
+            browser.startBrowsingForPeers()
+        }
+        #if os(iOS)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
+            guard let self else { return }
+            if self.cachedPeers.isEmpty {
+                self.advertiser.stopAdvertisingPeer()
+                self.browser.stopBrowsingForPeers()
+            }
+        }
+        #endif
     }
 
     func stop() {
@@ -112,7 +141,18 @@ extension NearbyTransport: MCSessionDelegate {
             // can still find us; browsing resumes when we drop to zero peers.
             if !peers.isEmpty { browser.stopBrowsingForPeers() }
         } else if peers.isEmpty {
+            // Resume discovery after all peers leave — but only browse; advertise restarts with browse.
+            advertiser.startAdvertisingPeer()
             browser.startBrowsingForPeers()
+            #if os(iOS)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 90) { [weak self] in
+                guard let self else { return }
+                if self.cachedPeers.isEmpty {
+                    self.advertiser.stopAdvertisingPeer()
+                    self.browser.stopBrowsingForPeers()
+                }
+            }
+            #endif
         }
     }
     func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {

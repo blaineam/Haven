@@ -169,9 +169,12 @@ final class FeedStore: ObservableObject {
         let idle = now() &- lastActivityMs
         var mult: UInt64
         #if os(iOS)
-        if idle < 60_000 { mult = 1 }
-        else if idle < 300_000 { mult = 3 }
-        else { mult = 8 }
+        // Aggressive stretch: phone was still warm with 60s base stretch. After 30s idle
+        // slow down; after 2 min crawl; after 10 min almost park the radio.
+        if idle < 30_000 { mult = 1 }
+        else if idle < 120_000 { mult = 4 }
+        else if idle < 600_000 { mult = 10 }
+        else { mult = 20 }
         #else
         if idle < 180_000 { mult = 1 }
         else if idle < 900_000 { mult = 3 }
@@ -179,12 +182,12 @@ final class FeedStore: ObservableObject {
         #endif
         #if os(iOS)
         switch ProcessInfo.processInfo.thermalState {
-        case .serious, .critical: mult *= 3
+        case .serious, .critical: mult *= 4
         case .fair: mult *= 2
         default: break
         }
         #endif
-        if SettingsStore.shared.superDataSaver { mult = (mult * 3) / 2 }
+        if SettingsStore.shared.superDataSaver { mult = mult * 2 }
         return base * max(1, mult)
     }
     /// Mark "something is happening" → snap both timers back to their tight base cadence immediately.
@@ -192,6 +195,8 @@ final class FeedStore: ObservableObject {
         lastActivityMs = now()
         nextSyncDueMs = 0
         nextPollDueMs = 0
+        // Re-open Multipeer discovery briefly after user activity (iOS parks it when idle).
+        nearby?.nudgeDiscovery()
     }
 
     // Chunked media reassembly: ref → temp file + which chunk indices we've received.
@@ -379,8 +384,8 @@ final class FeedStore: ObservableObject {
         pollMailboxNow()
         // 10s heartbeat, but the actual poll only runs when due (30s base, stretching when idle).
         #if os(iOS)
-        let pollHeartbeat: TimeInterval = 15
-        let pollBaseMs: UInt64 = 45_000
+        let pollHeartbeat: TimeInterval = 20
+        let pollBaseMs: UInt64 = 60_000
         #else
         let pollHeartbeat: TimeInterval = 10
         let pollBaseMs: UInt64 = 30_000
@@ -1268,9 +1273,17 @@ final class FeedStore: ObservableObject {
                 // account id is the sealing/trust anchor + contact handle only. The self-connect leak this
                 // re-triggered is defended at the CORE chokepoint now (haven-net Node refuses to open a
                 // connection to our OWN node id), so no app-level dial path can loop it.
-                // DIAGNOSTIC: capture iroh/noq connection-level logs to Application Support/iroh-trace.log
-                // BEFORE the node starts, so we can compare both sides of the multipath handshake.
-                if let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+                // iroh-trace.debug logging is **off by default** — full `iroh=debug` tracing
+                // writes continuously during path discovery and was a real heat/battery source
+                // on daily-driver phones (unbounded append + CPU). Opt-in only:
+                // UserDefaults `haven.debug.irohTrace` = true (or set in a debug menu later).
+                #if DEBUG
+                let wantIrohTrace = UserDefaults.standard.object(forKey: "haven.debug.irohTrace") as? Bool ?? false
+                #else
+                let wantIrohTrace = UserDefaults.standard.bool(forKey: "haven.debug.irohTrace")
+                #endif
+                if wantIrohTrace,
+                   let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
                     initLogging(dir: dir.path)
                 }
                 let deviceSeed = DeviceKeyStore.deviceAccount().secretSeed()
@@ -1283,29 +1296,16 @@ final class FeedStore: ObservableObject {
                 self.internetReady = true
                 self.online = true
                 HavenLog.net("node started id=\(n.nodeIdHex().prefix(10)) account=\(social?.myNodeHex().prefix(10) ?? "?")")
-                // The node's reachable address (direct addrs + iroh relay url). If this is empty or has no
-                // relay, NOTHING can reach us regardless of identity — that's a network/discovery problem.
+                // One delayed ticket snapshot for diagnostics — not a multi-probe heat loop.
                 Task {
-                    // REACHABILITY PROBE: keep re-reading the ticket (discovery + DERP take a few seconds to
-                    // populate) and dump it to a readable file so we can SEE whether this device node has an
-                    // internet-reachable path (a DERP relay url in the ticket) at all — the fact that decides
-                    // whether relay timeouts are the network or a node-publish bug. Remove once settled.
-                    for delay in [0.0, 3.0, 8.0, 20.0] {
-                        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                        let t = (try? await n.ticket()) ?? ""
-                        let report = "nodeId=\(n.nodeIdHex())\naccount=\(social?.myNodeHex() ?? "?")\nticketLen=\(t.count)\nticket=\(t)\n"
-                        if let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-                            try? report.write(to: dir.appendingPathComponent("haven-node-ticket.txt"), atomically: true, encoding: .utf8)
-                        }
-                        HavenLog.net(t.isEmpty ? "node TICKET = EMPTY (no reachable path)" : "node TICKET len=\(t.count)")
-                    }
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    let t = (try? await n.ticket()) ?? ""
+                    HavenLog.net(t.isEmpty ? "node TICKET = EMPTY (no reachable path)" : "node TICKET len=\(t.count)")
                 }
                 self.startSyncTimer()
-                // Sync soon (discovery needs a moment to resolve), then keep retrying.
-                for delay in [1.0, 4.0, 10.0] {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                        self.syncWithContacts()
-                    }
+                // One boot sync after discovery settles — not three stacked fan-outs at 1/4/10s.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    self.syncWithContacts()
                 }
             } catch {
                 self.nodeError = error.localizedDescription
@@ -1376,8 +1376,8 @@ final class FeedStore: ObservableObject {
         // Heartbeat: 15s on iOS (was 10) so idle phones wake the main actor less often; due-gate
         // still decides when expensive work runs (base 30s on iOS, 20s elsewhere).
         #if os(iOS)
-        let syncHeartbeat: TimeInterval = 15
-        let syncBaseMs: UInt64 = 30_000
+        let syncHeartbeat: TimeInterval = 20
+        let syncBaseMs: UInt64 = 45_000
         #else
         let syncHeartbeat: TimeInterval = 10
         let syncBaseMs: UInt64 = 20_000
@@ -1390,7 +1390,10 @@ final class FeedStore: ObservableObject {
                 // requestMissingMedia runs inside syncWithContacts (already throttled) — do not
                 // call it again here or every tick doubles the media-scan + restore Tasks.
                 self.syncWithContacts()
-                RelayHost.shared.meshSyncTick()   // if we host a relay, pull from sibling relays
+                // Mesh tick only when we host a relay (avoid empty work every cycle on phones).
+                if RelayHost.shared.serving {
+                    RelayHost.shared.meshSyncTick()
+                }
                 RelayMailboxStore.shared.purgeStale()   // GC relays inactive + unseen > 7 days
                 self.maybeWeeklyMediaSweep()      // orphaned media blobs (at most once a week)
                 self.enforceLocalLimits()         // device-local age/size caps (throttled ~10 min; no-op if off)
@@ -1742,7 +1745,8 @@ final class FeedStore: ObservableObject {
         // When the app is open but quiet, skip keep-alive hello/roster to peers we heard from
         // recently. Real posts still go out via broadcastEvent; mailbox/poll covers the offline case.
         // Without this, every sync tick redials every warm peer (iroh path discovery / radio heat).
-        let skipWarmKeepalives = (nowMs &- lastActivityMs) > 60_000
+        // 30s idle (was 60s): warm peers don't need hello storms while you're just reading the feed.
+        let skipWarmKeepalives = (nowMs &- lastActivityMs) > 30_000
         for circle in circles {
             guard let hello = helloPayload(circleId: circle.id, circleName: circle.name) else { continue }
             // syncEnvelopes RE-SEALS every one of my events — expensive. Calling it for every circle on every
@@ -1791,7 +1795,10 @@ final class FeedStore: ObservableObject {
             // Only the OPEN default circle broadcasts its handshake to nearby. Custom + DM
             // circles must NOT — a broadcast Hello let any nearby contact handshake their way
             // into a circle they were never added to (membership contamination).
-            if circle.id == "default" { nearbyBroadcast(0, hello) }
+            // Skip when idle with no connected peers (radio heat for nobody).
+            if circle.id == "default", !skipWarmKeepalives || (nearby?.hasConnectedPeers == true) {
+                nearbyBroadcast(0, hello)
+            }
             // (Own-device nearby catch-up of events moved below — every cycle, off-main.)
             // Mesh: let a relay carry our handshake to members we can't reach directly.
             // When idle, only mesh-originate to cold targets (same filter as the iroh keep-alives).

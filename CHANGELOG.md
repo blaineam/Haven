@@ -31,6 +31,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   comments include a clipped preview. The NSE still only decrypts a tiny sealed JSON — richness is
   decided at send time (`PushBanner`) because the extension has no circle engine. Un-reacts and
   moderation flags stay silent so they don't spam the lock screen.
+- **Lock-screen privacy for notification detail.** Senders seal both a full body and a private
+  kind-only body; the recipient's NSE picks based on iOS Show Previews and a new Haven setting
+  (Settings → Lock screen → Notification previews: full / name+type only / minimal). "When
+  Unlocked" never quotes message text on the lock screen.
 - **DM push inbox no longer leaves sibling devices with a banner and an empty thread.** Inline push
   events now fan out to the user's other online devices, fetch DM media, recompute DM badges, and
   still pull the mailbox for anything that didn't fit in the push payload.

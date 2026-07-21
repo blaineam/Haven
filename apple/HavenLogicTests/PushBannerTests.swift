@@ -65,7 +65,7 @@ final class PushBannerTests: XCTestCase {
         XCTAssertNil(PushBanner.clip(nil))
     }
 
-    func testJsonObjectCarriesKindAndCircle() {
+    func testJsonObjectCarriesKindAndCircleAndPrivateBody() {
         let b = PushBanner.forReaction(emoji: "🎉", circleId: "family")
         let o = b.jsonObject(title: "Blaine", circleId: "family")
         XCTAssertEqual(o["t"] as? String, "Blaine")
@@ -73,6 +73,43 @@ final class PushBannerTests: XCTestCase {
         XCTAssertEqual(o["e"] as? String, "🎉")
         XCTAssertEqual(o["c"] as? String, "family")
         XCTAssertEqual(o["b"] as? String, "Reacted 🎉 to your post")
+        // Private body has kind only — no emoji — so lock-screen privacy can drop the detail.
+        XCTAssertEqual(o["bp"] as? String, "Reacted to your post")
+        XCTAssertFalse((o["bp"] as? String)?.contains("🎉") == true)
+    }
+
+    func testPrivateBodyNeverQuotesMessageText() {
+        let dm = PushBanner.forPost(circleId: "dm:aa-bb", circleName: "x",
+                                    body: "secret plans at midnight", media: [], story: false)
+        XCTAssertEqual(dm.body, "secret plans at midnight")
+        XCTAssertEqual(dm.privateBody, "Sent you a message")
+        XCTAssertFalse(dm.privateBody.contains("midnight"))
+
+        let comment = PushBanner.forComment(body: "love this photo", circleId: "family", circleName: "Family")
+        XCTAssertTrue(comment.body.contains("love this photo"))
+        XCTAssertEqual(comment.privateBody, "Left a comment")
+    }
+
+    func testDisplayBodyRespectsDetailLevel() {
+        let full = "Family: hello there"
+        let priv = "Posted in your circle"
+        let f = SharedNotificationPrivacy.displayBody(full: full, privateBody: priv, kind: "post", detail: .full)
+        XCTAssertEqual(f.body, full)
+        XCTAssertTrue(f.titleUsesName)
+
+        let p = SharedNotificationPrivacy.displayBody(full: full, privateBody: priv, kind: "post", detail: .privateDetail)
+        XCTAssertEqual(p.body, priv)
+        XCTAssertTrue(p.titleUsesName)
+
+        let m = SharedNotificationPrivacy.displayBody(full: full, privateBody: priv, kind: "post", detail: .minimal)
+        XCTAssertEqual(m.body, "New activity")
+        XCTAssertFalse(m.titleUsesName)
+    }
+
+    func testStricterDetailNeverLoosens() {
+        XCTAssertEqual(SharedNotificationPrivacy.stricter(.full, .privateDetail), .privateDetail)
+        XCTAssertEqual(SharedNotificationPrivacy.stricter(.minimal, .full), .minimal)
+        XCTAssertEqual(SharedNotificationPrivacy.stricter(.privateDetail, .privateDetail), .privateDetail)
     }
 
     func testUnsendAndEdit() {

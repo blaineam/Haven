@@ -26,6 +26,12 @@ final class SettingsStore: ObservableObject {
     /// just keeps the camera original available via "Show original" for recipients who want it.
     /// DEVICE-LOCAL (a preference about what *this* device is willing to upload).
     @Published var sendOriginal: Bool { didSet { d.set(sendOriginal, forKey: kSendOriginal) } }
+    /// How much detail banners may show. DEVICE-LOCAL and mirrored into the App Group so the
+    /// Notification Service Extension can honor it on the lock screen without opening the app.
+    /// Combined with iOS Show Previews (system setting) — whichever is stricter wins.
+    @Published var notificationDetail: SharedNotificationPrivacy.Detail {
+        didSet { SharedNotificationPrivacy.detail = notificationDetail }
+    }
     /// Auto-delete posts older than this many days (0 = keep forever).
     @Published var retentionDays: Int { didSet { d.set(retentionDays, forKey: kRet); stamp(kRet) } }
 
@@ -100,6 +106,7 @@ final class SettingsStore: ObservableObject {
         autoOptimize = d.object(forKey: kOpt) as? Bool ?? true
         superDataSaver = d.object(forKey: kDataSaver) as? Bool ?? false
         sendOriginal = d.object(forKey: kSendOriginal) as? Bool ?? false
+        notificationDetail = SharedNotificationPrivacy.detail
         retentionDays = d.object(forKey: kRet) as? Int ?? 0       // default forever
         keepMyPosts = d.object(forKey: kKeepMine) as? Bool ?? true   // default: always keep my own archive
         #if os(macOS)
@@ -225,6 +232,18 @@ struct SettingsView: View {
                         .tint(HavenTheme.pink)
                 } footer: {
                     Text("Auto-optimize shares a smaller photo/video by default (always strips location). “Also send original” keeps the camera file beside it so recipients can open the full-size copy from the post menu. Super data saver never autoplays video or music, loads poster stills only, and downloads a video only when you tap play. Per-circle override available for optimize.")
+                }
+                Section {
+                    Picker("Notification previews", selection: $settings.notificationDetail) {
+                        ForEach(SharedNotificationPrivacy.Detail.allCases, id: \.self) { d in
+                            Text(SharedNotificationPrivacy.label(d)).tag(d)
+                        }
+                    }
+                    .tint(HavenTheme.pink)
+                } header: { Text("Lock screen") }
+                footer: {
+                    Text(SharedNotificationPrivacy.footer(settings.notificationDetail)
+                          + " Also follows iOS Settings → Notifications → Show Previews.")
                 }
                 Section {
                     Picker("Auto-delete old posts", selection: $settings.retentionDays) {

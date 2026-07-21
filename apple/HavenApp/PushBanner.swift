@@ -38,15 +38,15 @@ enum PushBanner: Sendable {
         }
     }
 
-    /// Human body line under the sender's name.
+    /// Full body line under the sender's name (may quote message text / emoji).
     var body: String {
         switch self {
         case .post(let circle, let preview, let hasMedia):
             if let p = Self.clip(preview), !p.isEmpty { return "\(circle): \(p)" }
             if hasMedia { return "Shared a photo in \(circle)" }
             return "Posted in \(circle)"
-        case .story(let circle, let hasCaption):
-            return hasCaption ? "Shared a story in \(circle)" : "Shared a story in \(circle)"
+        case .story(let circle, _):
+            return "Shared a story in \(circle)"
         case .dm(let preview, let hasMedia, let hasAudio):
             if let p = Self.clip(preview), !p.isEmpty { return p }
             if hasAudio { return "Sent a voice note" }
@@ -69,6 +69,31 @@ enum PushBanner: Sendable {
         }
     }
 
+    /// Privacy-safe body: kind of activity only — no message text, no comment quote, no emoji.
+    /// The recipient's NSE uses this when their lock-screen / Haven preview preference says so.
+    var privateBody: String {
+        switch self {
+        case .post(_, _, let hasMedia):
+            return hasMedia ? "Shared a photo" : "Posted in your circle"
+        case .story:
+            return "Shared a story"
+        case .dm(_, let hasMedia, let hasAudio):
+            if hasAudio { return "Sent a voice note" }
+            if hasMedia { return "Sent a photo" }
+            return "Sent you a message"
+        case .reaction(_, let isDM):
+            return isDM ? "Reacted to your message" : "Reacted to your post"
+        case .comment(_, let isDM, _):
+            return isDM ? "Replied to your message" : "Left a comment"
+        case .edit(let isDM, _):
+            return isDM ? "Edited a message" : "Edited a post"
+        case .unsend(let isDM):
+            return isDM ? "Unsent a message" : "Unsent a post"
+        case .generic(let isDM, _):
+            return isDM ? "Sent you a message" : "New activity in your circle"
+        }
+    }
+
     /// Optional reaction emoji for the wire field `e`.
     var emoji: String? {
         if case .reaction(let emoji, _) = self { return emoji.isEmpty ? nil : emoji }
@@ -76,10 +101,13 @@ enum PushBanner: Sendable {
     }
 
     /// JSON object ready to seal. `title` is the sender display name.
+    /// Always includes both `b` (full) and `bp` (private) so the *recipient* chooses detail
+    /// level — the sender must not decide how much of someone else's lock screen to expose.
     func jsonObject(title: String, circleId: String) -> [String: Any] {
         var o: [String: Any] = [
             "t": title,
             "b": body,
+            "bp": privateBody,
             "c": circleId,
             "k": kind,
         ]

@@ -9,9 +9,11 @@ import UserNotifications
 /// lock screen.
 ///
 /// The sealed plaintext is a small JSON object the SENDER built (see `PushBanner`):
-/// `{ "t": title, "b": body, "c": circleId, "k": kind, "e": emoji? }`. The NSE cannot open
-/// circle events (no social engine here), so richness must ride in that blob — we only format
-/// and present what the sender already put there.
+/// `{ "t", "b", "bp", "c", "k", "e"? }`. `b` is the full preview; `bp` is a privacy-safe
+/// kind-only line. This extension picks which to show from:
+///   1. the user's iOS **Show Previews** setting, and
+///   2. Haven's own notification-detail preference (App Group).
+/// The sender always ships both — privacy is a *recipient* choice.
 ///
 /// Everything is best-effort: if the seed is unavailable, the blob is missing/malformed, or
 /// it wasn't sealed to us, we fall back to the generic banner the relay supplied. We never
@@ -47,20 +49,92 @@ final class NotificationService: UNNotificationServiceExtension {
             return
         }
 
-        best.title = decoded.title
-        best.body = decoded.body
-        // Group notifications by conversation so a burst of DMs or reactions stacks sensibly
-        // instead of flooding the lock screen as unrelated cards.
-        if let thread = decoded.threadId, !thread.isEmpty {
-            best.threadIdentifier = thread
+        // Resolve how much detail THIS device is allowed to show. Async because iOS notification
+        // settings are. Cap wait so we never miss the NSE deadline if the system stalls.
+        Self.resolveDetail { detail in
+            let shown = Self.applyPrivacy(decoded, detail: detail)
+            best.title = shown.title
+            best.body = shown.body
+            // Group notifications by conversation so a burst of DMs or reactions stacks sensibly
+            // instead of flooding the lock screen as unrelated cards.
+            if let thread = decoded.threadId, !thread.isEmpty {
+                best.threadIdentifier = thread
+            }
+            // Surface the kind as a summary argument so iOS 15+ notification summaries can say
+            // "3 reactions" rather than "3 notifications" when the system collapses a thread.
+            // Use private labels so a collapsed stack doesn't re-leak emoji/previews.
+            if let kind = decoded.kind, !kind.isEmpty {
+                best.summaryArgument = Self.summaryLabel(kind: kind)
+                best.summaryArgumentCount = 1
+            }
+            contentHandler(best)
         }
-        // Surface the kind as a summary argument so iOS 15+ notification summaries can say
-        // "3 reactions" rather than "3 notifications" when the system collapses a thread.
-        if let kind = decoded.kind, !kind.isEmpty {
-            best.summaryArgument = Self.summaryLabel(kind: kind, emoji: decoded.emoji)
-            best.summaryArgumentCount = 1
+    }
+
+    /// Combine Haven preference with iOS Show Previews. Conservative when uncertain.
+    private static func resolveDetail(completion: @escaping (SharedNotificationPrivacy.Detail) -> Void) {
+        let haven = SharedNotificationPrivacy.detail
+        // Haven already wants minimal/private — no need to ask the system.
+        if haven != .full {
+            completion(haven)
+            return
         }
-        contentHandler(best)
+        let center = UNUserNotificationCenter.current()
+        // Semaphore with a short timeout: getNotificationSettings is async and the NSE budget
+        // is tight. If the system doesn't answer in time, fall back to Haven's preference.
+        let box = DetailBox()
+        center.getNotificationSettings { settings in
+            let resolved: SharedNotificationPrivacy.Detail
+            switch settings.showPreviewsSetting {
+            case .never:
+                // User asked the OS to never show notification content — honor that fully.
+                resolved = .minimal
+            case .whenAuthenticated:
+                // Previews only when unlocked. An NSE cannot reliably know lock state
+                // (UIApplication is unavailable / unprotected-data is still readable after first
+                // unlock), so we use the private body: name + kind, no message text. That way a
+                // glance at the lock screen never quotes a DM; the user opens Haven for the rest.
+                resolved = .privateDetail
+            case .always:
+                resolved = .full
+            @unknown default:
+                resolved = .privateDetail
+            }
+            // Haven preference can only tighten, never loosen, past what the system allows.
+            box.set(SharedNotificationPrivacy.stricter(haven, resolved))
+        }
+        // Wait up to 1.5s for settings; otherwise use Haven preference alone.
+        let detail = box.wait(timeout: 1.5) ?? haven
+        completion(detail)
+    }
+
+    private final class DetailBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: SharedNotificationPrivacy.Detail?
+        private let sem = DispatchSemaphore(value: 0)
+        func set(_ d: SharedNotificationPrivacy.Detail) {
+            lock.lock(); value = d; lock.unlock()
+            sem.signal()
+        }
+        func wait(timeout: TimeInterval) -> SharedNotificationPrivacy.Detail? {
+            _ = sem.wait(timeout: .now() + timeout)
+            lock.lock(); defer { lock.unlock() }
+            return value
+        }
+    }
+
+    private static func applyPrivacy(_ decoded: Decoded,
+                                     detail: SharedNotificationPrivacy.Detail) -> (title: String, body: String) {
+        // Biometric-locked circles always win — never quote their content.
+        if decoded.redactedForLock {
+            return (decoded.title, decoded.body)
+        }
+        let pick = SharedNotificationPrivacy.displayBody(full: decoded.fullBody,
+                                                          privateBody: decoded.privateBody,
+                                                          kind: decoded.kind,
+                                                          detail: detail)
+        let title = pick.titleUsesName ? decoded.title : "Haven"
+        return (title, pick.body)
     }
 
     /// If the sealed payload names a circle the user has biometric-locked, hide its content —
@@ -69,8 +143,9 @@ final class NotificationService: UNNotificationServiceExtension {
         guard let circleId = obj["c"] as? String, SharedLockedCircles.read().contains(circleId) else {
             return nil
         }
-        return Decoded(title: "Haven", body: "New activity in a locked circle",
-                       kind: "locked", emoji: nil, threadId: circleId)
+        return Decoded(title: "Haven", fullBody: "New activity in a locked circle",
+                       privateBody: "New activity in a locked circle",
+                       kind: "locked", emoji: nil, threadId: circleId, redactedForLock: true)
     }
 
     override func serviceExtensionTimeWillExpire() {
@@ -82,14 +157,18 @@ final class NotificationService: UNNotificationServiceExtension {
 
     struct Decoded {
         let title: String
-        let body: String
+        let fullBody: String
+        let privateBody: String?
         let kind: String?
         let emoji: String?
         let threadId: String?
+        var redactedForLock: Bool = false
+        /// Convenience when already fully redacted (locked circle / call).
+        var body: String { fullBody }
     }
 
     /// The sealed payload is a tiny JSON object:
-    /// - Message/post: `{ "t", "b", "c", "k"?, "e"? }` — built by `PushBanner` on the sender.
+    /// - Message/post: `{ "t", "b", "bp"?, "c", "k"?, "e"? }` — built by `PushBanner`.
     /// - Call fallback: `{ "t": <caller name>, "h": <caller hex> }` — no `b`.
     private static func decode(_ data: Data) -> Decoded? {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
@@ -98,20 +177,20 @@ final class NotificationService: UNNotificationServiceExtension {
         let kind = obj["k"] as? String
         let emoji = obj["e"] as? String
         let circleId = obj["c"] as? String
+        let privateBody = obj["bp"] as? String
         // Call payload: no body, has peer hex.
         if obj["b"] == nil, obj["h"] is String {
-            return Decoded(title: title, body: "📞 Incoming call — open Haven to answer",
+            return Decoded(title: title, fullBody: "📞 Incoming call — open Haven to answer",
+                           privateBody: "Incoming call",
                            kind: "call", emoji: nil, threadId: obj["h"] as? String)
         }
-        var body = (obj["b"] as? String) ?? "New message"
-        // Older senders still ship the generic "Posted in …" for reactions/stories. If a modern
-        // kind tag is present but the body is empty somehow, synthesize from kind.
-        if body.isEmpty, let kind {
-            body = fallbackBody(kind: kind, emoji: emoji)
+        var full = (obj["b"] as? String) ?? "New message"
+        if full.isEmpty, let kind {
+            full = fallbackBody(kind: kind, emoji: emoji)
         }
-        // Thread: DMs and circle activity each get their own stack. Prefer the circle id.
         let thread = circleId ?? kind
-        return Decoded(title: title, body: body, kind: kind, emoji: emoji, threadId: thread)
+        return Decoded(title: title, fullBody: full, privateBody: privateBody,
+                       kind: kind, emoji: emoji, threadId: thread)
     }
 
     private static func fallbackBody(kind: String, emoji: String?) -> String {
@@ -127,9 +206,10 @@ final class NotificationService: UNNotificationServiceExtension {
         }
     }
 
-    private static func summaryLabel(kind: String, emoji: String?) -> String {
+    /// Summary labels stay kind-only (no emoji) so a collapsed stack doesn't re-leak detail.
+    private static func summaryLabel(kind: String) -> String {
         switch kind {
-        case "react":   return emoji.map { "\($0) reactions" } ?? "reactions"
+        case "react":   return "reactions"
         case "comment": return "comments"
         case "story":   return "stories"
         case "dm":      return "messages"

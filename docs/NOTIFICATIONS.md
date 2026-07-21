@@ -81,15 +81,31 @@ cannot open circle events, so every bit of richness has to ride here):
   "e": "<emoji>" }
 ```
 
-Examples of `b`:
-- DM text: `"on my way"` (preview, truncated; secret messages become `"🔒 Secret message"`)
-- Reaction: `"Reacted ❤️ to your post"` / `"Reacted 😂 to your message"`
-- Story: `"Shared a story in Family"`
-- Comment: `"Commented in Family: love this"`
-- Post with media only: `"Shared a photo in Family"`
+Examples of `b` / `bp`:
+- DM text: `b` = `"on my way"` (clipped); `bp` = `"Sent you a message"`
+- Reaction: `b` = `"Reacted ❤️ to your post"`; `bp` = `"Reacted to your post"` (no emoji)
+- Story: `b` = `"Shared a story in Family"`; `bp` = `"Shared a story"`
+- Comment: `b` quotes text; `bp` = `"Left a comment"`
+- Secret DM: `b` = `"🔒 Secret message"` (never the plaintext)
 
 Older clients that only read `t`/`b`/`c` keep working; unknown keys are ignored. The NSE
 sets `threadIdentifier` from `c` so a burst of DMs stacks as one conversation.
+
+### Lock-screen privacy (recipient chooses)
+
+The **sender always seals both** `b` and `bp`. The **recipient's NSE** picks which to show:
+
+1. **iOS Show Previews** (Settings → Notifications → Show Previews)
+   - `Never` → minimal (`Haven` / `New activity`)
+   - `When Unlocked` → private body (name + kind, no message text) — NSE cannot reliably
+     detect lock state, so we never paint quoted content under this system setting
+   - `Always` → full body, unless Haven preference is stricter
+2. **Haven → Settings → Lock screen → Notification previews**
+   - Full previews / Name and type only / Minimal
+   - Stored in the App Group so the NSE reads it without launching the app
+   - Can only **tighten** past the system setting, never loosen it
+
+Biometric-locked circles still force full redaction regardless.
 
 ### Still device/pipeline-only
 APNs and the NSE don't run in the iOS Simulator, so live decryption is verified on a physical

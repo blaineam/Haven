@@ -600,7 +600,10 @@ final class RelayMailboxStore: ObservableObject {
             entries = decoded
         }
         migrateEntries()
-        Self.refreshHavenFabric()
+        // Do NOT call refreshHavenFabric() here. That path reads `RelayMailboxStore.shared`,
+        // which is still inside this dispatch_once init → recursive lock → SIGTRAP on launch
+        // (libdispatch: "trying to lock recursively"). Push fabric after init returns.
+        DispatchQueue.main.async { Self.refreshHavenFabric() }
     }
 
     /// Ensure every relay referenced by relaysByCircle / the default has a RelayEntry record.
@@ -714,7 +717,7 @@ final class RelayMailboxStore: ObservableObject {
         entries[hex] = e
         persistEntries()
         objectWillChange.send()
-        Self.refreshHavenFabric()
+        pushHavenFabric()
     }
 
     /// Every live DERP URL we know — feeds iroh RelayMap (Haven-first) and WebRTC ICE preference.
@@ -728,13 +731,17 @@ final class RelayMailboxStore: ObservableObject {
     /// Push known DERP URLs into the process fabric policy (Rust `apply_derp_urls`) for the **next**
     /// `HavenNode.start` bind, and into UserDefaults / `HavenFabric` for WebRTC ICE. iroh binds
     /// `RelayMap` at endpoint construct time — this does not hot-rebind a live node.
-    static func refreshHavenFabric() {
-        let urls = shared.allDerpUrls()
+    ///
+    /// Prefer the instance form when you already hold `self` (avoids re-entering `.shared`).
+    func pushHavenFabric() {
+        let urls = allDerpUrls()
         UserDefaults.standard.set(urls, forKey: "haven.fabric.derpUrls")
         HavenFabric.shared.update(derpUrls: urls)
-        // Process-wide Rust EndpointPolicy (Haven-first when non-empty). Safe no-op shape if
-        // bindings lag a host rebuild — symbol lands with the next xcframework.
         applyDerpUrls(urls: urls)
+    }
+
+    static func refreshHavenFabric() {
+        shared.pushHavenFabric()
     }
 
     /// The relay's HTTP interface (urls + token), or nil for an iroh-only relay.

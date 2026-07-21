@@ -260,11 +260,11 @@ struct RelayFrontDoorControls: View {
     private var help: String {
         switch tunnel.frontDoorMode {
         case "manual":
-            return "Manual: you run cloudflared, Caddy, nginx, Tailscale Funnel, etc. against http://127.0.0.1:8674. Haven only announces the HTTPS URL — works even if free Cloudflare tunnels are blocked."
+            return "Manual: you run cloudflared, Caddy, nginx, Tailscale Funnel, etc. against http://127.0.0.1:8674 (media) and optionally :3340 (DERP fabric). Haven only announces the HTTPS URL(s) — works even if free Cloudflare tunnels are blocked."
         case "bundled":
-            return "Custom domain: paste domain + Zero Trust install token. In the Cloudflare dashboard, set the public hostname service to http://127.0.0.1:8674."
+            return "Custom domain: paste media domain + Zero Trust install token. CF public hostname → http://127.0.0.1:8674. For fabric, path-route DERP on the same host or set a sibling DERP URL → :3340."
         default:
-            return "Auto: free ephemeral trycloudflare.com when the relay starts. Hostname changes if cloudflared restarts — use Custom domain or Manual for a stable always-on relay."
+            return "Auto: free ephemeral trycloudflare.com for media + a second free tunnel for DERP fabric. Hostnames change on restart — use Custom domain or Manual for stable always-on."
         }
     }
 
@@ -278,7 +278,7 @@ struct RelayFrontDoorControls: View {
             Text("Manual / external tunnel").tag("manual")
         }
         if tunnel.frontDoorMode != "auto" {
-            TextField("Public URL (https://relay.example.com)", text: Binding(
+            TextField("Media public URL (https://relay.example.com)", text: Binding(
                 get: { tunnel.configuredPublicURL },
                 set: { v in
                     tunnel.configuredPublicURL = v
@@ -287,6 +287,31 @@ struct RelayFrontDoorControls: View {
             ))
             .autocorrectionDisabled().havenAutocap(.never)
             .textContentType(.URL)
+            // Optional dedicated DERP fabric URL when media and DERP use different public hosts.
+            TextField("DERP fabric URL (optional)", text: Binding(
+                get: { UserDefaults.standard.string(forKey: "haven.relay.derpURL") ?? "" },
+                set: { v in
+                    let t = v.trimmingCharacters(in: .whitespacesAndNewlines)
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                    if t.isEmpty {
+                        UserDefaults.standard.removeObject(forKey: "haven.relay.derpURL")
+                    } else {
+                        UserDefaults.standard.set(t, forKey: "haven.relay.derpURL")
+                    }
+                    // Announce immediately when hosting; process fabric policy updates for peers.
+                    // Local DERP listen is already up — public URL is gossip only.
+                    if relay.serving, !relay.nodeId.isEmpty {
+                        RelayMailboxStore.shared.setDerpUrl(relay.nodeId, url: t.isEmpty ? nil : t)
+                        FeedStore.shared.reannounceOwnRelay()
+                    }
+                }
+            ))
+            .autocorrectionDisabled().havenAutocap(.never)
+            .textContentType(.URL)
+            Text("Leave DERP empty to reuse the media URL (path-route :3340 on the same host). Sibling hostname example: https://derp.example.com → http://127.0.0.1:3340.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         if tunnel.frontDoorMode == "bundled" {
             SecureField("Cloudflare tunnel install token", text: Binding(

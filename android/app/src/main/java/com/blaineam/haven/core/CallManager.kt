@@ -102,6 +102,10 @@ object CallManager {
     /**
      * Haven-first ICE. Google STUN only when no circle fabric (DERP URLs) is known —
      * parity with Apple [HavenFabric.iceServerUrls]. Prefs key `haven.fabric.derpUrls`.
+     *
+     * Empty list when fabric is active is intentional (no Google, no third-party STUN).
+     * Cross-NAT WebRTC calls may fail until Haven TURN; live messaging still uses iroh + circle DERP.
+     * LAN peers can still connect via host candidates.
      */
     private fun iceServers(): List<PeerConnection.IceServer> {
         val prefs = appContext.getSharedPreferences("haven.fabric", android.content.Context.MODE_PRIVATE)

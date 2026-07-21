@@ -34,11 +34,14 @@ final class HavenFabric: ObservableObject {
     }
 
     /// WebRTC ICE server list. Google STUN **only** when no Haven fabric is known.
+    ///
+    /// When fabric is active this returns **empty** (host candidates only). That is intentional:
+    /// we do not silently re-add Google STUN, and Haven TURN is not shipped yet. Cross-NAT
+    /// **calls** may fail while fabric is active; live messaging still uses iroh (+ circle DERP).
+    /// LAN / same-subnet peers can still connect via host candidates. Do not add third-party STUN
+    /// here without a product decision — see `docs/IROH-RELAY-GOSSIP.md`.
     func iceServerUrls() -> [String] {
         if isActive {
-            // Prefer host/srflx without third-party STUN when the circle has a fabric.
-            // Operators can later advertise TURN via announce; until then empty = host candidates.
-            // If that proves too weak for calls, add a Haven TURN role — do not silently re-add Google.
             return []
         }
         return [

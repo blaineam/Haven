@@ -270,6 +270,12 @@ pub struct Prefs {
     /// - **auto** — free trycloudflare when no URL; infer manual/bundled from fields.
     #[serde(default)]
     pub relay_front_door: Option<String>,
+    /// Optional dedicated public HTTPS base for OUR hosted iroh-relay (DERP) fabric role.
+    /// Distinct from [`relay_public_url`] (media `:8674`) when the operator uses a sibling
+    /// hostname or separate path-routed front door for `:3340`. Empty → named/manual reuse the
+    /// media URL; free auto still spins a second trycloudflare origin.
+    #[serde(default)]
+    pub relay_derp_url: String,
     /// Local notification preview detail: "full" | "private" | "minimal" (Apple/Android parity).
     #[serde(default)]
     pub notification_detail: Option<String>,

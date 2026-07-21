@@ -4206,15 +4206,27 @@ impl Engine {
         log::info!("relay http on :{port} urls={urls:?}");
 
         // Haven fabric: embed iroh-relay (separate socket — not a second Endpoint under our key).
+        // Dedicated `relay_derp_url` pref wins (sibling hostname / dual-role named tunnel).
+        let configured_derp = {
+            let p = self.prefs.lock().unwrap();
+            let d = p.relay_derp_url.trim().trim_end_matches('/').to_string();
+            if d.is_empty() { None } else { Some(d) }
+        };
         let derp_url = self
-            .start_desktop_derp(media_was_quick, urls.first().cloned())
+            .start_desktop_derp(media_was_quick, urls.first().cloned(), configured_derp)
             .await;
 
-        if urls.is_empty() {
+        // Always record HTTP when we have URLs; DERP can land even on LAN-only media
+        // (local DERP still useful, public DERP only if we resolved a URL).
+        if urls.is_empty() && derp_url.is_none() {
             return;
         }
         let mut p = self.prefs.lock().unwrap();
-        let mut changed = p.set_relay_http(node_hex, urls, token);
+        let mut changed = if !urls.is_empty() {
+            p.set_relay_http(node_hex, urls.clone(), token.clone())
+        } else {
+            false
+        };
         if let Some(ref d) = derp_url {
             changed |= p.set_relay_derp(node_hex, d);
         }
@@ -4223,24 +4235,52 @@ impl Engine {
         }
         drop(p);
         self.refresh_haven_fabric();
+        self.write_host_interface_json(node_hex, &urls, &token, derp_url.as_deref());
+    }
+
+    /// Paste-ready interface blob (CLI parity) so headless / operators can copy media + DERP.
+    fn write_host_interface_json(
+        &self,
+        node_hex: &str,
+        urls: &[String],
+        token: &str,
+        derp: Option<&str>,
+    ) {
+        let interface = serde_json::json!({
+            "node": node_hex,
+            "urls": urls,
+            "token": token,
+            "derp": derp.unwrap_or(""),
+        });
+        let path = self.paths.relay_dir().join("interface.json");
+        if let Ok(bytes) = serde_json::to_vec_pretty(&interface) {
+            let _ = std::fs::write(&path, bytes);
+            log::info!("relay interface written to {}", path.display());
+        }
     }
 
     /// Start embedded DERP and, for free auto front door, a **second** trycloudflare origin.
-    /// Named/manual reuse the media public URL (operator path-routes or uses one dual-role host).
+    /// Named/manual: explicit `relay_derp_url` pref wins; else reuse media public URL
+    /// (operator path-routes or uses one dual-role host).
     async fn start_desktop_derp(
         self: &Arc<Self>,
         media_was_quick: bool,
         media_public: Option<String>,
+        configured_derp: Option<String>,
     ) -> Option<String> {
+        // Prefer dedicated DERP URL. Free quick still needs a second tunnel unless the operator
+        // already set a stable derp URL (named dual-role while media stays ephemeral is rare but valid).
+        let initial_public = if let Some(d) = configured_derp.clone() {
+            d
+        } else if media_was_quick {
+            String::new()
+        } else {
+            media_public.clone().unwrap_or_default()
+        };
         let dcfg = haven_net::DerpConfig {
             enabled: true,
             bind: haven_net::DEFAULT_DERP_BIND.into(),
-            // Quick: leave empty until second tunnel; named/manual: media URL (path-route).
-            public_url: if media_was_quick {
-                String::new()
-            } else {
-                media_public.clone().unwrap_or_default()
-            },
+            public_url: initial_public,
         };
         let mut srv = match haven_net::DerpServer::spawn(&dcfg).await {
             Ok(Some(s)) => s,
@@ -4250,6 +4290,7 @@ impl Engine {
                 return None;
             }
         };
+        // Second free tunnel only when we still lack a public DERP URL.
         if media_was_quick && srv.public_url.is_empty() {
             match Self::start_desktop_derp_quick_tunnel(srv.local_port()) {
                 Ok(t) => {
@@ -4263,7 +4304,9 @@ impl Engine {
             }
         }
         if srv.public_url.is_empty() {
-            if let Some(u) = media_public {
+            if let Some(d) = configured_derp {
+                srv.public_url = d;
+            } else if let Some(u) = media_public {
                 srv.public_url = u;
             }
         }
@@ -4338,13 +4381,15 @@ impl Engine {
     }
 
     /// Public HTTPS front door settings (device-local prefs).
-    pub fn relay_public_settings(&self) -> (String, String, bool, String) {
+    /// Returns `(media_url, tunnel_token, auto_tunnel, front_door, derp_url)`.
+    pub fn relay_public_settings(&self) -> (String, String, bool, String, String) {
         let p = self.prefs.lock().unwrap();
         (
             p.relay_public_url.clone(),
             p.relay_cf_tunnel_token.clone(),
             p.auto_tunnel(),
             p.front_door_mode().as_str().to_string(),
+            p.relay_derp_url.clone(),
         )
     }
 
@@ -4354,6 +4399,7 @@ impl Engine {
         tunnel_token: String,
         auto_tunnel: bool,
         front_door: String,
+        derp_url: String,
     ) {
         let mut p = self.prefs.lock().unwrap();
         p.relay_public_url = public_url.trim().trim_end_matches('/').to_string();
@@ -4361,6 +4407,7 @@ impl Engine {
         p.relay_auto_tunnel = Some(auto_tunnel);
         let mode = haven_net::cfquicktunnel::FrontDoorMode::parse(&front_door);
         p.relay_front_door = Some(mode.as_str().to_string());
+        p.relay_derp_url = derp_url.trim().trim_end_matches('/').to_string();
         let _ = p.save(&self.paths);
     }
 

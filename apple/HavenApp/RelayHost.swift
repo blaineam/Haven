@@ -183,12 +183,21 @@ final class RelayHost: ObservableObject {
 
     #if os(macOS)
     /// Start embedded DERP + optional second free tunnel; record `derp` on our RelayEntry.
+    ///
+    /// Public URL priority:
+    /// 1. `haven.relay.derpURL` — dedicated fabric front door (sibling host / path-routed `:3340`)
+    /// 2. Free auto: second trycloudflare → local DERP bind
+    /// 3. Named/manual media URL (non-trycloudflare) when operator dual-routes one hostname
     private func startDerpFabric(mediaUrls: [String], mediaWasQuick: Bool) async {
         do {
-            let derp = try await DerpServerHandle.spawn(bind: "127.0.0.1:3340", publicUrl: "")
+            let configured = (UserDefaults.standard.string(forKey: "haven.relay.derpURL") ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let seedPublic = configured.isEmpty ? "" : configured
+            let derp = try await DerpServerHandle.spawn(bind: "127.0.0.1:3340", publicUrl: seedPublic)
             self.derpHandle = derp
-            var derpPublic: String?
-            if mediaWasQuick {
+            var derpPublic: String? = seedPublic.isEmpty ? nil : seedPublic
+            if derpPublic == nil, mediaWasQuick {
                 derpPublic = await CloudflaredTunnel.shared.startQuickDerp(port: derp.localPort())
             }
             if derpPublic == nil {

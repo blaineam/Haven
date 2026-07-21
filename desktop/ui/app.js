@@ -3572,7 +3572,7 @@ async function relayLimitsSection(hosting) {
 async function relaySheet() {
   const s = await invoke("relay_status");
   const pub = await invoke("relay_public_settings").catch(() => ({
-    public_url: "", tunnel_token: "", auto_tunnel: true, front_door: "auto",
+    public_url: "", tunnel_token: "", auto_tunnel: true, front_door: "auto", derp_url: "",
   }));
   const adoptInput = el("input", { placeholder: "Paste node id (64 hex) or haven-relay interface JSON…" });
   // Three first-class modes — Manual stays correct if free/token Cloudflare paths go away.
@@ -3580,6 +3580,10 @@ async function relaySheet() {
   const urlInput = el("input", {
     value: pub.public_url || "",
     placeholder: "https://relay.example.com",
+  });
+  const derpInput = el("input", {
+    value: pub.derp_url || "",
+    placeholder: "optional — https://derp.example.com (sibling host for :3340)",
   });
   const tokenInput = el("input", {
     type: "password",
@@ -3589,16 +3593,21 @@ async function relaySheet() {
   });
   const modeBox = el("div", { class: "col", style: "gap:4px" });
   const modes = [
-    ["auto", "Free trycloudflare", "Ephemeral *.trycloudflare.com when no custom domain — may change every restart."],
-    ["bundled", "Custom domain (Haven runs cloudflared)", "Paste domain + Cloudflare install token. Origin in CF dashboard must be http://127.0.0.1:8674."],
-    ["manual", "Manual / external tunnel", "You run cloudflared, Caddy, nginx, Tailscale Funnel, etc. Haven only announces the HTTPS URL — works even if free tunnels are blocked."],
+    ["auto", "Free trycloudflare", "Ephemeral *.trycloudflare.com when no custom domain — may change every restart. Media + DERP each get their own free tunnel."],
+    ["bundled", "Custom domain (Haven runs cloudflared)", "Paste media domain + Cloudflare install token. Origin in CF dashboard: :8674 for media; path-route or sibling host → :3340 for DERP fabric."],
+    ["manual", "Manual / external tunnel", "You run cloudflared, Caddy, nginx, Tailscale Funnel, etc. Haven only announces the HTTPS URL(s) — works even if free tunnels are blocked."],
   ];
+  const derpLabel = el("label", { class: "muted small", style: "margin-top:6px" }, "DERP fabric URL (optional, distinct from media)");
   const syncModeUi = () => {
     tokenInput.disabled = frontDoor === "manual" || frontDoor === "auto";
     tokenInput.style.opacity = tokenInput.disabled ? "0.5" : "1";
     urlInput.placeholder = frontDoor === "auto"
-      ? "optional stable URL (switches to manual when set alone)"
+      ? "optional stable media URL (switches to manual when set alone)"
       : "https://relay.example.com";
+    // Dedicated DERP URL is most useful for named/manual dual-role; free auto uses a second tunnel.
+    const hideDerp = frontDoor === "auto";
+    derpInput.style.display = hideDerp ? "none" : "";
+    derpLabel.style.display = hideDerp ? "none" : "";
   };
   for (const [value, label, hint] of modes) {
     const radio = el("input", { type: "radio", name: "front-door", style: "width:auto" });
@@ -3623,6 +3632,7 @@ async function relaySheet() {
         tunnelToken: tokenInput.value.trim(),
         autoTunnel: frontDoor === "auto",
         frontDoor,
+        derpUrl: derpInput.value.trim(),
       });
       toast(s.hosting
         ? "Saved — restart hosting to apply front-door settings"
@@ -3632,15 +3642,17 @@ async function relaySheet() {
   const publicCard = el("div", { class: "card col" },
     el("h3", {}, "Public HTTPS front door"),
     el("div", { class: "muted small" },
-      "Friends off your LAN need HTTPS to the media port (8674). Blobs stay E2E-sealed — the front door only moves ciphertext."),
+      "Friends off your LAN need HTTPS to the media port (8674) and (for circle-hosted NAT fabric) DERP on 3340. Blobs stay E2E-sealed — the front door only moves ciphertext."),
     modeBox,
-    el("label", { class: "muted small", style: "margin-top:8px" }, "Public URL"),
+    el("label", { class: "muted small", style: "margin-top:8px" }, "Media public URL"),
     urlInput,
+    derpLabel,
+    derpInput,
     el("label", { class: "muted small", style: "margin-top:6px" }, "Tunnel token (bundled mode only)"),
     tokenInput,
     el("button", { class: "btn small primary", style: "align-self:flex-start;margin-top:8px", onclick: savePublic }, "Save front door"),
     el("div", { class: "muted small" },
-      "Manual mode is the durable escape hatch: any reverse proxy or tunnel that terminates TLS and forwards to 127.0.0.1:8674 works — Cloudflare free/token paths are optional convenience."),
+      "Named/Manual dual role: point media at :8674 and either path-route DERP on the same host or set a sibling hostname for :3340 in the DERP field. Empty DERP field reuses the media URL (path-route required). Free auto uses two trycloudflare origins."),
   );
   const hostCard = el("div", { class: "card col" },
     el("h3", {}, "Host the relay on this PC"),
@@ -4339,6 +4351,9 @@ const line = (label, ok) => el("div", { class: "row" }, el("span", { style: "fle
 // sealed iroh channel via the call_signal command; media is DTLS-SRTP in the WebView.
 // Haven-first ICE: Google STUN only when no circle fabric DERP URLs are known
 // (window.__havenFabricDerp from prefs / relay announce). Parity with Apple HavenFabric.
+// When fabric is active, ICE is host-candidates only (empty server list) — intentional:
+// no Google, no third-party STUN. Cross-NAT WebRTC may fail until Haven TURN ships.
+// Live messaging still rides iroh (+ circle DERP); calls are the WebRTC path.
 function iceServers() {
   const derp = (window.__havenFabricDerp && window.__havenFabricDerp.length)
     ? window.__havenFabricDerp
@@ -5081,9 +5096,15 @@ async function boot() {
     await render();
   });
   // Haven fabric: circle-hosted DERP URLs — WebRTC prefers no Google STUN when non-empty.
+  // rebindPending: fabric first learned mid-session after HavenNode already bound → one-shot hint
+  // (no full soft-restart; iroh RelayMap is construct-time — restart app when convenient).
   listen("haven-fabric", (e) => {
     const urls = (e.payload && e.payload.derpUrls) || [];
     window.__havenFabricDerp = Array.isArray(urls) ? urls : [];
+    if (e.payload && e.payload.rebindPending && !window.__havenFabricRebindHinted) {
+      window.__havenFabricRebindHinted = true;
+      toast("Haven fabric ready — restart Haven so this session uses circle DERP (next launch is automatic)");
+    }
   });
   // A notification carrying a deepLink is ABOUT something openable — make the toast take you there
   // rather than just announcing it. Routed through routeDeepLink, the same parser a pasted or

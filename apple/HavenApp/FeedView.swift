@@ -934,14 +934,15 @@ final class FeedStore: ObservableObject {
             var inUse = Self.mediaInUseStems(social: social)
             for r in scheduledRefs { inUse.formUnion(MediaStore.storedStems(for: r)) }
             inUse.formUnion(pinnedStems)
-            await MainActor.run {
+            let inUseFinal = inUse
+            await MainActor.run { [weak self] in
                 guard let self else { return }
                 // Persist FIRST: once the blobs are gone, the purged events must not resurrect from
                 // a stale state file and re-request their (now deleted) media forever.
                 self.persist()
                 var freed: Int64 = 0
                 for ref in purged where !MediaStore.isSynthetic(ref) {
-                    if MediaStore.storedStems(for: ref).isDisjoint(with: inUse) {
+                    if MediaStore.storedStems(for: ref).isDisjoint(with: inUseFinal) {
                         freed += MediaStore.shared.delete(ref)
                     }
                 }
@@ -1155,7 +1156,7 @@ final class FeedStore: ObservableObject {
         Task.detached(priority: .utility) { [weak self] in
             let inUse = Self.mediaInUseStems(social: social)
             let r = MediaStore.performLimitSweep(maxDays: maxDays, maxGB: maxGB, pinnedStems: pinnedStems, inUse: inUse)
-            await MainActor.run {
+            await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.limitSweepInFlight = false
                 guard r.files > 0 else { return }
@@ -1276,8 +1277,8 @@ final class FeedStore: ObservableObject {
                 self.startSyncTimer()
                 // Sync soon (discovery needs a moment to resolve), then keep retrying.
                 for delay in [1.0, 4.0, 10.0] {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                        self?.syncWithContacts()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                        self.syncWithContacts()
                     }
                 }
             } catch {
@@ -1385,7 +1386,7 @@ final class FeedStore: ObservableObject {
                 return members.contains(where: { $0.hasPrefix(fi.authorShort) })
             }
             let hiddenHere = raw.reduce(into: 0) { if hidden.contains($1.id) { $0 += 1 } }   // hidden IN THIS circle
-            await MainActor.run {
+            await MainActor.run { [weak self] in
                 guard let self, self.refreshGeneration == gen, self.activeCircleId == circleId else { return }
                 // Only republish when the content ACTUALLY changed. A refresh triggered incidentally during
                 // a scroll (media backfill, a poster landing, a periodic tick) usually produces an identical
@@ -1791,9 +1792,10 @@ final class FeedStore: ObservableObject {
                     let envs = social.exportRecentEnvelopes(circleId: cid, limit: 50)
                     if !envs.isEmpty { work.append((cid, envs)) }
                 }
-                await MainActor.run {
+                let workFinal = work
+                await MainActor.run { [weak self] in
                     guard let self else { return }
-                    for (cid, envs) in work { for env in envs { self.nearbyBroadcast(1, self.eventPayload(cid, env)) } }
+                    for (cid, envs) in workFinal { for env in envs { self.nearbyBroadcast(1, self.eventPayload(cid, env)) } }
                 }
             }
         }
@@ -1816,9 +1818,10 @@ final class FeedStore: ObservableObject {
                     let envs = social.exportRecentEnvelopes(circleId: cid, limit: 50)
                     if !envs.isEmpty { work.append((cid, envs)) }
                 }
-                await MainActor.run {
+                let workFinal = work
+                await MainActor.run { [weak self] in
                     guard let self else { return }
-                    for (cid, envs) in work {
+                    for (cid, envs) in workFinal {
                         self.liveDeliverManyToMyDevices(1, envs.map { self.eventPayload(cid, $0) })
                     }
                 }
@@ -1950,7 +1953,7 @@ final class FeedStore: ObservableObject {
     /// so a profile change — new photo, emoji, name, bio, or link — reaches them without waiting
     /// for a fresh handshake. Call this whenever the user edits their profile.
     func rebroadcastProfile() {
-        guard let social else { return }
+        guard social != nil else { return }
         for circle in circles {
             guard let hello = helloPayload(circleId: circle.id, circleName: circle.name) else { continue }
             for hex in dialTargets(circle.id) { sendIroh(0, hello, to: hex) }
@@ -2162,10 +2165,11 @@ final class FeedStore: ObservableObject {
                 }
             }
             guard !ingested.isEmpty else { return }
-            await MainActor.run {
+            let ingestedFinal = ingested
+            await MainActor.run { [weak self] in
                 guard let self else { return }
                 var dmCircles = Set<String>()
-                for (cid, env) in ingested {
+                for (cid, env) in ingestedFinal {
                     self.notifyNewest(in: cid)
                     if cid.hasPrefix("dm:") {
                         dmCircles.insert(cid)
@@ -2957,7 +2961,7 @@ final class FeedStore: ObservableObject {
         guard !circleId.isEmpty, !sealed.isEmpty,
               let opened = social.openCircleMediaSender(circleId: circleId, sealed: sealed),
               var nodeHex = String(data: opened.data, encoding: .utf8) else { return }
-        let announcerHex = opened.senderHex.lowercased()   // authenticated envelope sender (account id)
+        _ = opened.senderHex.lowercased()   // authenticated envelope sender (account id); reserved for future owner-gate
         let data = opened.data
         // Extended announce: JSON {node, urls, token} also carries the relay's plain-HTTP media
         // interface (the reliable cross-NAT path). Legacy announces are the bare 64-hex id.
@@ -3674,6 +3678,9 @@ final class FeedStore: ObservableObject {
         // BACKGROUND queue. This loop streams thousands of chunks; running it on the main actor (as it did)
         // made the whole UI lag while syncing. It needs no engine, so it's safe off-main.
         if requesterHex == social.myNodeHex(), let ownKey = Self.ownMediaKey() {
+            // NearbyTransport is not Sendable; broadcast/backlog APIs are used from this exclusive
+            // utility queue only for the duration of the serve (same process, serialized by us).
+            nonisolated(unsafe) let mesh = nearby
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 defer {
                     try? handle.close()
@@ -3685,10 +3692,11 @@ final class FeedStore: ObservableObject {
                     let chunk = handle.readData(ofLength: chunkSize)
                     if chunk.isEmpty { break }
                     guard let sealed = try? AES.GCM.seal(chunk, using: ownKey).combined else { break }
-                    nearby?.broadcast(Data([5]) + Self.chunkFrame(refData: refData, index: index, total: total, sealed: sealed))
+                    let frame = Self.chunkFrame(refData: refData, index: index, total: total, sealed: sealed)
+                    mesh?.broadcast(Data([5]) + frame)
                     Thread.sleep(forTimeInterval: 0.030)   // pace so we don't outrun a slow link → unbounded send backlog
                     // Stop early if the send backlog is already high — the rest re-pushes next tick.
-                    if (nearby?.sendBacklogHigh ?? false) { break }
+                    if (mesh?.sendBacklogHigh ?? false) { break }
                 }
             }
             return
@@ -3720,7 +3728,8 @@ final class FeedStore: ObservableObject {
         }
     }
 
-    private static func chunkFrame(refData: Data, index: Int, total: Int, sealed: Data) -> Data {
+    /// Pure frame layout — `nonisolated` so media serve can build frames off the main actor.
+    nonisolated private static func chunkFrame(refData: Data, index: Int, total: Int, sealed: Data) -> Data {
         var f = Data()
         let rl = UInt16(refData.count)
         f.append(UInt8(rl & 0xff)); f.append(UInt8(rl >> 8))
@@ -3734,7 +3743,7 @@ final class FeedStore: ObservableObject {
     }
 
     private func handleMediaChunk(_ payload: Data) {
-        guard let social, payload.count >= 2 else { return }
+        guard social != nil, payload.count >= 2 else { return }
         let lb = [UInt8](payload.prefix(2))
         let refLen = Int(UInt16(lb[0]) | UInt16(lb[1]) << 8)
         guard payload.count >= 2 + refLen + 8 else { return }
@@ -3773,13 +3782,9 @@ final class FeedStore: ObservableObject {
         let ownKey = Self.ownMediaKey()
         // Receive backpressure: if the decrypt+write queue is already backed up, DROP this chunk — the
         // reassembly stays incomplete and it's re-requested / re-sent. Prevents an unbounded queue → jetsam.
-        Self.mediaBacklogLock.lock()
-        let drop = Self.mediaBacklogBytes > Self.mediaBacklogCap
-        if !drop { Self.mediaBacklogBytes += sealed.count }
-        Self.mediaBacklogLock.unlock()
-        if drop { return }
+        if Self.mediaBacklogWouldDrop(adding: sealed.count, cap: Self.mediaBacklogCap) { return }
         Self.mediaQueue.async { [weak self] in
-            defer { Self.mediaBacklogLock.lock(); Self.mediaBacklogBytes -= sealed.count; Self.mediaBacklogLock.unlock() }
+            defer { Self.adjustMediaBacklog(-sealed.count) }
             // Own-device chunks are symmetric (account-key); friend chunks are KEM. Try symmetric first.
             var plain: Data? = nil
             if let ownKey, let box = try? AES.GCM.SealedBox(combined: sealed), let p = try? AES.GCM.open(box, using: ownKey) {
@@ -3804,11 +3809,23 @@ final class FeedStore: ObservableObject {
     }
 
     private static let mediaQueue = DispatchQueue(label: "haven.media.reassembly", qos: .utility)
+
+    /// Thread-safe backlog accounting for the reassembly queue (not MainActor — called from
+    /// `mediaQueue` and the main actor receive path).
+    nonisolated private static func adjustMediaBacklog(_ delta: Int) {
+        mediaBacklogLock.lock(); mediaBacklogBytes += delta; mediaBacklogLock.unlock()
+    }
+    nonisolated private static func mediaBacklogWouldDrop(adding n: Int, cap: Int) -> Bool {
+        mediaBacklogLock.lock(); defer { mediaBacklogLock.unlock() }
+        if mediaBacklogBytes > cap { return true }
+        mediaBacklogBytes += n
+        return false
+    }
     // Backpressure for the receive queue: chunks arriving faster than they're decrypted+written piled up
     // here and ballooned memory to multi-GB → jetsam. Drop incoming chunks past this cap (re-requested).
-    private static let mediaBacklogLock = NSLock()
-    private static var mediaBacklogBytes = 0
-    private static let mediaBacklogCap = 8 * 1024 * 1024
+    nonisolated private static let mediaBacklogLock = NSLock()
+    nonisolated(unsafe) private static var mediaBacklogBytes = 0
+    nonisolated private static let mediaBacklogCap = 8 * 1024 * 1024
 
     /// Bookkeeping after a chunk's plaintext is written to the temp file (main-actor state).
     @MainActor private func finishChunk(ref: String, index: Int) {
@@ -3992,7 +4009,7 @@ final class FeedStore: ObservableObject {
         // during a sync. Do the crypto off-main; hop back only for the (already-coalesced) applies.
         Task.detached(priority: .utility) { [weak self] in
             guard (try? social.receive(circleId: circleId, envelope: envelope)) == true else { return }
-            await MainActor.run {
+            await MainActor.run { [weak self] in
                 guard let self else { return }
                 // FAN OUT to my other devices. A sender dials the device ids its copy of my roster
                 // resolves — often just one — so a DM delivered straight to my Mac never reached my

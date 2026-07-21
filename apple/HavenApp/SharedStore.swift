@@ -418,7 +418,7 @@ enum SharedStore {
         var landed = false   // some destination holds it (probe hit) or accepted it (upload)
 
         // S3/HTTP bucket — the DEFAULT media transport (see the upload ordering note below).
-        if let s3, force {
+        if s3 != nil, force {
             s3Needs = true   // recovery: overwrite unconditionally, no head probe
         } else if let s3, !MediaBackupLedger.has("s3", ref) {
             switch await s3.headObjectExists(key: key(ref)) {
@@ -880,7 +880,7 @@ enum SharedStore {
             // The upload already moves in 8 MB windows, so "how far along is this" was sitting here
             // unused while the UI could only say "pending" forever. Report it: a 600 MB video is 75
             // windows, and a post stuck at 3/75 is a visibly different thing from one at 74/75.
-            await MediaUploadProgress.shared.begin(ref, windows: max(1, ranges.count))
+            await MainActor.run { MediaUploadProgress.shared.begin(ref, windows: max(1, ranges.count)) }
             // How many leading windows may be skipped: capped by our own high-water mark for this
             // destination under this exact fingerprint, then confirmed by the probe (a relay may have
             // swept the chunks since). Both must agree; with no record the probe is never consulted.
@@ -911,7 +911,7 @@ enum SharedStore {
                 // Recorded AFTER the window is on the far side, never before: understating progress
                 // costs a re-sent window, overstating it corrupts the blob.
                 if !sealFp.isEmpty { MediaUploadResume.record(dest: dest, ref: ref, fp: sealFp, windows: i + 1) }
-                await MediaUploadProgress.shared.advance(ref, done: sizes.count)
+                await MainActor.run { MediaUploadProgress.shared.advance(ref, done: sizes.count) }
             }
             if skip > 0 {
                 HavenLog.sync("backup ref=\(ref.prefix(12)): resumed on \(dest.prefix(8)), \(skip)/\(sizes.count) windows already stored from these bytes")
@@ -1196,7 +1196,7 @@ enum SharedStore {
     // envelope (observed: ~6700 keys for an 88-event circle → the 30-second cold start on the
     // circle feed, all burned on crypto for duplicates the engine then dropped). Guarded by a lock
     // (poll/upload run on detached tasks); writes are debounced to one file save per burst.
-    private static let seenLock = NSLock()
+    nonisolated private static let seenLock = NSLock()
     nonisolated(unsafe) private static var seenLoaded = false
     nonisolated(unsafe) private static var seenMailbox = Set<String>()
     nonisolated(unsafe) private static var seenSavePending = false

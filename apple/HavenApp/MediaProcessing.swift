@@ -33,7 +33,7 @@ final class MediaProcessing: ObservableObject {
 
     /// Run `body` with the indicator up, balanced however it exits.
     static func tracking<T>(_ what: String = "video", _ body: () async -> T) async -> T {
-        await MediaProcessing.shared.begin(what)
+        await MainActor.run { MediaProcessing.shared.begin(what) }
         defer { Task { @MainActor in MediaProcessing.shared.end() } }
         return await body()
     }

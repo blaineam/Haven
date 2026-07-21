@@ -184,16 +184,21 @@ enum VideoEncoder {
                              reader: AVAssetReader,
                              label: String) async {
         let latch = ResumeOnce()
+        // AVFoundation writer/reader types are not Sendable; the pump queue is exclusive to this
+        // call and the latch ensures a single resume — treat them as serialized ownership.
+        nonisolated(unsafe) let inRef = input
+        nonisolated(unsafe) let outRef = output
+        nonisolated(unsafe) let readerRef = reader
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
-            input.requestMediaDataWhenReady(on: DispatchQueue(label: "haven.encode.\(label)")) {
-                while input.isReadyForMoreMediaData {
-                    guard reader.status == .reading, let buf = output.copyNextSampleBuffer() else {
-                        input.markAsFinished()
+            inRef.requestMediaDataWhenReady(on: DispatchQueue(label: "haven.encode.\(label)")) {
+                while inRef.isReadyForMoreMediaData {
+                    guard readerRef.status == .reading, let buf = outRef.copyNextSampleBuffer() else {
+                        inRef.markAsFinished()
                         latch.fire { c.resume() }
                         return
                     }
-                    if !input.append(buf) {
-                        input.markAsFinished()
+                    if !inRef.append(buf) {
+                        inRef.markAsFinished()
                         latch.fire { c.resume() }
                         return
                     }

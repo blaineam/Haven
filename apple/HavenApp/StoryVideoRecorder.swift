@@ -99,25 +99,36 @@ final class StoryVideoRecorder: @unchecked Sendable {
 
     /// Finish the clip and return its URL (nil if nothing usable was written). Resets for the next segment.
     func finish() async -> URL? {
-        lock.lock()
-        guard isRecording, let writer, let url = outURL, started else {
-            // Nothing recorded (no frame ever arrived) — tear down cleanly.
-            self.writer = nil; self.videoInput = nil; self.audioInput = nil; self.adaptor = nil
-            self.isRecording = false; self.started = false
-            lock.unlock(); return nil
+        // NSLock must not be held across `await` (Swift 6). Snapshot under the lock, then finishWriting.
+        enum Snapshot {
+            case empty
+            case ready(writer: AVAssetWriter, url: URL)
         }
-        isRecording = false
-        videoInput?.markAsFinished()
-        audioInput?.markAsFinished()
-        let w = writer
-        lock.unlock()
+        let snap: Snapshot = withLock {
+            guard isRecording, let writer, let url = outURL, started else {
+                self.writer = nil; self.videoInput = nil; self.audioInput = nil; self.adaptor = nil
+                self.isRecording = false; self.started = false
+                return .empty
+            }
+            isRecording = false
+            videoInput?.markAsFinished()
+            audioInput?.markAsFinished()
+            let w = writer
+            return .ready(writer: w, url: url)
+        }
+        guard case .ready(let w, let url) = snap else { return nil }
 
         await w.finishWriting()
         let ok = (w.status == .completed)
 
-        lock.lock()
-        self.writer = nil; self.videoInput = nil; self.audioInput = nil; self.adaptor = nil; self.started = false
-        lock.unlock()
+        withLock {
+            self.writer = nil; self.videoInput = nil; self.audioInput = nil; self.adaptor = nil; self.started = false
+        }
         return ok ? url : nil
+    }
+
+    private func withLock<T>(_ body: () -> T) -> T {
+        lock.lock(); defer { lock.unlock() }
+        return body()
     }
 }

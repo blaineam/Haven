@@ -1,5 +1,5 @@
 import SwiftUI
-import AVFoundation
+@preconcurrency import AVFoundation
 #if canImport(UIKit)
 import UIKit
 #else
@@ -147,7 +147,9 @@ final class CameraModel: NSObject, ObservableObject {
         }
     }
 
-    private func configureInputs(position: AVCaptureDevice.Position) {
+    /// Runs only on `queue` (serialized with the session). Marked nonisolated so the capture
+    /// queue isn't forced onto the MainActor for pure AVFoundation configuration.
+    nonisolated private func configureInputs(position: AVCaptureDevice.Position) {
         for input in session.inputs { session.removeInput(input) }
         // Pick the lens: the ultra-wide (0.5×) when selected and available, else the wide camera.
         let type: AVCaptureDevice.DeviceType = (position == .back && usingUltraWide && hasUltraWide(position))
@@ -173,8 +175,9 @@ final class CameraModel: NSObject, ObservableObject {
     /// Orient (portrait) + mirror (front) the live-preview data-output connection AND the still/movie
     /// capture connections, so captured media isn't sideways and the front camera matches the
     /// (mirrored) preview. Safe to call before an output is added (no connection yet → no-op).
-    private func configurePreviewConnection(position: AVCaptureDevice.Position? = nil) {
-        let pos = position ?? self.position
+    nonisolated private func configurePreviewConnection(position: AVCaptureDevice.Position? = nil) {
+        // Default to back when called off-main without an explicit position (start() path).
+        let pos = position ?? .back
         let mirrorFront = pos == .front
         // FILE outputs honor rotation+mirror (captured media upright). The PREVIEW data output does
         // NOT reliably rotate its buffers, so the Metal preview orients the CIImage via `.oriented()`
@@ -184,7 +187,7 @@ final class CameraModel: NSObject, ObservableObject {
         movieOutput.connection(with: .video)?.applyPreviewOrientation(angle: 90, mirroredFront: mirrorFront)
     }
 
-    private func hasUltraWide(_ position: AVCaptureDevice.Position) -> Bool {
+    nonisolated private func hasUltraWide(_ position: AVCaptureDevice.Position) -> Bool {
         AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: position) != nil
     }
 
@@ -259,7 +262,9 @@ final class CameraModel: NSObject, ObservableObject {
         let settings = AVCapturePhotoSettings()
         queue.async { [weak self] in
             guard let self else { return }
-            self.photoOutput.capturePhoto(with: settings, delegate: self)
+            // AVCapturePhotoSettings is not Sendable; capture on the session queue only.
+            nonisolated(unsafe) let s = settings
+            self.photoOutput.capturePhoto(with: s, delegate: self)
         }
     }
 
@@ -2030,17 +2035,7 @@ struct LoopingVideo: UIViewRepresentable {
 
         /// A copy of the asset carrying ONLY its video track, so the resulting player never touches audio.
         private static func videoOnly(_ asset: AVURLAsset) -> AVAsset? {
-            let comp = AVMutableComposition()
-            guard let vTrack = asset.tracks(withMediaType: .video).first,
-                  let cTrack = comp.addMutableTrack(withMediaType: .video,
-                                                    preferredTrackID: kCMPersistentTrackID_Invalid)
-            else { return nil }
-            do {
-                try cTrack.insertTimeRange(CMTimeRange(start: .zero, duration: asset.duration),
-                                           of: vTrack, at: .zero)
-            } catch { return nil }
-            cTrack.preferredTransform = vTrack.preferredTransform
-            return comp
+            HavenAVComposition.videoOnly(from: asset)
         }
     }
 }
@@ -2151,17 +2146,7 @@ struct LoopingVideo: NSViewRepresentable {
 
         /// A copy of the asset carrying ONLY its video track, so the resulting player never touches audio.
         private static func videoOnly(_ asset: AVURLAsset) -> AVAsset? {
-            let comp = AVMutableComposition()
-            guard let vTrack = asset.tracks(withMediaType: .video).first,
-                  let cTrack = comp.addMutableTrack(withMediaType: .video,
-                                                    preferredTrackID: kCMPersistentTrackID_Invalid)
-            else { return nil }
-            do {
-                try cTrack.insertTimeRange(CMTimeRange(start: .zero, duration: asset.duration),
-                                           of: vTrack, at: .zero)
-            } catch { return nil }
-            cTrack.preferredTransform = vTrack.preferredTransform
-            return comp
+            HavenAVComposition.videoOnly(from: asset)
         }
         func stop() {
             queue?.pause()

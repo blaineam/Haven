@@ -1,5 +1,6 @@
 import SwiftUI
 import AVKit
+import Combine
 #if canImport(UIKit)
 import UIKit
 #else
@@ -15,18 +16,7 @@ struct StoryViewer: View {
     /// track at all. See the call site for why muting is not sufficient. Returns nil if the asset
     /// can't be rebuilt, in which case the caller falls back to a plain muted player.
     private static func videoOnlyAsset(_ url: URL) -> AVAsset? {
-        let asset = AVURLAsset(url: url)
-        let comp = AVMutableComposition()
-        guard let vTrack = asset.tracks(withMediaType: .video).first,
-              let cTrack = comp.addMutableTrack(withMediaType: .video,
-                                                preferredTrackID: kCMPersistentTrackID_Invalid)
-        else { return nil }
-        do {
-            try cTrack.insertTimeRange(CMTimeRange(start: .zero, duration: asset.duration),
-                                       of: vTrack, at: .zero)
-        } catch { return nil }
-        cTrack.preferredTransform = vTrack.preferredTransform
-        return comp
+        HavenAVComposition.videoOnly(from: AVURLAsset(url: url))
     }
 
     let stories: [FeedItemFfi]

@@ -718,12 +718,13 @@ final class CallManager: NSObject, ObservableObject {
         for conn in conns {
             let hex = conn.hex
             conn.call.audioLevels { inbound, outbound in
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
+                Task { @MainActor in
                     if inbound > bestRemote { bestRemote = inbound; bestPeer = hex }
                     if outbound > myLevel { myLevel = outbound }
                     remaining -= 1
-                    if remaining == 0 { self.resolveActiveSpeaker(bestPeer: bestPeer, bestRemote: bestRemote, myLevel: myLevel) }
+                    if remaining == 0 {
+                        self.resolveActiveSpeaker(bestPeer: bestPeer, bestRemote: bestRemote, myLevel: myLevel)
+                    }
                 }
             }
         }
@@ -881,7 +882,7 @@ final class CallManager: NSObject, ObservableObject {
         #if os(iOS)
         let session = RTCAudioSession.sharedInstance()
         session.lockForConfiguration()
-        try? session.setCategory(.playAndRecord, with: [.allowBluetooth, .defaultToSpeaker])
+        try? session.setCategory(.playAndRecord, with: [.allowBluetoothHFP, .defaultToSpeaker])
         try? session.setMode(.voiceChat)
         #if targetEnvironment(macCatalyst)
         try? session.setActive(true)
@@ -928,7 +929,7 @@ final class CallManager: NSObject, ObservableObject {
         HavenLog.net("call audio recovery (\(reason))")
         let rtc = RTCAudioSession.sharedInstance()
         rtc.lockForConfiguration()
-        try? rtc.setCategory(.playAndRecord, with: [.allowBluetooth, .defaultToSpeaker])
+        try? rtc.setCategory(.playAndRecord, with: [.allowBluetoothHFP, .defaultToSpeaker])
         try? rtc.setMode(.voiceChat)
         try? rtc.setActive(true)
         try? rtc.overrideOutputAudioPort(speakerOn ? .speaker : .none)

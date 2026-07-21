@@ -156,6 +156,9 @@ final class FeedStore: ObservableObject {
     /// Last time we re-announced circle relays (frame 19). Must NOT ride every sync tick —
     /// sealing + fan-out to every member is real radio work and kept phones hot.
     private var lastRelayReannounceMs: UInt64 = 0
+    /// Last Multipeer `connected` callback — flaps reconnect every few seconds on BLE and used
+    /// to re-arm tight sync + re-export history each time (device log: DTLS broken-pipe storms).
+    private var lastNearbyConnectMs: UInt64 = 0
     /// Base cadences and the idle multipliers. Idle <3min = base; <15min = ×3; else ×6.
     /// Thermal pressure and super data saver stretch further so a warm phone (or one the user
     /// asked to go easy on the radio) isn't also blasting hello+roster at the tight cadence.
@@ -1327,6 +1330,20 @@ final class FeedStore: ObservableObject {
         return Date().timeIntervalSince(t) < 120
     }
 
+    /// Prefix-tolerant "heard within window" check for keep-alive skip. `lastHeard` keys may be
+    /// full device ids, account ids, or short prefixes depending on the inbound path.
+    private func recentlyHeard(_ nodeHex: String, withinMs: UInt64, nowMs: UInt64) -> Bool {
+        let needle = nodeHex.lowercased()
+        guard !needle.isEmpty else { return false }
+        for (k, date) in lastHeard {
+            let key = k.lowercased()
+            guard key.hasPrefix(needle) || needle.hasPrefix(key) else { continue }
+            let heardMs = UInt64(max(0, date.timeIntervalSince1970) * 1000)
+            if nowMs >= heardMs, nowMs &- heardMs < withinMs { return true }
+        }
+        return false
+    }
+
     private let lastHeardKey = "haven.lastHeard"
     /// Note that we just heard from a peer (drives both "online" and "last seen"), persisting
     /// it so the last-seen time survives an app restart.
@@ -1370,10 +1387,9 @@ final class FeedStore: ObservableObject {
                 guard let self else { return }
                 guard self.now() >= self.nextSyncDueMs else { return }
                 self.nextSyncDueMs = self.now() + self.adaptiveInterval(base: syncBaseMs)
+                // requestMissingMedia runs inside syncWithContacts (already throttled) — do not
+                // call it again here or every tick doubles the media-scan + restore Tasks.
                 self.syncWithContacts()
-                // Persistently retry any media an interrupted nearby/iroh transfer left incomplete —
-                // re-request direct from contacts AND pull from the circle relay if one exists.
-                self.requestMissingMedia()
                 RelayHost.shared.meshSyncTick()   // if we host a relay, pull from sibling relays
                 RelayMailboxStore.shared.purgeStale()   // GC relays inactive + unseen > 7 days
                 self.maybeWeeklyMediaSweep()      // orphaned media blobs (at most once a week)
@@ -1758,7 +1774,8 @@ final class FeedStore: ObservableObject {
             // roster — but their relay node (== their device messaging endpoint, one-endpoint design) IS
             // reachable. Push my roster there so the relay-hosting friend learns + authorizes my device id
             // (that's what lets me then read their mailbox). Skip my own hosted relay.
-            if !rosterWire.isEmpty {
+            // When idle, skip warm relays too — re-publishing every sync tick was pure dial heat.
+            if !rosterWire.isEmpty, !skipWarmKeepalives {
                 // Exclude OUR OWN ids: sending to our device id (RelayHost.nodeId) or our account id is a
                 // self-dial. A stale relay-list entry == our account id (pre-device-seed leftover) that
                 // resolves back to us sends iroh path discovery into the runaway loop (the 100GB leak). We
@@ -1777,7 +1794,13 @@ final class FeedStore: ObservableObject {
             if circle.id == "default" { nearbyBroadcast(0, hello) }
             // (Own-device nearby catch-up of events moved below — every cycle, off-main.)
             // Mesh: let a relay carry our handshake to members we can't reach directly.
-            originateRelay(dests: Array(targets), inner: frame(0, hello))
+            // When idle, only mesh-originate to cold targets (same filter as the iroh keep-alives).
+            let meshDests: [String] = skipWarmKeepalives
+                ? targets.filter { !recentlyHeard($0, withinMs: 120_000, nowMs: nowMs) }
+                : Array(targets)
+            if !meshDests.isEmpty {
+                originateRelay(dests: meshDests, inner: frame(0, hello))
+            }
         }
         if resendHistory { lastHistoryResendMs = nowMs }
         // PULL the rosters we're missing. Announcing ours (frame 27, above) only works when the
@@ -1956,10 +1979,15 @@ final class FeedStore: ObservableObject {
     private func nearbyPeerConnected() {
         guard let social else { return }
         nearbyActive = true
-        bumpActivity()   // a peer just appeared → sync tight for the catch-up burst
-        // S4: if this device is mid seedless-enrollment, a primary that only just came into range now
-        // gets our frame-28 request (the ticket is single-use but the request is safe to resend).
+        // Multipeer flaps (connect → broken-pipe → reconnect) were observed live on device: each
+        // transition re-armed tight sync cadence + re-exported 150 envelopes/circle + re-announced
+        // relays. Debounce the heavy catch-up to once per 45s; light enroll still retries.
+        let nowMs = now()
+        let flap = lastNearbyConnectMs > 0 && (nowMs &- lastNearbyConnectMs) < 45_000
+        lastNearbyConnectMs = nowMs
         if pendingEnrollTicket != nil { sendEnrollRequest() }
+        if flap { return }
+        bumpActivity()   // a peer just appeared → sync tight for the catch-up burst
         reannounceOwnRelay()   // a freshly-connected sibling/friend immediately learns this host's relay
         // FIRST: offer this device's sealed self-sync slot to nearby peers. ONLY our own devices (same
         // seed) can open it — it's how a linked Mac/phone bootstraps circles + profile + posts LOCALLY,

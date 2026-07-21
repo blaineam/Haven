@@ -38,7 +38,9 @@ enum SilentSwitch {
 
     /// How often the switch is re-probed while the app is in the foreground. Flipping the physical switch
     /// takes effect within this window rather than requiring the app to be force-quit and relaunched.
-    private static let pollSeconds = 2.0
+    /// 15s (was 2s): each probe plays a silent system sound and wakes AudioSession — at 2s that was
+    /// ~30 audio wakeups/min for the whole foreground session (battery + heat for no UX win).
+    private static let pollSeconds = 15.0
 
     @MainActor private static var timer: Timer?
     @MainActor private static var probing = false

@@ -104,7 +104,16 @@ extension NearbyTransport: MCSessionDelegate {
         // no other thread ever needs to touch session.connectedPeers.
         let peers = session.connectedPeers
         peersLock.lock(); peersSnapshot = peers; peersLock.unlock()
-        if state == .connected { onPeerConnected() }
+        if state == .connected {
+            onPeerConnected()
+            // Battery: stop browsing once we have a live peer. Continuous MC browse keeps BLE +
+            // peer-to-peer Wi-Fi discovery scanning even while already connected (device log:
+            // Multipeer packet storms + reconnect flaps with Mac). Advertising stays on so others
+            // can still find us; browsing resumes when we drop to zero peers.
+            if !peers.isEmpty { browser.stopBrowsingForPeers() }
+        } else if peers.isEmpty {
+            browser.startBrowsingForPeers()
+        }
     }
     func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
         onInbound(data)

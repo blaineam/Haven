@@ -159,6 +159,8 @@ final class FeedStore: ObservableObject {
     /// Last Multipeer `connected` callback — flaps reconnect every few seconds on BLE and used
     /// to re-arm tight sync + re-export history each time (device log: DTLS broken-pipe storms).
     private var lastNearbyConnectMs: UInt64 = 0
+    /// Last Multipeer media push on the sync path (not connect path). Mac→iPhone flood fix.
+    private var lastNearbyMediaPushMs: UInt64 = 0
     /// Base cadences and the idle multipliers. Idle <3min = base; <15min = ×3; else ×6.
     /// Thermal pressure and super data saver stretch further so a warm phone (or one the user
     /// asked to go easy on the radio) isn't also blasting hello+roster at the tight cadence.
@@ -1866,27 +1868,11 @@ final class FeedStore: ObservableObject {
         // waiting for the 3-min full re-send. Re-seal (the expensive part) runs OFF the main thread; only the
         // cheap fan-out hops back to main. Capped to recent events so it isn't a congestion/CPU sink. The
         // receiver dedups known events, so re-broadcasting is harmless.
-        // Own-device nearby catch-up RE-SEALS up to 50 events per circle (a hybrid signature each) —
-        // real CPU. Only worth doing when a nearby sibling is actually connected to receive it;
-        // otherwise it was pure heat every 20s on a phone with no Mac nearby. When no nearby peer is
-        // present the internet + mailbox paths already carry everything.
-        if nearby?.hasConnectedPeers == true {
-            let cidsForNearby = circles.map(\.id)
-            Task.detached(priority: .utility) { [weak self, social] in
-                var work: [(String, [Data])] = []
-                for cid in cidsForNearby {
-                    // export_recent_envelopes = ALL authors (mine + received), so a sibling catches up on friends'
-                    // posts/DMs I received too — not just my own (which syncEnvelopes was limited to).
-                    let envs = social.exportRecentEnvelopes(circleId: cid, limit: 50)
-                    if !envs.isEmpty { work.append((cid, envs)) }
-                }
-                let workFinal = work
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
-                    for (cid, envs) in workFinal { for env in envs { self.nearbyBroadcast(1, self.eventPayload(cid, env)) } }
-                }
-            }
-        }
+        // Own-device nearby catch-up of history belongs on **connect** (`nearbyPeerConnected`), NOT
+        // every sync tick. Mac used to re-export 50 envelopes × every circle over Multipeer every
+        // ~20s while the iPhone was connected — field log: continuous IncomingPacket / 32KB frames
+        // and a hot phone. Internet own-device catch-up below covers multi-device when not nearby.
+        // (Intentionally no periodic Multipeer history dump here.)
         // Own-device catch-up over the INTERNET. The nearby sweep above only runs when a sibling is
         // physically connected — so two devices on different networks never reconciled, and anything
         // that reached only ONE of them stayed there. That is the "a DM landed on my Mac and never on
@@ -1935,8 +1921,12 @@ final class FeedStore: ObservableObject {
             // ERR-forbidding our mailbox ops — the "my own NAS relay rejects my phone" fix.
             Task { await SharedStore.publishDeviceRoster(social: social) }
         }
-        // Only push media over nearby when a sibling is actually connected (else it's idle work).
-        if nearby?.hasConnectedPeers == true { pushOwnMediaNearby() }
+        // Multipeer media: at most every 5 min on the sync path (connect still pushes once).
+        // Every-tick pushOwnMediaNearby from Mac was a major iPhone heat source.
+        if nearby?.hasConnectedPeers == true, nowMs &- lastNearbyMediaPushMs > 300_000 {
+            lastNearbyMediaPushMs = nowMs
+            pushOwnMediaNearby()
+        }
         requestMissingMedia()
     }
 

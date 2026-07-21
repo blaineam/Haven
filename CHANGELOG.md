@@ -26,6 +26,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Push banners name the real activity.** Reactions no longer say "Posted in the Circle", stories
+  say "Shared a story…", DMs show a short message preview (or "Sent a photo" / voice note), and
+  comments include a clipped preview. The NSE still only decrypts a tiny sealed JSON — richness is
+  decided at send time (`PushBanner`) because the extension has no circle engine. Un-reacts and
+  moderation flags stay silent so they don't spam the lock screen.
 - **DM push inbox no longer leaves sibling devices with a banner and an empty thread.** Inline push
   events now fan out to the user's other online devices, fetch DM media, recompute DM badges, and
   still pull the mailbox for anything that didn't fit in the push payload.

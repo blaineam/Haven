@@ -865,7 +865,8 @@ final class FeedStore: ObservableObject {
     /// disappearing retention (seconds; the message auto-deletes after that).
     func sendMessage(to circleId: String, _ body: String, media: [String], music: TrackRefFfi?, retentionSecs: UInt64? = nil) {
         guard let social, let env = try? social.post(circleId: circleId, body: body, media: media, music: music, retentionSecs: retentionSecs, story: false, muteVideo: false, createdAt: now()) else { return }
-        broadcastEvent(circleId, env)
+        let name = circles.first(where: { $0.id == circleId })?.name ?? "your circle"
+        broadcastEvent(circleId, env, banner: .forPost(circleId: circleId, circleName: name, body: body, media: media, story: false))
         postTick += 1
         let circle = circleId
         for ref in media { MediaBackupQueue.shared.enqueue(ref, circleId: circle, social: social) }
@@ -880,13 +881,14 @@ final class FeedStore: ObservableObject {
     func editMessage(in circleId: String, _ id: String, _ body: String,
                      media: [String] = [], music: TrackRefFfi? = nil) {
         guard let social, let env = try? social.edit(circleId: circleId, target: id, body: body, media: media, music: music, muteVideo: false, createdAt: now()) else { return }
-        broadcastEvent(circleId, env); postTick += 1; refresh()
+        let name = circles.first(where: { $0.id == circleId })?.name ?? "your circle"
+        broadcastEvent(circleId, env, banner: .forEdit(circleId: circleId, circleName: name)); postTick += 1; refresh()
     }
 
     /// Delete (retract) one of your own messages in a specific (DM) circle.
     func deleteMessage(in circleId: String, _ id: String) {
         guard let social, let env = try? social.unsend(circleId: circleId, target: id, createdAt: now()) else { return }
-        broadcastEvent(circleId, env); postTick += 1; refresh()
+        broadcastEvent(circleId, env, banner: .forUnsend(circleId: circleId)); postTick += 1; refresh()
     }
 
     /// Delete a whole DM conversation locally (also clears any old contaminated thread).
@@ -1484,7 +1486,7 @@ final class FeedStore: ObservableObject {
         guard let social, !sensitiveRefs(circleId: circleId).contains(ref) else { return }
         guard let env = try? social.flagSensitive(circleId: circleId, target: ref, createdAt: now()) else { return }
         sensitiveCache[circleId, default: []].insert(ref)   // optimistic local
-        broadcastEvent(circleId, env)
+        broadcastEvent(circleId, env, silent: true)   // not user-facing news
         objectWillChange.send()
     }
 
@@ -1516,7 +1518,7 @@ final class FeedStore: ObservableObject {
     @discardableResult
     func report(circleId: String, target: String, reason: String, comment: String) -> String? {
         guard let social, let env = try? social.report(circleId: circleId, target: target, reason: reason, comment: comment, createdAt: now()) else { return nil }
-        broadcastEvent(circleId, env)
+        broadcastEvent(circleId, env, silent: true)   // deliver the report without a lock-screen banner
         HiddenStore.shared.hide(target)
         reportsCache.removeValue(forKey: circleId)
         let author = reports(circleId: circleId)[target]?.first?.author
@@ -1554,16 +1556,20 @@ final class FeedStore: ObservableObject {
 
     func post(_ body: String, media: [String] = [], music: TrackRefFfi? = nil, retentionSecs: UInt64? = nil, story: Bool = false, muteVideo: Bool = false) {
         guard let social, let env = try? social.post(circleId: activeCircleId, body: body, media: media, music: music, retentionSecs: retentionSecs, story: story, muteVideo: muteVideo, createdAt: now()) else { return }
-        broadcastEvent(activeCircleId, env); postTick += 1; refresh()
-        let circle = activeCircleId
-        for ref in media { MediaBackupQueue.shared.enqueue(ref, circleId: circle, social: social) }
+        let cid = activeCircleId
+        let name = circles.first(where: { $0.id == cid })?.name ?? "your circle"
+        broadcastEvent(cid, env, banner: .forPost(circleId: cid, circleName: name, body: body, media: media, story: story))
+        postTick += 1; refresh()
+        for ref in media { MediaBackupQueue.shared.enqueue(ref, circleId: cid, social: social) }
     }
 
     /// Post to a SPECIFIC circle (used by the scheduler when a queued post fires — the target
     /// circle may not be the active one). Same seal → broadcast → mailbox-backup path as `post`.
     func postScheduled(circleId: String, body: String, media: [String]) {
         guard let social, let env = try? social.post(circleId: circleId, body: body, media: media, music: nil, retentionSecs: nil, story: false, muteVideo: false, createdAt: now()) else { return }
-        broadcastEvent(circleId, env); postTick += 1
+        let name = circles.first(where: { $0.id == circleId })?.name ?? "your circle"
+        broadcastEvent(circleId, env, banner: .forPost(circleId: circleId, circleName: name, body: body, media: media, story: false))
+        postTick += 1
         if circleId == activeCircleId { refresh() }
         for ref in media { MediaBackupQueue.shared.enqueue(ref, circleId: circleId, social: social) }
     }
@@ -1571,7 +1577,9 @@ final class FeedStore: ObservableObject {
     /// Post text to a specific circle (used by App Intents with a circle filter).
     func post(_ body: String, toCircle circleId: String) {
         guard let social, let env = try? social.post(circleId: circleId, body: body, media: [], music: nil, retentionSecs: nil, story: false, muteVideo: false, createdAt: now()) else { return }
-        broadcastEvent(circleId, env); postTick += 1; refresh()
+        let name = circles.first(where: { $0.id == circleId })?.name ?? "your circle"
+        broadcastEvent(circleId, env, banner: .forPost(circleId: circleId, circleName: name, body: body, media: [], story: false))
+        postTick += 1; refresh()
     }
 
     /// Post a full-screen story to the active circle — auto-expires after 24h (retention).
@@ -1601,31 +1609,37 @@ final class FeedStore: ObservableObject {
     var feedItems: [FeedItemFfi] { items.filter { !$0.story && !$0.unsent } }
     func comment(_ id: String, _ body: String, _ media: [String] = []) {
         guard let social, let env = try? social.comment(circleId: activeCircleId, target: id, body: body, media: media, createdAt: now()) else { return }
-        broadcastEvent(activeCircleId, env); refresh()
+        let cid = activeCircleId
+        let name = circles.first(where: { $0.id == cid })?.name ?? "your circle"
+        broadcastEvent(cid, env, banner: .forComment(body: body, circleId: cid, circleName: name)); refresh()
     }
     func react(_ id: String, _ emoji: String) {
         guard let social, let env = try? social.react(circleId: activeCircleId, target: id, emoji: emoji, createdAt: now()) else { return }
-        broadcastEvent(activeCircleId, env); reactionTick += 1; refresh()
+        broadcastEvent(activeCircleId, env, banner: .forReaction(emoji: emoji, circleId: activeCircleId))
+        reactionTick += 1; refresh()
     }
     /// Remove my own reaction (emoji) from a post/comment in the active circle.
+    /// Silent: un-react is not news worth a lock-screen banner (and would look like a new reaction).
     func unreact(_ id: String, _ emoji: String) {
         guard let social, let env = try? social.unreact(circleId: activeCircleId, target: id, emoji: emoji, createdAt: now()) else { return }
-        broadcastEvent(activeCircleId, env); reactionTick += 1; refresh()
+        broadcastEvent(activeCircleId, env, silent: true); reactionTick += 1; refresh()
     }
     /// React to a message in a specific (DM) circle.
     func reactMessage(in circleId: String, _ id: String, _ emoji: String) {
         guard let social, let env = try? social.react(circleId: circleId, target: id, emoji: emoji, createdAt: now()) else { return }
-        broadcastEvent(circleId, env); reactionTick += 1; refresh()
+        broadcastEvent(circleId, env, banner: .forReaction(emoji: emoji, circleId: circleId))
+        reactionTick += 1; refresh()
     }
-    /// Remove my own reaction from a message in a specific (DM) circle.
+    /// Remove my own reaction from a message in a specific (DM) circle. Silent (see `unreact`).
     func unreactMessage(in circleId: String, _ id: String, _ emoji: String) {
         guard let social, let env = try? social.unreact(circleId: circleId, target: id, emoji: emoji, createdAt: now()) else { return }
-        broadcastEvent(circleId, env); reactionTick += 1; refresh()
+        broadcastEvent(circleId, env, silent: true); reactionTick += 1; refresh()
     }
     /// Comment on a post in a specific circle (used by the deep-link post viewer).
     func commentMessage(in circleId: String, _ id: String, _ body: String, _ media: [String] = []) {
         guard let social, let env = try? social.comment(circleId: circleId, target: id, body: body, media: media, createdAt: now()) else { return }
-        broadcastEvent(circleId, env); refresh()
+        let name = circles.first(where: { $0.id == circleId })?.name ?? "your circle"
+        broadcastEvent(circleId, env, banner: .forComment(body: body, circleId: circleId, circleName: name)); refresh()
     }
     /// Auto-save freshly-received media to Photos (Haven ▸ Received) when "Save to Photos" is on.
     func autoSaveReceived(_ ref: String) {
@@ -1639,13 +1653,14 @@ final class FeedStore: ObservableObject {
     }
     func edit(_ id: String, _ body: String, media: [String] = [], music: TrackRefFfi? = nil, muteVideo: Bool = false) {
         guard let social, let env = try? social.edit(circleId: activeCircleId, target: id, body: body, media: media, music: music, muteVideo: muteVideo, createdAt: now()) else { return }
-        broadcastEvent(activeCircleId, env); refresh()
-        let circle = activeCircleId
-        for ref in media { MediaBackupQueue.shared.enqueue(ref, circleId: circle, social: social) }
+        let cid = activeCircleId
+        let name = circles.first(where: { $0.id == cid })?.name ?? "your circle"
+        broadcastEvent(cid, env, banner: .forEdit(circleId: cid, circleName: name)); refresh()
+        for ref in media { MediaBackupQueue.shared.enqueue(ref, circleId: cid, social: social) }
     }
     func unsend(_ id: String) {
         guard let social, let env = try? social.unsend(circleId: activeCircleId, target: id, createdAt: now()) else { return }
-        broadcastEvent(activeCircleId, env); refresh()
+        broadcastEvent(activeCircleId, env, banner: .forUnsend(circleId: activeCircleId)); refresh()
     }
 
     // MARK: - Wire protocol  [type][payload]: 0 Hello, 1 Event, 3 MediaReq, 5 MediaChunk
@@ -1947,20 +1962,27 @@ final class FeedStore: ObservableObject {
     }
 
     /// `silent` suppresses the recipient banner — the event still delivers and still syncs. Use it for
-    /// a republish that is not news (see the re-optimize pass); everything a person actually wrote
-    /// should notify normally.
-    private func broadcastEvent(_ circleId: String, _ env: Data, silent: Bool = false) {
+    /// a republish that is not news (see the re-optimize pass) or un-reacts; everything a person
+    /// actually wrote should notify with a kind-specific `banner`.
+    ///
+    /// `banner` is the lock-screen copy the recipient's NSE will show after decrypting. The NSE has
+    /// the seed alone and cannot open circle events, so richness (reaction vs story vs DM preview)
+    /// MUST be decided here at send time. Nil falls back to the legacy generic line.
+    private func broadcastEvent(_ circleId: String, _ env: Data, silent: Bool = false,
+                                banner: PushBanner? = nil) {
         bumpActivity()   // I just posted/messaged → keep sync tight
         let payload = eventPayload(circleId, env)
         let members = social?.contactNodeIds(circleId: circleId) ?? []
-        // Build the push banner once: title = my name, body keyed to the circle. We seal it
+        // Build the push banner once: title = my name, body keyed to the KIND of event. We seal it
         // *per recipient* below so the relay only ever forwards ciphertext.
         let myName = ProfileStore.shared.displayName.isEmpty ? "Someone" : ProfileStore.shared.displayName
         let isDM = circleId.hasPrefix("dm:")
         let circleName = circles.first(where: { $0.id == circleId })?.name ?? "your circle"
-        let body = isDM ? "Sent you a message" : "Posted in \(circleName)"
+        let resolved = banner ?? .generic(isDM: isDM, circleName: circleName)
         // `c` lets the recipient's NSE redact the banner if *they've* locked this circle.
-        let notifJSON = (try? JSONSerialization.data(withJSONObject: ["t": myName, "b": body, "c": circleId])) ?? Data()
+        // `k`/`e` let a modern NSE group and format; older NSEs ignore unknown keys.
+        let notifJSON = (try? JSONSerialization.data(
+            withJSONObject: resolved.jsonObject(title: myName, circleId: circleId))) ?? Data()
         let eventB64 = env.base64EncodedString()   // the sealed circle event, for push-inline sync
         PushManager.shared.syncSelf(event: eventB64)   // multi-device: deliver to my own other devices
         // Deliver the event to each member's DEVICE node ids (+ account id for old-build peers) — the account

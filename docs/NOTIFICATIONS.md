@@ -69,8 +69,27 @@ Worker).
 5. Local notifications + the (crash-fixed) background refresh remain as a fallback.
 
 ### Sealed banner wire format
-The relay's `e` = base64 of `seal_media`'s layout `[32 eph_x_pub][u32 LE pq_len][pq_ct][AEAD]`.
-Plaintext is JSON `{ "t": "<sender name>", "b": "Sent you a message" | "Posted in <circle>" }`.
+The relay's `e` = base64 of the signed notification envelope (see `seal_signed_notification`).
+Plaintext is JSON built by `PushBanner` on the **sender** (the NSE has the seed alone and
+cannot open circle events, so every bit of richness has to ride here):
+
+```json
+{ "t": "<sender display name>",
+  "b": "<human body line>",
+  "c": "<circleId>",
+  "k": "post|story|dm|react|comment|edit|unsend|…",
+  "e": "<emoji>" }
+```
+
+Examples of `b`:
+- DM text: `"on my way"` (preview, truncated; secret messages become `"🔒 Secret message"`)
+- Reaction: `"Reacted ❤️ to your post"` / `"Reacted 😂 to your message"`
+- Story: `"Shared a story in Family"`
+- Comment: `"Commented in Family: love this"`
+- Post with media only: `"Shared a photo in Family"`
+
+Older clients that only read `t`/`b`/`c` keep working; unknown keys are ignored. The NSE
+sets `threadIdentifier` from `c` so a burst of DMs stacks as one conversation.
 
 ### Still device/pipeline-only
 APNs and the NSE don't run in the iOS Simulator, so live decryption is verified on a physical

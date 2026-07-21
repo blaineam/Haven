@@ -314,6 +314,7 @@ targets:
       - path: HavenApp/RelayAddress.swift
       - path: HavenApp/MediaVariants.swift
       - path: HavenApp/FileArchive.swift
+      - path: HavenApp/PushBanner.swift
       - path: HavenLogicTests
     settings:
       base:

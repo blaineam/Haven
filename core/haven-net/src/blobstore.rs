@@ -1596,14 +1596,25 @@ pub struct BlobClient {
     /// hole-punch machinery. That is why the phone ran hot. Failing fast during the cooldown also
     /// stops a doomed op from occupying its caller for the full 12s dial timeout.
     last_dial_fail: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    /// Consecutive dial failures to `dest` (reset on success). Drives escalating cooldown so a
+    /// permanently-dead relay id doesn't re-enter path discovery every mailbox poll.
+    dial_fails: Arc<std::sync::atomic::AtomicU32>,
     /// Circles we have already tried to ENROLL with this relay, so a relay that refuses (or an OLD
     /// relay that answers `ERR verb`) costs one extra round trip per circle per process — not one on
     /// every mailbox op forever.
     enrolled: Arc<std::sync::Mutex<HashSet<String>>>,
 }
 
-/// How long to stop re-dialling a peer whose last dial failed.
-const DIAL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5);
+/// Base cooldown after a blob dial failure. Escalates with `dial_fails` (see `blob_dial_cooldown`).
+/// Was 5s — short enough that a 20–45s mailbox poll re-armed doomed dials continuously.
+const DIAL_COOLDOWN_BASE: std::time::Duration = std::time::Duration::from_secs(60);
+const DIAL_COOLDOWN_CAP: std::time::Duration = std::time::Duration::from_secs(900);
+
+fn blob_dial_cooldown(fails: u32) -> std::time::Duration {
+    let f = fails.max(1);
+    let secs = (DIAL_COOLDOWN_BASE.as_secs() << (f.min(5) - 1)).min(DIAL_COOLDOWN_CAP.as_secs());
+    std::time::Duration::from_secs(secs)
+}
 
 impl BlobClient {
     /// Connect by the volunteer's hex node id (discovery resolves a live address).
@@ -1627,7 +1638,15 @@ impl BlobClient {
         if endpoint.id() == dest.id {
             anyhow::bail!("refusing to dial our own node id (blob self-connect guard)");
         }
-        Ok(Self { endpoint, dest, conn: Arc::new(tokio::sync::Mutex::new(None)), owns_endpoint: true, last_dial_fail: Arc::new(std::sync::Mutex::new(None)), enrolled: Arc::new(std::sync::Mutex::new(HashSet::new())) })
+        Ok(Self {
+            endpoint,
+            dest,
+            conn: Arc::new(tokio::sync::Mutex::new(None)),
+            owns_endpoint: true,
+            last_dial_fail: Arc::new(std::sync::Mutex::new(None)),
+            dial_fails: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            enrolled: Arc::new(std::sync::Mutex::new(HashSet::new())),
+        })
     }
 
     /// Reuse an EXISTING, warm endpoint (the messaging node's) instead of binding a fresh one. The
@@ -1639,7 +1658,15 @@ impl BlobClient {
         if endpoint.id() == dest.id {
             anyhow::bail!("refusing to dial our own node id (blob self-connect guard)");
         }
-        Ok(Self { endpoint, dest, conn: Arc::new(tokio::sync::Mutex::new(None)), owns_endpoint: false, last_dial_fail: Arc::new(std::sync::Mutex::new(None)), enrolled: Arc::new(std::sync::Mutex::new(HashSet::new())) })
+        Ok(Self {
+            endpoint,
+            dest,
+            conn: Arc::new(tokio::sync::Mutex::new(None)),
+            owns_endpoint: false,
+            last_dial_fail: Arc::new(std::sync::Mutex::new(None)),
+            dial_fails: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            enrolled: Arc::new(std::sync::Mutex::new(HashSet::new())),
+        })
     }
 
     /// Return the ONE warm connection to `dest`, reusing it if still open, else dialing (and caching) a
@@ -1651,11 +1678,14 @@ impl BlobClient {
                 return Ok(c.clone());
             }
         }
-        // A recent dial failure means don't try again yet — see `last_dial_fail`.
-        if let Ok(g) = self.last_dial_fail.lock() {
-            if let Some(t) = *g {
-                if t.elapsed() < DIAL_COOLDOWN {
-                    bail!("relay dial in cooldown");
+        // Escalating cooldown after failures — see `dial_fails` / `blob_dial_cooldown`.
+        let fails = self.dial_fails.load(std::sync::atomic::Ordering::Relaxed);
+        if fails > 0 {
+            if let Ok(g) = self.last_dial_fail.lock() {
+                if let Some(t) = *g {
+                    if t.elapsed() < blob_dial_cooldown(fails) {
+                        bail!("relay dial in cooldown");
+                    }
                 }
             }
         }
@@ -1666,11 +1696,13 @@ impl BlobClient {
         match dialed {
             Ok(c) => {
                 if let Ok(mut g) = self.last_dial_fail.lock() { *g = None; }
+                self.dial_fails.store(0, std::sync::atomic::Ordering::Relaxed);
                 *guard = Some(c.clone());
                 Ok(c)
             }
             Err(e) => {
                 if let Ok(mut g) = self.last_dial_fail.lock() { *g = Some(std::time::Instant::now()); }
+                let _ = self.dial_fails.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Err(e)
             }
         }

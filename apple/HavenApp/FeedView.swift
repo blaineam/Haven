@@ -1723,6 +1723,10 @@ final class FeedStore: ObservableObject {
         // The nearby broadcast is a single LOCAL fan-out (not × contacts) and is the own-device
         // (iPhone↔Mac) sync path, so it stays every cycle.
         let resendHistory = nowMs - lastHistoryResendMs > 180_000   // ~3 min; gates the WHOLE history re-send
+        // When the app is open but quiet, skip keep-alive hello/roster to peers we heard from
+        // recently. Real posts still go out via broadcastEvent; mailbox/poll covers the offline case.
+        // Without this, every sync tick redials every warm peer (iroh path discovery / radio heat).
+        let skipWarmKeepalives = (nowMs &- lastActivityMs) > 60_000
         for circle in circles {
             guard let hello = helloPayload(circleId: circle.id, circleName: circle.name) else { continue }
             // syncEnvelopes RE-SEALS every one of my events — expensive. Calling it for every circle on every
@@ -1738,6 +1742,9 @@ final class FeedStore: ObservableObject {
                 for c in ContactsStore.shared.contacts { targets.insert(c.idHex) }
             }
             for nodeHex in targets {
+                if skipWarmKeepalives, recentlyHeard(nodeHex, withinMs: 120_000, nowMs: nowMs) {
+                    continue
+                }
                 sendIroh(0, hello, to: nodeHex)
                 if !rosterWire.isEmpty { sendIroh(27, rosterWire, to: nodeHex) }   // announce my device roster
                 // Per-contact history re-send is the flood — throttle it (offline members get history
@@ -1890,7 +1897,10 @@ final class FeedStore: ObservableObject {
     /// the iPhone "sees the Mac nearby but won't show its relay", and why an adopted EXTERNAL relay
     /// (NAS docker daemon) never reached circle members at all: only the self-hosted relay was ever
     /// re-announced. Android already re-announces all circle relays per hello — this is that parity.
-    /// Cheap (one small sealed announce per relay per circle), so it's safe every sync tick.
+    ///
+    /// Callers: host start / nearby connect / adopt may fire immediately; the periodic sync path
+    /// must throttle via `lastRelayReannounceMs` (not every tick — each call fans out sealed
+    /// frame-19 to every member over iroh and re-arms dials to unreachable ids).
     func reannounceOwnRelay() {
         guard let social else { return }
         for ci in circles {

@@ -129,19 +129,21 @@ pub fn endpoint_policy() -> EndpointPolicy {
 /// bind site shares the same scar-fix (cross-NAT multipath negotiation).
 pub fn haven_endpoint_builder() -> Builder {
     let policy = endpoint_policy();
-    // Multipath must stay ON (iroh path manager assumes it) but 16 concurrent paths made
-    // hole-punch / path-probe UDP explode on phones — field log: ~350k UDP packets + ~0.5GB
-    // in ~5 minutes, phone heat + multi-% battery burn. Cap aggressively on mobile; desktop
-    // still gets more headroom for multi-homed home relays.
-    #[cfg(any(target_os = "ios", target_os = "android"))]
-    let max_mp = 4u32;
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
-    let max_mp = 8u32;
+    // Multipath must stay ON (iroh path manager assumes it). We previously set 16, which
+    // multiplied hole-punch / path-probe UDP on phones — field log: ~350k UDP packets + ~0.5GB
+    // in ~5 minutes, thermal HIGH_TEMP_ACTIVE, multi-% battery burn.
+    //
+    // iroh's QuicTransportConfigBuilder **ignores** values below 9
+    // (`MAX_MULTIPATH_PATHS + 1` where `MAX_MULTIPATH_PATHS = 8` in iroh 1.0.2) and leaves the
+    // builder default (8). So "cap at 4" is a silent no-op. Explicitly set the floor (9) —
+    // the lowest value iroh will actually honor — globally. That is still multipath-on and
+    // well below the old 16.
+    const MAX_MP: u32 = 9;
     Endpoint::builder(N0)
         .relay_mode(policy.relay_mode())
         .transport_config(
             QuicTransportConfig::builder()
-                .max_concurrent_multipath_paths(max_mp)
+                .max_concurrent_multipath_paths(MAX_MP)
                 .build(),
         )
 }

@@ -161,13 +161,14 @@ enum PlatformPasteboard {
     }
 }
 
-// MARK: - Idle timer (keep the device serving while the relay is hosted)
+// MARK: - Idle timer (keep a Mac serving while the relay is hosted)
 
-/// `UIApplication.isIdleTimerDisabled` on iOS (the app only relays while foreground, so the screen
-/// must stay on); an `IOPMAssertion` on macOS. The Mac assertion prevents SYSTEM sleep only — the
-/// display is free to sleep, since the app keeps running either way. (It used to be
-/// `PreventUserIdleDisplaySleep` named "Haven media playback", which held the screen awake for the
-/// entire multi-day life of a relay-hosting Mac.)
+/// Prevent system sleep **on Mac only** while hosting a relay (`IOPMAssertion` —
+/// system sleep, display may dim). On iPhone/iPad this is deliberately a **no-op**:
+/// pinning `isIdleTimerDisabled` kept the screen awake for the whole hosting session
+/// and was a major battery/heat source (field: multi-% drain in minutes with the app
+/// merely open). Phone relay work already stops when the app backgrounds; calls still
+/// set the idle timer directly in `CallManager`.
 enum PlatformIdle {
     #if !canImport(UIKit)
     private static var assertion: IOPMAssertionID = 0
@@ -177,7 +178,8 @@ enum PlatformIdle {
     static var disabled: Bool = false {
         didSet {
             #if canImport(UIKit)
-            UIApplication.shared.isIdleTimerDisabled = disabled
+            // iOS/iPadOS: never pin the screen for relay hosting.
+            _ = disabled
             #else
             setMacAssertion(disabled)
             #endif

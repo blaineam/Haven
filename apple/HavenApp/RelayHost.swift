@@ -295,7 +295,9 @@ final class RelayHost: ObservableObject {
         setHandle(nil)         // releases the FFI handle (best-effort; OS reclaims on exit)
         serving = false
         nodeId = ""
+        #if os(macOS)
         PlatformIdle.disabled = false
+        #endif
     }
 
     /// Mesh anti-entropy: while we're hosting, pull every sealed blob each SIBLING relay holds that

@@ -62,6 +62,10 @@ pub struct Config {
     /// tunnel), e.g. `https://relay.example.com`. Printed for the operator to hand to circle
     /// members; defaults to the LAN address when unset.
     pub http_url: Option<String>,
+    /// When true and `http_url` is unset, start a Cloudflare Quick Tunnel (`*.trycloudflare.com`)
+    /// against the local HTTP interface so remote members can reach media without port-forwarding.
+    /// Default ON for serious always-on deployments; `--no-tunnel` disables; `--http-url` wins.
+    pub auto_tunnel: bool,
     /// Bearer token the HTTP interface requires (generated once, persisted next to the seed).
     pub http_token: String,
     /// Operator-chosen store retention (mailbox TTL override + optional media age/size
@@ -96,6 +100,9 @@ struct FileConfig {
     /// Public URL for the HTTP interface (reverse proxy / port-forward / tunnel).
     #[serde(default)]
     http_url: Option<String>,
+    /// Auto Cloudflare Quick Tunnel when http_url is unset (default true).
+    #[serde(default)]
+    auto_tunnel: Option<bool>,
     /// Mailbox TTL override in days (default 30).
     #[serde(default)]
     mailbox_ttl_days: Option<u64>,
@@ -179,6 +186,15 @@ impl Config {
             Some(arg_value(args, "--http").unwrap_or_else(|| DEFAULT_HTTP_BIND.to_string()))
         };
         let http_url = arg_value(args, "--http-url");
+        // Auto quick-tunnel: ON by default when no explicit public URL. `--no-tunnel` disables;
+        // `--tunnel` forces on even if a stale config said otherwise.
+        let auto_tunnel = if args.iter().any(|a| a == "--no-tunnel") {
+            false
+        } else if args.iter().any(|a| a == "--tunnel") {
+            true
+        } else {
+            http_url.is_none() // default: tunnel when we have no stable public URL
+        };
 
         // Operator-chosen retention. Absent/0 media limits = today's behavior (never delete).
         let retention = resolve_retention(
@@ -193,7 +209,10 @@ impl Config {
 
         let seed = load_or_create_seed(&data_dir)?;
         let http_token = load_or_create_http_token(&data_dir)?;
-        Ok(Self { link, data_dir, seed, backend, s3_port, rclone_bin, rclone_config, peers, http_bind, http_url, http_token, retention })
+        Ok(Self {
+            link, data_dir, seed, backend, s3_port, rclone_bin, rclone_config, peers,
+            http_bind, http_url, auto_tunnel, http_token, retention,
+        })
     }
 
     fn from_file(path: &str) -> Result<Self> {
@@ -248,7 +267,8 @@ impl Config {
                 .filter(|h| h.len() == 64)
                 .collect(),
             http_bind,
-            http_url: fc.http_url,
+            http_url: fc.http_url.clone(),
+            auto_tunnel: fc.auto_tunnel.unwrap_or(fc.http_url.is_none()),
             http_token,
             retention,
         })

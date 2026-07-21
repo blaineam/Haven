@@ -144,7 +144,21 @@ final class RelayHost: ObservableObject {
             do { port = try await h.serveHttp(bind: "0.0.0.0:8674", token: token) }
             catch { port = try? await h.serveHttp(bind: "0.0.0.0:0", token: token) }   // port taken → ephemeral
             guard let self, let port else { HavenLog.relay("relay http serve FAILED"); return }
-            let urls = Self.reachableHttpUrls(port: port)
+            var urls = Self.reachableHttpUrls(port: port)
+            // Desktop-class hosts: if the operator didn't set a stable public URL, open a free
+            // Cloudflare Quick Tunnel so remote members can fetch media without port-forwarding.
+            // Ephemeral hostname; killed when hosting stops. iOS skips (no helper binary).
+            #if os(macOS)
+            // reachableHttpUrls returns only the configured public URL when set — if empty, try tunnel.
+            let configuredPublic = UserDefaults.standard.string(forKey: "haven.relay.publicURL")?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if configuredPublic.isEmpty, CloudflaredTunnel.shared.autoEnabled {
+                if let tunnelURL = await CloudflaredTunnel.shared.start(port: port) {
+                    urls = [tunnelURL] + urls
+                    HavenLog.relay("relay quick tunnel \(tunnelURL)")
+                }
+            }
+            #endif
             HavenLog.relay("relay http on :\(port) urls=\(urls.joined(separator: " "))")
             guard !urls.isEmpty, !self.nodeId.isEmpty else { return }
             RelayMailboxStore.shared.setHttpInterface(self.nodeId, urls: urls, token: token)
@@ -228,6 +242,9 @@ final class RelayHost: ObservableObject {
     }
 
     private func stop() {
+        #if os(macOS)
+        CloudflaredTunnel.shared.stop()
+        #endif
         handle?.disable()      // detach the relay from the node's endpoint
         setHandle(nil)         // releases the FFI handle (best-effort; OS reclaims on exit)
         serving = false

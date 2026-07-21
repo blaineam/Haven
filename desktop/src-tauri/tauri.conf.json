@@ -44,6 +44,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "externalBin": [
+      "binaries/cloudflared"
+    ],
     "macOS": {
       "dmg": {
         "background": "dmg/background.png",

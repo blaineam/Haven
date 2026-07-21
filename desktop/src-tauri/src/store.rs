@@ -250,6 +250,11 @@ pub struct Prefs {
     /// tunnel) — announced ahead of the LAN address when set.
     #[serde(default)]
     pub relay_public_url: String,
+    /// When true and `relay_public_url` is empty, start a Cloudflare Quick Tunnel so remote
+    /// members can fetch media over HTTPS without port-forwarding. Default true.
+    /// `Option` so older prefs files without the field resolve to ON via [`Prefs::auto_tunnel`].
+    #[serde(default)]
+    pub relay_auto_tunnel: Option<bool>,
     /// The all-circles DEFAULT relay hex (every present + future circle inherits it). Empty = none.
     /// Mirrors iOS `haven.relay.default`.
     #[serde(default)]
@@ -526,6 +531,11 @@ impl Prefs {
             self.relay_media_max_age_days.unwrap_or(Self::DEFAULT_MEDIA_MAX_AGE_DAYS),
             self.relay_media_max_bytes.unwrap_or(Self::DEFAULT_MEDIA_MAX_BYTES),
         )
+    }
+
+    /// Cloudflare Quick Tunnel when no stable public URL is configured. Default ON.
+    pub fn auto_tunnel(&self) -> bool {
+        self.relay_auto_tunnel.unwrap_or(true)
     }
 
     pub fn load(paths: &Paths) -> Self {

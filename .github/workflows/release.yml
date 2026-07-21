@@ -301,6 +301,11 @@ jobs:
           node -e "const f='desktop/src-tauri/tauri.conf.json';const c=require('fs');const j=JSON.parse(c.readFileSync(f));j.version='${{ needs.meta.outputs.version }}'.split('-')[0];c.writeFileSync(f,JSON.stringify(j,null,2));"
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
+      # Cloudflare Quick Tunnel helper — bundled as Tauri externalBin so hosted relays get a free
+      # HTTPS front door without a user-installed cloudflared. Pinned version; see
+      # tools/fetch-cloudflared.sh + core/haven-net/src/cfquicktunnel.rs.
+      - name: Fetch cloudflared for this runner
+        run: tools/fetch-cloudflared.sh
       - name: Build
         working-directory: desktop/src-tauri
         run: cargo tauri build

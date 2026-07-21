@@ -11,6 +11,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **Bundled Cloudflare Quick Tunnel for desktop + haven-relay.** Serious always-on relays can expose
+  the HTTP media interface over a free `*.trycloudflare.com` HTTPS URL without port-forwarding or a
+  user-installed `cloudflared` CLI. Desktop (Windows/macOS/Linux) ships the official Apache-2.0
+  binary via Tauri `externalBin` (`tools/fetch-cloudflared.sh`); `haven-relay` downloads it next to
+  itself on first tunnel use. Auto-on when no stable `--http-url` / public URL is set; `--no-tunnel`
+  or a manual public URL disables it. Hostname is ephemeral (changes on restart).
 - **Video posters ship with every video.** Attaching a video always cuts a compressed JPEG still and
   publishes it alongside the playable clip (`poster:<video>:<image>` marker). Super data saver and
   Places can render the card without downloading the video bytes.

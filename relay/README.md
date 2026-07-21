@@ -36,9 +36,12 @@ Once linked it serves **both** relay roles while the device is online:
    **cannot open**.
 2. **Media store-and-forward** — by default a **local-disk blob mailbox**: sealed,
    content-addressed blobs are stored under `~/.haven-relay/store` and served over the
-   Haven Net overlay (iroh, ALPN `haven/blob/1`) with **no public host, no port-forward,
-   no domain, and no `rclone`**. The blobs are circle-sealed, so the relay host can't read
-   the media.
+   Haven Net overlay (iroh, ALPN `haven/blob/1`) **and** a plain-HTTP interface on `:8674`.
+   When you don't pass `--http-url`, the relay **auto-starts a free Cloudflare Quick Tunnel**
+   (`*.trycloudflare.com`) so remote members can pull media over HTTPS without port-forwarding.
+   On first use it downloads the official `cloudflared` binary next to `haven-relay` (or into
+   `<data>/bin`). Use `--http-url https://…` for a stable front door, or `--no-tunnel` to stay
+   LAN/iroh-only. Blobs are circle-sealed; the tunnel only moves ciphertext.
 
 ### Run it — three steps
 

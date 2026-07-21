@@ -20,6 +20,7 @@ use iroh::{
 };
 
 pub mod blobstore;
+pub mod cfquicktunnel;
 pub mod discovery;
 pub mod httprelay;
 pub mod livedelivery;

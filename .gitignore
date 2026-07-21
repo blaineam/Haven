@@ -52,3 +52,7 @@ docs/audits/
 docs/SECURITY-AUDIT-*.md
 **/SECURITY-AUDIT-*crypto*.md
 core/.claude/
+
+# cloudflared helpers (fetched by tools/fetch-cloudflared.sh)
+desktop/src-tauri/binaries/cloudflared*
+!desktop/src-tauri/binaries/README.md

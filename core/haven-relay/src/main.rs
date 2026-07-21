@@ -92,8 +92,11 @@ fn print_help() {
          HTTP MEDIA INTERFACE (default = ON, the reliable cross-NAT media path):\n  \
          --http <bind>             bind address (default 0.0.0.0:8674)\n  \
          --http-url <url>          public URL members reach it at (port-forward/proxy/tunnel)\n  \
+         --tunnel                  force a free Cloudflare Quick Tunnel (*.trycloudflare.com)\n  \
+         --no-tunnel               do not auto-start a quick tunnel (default is ON when no --http-url)\n  \
          --no-http                 disable the HTTP interface\n  \
-         Requests need the bearer token printed at start (persisted in <data>/http_token).\n\n\
+         Requests need the bearer token printed at start (persisted in <data>/http_token).\n  \
+         On first tunnel use, cloudflared is downloaded next to this binary (or into <data>/bin).\n\n\
          RETENTION (your choice; default = keep media forever, prune mailbox after 30 days):\n  \
          --media-max-age-days N    prune media not touched for N days (0 = keep forever)\n  \
          --media-max-bytes SIZE    cap the media store, oldest deleted first (50G, 500M; 0 = unbounded)\n  \

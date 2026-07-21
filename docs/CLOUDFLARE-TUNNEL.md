@@ -367,30 +367,31 @@ Why A wins:
    (heavy) or "iOS hosts LAN-only; Mac/desktop does public HTTP" — which already matches
    Haven's copy that a Mac is best for always-on relay.
 
-### Bundle layout (Path A)
+### What ships today (Path A — implemented)
 
-```text
-Haven.app/Contents/MacOS/Haven
-Haven.app/Contents/Helpers/cloudflared   # signed + notarized with the app
+| Surface | How cloudflared arrives | Auto quick tunnel |
+|---|---|---|
+| **Desktop (Tauri)** — Windows MS Store / macOS DMG / Linux | `tools/fetch-cloudflared.sh` → `desktop/src-tauri/binaries/`; Tauri `externalBin` | ON when hosting and no stable `relay_public_url` |
+| **HavenMac (App Store)** | Sign `cloudflared` into `Contents/Helpers/` (CI); falls back to PATH | ON when hosting and no `haven.relay.publicURL` (`CloudflaredTunnel`) |
+| **`haven-relay` CLI** | First tunnel use downloads official binary **next to** the CLI (or into `<data>/bin`) | ON by default when no `--http-url`; `--no-tunnel` / `--tunnel` |
+
+Pinned version: `2026.7.2` (see `haven_net::cfquicktunnel::CLOUDFLARED_VERSION` and the fetch script).
+
+```sh
+# CI / local pack prep
+tools/fetch-cloudflared.sh --all
+# then code-sign each binary with the product identity before store packaging
 ```
 
-Linux/Windows desktop: ship next to the Tauri/binary or under a known resources path.
-`haven-relay` static binary: optional `haven-relay tunnel` subcommand that shells to a
-same-directory `cloudflared`, or vendors it in the .deb.
+Lifecycle when hosting with auto-tunnel:
 
-Lifecycle when "Be this circle's relay" is on and **Auto public URL (Cloudflare)** is on:
+1. Start local HTTP on 8674.
+2. Spawn bundled/neighbor `cloudflared tunnel --url http://127.0.0.1:8674 --no-autoupdate --protocol http2`.
+3. Scrape `https://….trycloudflare.com` from logs.
+4. Announce that URL on the circle's relay HTTP interface (frame 19).
+5. On stop: kill the child (hostname dies — expected for ephemeral).
 
-1. Start local HTTP on 8674 (existing).
-2. `Process` → `Helpers/cloudflared tunnel --url http://127.0.0.1:8674 --no-autoupdate`
-   (and prefer `--protocol http2` if UDP is flaky).
-3. Read stdout/stderr until a line matches `https://[a-z0-9-]+\.trycloudflare\.com`.
-4. Write `haven.relay.publicURL`, call `reannounceOwnRelay()`.
-5. On relay stop / app quit: terminate the child; clear or keep last URL (clear is safer —
-   the hostname is dead).
-
-Size: one cloudflared per arch is typically on the order of **~20–40 MB**. Fat multi-arch
-macOS builds pay twice unless you thinned-slice. Acceptable for desktop; painful if forced
-into every iOS download for a feature iOS can't run well anyway.
+Size: ~20–40 MB per arch. Not shipped on iOS.
 
 ### Legal / product notes
 

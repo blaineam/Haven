@@ -245,6 +245,8 @@ pub struct Engine {
     app: StdMutex<Option<AppHandle>>,
     node: StdMutex<Option<Arc<HavenNode>>>,
     relay_host: StdMutex<Option<Arc<RelayServerHandle>>>,
+    /// Live Cloudflare Quick Tunnel (trycloudflare). Dropped when hosting stops.
+    quick_tunnel: StdMutex<Option<haven_net::cfquicktunnel::QuickTunnel>>,
     prefs: StdMutex<Prefs>,
     dyn_state: StdMutex<DynState>,
     scheduled: StdMutex<crate::scheduled::ScheduledStore>,
@@ -487,6 +489,7 @@ impl Engine {
             app: StdMutex::new(None),
             node: StdMutex::new(None),
             relay_host: StdMutex::new(None),
+            quick_tunnel: StdMutex::new(None),
             prefs: StdMutex::new(prefs),
             dyn_state: StdMutex::new(dyn_state),
             scheduled: StdMutex::new(scheduled),
@@ -587,6 +590,7 @@ impl Engine {
             app: StdMutex::new(None),
             node: StdMutex::new(None),
             relay_host: StdMutex::new(None),
+            quick_tunnel: StdMutex::new(None),
             prefs: StdMutex::new(prefs),
             dyn_state: StdMutex::new(dyn_state),
             scheduled: StdMutex::new(scheduled),
@@ -4080,17 +4084,35 @@ impl Engine {
         // should use it — that is the fast local path and it genuinely works. Remote members discard it
         // on receipt (`relay_http_reachable` keeps a private address only when we are on that /24), so
         // the useless case is filtered by the side that can actually tell.
-        let public_url = {
+        let (configured_public, auto_tunnel) = {
             let p = self.prefs.lock().unwrap();
-            if p.relay_public_url.starts_with("http") {
+            let pub_url = if p.relay_public_url.starts_with("http") {
                 Some(p.relay_public_url.trim_end_matches('/').to_string())
             } else {
                 None
-            }
+            };
+            (pub_url, p.auto_tunnel())
         };
         let mut urls = Vec::new();
-        match public_url {
+        match configured_public {
             Some(u) => urls.push(u),
+            None if auto_tunnel => {
+                // Free Cloudflare Quick Tunnel — remote members reach media over HTTPS without
+                // port-forwarding. Ephemeral hostname; re-created each host start.
+                match Self::start_desktop_quick_tunnel(port) {
+                    Ok(t) => {
+                        log::info!("relay quick tunnel: {}", t.public_url);
+                        urls.push(t.public_url.clone());
+                        *self.quick_tunnel.lock().unwrap() = Some(t);
+                    }
+                    Err(e) => {
+                        log::warn!("relay quick tunnel unavailable: {e}");
+                        if let Some(ip) = Self::primary_lan_ip() {
+                            urls.push(format!("http://{ip}:{port}"));
+                        }
+                    }
+                }
+            }
             None => {
                 if let Some(ip) = Self::primary_lan_ip() {
                     urls.push(format!("http://{ip}:{port}"));
@@ -4105,6 +4127,29 @@ impl Engine {
         if p.set_relay_http(node_hex, urls, token) {
             let _ = p.save(&self.paths);
         }
+    }
+
+    /// Locate bundled/PATH cloudflared (download next to resource dir if needed) and open a
+    /// trycloudflare tunnel to the local media port.
+    fn start_desktop_quick_tunnel(port: u16) -> anyhow::Result<haven_net::cfquicktunnel::QuickTunnel> {
+        use haven_net::cfquicktunnel::{ensure_cloudflared, executable_dir, QuickTunnel};
+        let mut search = Vec::new();
+        if let Ok(exe) = executable_dir() {
+            search.push(exe.clone());
+            // Tauri externalBin lands next to the executable or under resources.
+            search.push(exe.join("binaries"));
+            search.push(exe.join("../Resources"));
+            search.push(exe.join("../Helpers"));
+        }
+        // resource_dir from Tauri if available via env
+        if let Ok(res) = std::env::var("TAURI_RESOURCE_DIR") {
+            search.push(std::path::PathBuf::from(res));
+        }
+        let install = executable_dir()
+            .unwrap_or_else(|_| std::env::temp_dir())
+            .join("haven-cloudflared");
+        let bin = ensure_cloudflared(&search, &install, true)?;
+        QuickTunnel::start(&bin, &format!("http://127.0.0.1:{port}"))
     }
 
     /// A relay's HTTP interface as seen FROM HERE — `None` means "iroh-only", which is the honest
@@ -4237,6 +4282,8 @@ impl Engine {
 
     pub fn stop_hosting(self: &Arc<Self>) {
         *self.relay_host.lock().unwrap() = None;
+        // Drop kills cloudflared; the trycloudflare hostname dies with it.
+        *self.quick_tunnel.lock().unwrap() = None;
         self.dyn_state.lock().unwrap().hosting = false;
         self.emit_changed();
     }

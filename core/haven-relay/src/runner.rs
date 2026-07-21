@@ -55,6 +55,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     // Keep the started servers/guards alive for the process lifetime.
     let mut _s3_guard: Option<std::sync::Arc<S3Server>> = None;
     let mut _rclone_guard: Option<RcloneChild> = None;
+    let mut _quick_tunnel: Option<haven_net::cfquicktunnel::QuickTunnel> = None;
 
     match &cfg.backend {
         StoreBackend::Local => {
@@ -153,12 +154,33 @@ pub async fn run(cfg: Config) -> Result<()> {
                     .await
                     .map_err(|e| anyhow!("start http blob interface: {e}"))?;
                 println!("✓ http media interface live on {bind} (port {port}).");
-                match &cfg.http_url {
+                let mut public = cfg.http_url.clone();
+                if public.is_none() && cfg.auto_tunnel {
+                    match start_auto_tunnel(port, &cfg.data_dir) {
+                        Ok(t) => {
+                            println!("✓ cloudflare quick tunnel: {}", t.public_url);
+                            println!(
+                                "  ephemeral — hostname changes when this process restarts \
+                                 (use --http-url for a stable front door)."
+                            );
+                            public = Some(t.public_url.clone());
+                            _quick_tunnel = Some(t);
+                        }
+                        Err(e) => {
+                            eprintln!("⚠ auto-tunnel unavailable: {e}");
+                            eprintln!(
+                                "  media still works on the LAN / iroh. Fix cloudflared or pass \
+                                 --http-url / --no-tunnel."
+                            );
+                        }
+                    }
+                }
+                match &public {
                     Some(url) => println!("  public URL : {url}"),
                     None => println!(
                         "  reachable at http://<this-host>:{port} — port-forward / reverse-proxy \
                          (TLS) / tunnel it to serve members across the internet, then pass \
-                         --http-url <public url>."
+                         --http-url <public url> (or omit --no-tunnel for a free trycloudflare URL)."
                     ),
                 }
                 println!("  http token : {}", cfg.http_token);
@@ -211,10 +233,45 @@ pub async fn run(cfg: Config) -> Result<()> {
     println!("═══════════════════════════════════════════════════════════════\n");
 
     // Idle until Ctrl-C; the relay's accept/forward loops run in the background.
-    let _ = &relay;
+    // `_quick_tunnel` Drop kills cloudflared on exit.
+    let _ = (&relay, &_quick_tunnel);
     tokio::signal::ctrl_c().await.ok();
     println!("▸ shutting down.");
     Ok(())
+}
+
+/// Install cloudflared next to this binary (or under data_dir) and open a trycloudflare tunnel
+/// to the local HTTP media port.
+fn start_auto_tunnel(
+    port: u16,
+    data_dir: &std::path::Path,
+) -> Result<haven_net::cfquicktunnel::QuickTunnel> {
+    use haven_net::cfquicktunnel::{ensure_cloudflared, executable_dir, QuickTunnel};
+    let mut search = Vec::new();
+    if let Ok(exe_dir) = executable_dir() {
+        search.push(exe_dir.clone());
+    }
+    search.push(data_dir.join("bin"));
+    // Prefer installing next to the haven-relay binary so upgrades leave a stable neighbor;
+    // fall back to <data>/bin when the install dir is not writable (e.g. /usr/bin).
+    let install = executable_dir()
+        .ok()
+        .filter(|d| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(d.join(".haven-write-test"))
+                .map(|f| {
+                    drop(f);
+                    let _ = std::fs::remove_file(d.join(".haven-write-test"));
+                    true
+                })
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| data_dir.join("bin"));
+    let bin = ensure_cloudflared(&search, &install, true)?;
+    let local = format!("http://127.0.0.1:{port}");
+    QuickTunnel::start(&bin, &local)
 }
 
 /// Launch `rclone serve s3` bound to loopback only (never a public interface), with

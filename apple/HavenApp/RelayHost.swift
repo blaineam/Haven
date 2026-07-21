@@ -35,7 +35,7 @@ final class RelayHost: ObservableObject {
     /// relay on" report, and why the hang counter climbs many times a second rather than once per
     /// sync tick. The Rust side is internally locked, so the only thing needing protection here is the
     /// pointer itself, which changes just at start/stop.
-    private static let handleLock = NSLock()
+    nonisolated private static let handleLock = NSLock()
     nonisolated(unsafe) private static var sharedHandle: RelayServerHandle?
     nonisolated private static func currentHandle() -> RelayServerHandle? {
         handleLock.lock(); defer { handleLock.unlock() }

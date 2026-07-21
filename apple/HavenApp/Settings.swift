@@ -193,7 +193,10 @@ struct SettingsView: View {
 
     /// Walk the media dir off the main actor and format the total (e.g. "1.2 GB · 340 files").
     private func measureStorage() async {
-        let usage = await Task.detached(priority: .utility) { MediaStore.shared.diskUsage() }.value
+        // diskUsage is nonisolated file I/O; do not touch MediaStore.shared from the detached task.
+        let usage = await Task.detached(priority: .utility) {
+            MediaStore.diskUsageOnDisk()
+        }.value
         let size = ByteCountFormatter.string(fromByteCount: usage.bytes, countStyle: .file)
         storageText = usage.files == 0 ? "None yet" : "\(size) · \(usage.files) file\(usage.files == 1 ? "" : "s")"
     }

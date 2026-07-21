@@ -265,10 +265,10 @@ final class LinkMetaLoader: ObservableObject {
         // resolution blocks. See LinkSafety for what this does and does not cover on Apple.
         Task.detached(priority: .utility) { [weak self] in
             guard LinkSafety.resolvesPublicly(url) else {
-                await MainActor.run { self?.isLoading = false }
+                await MainActor.run { [weak self] in self?.isLoading = false }
                 return
             }
-            await MainActor.run { self?.beginFetch(url) }
+            await MainActor.run { [weak self] in self?.beginFetch(url) }
         }
     }
 

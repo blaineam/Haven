@@ -25,7 +25,8 @@ final class WatchSessionManager: NSObject, WCSessionDelegate {
         session.activate()
         // Keep the Watch's thread list live: re-push a snapshot whenever the feed changes,
         // debounced so a burst of inbound events coalesces into one transfer.
-        Task { @MainActor in
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             self.feedObserver = FeedStore.shared.objectWillChange
                 .debounce(for: .seconds(0.6), scheduler: RunLoop.main)
                 .sink { [weak self] in self?.pushSnapshot() }

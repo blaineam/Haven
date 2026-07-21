@@ -60,13 +60,9 @@ final class NotificationService: UNNotificationServiceExtension {
             if let thread = decoded.threadId, !thread.isEmpty {
                 best.threadIdentifier = thread
             }
-            // Surface the kind as a summary argument so iOS 15+ notification summaries can say
-            // "3 reactions" rather than "3 notifications" when the system collapses a thread.
-            // Use private labels so a collapsed stack doesn't re-leak emoji/previews.
-            if let kind = decoded.kind, !kind.isEmpty {
-                best.summaryArgument = Self.summaryLabel(kind: kind)
-                best.summaryArgumentCount = 1
-            }
+            // iOS 15+ ignores summaryArgument / summaryArgumentCount — threadIdentifier above
+            // is what groups the stack. Kind labels stay available via SharedNotificationPrivacy.
+            _ = decoded.kind
             contentHandler(best)
         }
     }

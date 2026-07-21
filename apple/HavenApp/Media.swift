@@ -292,7 +292,8 @@ final class MediaStore: ObservableObject {
     func anyLocated(_ refs: [String]) -> Bool { refs.contains { locations[$0] != nil } }
 
     /// Pull a GPS coordinate out of raw image bytes (EXIF GPS dictionary), or nil if absent.
-    static func gpsCoordinate(fromImageData data: Data) -> CLLocationCoordinate2D? {
+    /// `nonisolated` so picker decode queues can read EXIF without hopping to the MainActor.
+    nonisolated static func gpsCoordinate(fromImageData data: Data) -> CLLocationCoordinate2D? {
         guard let src = CGImageSourceCreateWithData(data as CFData, nil),
               let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
               let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any],
@@ -439,8 +440,12 @@ final class MediaStore: ObservableObject {
     /// Total bytes of synced media on disk (the `haven-media` dir), and the file count. Walked lazily
     /// off the caller's thread by the Settings screen so it never blocks. Photos/videos/audio dominate;
     /// the small event log lives elsewhere and isn't counted here.
-    func diskUsage() -> (bytes: Int64, files: Int) {
+    nonisolated func diskUsage() -> (bytes: Int64, files: Int) { Self.diskUsageOnDisk() }
+
+    /// Pure directory walk — no MainActor / shared instance required.
+    nonisolated static func diskUsageOnDisk() -> (bytes: Int64, files: Int) {
         let fm = FileManager.default
+        let dir = storageDir
         guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey],
                                                        options: [.skipsHiddenFiles]) else { return (0, 0) }
         var total: Int64 = 0
@@ -533,7 +538,7 @@ final class MediaStore: ObservableObject {
         }
         if maxGB > 0 {
             let cap = Int64(maxGB) * 1_000_000_000
-            var survivors = cands.filter { !deleted.contains($0.url) }.sorted { $0.mtime < $1.mtime }  // oldest first
+            let survivors = cands.filter { !deleted.contains($0.url) }.sorted { $0.mtime < $1.mtime }  // oldest first
             var total = pinnedBytes + survivors.reduce(0) { $0 + $1.bytes }
             var i = 0
             while total > cap, i < survivors.count { remove(survivors[i]); total -= survivors[i].bytes; i += 1 }

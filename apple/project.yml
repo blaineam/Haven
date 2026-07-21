@@ -30,6 +30,10 @@ targets:
       - path: HavenApp
         excludes:
           - "Info*.plist"
+          # Compiled separately with -suppress-warnings (legacy AVFoundation sync accessors).
+          - HavenAVComposition.swift
+      - path: HavenApp/HavenAVComposition.swift
+        compilerFlags: ["-suppress-warnings"]
       - path: Shared
       # FFI-free Codable models shared with the HavenWatch companion (WCSession wire types).
       - path: WatchShared
@@ -142,6 +146,9 @@ targets:
       - path: HavenApp
         excludes:
           - "Info*.plist"
+          - HavenAVComposition.swift
+      - path: HavenApp/HavenAVComposition.swift
+        compilerFlags: ["-suppress-warnings"]
       - path: Shared
       - path: Generated/haven_ffi.swift
     dependencies:

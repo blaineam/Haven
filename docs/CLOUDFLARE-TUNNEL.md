@@ -75,6 +75,72 @@ only makes the HTTP face publicly reachable.
 **Bottom line:** CF can carry sealed-media mailbox traffic even when direct iroh media
 is bad. It cannot alone cover every feature that currently rides iroh.
 
+### Later: embed open-source iroh-relay *behind* the same tunnel
+
+iroh is open source (Apache-2.0/MIT). The **peer** path is UDP/QUIC; the **relay** path
+(iroh-relay / DERP-style) is **HTTPS + WebSocket** — the same kind of TCP-friendly
+service cloudflared already fronts. So a Haven volunteer box can, in principle, host
+three roles on one machine and one public front door:
+
+```text
+peer A ──QUIC direct──► peer B          (still preferred when it works)
+   │                         ▲
+   └──HTTPS/WSS──► cloudflared ──► localhost iroh-relay ──► (relayed bytes) ──┘
+                         │
+                         └── also :8674 HTTP mailbox (what CF does *today*)
+```
+
+| Role | Today | With embedded iroh-relay |
+|---|---|---|
+| Blob / HTTP mailbox (`:8674`) | CF / Manual front door | unchanged |
+| App mesh switchboard (`HVR1`) | Haven already | unchanged |
+| iroh DERP (NAT fallback for live frames) | n0 public relays | **circle-hosted** via custom `RelayMap` |
+
+**Client side** (not shipped yet): point endpoints at Haven URLs instead of only n0 —
+
+```text
+RelayMode::Custom(RelayMap::from(haven_iroh_relay_https_urls))
+```
+
+**Why this works with Cloudflare (and what it still is not)**
+
+- **Works:** iroh-relay is reverse-proxy friendly; CF/Manual terminate TLS and forward to
+  localhost. Bytes stay E2E-encrypted; the edge still only sees ciphertext + metadata.
+- **Works:** surviving **n0 DERP outage** for circles that run ≥1 reachable Haven
+  iroh-relay — live-frame fallback no longer hard-depends on n0.
+- **Does not:** replace **direct QUIC** (UDP hole-punch still preferred when possible;
+  CF does not carry peer UDP through the tunnel).
+- **Does not:** solve **discovery** (node id → address). That stays n0 DNS/pkarr until
+  Haven gossip / self-hosted discovery lands (see [`RESILIENCE-DESIGN.md`](RESILIENCE-DESIGN.md) §4).
+- **Does not:** mean “delete iroh.” It means **self-host the open-source relay role**
+  so media *and* live fallback can ride circle infrastructure.
+
+**Practical constraints**
+
+1. **Stable hostname** — `*.trycloudflare.com` dies on restart; bad as a `RelayMap`
+   entry. Named tunnel or **Manual** domain is the real product path for DERP.
+2. **Bootstrap** — peers must learn the circle’s iroh-relay URL(s) (announce, signed
+   list, enroll ticket, …). n0 is hardcoded today; custom map needs a bootstrap story
+   ([`RESILIENCE-DESIGN.md`](RESILIENCE-DESIGN.md) §3.2).
+3. **Long-lived WebSockets** — soak-test CF free edge idle timeouts / rate limits.
+4. **Not implemented yet** — this is resilience work item **R1** in
+   [`RESILIENCE-DESIGN.md`](RESILIENCE-DESIGN.md) §3.1: optional `iroh-relay` `server`
+   role inside `haven-relay`, plus a shared `haven_endpoint_builder()` so all endpoints
+   share one `RelayMap`. Scar guard: DERP is a **server socket other nodes connect to**,
+   not a second iroh *endpoint under the relay’s node key* (same-key second-endpoint bug).
+5. **Scale** — fine for a family/circle home host; not a global free tier for strangers.
+
+| Goal | CF media tunnel only (shipped) | CF + embedded iroh-relay (planned) |
+|---|---|---|
+| Cross-NAT **media** mailbox | Yes | Yes |
+| Cross-NAT **live frames** when direct fails | Relies on n0 (or fails) | Can ride **your** iroh-relay |
+| Survive n0 DERP outage | Partial (HTTP media) | Much better for live P2P fallback |
+| “Turn iroh off forever” | No | Still no — still iroh, self-hosted relay |
+
+**Bottom line (extension):** Yes — embed open-source iroh-relay behind the same
+cloudflared/Manual front door. That is how CF grows from “media mailbox only” toward
+“circle-hosted NAT fallback,” without pretending Cloudflare replaces iroh.
+
 ---
 
 ## Path A — Zero account: Quick Tunnel (fastest try)

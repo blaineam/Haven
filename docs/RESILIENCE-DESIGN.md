@@ -188,6 +188,13 @@ domain with TLS) — this is the one place "no public host" genuinely cannot hol
 requirement n0 fulfills for us today. The honest framing: we don't remove the *need* for some public
 relay, we remove the need for *n0's specific* relays and make the role self-hostable and federated.
 
+> **Home operators + Cloudflare.** iroh-relay speaks HTTPS/WebSocket (not peer UDP), so the same
+> cloudflared / Manual front door already used for the `:8674` media mailbox can front the DERP
+> role too — named tunnel or stable domain preferred over ephemeral trycloudflare hostnames (they
+> die on restart and are a bad `RelayMap` entry). Full product notes, constraints, and the
+> “CF is not full iroh / but can host iroh-relay” framing:
+> [`CLOUDFLARE-TUNNEL.md`](CLOUDFLARE-TUNNEL.md#later-embed-open-source-iroh-relay-behind-the-same-tunnel).
+
 **Client side.** Replace the `N0` preset with an explicit builder that composes:
 `RelayMode::Custom(RelayMap::try_from_iter(<Haven relay urls>))` (`relay_map.rs:64`,
 `endpoint.rs:1933`) + the layered discovery of §4. Because the four `Endpoint::builder(N0)` sites are

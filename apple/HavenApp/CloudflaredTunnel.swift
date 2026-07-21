@@ -11,7 +11,11 @@ import Foundation
 final class CloudflaredTunnel {
     static let shared = CloudflaredTunnel()
 
+    // Foundation.Process (subprocess spawn) exists on macOS only — never declare it on iOS
+    // or Xcode Cloud's Haven iOS archive fails with "Cannot find type 'Process' in scope".
+    #if os(macOS)
     private var process: Process?
+    #endif
     private(set) var publicURL: String?
 
     /// Front-door policy: `auto` | `manual` | `bundled` (see docs/CLOUDFLARE-TUNNEL.md).

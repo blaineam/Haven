@@ -135,23 +135,16 @@ extension NearbyTransport: MCSessionDelegate {
         peersLock.lock(); peersSnapshot = peers; peersLock.unlock()
         if state == .connected {
             onPeerConnected()
-            // Battery: stop browsing once we have a live peer. Continuous MC browse keeps BLE +
-            // peer-to-peer Wi-Fi discovery scanning even while already connected (device log:
-            // Multipeer packet storms + reconnect flaps with Mac). Advertising stays on so others
-            // can still find us; browsing resumes when we drop to zero peers.
-            if !peers.isEmpty { browser.stopBrowsingForPeers() }
+            // Stop discovery entirely while connected — advertising next to a Mac kept inviting
+            // flaps; browsing kept scanning. Session stays up for the active transfer only.
+            browser.stopBrowsingForPeers()
+            advertiser.stopAdvertisingPeer()
         } else if peers.isEmpty {
-            // Resume discovery after all peers leave — but only browse; advertise restarts with browse.
+            #if os(iOS)
+            // iPhone: do not auto-resume Multipeer discovery (heat). User/activity can nudge.
+            #else
             advertiser.startAdvertisingPeer()
             browser.startBrowsingForPeers()
-            #if os(iOS)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 90) { [weak self] in
-                guard let self else { return }
-                if self.cachedPeers.isEmpty {
-                    self.advertiser.stopAdvertisingPeer()
-                    self.browser.stopBrowsingForPeers()
-                }
-            }
             #endif
         }
     }

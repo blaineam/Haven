@@ -195,8 +195,9 @@ final class FeedStore: ObservableObject {
         lastActivityMs = now()
         nextSyncDueMs = 0
         nextPollDueMs = 0
-        // Re-open Multipeer discovery briefly after user activity (iOS parks it when idle).
-        nearby?.nudgeDiscovery()
+        // Do NOT re-open Multipeer on every activity — that kept BLE discovery warm whenever
+        // the user scrolled (device log: 150k+ Multipeer debug lines / 18s while merely open).
+        // Call `nearby?.nudgeDiscovery()` only from explicit multi-device / Storage actions.
     }
 
     // Chunked media reassembly: ref → temp file + which chunk indices we've received.
@@ -1258,8 +1259,16 @@ final class FeedStore: ObservableObject {
                 onInbound: { [weak self] data in Task { @MainActor in self?.handleInbound(data, viaNearby: true) } },
                 onPeerConnected: { [weak self] in Task { @MainActor in self?.nearbyPeerConnected() } }
             )
+            #if os(iOS)
+            // iPhone heat: do not start Multipeer at cold launch. BLE + peer Wi‑Fi discovery
+            // next to a Mac produced continuous IncomingPacket storms (field: ~3k pkt/s UDP-class
+            // Multipeer traffic + phone thermal). Opt-in briefly via Storage / Devices later, or
+            // when the user force-syncs. Internet + mailbox still carry multi-device sync.
+            nearby = nt
+            #else
             nt.start()
             nearby = nt
+            #endif
             online = true
         }
         // Internet path (iroh + n0 discovery/relays).
@@ -1366,7 +1375,17 @@ final class FeedStore: ObservableObject {
         guard let raw = UserDefaults.standard.dictionary(forKey: lastHeardKey) as? [String: Double] else { return }
         lastHeard = raw.mapValues { Date(timeIntervalSince1970: $0) }
     }
-    func forceSync() { bumpActivity(); ingestPushInbox(); syncWithContacts(); forceSelfSyncNextPoll(); pollMailboxNow() }
+    func forceSync() {
+        bumpActivity()
+        // Brief Multipeer window for local multi-device (iOS does not auto-start nearby).
+        #if os(iOS)
+        nearby?.nudgeDiscovery()
+        #endif
+        ingestPushInbox()
+        syncWithContacts()
+        forceSelfSyncNextPoll()
+        pollMailboxNow()
+    }
 
     private func startSyncTimer() {
         syncTimer?.invalidate()
@@ -2001,16 +2020,31 @@ final class FeedStore: ObservableObject {
         // with no relay or S3 at all (the local "handshake" sync). Sent before the post events below so
         // the receiver learns the circles before their posts arrive.
         if let slot = SelfSyncCoordinator.shared.sealedLocalSlot(social: social) { nearbyBroadcast(23, slot) }
+        #if os(iOS)
+        let nearbyCatchupLimit: UInt32 = 25   // 150 × N circles over Multipeer cooked the phone
+        #else
+        let nearbyCatchupLimit: UInt32 = 150
+        #endif
         for circle in circles {
             guard let hello = helloPayload(circleId: circle.id, circleName: circle.name) else { continue }
             if circle.id == "default" { nearbyBroadcast(0, hello) }   // only the open circle broadcasts handshake
             // DMs + RECEIVED events included — export_recent_envelopes re-broadcasts ALL authors' recent
             // events (not just mine), so a freshly-connected sibling catches up on friends' posts/DMs I
             // received too. Sealed, so a nearby non-member just drops it.
-            for env in social.exportRecentEnvelopes(circleId: circle.id, limit: 150) { nearbyBroadcast(1, eventPayload(circle.id, env)) }
+            for env in social.exportRecentEnvelopes(circleId: circle.id, limit: nearbyCatchupLimit) {
+                nearbyBroadcast(1, eventPayload(circle.id, env))
+            }
         }
         pushOwnMediaNearby(freshPeer: true)   // a newly-connected sibling has nothing — push it my media now
         refresh()
+        #if os(iOS)
+        // After catch-up, drop Multipeer entirely on iPhone — continuous mesh with a Mac was the
+        // dominant heat source (IncomingPacket storms). Multi-device continues over iroh/mailbox.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
+            self?.nearby?.stop()
+            HavenLog.net("iOS: Multipeer parked after catch-up (heat control)")
+        }
+        #endif
     }
 
     /// A self-sync slot arrived from another of the user's OWN devices over the nearby mesh (only our

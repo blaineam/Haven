@@ -201,9 +201,8 @@ final class FeedStore: ObservableObject {
         lastActivityMs = now()
         nextSyncDueMs = 0
         nextPollDueMs = 0
-        // Do NOT re-open Multipeer on every activity — that kept BLE discovery warm whenever
-        // the user scrolled (device log: 150k+ Multipeer debug lines / 18s while merely open).
-        // Call `nearby?.nudgeDiscovery()` only from explicit multi-device / Storage actions.
+        // Multipeer discovery is NOT re-opened on every scroll — only forceSync / cold start /
+        // peer-left rediscovery. That prevented discovery from staying warm all day.
     }
 
     // Chunked media reassembly: ref → temp file + which chunk indices we've received.
@@ -1265,16 +1264,15 @@ final class FeedStore: ObservableObject {
                 onInbound: { [weak self] data in Task { @MainActor in self?.handleInbound(data, viaNearby: true) } },
                 onPeerConnected: { [weak self] in Task { @MainActor in self?.nearbyPeerConnected() } }
             )
+            // iOS + Mac: start Multipeer for a bounded discovery window, then park advertise/browse
+            // if nobody connects. Live sessions keep working; send path is rate-limited so neither
+            // side can flood (Mac→iPhone history dump was the field heat source).
             #if os(iOS)
-            // iPhone heat: do not start Multipeer at cold launch. BLE + peer Wi‑Fi discovery
-            // next to a Mac produced continuous IncomingPacket storms (field: ~3k pkt/s UDP-class
-            // Multipeer traffic + phone thermal). Opt-in briefly via Storage / Devices later, or
-            // when the user force-syncs. Internet + mailbox still carry multi-device sync.
-            nearby = nt
+            nt.start(parkAfter: 60)
             #else
-            nt.start()
-            nearby = nt
+            nt.start(parkAfter: 120)
             #endif
+            nearby = nt
             online = true
         }
         // Internet path (iroh + n0 discovery/relays).
@@ -1447,10 +1445,8 @@ final class FeedStore: ObservableObject {
     }
     func forceSync() {
         bumpActivity()
-        // Brief Multipeer window for local multi-device (iOS does not auto-start nearby).
-        #if os(iOS)
-        nearby?.nudgeDiscovery()
-        #endif
+        // Open a short Multipeer discovery window when the user asks to sync (needed local mesh).
+        nearby?.nudgeDiscovery(parkAfter: 45)
         ingestPushInbox()
         syncWithContacts()
         forceSelfSyncNextPoll()
@@ -2084,32 +2080,27 @@ final class FeedStore: ObservableObject {
         // seed) can open it — it's how a linked Mac/phone bootstraps circles + profile + posts LOCALLY,
         // with no relay or S3 at all (the local "handshake" sync). Sent before the post events below so
         // the receiver learns the circles before their posts arrive.
-        if let slot = SelfSyncCoordinator.shared.sealedLocalSlot(social: social) { nearbyBroadcast(23, slot) }
+        if let slot = SelfSyncCoordinator.shared.sealedLocalSlot(social: social) {
+            nearbyBroadcast(23, slot, class: .control)
+        }
+        // Bounded catch-up — rate-limited bulk path; never 150×circles flood (Mac→iPhone heat).
         #if os(iOS)
-        let nearbyCatchupLimit: UInt32 = 25   // 150 × N circles over Multipeer cooked the phone
+        let nearbyCatchupLimit: UInt32 = 40
         #else
-        let nearbyCatchupLimit: UInt32 = 150
+        let nearbyCatchupLimit: UInt32 = 80
         #endif
         for circle in circles {
             guard let hello = helloPayload(circleId: circle.id, circleName: circle.name) else { continue }
-            if circle.id == "default" { nearbyBroadcast(0, hello) }   // only the open circle broadcasts handshake
-            // DMs + RECEIVED events included — export_recent_envelopes re-broadcasts ALL authors' recent
-            // events (not just mine), so a freshly-connected sibling catches up on friends' posts/DMs I
-            // received too. Sealed, so a nearby non-member just drops it.
+            if circle.id == "default" { nearbyBroadcast(0, hello, class: .control) }
+            // DMs + RECEIVED events — sealed; non-members drop. Rate limiter paces bulk sends.
             for env in social.exportRecentEnvelopes(circleId: circle.id, limit: nearbyCatchupLimit) {
-                nearbyBroadcast(1, eventPayload(circle.id, env))
+                nearbyBroadcast(1, eventPayload(circle.id, env), class: .bulk)
             }
         }
-        pushOwnMediaNearby(freshPeer: true)   // a newly-connected sibling has nothing — push it my media now
+        pushOwnMediaNearby(freshPeer: true)   // paced bulk media via rate limiter
         refresh()
-        #if os(iOS)
-        // After catch-up, drop Multipeer entirely on iPhone — continuous mesh with a Mac was the
-        // dominant heat source (IncomingPacket storms). Multi-device continues over iroh/mailbox.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
-            self?.nearby?.stop()
-            HavenLog.net("iOS: Multipeer parked after catch-up (heat control)")
-        }
-        #endif
+        // Keep the Multipeer **session** for live nearby delivery; discovery is already parked
+        // on connect. Do not disconnect — that forced internet-only and broke local mesh UX.
     }
 
     /// A self-sync slot arrived from another of the user's OWN devices over the nearby mesh (only our
@@ -2464,8 +2455,18 @@ final class FeedStore: ObservableObject {
         }
     }
 
-    private func nearbyBroadcast(_ type: UInt8, _ payload: Data) {
-        nearby?.broadcast(frame(type, payload))
+    /// Multipeer fan-out with rate class. Control = hello/announce/signals; bulk = history/media.
+    private func nearbyBroadcast(_ type: UInt8, _ payload: Data, class sendClass: NearbyTransport.SendClass = .control) {
+        // Large frames (media chunks / fat envelopes) are bulk by default if caller left default.
+        let cls: NearbyTransport.SendClass = {
+            if sendClass != .control { return sendClass }
+            // Heuristic: frames > 2 KB are bulk even if tagged control (defensive).
+            if payload.count > 2048 { return .bulk }
+            // Explicit bulk types: event history (1) can be large; media (5) always bulk.
+            if type == 5 { return .bulk }
+            return sendClass
+        }()
+        nearby?.broadcast(frame(type, payload), class: cls)
     }
 
     /// `senderDevice` = the AUTHENTICATED transport id the frame arrived from (nil for nearby /
@@ -3547,7 +3548,7 @@ final class FeedStore: ObservableObject {
         p.append(UInt8(min(destBytes.count, 255)))
         for d in destBytes.prefix(255) { p.append(d) }
         p.append(inner)
-        nearby?.broadcast(frame(9, p))
+        nearby?.broadcast(frame(9, p), class: .control)
     }
 
     private func handleRelay(_ payload: Data) {
@@ -3940,8 +3941,12 @@ final class FeedStore: ObservableObject {
                     if chunk.isEmpty { break }
                     guard let sealed = try? AES.GCM.seal(chunk, using: ownKey).combined else { break }
                     let frame = Self.chunkFrame(refData: refData, index: index, total: total, sealed: sealed)
-                    mesh?.broadcast(Data([5]) + frame)
-                    Thread.sleep(forTimeInterval: 0.030)   // pace so we don't outrun a slow link → unbounded send backlog
+                    // Bulk + rate limiter (~64 KB/s); drop if flooded — resume path refills holes.
+                    if mesh?.broadcast(Data([5]) + frame, class: .bulk) != true {
+                        Thread.sleep(forTimeInterval: 0.050)
+                        // One retry after brief wait for tokens; then stop this pass.
+                        if mesh?.broadcast(Data([5]) + frame, class: .bulk) != true { break }
+                    }
                     // Stop early if the send backlog is already high — the rest re-pushes next tick.
                     if (mesh?.sendBacklogHigh ?? false) { break }
                 }
@@ -3968,7 +3973,10 @@ final class FeedStore: ObservableObject {
                     break
                 }
                 let out = Data([5]) + Self.chunkFrame(refData: refData, index: index, total: total, sealed: sealed)
-                nearby?.broadcast(out)
+                if nearby?.broadcast(out, class: .bulk) != true {
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                    if nearby?.broadcast(out, class: .bulk) != true { break }
+                }
                 if let node { Task.detached { try? await node.sendToNode(nodeIdHex: requesterHex, payload: out) } }
                 try? await Task.sleep(nanoseconds: 12_000_000)
             }

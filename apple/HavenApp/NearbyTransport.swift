@@ -6,8 +6,18 @@ import MultipeerConnectivity
 /// sealed protocol frames ([type][payload]) as the iroh path, so two phones in the same
 /// room sync even fully offline. The bytes are already E2E-encrypted by the core; the
 /// Multipeer link adds its own transport encryption on top.
+///
+/// ## Heat / flood policy
+///
+/// Field log (Mac↔iPhone): continuous Multipeer at ~kpkt/s cooked the phone. Two rules:
+///
+/// 1. **Discovery only when needed** — advertise/browse for a short window at start or
+///    `nudgeDiscovery()`, then park if nobody connects. Session stays up while peers exist.
+/// 2. **Send rate limit** — token bucket on outbound frames (moderate sustained rate). Control
+///    frames (hello, roster, small signals) get priority; media/history bulk shares the bucket
+///    and is paced so neither side can flood the link.
 final class NearbyTransport: NSObject {
-    private let serviceType = "haven-circle"   // 1–15 chars, lowercase + hyphens 
+    private let serviceType = "haven-circle"   // 1–15 chars, lowercase + hyphens
     private let peerID: MCPeerID
     private let session: MCSession
     private let advertiser: MCNearbyServiceAdvertiser
@@ -15,16 +25,30 @@ final class NearbyTransport: NSObject {
 
     private let onInbound: (Data) -> Void
     private let onPeerConnected: () -> Void
-    /// All MCSession reads/writes happen here, never on the main thread. `connectedPeers` and
-    /// `send(_:toPeers:)` both dispatch into MultipeerConnectivity's own serial queue; calling them
-    /// from `@MainActor` (as every `nearbyBroadcast` caller does) means a backed-up send queue — e.g.
-    /// posting a big batch of media, one frame per chunk — blocks the main thread until the 0x8BADF00D
-    /// watchdog kills the app. Serializing here keeps frame order while freeing the main thread.
+    /// All MCSession reads/writes happen here, never on the main thread.
     private let sendQueue = DispatchQueue(label: "haven.nearby.send", qos: .utility)
 
-    /// `displayName` should be our node id hex (truncated to Multipeer's 63-byte limit);
-    /// it's only used to deduplicate who-invites-whom. Identity is still proven by the
-    /// Hello bundle + verification-hash handshake at the protocol layer.
+    // MARK: - Rate limit (token bucket)
+
+    /// Sustained outbound budget — enough for hello/catch-up, far below field flood rates.
+    /// ~64 KB/s sustained, burst 192 KB. Media chunks (32 KB) ≈ 2/s peak.
+    private static let bytesPerSecond: Double = 64 * 1024
+    private static let burstBytes: Double = 192 * 1024
+    /// Cap control-ish frames so a hello storm still can't fill the queue.
+    private static let maxFramesPerSecond: Double = 12
+    private static let burstFrames: Double = 24
+
+    private let rateLock = NSLock()
+    private var byteTokens: Double = NearbyTransport.burstBytes
+    private var frameTokens: Double = NearbyTransport.burstFrames
+    private var lastRefill = Date()
+    private var droppedBulk = 0
+
+    /// True while advertise and/or browse are running.
+    private(set) var isDiscovering = false
+    private var parkWorkItem: DispatchWorkItem?
+
+    /// `displayName` should be our node id hex (truncated to Multipeer's 63-byte limit).
     init(displayName: String, onInbound: @escaping (Data) -> Void, onPeerConnected: @escaping () -> Void) {
         self.onInbound = onInbound
         self.onPeerConnected = onPeerConnected
@@ -39,13 +63,6 @@ final class NearbyTransport: NSObject {
         browser.delegate = self
     }
 
-    /// Peer list CACHED from the delegate. Reading `session.connectedPeers` synchronously
-    /// dispatch_syncs into MultipeerConnectivity's internal queue — and while the session's recv
-    /// thread is mid-transfer (media chunks streaming) that call DEADLOCKS the caller against MC's
-    /// internal rwlock. Observed live: the sync-status badge (a TimelineView — re-evaluated on a
-    /// schedule) read it from the MAIN thread and wedged the app permanently: frozen video frame,
-    /// dead touches, "swiping on a tall video post won't scroll the feed". The delegate callback is
-    /// the sanctioned place to learn peer state; everything else reads this snapshot.
     private let peersLock = NSLock()
     private var peersSnapshot: [MCPeerID] = []
     private var cachedPeers: [MCPeerID] {
@@ -53,73 +70,128 @@ final class NearbyTransport: NSObject {
         return peersSnapshot
     }
 
-    /// Whether any nearby peer is currently connected (used to tell the user whether a device-link
-    /// request actually has a path to the other device). Lock-guarded cache — NEVER touches MCSession.
     var hasConnectedPeers: Bool { !cachedPeers.isEmpty }
 
-    func start() {
-        advertiser.startAdvertisingPeer()
-        browser.startBrowsingForPeers()
-        #if os(iOS)
-        // iPhone heat: Multipeer discovery is expensive (BLE + peer Wi‑Fi). After a short window,
-        // if nobody is connected, pause BOTH advertise and browse until something reconnects or
-        // the app calls `nudgeDiscovery()`. Always-on discovery was a top field heat source.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 90) { [weak self] in
-            guard let self else { return }
-            if self.cachedPeers.isEmpty {
-                self.advertiser.stopAdvertisingPeer()
-                self.browser.stopBrowsingForPeers()
-            }
-        }
-        #endif
+    /// Start discovery (advertise + browse). Parks after `parkAfter` if still alone.
+    func start(parkAfter: TimeInterval = 60) {
+        startDiscovery(parkAfter: parkAfter)
     }
 
-    /// Re-open nearby discovery briefly (e.g. after user activity / open Storage).
-    func nudgeDiscovery() {
+    /// Re-open discovery briefly (force-sync, Storage, multi-device UI).
+    func nudgeDiscovery(parkAfter: TimeInterval = 45) {
+        startDiscovery(parkAfter: parkAfter)
+    }
+
+    private func startDiscovery(parkAfter: TimeInterval) {
+        parkWorkItem?.cancel()
         advertiser.startAdvertisingPeer()
         if cachedPeers.isEmpty {
             browser.startBrowsingForPeers()
         }
-        #if os(iOS)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
+        isDiscovering = true
+        // While connected we only need the session — stop discovery once a peer is up.
+        if !cachedPeers.isEmpty {
+            browser.stopBrowsingForPeers()
+            advertiser.stopAdvertisingPeer()
+            isDiscovering = false
+            return
+        }
+        let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             if self.cachedPeers.isEmpty {
-                self.advertiser.stopAdvertisingPeer()
-                self.browser.stopBrowsingForPeers()
+                self.parkDiscovery()
             }
         }
-        #endif
+        parkWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + parkAfter, execute: work)
+    }
+
+    /// Stop advertise/browse but keep any live session (no disconnect).
+    func parkDiscovery() {
+        parkWorkItem?.cancel()
+        parkWorkItem = nil
+        advertiser.stopAdvertisingPeer()
+        browser.stopBrowsingForPeers()
+        isDiscovering = false
     }
 
     func stop() {
-        advertiser.stopAdvertisingPeer()
-        browser.stopBrowsingForPeers()
+        parkDiscovery()
         session.disconnect()
         peersLock.lock(); peersSnapshot = []; peersLock.unlock()
     }
 
-    /// Bytes enqueued for sending but not yet handed off — backpressure so a slow link (BLE) can't let the
-    /// send backlog grow unbounded (it ballooned to multi-GB and jetsam-killed the app).
     private let backlogLock = NSLock()
     private var backlogBytes = 0
-    static let sendBacklogCap = 4 * 1024 * 1024   // 4 MB of unsent frames; drop large ones past this
-    /// True when the unsent backlog is high — a media sender checks this to stop early instead of piling on.
-    var sendBacklogHigh: Bool { backlogLock.lock(); defer { backlogLock.unlock() }; return backlogBytes > Self.sendBacklogCap }
+    static let sendBacklogCap = 2 * 1024 * 1024   // 2 MB unsent — tighter than old 4 MB flood
+    var sendBacklogHigh: Bool {
+        backlogLock.lock(); defer { backlogLock.unlock() }
+        return backlogBytes > Self.sendBacklogCap
+    }
 
-    /// Send a frame to every connected nearby peer (recipients who can't open it ignore it).
-    /// Fire-and-forget on a background queue so a slow/jammed Multipeer link never stalls the main
-    /// thread (see `sendQueue`).
-    func broadcast(_ frame: Data) {
-        // Backpressure: when the unsent backlog is high, DROP large (media-chunk) frames — the receiver
-        // re-requests / the sender re-pushes later. Small frames (posts/hellos/requests) always go through.
+    /// Control frame = small, high-value (hello, announce, signal). Bulk = history/media.
+    enum SendClass {
+        case control   // ≤ 2 KB — always try to send (still framed/sec limited lightly)
+        case bulk      // history + media — full token bucket
+    }
+
+    /// Send a frame to every connected nearby peer. Returns false if dropped by rate limit / backlog.
+    @discardableResult
+    func broadcast(_ frame: Data, class sendClass: SendClass = .bulk) -> Bool {
         backlogLock.lock(); let backlog = backlogBytes; backlogLock.unlock()
-        if frame.count > 8192 && backlog > Self.sendBacklogCap { return }
+        if frame.count > 8192 && backlog > Self.sendBacklogCap { return false }
+
+        let cost = Double(frame.count)
+        rateLock.lock()
+        refillTokensLocked()
+        let needFrames = sendClass == .control ? 0.25 : 1.0
+        let needBytes = sendClass == .control ? min(cost, 2048) : cost
+        if frameTokens < needFrames || byteTokens < needBytes {
+            if sendClass == .bulk {
+                droppedBulk += 1
+                if droppedBulk % 50 == 1 {
+                    // Occasional log without spam
+                    NSLog("haven nearby: rate-limit drop bulk size=%d (dropped≈%d)", frame.count, droppedBulk)
+                }
+            }
+            rateLock.unlock()
+            // Control frames: wait briefly on the send queue instead of hard-dropping.
+            if sendClass == .control {
+                enqueuePaced(frame, waitMs: 40)
+                return true
+            }
+            return false
+        }
+        frameTokens -= needFrames
+        byteTokens -= needBytes
+        rateLock.unlock()
+
+        enqueuePaced(frame, waitMs: sendClass == .bulk && frame.count > 4096 ? 12 : 0)
+        return true
+    }
+
+    private func refillTokensLocked() {
+        let now = Date()
+        let dt = now.timeIntervalSince(lastRefill)
+        lastRefill = now
+        if dt > 0 {
+            byteTokens = min(Self.burstBytes, byteTokens + dt * Self.bytesPerSecond)
+            frameTokens = min(Self.burstFrames, frameTokens + dt * Self.maxFramesPerSecond)
+        }
+    }
+
+    private func enqueuePaced(_ frame: Data, waitMs: Int) {
         backlogLock.lock(); backlogBytes += frame.count; backlogLock.unlock()
         sendQueue.async { [weak self] in
             guard let self else { return }
-            defer { self.backlogLock.lock(); self.backlogBytes -= frame.count; self.backlogLock.unlock() }
-            // Cached peers, not session.connectedPeers — the sync read can deadlock against MC's
-            // recv thread mid-transfer (see peersSnapshot), which would wedge this queue forever.
+            defer {
+                self.backlogLock.lock()
+                self.backlogBytes -= frame.count
+                self.backlogLock.unlock()
+            }
+            if waitMs > 0 {
+                Thread.sleep(forTimeInterval: Double(waitMs) / 1000.0)
+            }
             let peers = self.cachedPeers
             guard !peers.isEmpty else { return }
             try? self.session.send(frame, toPeers: peers, with: .reliable)
@@ -129,23 +201,19 @@ final class NearbyTransport: NSObject {
 
 extension NearbyTransport: MCSessionDelegate {
     func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
-        // Refresh the snapshot HERE (we're on MC's own callback queue, where the read is safe) so
-        // no other thread ever needs to touch session.connectedPeers.
         let peers = session.connectedPeers
         peersLock.lock(); peersSnapshot = peers; peersLock.unlock()
         if state == .connected {
             onPeerConnected()
-            // Stop discovery entirely while connected — advertising next to a Mac kept inviting
-            // flaps; browsing kept scanning. Session stays up for the active transfer only.
-            browser.stopBrowsingForPeers()
-            advertiser.stopAdvertisingPeer()
+            // Discovery not needed while connected — session carries traffic.
+            DispatchQueue.main.async { [weak self] in
+                self?.parkDiscovery()
+            }
         } else if peers.isEmpty {
-            #if os(iOS)
-            // iPhone: do not auto-resume Multipeer discovery (heat). User/activity can nudge.
-            #else
-            advertiser.startAdvertisingPeer()
-            browser.startBrowsingForPeers()
-            #endif
+            // Peer left: short rediscovery window so devices can find each other again.
+            DispatchQueue.main.async { [weak self] in
+                self?.startDiscovery(parkAfter: 45)
+            }
         }
     }
     func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
@@ -164,7 +232,6 @@ extension NearbyTransport: MCNearbyServiceAdvertiserDelegate {
 
 extension NearbyTransport: MCNearbyServiceBrowserDelegate {
     func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String: String]?) {
-        // Only one side initiates, to avoid dueling invitations (the other side accepts).
         if self.peerID.displayName < peerID.displayName {
             browser.invitePeer(peerID, to: session, withContext: nil, timeout: 15)
         }

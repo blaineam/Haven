@@ -1609,6 +1609,18 @@ final class MediaStore: ObservableObject {
         else { return nil }
         return PlatformImage(cgImage: cg)
     }
+
+    /// Content-address a poster still for an **already stored** video without re-encoding the clip.
+    /// Used by re-optimize's poster-only path: already-compressed videos that never published a
+    /// `poster:` marker still need a still for super data saver / feed cards.
+    @MainActor
+    func ensurePosterImage(for videoRef: String) -> String? {
+        guard MediaKind(ref: videoRef) == .video,
+              let url = storagePath(for: videoRef),
+              FileManager.default.fileExists(atPath: url.path),
+              let img = Self.poster(for: url) else { return nil }
+        return addImage(img, forceOptimize: true)
+    }
 }
 
 // MARK: - Device pin (#2) — local retention exemption

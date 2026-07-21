@@ -539,7 +539,13 @@ private fun ReoptimizeMediaRow() {
         candidates.isEmpty() -> "Re-optimize media I already shared"
         else -> {
             val n = minOf(candidates.size, MediaReoptimizer.BATCH_LIMIT)
-            "Shrink & re-share $n item${if (n == 1) "" else "s"}"
+            val posters = candidates.count { it.work == MediaReoptimizer.Work.POSTER_ONLY }
+            val shrinks = candidates.size - posters
+            when {
+                shrinks == 0 -> "Add posters to ${minOf(posters, n)} video${if (minOf(posters, n) == 1) "" else "s"}"
+                posters == 0 -> "Shrink & re-share $n item${if (n == 1) "" else "s"}"
+                else -> "Improve $n item${if (n == 1) "" else "s"} (shrink + posters)"
+            }
         }
     }
 
@@ -576,15 +582,24 @@ private fun ReoptimizeMediaRow() {
         val total = candidates.size
         val batch = minOf(total, MediaReoptimizer.BATCH_LIMIT)
         val legacy = candidates.count { it.legacyByAge }
+        val posters = MediaReoptimizer.posterOnlyCount
+        val shrinks = total - posters
         val size = android.text.format.Formatter.formatFileSize(context, MediaReoptimizer.pendingBytes)
-        var s = "$total item${if (total == 1) "" else "s"} · $size currently on every member's device"
+        var s = ""
+        if (shrinks > 0) {
+            s = "$shrinks item${if (shrinks == 1) "" else "s"} · $size currently on every member's device"
+        }
+        if (posters > 0) {
+            val p = "$posters video${if (posters == 1) "" else "s"} missing a feed poster"
+            s = if (s.isEmpty()) p else "$s · $p"
+        }
         if (legacy > 0) s += " · $legacy shared before Haven learned to compress"
-        if (batch < total) s += ". This run does the $batch largest; tap again for the rest."
+        if (batch < total) s += ". This run does $batch; tap again for the rest."
         Spacer(Modifier.height(4.dp))
         Text(s, color = HavenTheme.textSecondary, fontSize = 11.sp)
     } else if (MediaReoptimizer.hasScanned.value && !busy && summary == null) {
         Spacer(Modifier.height(4.dp))
-        Text("Everything you've shared is already as small as it can be.",
+        Text("Everything you've shared is already optimized — including video posters.",
             color = HavenTheme.textSecondary, fontSize = 11.sp)
     }
 }

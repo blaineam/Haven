@@ -140,4 +140,69 @@ enum MediaVariants {
         }
         return out
     }
+
+    // MARK: - Re-optimize rewrite
+
+    /// Rewrite a post's media array after re-optimize.
+    ///
+    /// - `swap`: old content ref → new content ref (stills/videos that were re-encoded).
+    /// - `posters`: **old** video ref → poster image ref to attach (or replace). Poster-only
+    ///   work uses this with an empty `swap`; a re-encoded video uses both (new clip + new still).
+    ///
+    /// Why this is not a plain `map { swap[$0] ?? $0 }`:
+    /// 1. Re-encoding changes the video's content address — any existing `poster:old:img` marker
+    ///    must be rewritten or the still is orphaned from the playable clip.
+    /// 2. Already-compressed clips never enter the shrink path, but old posts may still lack a
+    ///    published poster. Poster-only work **inserts** `img_` + `poster:` without touching the
+    ///    video bytes (length of the array grows — desktop's equal-length check does not apply on
+    ///    Apple/Android, which re-sign the full media list).
+    /// 3. Replacing a poster must drop the previous poster image ref and marker so they do not
+    ///    linger as a second still in the carousel.
+    static func rewriteMedia(_ media: [String], swap: [String: String], posters: [String: String]) -> [String] {
+        // Old poster stills we are replacing — drop their bare `img_` entries when we hit them.
+        var dropPosterImages = Set<String>()
+        for (oldVideo, _) in posters {
+            if let oldP = poster(for: oldVideo, in: media) {
+                dropPosterImages.insert(oldP)
+            }
+        }
+        var out: [String] = []
+        var emittedPosterFor = Set<String>() // old video refs already paired
+
+        for ref in media {
+            if let (v, p) = parsePoster(ref) {
+                if posters[v] != nil {
+                    // Replacing this video's poster — marker re-inserted next to the video.
+                    continue
+                }
+                let nv = swap[v] ?? v
+                let np = swap[p] ?? p
+                out.append(posterMarker(video: nv, poster: np))
+                continue
+            }
+            if let (opt, orig) = parseOriginal(ref) {
+                out.append(originalMarker(optimized: swap[opt] ?? opt, original: swap[orig] ?? orig))
+                continue
+            }
+            if dropPosterImages.contains(ref) {
+                // Old still that only existed as this video's published poster.
+                continue
+            }
+
+            let oldRef = ref
+            let newRef = swap[ref] ?? ref
+            if let posterImg = posters[oldRef], !emittedPosterFor.contains(oldRef) {
+                if !out.contains(posterImg) { out.append(posterImg) }
+                out.append(posterMarker(video: newRef, poster: posterImg))
+                out.append(newRef)
+                emittedPosterFor.insert(oldRef)
+                continue
+            }
+            out.append(newRef)
+        }
+
+        // Videos that needed a poster but were missing from the list entirely (shouldn't happen)
+        // — no-op. Videos present only via swap without appearing as bare refs are covered above.
+        return out
+    }
 }

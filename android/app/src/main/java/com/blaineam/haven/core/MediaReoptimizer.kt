@@ -103,10 +103,14 @@ object MediaReoptimizer {
         val createdAtMs: Long,
     )
 
-    /** One blob of mine whose stored bytes are above target. */
+    /** Shrink the blob, or only publish a missing video poster (no re-transcode). */
+    enum class Work { REENCODE, POSTER_ONLY }
+
+    /** One blob of mine re-optimize can improve (smaller bytes and/or a missing video poster). */
     data class Candidate(
         val ref: String,
         val circleId: String,
+        val work: Work,
         val shape: MediaOptimizationTarget.Shape,
         /** Timestamp of the oldest post/comment of mine that names it. */
         val firstSharedMs: Long,
@@ -139,8 +143,12 @@ object MediaReoptimizer {
      */
     private val inFlight = java.util.concurrent.atomic.AtomicBoolean(false)
 
-    /** Total bytes of everything still waiting. */
-    val pendingBytes: Long get() = candidates.value.sumOf { it.shape.bytes }
+    /** Total bytes of shrink candidates still waiting (poster-only is a small JPEG). */
+    val pendingBytes: Long
+        get() = candidates.value.filter { it.work == Work.REENCODE }.sumOf { it.shape.bytes }
+
+    val posterOnlyCount: Int
+        get() = candidates.value.count { it.work == Work.POSTER_ONLY }
 
     fun cancel() { cancelRequested = true }
 
@@ -171,18 +179,21 @@ object MediaReoptimizer {
     // ---- Pure helpers, split out so the parts that decide are testable off-device ----------------
 
     /**
-     * Apply the batch's old-ref → new-ref swap to one media array.
-     *
-     * ORDER IS PRESERVED and anything not swapped passes through untouched — including synthetic
-     * `geo:` location pins, which ride in the same array and carry no bytes. Getting this wrong
-     * would silently reorder or drop attachments on a post the user never edited.
+     * Apply re-encode swaps and/or new video posters to one media array.
+     * Delegates to [MediaVariants.rewriteMedia] so poster markers stay paired with the playable clip.
      */
-    fun rewriteMedia(media: List<String>, swap: Map<String, String>): List<String> =
-        media.map { swap[it] ?: it }
+    fun rewriteMedia(
+        media: List<String>,
+        swap: Map<String, String>,
+        posters: Map<String, String> = emptyMap(),
+    ): List<String> = MediaVariants.rewriteMedia(media, swap, posters)
 
-    /** Biggest first: the win is dominated by a handful of videos, so a user who runs one batch and
-     *  stops should still have captured most of the saving. */
-    fun ordered(found: List<Candidate>): List<Candidate> = found.sortedByDescending { it.shape.bytes }
+    /** Re-encodes first (biggest), then poster-only. */
+    fun ordered(found: List<Candidate>): List<Candidate> =
+        found.sortedWith(
+            compareBy<Candidate> { if (it.work == Work.REENCODE) 0 else 1 }
+                .thenByDescending { it.shape.bytes },
+        )
 
     /** Room for the decrypt (≈[bytes]), the encoded output, and a margin. Filling the disk in a loop
      *  is the other way a job like this ruins someone's day. Unknown free space does NOT block. */
@@ -192,16 +203,12 @@ object MediaReoptimizer {
     // ---- Scan -----------------------------------------------------------------------------------
 
     /**
-     * Find my shared media that is above target.
+     * Find my shared media that is above target, **and** videos that never published a poster.
      *
-     * TWO SIGNALS, and how they combine is not the obvious reading. AGE
-     * ([MediaOptimizationTarget.LEGACY_CUTOFF_MS]) is a fact about provenance: media shared before
-     * that instant cannot have come from the current encoder. SHAPE
-     * ([MediaOptimizationTarget.judgeVideo] / [MediaOptimizationTarget.judgeImage]) is a fact about
-     * the bytes. SHAPE alone is dispositive and AGE is only REPORTED — age would exclude media shared
-     * after the cutoff with auto-optimize off, which is half the population this button exists for,
-     * and would include media already at target that would gain nothing. Asking the file is strictly
-     * better than asking the calendar.
+     * SHAPE alone is dispositive for re-encode; AGE is only REPORTED. POSTER-ONLY is separate: a
+     * video may already be at target (so it will never re-encode) yet still lack a
+     * `poster:<video>:<image>` marker — super data saver needs that still. We cut a JPEG from the
+     * existing file and edit the post without re-transcoding the clip.
      */
     suspend fun scan() = withContext(Dispatchers.IO) {
         if (!inFlight.compareAndSet(false, true)) return@withContext
@@ -212,19 +219,18 @@ object MediaReoptimizer {
         // report a stale/empty remaining count. The Stop control only exists while a run is in flight.
         cancelRequested = false
         try {
-            // Earliest time each ref was shared by me, and the circle it can be decrypted with. A ref
-            // used by several posts is ONE encode.
             val firstShared = HashMap<String, Long>()
             val circleOf = HashMap<String, String>()
+            val needsPoster = HashSet<String>()
             for (t in HavenNet.reoptimizeTargets()) {
                 for (ref in t.media) {
-                    // geo: pins et al. carry no bytes; audio is provably at target on Android (see
-                    // MediaOptimizationTarget.judgeAudio); a skipped ref has already been decided.
                     if (LocalMedia.isSynthetic(ref) || LocalMedia.isAudio(ref)) continue
-                    if (skipped.contains(ref)) continue
                     val prev = firstShared[ref]
                     if (prev == null || t.createdAtMs < prev) firstShared[ref] = t.createdAtMs
                     circleOf.putIfAbsent(ref, t.circleId)
+                    if (LocalMedia.isVideo(ref) && MediaVariants.posterFor(ref, t.media) == null) {
+                        needsPoster.add(ref)
+                    }
                 }
             }
 
@@ -232,17 +238,30 @@ object MediaReoptimizer {
             for ((ref, sinceMs) in firstShared) {
                 if (cancelRequested) break
                 val circleId = circleOf[ref] ?: continue
-                // Only refs whose bytes are actually HERE. One that has been evicted or never arrived
-                // can't be re-encoded from nothing, and re-downloading a 320 MB blob in order to
-                // shrink it is a decision for the user, not for a settings button.
                 val sealed = LocalMedia.sealedSize(ref)
                 if (sealed <= 0) continue
-                // Free gate on the SEALED length before any decrypt — see the class doc.
-                if (sealed < MediaOptimizationTarget.MINIMUM_INTERESTING_BYTES) continue
-                val shape = probe(circleId, ref) ?: continue
-                if (!shape.aboveTarget) continue
-                found.add(Candidate(ref, circleId, shape, sinceMs,
-                    MediaOptimizationTarget.isLegacyByAge(sinceMs)))
+                val wantPoster = needsPoster.contains(ref) && !skipped.contains("poster:$ref")
+                val aboveInteresting = sealed >= MediaOptimizationTarget.MINIMUM_INTERESTING_BYTES
+                // Poster-only may be a small clip; re-encode still requires the free sealed gate.
+                if (!aboveInteresting && !wantPoster) continue
+
+                val shape = if (aboveInteresting || LocalMedia.isVideo(ref)) {
+                    probe(circleId, ref)
+                } else null
+                val legacy = MediaOptimizationTarget.isLegacyByAge(sinceMs)
+                if (shape != null && shape.aboveTarget && aboveInteresting && !skipped.contains(ref)) {
+                    found.add(Candidate(ref, circleId, Work.REENCODE, shape, sinceMs, legacy))
+                } else if (LocalMedia.isVideo(ref) && wantPoster) {
+                    val s = shape ?: MediaOptimizationTarget.Shape(
+                        bytes = sealed,
+                        maxDimension = 0,
+                        codec = "video",
+                        bitrate = 0,
+                        seconds = 0.0,
+                        aboveTargetReason = null,
+                    )
+                    found.add(Candidate(ref, circleId, Work.POSTER_ONLY, s, sinceMs, legacy))
+                }
             }
             candidates.value = ordered(found)
             hasScanned.value = true
@@ -267,7 +286,7 @@ object MediaReoptimizer {
 
     // ---- Run ------------------------------------------------------------------------------------
 
-    /** Re-encode up to [BATCH_LIMIT] candidates and re-share every post that named them. */
+    /** Re-encode / poster-fill up to [BATCH_LIMIT] candidates and re-share every post that named them. */
     suspend fun run() = withContext(Dispatchers.IO) {
         if (candidates.value.isEmpty()) return@withContext
         if (!inFlight.compareAndSet(false, true)) return@withContext
@@ -281,119 +300,171 @@ object MediaReoptimizer {
             batchCount.intValue = batch.size
             var before = 0L
             var after = 0L
-            // old ref -> new ref. Built across the WHOLE batch, then applied in ONE pass, so a post
-            // with three rewritten photos gets a single edit rather than three.
             val swap = LinkedHashMap<String, String>()
-            // old ref -> the circle its NEW blob is sealed to. See the scoping note at the apply below.
             val sealedTo = HashMap<String, String>()
+            // old video ref -> poster image ref
+            val posters = LinkedHashMap<String, String>()
+            var postersAdded = 0
 
             for (c in batch) {
                 if (cancelRequested) { stopped = "Stopped."; break }
-                if (!hasDiskHeadroom(LocalMedia.usableSpaceBytes(), c.shape.bytes)) {
-                    stopped = "Stopped — not enough free space to re-encode safely."
-                    break
-                }
-                currentLabel.value = if (LocalMedia.isVideo(c.ref)) "video" else "photo"
 
-                // PLAINTEXT sizes on both sides. Comparing the new blob's sealed file length against
-                // the old blob's plaintext length would compare two different quantities; the AEAD
-                // overhead is small, but the shrink rule is the one thing here that must be exact.
-                val encoded = encode(c)
-                val newRef = encoded?.first
-                val newBytes = encoded?.second ?: -1L
-                if (newRef == null || newRef == c.ref || newBytes <= 0) {
-                    skip(c.ref)
-                    doneCount.intValue++
-                    yield()
-                    continue
+                when (c.work) {
+                    Work.POSTER_ONLY -> {
+                        currentLabel.value = "poster"
+                        if (!hasDiskHeadroom(LocalMedia.usableSpaceBytes(), 8L * 1024 * 1024)) {
+                            stopped = "Stopped — not enough free space to re-encode safely."
+                            break
+                        }
+                        val pRef = LocalMedia.ensurePosterImage(c.circleId, c.ref)
+                        if (!pRef.isNullOrEmpty()) {
+                            posters[c.ref] = pRef
+                            sealedTo[c.ref] = c.circleId
+                            postersAdded++
+                        } else {
+                            skip("poster:${c.ref}")
+                        }
+                        doneCount.intValue++
+                        yield()
+                    }
+                    Work.REENCODE -> {
+                        if (!hasDiskHeadroom(LocalMedia.usableSpaceBytes(), c.shape.bytes)) {
+                            stopped = "Stopped — not enough free space to re-encode safely."
+                            break
+                        }
+                        currentLabel.value = if (LocalMedia.isVideo(c.ref)) "video" else "photo"
+                        val encoded = encode(c)
+                        val newRef = encoded?.videoRef
+                        val newBytes = encoded?.bytes ?: -1L
+                        val posterRef = encoded?.posterRef
+                        if (newRef == null || newRef == c.ref || newBytes <= 0) {
+                            // Re-encode failed — still try a poster for videos that never published one.
+                            if (LocalMedia.isVideo(c.ref)) {
+                                LocalMedia.ensurePosterImage(c.circleId, c.ref)?.let {
+                                    posters[c.ref] = it
+                                    sealedTo[c.ref] = c.circleId
+                                    postersAdded++
+                                }
+                            }
+                            skip(c.ref)
+                            doneCount.intValue++
+                            yield()
+                            continue
+                        }
+                        if (!MediaOptimizationTarget.keepsNewEncode(c.shape.bytes, newBytes)) {
+                            android.util.Log.i(
+                                "Reoptimize",
+                                "${c.ref.take(12)} came back no smaller ($newBytes vs ${c.shape.bytes}) — keeping the original",
+                            )
+                            LocalMedia.delete(newRef)
+                            if (LocalMedia.isVideo(c.ref)) {
+                                LocalMedia.ensurePosterImage(c.circleId, c.ref)?.let {
+                                    posters[c.ref] = it
+                                    sealedTo[c.ref] = c.circleId
+                                    postersAdded++
+                                }
+                            }
+                            skip(c.ref)
+                            doneCount.intValue++
+                            yield()
+                            continue
+                        }
+                        before += c.shape.bytes
+                        after += newBytes
+                        swap[c.ref] = newRef
+                        sealedTo[c.ref] = c.circleId
+                        if (!posterRef.isNullOrEmpty()) {
+                            posters[c.ref] = posterRef
+                            postersAdded++
+                        } else if (LocalMedia.isVideo(c.ref)) {
+                            LocalMedia.ensurePosterImage(c.circleId, newRef)?.let {
+                                posters[c.ref] = it
+                                postersAdded++
+                            }
+                        }
+                        doneCount.intValue++
+                        yield()
+                    }
                 }
-                // A rewrite that doesn't clearly win is worse than none: every member pays a
-                // re-download for nothing. Drop it and never offer this ref again.
-                if (!MediaOptimizationTarget.keepsNewEncode(c.shape.bytes, newBytes)) {
-                    android.util.Log.i("Reoptimize",
-                        "${c.ref.take(12)} came back no smaller (${newBytes} vs ${c.shape.bytes}) — keeping the original")
-                    LocalMedia.delete(newRef)
-                    skip(c.ref)
-                    doneCount.intValue++
-                    yield()
-                    continue
-                }
-                before += c.shape.bytes
-                after += newBytes
-                swap[c.ref] = newRef
-                sealedTo[c.ref] = c.circleId
-                doneCount.intValue++
-                yield()   // cancellation point + let the UI breathe between items
             }
 
-            // Apply. Targets are re-read NOW rather than reused from the scan: minutes have passed,
-            // and a post edited or retracted in the meantime must be edited against its CURRENT
-            // state, not a stale copy that would silently revert the user's own change.
-            //
-            // SCOPED TO THE CIRCLE THE NEW BLOB WAS SEALED TO — an Android-only constraint with no
-            // counterpart on iOS, which keeps media plaintext at rest. Here `LocalMedia.store` seals
-            // to ONE circle and there is one file per ref, so a blob encoded while walking circle A
-            // opens with A's key and only A's. If the same ref was also shared into circle B and we
-            // rewrote B's post too, B's copy of the post would name a blob this device cannot open —
-            // a placeholder where the user's own photo used to be. So B keeps naming the OLD ref,
-            // which still exists and still works; it simply misses this round's saving.
+            // SCOPED TO THE CIRCLE THE NEW BLOB WAS SEALED TO (Android sealed-at-rest).
             var reshared = 0
-            if (swap.isNotEmpty()) {
+            if (swap.isNotEmpty() || posters.isNotEmpty()) {
                 for (t in HavenNet.reoptimizeTargets()) {
-                    val applicable = swap.filterKeys { sealedTo[it] == t.circleId }
-                    if (t.media.none { applicable.containsKey(it) }) continue
-                    if (HavenNet.applyReoptimized(t, rewriteMedia(t.media, applicable))) reshared++
+                    val applicableSwap = swap.filterKeys { sealedTo[it] == t.circleId }
+                    val postPosters = HashMap<String, String>()
+                    for ((oldV, pImg) in posters) {
+                        if (sealedTo[oldV] != t.circleId) continue
+                        if (!t.media.contains(oldV)) continue
+                        val willSwap = applicableSwap.containsKey(oldV)
+                        val missing = MediaVariants.posterFor(oldV, t.media) == null
+                        if (willSwap || missing) postPosters[oldV] = pImg
+                    }
+                    if (t.media.none { applicableSwap.containsKey(it) } && postPosters.isEmpty()) continue
+                    val media = rewriteMedia(t.media, applicableSwap, postPosters)
+                    if (media != t.media && HavenNet.applyReoptimized(t, media)) reshared++
                 }
             }
 
-            lastSummary.value = if (swap.isEmpty()) "Nothing could be made smaller"
-            else "${swap.size} item${plural(swap.size)} re-shared across $reshared post${plural(reshared)} · " +
-                "${fmt(before)} → ${fmt(after)} (${pct(before, after)}% smaller)"
+            lastSummary.value = when {
+                swap.isEmpty() && postersAdded == 0 -> "Nothing could be improved"
+                else -> {
+                    val parts = ArrayList<String>()
+                    if (swap.isNotEmpty()) {
+                        parts.add(
+                            "${swap.size} item${plural(swap.size)} smaller " +
+                                "(${fmt(before)} → ${fmt(after)}, ${pct(before, after)}%)",
+                        )
+                    }
+                    if (postersAdded > 0) {
+                        parts.add("$postersAdded video poster${plural(postersAdded)} added")
+                    }
+                    parts.add("$reshared post${plural(reshared)} re-shared")
+                    parts.joinToString(" · ")
+                }
+            }
             android.util.Log.i("Reoptimize", lastSummary.value ?: "")
             lastWarning.value = stopped
         } finally {
             running.value = false
             currentLabel.value = ""
-            // Released BEFORE the re-scan below, which takes the latch itself.
             inFlight.set(false)
         }
-        // Re-scan so the remaining count is honest, and so anything just rewritten drops off the
-        // list (nothing references the old ref any more, so it is no longer one of my shared items).
-        //
-        // But HOLD THE WARNING ACROSS IT. scan() clears lastWarning (a fresh measurement shouldn't
-        // inherit a stale complaint), which means this trailing re-scan would otherwise wipe the two
-        // messages this run most needs to deliver — "Stopped." and "not enough free space" — before
-        // SettingsScreen ever renders them. A warning that is only displayed for the duration of a
-        // re-scan is a warning that was never shown. A warning raised BY the re-scan wins, since
-        // that one describes the state the user is looking at now.
         val raised = lastWarning.value
         scan()
         if (raised != null && lastWarning.value == null) lastWarning.value = raised
     }
 
+    private data class Encoded(val videoRef: String, val bytes: Long, val posterRef: String?)
+
     /**
-     * Re-encode one blob through the SAME entry points a brand-new attachment uses — that is the
-     * whole point of `forceOptimize` on [readVideoBytes] and of the explicit target arguments to
-     * [downscaleJpeg]. Not a parallel encoder: when [MediaTargets] changes again, old media follows
-     * automatically. Returns (new ref, PLAINTEXT byte count), or null if nothing usable came out.
+     * Re-encode through the same entry points as a brand-new attachment. Videos use [LocalMedia.prepareVideo]
+     * so a poster still is produced for the media rewrite.
      */
-    private fun encode(c: Candidate): Pair<String, Long>? {
+    private fun encode(c: Candidate): Encoded? {
         if (LocalMedia.isVideo(c.ref)) {
             val cached = LocalMedia.hasPlainCache(c.ref, "mp4")
             val src = LocalMedia.videoFile(c.circleId, c.ref) ?: return null
-            val out = runCatching {
-                readVideoBytes(appContext, Uri.fromFile(src), MediaTargets.MAX_VIDEO_BYTES,
-                    forceOptimize = true)
+            val prepared = runCatching {
+                LocalMedia.prepareVideo(
+                    appContext, Uri.fromFile(src), c.circleId,
+                    forceOptimize = true,
+                )
             }.getOrNull()
             if (!cached) LocalMedia.dropPlainCache(c.ref, "mp4")
-            if (out == null || out.isEmpty()) return null
-            return LocalMedia.store(c.circleId, out, isVideo = true) to out.size.toLong()
+            if (prepared == null || prepared.isEmpty) return null
+            // Plaintext size of the new playable for the shrink check.
+            val plain = LocalMedia.load(c.circleId, prepared.videoRef)?.size?.toLong()
+                ?: LocalMedia.sealedSize(prepared.videoRef)
+            return Encoded(prepared.videoRef, plain, prepared.posterRef)
         }
         val src = LocalMedia.load(c.circleId, c.ref) ?: return null
         val out = downscaleJpeg(src, MediaTargets.STILL_LONG_EDGE,
             MediaTargets.STILL_JPEG_QUALITY) ?: return null
         if (out.isEmpty()) return null
-        return LocalMedia.store(c.circleId, out, isVideo = false) to out.size.toLong()
+        val ref = LocalMedia.store(c.circleId, out, isVideo = false)
+        return Encoded(ref, out.size.toLong(), null)
     }
 
     // ---- Formatting -----------------------------------------------------------------------------

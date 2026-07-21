@@ -706,6 +706,28 @@ object LocalMedia {
         val isEmpty: Boolean get() = videoRef.isEmpty()
     }
 
+    /**
+     * Content-address a poster still for an **already stored** video without re-encoding the clip.
+     * Decrypts to the plain cache if needed (re-optimize path only — feed tiles still avoid this).
+     */
+    fun ensurePosterImage(circleId: String, videoRef: String): String? {
+        if (!isVideo(videoRef)) return null
+        val file = videoFile(circleId, videoRef) ?: return null
+        return runCatching {
+            val mmr = android.media.MediaMetadataRetriever()
+            try {
+                mmr.setDataSource(file.absolutePath)
+                val frame = mmr.getFrameAtTime(0, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    ?: return null
+                val baos = java.io.ByteArrayOutputStream()
+                frame.compress(android.graphics.Bitmap.CompressFormat.JPEG, 70, baos)
+                store(circleId, baos.toByteArray(), isVideo = false)
+            } finally {
+                runCatching { mmr.release() }
+            }
+        }.getOrNull()
+    }
+
     fun prepareVideo(
         context: android.content.Context,
         uri: android.net.Uri,

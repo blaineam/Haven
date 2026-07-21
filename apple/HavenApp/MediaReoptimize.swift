@@ -70,11 +70,25 @@ final class MediaReoptimizer: ObservableObject {
     /// full batch is minutes, not hours, and the user is never more than one batch from an idle app.
     static let batchLimit = 25
 
-    /// One item of mine whose stored bytes are above target.
+    /// What this candidate needs. Re-encode shrinks bytes; poster-only publishes a still for a
+    /// video that is already small enough (or that we are not re-encoding) but never shipped a
+    /// `poster:` marker — super data saver and feed cards need that still even when the clip
+    /// itself will not shrink.
+    enum Work: Sendable {
+        case reencode
+        case posterOnly
+    }
+
+    /// One item of mine that re-optimize can improve (smaller bytes and/or a missing video poster).
     struct Candidate: Identifiable, Sendable {
-        var id: String { ref }
+        /// Distinct from `ref` so a video can be both "needs shrink" and "needs poster" without
+        /// colliding in the skip set (poster failures use `poster:<ref>`).
+        var id: String { work == .posterOnly ? "poster:\(ref)" : ref }
         let ref: String
         let kind: MediaKind
+        let work: Work
+        /// Shape of the on-disk bytes. For poster-only this is still the video's shape (for
+        /// ordering / UI size), not a claim that we will re-encode it.
         let shape: MediaOptimizationTarget.Shape
         /// Timestamp of the oldest post/comment of mine that names it.
         let firstSharedMs: UInt64
@@ -97,8 +111,11 @@ final class MediaReoptimizer: ObservableObject {
     @Published private(set) var hasScanned = false
 
     private var cancelRequested = false
-    /// Total bytes of everything still waiting.
-    var pendingBytes: Int64 { candidates.reduce(0) { $0 + $1.shape.bytes } }
+    /// Total bytes of shrink candidates still waiting (poster-only is a small JPEG — not counted as library size).
+    var pendingBytes: Int64 {
+        candidates.reduce(0) { $0 + ($1.work == .reencode ? $1.shape.bytes : 0) }
+    }
+    var posterOnlyCount: Int { candidates.filter { $0.work == .posterOnly }.count }
 
     // MARK: - Don't-retry set
     //
@@ -115,10 +132,10 @@ final class MediaReoptimizer: ObservableObject {
 
     // MARK: - Scan
 
-    /// Find my shared media that is above target.
+    /// Find my shared media that is above target, **and** videos that never published a poster.
     ///
-    /// TWO SIGNALS, and it is worth being precise about how they combine, because the obvious
-    /// reading ("anything before the cutoff") is not what this does:
+    /// TWO SIGNALS for the shrink path, and it is worth being precise about how they combine, because
+    /// the obvious reading ("anything before the cutoff") is not what this does:
     ///
     ///   AGE (`MediaOptimizationTarget.legacyCutoff`, 2026-07-20 08:00 America/Los_Angeles) is a
     ///   fact about provenance: media shared before that instant CANNOT have come from the current
@@ -129,57 +146,86 @@ final class MediaReoptimizer: ObservableObject {
     ///   H.264 because Android can't be relied on to decode HEVC — so an `hvc1` track is proof the
     ///   file came from the passthrough remux or the raw-copy fallback.
     ///
-    /// SHAPE alone is dispositive, and AGE is reported rather than enforced. That is deliberate:
-    /// age would exclude media shared AFTER the cutoff with auto-optimize switched OFF, which is
-    /// half the population this button exists for, and it would include media that is already at
-    /// target and would gain nothing from a rewrite. Asking the file is strictly better than asking
-    /// the calendar. The cutoff is kept because it explains a row to the user ("shared before Haven
-    /// learned to compress") and because it is the honest answer to "why is this here at all".
+    /// SHAPE alone is dispositive for re-encode, and AGE is reported rather than enforced. That is
+    /// deliberate: age would exclude media shared AFTER the cutoff with auto-optimize switched OFF,
+    /// which is half the population this button exists for, and it would include media that is
+    /// already at target and would gain nothing from a rewrite. Asking the file is strictly better
+    /// than asking the calendar.
+    ///
+    /// POSTER-ONLY is a third path: a video may already be at target (so it will never re-encode)
+    /// yet still lack a `poster:<video>:<image>` marker on one of my posts. Super data saver and
+    /// feed cards need that still. We cut a JPEG from the existing file and edit the post — no
+    /// re-transcode of the clip.
     ///
     /// The safety property that makes a shape-only gate sound is idempotence: the encoder's own
     /// output must re-probe as AT target, or this would re-encode the same clip on every run. That
     /// is why the probe's ceilings carry headroom over the encoder's nominal rates, and it was
     /// measured on real files rather than reasoned about — 305.7 MB @ 38.1 Mbps in, 37.7 MB @ 4.7
-    /// Mbps out, against a 6.0 Mbps ceiling.
+    /// Mbps out, against a 6.0 Mbps ceiling. Poster-only is idempotent because a post that already
+    /// has a marker for that video is not offered again.
     func scan() async {
         guard !scanning, !running else { return }
         scanning = true
         lastWarning = nil
         defer { scanning = false }
 
+        let targets = FeedStore.shared.reoptimizeTargets()
         // Earliest time each ref was shared by me. A ref used by several posts is ONE encode.
         var firstShared: [String: UInt64] = [:]
-        for target in FeedStore.shared.reoptimizeTargets() {
+        // Videos that appear on at least one of my posts without a poster marker.
+        var needsPoster = Set<String>()
+        for target in targets {
             for ref in target.media {
-                guard !MediaStore.isSynthetic(ref), MediaKind(ref: ref) != nil, !skipped.contains(ref) else { continue }
+                guard !MediaStore.isSynthetic(ref), let kind = MediaKind(ref: ref) else { continue }
                 firstShared[ref] = min(firstShared[ref] ?? .max, target.createdAtMs)
+                if kind == .video,
+                   MediaVariants.poster(for: ref, in: target.media) == nil {
+                    needsPoster.insert(ref)
+                }
             }
         }
-        // Only refs whose bytes are actually here. One that has been evicted or never arrived can't
-        // be re-encoded from nothing, and re-downloading a 320 MB blob in order to shrink it is a
-        // decision for the user, not for a settings button.
-        let probeList: [(ref: String, url: URL, kind: MediaKind, since: UInt64)] = firstShared.compactMap { ref, ms in
-            guard let kind = MediaKind(ref: ref),
-                  let url = MediaStore.shared.storagePath(for: ref),
-                  FileManager.default.fileExists(atPath: url.path) else { return nil }
-            return (ref, url, kind, ms)
-        }
+        let skipSnap = skipped
+        // Only refs whose bytes are actually here.
+        let probeList: [(ref: String, url: URL, kind: MediaKind, since: UInt64, wantPoster: Bool)] =
+            firstShared.compactMap { ref, ms in
+                guard let kind = MediaKind(ref: ref),
+                      let url = MediaStore.shared.storagePath(for: ref),
+                      FileManager.default.fileExists(atPath: url.path) else { return nil }
+                return (ref, url, kind, ms, needsPoster.contains(ref) && !skipSnap.contains("poster:\(ref)"))
+            }
 
         // Probing reads headers off dozens of files and spins up an AVAsset per video — off the main
         // actor, or the Settings screen locks up for the duration.
         let found: [Candidate] = await Task.detached(priority: .userInitiated) {
             var out: [Candidate] = []
             for p in probeList {
-                guard let shape = await MediaOptimizationTarget.probe(p.url), shape.aboveTarget else { continue }
-                out.append(Candidate(ref: p.ref, kind: p.kind, shape: shape, firstSharedMs: p.since,
-                                     legacyByAge: MediaOptimizationTarget.isLegacyByAge(createdAtMs: p.since)))
+                let shape = await MediaOptimizationTarget.probe(p.url)
+                let legacy = MediaOptimizationTarget.isLegacyByAge(createdAtMs: p.since)
+                let above = shape?.aboveTarget == true
+                if above, !skipSnap.contains(p.ref), let shape {
+                    // Re-encode path also regenerates a poster when the clip is a video.
+                    out.append(Candidate(ref: p.ref, kind: p.kind, work: .reencode, shape: shape,
+                                         firstSharedMs: p.since, legacyByAge: legacy))
+                } else if p.kind == .video, p.wantPoster {
+                    // Already small enough (or unprobeable) but still missing a published still.
+                    // Do NOT also add poster-only when we're re-encoding — that path publishes a poster.
+                    let bytes = shape?.bytes
+                        ?? Int64((try? p.url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+                    let s = shape ?? MediaOptimizationTarget.Shape(
+                        bytes: bytes, maxDimension: 0, codec: "video", bitrate: 0, seconds: 0,
+                        aboveTargetReason: nil)
+                    out.append(Candidate(ref: p.ref, kind: .video, work: .posterOnly, shape: s,
+                                         firstSharedMs: p.since, legacyByAge: legacy))
+                }
             }
             return out
         }.value
 
-        // Biggest first: the win is dominated by a handful of videos, and a user who runs one batch
-        // and stops should still have captured most of the saving.
-        candidates = found.sorted { $0.shape.bytes > $1.shape.bytes }
+        // Biggest re-encodes first; poster-only (cheap JPEG cut) after shrink work of similar size.
+        candidates = found.sorted {
+            if $0.work != $1.work { return $0.work == .reencode && $1.work == .posterOnly }
+            return $0.shape.bytes > $1.shape.bytes
+        }
         hasScanned = true
     }
 
@@ -187,7 +233,7 @@ final class MediaReoptimizer: ObservableObject {
 
     func cancel() { cancelRequested = true }
 
-    /// Re-encode up to `batchLimit` candidates and re-share every post that named them.
+    /// Re-encode / poster-fill up to `batchLimit` candidates and re-share every post that named them.
     func run() async {
         guard !running, !candidates.isEmpty else { return }
         running = true
@@ -199,101 +245,153 @@ final class MediaReoptimizer: ObservableObject {
         let batch = Array(candidates.prefix(Self.batchLimit))
         batchCount = batch.count
         var before: Int64 = 0, after: Int64 = 0
-        // old ref -> new ref. Built across the whole batch, then applied in ONE pass, so a post with
-        // three rewritten photos gets a single edit rather than three.
+        // old ref -> new ref (re-encoded stills/videos).
         var swap: [String: String] = [:]
+        // old video ref -> poster image ref (poster-only OR regenerated with re-encode).
+        var posters: [String: String] = [:]
+        var postersAdded = 0
 
         for candidate in batch {
             if cancelRequested || Task.isCancelled { break }
-            guard hasDiskHeadroom(for: candidate.shape.bytes) else {
-                lastWarning = "Stopped — not enough free space to re-encode safely."
-                break
-            }
-            currentLabel = candidate.kind == .video ? "video" : (candidate.kind == .audio ? "audio" : "photo")
 
-            guard let newRef = await encode(candidate), !newRef.isEmpty, newRef != candidate.ref,
-                  let newURL = MediaStore.shared.storagePath(for: newRef),
-                  let newBytes = (try? newURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
-            else {
-                skip(candidate.ref)
+            switch candidate.work {
+            case .posterOnly:
+                currentLabel = "poster"
+                // Poster is a small JPEG — only need modest headroom, not a full video rewrite budget.
+                guard hasDiskHeadroom(for: 8 * 1_048_576) else {
+                    lastWarning = "Stopped — not enough free space to re-encode safely."
+                    break
+                }
+                if let pRef = MediaStore.shared.ensurePosterImage(for: candidate.ref), !pRef.isEmpty {
+                    posters[candidate.ref] = pRef
+                    postersAdded += 1
+                } else {
+                    skip("poster:\(candidate.ref)")
+                }
                 doneCount += 1
-                continue
-            }
-            // A rewrite that doesn't clearly win is worse than none: every member pays a re-download
-            // for nothing. Drop it and never offer this ref again.
-            guard Double(newBytes) < Double(candidate.shape.bytes) * MediaOptimizationTarget.requiredShrinkFactor else {
-                HavenLog.sync("reoptimize: \(candidate.ref.prefix(12)) came back no smaller (\(newBytes) vs \(candidate.shape.bytes)) — keeping the original")
-                MediaStore.shared.delete(newRef)
-                skip(candidate.ref)
+                await Task.yield()
+
+            case .reencode:
+                guard hasDiskHeadroom(for: candidate.shape.bytes) else {
+                    lastWarning = "Stopped — not enough free space to re-encode safely."
+                    break
+                }
+                currentLabel = candidate.kind == .video ? "video" : (candidate.kind == .audio ? "audio" : "photo")
+
+                let encoded = await encode(candidate)
+                guard let newRef = encoded.ref, !newRef.isEmpty, newRef != candidate.ref,
+                      let newURL = MediaStore.shared.storagePath(for: newRef),
+                      let newBytes = (try? newURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
+                else {
+                    // Re-encode failed — still try a poster if this video never published one.
+                    if candidate.kind == .video,
+                       let pRef = MediaStore.shared.ensurePosterImage(for: candidate.ref), !pRef.isEmpty {
+                        posters[candidate.ref] = pRef
+                        postersAdded += 1
+                    }
+                    skip(candidate.ref)
+                    doneCount += 1
+                    continue
+                }
+                // A rewrite that doesn't clearly win is worse than none: every member pays a re-download
+                // for nothing. Drop it and never offer this ref again — but still publish a poster if
+                // the post never had one (the clip stays; the still is new value).
+                if Double(newBytes) >= Double(candidate.shape.bytes) * MediaOptimizationTarget.requiredShrinkFactor {
+                    HavenLog.sync("reoptimize: \(candidate.ref.prefix(12)) came back no smaller (\(newBytes) vs \(candidate.shape.bytes)) — keeping the original")
+                    MediaStore.shared.delete(newRef)
+                    if candidate.kind == .video,
+                       let pRef = MediaStore.shared.ensurePosterImage(for: candidate.ref), !pRef.isEmpty {
+                        posters[candidate.ref] = pRef
+                        postersAdded += 1
+                    }
+                    skip(candidate.ref)
+                    doneCount += 1
+                    continue
+                }
+                before += candidate.shape.bytes
+                after += Int64(newBytes)
+                swap[candidate.ref] = newRef
+                if let p = encoded.posterRef, !p.isEmpty {
+                    posters[candidate.ref] = p
+                    postersAdded += 1
+                } else if candidate.kind == .video,
+                          let pRef = MediaStore.shared.ensurePosterImage(for: newRef), !pRef.isEmpty {
+                    // prepareVideo should have cut one; fall back if it didn't.
+                    posters[candidate.ref] = pRef
+                    postersAdded += 1
+                }
                 doneCount += 1
-                continue
+                await Task.yield()
             }
-            before += candidate.shape.bytes
-            after += Int64(newBytes)
-            swap[candidate.ref] = newRef
-            doneCount += 1
-            // Let the UI (and anything else on the main actor) breathe between items — the encode
-            // itself is off-main, but content-addressing the result streams a sha-256 here.
-            await Task.yield()
         }
 
         // Apply. Targets are re-read NOW rather than reused from the scan: minutes have passed, and
         // a post edited or retracted in the meantime must be edited against its current state, not a
         // stale copy that would silently revert the user's own change.
         var reshared = 0
-        if !swap.isEmpty {
-            for target in FeedStore.shared.reoptimizeTargets() where target.media.contains(where: { swap[$0] != nil }) {
-                // `map` preserves order and passes everything else through untouched — including
-                // synthetic `geo:` location pins, which ride in the same array and carry no bytes.
-                let media = target.media.map { swap[$0] ?? $0 }
-                if FeedStore.shared.applyReoptimized(target, media: media) { reshared += 1 }
+        if !swap.isEmpty || !posters.isEmpty {
+            for target in FeedStore.shared.reoptimizeTargets() {
+                // Poster map is per-post: only videos this post names, and only when the post
+                // still lacks a marker (or the video itself is being swapped — re-pair then).
+                var postPosters: [String: String] = [:]
+                for (oldV, pImg) in posters {
+                    guard target.media.contains(oldV) else { continue }
+                    let willSwap = swap[oldV] != nil
+                    let missing = MediaVariants.poster(for: oldV, in: target.media) == nil
+                    if willSwap || missing { postPosters[oldV] = pImg }
+                }
+                let needsSwap = target.media.contains { swap[$0] != nil }
+                guard needsSwap || !postPosters.isEmpty else { continue }
+                let media = MediaVariants.rewriteMedia(target.media, swap: swap, posters: postPosters)
+                if media != target.media, FeedStore.shared.applyReoptimized(target, media: media) {
+                    reshared += 1
+                }
             }
             FeedStore.shared.refresh()
         }
 
-        lastSummary = swap.isEmpty
-            ? "Nothing could be made smaller"
-            : "\(swap.count) item\(swap.count == 1 ? "" : "s") re-shared across \(reshared) post\(reshared == 1 ? "" : "s") · "
-              + "\(fmt(before)) → \(fmt(after)) (\(pct(before, after))% smaller)"
+        let shrinkN = swap.count
+        if shrinkN == 0 && postersAdded == 0 {
+            lastSummary = "Nothing could be improved"
+        } else {
+            var parts: [String] = []
+            if shrinkN > 0 {
+                parts.append("\(shrinkN) item\(shrinkN == 1 ? "" : "s") smaller (\(fmt(before)) → \(fmt(after)), \(pct(before, after))%)")
+            }
+            if postersAdded > 0 {
+                parts.append("\(postersAdded) video poster\(postersAdded == 1 ? "" : "s") added")
+            }
+            parts.append("\(reshared) post\(reshared == 1 ? "" : "s") re-shared")
+            lastSummary = parts.joined(separator: " · ")
+        }
         HavenLog.sync("reoptimize: \(lastSummary ?? "")")
         if cancelRequested { lastWarning = "Stopped." }
 
-        // Re-scan so the remaining count is honest, and so anything just rewritten drops off the
-        // list (nothing references the old ref any more, so it is no longer one of my shared items).
-        //
-        // But HOLD THE WARNING ACROSS IT. `scan()` clears `lastWarning` (a fresh measurement
-        // shouldn't inherit a stale complaint), which means this trailing re-scan would otherwise
-        // wipe the two messages this run most needs to deliver — "Stopped." and "not enough free
-        // space" — before `ReoptimizeMediaRow` ever renders them. A warning that is only displayed
-        // for the duration of a re-scan is a warning that was never shown. A warning raised BY the
-        // re-scan wins, since that one describes the state the user is looking at now.
+        // Re-scan so the remaining count is honest.
         let raised = lastWarning
         await scan()
         if let raised, lastWarning == nil { lastWarning = raised }
     }
 
-    /// Re-encode one blob through the SAME entry points a brand-new attachment uses — the whole
-    /// point of `forceOptimize` on those two. Not a parallel encoder: when the compression targets
-    /// change again, old media follows automatically.
-    private func encode(_ candidate: Candidate) async -> String? {
-        guard let src = MediaStore.shared.storagePath(for: candidate.ref) else { return nil }
+    /// Re-encode one blob through the SAME entry points a brand-new attachment uses.
+    /// Videos use `prepareVideo` so a poster still is produced and returned for the media rewrite.
+    private func encode(_ candidate: Candidate) async -> (ref: String?, posterRef: String?) {
+        guard let src = MediaStore.shared.storagePath(for: candidate.ref) else { return (nil, nil) }
         switch candidate.kind {
         case .video:
-            // addVideo already drives MediaProcessing itself, so the shared card is live here.
-            return await MediaStore.shared.addVideo(url: src, forceOptimize: true)
+            let prepared = await MediaStore.shared.prepareVideo(url: src, forceOptimize: true)
+            if prepared.isEmpty { return (nil, nil) }
+            return (prepared.videoRef, prepared.posterRef)
         case .audio:
-            return await MediaStore.shared.addAudio(url: src)
+            return (await MediaStore.shared.addAudio(url: src), nil)
         case .image:
-            // addImage is synchronous and has no indicator of its own — wrap it in the SAME counted
-            // store the composer uses rather than inventing a second progress mechanism.
-            return await MediaProcessing.tracking("photo") {
+            let ref = await MediaProcessing.tracking("photo") { () -> String? in
                 guard let img = MediaStore.shared.item(candidate.ref)?.image else { return nil }
                 return MediaStore.shared.addImage(img, forceOptimize: true)
             }
+            return (ref, nil)
         case .file:
-            // Zip attachments are already the user's chosen archive — re-encoding them is
-            // meaningless. Skip so re-optimize never invents a second copy of a file blob.
-            return nil
+            return (nil, nil)
         }
     }
 
@@ -369,7 +467,7 @@ struct ReoptimizeMediaRow: View {
             if !reopt.candidates.isEmpty && !reopt.running {
                 Text(foundText).font(.caption).foregroundStyle(.secondary)
             } else if reopt.hasScanned && !reopt.scanning && !reopt.running && reopt.lastSummary == nil {
-                Label("Everything you've shared is already as small as it can be.",
+                Label("Everything you've shared is already optimized — including video posters.",
                       systemImage: "checkmark.circle")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -383,7 +481,15 @@ struct ReoptimizeMediaRow: View {
         }
         if reopt.candidates.isEmpty { return "Re-optimize media I already shared" }
         let n = min(reopt.candidates.count, MediaReoptimizer.batchLimit)
-        return "Shrink & re-share \(n) item\(n == 1 ? "" : "s")"
+        let posters = reopt.candidates.filter { $0.work == .posterOnly }.count
+        let shrinks = reopt.candidates.count - posters
+        if shrinks == 0 {
+            return "Add posters to \(min(posters, n)) video\(min(posters, n) == 1 ? "" : "s")"
+        }
+        if posters == 0 {
+            return "Shrink & re-share \(n) item\(n == 1 ? "" : "s")"
+        }
+        return "Improve \(n) item\(n == 1 ? "" : "s") (shrink + posters)"
     }
     private var icon: String {
         reopt.candidates.isEmpty ? "arrow.down.circle" : "arrow.down.circle.fill"
@@ -393,9 +499,18 @@ struct ReoptimizeMediaRow: View {
         let size = ByteCountFormatter.string(fromByteCount: reopt.pendingBytes, countStyle: .file)
         let batch = min(total, MediaReoptimizer.batchLimit)
         let legacy = reopt.candidates.filter(\.legacyByAge).count
-        var s = "\(total) item\(total == 1 ? "" : "s") · \(size) currently on every member's device"
+        let posters = reopt.posterOnlyCount
+        let shrinks = total - posters
+        var s = ""
+        if shrinks > 0 {
+            s = "\(shrinks) item\(shrinks == 1 ? "" : "s") · \(size) currently on every member's device"
+        }
+        if posters > 0 {
+            let p = "\(posters) video\(posters == 1 ? "" : "s") missing a feed poster"
+            s = s.isEmpty ? p : s + " · " + p
+        }
         if legacy > 0 { s += " · \(legacy) shared before Haven learned to compress" }
-        if batch < total { s += ". This run does the \(batch) largest; tap again for the rest." }
+        if batch < total { s += ". This run does \(batch); tap again for the rest." }
         return s
     }
 }

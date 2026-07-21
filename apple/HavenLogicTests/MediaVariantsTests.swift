@@ -85,4 +85,29 @@ final class MediaVariantsTests: XCTestCase {
         XCTAssertNil(MediaVariants.parseOriginal("orig:"))
         XCTAssertNil(MediaVariants.parsePoster("img_not_a_marker"))
     }
+
+    func testRewriteAddsPosterOnlyWithoutTouchingVideo() {
+        let media = ["vid_old", "img_still"]
+        let out = MediaVariants.rewriteMedia(media, swap: [:], posters: ["vid_old": "img_poster"])
+        XCTAssertEqual(out, [
+            "img_poster",
+            "poster:vid_old:img_poster",
+            "vid_old",
+            "img_still",
+        ])
+    }
+
+    func testRewriteReencodeReplacesPosterAndVideo() {
+        let media = MediaVariants.composeVideoMedia(
+            poster: "img_oldp", optimized: "vid_a", original: nil)
+        let out = MediaVariants.rewriteMedia(
+            media, swap: ["vid_a": "vid_b"], posters: ["vid_a": "img_newp"])
+        XCTAssertEqual(out, [
+            "img_newp",
+            "poster:vid_b:img_newp",
+            "vid_b",
+        ])
+        XCTAssertFalse(out.contains("img_oldp"))
+        XCTAssertFalse(out.contains("vid_a"))
+    }
 }

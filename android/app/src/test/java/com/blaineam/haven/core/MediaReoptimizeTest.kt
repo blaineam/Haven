@@ -247,8 +247,29 @@ class MediaReoptimizeTest {
         assertEquals(0, MediaReoptimizer.pct(100, 250))   // never reports a negative saving
     }
 
+    @Test fun rewriteMediaAddsPosterOnlyWithoutTouchingVideo() {
+        val media = listOf("vid_old", "img_still")
+        val out = MediaReoptimizer.rewriteMedia(
+            media, emptyMap(), mapOf("vid_old" to "img_poster"),
+        )
+        assertEquals(
+            listOf("img_poster", "poster:vid_old:img_poster", "vid_old", "img_still"),
+            out,
+        )
+    }
+
+    @Test fun rewriteMediaReencodeReplacesPosterAndVideo() {
+        val media = MediaVariants.composeVideoMedia("img_oldp", "vid_a", null)
+        val out = MediaReoptimizer.rewriteMedia(
+            media, mapOf("vid_a" to "vid_b"), mapOf("vid_a" to "img_newp"),
+        )
+        assertEquals(listOf("img_newp", "poster:vid_b:img_newp", "vid_b"), out)
+        assertFalse(out.contains("img_oldp"))
+        assertFalse(out.contains("vid_a"))
+    }
+
     private fun shaped(ref: String, bytes: Long) = MediaReoptimizer.Candidate(
-        ref = ref, circleId = "c",
+        ref = ref, circleId = "c", work = MediaReoptimizer.Work.REENCODE,
         shape = MediaOptimizationTarget.Shape(bytes, 1920, "video/avc", 8_000_000, 10.0, "test"),
         firstSharedMs = 0, legacyByAge = true,
     )

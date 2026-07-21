@@ -103,6 +103,60 @@ pub fn compose_video_media(poster: Option<&str>, optimized: &str, original: Opti
     out
 }
 
+/// Rewrite a media array after re-optimize (Apple/Android parity).
+///
+/// `swap`: old content ref → new content ref.
+/// `posters`: **old** video ref → poster image ref to attach or replace.
+pub fn rewrite_media(
+    media: &[String],
+    swap: &std::collections::HashMap<String, String>,
+    posters: &std::collections::HashMap<String, String>,
+) -> Vec<String> {
+    let mut drop_poster_images = std::collections::HashSet::new();
+    for old_video in posters.keys() {
+        if let Some(p) = poster_for(old_video, media) {
+            drop_poster_images.insert(p.to_string());
+        }
+    }
+    let mut out = Vec::new();
+    let mut emitted_poster_for = std::collections::HashSet::new();
+
+    for ref_ in media {
+        if let Some((v, p)) = parse_poster(ref_) {
+            if posters.contains_key(v) {
+                continue;
+            }
+            let nv = swap.get(v).map(|s| s.as_str()).unwrap_or(v);
+            let np = swap.get(p).map(|s| s.as_str()).unwrap_or(p);
+            out.push(poster_marker(nv, np));
+            continue;
+        }
+        if let Some((opt, orig)) = parse_original(ref_) {
+            let no = swap.get(opt).map(|s| s.as_str()).unwrap_or(opt);
+            let nr = swap.get(orig).map(|s| s.as_str()).unwrap_or(orig);
+            out.push(original_marker(no, nr));
+            continue;
+        }
+        if drop_poster_images.contains(ref_) {
+            continue;
+        }
+        let new_ref = swap.get(ref_).cloned().unwrap_or_else(|| ref_.clone());
+        if let Some(poster_img) = posters.get(ref_) {
+            if !emitted_poster_for.contains(ref_) {
+                if !out.iter().any(|x| x == poster_img) {
+                    out.push(poster_img.clone());
+                }
+                out.push(poster_marker(&new_ref, poster_img));
+                out.push(new_ref);
+                emitted_poster_for.insert(ref_.clone());
+                continue;
+            }
+        }
+        out.push(new_ref);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +180,40 @@ mod tests {
         assert!(pref.iter().any(|x| x == "img_p"));
         assert!(!pref.iter().any(|x| x == "vid_v"));
         assert!(!pref.iter().any(|x| x == "vid_o"));
+    }
+
+    #[test]
+    fn rewrite_adds_poster_only_without_touching_video() {
+        let media = vec![String::from("vid_old"), String::from("img_still")];
+        let swap = std::collections::HashMap::new();
+        let mut posters = std::collections::HashMap::new();
+        posters.insert(String::from("vid_old"), String::from("img_poster"));
+        let out = rewrite_media(&media, &swap, &posters);
+        let expected: Vec<String> = vec![
+            String::from("img_poster"),
+            String::from("poster:vid_old:img_poster"),
+            String::from("vid_old"),
+            String::from("img_still"),
+        ];
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn rewrite_reencode_replaces_poster_and_video() {
+        let media = compose_video_media(Some("img_oldp"), "vid_a", None);
+        let mut swap = std::collections::HashMap::new();
+        swap.insert(String::from("vid_a"), String::from("vid_b"));
+        let mut posters = std::collections::HashMap::new();
+        posters.insert(String::from("vid_a"), String::from("img_newp"));
+        let out = rewrite_media(&media, &swap, &posters);
+        let expected: Vec<String> = vec![
+            String::from("img_newp"),
+            String::from("poster:vid_b:img_newp"),
+            String::from("vid_b"),
+        ];
+        assert_eq!(out, expected);
+        // Old poster image must not linger.
+        assert!(!out.iter().any(|x| x == "img_oldp"));
+        assert!(!out.iter().any(|x| x == "vid_a"));
     }
 }

@@ -67,4 +67,51 @@ object MediaVariants {
         }
         return out
     }
+
+    /**
+     * Rewrite a media array after re-optimize (Apple/Rust parity).
+     *
+     * @param swap old content ref → new content ref (re-encoded stills/videos)
+     * @param posters **old** video ref → poster image ref to attach or replace.
+     *   Poster-only work uses this with an empty [swap] so already-compressed clips still get a
+     *   published still for super data saver without a pointless re-encode.
+     */
+    fun rewriteMedia(
+        media: List<String>,
+        swap: Map<String, String>,
+        posters: Map<String, String>,
+    ): List<String> {
+        val dropPosterImages = HashSet<String>()
+        for (oldVideo in posters.keys) {
+            posterFor(oldVideo, media)?.let { dropPosterImages.add(it) }
+        }
+        val out = ArrayList<String>()
+        val emittedPosterFor = HashSet<String>()
+        for (ref in media) {
+            val posterPair = parsePoster(ref)
+            if (posterPair != null) {
+                val (v, p) = posterPair
+                if (posters.containsKey(v)) continue
+                out.add(posterMarker(swap[v] ?: v, swap[p] ?: p))
+                continue
+            }
+            val origPair = parseOriginal(ref)
+            if (origPair != null) {
+                val (opt, orig) = origPair
+                out.add(originalMarker(swap[opt] ?: opt, swap[orig] ?: orig))
+                continue
+            }
+            if (ref in dropPosterImages) continue
+            val newRef = swap[ref] ?: ref
+            val posterImg = posters[ref]
+            if (posterImg != null && emittedPosterFor.add(ref)) {
+                if (posterImg !in out) out.add(posterImg)
+                out.add(posterMarker(newRef, posterImg))
+                out.add(newRef)
+            } else {
+                out.add(newRef)
+            }
+        }
+        return out
+    }
 }

@@ -275,7 +275,7 @@ struct CircleMailboxSection: View {
         } header: {
             Text("Relay")
         } footer: {
-            Text("Where this circle's sealed posts & media live so they reach people who were offline. Leave a device on as the relay (easy), or point at an external relay / your own S3 bucket under Advanced. A Public relay URL (e.g. your Tailscale MagicDNS name or a free tunnel to port 8674) lets friends fetch media over plain HTTP without needing the iroh path — preferred when you can set one up without third-party infrastructure.")
+            Text("Where this circle's sealed posts & media live so they reach people who were offline. Leave a device on as the relay (easy), or point at an external relay / your own S3 bucket under Advanced. A Public relay URL (HTTPS) lets friends off your LAN fetch media without the iroh path — Tailscale MagicDNS, or a free Cloudflare Tunnel to port 8674 (see docs/CLOUDFLARE-TUNNEL.md). Blobs stay E2E-sealed; the tunnel only moves ciphertext.")
                 .fixedSize(horizontal: false, vertical: true)
         }
         RelayPoolSection(circleId: circleId)

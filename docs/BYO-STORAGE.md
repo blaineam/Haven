@@ -41,7 +41,9 @@ Events/mailbox polling are unchanged.
 The relay HTTP interface is **on by default**. Blobs are E2E-sealed before they touch
 the wire, so the interface only ever moves ciphertext; expose it to the internet behind
 TLS (reverse proxy / tunnel) and pass the public URL to the daemon with `--http-url`
-(the LAN address is advertised automatically for same-network members).
+(the LAN address is advertised automatically for same-network members). Free Cloudflare
+setup (quick tunnel, own domain, or a shared `*.net.haven…` namespace design) is in
+[`CLOUDFLARE-TUNNEL.md`](CLOUDFLARE-TUNNEL.md).
 
 - Media is **end-to-end encrypted before it is stored** anywhere — the storage
   backend (a Haven relay or the user's own bucket) only ever holds ciphertext.

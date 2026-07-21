@@ -67,26 +67,26 @@ hostnames). Free trycloudflare is one origin per process — auto mode spins **t
 - Frame 19 JSON: `{"node","urls","token","derp","addedAt"}`.
 - **Apple / Android / desktop** learn `derp` on announce; re-announce on adopt/host.
 - Adopt accepts bare 64-hex **or** the interface JSON (media + fabric in one paste).
-- Desktop: `apply_derp_urls` **before** `HavenNode::start` + on every learn; `haven-fabric` event
-  → WebView (`rebindPending` when fabric first appears mid-session → one-shot restart hint).
+- Desktop: `apply_derp_urls` **before** `HavenNode::start` + on every learn; soft-rebind when
+  fabric becomes active or DERP URLs change mid-session (`Engine::rebind_transport_for_fabric`,
+  2s debounce, concurrent guard). `haven-fabric` event → WebView (`rebindPending` while rebinding).
 - Apple: `HavenFabric` + FFI `applyDerpUrls` via `RelayMailboxStore.refreshHavenFabric` (before
-  node start + on learn); WebRTC via `iceServerUrls()`.
+  node start + on learn); soft rebind via `FeedStore.rebindTransportForFabric` when node is up.
 - Android: `refreshHavenFabric` → prefs + `applyDerpUrls` **before** `HavenNode.start` + on learn;
-  `CallManager.iceServers()`.
+  soft rebind via `HavenNet.rebindTransportForFabric` when node is up; `CallManager.iceServers()`.
 
-### Bind-time limit (do not paper over)
+### Bind-time limit (soft rebind, not hot map swap)
 
 iroh takes `RelayMode` / `RelayMap` when the `Endpoint` is constructed. `apply_derp_urls` updates
-the **process policy** for the next `haven_endpoint_builder().bind()` only. There is **no**
-low-risk hot rebind of a live `HavenNode` today (AddressLookup can hot-add; RelayMap cannot).
-Shipping posture:
+the **process policy** only. Live endpoints cannot retarget RelayMap in place (AddressLookup can
+hot-add; RelayMap cannot). Shipping posture:
 
 1. Apply fabric from prefs **before** every cold `HavenNode::start` / `Node::spawn`.
-2. On mid-session learn, still call `apply_derp_urls` so late secondary binds + next launch are
-   Haven-first; live messaging node keeps its construct-time map until process restart.
-3. Desktop surfaces a **one-shot toast** when `rebindPending` becomes true (fabric first learned
-   while node is already bound). Full soft-reconnect (stop + re-start node in place) is deferred —
-   high state-churn risk; restart the app when convenient.
+2. On mid-session learn, call `apply_derp_urls` **and** soft-rebind: `HavenNode::shutdown` (full
+   endpoint close — no same-key dual endpoint), then `start` again with the same device seed.
+   Desktop re-attaches the in-process relay host without killing cloudflared / embedded DERP.
+3. Debounce 2s, guard concurrent rebind, never rebind onto an empty (n0-only) map mid-session.
+4. `rebindPending` is true while a rebind is scheduled/in-flight; false after success.
 
 ## R3 — AddressLookup over HVD1 (next)
 

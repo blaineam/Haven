@@ -107,6 +107,14 @@ fn print_help() {
          --derp-url <https://…>    public HTTPS URL for DERP (defaults to media front-door URL)\n  \
          Point your tunnel/proxy so that URL reaches --derp-bind (path or hostname). Peers learn\n  \
          it from the circle announce after someone pastes the relay link / hosts once.\n\n\
+         CIRCLE TURN / WebRTC ICE (default ON for local-disk — cross-NAT calls without Google STUN):\n  \
+         --turn                    force-enable embedded TURN (default on for local-disk)\n  \
+         --no-turn                 disable TURN (fabric-active clients keep host-only ICE)\n  \
+         --turn-bind <addr>        local UDP bind (default 0.0.0.0:3478)\n  \
+         --turn-public-ip <ip>     IP advertised in ALLOCATE (defaults to LAN / media host)\n  \
+         --turn-url <turn:host:p>  public TURN URI to announce (repeatable)\n  \
+         Auth: username `haven` + long-lived secret in <data>/turn_token (like http_token).\n  \
+         UDP cannot ride free trycloudflare — port-forward 3478 or use LAN for local peers.\n\n\
          RETENTION (your choice; default = keep media forever, prune mailbox after 30 days):\n  \
          --media-max-age-days N    prune media not touched for N days (0 = keep forever)\n  \
          --media-max-bytes SIZE    cap the media store, oldest deleted first (50G, 500M; 0 = unbounded)\n  \

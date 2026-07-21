@@ -67,12 +67,18 @@ final class WebRTCCall: NSObject {
 
     override init() {
         let config = RTCConfiguration()
-        // Haven-first ICE: Google STUN only when no circle-hosted fabric is known
-        // (UserDefaults — nonisolated; see HavenFabric.iceServerUrlsFromDefaults).
-        let ice = HavenFabric.iceServerUrlsFromDefaults()
-        config.iceServers = ice.isEmpty
-            ? []
-            : [RTCIceServer(urlStrings: ice)]
+        // Haven-first ICE: circle TURN when fabric + TURN known; else host-only if fabric;
+        // Google STUN only when no fabric (see HavenFabric.iceServersFromDefaults).
+        let iceDicts = HavenFabric.iceServersFromDefaults()
+        config.iceServers = iceDicts.compactMap { d -> RTCIceServer? in
+            let urls = d["urls"] as? [String] ?? []
+            guard !urls.isEmpty else { return nil }
+            if let user = d["username"] as? String, let pass = d["credential"] as? String,
+               !user.isEmpty, !pass.isEmpty {
+                return RTCIceServer(urlStrings: urls, username: user, credential: pass)
+            }
+            return RTCIceServer(urlStrings: urls)
+        }
         config.sdpSemantics = .unifiedPlan
         config.continualGatheringPolicy = .gatherContinually
         let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)

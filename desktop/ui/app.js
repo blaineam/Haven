@@ -4351,15 +4351,23 @@ const line = (label, ok) => el("div", { class: "row" }, el("span", { style: "fle
 // sealed iroh channel via the call_signal command; media is DTLS-SRTP in the WebView.
 // Haven-first ICE: Google STUN only when no circle fabric DERP URLs are known
 // (window.__havenFabricDerp from prefs / relay announce). Parity with Apple HavenFabric.
-// When fabric is active, ICE is host-candidates only (empty server list) — intentional:
-// no Google, no third-party STUN. Cross-NAT WebRTC may fail until Haven TURN ships.
-// Live messaging still rides iroh (+ circle DERP); calls are the WebRTC path.
+// When fabric is active AND circle TURN is known (__havenFabricTurn), use those URLs + creds.
+// Fabric without TURN → host candidates only (no Google). Live messaging still uses iroh + DERP.
 function iceServers() {
   const derp = (window.__havenFabricDerp && window.__havenFabricDerp.length)
     ? window.__havenFabricDerp
     : [];
-  if (derp.length > 0) {
-    // Fabric present — host candidates only until Haven TURN ships (no Google).
+  const turn = window.__havenFabricTurn || {};
+  const turnUrls = Array.isArray(turn.urls) ? turn.urls.filter(Boolean) : [];
+  if (derp.length > 0 || turnUrls.length > 0) {
+    if (turnUrls.length > 0 && turn.user && turn.pass) {
+      return [{
+        urls: turnUrls,
+        username: turn.user,
+        credential: turn.pass,
+      }];
+    }
+    // Fabric known but no TURN yet — host candidates only (no Google).
     return [];
   }
   return [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
@@ -5095,15 +5103,24 @@ async function boot() {
     if (state.view === "you" && ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA") && $("#view-you").contains(ae)) return;
     await render();
   });
-  // Haven fabric: circle-hosted DERP URLs — WebRTC prefers no Google STUN when non-empty.
-  // rebindPending: fabric first learned mid-session after HavenNode already bound → one-shot hint
-  // (no full soft-restart; iroh RelayMap is construct-time — restart app when convenient).
+  // Haven fabric: circle-hosted DERP (+ TURN for WebRTC ICE). Google STUN only when fabric empty.
+  // rebindPending: soft rebind in progress (Engine stops + restarts HavenNode onto Haven RelayMap).
   listen("haven-fabric", (e) => {
     const urls = (e.payload && e.payload.derpUrls) || [];
     window.__havenFabricDerp = Array.isArray(urls) ? urls : [];
-    if (e.payload && e.payload.rebindPending && !window.__havenFabricRebindHinted) {
+    window.__havenFabricTurn = {
+      urls: Array.isArray(e.payload && e.payload.turnUrls) ? e.payload.turnUrls : [],
+      user: (e.payload && e.payload.turnUser) || "",
+      pass: (e.payload && e.payload.turnPass) || "",
+    };
+    const pending = !!(e.payload && e.payload.rebindPending);
+    if (pending && !window.__havenFabricRebindHinted) {
       window.__havenFabricRebindHinted = true;
-      toast("Haven fabric ready — restart Haven so this session uses circle DERP (next launch is automatic)");
+      toast("Haven fabric ready — reconnecting this session onto circle DERP…");
+    }
+    if (!pending && window.__havenFabricRebindHinted && !window.__havenFabricRebindDone) {
+      window.__havenFabricRebindDone = true;
+      toast("Connected on Haven fabric (circle DERP)");
     }
   });
   // A notification carrying a deepLink is ABOUT something openable — make the toast take you there

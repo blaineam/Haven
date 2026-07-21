@@ -161,6 +161,10 @@ final class FeedStore: ObservableObject {
     private var lastNearbyConnectMs: UInt64 = 0
     /// Last Multipeer media push on the sync path (not connect path). Mac→iPhone flood fix.
     private var lastNearbyMediaPushMs: UInt64 = 0
+    /// Fabric soft-rebind: DERP URLs the live messaging node was bound with + debounce/guard.
+    private var fabricBoundUrls: [String] = []
+    private var fabricRebindGen: UInt64 = 0
+    private var fabricRebindInFlight = false
     /// Base cadences and the idle multipliers. Idle <3min = base; <15min = ×3; else ×6.
     /// Thermal pressure and super data saver stretch further so a warm phone (or one the user
     /// asked to go easy on the radio) isn't also blasting hello+roster at the tight cadence.
@@ -1304,6 +1308,7 @@ final class FeedStore: ObservableObject {
                 RelayMailboxStore.refreshHavenFabric()
                 let n = try await HavenNode.start(accountSeed: deviceSeed, listener: bridge)
                 self.node = n
+                self.fabricBoundUrls = RelayMailboxStore.shared.allDerpUrls()
                 self.internetReady = true
                 self.online = true
                 HavenLog.net("node started id=\(n.nodeIdHex().prefix(10)) account=\(social?.myNodeHex().prefix(10) ?? "?")")
@@ -1321,6 +1326,69 @@ final class FeedStore: ObservableObject {
             } catch {
                 self.nodeError = error.localizedDescription
             }
+        }
+    }
+
+    /// Called when circle DERP URLs change (frame 19 / adopt / host). If the messaging node is
+    /// already live on a different map, debounce and soft-rebind (iroh RelayMap is bind-time).
+    func noteFabricUrlsChanged(_ urls: [String]) {
+        let target = urls.sorted()
+        guard node != nil, !target.isEmpty, target != fabricBoundUrls, !fabricRebindInFlight else { return }
+        fabricRebindGen &+= 1
+        let gen = fabricRebindGen
+        HavenLog.net("fabric rebind scheduled (urls=\(target.count))")
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard gen == fabricRebindGen else { return }
+            await rebindTransportForFabric()
+        }
+    }
+
+    /// Stop messaging node cleanly, re-apply fabric, start again, re-attach relay host if needed.
+    private func rebindTransportForFabric() async {
+        guard !fabricRebindInFlight else { return }
+        let target = RelayMailboxStore.shared.allDerpUrls().sorted()
+        guard !target.isEmpty, target != fabricBoundUrls else { return }
+        fabricRebindInFlight = true
+        defer { fabricRebindInFlight = false }
+        HavenLog.net("fabric rebind starting…")
+        let wasHosting = RelayHost.shared.serving || RelayHost.shared.enabled
+        let hostingWasLive = RelayHost.shared.serving
+        if hostingWasLive {
+            RelayHost.shared.detachForFabricRebind()
+        }
+        if let old = node {
+            await old.shutdown()
+            node = nil
+            internetReady = false
+            // Let OS / accept loop finish teardown before same-seed spawn.
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        guard let bridge = listener else {
+            HavenLog.net("fabric rebind aborted — no inbound listener")
+            return
+        }
+        do {
+            RelayMailboxStore.refreshHavenFabric()
+            let deviceSeed = DeviceKeyStore.deviceAccount().secretSeed()
+            let n = try await HavenNode.start(accountSeed: deviceSeed, listener: bridge)
+            node = n
+            fabricBoundUrls = RelayMailboxStore.shared.allDerpUrls().sorted()
+            internetReady = true
+            online = true
+            HavenLog.net("fabric rebind ok id=\(n.nodeIdHex().prefix(10)) urls=\(fabricBoundUrls.count)")
+            if wasHosting {
+                RelayHost.shared.reattachAfterFabricRebind()
+            }
+            reannounceOwnRelay()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.syncWithContacts()
+            }
+            // Catch learns that arrived during rebind.
+            noteFabricUrlsChanged(RelayMailboxStore.shared.allDerpUrls())
+        } catch {
+            nodeError = error.localizedDescription
+            HavenLog.net("fabric rebind failed: \(error.localizedDescription)")
         }
     }
 
@@ -1971,21 +2039,28 @@ final class FeedStore: ObservableObject {
         }
     }
 
-    /// The frame-19 announce body for one relay: the legacy bare 64-hex node id, or — once the
-    /// relay's plain-HTTP interface is known — JSON `{"node":hex,"urls":[…],"token":…,"derp":…}` so
-    /// members also learn the media path **and** the Haven DERP fabric URL (n0-free NAT).
+    /// The frame-19 announce body for one relay: bare 64-hex, or JSON with media/DERP/TURN.
     private func relayAnnounceData(_ hex: String) -> Data {
         // Always carry the relay's adoption timestamp so receivers can LWW a stale tombstone. Use the
         // JSON form whenever we have EITHER an HTTP interface or a non-zero adoption stamp; a legacy
         // receiver ignores JSON it can't parse as a bare hex (wrong length), so this stays compatible.
         let addedAt = RelayMailboxStore.shared.addedAtMs(hex)
         let http = RelayMailboxStore.shared.httpInterface(hex)
-        let derp = RelayMailboxStore.shared.entries[hex.lowercased()]?.derpUrl
-            ?? RelayMailboxStore.shared.entries[hex]?.derpUrl
-        if http != nil || addedAt > 0 || (derp?.isEmpty == false) {
+        let entry = RelayMailboxStore.shared.entries[hex.lowercased()]
+            ?? RelayMailboxStore.shared.entries[hex]
+        let derp = entry?.derpUrl
+        let turnUrls = entry?.turnUrls ?? []
+        let turnUser = entry?.turnUser ?? ""
+        let turnPass = entry?.turnPass ?? ""
+        if http != nil || addedAt > 0 || (derp?.isEmpty == false) || !turnUrls.isEmpty {
             var obj: [String: Any] = ["node": hex, "addedAt": addedAt]
             if let http { obj["urls"] = http.urls; obj["token"] = http.token }
             if let derp, !derp.isEmpty { obj["derp"] = derp }
+            if !turnUrls.isEmpty {
+                obj["turn"] = turnUrls
+                if !turnUser.isEmpty { obj["turnUser"] = turnUser }
+                if !turnPass.isEmpty { obj["turnPass"] = turnPass }
+            }
             if let json = try? JSONSerialization.data(withJSONObject: obj) { return json }
         }
         return Data(hex.utf8)
@@ -2956,19 +3031,33 @@ final class FeedStore: ObservableObject {
     /// Adopt a relay node as the mailbox for specific circles (and optionally make it the default
     /// every present + future circle inherits). Each circle's members are told over frame 19.
     /// Adopt a relay. Accepts a bare 64-hex node id, or the JSON interface blob printed by
-    /// `haven-relay` (`{"node","urls","token","derp"}`) so media HTTP + Haven DERP fabric are
+    /// `haven-relay` (`{"node","urls","token","derp","turn",…}`) so media + fabric + TURN are
     /// learned in one paste and re-announced to the circle (frame 19).
     func adoptRelayNode(_ nodeHex: String, circleIds: [String], setDefault: Bool) {
         var hex = nodeHex.trimmingCharacters(in: .whitespacesAndNewlines)
         var announcedUrls: [String] = []
         var announcedToken = ""
         var announcedDerp: String?
+        var announcedTurn: [String] = []
+        var announcedTurnUser = ""
+        var announcedTurnPass = ""
         if hex.hasPrefix("{"),
            let obj = try? JSONSerialization.jsonObject(with: Data(hex.utf8)) as? [String: Any] {
             announcedUrls = (obj["urls"] as? [String] ?? []).filter { $0.hasPrefix("http") }
             announcedToken = obj["token"] as? String ?? ""
             if let d = obj["derp"] as? String, d.hasPrefix("http") {
                 announcedDerp = d.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            }
+            if let arr = obj["turn"] as? [String] {
+                announcedTurn = arr.filter { $0.hasPrefix("turn:") || $0.hasPrefix("turns:") }
+            } else if let s = obj["turn"] as? String, s.hasPrefix("turn:") || s.hasPrefix("turns:") {
+                announcedTurn = [s]
+            }
+            announcedTurnUser = obj["turnUser"] as? String ?? ""
+            announcedTurnPass = obj["turnPass"] as? String ?? ""
+            if announcedTurnUser.isEmpty, !announcedTurn.isEmpty { announcedTurnUser = "haven" }
+            if announcedTurnPass.isEmpty, !announcedTurn.isEmpty, !announcedToken.isEmpty {
+                announcedTurnPass = announcedToken
             }
             hex = (obj["node"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         }
@@ -2980,6 +3069,9 @@ final class FeedStore: ObservableObject {
         }
         if let announcedDerp {
             RelayMailboxStore.shared.setDerpUrl(hex, url: announcedDerp)
+        }
+        if !announcedTurn.isEmpty {
+            RelayMailboxStore.shared.setTurn(hex, urls: announcedTurn, user: announcedTurnUser, pass: announcedTurnPass)
         }
         let data = relayAnnounceData(hex)
         if setDefault { RelayMailboxStore.shared.defaultNodeHex = hex }
@@ -3101,12 +3193,26 @@ final class FeedStore: ObservableObject {
         var announcedToken = ""
         var announcedAddedAt: UInt64 = 0
         var announcedDerp: String?
+        var announcedTurn: [String] = []
+        var announcedTurnUser = ""
+        var announcedTurnPass = ""
         if nodeHex.hasPrefix("{"),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             announcedUrls = (obj["urls"] as? [String] ?? []).filter { $0.hasPrefix("http") }
             announcedToken = obj["token"] as? String ?? ""
             announcedAddedAt = (obj["addedAt"] as? NSNumber)?.uint64Value ?? 0
             if let d = obj["derp"] as? String, d.hasPrefix("http") { announcedDerp = d }
+            if let arr = obj["turn"] as? [String] {
+                announcedTurn = arr.filter { $0.hasPrefix("turn:") || $0.hasPrefix("turns:") }
+            } else if let s = obj["turn"] as? String, s.hasPrefix("turn:") || s.hasPrefix("turns:") {
+                announcedTurn = [s]
+            }
+            announcedTurnUser = obj["turnUser"] as? String ?? ""
+            announcedTurnPass = obj["turnPass"] as? String ?? ""
+            if announcedTurnUser.isEmpty, !announcedTurn.isEmpty { announcedTurnUser = "haven" }
+            if announcedTurnPass.isEmpty, !announcedTurn.isEmpty, !announcedToken.isEmpty {
+                announcedTurnPass = announcedToken
+            }
             nodeHex = (obj["node"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         }
         guard nodeHex.count == 64 else { return }
@@ -3141,6 +3247,9 @@ final class FeedStore: ObservableObject {
         // Haven fabric: DERP URL so peers prefer this box over n0 for live NAT.
         if let announcedDerp {
             RelayMailboxStore.shared.setDerpUrl(lower, url: announcedDerp)
+        }
+        if !announcedTurn.isEmpty {
+            RelayMailboxStore.shared.setTurn(lower, urls: announcedTurn, user: announcedTurnUser, pass: announcedTurnPass)
         }
         // SUPERSEDE stale account-id relays. Under the per-device transport a relay is ALWAYS a device id,
         // never an account id. A relay-list entry equal to a member's (or our own) ACCOUNT id is a dead

@@ -28,12 +28,17 @@ pub mod httprelay;
 pub mod livedelivery;
 pub mod relay;
 pub mod s3tunnel;
+pub mod turn;
 
 pub use derp::{DerpConfig, DerpServer, DEFAULT_DERP_BIND};
 pub use endpoint_builder::{
     active_derp_urls, apply_book_to_policy, apply_derp_urls, derp_urls_from_book, endpoint_policy,
     haven_endpoint_builder, haven_fabric_active, merge_derp_urls, set_endpoint_policy,
     EndpointPolicy,
+};
+pub use turn::{
+    host_from_http_url, parse_turn_urls, suggest_turn_urls, turn_url, TurnConfig, TurnServer,
+    DEFAULT_TURN_BIND, DEFAULT_TURN_REALM, DEFAULT_TURN_USER,
 };
 
 const ALPN: &[u8] = b"haven/social/0";
@@ -630,8 +635,20 @@ impl Node {
         self.send(addr, payload).await
     }
 
+    /// Fully close this endpoint (accept loop exits, UDP released) so a later
+    /// [`Node::spawn`] with the **same secret** is safe. iroh same-key dual endpoints
+    /// are a known path-churn scar — callers must await this before rebinding.
+    pub async fn shutdown(&self) {
+        self.disable_relay();
+        self.blob_clients.lock().await.clear();
+        lock(&self.conns).clear();
+        if !self.endpoint.is_closed() {
+            self.endpoint.close().await;
+        }
+    }
+
     pub async fn close(self) {
-        self.endpoint.close().await;
+        self.shutdown().await;
     }
 }
 

@@ -59,7 +59,11 @@ pub async fn run(cfg: Config) -> Result<()> {
     // Second free trycloudflare process for DERP (one origin per quick tunnel).
     let mut _derp_tunnel: Option<haven_net::cfquicktunnel::QuickTunnel> = None;
     let mut _derp_guard: Option<crate::derp::DerpServer> = None;
+    let mut _turn_guard: Option<haven_net::TurnServer> = None;
     let mut derp_public: Option<String> = cfg.derp_url.clone();
+    let mut turn_public: Vec<String> = cfg.turn_urls.clone();
+    let mut turn_user = haven_net::DEFAULT_TURN_USER.to_string();
+    let mut turn_pass = cfg.turn_token.clone();
     let mut media_was_quick = false;
 
     match &cfg.backend {
@@ -264,6 +268,78 @@ pub async fn run(cfg: Config) -> Result<()> {
                     }
                 }
 
+                // Circle TURN: own UDP socket for WebRTC ICE (not a second iroh Endpoint).
+                if cfg.turn_enabled {
+                    let lan = primary_lan_ip();
+                    let public_ip = cfg
+                        .turn_public_ip
+                        .clone()
+                        .or_else(|| lan.clone())
+                        .or_else(|| {
+                            public
+                                .as_ref()
+                                .and_then(|u| haven_net::host_from_http_url(u))
+                                .filter(|h| !h.contains("trycloudflare.com"))
+                        })
+                        .unwrap_or_else(|| "127.0.0.1".into());
+                    let media_list: Vec<String> = public.iter().cloned().collect();
+                    let suggested = if cfg.turn_urls.is_empty() {
+                        haven_net::suggest_turn_urls(
+                            &media_list,
+                            lan.as_deref(),
+                            // Port from bind string if present, else default 3478.
+                            cfg.turn_bind
+                                .rsplit(':')
+                                .next()
+                                .and_then(|p| p.parse().ok())
+                                .unwrap_or(3478),
+                        )
+                    } else {
+                        cfg.turn_urls.clone()
+                    };
+                    let tcfg = haven_net::TurnConfig {
+                        enabled: true,
+                        bind: cfg.turn_bind.clone(),
+                        public_ip: public_ip.clone(),
+                        secret: cfg.turn_token.clone(),
+                        public_urls: suggested,
+                    };
+                    match haven_net::TurnServer::spawn(&tcfg).await {
+                        Ok(Some(srv)) => {
+                            turn_public = srv.public_urls.clone();
+                            turn_user = srv.username.clone();
+                            turn_pass = srv.password.clone();
+                            println!(
+                                "✓ circle TURN live on {} (UDP) — WebRTC ICE without Google STUN",
+                                srv.local_addr
+                            );
+                            if !turn_public.is_empty() {
+                                println!("  turn urls   : {}", turn_public.join(", "));
+                                println!(
+                                    "  turn auth   : user={} (password in turn_token / interface.json)",
+                                    turn_user
+                                );
+                            } else {
+                                println!(
+                                    "  turn local only — set --turn-url or open UDP {} to peers",
+                                    public_ip
+                                );
+                            }
+                            println!(
+                                "  note: free trycloudflare cannot front UDP TURN; port-forward 3478 for WAN."
+                            );
+                            _turn_guard = Some(srv);
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            eprintln!("⚠ circle TURN failed to start: {e:#}");
+                            eprintln!(
+                                "  calls may stay host-only ICE while fabric is active; see coturn fallback in docs."
+                            );
+                        }
+                    }
+                }
+
                 match &public {
                     Some(url) => println!("  public URL : {url}"),
                     None => println!(
@@ -275,14 +351,19 @@ pub async fn run(cfg: Config) -> Result<()> {
                 }
                 println!("  http token : {}", cfg.http_token);
 
-                // Write a paste-ready interface blob so the app learns media URL + DERP fabric in
-                // one adopt (then re-announces frame 19 to the circle). Also on disk for restarts.
-                let interface = serde_json::json!({
+                // Write a paste-ready interface blob so the app learns media URL + DERP fabric +
+                // TURN in one adopt (then re-announces frame 19 to the circle). Also on disk.
+                let mut interface = serde_json::json!({
                     "node": my_hex,
                     "urls": public.as_ref().map(|u| vec![u.clone()]).unwrap_or_default(),
                     "token": cfg.http_token,
                     "derp": derp_public.clone().unwrap_or_default(),
                 });
+                if !turn_public.is_empty() {
+                    interface["turn"] = serde_json::json!(turn_public);
+                    interface["turnUser"] = serde_json::json!(turn_user);
+                    interface["turnPass"] = serde_json::json!(turn_pass);
+                }
                 let path = cfg.data_dir.join("interface.json");
                 if let Ok(bytes) = serde_json::to_vec_pretty(&interface) {
                     let _ = std::fs::write(&path, bytes);
@@ -342,10 +423,21 @@ pub async fn run(cfg: Config) -> Result<()> {
 
     // Idle until Ctrl-C; the relay's accept/forward loops run in the background.
     // Tunnel Drop kills cloudflared on exit.
-    let _ = (&relay, &_quick_tunnel, &_derp_tunnel, &_derp_guard);
+    let _ = (&relay, &_quick_tunnel, &_derp_tunnel, &_derp_guard, &_turn_guard);
     tokio::signal::ctrl_c().await.ok();
     println!("▸ shutting down.");
     Ok(())
+}
+
+/// This machine's primary LAN IPv4 (UDP-connect trick — no packet is actually sent).
+fn primary_lan_ip() -> Option<String> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("8.8.8.8:80").ok()?;
+    let ip = s.local_addr().ok()?.ip();
+    if ip.is_loopback() {
+        return None;
+    }
+    Some(ip.to_string())
 }
 
 /// Second free trycloudflare for the DERP bind (media already has its own origin).

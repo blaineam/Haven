@@ -124,9 +124,11 @@ pub fn init_logging(dir: String) {
 /// Empty → stock n0 only. Non-empty → Haven-only (n0 off). Call **before** [`HavenNode::start`]
 /// when prefs already know a fabric, and again whenever frame 19 / adopt learns a `derp` URL.
 ///
-/// **Limit:** iroh binds `RelayMap` at endpoint construct time. This updates the policy for the
-/// *next* bind; it does not hot-rebind a live `HavenNode`. WebRTC ICE still follows app-side
-/// fabric prefs (Apple `HavenFabric` / Android `haven.fabric`).
+/// **Limit:** iroh binds `RelayMap` at endpoint construct time. This updates the process policy
+/// for the *next* bind. Live messaging nodes must be stopped and re-started (see
+/// [`HavenNode::shutdown`]) to pick up a new map — desktop does this via soft rebind when fabric
+/// is first learned mid-session. WebRTC ICE still follows app-side fabric prefs
+/// (Apple `HavenFabric` / Android `haven.fabric`).
 #[uniffi::export]
 pub fn apply_derp_urls(urls: Vec<String>) {
     haven_net::apply_derp_urls(urls);
@@ -1137,6 +1139,13 @@ impl HavenNode {
             .await
             .map_err(|e| HavenError::Invalid { msg: e.to_string() })?;
         Ok(Arc::new(Self { node }))
+    }
+
+    /// Close the underlying iroh endpoint so a same-seed restart is safe (no dual endpoint
+    /// under one key). Await this, drop all app references, then call [`HavenNode::start`] again
+    /// after [`apply_derp_urls`] when fabric is learned mid-session.
+    pub async fn shutdown(&self) {
+        self.node.shutdown().await;
     }
 
     /// This node's id (== the account's Haven id), as hex.

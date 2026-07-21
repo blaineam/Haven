@@ -104,6 +104,51 @@ final class RelayHost: ObservableObject {
     /// Restart the relay at launch if the user had it on.
     func startIfEnabled() { if enabled && handle == nil { start() } }
 
+    /// Detach mailbox from the messaging node without killing cloudflared / embedded DERP —
+    /// used by fabric soft-rebind (same-key endpoint must fully stop before re-spawn).
+    func detachForFabricRebind() {
+        handle?.disable()
+        setHandle(nil)
+        serving = false
+        // Keep nodeId so reannounce still has a stable id; reattach refreshes it.
+    }
+
+    /// Re-attach after `FeedStore` restarted the messaging node onto Haven RelayMap.
+    func reattachAfterFabricRebind() {
+        guard enabled, handle == nil else { return }
+        guard let node = FeedStore.shared.transportNode else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.reattachAfterFabricRebind()
+            }
+            return
+        }
+        #if os(macOS)
+        PlatformIdle.disabled = true
+        #endif
+        let h = RelayServerHandle.attachWithLimits(node: node, dir: storeDir,
+                                                   mediaMaxAgeDays: UInt32(max(0, mediaMaxAgeDays)),
+                                                   mediaMaxBytes: mediaMaxBytes)
+        setHandle(h)
+        nodeId = h.nodeIdHex()
+        serving = true
+        authorizeMembership()
+        // HTTP only — tunnels/DERP already running from the original start.
+        Task { [weak self] in
+            guard let self else { return }
+            let token = self.httpToken()
+            var port: UInt16?
+            do { port = try await h.serveHttp(bind: "0.0.0.0:8674", token: token) }
+            catch { port = try? await h.serveHttp(bind: "0.0.0.0:0", token: token) }
+            guard let port else { HavenLog.relay("reattach http FAILED"); return }
+            let urls = Self.reachableHttpUrls(port: port)
+            if !urls.isEmpty, !self.nodeId.isEmpty {
+                RelayMailboxStore.shared.setHttpInterface(self.nodeId, urls: urls, token: token)
+            }
+            FeedStore.shared.reannounceOwnRelay()
+            HavenLog.relay("reattach after fabric rebind relay=\(self.nodeId.prefix(10)) :\(port)")
+        }
+    }
+
     private func start() {
         guard handle == nil else { return }
         // The relay now ATTACHES to the messaging node's endpoint (one iroh node, two ALPNs) — running a
@@ -444,6 +489,13 @@ struct RelayEntry: Codable, Identifiable, Equatable {
     /// Public HTTPS URL of this relay's embedded iroh-relay (DERP) fabric role. When set, peers
     /// prefer it over n0 for NAT fallback. Empty = use n0 (or another relay's DERP).
     var derpUrl: String?
+    /// Public TURN URLs for WebRTC ICE (`turn:host:port`). When fabric is active and non-empty,
+    /// clients use these instead of empty ICE / Google STUN.
+    var turnUrls: [String]?
+    /// TURN username (default `haven`).
+    var turnUser: String?
+    /// TURN password (long-lived secret). Travels only inside sealed announces.
+    var turnPass: String?
     /// When this relay was last (re-)ADOPTED into a circle (unix ms). Rides the announce so a member
     /// who FORGOT it earlier reactivates on a NEWER re-add (LWW), while a stale third-party echo —
     /// which carries the original, older timestamp — loses and stays forgotten. Defaulted (0) so old
@@ -720,6 +772,24 @@ final class RelayMailboxStore: ObservableObject {
         pushHavenFabric()
     }
 
+    /// Record a relay's circle TURN URLs + credentials for WebRTC ICE.
+    func setTurn(_ hex: String, urls: [String], user: String, pass: String) {
+        ensureEntry(hex, activate: true)
+        guard var e = entries[hex] else { return }
+        let cleaned = urls.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.hasPrefix("turn:") || $0.hasPrefix("turns:") }
+        let u = user.trimmingCharacters(in: .whitespacesAndNewlines)
+        let p = pass.trimmingCharacters(in: .whitespacesAndNewlines)
+        if e.turnUrls == cleaned, e.turnUser == u, e.turnPass == p { return }
+        e.turnUrls = cleaned.isEmpty ? nil : cleaned
+        e.turnUser = u.isEmpty ? nil : u
+        e.turnPass = p.isEmpty ? nil : p
+        entries[hex] = e
+        persistEntries()
+        objectWillChange.send()
+        pushHavenFabric()
+    }
+
     /// Every live DERP URL we know — feeds iroh RelayMap (Haven-first) and WebRTC ICE preference.
     func allDerpUrls() -> [String] {
         entries.values.compactMap { e -> String? in
@@ -728,16 +798,37 @@ final class RelayMailboxStore: ObservableObject {
         }.sorted()
     }
 
+    /// Union of live TURN URLs + first non-empty credentials across active relays.
+    func allTurnIce() -> (urls: [String], user: String, pass: String) {
+        var urls: [String] = []
+        var user = ""
+        var pass = ""
+        for e in entries.values where e.active {
+            guard let t = e.turnUrls, !t.isEmpty else { continue }
+            for u in t where !urls.contains(u) { urls.append(u) }
+            if user.isEmpty, let uu = e.turnUser, let pp = e.turnPass, !uu.isEmpty, !pp.isEmpty {
+                user = uu; pass = pp
+            }
+        }
+        return (urls.sorted(), user, pass)
+    }
+
     /// Push known DERP URLs into the process fabric policy (Rust `apply_derp_urls`) for the **next**
-    /// `HavenNode.start` bind, and into UserDefaults / `HavenFabric` for WebRTC ICE. iroh binds
-    /// `RelayMap` at endpoint construct time — this does not hot-rebind a live node.
+    /// `HavenNode.start` bind, and into UserDefaults / `HavenFabric` for WebRTC ICE. When a live
+    /// messaging node is already up and the fabric set changed, `FeedStore` soft-rebinds (stop + start).
     ///
     /// Prefer the instance form when you already hold `self` (avoids re-entering `.shared`).
     func pushHavenFabric() {
         let urls = allDerpUrls()
         UserDefaults.standard.set(urls, forKey: "haven.fabric.derpUrls")
         HavenFabric.shared.update(derpUrls: urls)
+        let turn = allTurnIce()
+        HavenFabric.shared.updateTurn(urls: turn.urls, user: turn.user, pass: turn.pass)
         applyDerpUrls(urls: urls)
+        // Soft-rebind if the messaging node is live on a stale RelayMap (MainActor FeedStore).
+        Task { @MainActor in
+            FeedStore.shared.noteFabricUrlsChanged(urls)
+        }
     }
 
     static func refreshHavenFabric() {

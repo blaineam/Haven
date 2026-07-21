@@ -20,6 +20,9 @@ rand = "0.8"
 # verifying a request signature is how that transport learns who the caller is (`httprelay`).
 ed25519-dalek = "2"
 blake3 = "1"
+# Embedded circle TURN for WebRTC ICE (own UDP socket — not a second iroh Endpoint).
+turn = "0.17"
+webrtc-util = { version = "0.17", default-features = false, features = ["conn", "vnet"] }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

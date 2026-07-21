@@ -126,6 +126,16 @@ pub struct RelayEntry {
     /// prefer it over n0 for NAT fallback. Empty = use n0 (or another relay's DERP).
     #[serde(default)]
     pub derp_url: String,
+    /// Public TURN URLs for WebRTC ICE (`turn:host:port`). When fabric is active and non-empty,
+    /// clients use these instead of empty ICE / Google STUN.
+    #[serde(default)]
+    pub turn_urls: Vec<String>,
+    /// TURN username (default `haven`).
+    #[serde(default)]
+    pub turn_user: String,
+    /// TURN password (long-lived secret from the relay). Travels only inside sealed announces.
+    #[serde(default)]
+    pub turn_pass: String,
 }
 
 /// Erase an inactive+unseen relay entry after this long (7 days), matching iOS `staleAfterMs`.
@@ -250,6 +260,10 @@ pub struct Prefs {
     /// host). A pre-filter mixed into request signatures — membership is what authorizes.
     #[serde(default)]
     pub relay_http_token: String,
+    /// Long-lived TURN password for OUR hosted relay (username `haven`). Generated once, like
+    /// [`relay_http_token`]. Travels only inside sealed frame-19 / interface.json.
+    #[serde(default)]
+    pub relay_turn_token: String,
     /// Optional public URL for OUR hosted relay's HTTP interface (port-forward / reverse proxy /
     /// tunnel) — announced ahead of the LAN address when set.
     #[serde(default)]
@@ -769,6 +783,9 @@ impl Prefs {
                         http_token: String::new(),
                         added_at_ms: now,
                         derp_url: String::new(),
+                        turn_urls: Vec::new(),
+                        turn_user: String::new(),
+                        turn_pass: String::new(),
                         hex,
                     },
                 );
@@ -942,6 +959,9 @@ impl Prefs {
                         http_token: String::new(),
                         added_at_ms: now,
                         derp_url: String::new(),
+                        turn_urls: Vec::new(),
+                        turn_user: String::new(),
+                        turn_pass: String::new(),
                     },
                 );
             }
@@ -988,6 +1008,59 @@ impl Prefs {
         urls.sort();
         urls.dedup();
         urls
+    }
+
+    /// Record a relay's circle TURN URLs + credentials for WebRTC ICE.
+    pub fn set_relay_turn(
+        &mut self,
+        hex: &str,
+        urls: Vec<String>,
+        user: &str,
+        pass: &str,
+    ) -> bool {
+        self.ensure_relay_entry(hex, None, hex.starts_with("s3:"), true);
+        let cleaned: Vec<String> = urls
+            .into_iter()
+            .map(|u| u.trim().to_string())
+            .filter(|u| u.starts_with("turn:") || u.starts_with("turns:"))
+            .collect();
+        let user = user.trim().to_string();
+        let pass = pass.trim().to_string();
+        if let Some(e) = self.relay_entries.get_mut(hex) {
+            if e.turn_urls == cleaned && e.turn_user == user && e.turn_pass == pass {
+                return false;
+            }
+            e.turn_urls = cleaned;
+            e.turn_user = user;
+            e.turn_pass = pass;
+            return true;
+        }
+        false
+    }
+
+    /// Union of live TURN URLs + first non-empty credentials across active relays.
+    /// Returns `(urls, user, pass)`.
+    pub fn all_turn_ice(&self) -> (Vec<String>, String, String) {
+        let mut urls: Vec<String> = Vec::new();
+        let mut user = String::new();
+        let mut pass = String::new();
+        for e in self.relay_entries.values() {
+            if !e.active || e.turn_urls.is_empty() {
+                continue;
+            }
+            for u in &e.turn_urls {
+                if !urls.contains(u) {
+                    urls.push(u.clone());
+                }
+            }
+            if user.is_empty() && !e.turn_user.is_empty() && !e.turn_pass.is_empty() {
+                user = e.turn_user.clone();
+                pass = e.turn_pass.clone();
+            }
+        }
+        urls.sort();
+        urls.dedup();
+        (urls, user, pass)
     }
 
     /// The relay's HTTP interface (urls, token), or None for an iroh-only relay.

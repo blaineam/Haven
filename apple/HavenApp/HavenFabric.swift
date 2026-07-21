@@ -3,12 +3,16 @@ import Foundation
 /// Process-wide view of the **Haven transport fabric**: circle-hosted iroh DERP URLs learned
 /// from frame-19 announces / local host start.
 ///
-/// Policy (matches `haven_net::endpoint_builder::apply_derp_urls`):
+/// Policy (matches `haven_net::endpoint_builder::apply_derp_urls` / FFI `applyDerpUrls`):
 /// - **No Haven DERP known** → n0 public relays + Google STUN remain the only fallback.
 /// - **≥1 Haven DERP known** → iroh should use those URLs only; WebRTC prefers non-Google ICE
 ///   (see `iceServers()`). Full TURN on haven-relay is future work; until then hard-NAT calls may
 ///   still need a STUN/TURN path — we avoid Google when a fabric is present and fall back only if
 ///   the operator has not configured any circle ICE yet.
+///
+/// Rust process policy is applied via `RelayMailboxStore.refreshHavenFabric()` → `applyDerpUrls`.
+/// iroh `RelayMap` is bind-time: call refresh **before** `HavenNode.start` when prefs already know
+/// a fabric; mid-session learns update policy for the next bind / process restart only.
 @MainActor
 final class HavenFabric: ObservableObject {
     static let shared = HavenFabric()

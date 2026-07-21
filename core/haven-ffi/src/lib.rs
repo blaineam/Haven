@@ -119,6 +119,31 @@ pub fn init_logging(dir: String) {
     });
 }
 
+/// Install known circle DERP HTTPS URLs as the process-wide iroh fabric policy.
+///
+/// Empty → stock n0 only. Non-empty → Haven-only (n0 off). Call **before** [`HavenNode::start`]
+/// when prefs already know a fabric, and again whenever frame 19 / adopt learns a `derp` URL.
+///
+/// **Limit:** iroh binds `RelayMap` at endpoint construct time. This updates the policy for the
+/// *next* bind; it does not hot-rebind a live `HavenNode`. WebRTC ICE still follows app-side
+/// fabric prefs (Apple `HavenFabric` / Android `haven.fabric`).
+#[uniffi::export]
+pub fn apply_derp_urls(urls: Vec<String>) {
+    haven_net::apply_derp_urls(urls);
+}
+
+/// True when ≥1 Haven DERP URL is installed in the process policy (n0 is not sole fabric).
+#[uniffi::export]
+pub fn haven_fabric_active() -> bool {
+    haven_net::haven_fabric_active()
+}
+
+/// Active custom DERP URLs from the process policy (empty when n0-only).
+#[uniffi::export]
+pub fn active_derp_urls() -> Vec<String> {
+    haven_net::active_derp_urls()
+}
+
 /// Multi-device (D16): device-credential + account-state self-sync FFI surface.
 /// `pub` so the desktop backend (which links this crate directly) can call the shared
 /// circle encoder + S3 helpers without going through UniFFI.

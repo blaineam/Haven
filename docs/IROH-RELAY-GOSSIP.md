@@ -56,13 +56,32 @@ path rules or sibling hostnames. Free trycloudflare is one origin — use Manual
 - Frame 19 JSON: `{"node","urls","token","derp","addedAt"}`.
 - **Apple / Android / desktop** learn `derp` on announce; re-announce on adopt/host.
 - Adopt accepts bare 64-hex **or** the CLI interface JSON (media + fabric in one paste).
-- Desktop: `apply_derp_urls` + `haven-fabric` event → WebView `__havenFabricDerp`.
-- Apple: `HavenFabric` + `WebRTCCall`; Android: `haven.fabric` prefs + `CallManager.iceServers()`.
+- Desktop: `apply_derp_urls` **before** `HavenNode::start` + on every learn; `haven-fabric` event
+  → WebView (`rebindPending` when fabric first appears mid-session).
+- Apple: `HavenFabric` + FFI `applyDerpUrls` via `RelayMailboxStore.refreshHavenFabric` (before
+  node start + on learn); WebRTC via `iceServerUrls()`.
+- Android: `refreshHavenFabric` → prefs + `applyDerpUrls` (before node start + on learn);
+  `CallManager.iceServers()`.
+
+### Bind-time limit (do not paper over)
+
+iroh takes `RelayMode` / `RelayMap` when the `Endpoint` is constructed. `apply_derp_urls` updates
+the **process policy** for the next `haven_endpoint_builder().bind()` only. There is **no**
+low-risk hot rebind of a live `HavenNode` today (AddressLookup can hot-add; RelayMap cannot).
+Shipping posture:
+
+1. Apply fabric from prefs **before** every cold `HavenNode::start` / `Node::spawn`.
+2. On mid-session learn, still call `apply_derp_urls` so late secondary binds + next launch are
+   Haven-first; live messaging node keeps its construct-time map until process restart.
+3. Full soft-reconnect (stop + re-start node in place) is deferred — high state-churn risk.
 
 ## R3 — AddressLookup over HVD1 (next)
 
 - Wire existing `discovery::AddrRecord` publish/resolve as an iroh `AddressLookup`.
 - n0 DNS stays as concurrent fallback until R5.
+- **Light slice landed:** `AddrRecord::derp_urls` / `relay_addr` / `push_derp_url` — discovery
+  records can carry `relay:https://…` fabric hints in the existing wire format; resolvers can
+  `merge_derp_urls` without a full lookup shim.
 
 ## In-app host (Mac / desktop GUI)
 

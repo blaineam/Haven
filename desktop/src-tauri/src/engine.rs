@@ -928,6 +928,10 @@ impl Engine {
         // Switch-Flip 1.0.7 §§2-5: re-apply the non-persisted crypto switches every launch (master
         // keying/retire + per-circle creator pin + DM live-lane). Cheap, gated in-core.
         self.reapply_crypto_switches();
+        // Haven fabric BEFORE bind: iroh takes RelayMap at Endpoint construct time. Applying after
+        // HavenNode::start left the main node on n0 for the whole session even when prefs already
+        // knew circle DERP URLs. Late learns still call refresh_haven_fabric for the next bind.
+        self.refresh_haven_fabric();
         let listener: Arc<dyn InboundListener> = Arc::new(NodeListener {
             engine: Arc::downgrade(self),
         });
@@ -938,8 +942,6 @@ impl Engine {
             Ok(node) => {
                 *self.node.lock().unwrap() = Some(node);
                 self.dyn_state.lock().unwrap().started = true;
-                // Re-apply any DERP fabric learned before this process started (prefs).
-                self.refresh_haven_fabric();
                 self.emit_changed();
                 self.sync_with_contacts();
                 // Seedless LINKING device: fire the frame-28 request now that the transport is up (the
@@ -4460,11 +4462,29 @@ impl Engine {
 
     /// Apply known circle DERP URLs as the process-wide Haven fabric (n0 off when non-empty)
     /// and surface them to the WebView for WebRTC ICE policy.
+    ///
+    /// Safe anytime (launch, frame-19 learn, adopt, host DERP start). Process policy updates
+    /// immediately so the **next** `haven_endpoint_builder` bind is Haven-first. The live
+    /// messaging `HavenNode` keeps its construct-time RelayMap until process restart — there is
+    /// no low-risk hot rebind path yet (iroh bind-time map). Secondary cold binds (rare
+    /// `BlobClient::connect` paths) pick up the new map.
     pub fn refresh_haven_fabric(&self) {
         let urls = self.prefs.lock().unwrap().all_derp_urls();
+        let was_active = haven_net::haven_fabric_active();
         haven_net::apply_derp_urls(urls.clone());
+        let now_active = haven_net::haven_fabric_active();
+        // Fabric first learned while the messaging node is already bound → process policy is
+        // ahead of that endpoint's RelayMap until process restart (no low-risk hot rebind).
+        let rebind_pending =
+            !was_active && now_active && self.node.lock().unwrap().is_some();
         if let Some(app) = self.app.lock().unwrap().as_ref() {
-            let _ = app.emit("haven-fabric", serde_json::json!({ "derpUrls": urls }));
+            let _ = app.emit(
+                "haven-fabric",
+                serde_json::json!({
+                    "derpUrls": urls,
+                    "rebindPending": rebind_pending,
+                }),
+            );
         }
     }
 

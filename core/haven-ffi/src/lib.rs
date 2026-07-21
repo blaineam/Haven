@@ -726,6 +726,63 @@ impl RelayServerHandle {
     }
 }
 
+/// Embedded circle-hosted iroh-relay (DERP) — Haven fabric NAT fallback.
+///
+/// Separate listen socket from the messaging node (same-key second-endpoint scar). Hold this
+/// object while hosting; drop stops the server. Desktop / macOS hosts call this; iOS usually does not.
+#[derive(uniffi::Object)]
+pub struct DerpServerHandle {
+    public_url: String,
+    local_addr: String,
+    local_port: u16,
+    _server: haven_net::DerpServer,
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl DerpServerHandle {
+    /// Start DERP on `bind` (e.g. `127.0.0.1:3340`). `public_url` may be empty until a tunnel is up.
+    #[uniffi::constructor]
+    pub async fn spawn(bind: String, public_url: String) -> Result<Arc<Self>, HavenError> {
+        let cfg = haven_net::DerpConfig {
+            enabled: true,
+            bind,
+            public_url: public_url.trim().trim_end_matches('/').to_string(),
+        };
+        let server = haven_net::DerpServer::spawn(&cfg)
+            .await
+            .map_err(|e| HavenError::Invalid {
+                msg: format!("derp spawn: {e}"),
+            })?
+            .ok_or_else(|| HavenError::Invalid {
+                msg: "derp disabled".into(),
+            })?;
+        let local_addr = server.local_addr.to_string();
+        let local_port = server.local_port();
+        let public_url = server.public_url.clone();
+        Ok(Arc::new(Self {
+            public_url,
+            local_addr,
+            local_port,
+            _server: server,
+        }))
+    }
+
+    /// Public HTTPS base for RelayMap / frame-19 `derp` (may be empty until tunnel assigns one).
+    pub fn public_url(&self) -> String {
+        self.public_url.clone()
+    }
+
+    /// Local bind address actually used.
+    pub fn local_addr(&self) -> String {
+        self.local_addr.clone()
+    }
+
+    /// Local TCP port for a second cloudflared quick tunnel.
+    pub fn local_port(&self) -> u16 {
+        self.local_port
+    }
+}
+
 // ===== Live social demo =====
 //
 // A local, on-device demonstration of the social engine: every post / comment /

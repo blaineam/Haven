@@ -252,9 +252,13 @@ pub struct Engine {
     app: StdMutex<Option<AppHandle>>,
     node: StdMutex<Option<Arc<HavenNode>>>,
     relay_host: StdMutex<Option<Arc<RelayServerHandle>>>,
-    /// Live cloudflared process (quick or named). Dropped when hosting stops. Manual front door
-    /// never sets this — operator runs the tunnel externally.
+    /// Live cloudflared process (quick or named) for the **media** HTTP mailbox. Dropped when
+    /// hosting stops. Manual front door never sets this — operator runs the tunnel externally.
     quick_tunnel: StdMutex<Option<haven_net::cfquicktunnel::QuickTunnel>>,
+    /// Second free trycloudflare (or none) for the embedded DERP fabric bind.
+    derp_tunnel: StdMutex<Option<haven_net::cfquicktunnel::QuickTunnel>>,
+    /// Embedded iroh-relay (DERP) — separate listen socket; drop stops the fabric role.
+    derp_server: StdMutex<Option<haven_net::DerpServer>>,
     prefs: StdMutex<Prefs>,
     dyn_state: StdMutex<DynState>,
     scheduled: StdMutex<crate::scheduled::ScheduledStore>,
@@ -498,6 +502,8 @@ impl Engine {
             node: StdMutex::new(None),
             relay_host: StdMutex::new(None),
             quick_tunnel: StdMutex::new(None),
+            derp_tunnel: StdMutex::new(None),
+            derp_server: StdMutex::new(None),
             prefs: StdMutex::new(prefs),
             dyn_state: StdMutex::new(dyn_state),
             scheduled: StdMutex::new(scheduled),
@@ -599,6 +605,8 @@ impl Engine {
             node: StdMutex::new(None),
             relay_host: StdMutex::new(None),
             quick_tunnel: StdMutex::new(None),
+            derp_tunnel: StdMutex::new(None),
+            derp_server: StdMutex::new(None),
             prefs: StdMutex::new(prefs),
             dyn_state: StdMutex::new(dyn_state),
             scheduled: StdMutex::new(scheduled),
@@ -4155,6 +4163,7 @@ impl Engine {
             (mode, pub_url, tok, p.auto_tunnel())
         };
         let mut urls = Vec::new();
+        let mut media_was_quick = false;
         // Manual = announce-only (operator's tunnel/proxy). Bundled/Auto may spawn cloudflared.
         match Self::start_desktop_front_door(
             port,
@@ -4164,7 +4173,8 @@ impl Engine {
             auto_tunnel,
         ) {
             Ok(DeskFrontDoor::Spawned(t)) => {
-                log::info!("relay {} tunnel: {}", t.kind, t.public_url);
+                log::info!("relay {} tunnel (media): {}", t.kind, t.public_url);
+                media_was_quick = t.kind == "quick";
                 urls.push(t.public_url.clone());
                 *self.quick_tunnel.lock().unwrap() = Some(t);
             }
@@ -4192,27 +4202,100 @@ impl Engine {
             }
         }
         log::info!("relay http on :{port} urls={urls:?}");
+
+        // Haven fabric: embed iroh-relay (separate socket — not a second Endpoint under our key).
+        let derp_url = self
+            .start_desktop_derp(media_was_quick, urls.first().cloned())
+            .await;
+
         if urls.is_empty() {
             return;
         }
-        // Until desktop embeds iroh-relay in-process, announce a stable (non-trycloudflare)
-        // public media front door as derp_url only when the operator can path-route DERP
-        // (named/manual host). Free trycloudflare on :8674 alone is not a DERP endpoint —
-        // prefer the `haven-relay` CLI for full fabric. Peers still learn DERP from CLI paste.
-        let stable_derp = urls
-            .iter()
-            .find(|u| u.starts_with("https://") && !u.contains("trycloudflare"))
-            .cloned();
         let mut p = self.prefs.lock().unwrap();
         let mut changed = p.set_relay_http(node_hex, urls, token);
-        if let Some(d) = stable_derp {
-            changed |= p.set_relay_derp(node_hex, &d);
+        if let Some(ref d) = derp_url {
+            changed |= p.set_relay_derp(node_hex, d);
         }
         if changed {
             let _ = p.save(&self.paths);
         }
         drop(p);
         self.refresh_haven_fabric();
+    }
+
+    /// Start embedded DERP and, for free auto front door, a **second** trycloudflare origin.
+    /// Named/manual reuse the media public URL (operator path-routes or uses one dual-role host).
+    async fn start_desktop_derp(
+        self: &Arc<Self>,
+        media_was_quick: bool,
+        media_public: Option<String>,
+    ) -> Option<String> {
+        let dcfg = haven_net::DerpConfig {
+            enabled: true,
+            bind: haven_net::DEFAULT_DERP_BIND.into(),
+            // Quick: leave empty until second tunnel; named/manual: media URL (path-route).
+            public_url: if media_was_quick {
+                String::new()
+            } else {
+                media_public.clone().unwrap_or_default()
+            },
+        };
+        let mut srv = match haven_net::DerpServer::spawn(&dcfg).await {
+            Ok(Some(s)) => s,
+            Ok(None) => return None,
+            Err(e) => {
+                log::warn!("iroh DERP failed to start: {e:#}");
+                return None;
+            }
+        };
+        if media_was_quick && srv.public_url.is_empty() {
+            match Self::start_desktop_derp_quick_tunnel(srv.local_port()) {
+                Ok(t) => {
+                    log::info!("relay quick tunnel (DERP fabric): {}", t.public_url);
+                    srv.public_url = t.public_url.clone();
+                    *self.derp_tunnel.lock().unwrap() = Some(t);
+                }
+                Err(e) => {
+                    log::warn!("DERP quick tunnel failed: {e:#}");
+                }
+            }
+        }
+        if srv.public_url.is_empty() {
+            if let Some(u) = media_public {
+                srv.public_url = u;
+            }
+        }
+        let out = if srv.public_url.is_empty() {
+            None
+        } else {
+            Some(srv.public_url.clone())
+        };
+        *self.derp_server.lock().unwrap() = Some(srv);
+        out
+    }
+
+    fn start_desktop_derp_quick_tunnel(
+        port: u16,
+    ) -> anyhow::Result<haven_net::cfquicktunnel::QuickTunnel> {
+        use haven_net::cfquicktunnel::{
+            ensure_cloudflared, executable_dir, QuickTunnel, TunnelSpec,
+        };
+        let local = format!("http://127.0.0.1:{port}");
+        let mut search = Vec::new();
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(d) = exe.parent() {
+                search.push(d.to_path_buf());
+            }
+        }
+        if let Ok(d) = executable_dir() {
+            search.push(d);
+        }
+        let install = search
+            .first()
+            .cloned()
+            .unwrap_or_else(|| std::env::temp_dir().join("haven-cloudflared"));
+        let bin = ensure_cloudflared(&search, &install, true)?;
+        QuickTunnel::start_spec(&bin, TunnelSpec::Quick { local_http: local })
     }
 
     /// Locate bundled/PATH cloudflared and apply front-door mode (manual never spawns).
@@ -4430,6 +4513,8 @@ impl Engine {
         *self.relay_host.lock().unwrap() = None;
         // Drop kills cloudflared; the trycloudflare hostname dies with it.
         *self.quick_tunnel.lock().unwrap() = None;
+        *self.derp_tunnel.lock().unwrap() = None;
+        *self.derp_server.lock().unwrap() = None;
         self.dyn_state.lock().unwrap().hosting = false;
         self.emit_changed();
     }

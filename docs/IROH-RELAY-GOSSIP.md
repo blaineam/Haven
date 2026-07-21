@@ -66,9 +66,16 @@ path rules or sibling hostnames. Free trycloudflare is one origin — use Manual
 
 ## In-app host (Mac / desktop GUI)
 
-In-app host serves the **HTTP mailbox** (+ cloudflared). Full **iroh-relay** is currently the
-**CLI / headless** path. GUI may announce a stable (non-trycloudflare) public URL as a DERP
-hint when the operator path-routes DERP; for real fabric prefer `haven-relay` on the same box.
+In-app host now embeds the same **iroh-relay** role as the CLI (`haven_net::DerpServer` /
+FFI `DerpServerHandle`):
+
+| Front door | Media | DERP fabric |
+|---|---|---|
+| **Auto (free trycloudflare)** | Quick tunnel → `:8674` | **Second** quick tunnel → `:3340` (one origin per process) |
+| **Manual / named** | Operator URL → `:8674` | Same public host if path-routed to `:3340`, or set `--derp-url` / stable domain |
+| **LAN only** | LAN IPs | Local bind only until a public URL exists |
+
+Stop hosting drops both cloudflared children + the DERP server.
 
 ## Ephemeral tunnels (product rule)
 

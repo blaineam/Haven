@@ -8,6 +8,8 @@ description = "Haven networking: iroh-backed P2P transport carrying sealed socia
 [dependencies]
 haven-p2p = { path = "../haven-p2p" }
 iroh = { version = "1", features = ["unstable-custom-transports"] }
+# Embedded circle-hosted DERP (Haven fabric) — separate listen socket, not a second Endpoint.
+iroh-relay = { version = "1", default-features = false, features = ["server", "tls-ring"] }
 tokio = { version = "1", features = ["full"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 anyhow = "1"

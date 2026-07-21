@@ -16,9 +16,13 @@ final class CloudflaredTunnel: ObservableObject {
     // or Xcode Cloud's Haven iOS archive fails with "Cannot find type 'Process' in scope".
     #if os(macOS)
     private var process: Process?
+    /// Second free trycloudflare for the embedded DERP fabric bind (one origin per process).
+    private var derpProcess: Process?
     #endif
     /// Live public URL from a spawned tunnel (trycloudflare or named). Settings UI shows this.
     @Published private(set) var publicURL: String?
+    /// Live public URL for the DERP fabric quick tunnel (if any).
+    @Published private(set) var derpPublicURL: String?
 
     /// Front-door policy: `auto` | `manual` | `bundled` (see docs/CLOUDFLARE-TUNNEL.md).
     /// Manual is first-class: operator runs any tunnel/proxy; Haven only announces the URL.
@@ -153,8 +157,87 @@ final class CloudflaredTunnel: ObservableObject {
         }
         process = nil
         publicURL = nil
+        if let p = derpProcess, p.isRunning {
+            p.terminate()
+            DispatchQueue.global(qos: .utility).async {
+                p.waitUntilExit()
+            }
+        }
+        derpProcess = nil
+        derpPublicURL = nil
         #endif
     }
+
+    /// Free trycloudflare for a second local port (DERP fabric). Does **not** stop the media tunnel.
+    func startQuickDerp(port: UInt16) async -> String? {
+        #if os(macOS)
+        stopDerpOnly()
+        guard let bin = Self.findBinary() else {
+            HavenLog.relay("cloudflared: binary not found for DERP tunnel")
+            return nil
+        }
+        let local = "http://127.0.0.1:\(port)"
+        let proc = Process()
+        proc.executableURL = bin
+        proc.arguments = ["tunnel", "--url", local, "--no-autoupdate", "--protocol", "http2"]
+        let ready = ReadyBox()
+        guard attachDerp(proc: proc, ready: ready) else { return nil }
+
+        let deadline = Date().addingTimeInterval(45)
+        while Date() < deadline {
+            if let url = ready.url {
+                derpPublicURL = url
+                HavenLog.relay("cloudflared: quick tunnel (DERP fabric) \(url)")
+                return url
+            }
+            if !proc.isRunning {
+                HavenLog.relay("cloudflared: DERP tunnel exited before printing a URL")
+                derpProcess = nil
+                return nil
+            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        HavenLog.relay("cloudflared: timed out waiting for DERP trycloudflare URL")
+        stopDerpOnly()
+        return nil
+        #else
+        return nil
+        #endif
+    }
+
+    #if os(macOS)
+    private func stopDerpOnly() {
+        if let p = derpProcess, p.isRunning {
+            p.terminate()
+            DispatchQueue.global(qos: .utility).async { p.waitUntilExit() }
+        }
+        derpProcess = nil
+        derpPublicURL = nil
+    }
+
+    private func attachDerp(proc: Process, ready: ReadyBox) -> Bool {
+        let out = Pipe()
+        let err = Pipe()
+        proc.standardOutput = out
+        proc.standardError = err
+        proc.standardInput = FileHandle.nullDevice
+        let onData: (FileHandle) -> Void = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let line = String(data: data, encoding: .utf8) else { return }
+            if let url = Self.extractTrycloudflareURL(line) { ready.url = url }
+        }
+        out.fileHandleForReading.readabilityHandler = onData
+        err.fileHandleForReading.readabilityHandler = onData
+        do {
+            try proc.run()
+            derpProcess = proc
+            return true
+        } catch {
+            HavenLog.relay("cloudflared: DERP spawn failed \(error.localizedDescription)")
+            return false
+        }
+    }
+    #endif
 
     #if os(macOS)
     private func startQuick(port: UInt16) async -> String? {

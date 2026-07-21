@@ -116,28 +116,32 @@ WebRTC likewise drops Google STUN when fabric is active. See [`IROH-RELAY-GOSSIP
 
 **Practical constraints**
 
-1. **Stable hostname** — `*.trycloudflare.com` dies on restart; bad as a `RelayMap`
-   entry. Named tunnel or **Manual** domain is the real product path for DERP.
-2. **Bootstrap** — peers must learn the circle’s iroh-relay URL(s) (announce, signed
-   list, enroll ticket, …). n0 is hardcoded today; custom map needs a bootstrap story
-   ([`RESILIENCE-DESIGN.md`](RESILIENCE-DESIGN.md) §3.2).
+1. **Stable hostname** — `*.trycloudflare.com` dies on restart; bad as a long-lived
+   `RelayMap` entry. Named tunnel or **Manual** domain is the real product path for DERP.
+   Free auto still works: Haven re-announces a **new** trycloudflare DERP URL every host start
+   (frame 19), and spins a **second** cloudflared process for `:3340` (one origin per quick tunnel).
+2. **Bootstrap** — peers learn the circle’s iroh-relay URL via frame 19 / interface JSON paste.
 3. **Long-lived WebSockets** — soak-test CF free edge idle timeouts / rate limits.
-4. **Implemented on `feature/iroh-relay-gossip`** — R0/R1/R2: `haven_endpoint_builder()`,
-   embedded `iroh-relay` in CLI `haven-relay` (`--derp`), frame-19 `derp` gossip, client
-   Haven-first map + WebRTC policy. Scar guard: DERP is a **server socket other nodes
-   connect to**, not a second iroh *endpoint under the relay’s node key*.
-5. **Scale** — fine for a family/circle home host; not a global free tier for strangers.
+4. **Implemented on `feature/iroh-relay-gossip`** — R0/R1/R2 + in-app host DERP:
+   `haven_endpoint_builder()`, shared `haven_net::DerpServer`, CLI + desktop + Mac host,
+   dual free tunnels, frame-19 `derp`, Haven-first map + WebRTC policy. Scar guard: DERP is a
+   **server socket other nodes connect to**, not a second iroh *endpoint under the node key*.
+5. **Named tunnel dual role** — in Zero Trust, add a public hostname for media
+   (`https://relay.example.com` → `http://127.0.0.1:8674`) and either path-route DERP on the
+   same host or a sibling hostname → `http://127.0.0.1:3340`. If media and DERP share one
+   hostname without path rules, DERP will not work; use free dual tunnels or two hostnames.
+6. **Scale** — fine for a family/circle home host; not a global free tier for strangers.
 
-| Goal | CF media tunnel only (shipped) | CF + embedded iroh-relay (planned) |
+| Goal | CF media tunnel only | CF + embedded iroh-relay (this branch) |
 |---|---|---|
 | Cross-NAT **media** mailbox | Yes | Yes |
 | Cross-NAT **live frames** when direct fails | Relies on n0 (or fails) | Can ride **your** iroh-relay |
 | Survive n0 DERP outage | Partial (HTTP media) | Much better for live P2P fallback |
 | “Turn iroh off forever” | No | Still no — still iroh, self-hosted relay |
 
-**Bottom line (extension):** Yes — embed open-source iroh-relay behind the same
-cloudflared/Manual front door. That is how CF grows from “media mailbox only” toward
-“circle-hosted NAT fallback,” without pretending Cloudflare replaces iroh.
+**Bottom line:** Haven embeds open-source iroh-relay behind cloudflared/Manual. Free auto
+uses **two** quick tunnels (media + DERP). Named/Manual should dual-route or use sibling
+hostnames. Cloudflare still does **not** replace iroh.
 
 ---
 

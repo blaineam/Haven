@@ -56,8 +56,11 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut _s3_guard: Option<std::sync::Arc<S3Server>> = None;
     let mut _rclone_guard: Option<RcloneChild> = None;
     let mut _quick_tunnel: Option<haven_net::cfquicktunnel::QuickTunnel> = None;
+    // Second free trycloudflare process for DERP (one origin per quick tunnel).
+    let mut _derp_tunnel: Option<haven_net::cfquicktunnel::QuickTunnel> = None;
     let mut _derp_guard: Option<crate::derp::DerpServer> = None;
     let mut derp_public: Option<String> = cfg.derp_url.clone();
+    let mut media_was_quick = false;
 
     match &cfg.backend {
         StoreBackend::Local => {
@@ -166,7 +169,8 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 "  stable custom domain — connector authenticated with --tunnel-token"
                             );
                         } else {
-                            println!("✓ cloudflare quick tunnel: {}", t.public_url);
+                            media_was_quick = true;
+                            println!("✓ cloudflare quick tunnel (media): {}", t.public_url);
                             println!(
                                 "  ephemeral — hostname changes when this process restarts \
                                  (use --http-url alone for manual, or + --tunnel-token for bundled)."
@@ -179,7 +183,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         println!("✓ manual front door (you run the tunnel/proxy): {u}");
                         println!(
                             "  Haven will not spawn cloudflared — point your proxy at \
-                             http://127.0.0.1:{port}"
+                             http://127.0.0.1:{port} (media) and derp bind for fabric"
                         );
                         public = Some(u);
                     }
@@ -194,26 +198,47 @@ pub async fn run(cfg: Config) -> Result<()> {
                 }
                 // Haven fabric: embed iroh-relay so circle members can drop n0 for live NAT.
                 if cfg.derp_enabled {
-                    let mut dcfg = crate::derp::DerpConfig {
+                    // Explicit --derp-url wins. Otherwise: named/manual can share the media
+                    // hostname if the operator path-routes; free quick needs a *second* tunnel
+                    // (one origin per cloudflared process) — started after we know the local port.
+                    let initial_derp_url = if cfg.derp_url.is_some() {
+                        cfg.derp_url.clone().unwrap_or_default()
+                    } else if media_was_quick {
+                        String::new() // filled by second quick tunnel below
+                    } else {
+                        public.clone().unwrap_or_default()
+                    };
+                    let dcfg = crate::derp::DerpConfig {
                         enabled: true,
                         bind: cfg.derp_bind.clone(),
-                        public_url: derp_public
-                            .clone()
-                            .or_else(|| public.clone())
-                            .unwrap_or_default(),
+                        public_url: initial_derp_url,
                     };
-                    // If we only have a media public URL, reuse it when the operator fronts both
-                    // ports on one hostname (named tunnel path rules) or the same trycloudflare
-                    // host is not enough for two origins — then operator should set --derp-url.
-                    if dcfg.public_url.is_empty() {
-                        if let Some(u) = &public {
-                            dcfg.public_url = u.clone();
-                        }
-                    }
                     match crate::derp::DerpServer::spawn(&dcfg).await {
                         Ok(Some(mut srv)) => {
+                            // Free auto path: second trycloudflare → this DERP bind.
+                            if media_was_quick && srv.public_url.is_empty() {
+                                match start_quick_tunnel_for_port(srv.local_port(), &cfg) {
+                                    Ok(t) => {
+                                        println!(
+                                            "✓ cloudflare quick tunnel (DERP fabric): {}",
+                                            t.public_url
+                                        );
+                                        println!(
+                                            "  separate origin from media — both re-announced on restart"
+                                        );
+                                        srv.public_url = t.public_url.clone();
+                                        _derp_tunnel = Some(t);
+                                    }
+                                    Err(e) => {
+                                        eprintln!("⚠ DERP quick tunnel failed: {e:#}");
+                                        eprintln!(
+                                            "  set --derp-url or use Manual/named front door for fabric"
+                                        );
+                                    }
+                                }
+                            }
                             if srv.public_url.is_empty() {
-                                if let Some(u) = public.clone().or(derp_public.clone()) {
+                                if let Some(u) = public.clone().or(cfg.derp_url.clone()) {
                                     srv.public_url = u;
                                 }
                             }
@@ -225,7 +250,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 );
                             } else {
                                 println!(
-                                    "  derp local only ({}) — set --derp-url or share media front-door URL",
+                                    "  derp local only ({}) — set --derp-url or open a public front door",
                                     srv.local_addr
                                 );
                             }
@@ -316,11 +341,39 @@ pub async fn run(cfg: Config) -> Result<()> {
     println!("═══════════════════════════════════════════════════════════════\n");
 
     // Idle until Ctrl-C; the relay's accept/forward loops run in the background.
-    // `_quick_tunnel` Drop kills cloudflared on exit.
-    let _ = (&relay, &_quick_tunnel);
+    // Tunnel Drop kills cloudflared on exit.
+    let _ = (&relay, &_quick_tunnel, &_derp_tunnel, &_derp_guard);
     tokio::signal::ctrl_c().await.ok();
     println!("▸ shutting down.");
     Ok(())
+}
+
+/// Second free trycloudflare for the DERP bind (media already has its own origin).
+fn start_quick_tunnel_for_port(port: u16, cfg: &Config) -> Result<haven_net::cfquicktunnel::QuickTunnel> {
+    use haven_net::cfquicktunnel::{ensure_cloudflared, executable_dir, QuickTunnel, TunnelSpec};
+    let local = format!("http://127.0.0.1:{port}");
+    let mut search = Vec::new();
+    if let Ok(exe_dir) = executable_dir() {
+        search.push(exe_dir.clone());
+    }
+    search.push(cfg.data_dir.join("bin"));
+    let install = executable_dir()
+        .ok()
+        .filter(|d| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(d.join(".haven-write-test"))
+                .map(|f| {
+                    drop(f);
+                    let _ = std::fs::remove_file(d.join(".haven-write-test"));
+                    true
+                })
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| cfg.data_dir.join("bin"));
+    let bin = ensure_cloudflared(&search, &install, true)?;
+    QuickTunnel::start_spec(&bin, TunnelSpec::Quick { local_http: local })
 }
 
 enum FrontDoorRun {

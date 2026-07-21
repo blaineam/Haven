@@ -21,6 +21,7 @@ use iroh::{
 
 pub mod blobstore;
 pub mod cfquicktunnel;
+pub mod derp;
 pub mod discovery;
 pub mod endpoint_builder;
 pub mod httprelay;
@@ -28,6 +29,7 @@ pub mod livedelivery;
 pub mod relay;
 pub mod s3tunnel;
 
+pub use derp::{DerpConfig, DerpServer, DEFAULT_DERP_BIND};
 pub use endpoint_builder::{
     apply_book_to_policy, apply_derp_urls, derp_urls_from_book, endpoint_policy,
     haven_endpoint_builder, haven_fabric_active, set_endpoint_policy, EndpointPolicy,

@@ -61,5 +61,3 @@ rand = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 # Pure-Rust QR encoder (no image backend) for the terminal "paste this into the app" code.
 qrcode = { version = "0.14", default-features = false }
-# Embedded iroh DERP server (Haven fabric) — separate listen socket, not a second Endpoint.
-iroh-relay = { version = "1", default-features = false, features = ["server", "tls-ring"] }

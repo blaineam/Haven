@@ -22,6 +22,35 @@ if [ -n "${HAVEN_RELAY_HTTP_URL:-}" ]; then
   set -- --http-url "$HAVEN_RELAY_HTTP_URL" "$@"
 fi
 
+# Haven fabric: circle-hosted iroh DERP (HTTPS front door → :3340) + TURN (UDP :3478).
+# See docs/NAS-FABRIC-RELAY.md. Flags are ignored by older binaries (unknown flag → fail);
+# use a fabric-capable build (feature/iroh-relay-gossip or newer release).
+if [ -n "${HAVEN_RELAY_DERP_URL:-}" ]; then
+  set -- --derp-url "$HAVEN_RELAY_DERP_URL" "$@"
+fi
+# Default DERP bind is 127.0.0.1 — useless behind Docker port publish. Listen on all interfaces
+# unless the operator overrides (HAVEN_RELAY_DERP_BIND=127.0.0.1:3340 to keep it loopback).
+if [ -n "${HAVEN_RELAY_DERP_BIND:-}" ]; then
+  set -- --derp-bind "$HAVEN_RELAY_DERP_BIND" "$@"
+else
+  set -- --derp-bind "0.0.0.0:3340" "$@"
+fi
+if [ -n "${HAVEN_RELAY_TURN_URL:-}" ]; then
+  set -- --turn-url "$HAVEN_RELAY_TURN_URL" "$@"
+fi
+if [ -n "${HAVEN_RELAY_TURN_PUBLIC_IP:-}" ]; then
+  set -- --turn-public-ip "$HAVEN_RELAY_TURN_PUBLIC_IP" "$@"
+fi
+if [ -n "${HAVEN_RELAY_TURN_BIND:-}" ]; then
+  set -- --turn-bind "$HAVEN_RELAY_TURN_BIND" "$@"
+fi
+if [ "${HAVEN_RELAY_NO_DERP:-0}" = "1" ]; then
+  set -- --no-derp "$@"
+fi
+if [ "${HAVEN_RELAY_NO_TURN:-0}" = "1" ]; then
+  set -- --no-turn "$@"
+fi
+
 # HAVEN_RELAY_LINK is applied ONLY on the first run — i.e. only while no link is saved in the data
 # dir yet.
 #

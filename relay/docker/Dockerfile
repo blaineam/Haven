@@ -90,8 +90,8 @@ RUN chmod 0755 /entrypoint.sh
 # Persisted store (identity + sealed-blob mailbox); HAVEN_RELAY_DIR points the relay at it.
 ENV HAVEN_RELAY_DIR=/data
 VOLUME ["/data"]
-# The plain-HTTP media interface (the reliable cross-NAT media path).
-EXPOSE 8674
+# Media HTTP, iroh DERP (TCP), circle TURN (UDP).
+EXPOSE 8674 3340 3478/udp
 # Runs as root by default — the pragmatic choice for a NAS: it can always read /entrypoint.sh and
 # write /data whether that's a named volume OR a bind mount to a NAS share (a non-root UID usually
 # can't write a bind-mounted share, and UID mapping across NAS platforms is a mess). This is a

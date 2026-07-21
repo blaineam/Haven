@@ -275,6 +275,11 @@ pub struct RelayEntry {
     pub node_hex: String,
     /// `host:port` for the plain-HTTP blob/discovery interface (default port 8674).
     pub http: String,
+    /// Public HTTPS base of this relay's **iroh-relay (DERP)** role, when hosted
+    /// (e.g. `https://relay.example.com` or an ephemeral `https://….trycloudflare.com`).
+    /// Empty when the operator only runs the mailbox/HTTP path. Circle gossip re-publishes
+    /// this on every tunnel restart so ephemeral hostnames stay fresh (gen LWW).
+    pub derp_url: String,
     /// Human label, for the settings UI only. Never trusted for anything.
     pub label: String,
     /// **Explicit** presence. `false` is a tombstone, not an omission.
@@ -329,6 +334,7 @@ impl RelayBook {
         let e = self.entries.entry(node_hex.to_string()).or_insert_with(|| RelayEntry {
             node_hex: node_hex.to_string(),
             http: String::new(),
+            derp_url: String::new(),
             label: String::new(),
             present: true,
             gen: 0,
@@ -338,13 +344,17 @@ impl RelayBook {
     }
 
     /// Add or update a relay, bumping its generation so the change wins over what peers hold.
-    pub fn upsert(&mut self, node_hex: &str, http: &str, label: &str) {
+    ///
+    /// `derp_url` is the public HTTPS front door for the optional embedded iroh-relay role
+    /// (cloudflared/Manual). Pass `""` when unknown; a later upsert with a real URL wins by gen.
+    pub fn upsert(&mut self, node_hex: &str, http: &str, label: &str, derp_url: &str) {
         let gen = self.entries.get(node_hex).map(|e| e.gen + 1).unwrap_or(1);
         self.entries.insert(
             node_hex.to_string(),
             RelayEntry {
                 node_hex: node_hex.to_string(),
                 http: http.to_string(),
+                derp_url: derp_url.trim().trim_end_matches('/').to_string(),
                 label: label.to_string(),
                 present: true,
                 gen,
@@ -579,6 +589,7 @@ mod tests {
                 RelayEntry {
                     node_hex: (*id).into(),
                     http: "h:8674".into(),
+                    derp_url: String::new(),
                     label: String::new(),
                     present: *present,
                     gen: *gen,
@@ -627,11 +638,12 @@ mod tests {
     #[test]
     fn upsert_bumps_generation_so_the_change_wins() {
         let mut b = RelayBook::default();
-        b.upsert("a", "h:8674", "home");
+        b.upsert("a", "h:8674", "home", "");
         let g1 = b.entries["a"].gen;
-        b.upsert("a", "h2:8674", "home2");
+        b.upsert("a", "h2:8674", "home2", "https://derp.example.com");
         assert!(b.entries["a"].gen > g1);
         assert_eq!(b.entries["a"].http, "h2:8674");
+        assert_eq!(b.entries["a"].derp_url, "https://derp.example.com");
     }
 
     #[test]

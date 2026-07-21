@@ -30,10 +30,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use iroh::{
-    endpoint::{presets::N0, Endpoint},
-    EndpointAddr, EndpointId, SecretKey,
-};
+use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -52,7 +49,7 @@ pub struct S3Server {
 
 impl S3Server {
     pub async fn spawn(secret: [u8; 32], local_s3: SocketAddr) -> Result<Arc<Self>> {
-        let endpoint = Endpoint::builder(N0)
+        let endpoint = crate::haven_endpoint_builder()
             .secret_key(SecretKey::from_bytes(&secret))
             .alpns(vec![S3_ALPN.to_vec()])
             .bind()
@@ -171,7 +168,7 @@ pub fn parse_node_id(hex: &str) -> Result<EndpointId> {
 /// As [`tunnel_to`], but dial an explicit [`EndpointAddr`] (e.g. a loopback address for
 /// same-machine tests, or a discovery-resolved address).
 pub async fn tunnel_to_addr(secret: [u8; 32], dest: EndpointAddr) -> Result<SocketAddr> {
-    let endpoint = Endpoint::builder(N0)
+    let endpoint = crate::haven_endpoint_builder()
         .secret_key(SecretKey::from_bytes(&secret))
         .alpns(vec![])
         .bind()

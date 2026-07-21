@@ -20,6 +20,7 @@
 //!   haven-relay id [--data DIR]      # print this relay's node id (for the app's storage config)
 
 mod config;
+mod derp;
 mod link;
 mod qr;
 mod runner;

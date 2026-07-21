@@ -15,17 +15,23 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use data_encoding::BASE32_NOPAD;
 use iroh::{
-    endpoint::{presets::N0, Connection, Endpoint},
+    endpoint::{Connection, Endpoint},
     EndpointAddr, EndpointId, SecretKey,
 };
 
 pub mod blobstore;
 pub mod cfquicktunnel;
 pub mod discovery;
+pub mod endpoint_builder;
 pub mod httprelay;
 pub mod livedelivery;
 pub mod relay;
 pub mod s3tunnel;
+
+pub use endpoint_builder::{
+    apply_book_to_policy, derp_urls_from_book, endpoint_policy, haven_endpoint_builder,
+    set_endpoint_policy, EndpointPolicy,
+};
 
 const ALPN: &[u8] = b"haven/social/0";
 const MAX_PAYLOAD: usize = 256 * 1024 * 1024;
@@ -137,10 +143,11 @@ impl Node {
         // rides this path (it uses the relay HTTP / S3 transports), so cross-NAT reliability no
         // longer depends on suppressing direct paths — keep them, and let the LAN be the LAN.
         // Multipath stays on (min 13) so a connection can hold a relay + a direct path at once.
-        let endpoint = Endpoint::builder(N0)
+        // All transport policy (n0 vs circle DERP map, multipath) goes through one chokepoint —
+        // see `endpoint_builder`. Do not call `Endpoint::builder(N0)` directly here.
+        let endpoint = haven_endpoint_builder()
             .secret_key(SecretKey::from_bytes(&secret))
             .alpns(vec![ALPN.to_vec(), blobstore::BLOB_ALPN.to_vec()])
-            .transport_config(iroh::endpoint::QuicTransportConfig::builder().max_concurrent_multipath_paths(16).build())
             .bind()
             .await
             .ah()?;

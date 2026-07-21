@@ -91,7 +91,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Result};
 use iroh::{
-    endpoint::{presets::N0, Connection, Endpoint},
+    endpoint::{Connection, Endpoint},
     EndpointAddr, EndpointId, SecretKey,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -831,12 +831,10 @@ impl BlobServer {
         std::fs::create_dir_all(&root).map_err(|e| anyhow!("create store {}: {e}", root.display()))?;
         // Stock transport (see Node::spawn): IP transport ENABLED so a same-LAN peer fetches blobs
         // over a direct local path instead of bouncing through the DERP cloud.
-        let endpoint = Endpoint::builder(N0)
+        // Transport policy + multipath: `haven_endpoint_builder` (see endpoint_builder.rs).
+        let endpoint = crate::haven_endpoint_builder()
             .secret_key(SecretKey::from_bytes(&secret))
             .alpns(vec![BLOB_ALPN.to_vec()])
-            // Multipath on (parity with Node::spawn / connect_addr): without it a multipath-enabled
-            // client's dial to this relay dies with MultipathNotNegotiated on cross-network paths.
-            .transport_config(iroh::endpoint::QuicTransportConfig::builder().max_concurrent_multipath_paths(16).build())
             .bind()
             .await
             .ah()?;
@@ -1617,12 +1615,9 @@ impl BlobClient {
     /// Connect to an explicit address (loopback for same-machine tests, or a resolved
     /// discovery address).
     pub async fn connect_addr(secret: [u8; 32], dest: EndpointAddr) -> Result<Self> {
-        let endpoint = Endpoint::builder(N0)
+        let endpoint = crate::haven_endpoint_builder()
             .secret_key(SecretKey::from_bytes(&secret))
             .alpns(vec![])
-            // Multipath on so a connection can hold a relay + a direct path at once. IP transport left
-            // ENABLED (no clear_ip_transports) so a same-LAN blob fetch takes the direct local path.
-            .transport_config(iroh::endpoint::QuicTransportConfig::builder().max_concurrent_multipath_paths(16).build())
             .bind()
             .await
             .ah()?;

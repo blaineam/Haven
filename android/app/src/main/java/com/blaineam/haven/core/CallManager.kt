@@ -101,17 +101,28 @@ object CallManager {
 
     /**
      * Haven-first ICE. Google STUN only when no circle fabric (DERP URLs) is known —
-     * parity with Apple [HavenFabric.iceServerUrls]. Prefs key `haven.fabric.derpUrls`.
+     * parity with Apple [HavenFabric]. Prefs `haven.fabric.derpUrls` + `turnUrls`/`turnUser`/`turnPass`.
      *
-     * Empty list when fabric is active is intentional (no Google, no third-party STUN).
-     * Cross-NAT WebRTC calls may fail until Haven TURN; live messaging still uses iroh + circle DERP.
-     * LAN peers can still connect via host candidates.
+     * Fabric + TURN known → circle TURN with credentials.
+     * Fabric without TURN → empty (host candidates only; no Google).
+     * No fabric → Google STUN.
      */
     private fun iceServers(): List<PeerConnection.IceServer> {
         val prefs = appContext.getSharedPreferences("haven.fabric", android.content.Context.MODE_PRIVATE)
         val derp = prefs.getStringSet("derpUrls", emptySet()).orEmpty()
-        if (derp.isNotEmpty()) {
-            // Fabric present — do not use Google. Host candidates only until Haven TURN ships.
+        val turn = prefs.getStringSet("turnUrls", emptySet()).orEmpty()
+        val user = prefs.getString("turnUser", "") ?: ""
+        val pass = prefs.getString("turnPass", "") ?: ""
+        if (derp.isNotEmpty() || turn.isNotEmpty()) {
+            if (turn.isNotEmpty() && user.isNotEmpty() && pass.isNotEmpty()) {
+                return listOf(
+                    PeerConnection.IceServer.builder(turn.toList())
+                        .setUsername(user)
+                        .setPassword(pass)
+                        .createIceServer(),
+                )
+            }
+            // Fabric present without usable TURN — host candidates only (no Google).
             return emptyList()
         }
         return listOf(

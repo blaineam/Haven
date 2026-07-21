@@ -5076,15 +5076,29 @@ object HavenNet : InboundListener {
 
     /**
      * Push live DERP URLs into SharedPreferences for [CallManager] ICE **and** into the Rust
-     * process policy via [uniffi.haven_ffi.applyDerpUrls]. When a messaging node is already live
-     * on a different map, schedules a debounced soft rebind (iroh RelayMap is construct-time).
+     * process policy via [uniffi.haven_ffi.applyDerpUrls]. Also persists circle TURN for WebRTC.
+     * When a messaging node is already live on a different map, schedules a debounced soft rebind.
      */
     private fun refreshHavenFabric() {
         if (!this::appContext.isInitialized) return
         val urls = activeFabricUrls()
+        val turnUrls = linkedSetOf<String>()
+        var turnUser = ""
+        var turnPass = ""
+        for (e in relayEntries.values) {
+            if (!e.active || e.turnUrls.isEmpty()) continue
+            turnUrls.addAll(e.turnUrls)
+            if (turnUser.isEmpty() && e.turnUser.isNotEmpty() && e.turnPass.isNotEmpty()) {
+                turnUser = e.turnUser
+                turnPass = e.turnPass
+            }
+        }
         appContext.getSharedPreferences("haven.fabric", android.content.Context.MODE_PRIVATE)
             .edit()
             .putStringSet("derpUrls", urls.toSet())
+            .putStringSet("turnUrls", turnUrls)
+            .putString("turnUser", turnUser)
+            .putString("turnPass", turnPass)
             .apply()
         // Sorted list for stable policy; empty → n0 only.
         runCatching { uniffi.haven_ffi.applyDerpUrls(urls) }
@@ -5185,6 +5199,9 @@ object HavenNet : InboundListener {
                 if (e.httpToken.isNotEmpty()) put("httpToken", e.httpToken)
                 if (e.addedAtMs > 0) put("addedAtMs", e.addedAtMs)
                 if (e.derpUrl.isNotEmpty()) put("derpUrl", e.derpUrl)
+                if (e.turnUrls.isNotEmpty()) put("turnUrls", JSONArray(e.turnUrls))
+                if (e.turnUser.isNotEmpty()) put("turnUser", e.turnUser)
+                if (e.turnPass.isNotEmpty()) put("turnPass", e.turnPass)
             })
         }
         val forgotAtJson = JSONObject().apply { forgotAtRelays.forEach { (k, v) -> put(k, v) } }

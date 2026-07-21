@@ -1,7 +1,7 @@
 # Embedded iroh-relay + circle gossip
 
 **Branch:** `feature/iroh-relay-gossip`  
-**Status:** R0–R2 + in-app host DERP + dual free tunnels + dedicated DERP URL pref.  
+**Status:** R0–R2 + in-app host DERP + dual free tunnels + dedicated DERP URL pref + **circle TURN**.  
 **Design parent:** [`RESILIENCE-DESIGN.md`](RESILIENCE-DESIGN.md) R0–R2, [`DECENTRALIZED-DISCOVERY.md`](DECENTRALIZED-DISCOVERY.md),  
 [`CLOUDFLARE-TUNNEL.md`](CLOUDFLARE-TUNNEL.md#later-embed-open-source-iroh-relay-behind-the-same-tunnel).
 
@@ -22,19 +22,17 @@ who can still reach that relay's public front door.
 | Fabric known? | iroh `RelayMap` | WebRTC ICE |
 |---|---|---|
 | No Haven DERP URL | n0 public fleet | Google STUN |
-| ≥1 Haven DERP URL | **Haven only** (n0 off) | **Host candidates only** (empty ICE server list; no Google) |
+| ≥1 Haven DERP, no TURN | **Haven only** (n0 off) | **Host candidates only** (empty ICE; no Google) |
+| ≥1 Haven DERP **and** TURN URLs | **Haven only** | **Circle TURN** (`turn:…` + username/password from announce) |
 
 ### WebRTC when fabric is active (read this)
 
-Empty ICE is **intentional**, not a missing wire-up:
-
 - Live **messaging** rides iroh QUIC; with fabric active it uses circle DERP instead of n0.
-- **Calls** are a separate WebRTC path. Without STUN/TURN, only host (and same-LAN) candidates work.
-- Cross-NAT **calls** may fail while fabric is active until Haven TURN ships.
+- **Calls** are a separate WebRTC path. With circle TURN, cross-NAT calls use the host’s UDP TURN.
+- Without TURN URLs (fabric but TURN not announced / not reachable): host candidates only — LAN still works.
 - We **do not** silently re-add Google STUN when fabric is present (no-Google product rule).
-- Do **not** stub a fake TURN URL — a real TURN role on haven-relay is future work.
 
-Surfaces: Apple `HavenFabric.iceServerUrls()`, Android `CallManager.iceServers()`, desktop `iceServers()` in `ui/app.js`.
+Surfaces: Apple `HavenFabric.iceServersFromDefaults()`, Android `CallManager.iceServers()`, desktop `iceServers()` in `ui/app.js` (`__havenFabricTurn`).
 
 ## R0 (done)
 
@@ -64,16 +62,37 @@ hostnames). Free trycloudflare is one origin per process — auto mode spins **t
 
 ## R2 — gossip the map (done on clients)
 
-- Frame 19 JSON: `{"node","urls","token","derp","addedAt"}`.
-- **Apple / Android / desktop** learn `derp` on announce; re-announce on adopt/host.
-- Adopt accepts bare 64-hex **or** the interface JSON (media + fabric in one paste).
+- Frame 19 JSON: `{"node","urls","token","derp","turn","turnUser","turnPass","addedAt"}`.
+- **Apple / Android / desktop** learn `derp` + `turn` on announce; re-announce on adopt/host.
+- Adopt accepts bare 64-hex **or** the interface JSON (media + fabric + TURN in one paste).
 - Desktop: `apply_derp_urls` **before** `HavenNode::start` + on every learn; soft-rebind when
   fabric becomes active or DERP URLs change mid-session (`Engine::rebind_transport_for_fabric`,
-  2s debounce, concurrent guard). `haven-fabric` event → WebView (`rebindPending` while rebinding).
-- Apple: `HavenFabric` + FFI `applyDerpUrls` via `RelayMailboxStore.refreshHavenFabric` (before
-  node start + on learn); soft rebind via `FeedStore.rebindTransportForFabric` when node is up.
-- Android: `refreshHavenFabric` → prefs + `applyDerpUrls` **before** `HavenNode.start` + on learn;
-  soft rebind via `HavenNet.rebindTransportForFabric` when node is up; `CallManager.iceServers()`.
+  2s debounce, concurrent guard). `haven-fabric` event → WebView (`derpUrls` + TURN fields).
+- Apple: `HavenFabric` + FFI `applyDerpUrls` via `RelayMailboxStore.refreshHavenFabric`; WebRTC via
+  `iceServersFromDefaults()` (circle TURN credentials when known).
+- Android: `refreshHavenFabric` → prefs + `applyDerpUrls` + TURN prefs; `CallManager.iceServers()`.
+
+## Circle TURN (WebRTC ICE)
+
+| Piece | Location |
+|---|---|
+| `TurnServer` / `TurnConfig` | `core/haven-net/src/turn.rs` (`turn` crate 0.17) |
+| Default bind | `0.0.0.0:3478` (own UDP socket — **not** a second iroh Endpoint) |
+| Auth | username `haven`, password = long-lived hex secret (`turn_token`, like `http_token`) |
+| CLI | `--turn` / `--no-turn` / `--turn-bind` / `--turn-url` / `--turn-public-ip` |
+| interface.json | `"turn":["turn:host:3478"]`, `"turnUser"`, `"turnPass"` |
+| Desktop host | `Engine::start_desktop_turn` with media/DERP |
+| Persist | `RelayEntry.turn_urls` / `turn_user` / `turn_pass` (Apple/Android/desktop) |
+
+**Reachability:** free trycloudflare cannot front UDP TURN. Port-forward UDP 3478, use a public IP
+with `--turn-url`, or rely on LAN `turn:<lan-ip>:3478`. Fallback: run [coturn](https://github.com/coturn/coturn)
+and put its URLs in the same frame-19 / interface.json fields.
+
+```sh
+haven-relay run --link <code> --http-url https://relay.example.com \
+  --turn-url turn:relay.example.com:3478 --turn-public-ip <public-v4>
+# interface.json includes turn + turnUser + turnPass
+```
 
 ### Bind-time limit (soft rebind, not hot map swap)
 
@@ -142,6 +161,8 @@ Stop hosting drops both cloudflared children + the DERP server.
 ## Scar guards
 
 - DERP server ≠ second endpoint under node key  
+- TURN server ≠ second endpoint under node key (own UDP socket only)  
 - All binds through `haven_endpoint_builder`  
 - Discovery answers are hints; QUIC identity is end-to-end  
 - WebRTC does not re-add Google when fabric is active  
+

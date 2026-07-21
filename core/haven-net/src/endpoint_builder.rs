@@ -151,14 +151,36 @@ pub fn derp_urls_from_book(book: &crate::discovery::RelayBook) -> Vec<String> {
     urls
 }
 
-/// Apply a circle's live relay book to the process policy (opt-in flag must be set by caller).
-/// Does **not** rebind existing endpoints — next spawn picks up the map.
-pub fn apply_book_to_policy(book: &crate::discovery::RelayBook, prefer_custom: bool) {
-    let urls = derp_urls_from_book(book);
-    let mut p = endpoint_policy();
-    p.custom_derp_urls = urls;
-    p.prefer_custom_relays = prefer_custom && !p.custom_derp_urls.is_empty();
+/// Apply a circle's live relay book to the process policy.
+///
+/// **Haven-first fabric:** when any live `derp_url` is known, n0 is **disabled** and the
+/// custom map is preferred. When the book has no DERP URLs, n0 remains the only NAT fallback.
+/// Does **not** rebind existing endpoints — next spawn / restart picks up the map.
+pub fn apply_book_to_policy(book: &crate::discovery::RelayBook, _prefer_custom: bool) {
+    apply_derp_urls(derp_urls_from_book(book));
+}
+
+/// Install known Haven DERP HTTPS URLs as the process-wide fabric policy.
+/// Empty → n0 only. Non-empty → Haven only (no n0).
+pub fn apply_derp_urls(urls: Vec<String>) {
+    let mut p = EndpointPolicy::default();
+    if urls.is_empty() {
+        // No circle-hosted DERP: keep stock n0.
+        p.use_n0_relays = true;
+        p.prefer_custom_relays = false;
+        p.custom_derp_urls.clear();
+    } else {
+        p.use_n0_relays = false;
+        p.prefer_custom_relays = true;
+        p.custom_derp_urls = urls;
+    }
     set_endpoint_policy(p);
+}
+
+/// True when at least one Haven DERP URL is active (n0 is not the sole fabric).
+pub fn haven_fabric_active() -> bool {
+    let p = endpoint_policy();
+    p.prefer_custom_relays && !p.custom_derp_urls.is_empty()
 }
 
 #[cfg(test)]
@@ -191,6 +213,19 @@ mod tests {
             RelayMode::Custom(map) => assert!(!map.is_empty()),
             other => panic!("expected Custom, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn apply_derp_urls_haven_first_disables_n0() {
+        apply_derp_urls(vec!["https://relay.example.com".into()]);
+        let p = endpoint_policy();
+        assert!(!p.use_n0_relays);
+        assert!(p.prefer_custom_relays);
+        assert!(haven_fabric_active());
+        // Reset so other tests see defaults.
+        apply_derp_urls(vec![]);
+        assert!(!haven_fabric_active());
+        assert!(endpoint_policy().use_n0_relays);
     }
 
     #[test]

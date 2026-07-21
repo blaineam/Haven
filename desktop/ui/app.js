@@ -3574,7 +3574,7 @@ async function relaySheet() {
   const pub = await invoke("relay_public_settings").catch(() => ({
     public_url: "", tunnel_token: "", auto_tunnel: true, front_door: "auto",
   }));
-  const adoptInput = el("input", { placeholder: "Paste a relay node id (64 hex)…" });
+  const adoptInput = el("input", { placeholder: "Paste node id (64 hex) or haven-relay interface JSON…" });
   // Three first-class modes — Manual stays correct if free/token Cloudflare paths go away.
   let frontDoor = pub.front_door || "auto";
   const urlInput = el("input", {
@@ -3696,7 +3696,19 @@ async function relaySheet() {
     ));
   }
   if (!relayList.length) adoptCard.append(el("div", { class: "muted small" }, "No relays yet — host one above, adopt a friend's, or add an S3 bucket below."));
-  adoptCard.append(el("div", { class: "row" }, adoptInput, el("button", { class: "btn primary", onclick: async () => { if (adoptInput.value.trim().length === 64) { await invoke("adopt_relay", { nodeHex: adoptInput.value.trim() }); toast("Relay added"); adoptInput.value = ""; renderRelay(); } else toast("That's not a 64-hex node id"); } }, "Add Haven relay")));
+  adoptCard.append(el("div", { class: "row" }, adoptInput, el("button", { class: "btn primary", onclick: async () => {
+    const v = adoptInput.value.trim();
+    const okBare = v.length === 64 && /^[0-9a-fA-F]+$/.test(v);
+    const okJson = v.startsWith("{") && v.includes("node");
+    if (okBare || okJson) {
+      await invoke("adopt_relay", { nodeHex: v });
+      toast("Relay added");
+      adoptInput.value = "";
+      renderRelay();
+    } else {
+      toast("Paste a 64-hex node id or the JSON block from haven-relay");
+    }
+  } }, "Add Haven relay")));
   const au = await invoke("autostart_status").catch(() => ({ login_item: false, host_on_launch: false }));
   const loginChk = el("input", { type: "checkbox", style: "width:auto" }); loginChk.checked = au.login_item;
   const hostChk = el("input", { type: "checkbox", style: "width:auto" }); hostChk.checked = au.host_on_launch;
@@ -4325,7 +4337,18 @@ const line = (label, ok) => el("div", { class: "row" }, el("span", { style: "fle
 // participant opens one RTCPeerConnection to every other (full mesh, no SFU). 1:1 is a
 // 2-person group. The lexicographically smaller hex offers (glare-free). SDP/ICE ride the
 // sealed iroh channel via the call_signal command; media is DTLS-SRTP in the WebView.
-const ICE_SERVERS = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
+// Haven-first ICE: Google STUN only when no circle fabric DERP URLs are known
+// (window.__havenFabricDerp from prefs / relay announce). Parity with Apple HavenFabric.
+function iceServers() {
+  const derp = (window.__havenFabricDerp && window.__havenFabricDerp.length)
+    ? window.__havenFabricDerp
+    : [];
+  if (derp.length > 0) {
+    // Fabric present — host candidates only until Haven TURN ships (no Google).
+    return [];
+  }
+  return [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
+}
 const call = {
   session: "", me: "", name: "", roster: new Set(), pcs: new Map(),
   localStream: null, micOn: true, camOn: true,
@@ -4499,7 +4522,7 @@ async function startMesh() {
 
 function pcFor(peer) {
   if (call.pcs.has(peer)) return call.pcs.get(peer);
-  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  const pc = new RTCPeerConnection({ iceServers: iceServers() });
   if (call.localStream) call.localStream.getTracks().forEach((t) => pc.addTrack(t, call.localStream));
   pc.onicecandidate = (e) => {
     if (e.candidate) invoke("call_signal", { kind: "ice", sessionId: call.session, to: peer, json: JSON.stringify({ c: e.candidate.candidate, m: e.candidate.sdpMLineIndex, i: e.candidate.sdpMid }) });
@@ -5056,6 +5079,11 @@ async function boot() {
     const ae = document.activeElement;
     if (state.view === "you" && ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA") && $("#view-you").contains(ae)) return;
     await render();
+  });
+  // Haven fabric: circle-hosted DERP URLs — WebRTC prefers no Google STUN when non-empty.
+  listen("haven-fabric", (e) => {
+    const urls = (e.payload && e.payload.derpUrls) || [];
+    window.__havenFabricDerp = Array.isArray(urls) ? urls : [];
   });
   // A notification carrying a deepLink is ABOUT something openable — make the toast take you there
   // rather than just announcing it. Routed through routeDeepLink, the same parser a pasted or

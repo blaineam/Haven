@@ -75,6 +75,13 @@ pub struct Config {
     /// Operator-chosen store retention (mailbox TTL override + optional media age/size
     /// limits). Defaults to today's behavior: 30-day mailbox TTL, media never deleted.
     pub retention: haven_net::blobstore::Retention,
+    /// Embed open-source iroh-relay (DERP) so the circle can use this box as the transport
+    /// fabric instead of n0. Default ON for local-disk always-on relays.
+    pub derp_enabled: bool,
+    /// Local bind for iroh-relay HTTP (TLS off — front door terminates). Default 127.0.0.1:3340.
+    pub derp_bind: String,
+    /// Public HTTPS URL for DERP (defaults to the media `http_url` / tunnel URL when empty).
+    pub derp_url: Option<String>,
 }
 
 /// On-disk JSON config (the `--config` form), all fields optional except `link`.
@@ -110,6 +117,13 @@ struct FileConfig {
     /// Cloudflare tunnel install token for a custom domain (pair with http_url).
     #[serde(default)]
     tunnel_token: Option<String>,
+    /// Embed iroh-relay DERP (default true for local storage).
+    #[serde(default)]
+    derp: Option<bool>,
+    #[serde(default)]
+    derp_bind: Option<String>,
+    #[serde(default)]
+    derp_url: Option<String>,
     /// Mailbox TTL override in days (default 30).
     #[serde(default)]
     mailbox_ttl_days: Option<u64>,
@@ -216,11 +230,25 @@ impl Config {
             arg_value(args, "--media-max-bytes").as_deref(),
         )?;
 
+        // Haven fabric (iroh DERP): default ON for local-disk relays so a linked Mac/Linux/CLI
+        // box can replace n0. `--no-derp` disables; `--derp-bind` / `--derp-url` override.
+        let derp_enabled = if args.iter().any(|a| a == "--no-derp") {
+            false
+        } else if args.iter().any(|a| a == "--derp") {
+            true
+        } else {
+            matches!(backend, StoreBackend::Local)
+        };
+        let derp_bind =
+            arg_value(args, "--derp-bind").unwrap_or_else(|| "127.0.0.1:3340".to_string());
+        let derp_url = arg_value(args, "--derp-url");
+
         let seed = load_or_create_seed(&data_dir)?;
         let http_token = load_or_create_http_token(&data_dir)?;
         Ok(Self {
             link, data_dir, seed, backend, s3_port, rclone_bin, rclone_config, peers,
             http_bind, http_url, auto_tunnel, tunnel_token, http_token, retention,
+            derp_enabled, derp_bind, derp_url,
         })
     }
 
@@ -260,6 +288,9 @@ impl Config {
             fc.media_max_age_days,
             fc.media_max_bytes.as_deref(),
         )?;
+        let derp_enabled = fc.derp.unwrap_or(matches!(&backend, StoreBackend::Local));
+        let derp_bind = fc.derp_bind.unwrap_or_else(|| "127.0.0.1:3340".to_string());
+        let derp_url = fc.derp_url.filter(|u| !u.trim().is_empty());
         Ok(Self {
             link,
             data_dir,
@@ -283,6 +314,9 @@ impl Config {
             tunnel_token: fc.tunnel_token.filter(|t| !t.trim().is_empty()),
             http_token,
             retention,
+            derp_enabled,
+            derp_bind,
+            derp_url,
         })
     }
 }

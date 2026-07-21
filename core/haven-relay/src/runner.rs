@@ -56,6 +56,8 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut _s3_guard: Option<std::sync::Arc<S3Server>> = None;
     let mut _rclone_guard: Option<RcloneChild> = None;
     let mut _quick_tunnel: Option<haven_net::cfquicktunnel::QuickTunnel> = None;
+    let mut _derp_guard: Option<crate::derp::DerpServer> = None;
+    let mut derp_public: Option<String> = cfg.derp_url.clone();
 
     match &cfg.backend {
         StoreBackend::Local => {
@@ -190,6 +192,53 @@ pub async fn run(cfg: Config) -> Result<()> {
                         );
                     }
                 }
+                // Haven fabric: embed iroh-relay so circle members can drop n0 for live NAT.
+                if cfg.derp_enabled {
+                    let mut dcfg = crate::derp::DerpConfig {
+                        enabled: true,
+                        bind: cfg.derp_bind.clone(),
+                        public_url: derp_public
+                            .clone()
+                            .or_else(|| public.clone())
+                            .unwrap_or_default(),
+                    };
+                    // If we only have a media public URL, reuse it when the operator fronts both
+                    // ports on one hostname (named tunnel path rules) or the same trycloudflare
+                    // host is not enough for two origins — then operator should set --derp-url.
+                    if dcfg.public_url.is_empty() {
+                        if let Some(u) = &public {
+                            dcfg.public_url = u.clone();
+                        }
+                    }
+                    match crate::derp::DerpServer::spawn(&dcfg).await {
+                        Ok(Some(mut srv)) => {
+                            if srv.public_url.is_empty() {
+                                if let Some(u) = public.clone().or(derp_public.clone()) {
+                                    srv.public_url = u;
+                                }
+                            }
+                            if !srv.public_url.is_empty() {
+                                derp_public = Some(srv.public_url.clone());
+                                println!("  derp public : {}", srv.public_url);
+                                println!(
+                                    "  clients prefer this DERP over n0 once they learn it (frame 19 / paste)."
+                                );
+                            } else {
+                                println!(
+                                    "  derp local only ({}) — set --derp-url or share media front-door URL",
+                                    srv.local_addr
+                                );
+                            }
+                            _derp_guard = Some(srv);
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            eprintln!("⚠ iroh DERP failed to start: {e:#}");
+                            eprintln!("  media still works; live NAT falls back to n0 until DERP is up.");
+                        }
+                    }
+                }
+
                 match &public {
                     Some(url) => println!("  public URL : {url}"),
                     None => println!(
@@ -200,6 +249,24 @@ pub async fn run(cfg: Config) -> Result<()> {
                     ),
                 }
                 println!("  http token : {}", cfg.http_token);
+
+                // Write a paste-ready interface blob so the app learns media URL + DERP fabric in
+                // one adopt (then re-announces frame 19 to the circle). Also on disk for restarts.
+                let interface = serde_json::json!({
+                    "node": my_hex,
+                    "urls": public.as_ref().map(|u| vec![u.clone()]).unwrap_or_default(),
+                    "token": cfg.http_token,
+                    "derp": derp_public.clone().unwrap_or_default(),
+                });
+                let path = cfg.data_dir.join("interface.json");
+                if let Ok(bytes) = serde_json::to_vec_pretty(&interface) {
+                    let _ = std::fs::write(&path, bytes);
+                }
+                if let Ok(line) = serde_json::to_string(&interface) {
+                    println!("\n  ── paste this into Haven (Storage → Connect external relay) ──");
+                    println!("  {line}");
+                    println!("  (also written to {})", path.display());
+                }
             }
         }
         StoreBackend::S3 | StoreBackend::Rclone { .. } => {

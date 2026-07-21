@@ -1,74 +1,103 @@
-//! Optional **iroh-relay (DERP)** role for the Haven circle relay.
+//! Embedded **iroh-relay (DERP)** role for the Haven circle relay.
 //!
-//! ## Why this file exists
+//! Cross-NAT peers that cannot hole-punch need an HTTPS/WebSocket packet relay. When a circle
+//! hosts this role, clients put its public URL in their iroh `RelayMap` and **stop depending on
+//! n0's public fleet** (n0 remains only when no Haven DERP URL is known).
 //!
-//! Cross-NAT peers that cannot hole-punch need an HTTPS/WebSocket packet relay. Today that is
-//! n0's public fleet (via the `N0` preset). This module is the home for hosting the **open-source**
-//! `iroh-relay` server *next to* the mailbox + HVR1 roles, fronted by the same cloudflared /
-//! Manual public URL the operator already uses for `:8674`.
+//! ## Scar guard
 //!
-//! ## Scar guard (read before implementing the server)
+//! The DERP process binds **its own** listen socket. It must **not** open a second iroh
+//! `Endpoint` under the relay's node key (`reference_iroh_same_key_second_endpoint`). Peers
+//! connect *to* this server; the Haven `RelayNode` remains the only endpoint under `cfg.seed`.
 //!
-//! The DERP process must bind **its own** listen socket. It must **not** open a second iroh
-//! `Endpoint` under the relay's node key — that is the same-key second-endpoint bug
-//! (`reference_iroh_same_key_second_endpoint`). Peers connect *to* this server; the Haven
-//! `RelayNode` remains the only endpoint under `cfg.seed`.
+//! ## Front door
 //!
-//! ## Status
-//!
-//! Scaffold only on `feature/iroh-relay-gossip`. Wiring `iroh-relay` `server` + CF path routing
-//! is the next commit series (R1 in `docs/IROH-RELAY-GOSSIP.md`).
+//! Listens on plain HTTP (default `127.0.0.1:3340`). Cloudflare / Manual terminates TLS and
+//! reverse-proxies to this bind — same pattern as the `:8674` media mailbox. Prefer a stable
+//! hostname for production; free trycloudflare works if re-announced every restart.
 
-#![allow(dead_code)] // R1 will call spawn from runner; kept linked so the type surface is stable.
+use std::net::SocketAddr;
 
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
+use iroh_relay::server::{RelayConfig as IrohRelayConfig, Server, ServerConfig};
 
 /// Config for the optional DERP role.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct DerpConfig {
-    /// Master switch. Default **false** — operator must opt in.
+    /// Master switch. Default **true** for local-disk always-on relays (the fabric path).
     pub enabled: bool,
-    /// Local bind for the iroh-relay HTTP(S) listener (e.g. `127.0.0.1:3340`).
-    /// cloudflared / Manual should proxy a public hostname to this address.
+    /// Local bind for the iroh-relay HTTP listener (TLS off — edge terminates).
     pub bind: String,
-    /// Public HTTPS base peers put in their `RelayMap` (and we gossip as `RelayEntry.derp_url`).
-    /// May equal the mailbox public URL when path-routed, or a sibling hostname.
+    /// Public HTTPS base peers put in their `RelayMap` / gossip as `derp_url`.
+    /// Empty = inherit the media front-door public URL at runtime.
     pub public_url: String,
 }
 
-impl DerpConfig {
-    pub fn is_active(&self) -> bool {
-        self.enabled && !self.public_url.trim().is_empty()
+impl Default for DerpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            bind: "127.0.0.1:3340".into(),
+            public_url: String::new(),
+        }
     }
 }
 
-/// Guard for a running DERP server. Drop stops it.
+impl DerpConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
+/// Guard for a running DERP server. Drop aborts the server task.
 pub struct DerpServer {
+    /// Public HTTPS URL clients should use (may match media URL or a sibling hostname).
     pub public_url: String,
+    /// Local bind actually used.
+    pub local_addr: SocketAddr,
+    _server: Server,
 }
 
 impl DerpServer {
     /// Start the embedded iroh-relay when `cfg.enabled`.
-    ///
-    /// Currently a **no-op placeholder** that returns `Ok(None)` so the binary still links and
-    /// operators can begin wiring config/CLI. R1 replaces this with a real `iroh_relay::server`.
     pub async fn spawn(cfg: &DerpConfig) -> Result<Option<Self>> {
-        if !cfg.is_active() {
+        if !cfg.is_enabled() {
             return Ok(None);
         }
-        // R1: spawn iroh-relay server on cfg.bind; do not touch the Haven Endpoint.
-        tracing_or_eprintln(
-            "derp: enabled in config but server not yet linked — public_url will still be gossiped when R1 lands",
+        let bind: SocketAddr = cfg
+            .bind
+            .parse()
+            .with_context(|| format!("invalid --derp-bind {}", cfg.bind))?;
+
+        // Plain HTTP; cloudflared / nginx supplies TLS. Access = allow all peers that can
+        // reach the front door (circle membership is enforced by who learns the URL via
+        // sealed announce — same trust model as n0 public relays, federated per circle).
+        let mut config = ServerConfig::default();
+        config.relay = Some(IrohRelayConfig::new(bind));
+        config.quic = None;
+        let server = Server::spawn(config)
+            .await
+            .map_err(|e| anyhow!("iroh-relay server spawn: {e:?}"))?;
+
+        let local_addr = server.http_addr().unwrap_or(bind);
+
+        let public_url = cfg.public_url.trim().trim_end_matches('/').to_string();
+        eprintln!(
+            "✓ iroh DERP (Haven fabric) listening on {local_addr}{}",
+            if public_url.is_empty() {
+                String::new()
+            } else {
+                format!(" → public {public_url}")
+            }
         );
-        let _ = &cfg.bind;
+        eprintln!(
+            "  peers use this as RelayMap entry (HTTPS). Prefer Manual/named tunnel for a stable hostname."
+        );
+
         Ok(Some(Self {
-            public_url: cfg.public_url.trim().trim_end_matches('/').to_string(),
+            public_url,
+            local_addr,
+            _server: server,
         }))
     }
-}
-
-fn tracing_or_eprintln(msg: &str) {
-    // haven-relay deliberately avoids a heavy log stack in the happy path; stderr is enough for
-    // an operator running in a terminal / systemd journal.
-    eprintln!("  note: {msg}");
 }

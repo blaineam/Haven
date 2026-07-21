@@ -99,10 +99,22 @@ object CallManager {
      *  those may re-ring a session we've already left. */
     private val endedSessions = HashMap<String, Long>()
 
-    private val iceServers = listOf(
-        PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
-        PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer(),
-    )
+    /**
+     * Haven-first ICE. Google STUN only when no circle fabric (DERP URLs) is known —
+     * parity with Apple [HavenFabric.iceServerUrls]. Prefs key `haven.fabric.derpUrls`.
+     */
+    private fun iceServers(): List<PeerConnection.IceServer> {
+        val prefs = appContext.getSharedPreferences("haven.fabric", android.content.Context.MODE_PRIVATE)
+        val derp = prefs.getStringSet("derpUrls", emptySet()).orEmpty()
+        if (derp.isNotEmpty()) {
+            // Fabric present — do not use Google. Host candidates only until Haven TURN ships.
+            return emptyList()
+        }
+        return listOf(
+            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
+            PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer(),
+        )
+    }
 
     fun init(context: Context, myNodeHex: String) {
         if (this::appContext.isInitialized) { myHex = myNodeHex; return }
@@ -473,7 +485,7 @@ object CallManager {
         WebRTCPeer(
             peerHex = peer,
             factory = ensureFactory(),
-            iceServers = iceServers,
+            iceServers = iceServers(),
             localAudio = audioTrack,
             localVideo = localVideo,
             onLocalSdp = { type, sdp ->

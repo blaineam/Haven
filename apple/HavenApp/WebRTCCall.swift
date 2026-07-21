@@ -67,10 +67,12 @@ final class WebRTCCall: NSObject {
 
     override init() {
         let config = RTCConfiguration()
-        config.iceServers = [RTCIceServer(urlStrings: [
-            "stun:stun.l.google.com:19302",
-            "stun:stun1.l.google.com:19302",
-        ])]
+        // Haven-first ICE: Google STUN only when no circle-hosted fabric is known
+        // (see HavenFabric.iceServerUrls).
+        let ice = HavenFabric.shared.iceServerUrls()
+        config.iceServers = ice.isEmpty
+            ? []
+            : [RTCIceServer(urlStrings: ice)]
         config.sdpSemantics = .unifiedPlan
         config.continualGatheringPolicy = .gatherContinually
         let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)

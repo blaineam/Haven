@@ -150,6 +150,9 @@ object HavenNet : InboundListener {
          *  it earlier reactivates only on a NEWER re-add (LWW); a stale echo carries the older stamp and
          *  loses. 0 = unknown (legacy). Mirrors iOS `RelayEntry.addedAtMs`. */
         val addedAtMs: Long = 0,
+        /** Public HTTPS URL of this relay's embedded iroh-relay (DERP) fabric role. When set, peers
+         *  prefer it over n0 for NAT fallback. Empty = use n0 (or another relay's DERP). */
+        val derpUrl: String = "",
     )
     /** Per-relay metadata records, keyed by hex. The config survives deactivation here. */
     private val relayEntries = HashMap<String, RelayEntry>()
@@ -2494,9 +2497,11 @@ object HavenNet : InboundListener {
         // Always carry the adoption timestamp so receivers can LWW a stale tombstone. Use the JSON form
         // whenever we have EITHER an HTTP interface or a non-zero adoption stamp; a legacy receiver
         // ignores JSON it can't read as a bare hex (wrong length), so mixed versions stay compatible.
-        val payload = if (hasHttp || addedAt > 0) {
+        val hasDerp = e != null && e.derpUrl.isNotEmpty()
+        val payload = if (hasHttp || addedAt > 0 || hasDerp) {
             org.json.JSONObject().put("node", nodeHex).put("addedAt", addedAt).apply {
                 if (hasHttp) { put("urls", JSONArray(e!!.httpUrls)); put("token", e.httpToken) }
+                if (hasDerp) put("derp", e!!.derpUrl)
             }.toString().toByteArray(Charsets.UTF_8)
         } else nodeHex.toByteArray(Charsets.UTF_8)
         return runCatching { social.sealCircleMedia(circleId, payload) }.getOrNull()
@@ -2513,10 +2518,11 @@ object HavenNet : InboundListener {
         val opened = runCatching { social.openCircleMediaSender(circleId, sealed) }.getOrNull() ?: return
         val announcerHex = opened.senderHex.lowercase()   // authenticated envelope sender (account id)
         val text = String(opened.data, Charsets.UTF_8).trim()
-        // Extended announce: JSON {node, urls, token} carries the relay's HTTP media interface.
+        // Extended announce: JSON {node, urls, token, derp} carries media HTTP + Haven fabric DERP.
         var announcedUrls: List<String> = emptyList()
         var announcedToken = ""
         var announcedAddedAt = 0L
+        var announcedDerp: String? = null
         val nodeHex: String = if (text.startsWith("{")) {
             val o = runCatching { JSONObject(text) }.getOrNull() ?: return
             announcedUrls = o.optJSONArray("urls")?.let { a ->
@@ -2524,6 +2530,8 @@ object HavenNet : InboundListener {
             } ?: emptyList()
             announcedToken = o.optString("token", "")
             announcedAddedAt = o.optLong("addedAt", 0L)
+            val d = o.optString("derp", "").trim()
+            if (d.startsWith("http")) announcedDerp = d.trimEnd('/')
             o.optString("node", "").trim().lowercase()
         } else text.lowercase()
         if (nodeHex.length != 64) return
@@ -2567,6 +2575,16 @@ object HavenNet : InboundListener {
                 relayEntries[nodeHex] = e.copy(httpUrls = announcedUrls, httpToken = announcedToken)
                 saveRelayNodes()
                 Log.i(TAG, "learned relay http interface for ${nodeHex.take(8)}: ${announcedUrls.size} url(s)")
+            }
+        }
+        // Haven fabric: DERP URL so peers prefer this box over n0 for live NAT.
+        if (announcedDerp != null) {
+            val e = relayEntries[nodeHex]
+            if (e != null && e.derpUrl != announcedDerp) {
+                relayEntries[nodeHex] = e.copy(derpUrl = announcedDerp)
+                saveRelayNodes()
+                refreshHavenFabric()
+                Log.i(TAG, "learned relay DERP fabric for ${nodeHex.take(8)}: $announcedDerp")
             }
         }
         scope.launch(Dispatchers.Main) { bumpRelays() }   // recompose the Relays hub off the inbound thread
@@ -2619,18 +2637,45 @@ object HavenNet : InboundListener {
         uniffi.haven_ffi.makeRelayLink(circleId, members)
     }.getOrNull()
 
+    /**
+     * Adopt a relay. Accepts either a bare 64-hex node id, or the JSON interface blob printed by
+     * `haven-relay` (`{"node","urls","token","derp"}`) so HTTP media + Haven DERP fabric are learned
+     * in one paste and re-announced to the circle (frame 19).
+     */
     fun adoptRelay(nodeHex: String, name: String? = null, setDefault: Boolean = false) {
-        val hex = nodeHex.trim().lowercase()
+        val raw = nodeHex.trim()
+        var hex = raw.lowercase()
+        var urls: List<String> = emptyList()
+        var token = ""
+        var derp = ""
+        if (raw.startsWith("{")) {
+            val o = runCatching { JSONObject(raw) }.getOrNull() ?: return
+            hex = o.optString("node", "").trim().lowercase()
+            urls = o.optJSONArray("urls")?.let { a ->
+                (0 until a.length()).mapNotNull { i -> a.optString(i).takeIf { u -> u.startsWith("http") } }
+            } ?: emptyList()
+            token = o.optString("token", "")
+            derp = o.optString("derp", "").trim().trimEnd('/')
+        }
         if (hex.length != 64) return
         unforgetRelay(hex)   // explicit adoption overrides a prior Forget + records a re-add CLEAR for self-sync
         ensureRelayEntry(hex, name = name, isS3 = false, activate = true)   // adoptedAtMs=0 → stamp now()
+        if (urls.isNotEmpty() && token.isNotEmpty()) {
+            val e = relayEntries[hex]
+            if (e != null) relayEntries[hex] = e.copy(httpUrls = urls, httpToken = token)
+        }
+        if (derp.isNotEmpty()) {
+            val e = relayEntries[hex]
+            if (e != null) relayEntries[hex] = e.copy(derpUrl = derp)
+            refreshHavenFabric()
+        }
         if (setDefault) defaultRelayHex = hex
         scope.launch {
             for (c in social.circles()) {
                 val cid = c.id
                 val list = relayNodes.getOrPut(cid) { mutableListOf() }
                 if (!list.contains(hex)) list.add(hex)
-                // Tell members (sealed) so they use the same mailbox.
+                // Tell members (sealed) so they use the same mailbox + fabric.
                 val sealed = relayAnnounceBlob(cid, hex)
                 if (sealed != null) {
                     val frame = Wire.eventPayload(cid, sealed)  // [LP cid][sealed] — same layout as frame 19
@@ -4938,12 +4983,30 @@ object HavenNet : InboundListener {
                         } ?: emptyList(),
                         httpToken = o.optString("httpToken", ""),
                         addedAtMs = o.optLong("addedAtMs", 0L),
+                        derpUrl = o.optString("derpUrl", "").trim().trimEnd('/'),
                     )
                 }
             }
         }
         // Migrate any relay that only exists in relayNodes/the default into a RelayEntry.
         migrateRelayEntries()
+        refreshHavenFabric()
+    }
+
+    /**
+     * Push live DERP URLs into SharedPreferences so [CallManager] ICE (and any future Rust
+     * endpoint policy) can prefer Haven fabric over Google STUN / n0.
+     */
+    private fun refreshHavenFabric() {
+        if (!this::appContext.isInitialized) return
+        val urls = relayEntries.values
+            .filter { it.active && it.derpUrl.isNotEmpty() }
+            .map { it.derpUrl }
+            .toSet()
+        appContext.getSharedPreferences("haven.fabric", android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putStringSet("derpUrls", urls)
+            .apply()
     }
 
     private fun saveRelayNodes() {
@@ -4957,6 +5020,7 @@ object HavenNet : InboundListener {
                 if (e.httpUrls.isNotEmpty()) put("httpUrls", JSONArray(e.httpUrls))
                 if (e.httpToken.isNotEmpty()) put("httpToken", e.httpToken)
                 if (e.addedAtMs > 0) put("addedAtMs", e.addedAtMs)
+                if (e.derpUrl.isNotEmpty()) put("derpUrl", e.derpUrl)
             })
         }
         val forgotAtJson = JSONObject().apply { forgotAtRelays.forEach { (k, v) -> put(k, v) } }

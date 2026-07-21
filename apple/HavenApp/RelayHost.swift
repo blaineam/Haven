@@ -163,6 +163,15 @@ final class RelayHost: ObservableObject {
             HavenLog.relay("relay http on :\(port) urls=\(urls.joined(separator: " "))")
             guard !urls.isEmpty, !self.nodeId.isEmpty else { return }
             RelayMailboxStore.shared.setHttpInterface(self.nodeId, urls: urls, token: token)
+            // Until Mac hosts embed iroh-relay in-process, announce the public media front door as
+            // derp_url only when the operator uses a named/manual host that can path-route /relay
+            // to a CLI derp — free trycloudflare on :8674 alone is not a DERP endpoint. Prefer
+            // `haven-relay` CLI on the Mac for full fabric; in-app still learns DERP from peers.
+            #if os(macOS)
+            if let pub = urls.first(where: { $0.contains("trycloudflare") == false && $0.hasPrefix("https://") }) {
+                RelayMailboxStore.shared.setDerpUrl(self.nodeId, url: pub)
+            }
+            #endif
             FeedStore.shared.reannounceOwnRelay()   // re-announce WITH the http interface attached
         }
     }
@@ -387,6 +396,9 @@ struct RelayEntry: Codable, Identifiable, Equatable {
     /// Shared relay secret folded into each request signature (travels ONLY inside sealed announces,
     /// and is never put on the wire — see SharedStore.httpAuth).
     var httpToken: String?
+    /// Public HTTPS URL of this relay's embedded iroh-relay (DERP) fabric role. When set, peers
+    /// prefer it over n0 for NAT fallback. Empty = use n0 (or another relay's DERP).
+    var derpUrl: String?
     /// When this relay was last (re-)ADOPTED into a circle (unix ms). Rides the announce so a member
     /// who FORGOT it earlier reactivates on a NEWER re-add (LWW), while a stale third-party echo —
     /// which carries the original, older timestamp — loses and stays forgotten. Defaulted (0) so old
@@ -543,6 +555,7 @@ final class RelayMailboxStore: ObservableObject {
             entries = decoded
         }
         migrateEntries()
+        Self.refreshHavenFabric()
     }
 
     /// Ensure every relay referenced by relaysByCircle / the default has a RelayEntry record.
@@ -643,6 +656,36 @@ final class RelayMailboxStore: ObservableObject {
         entries[hex] = e
         persistEntries()
         objectWillChange.send()
+    }
+
+    /// Record a relay's public iroh-relay (DERP) URL for Haven-first fabric (n0 only when empty).
+    func setDerpUrl(_ hex: String, url: String?) {
+        ensureEntry(hex, activate: true)
+        guard var e = entries[hex] else { return }
+        let t = url?.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let next = (t?.isEmpty == false) ? t : nil
+        if e.derpUrl == next { return }
+        e.derpUrl = next
+        entries[hex] = e
+        persistEntries()
+        objectWillChange.send()
+        Self.refreshHavenFabric()
+    }
+
+    /// Every live DERP URL we know — feeds iroh RelayMap (Haven-first) and WebRTC ICE preference.
+    func allDerpUrls() -> [String] {
+        entries.values.compactMap { e -> String? in
+            guard e.active, let u = e.derpUrl, !u.isEmpty else { return nil }
+            return u
+        }.sorted()
+    }
+
+    /// Push known DERP URLs into the process fabric policy via UserDefaults for the FFI/Rust node
+    /// to read on next spawn; also records for WebRTC. Full hot-rebind of iroh endpoints is later.
+    static func refreshHavenFabric() {
+        let urls = shared.allDerpUrls()
+        UserDefaults.standard.set(urls, forKey: "haven.fabric.derpUrls")
+        HavenFabric.shared.update(derpUrls: urls)
     }
 
     /// The relay's HTTP interface (urls + token), or nil for an iroh-only relay.

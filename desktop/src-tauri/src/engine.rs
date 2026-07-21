@@ -930,6 +930,8 @@ impl Engine {
             Ok(node) => {
                 *self.node.lock().unwrap() = Some(node);
                 self.dyn_state.lock().unwrap().started = true;
+                // Re-apply any DERP fabric learned before this process started (prefs).
+                self.refresh_haven_fabric();
                 self.emit_changed();
                 self.sync_with_contacts();
                 // Seedless LINKING device: fire the frame-28 request now that the transport is up (the
@@ -3931,11 +3933,12 @@ impl Engine {
         let Some(opened) = self.social.open_circle_media_sender(circle_id.clone(), sealed) else { return };
         let announcer_hex = opened.sender_hex.to_lowercase(); // authenticated envelope sender (account id)
         let text = String::from_utf8_lossy(&opened.data).trim().to_string();
-        // Extended announce: JSON {node, urls, token} also carries the relay's plain-HTTP media
-        // interface (the reliable cross-NAT path). Legacy announces are the bare 64-hex id.
+        // Extended announce: JSON {node, urls, token, derp} carries media HTTP + Haven DERP fabric.
+        // Legacy announces are the bare 64-hex id.
         let mut announced_urls: Vec<String> = Vec::new();
         let mut announced_token = String::new();
         let mut announced_added_at: u64 = 0;
+        let mut announced_derp: Option<String> = None;
         let node_hex = if text.starts_with('{') {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return };
             announced_urls = v["urls"]
@@ -3950,6 +3953,12 @@ impl Engine {
                 .unwrap_or_default();
             announced_token = v["token"].as_str().unwrap_or_default().to_string();
             announced_added_at = v["addedAt"].as_u64().unwrap_or(0);
+            if let Some(d) = v["derp"].as_str() {
+                let d = d.trim().trim_end_matches('/');
+                if d.starts_with("http") {
+                    announced_derp = Some(d.to_string());
+                }
+            }
             v["node"].as_str().unwrap_or_default().trim().to_lowercase()
         } else {
             text.to_lowercase()
@@ -4012,6 +4021,9 @@ impl Engine {
             if !announced_urls.is_empty() && !announced_token.is_empty() {
                 p.set_relay_http(&node_hex, announced_urls.clone(), announced_token.clone());
             }
+            if let Some(derp) = announced_derp {
+                p.set_relay_derp(&node_hex, &derp);
+            }
             let _ = p.save(&self.paths);
             // Clear any stale backoff so a just-reactivated relay is retried immediately.
             if was_suppressed_or_inactive {
@@ -4019,6 +4031,7 @@ impl Engine {
                 self.relay_health.lock().unwrap().remove(&node_hex);
             }
         }
+        self.refresh_haven_fabric();
         self.backfill_mailbox(&circle_id).await;
         self.poll_mailbox().await;
     }
@@ -4182,10 +4195,24 @@ impl Engine {
         if urls.is_empty() {
             return;
         }
+        // Until desktop embeds iroh-relay in-process, announce a stable (non-trycloudflare)
+        // public media front door as derp_url only when the operator can path-route DERP
+        // (named/manual host). Free trycloudflare on :8674 alone is not a DERP endpoint —
+        // prefer the `haven-relay` CLI for full fabric. Peers still learn DERP from CLI paste.
+        let stable_derp = urls
+            .iter()
+            .find(|u| u.starts_with("https://") && !u.contains("trycloudflare"))
+            .cloned();
         let mut p = self.prefs.lock().unwrap();
-        if p.set_relay_http(node_hex, urls, token) {
+        let mut changed = p.set_relay_http(node_hex, urls, token);
+        if let Some(d) = stable_derp {
+            changed |= p.set_relay_derp(node_hex, &d);
+        }
+        if changed {
             let _ = p.save(&self.paths);
         }
+        drop(p);
+        self.refresh_haven_fabric();
     }
 
     /// Locate bundled/PATH cloudflared and apply front-door mode (manual never spawns).
@@ -4316,27 +4343,46 @@ impl Engine {
     }
 
     /// The frame-19 announce body for one relay: the legacy bare 64-hex node id, or — once the
-    /// relay's plain-HTTP interface is known — JSON `{"node":hex,"urls":[…],"token":…}` so members
-    /// also learn the reliable cross-NAT media path. A legacy receiver ignores the JSON form.
+    /// relay's plain-HTTP interface / DERP fabric is known — JSON
+    /// `{"node":hex,"urls":[…],"token":…,"derp":…}` so members learn media + Haven-first NAT fabric.
+    /// A legacy receiver ignores the JSON form.
     fn relay_announce_body(&self, hex: &str) -> Vec<u8> {
         let p = self.prefs.lock().unwrap();
         let added_at = p.relay_entries.get(hex).map(|e| e.added_at_ms).unwrap_or(0);
         let http = p.relay_http(hex);
+        let derp = p
+            .relay_entries
+            .get(hex)
+            .map(|e| e.derp_url.clone())
+            .filter(|u| !u.is_empty());
         drop(p);
         // Always carry the adoption timestamp so receivers can LWW a stale tombstone. Use the JSON form
-        // whenever we have EITHER an HTTP interface or a non-zero adoption stamp; a legacy receiver ignores
+        // whenever we have HTTP, DERP, or a non-zero adoption stamp; a legacy receiver ignores
         // JSON it can't read as a bare hex (wrong length), so mixed versions stay compatible.
-        if http.is_some() || added_at > 0 {
+        if http.is_some() || derp.is_some() || added_at > 0 {
             let mut obj = serde_json::json!({ "node": hex, "addedAt": added_at });
             if let Some((urls, token)) = http {
                 obj["urls"] = serde_json::json!(urls);
                 obj["token"] = serde_json::json!(token);
+            }
+            if let Some(d) = derp {
+                obj["derp"] = serde_json::json!(d);
             }
             if let Ok(json) = serde_json::to_vec(&obj) {
                 return json;
             }
         }
         hex.as_bytes().to_vec()
+    }
+
+    /// Apply known circle DERP URLs as the process-wide Haven fabric (n0 off when non-empty)
+    /// and surface them to the WebView for WebRTC ICE policy.
+    pub fn refresh_haven_fabric(&self) {
+        let urls = self.prefs.lock().unwrap().all_derp_urls();
+        haven_net::apply_derp_urls(urls.clone());
+        if let Some(app) = self.app.lock().unwrap().as_ref() {
+            let _ = app.emit("haven-fabric", serde_json::json!({ "derpUrls": urls }));
+        }
     }
 
     /// A contact's signed device roster (frame 27): learn which DEVICE ids to dial/seal for them,
@@ -4709,9 +4755,33 @@ impl Engine {
     }
 
     /// Adopt a relay node for all circles (ADDED to the redundant set, not replacing existing
-    /// relays) + tell contacts via frame 19. Adopt several for redundancy.
+    /// relays) + tell contacts via frame 19. Accepts a bare 64-hex id **or** the JSON interface
+    /// blob printed by `haven-relay` (`{"node","urls","token","derp"}`) so one paste learns media
+    /// HTTP + Haven DERP fabric and re-announces them to the circle.
     pub async fn adopt_relay(self: &Arc<Self>, node_hex: String) {
-        let hex = node_hex.trim().to_lowercase();
+        let raw = node_hex.trim();
+        let mut hex = raw.to_lowercase();
+        let mut urls: Vec<String> = Vec::new();
+        let mut token = String::new();
+        let mut derp = String::new();
+        if raw.starts_with('{') {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else { return };
+            hex = v["node"].as_str().unwrap_or_default().trim().to_lowercase();
+            urls = v["urls"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|u| u.as_str())
+                        .filter(|u| u.starts_with("http"))
+                        .map(|u| u.to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            token = v["token"].as_str().unwrap_or_default().to_string();
+            if let Some(d) = v["derp"].as_str() {
+                derp = d.trim().trim_end_matches('/').to_string();
+            }
+        }
         if hex.len() != 64 {
             return;
         }
@@ -4722,8 +4792,15 @@ impl Engine {
             p.relay_clear_forget(&hex);        // explicit adoption clears the deletion stamp + records re-add
             p.ensure_relay_entry(&hex, None, false, true);
             p.set_relay_added_at(&hex, 0);     // fresh adoption stamp = now()
+            if !urls.is_empty() && !token.is_empty() {
+                p.set_relay_http(&hex, urls, token);
+            }
+            if !derp.is_empty() {
+                p.set_relay_derp(&hex, &derp);
+            }
             let _ = p.save(&self.paths);
         }
+        self.refresh_haven_fabric();
         for c in self.social.circles() {
             {
                 let mut p = self.prefs.lock().unwrap();

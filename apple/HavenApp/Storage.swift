@@ -393,28 +393,33 @@ struct AdvancedStorageView: View {
                               systemImage: linkCopied ? "checkmark.circle.fill" : "doc.on.doc")
                             .foregroundStyle(linkCopied ? Color.green : HavenTheme.pink)
                     }
-                    TextField("2. Paste the daemon's node id (64 hex)", text: $relayNodeInput)
+                    TextField("2. Paste node id (64 hex) or interface JSON", text: $relayNodeInput)
                         .autocorrectionDisabled().havenAutocap(.never)
                         .font(.system(.footnote, design: .monospaced))
                     Toggle("Use for all my circles (now & future)", isOn: $applyToAll).tint(HavenTheme.pink)
                     Button {
-                        let id = relayNodeInput.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                        guard id.count == 64, id.allSatisfy({ $0.isHexDigit }) else { return }
+                        let raw = relayNodeInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let okBare = raw.count == 64 && raw.allSatisfy({ $0.isHexDigit })
+                        let okJson = raw.hasPrefix("{") && raw.contains("node")
+                        guard okBare || okJson else { return }
                         let targets = applyToAll ? FeedStore.shared.circles.map(\.id) : [cid]
-                        FeedStore.shared.adoptRelayNode(id, circleIds: targets, setDefault: applyToAll)
+                        FeedStore.shared.adoptRelayNode(raw, circleIds: targets, setDefault: applyToAll)
                         relayAdopted = true; relayNodeInput = ""
                     } label: {
                         Label(applyToAll ? "Connect for all my circles" : "Connect for this circle",
                               systemImage: "antenna.radiowaves.left.and.right")
                     }
-                    .disabled(relayNodeInput.trimmingCharacters(in: .whitespacesAndNewlines).count != 64)
+                    .disabled({
+                        let t = relayNodeInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                        return !(t.count == 64 || (t.hasPrefix("{") && t.contains("node")))
+                    }())
                     if relayAdopted {
                         Label("Connected — used as the relay", systemImage: "checkmark.circle.fill")
                             .font(.caption).foregroundStyle(.green)
                     }
                 } header: { Text("Connect an external relay") }
                 footer: {
-                    Text("Running `haven-relay` on a Mac, Linux box, or a spare device? Copy the link above and start it with `haven-relay run --link <link>`, then paste back the node id it shows (`haven-relay id`). No cloud, no credentials.")
+                    Text("Running `haven-relay` on a Mac, Linux box, or a spare device? Copy the link above and start it with `haven-relay run --link <link>`, then paste back the interface JSON it prints (or the bare node id from `haven-relay id`). The JSON also carries media URL + Haven fabric DERP so n0 is not required. No cloud, no credentials.")
                 }
 
                 Section {
@@ -776,11 +781,11 @@ struct AddRelaySheet: View {
                         footer: { Text("For a `haven-relay` daemon or the Docker relay: copy this link, start the relay with it (`haven-relay run --link <link>`), then paste back the node id it prints below.") }
 
                         Section {
-                            TextField("Relay node id (64 hex)", text: $nodeInput)
+                            TextField("Node id (64 hex) or interface JSON", text: $nodeInput)
                                 .autocorrectionDisabled().havenAutocap(.never)
                                 .font(.system(.footnote, design: .monospaced))
                         } header: { Text("Haven relay") }
-                        footer: { Text("Paste the node id printed by a `haven-relay` daemon (`haven-relay id`), or another device that's acting as a relay. Connects over iroh — a live P2P relay.") }
+                        footer: { Text("Paste the interface JSON (or bare node id) printed by a `haven-relay` daemon, or another device that's acting as a relay. JSON includes media + Haven DERP fabric so the circle can drop n0.") }
                     } else {
                         Section {
                             TextField("Endpoint (e.g. s3.amazonaws.com)", text: $endpoint).autocorrectionDisabled().havenAutocap(.never)
@@ -816,10 +821,17 @@ struct AddRelaySheet: View {
     private func add() {
         let circles = FeedStore.shared.circles.map(\.id)
         if kind == .haven {
-            let id = nodeInput.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            FeedStore.shared.adoptRelayNode(id, circleIds: circles, setDefault: makeDefault)
-            if !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                RelayMailboxStore.shared.rename(id, to: name)
+            let raw = nodeInput.trimmingCharacters(in: .whitespacesAndNewlines)
+            FeedStore.shared.adoptRelayNode(raw, circleIds: circles, setDefault: makeDefault)
+            // Rename uses the resolved node hex (JSON paste stores under "node").
+            var hex = raw.lowercased()
+            if raw.hasPrefix("{"),
+               let obj = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
+               let n = obj["node"] as? String {
+                hex = n.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            }
+            if !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, hex.count == 64 {
+                RelayMailboxStore.shared.rename(hex, to: name)
             }
         } else {
             let cfg = S3Config(endpoint: endpoint, region: region.isEmpty ? "us-east-1" : region,

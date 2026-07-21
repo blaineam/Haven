@@ -1884,18 +1884,20 @@ final class FeedStore: ObservableObject {
     }
 
     /// The frame-19 announce body for one relay: the legacy bare 64-hex node id, or — once the
-    /// relay's plain-HTTP interface is known — JSON `{"node":hex,"urls":[…],"token":…}` so members
-    /// also learn the reliable cross-NAT media path. Sealed to the circle either way; a legacy
-    /// receiver that expects a bare hex simply ignores the JSON form (wrong length).
+    /// relay's plain-HTTP interface is known — JSON `{"node":hex,"urls":[…],"token":…,"derp":…}` so
+    /// members also learn the media path **and** the Haven DERP fabric URL (n0-free NAT).
     private func relayAnnounceData(_ hex: String) -> Data {
         // Always carry the relay's adoption timestamp so receivers can LWW a stale tombstone. Use the
         // JSON form whenever we have EITHER an HTTP interface or a non-zero adoption stamp; a legacy
         // receiver ignores JSON it can't parse as a bare hex (wrong length), so this stays compatible.
         let addedAt = RelayMailboxStore.shared.addedAtMs(hex)
         let http = RelayMailboxStore.shared.httpInterface(hex)
-        if http != nil || addedAt > 0 {
+        let derp = RelayMailboxStore.shared.entries[hex.lowercased()]?.derpUrl
+            ?? RelayMailboxStore.shared.entries[hex]?.derpUrl
+        if http != nil || addedAt > 0 || (derp?.isEmpty == false) {
             var obj: [String: Any] = ["node": hex, "addedAt": addedAt]
             if let http { obj["urls"] = http.urls; obj["token"] = http.token }
+            if let derp, !derp.isEmpty { obj["derp"] = derp }
             if let json = try? JSONSerialization.data(withJSONObject: obj) { return json }
         }
         return Data(hex.utf8)
@@ -2845,11 +2847,33 @@ final class FeedStore: ObservableObject {
 
     /// Adopt a relay node as the mailbox for specific circles (and optionally make it the default
     /// every present + future circle inherits). Each circle's members are told over frame 19.
+    /// Adopt a relay. Accepts a bare 64-hex node id, or the JSON interface blob printed by
+    /// `haven-relay` (`{"node","urls","token","derp"}`) so media HTTP + Haven DERP fabric are
+    /// learned in one paste and re-announced to the circle (frame 19).
     func adoptRelayNode(_ nodeHex: String, circleIds: [String], setDefault: Bool) {
-        let hex = nodeHex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var hex = nodeHex.trimmingCharacters(in: .whitespacesAndNewlines)
+        var announcedUrls: [String] = []
+        var announcedToken = ""
+        var announcedDerp: String?
+        if hex.hasPrefix("{"),
+           let obj = try? JSONSerialization.jsonObject(with: Data(hex.utf8)) as? [String: Any] {
+            announcedUrls = (obj["urls"] as? [String] ?? []).filter { $0.hasPrefix("http") }
+            announcedToken = obj["token"] as? String ?? ""
+            if let d = obj["derp"] as? String, d.hasPrefix("http") {
+                announcedDerp = d.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            }
+            hex = (obj["node"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        hex = hex.lowercased()
         guard let social, hex.count == 64 else { return }
-        let data = relayAnnounceData(hex)
         RelayMailboxStore.shared.unforget(hex)   // explicit adoption overrides a prior Forget
+        if !announcedUrls.isEmpty, !announcedToken.isEmpty {
+            RelayMailboxStore.shared.setHttpInterface(hex, urls: announcedUrls, token: announcedToken)
+        }
+        if let announcedDerp {
+            RelayMailboxStore.shared.setDerpUrl(hex, url: announcedDerp)
+        }
+        let data = relayAnnounceData(hex)
         if setDefault { RelayMailboxStore.shared.defaultNodeHex = hex }
         for cid in circleIds {
             RelayMailboxStore.shared.add(circleId: cid, nodeHex: hex)   // ADD (append), don't replace
@@ -2968,11 +2992,13 @@ final class FeedStore: ObservableObject {
         var announcedUrls: [String] = []
         var announcedToken = ""
         var announcedAddedAt: UInt64 = 0
+        var announcedDerp: String?
         if nodeHex.hasPrefix("{"),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             announcedUrls = (obj["urls"] as? [String] ?? []).filter { $0.hasPrefix("http") }
             announcedToken = obj["token"] as? String ?? ""
             announcedAddedAt = (obj["addedAt"] as? NSNumber)?.uint64Value ?? 0
+            if let d = obj["derp"] as? String, d.hasPrefix("http") { announcedDerp = d }
             nodeHex = (obj["node"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         }
         guard nodeHex.count == 64 else { return }
@@ -3003,6 +3029,10 @@ final class FeedStore: ObservableObject {
         // Record the relay's announced HTTP media interface (the reliable cross-NAT path).
         if !announcedUrls.isEmpty, !announcedToken.isEmpty {
             RelayMailboxStore.shared.setHttpInterface(lower, urls: announcedUrls, token: announcedToken)
+        }
+        // Haven fabric: DERP URL so peers prefer this box over n0 for live NAT.
+        if let announcedDerp {
+            RelayMailboxStore.shared.setDerpUrl(lower, url: announcedDerp)
         }
         // SUPERSEDE stale account-id relays. Under the per-device transport a relay is ALWAYS a device id,
         // never an account id. A relay-list entry equal to a member's (or our own) ACCOUNT id is a dead

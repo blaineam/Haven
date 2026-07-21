@@ -100,6 +100,13 @@ fn print_help() {
          --no-http                 disable the HTTP interface\n  \
          Requests need the bearer token printed at start (persisted in <data>/http_token).\n  \
          On first tunnel use, cloudflared is downloaded next to this binary (or into <data>/bin).\n\n\
+         HAVEN FABRIC / iroh DERP (default ON for local-disk — replaces n0 when members use your link):\n  \
+         --derp                    force-enable embedded iroh-relay (default on for --local)\n  \
+         --no-derp                 disable embedded DERP (n0 remains the only NAT fallback)\n  \
+         --derp-bind <addr>        local iroh-relay bind (default 127.0.0.1:3340)\n  \
+         --derp-url <https://…>    public HTTPS URL for DERP (defaults to media front-door URL)\n  \
+         Point your tunnel/proxy so that URL reaches --derp-bind (path or hostname). Peers learn\n  \
+         it from the circle announce after someone pastes the relay link / hosts once.\n\n\
          RETENTION (your choice; default = keep media forever, prune mailbox after 30 days):\n  \
          --media-max-age-days N    prune media not touched for N days (0 = keep forever)\n  \
          --media-max-bytes SIZE    cap the media store, oldest deleted first (50G, 500M; 0 = unbounded)\n  \

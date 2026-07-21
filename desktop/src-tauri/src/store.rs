@@ -122,6 +122,10 @@ pub struct RelayEntry {
     /// 0 = unknown (legacy). Mirrors iOS/Android `addedAtMs`.
     #[serde(default)]
     pub added_at_ms: u64,
+    /// Public HTTPS URL of this relay's embedded iroh-relay (DERP) fabric role. When set, peers
+    /// prefer it over n0 for NAT fallback. Empty = use n0 (or another relay's DERP).
+    #[serde(default)]
+    pub derp_url: String,
 }
 
 /// Erase an inactive+unseen relay entry after this long (7 days), matching iOS `staleAfterMs`.
@@ -758,6 +762,7 @@ impl Prefs {
                         http_urls: Vec::new(),
                         http_token: String::new(),
                         added_at_ms: now,
+                        derp_url: String::new(),
                         hex,
                     },
                 );
@@ -930,6 +935,7 @@ impl Prefs {
                         http_urls: Vec::new(),
                         http_token: String::new(),
                         added_at_ms: now,
+                        derp_url: String::new(),
                     },
                 );
             }
@@ -949,6 +955,33 @@ impl Prefs {
             return true;
         }
         false
+    }
+
+    /// Record a relay's public iroh-relay (DERP) fabric URL. Empty clears it.
+    pub fn set_relay_derp(&mut self, hex: &str, derp_url: &str) -> bool {
+        self.ensure_relay_entry(hex, None, hex.starts_with("s3:"), true);
+        let next = derp_url.trim().trim_end_matches('/').to_string();
+        if let Some(e) = self.relay_entries.get_mut(hex) {
+            if e.derp_url == next {
+                return false;
+            }
+            e.derp_url = next;
+            return true;
+        }
+        false
+    }
+
+    /// Every live DERP URL across active relays — Haven-first fabric map.
+    pub fn all_derp_urls(&self) -> Vec<String> {
+        let mut urls: Vec<String> = self
+            .relay_entries
+            .values()
+            .filter(|e| e.active && !e.derp_url.is_empty())
+            .map(|e| e.derp_url.clone())
+            .collect();
+        urls.sort();
+        urls.dedup();
+        urls
     }
 
     /// The relay's HTTP interface (urls, token), or None for an iroh-only relay.

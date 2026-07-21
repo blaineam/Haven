@@ -96,11 +96,10 @@ peer A ──QUIC direct──► peer B          (still preferred when it works
 | App mesh switchboard (`HVR1`) | Haven already | unchanged |
 | iroh DERP (NAT fallback for live frames) | n0 public relays | **circle-hosted** via custom `RelayMap` |
 
-**Client side** (not shipped yet): point endpoints at Haven URLs instead of only n0 —
-
-```text
-RelayMode::Custom(RelayMap::from(haven_iroh_relay_https_urls))
-```
+**Client side** (on `feature/iroh-relay-gossip`): when frame 19 carries a `derp` URL (or the
+operator pastes `haven-relay`'s interface JSON), clients call `apply_derp_urls` and build
+`RelayMode::Custom` — **n0 is disabled** for that process until no Haven DERP remains.
+WebRTC likewise drops Google STUN when fabric is active. See [`IROH-RELAY-GOSSIP.md`](IROH-RELAY-GOSSIP.md).
 
 **Why this works with Cloudflare (and what it still is not)**
 
@@ -123,11 +122,10 @@ RelayMode::Custom(RelayMap::from(haven_iroh_relay_https_urls))
    list, enroll ticket, …). n0 is hardcoded today; custom map needs a bootstrap story
    ([`RESILIENCE-DESIGN.md`](RESILIENCE-DESIGN.md) §3.2).
 3. **Long-lived WebSockets** — soak-test CF free edge idle timeouts / rate limits.
-4. **Not implemented yet** — this is resilience work item **R1** in
-   [`RESILIENCE-DESIGN.md`](RESILIENCE-DESIGN.md) §3.1: optional `iroh-relay` `server`
-   role inside `haven-relay`, plus a shared `haven_endpoint_builder()` so all endpoints
-   share one `RelayMap`. Scar guard: DERP is a **server socket other nodes connect to**,
-   not a second iroh *endpoint under the relay’s node key* (same-key second-endpoint bug).
+4. **Implemented on `feature/iroh-relay-gossip`** — R0/R1/R2: `haven_endpoint_builder()`,
+   embedded `iroh-relay` in CLI `haven-relay` (`--derp`), frame-19 `derp` gossip, client
+   Haven-first map + WebRTC policy. Scar guard: DERP is a **server socket other nodes
+   connect to**, not a second iroh *endpoint under the relay’s node key*.
 5. **Scale** — fine for a family/circle home host; not a global free tier for strangers.
 
 | Goal | CF media tunnel only (shipped) | CF + embedded iroh-relay (planned) |

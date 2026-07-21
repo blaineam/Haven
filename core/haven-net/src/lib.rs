@@ -29,8 +29,8 @@ pub mod relay;
 pub mod s3tunnel;
 
 pub use endpoint_builder::{
-    apply_book_to_policy, derp_urls_from_book, endpoint_policy, haven_endpoint_builder,
-    set_endpoint_policy, EndpointPolicy,
+    apply_book_to_policy, apply_derp_urls, derp_urls_from_book, endpoint_policy,
+    haven_endpoint_builder, haven_fabric_active, set_endpoint_policy, EndpointPolicy,
 };
 
 const ALPN: &[u8] = b"haven/social/0";

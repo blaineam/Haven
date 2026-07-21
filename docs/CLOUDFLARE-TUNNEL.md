@@ -324,6 +324,97 @@ Recommendation for the product:
 
 ---
 
+## Embedding: no external `cloudflared` CLI for the user
+
+Ephemeral trycloudflare is the preferred product path for "one tap, public HTTP."
+The open question is whether Haven can ship the tunnel **inside** the app so the user
+never installs Cloudflare's CLI.
+
+### What "inside the binary" can mean
+
+| Approach | User installs CLI? | Literally one process? | Platforms | Effort / risk |
+|---|---|---|---|---|
+| **A. Bundle `cloudflared` as an app helper** and spawn it | No | No (child process) | macOS, Linux, Windows desktop; **not iOS** | Low — official client, parse stdout for URL |
+| **B. Link a Go c-shared / third-party embed of cloudflared** into `haven-ffi` | No | Yes | Desktop + maybe Android; iOS painful (Go runtime) | Medium–high — size, build matrix, App Store |
+| **C. Reimplement quick-tunnel protocol in Rust** | No | Yes | All (including iOS in-process) | High — protocol is undocumented, breaks when CF changes it |
+| **D. Depend on system `cloudflared`** | Yes | No | Dev machines | Rejected for product |
+
+**Recommended for Haven: A on desktop-class hosts, skip trycloudflare on iOS for now.**
+
+Why A wins:
+
+1. **cloudflared is Apache-2.0** — redistributable with attribution.
+2. Quick tunnels are a first-class CLI mode:  
+   `cloudflared tunnel --url http://127.0.0.1:8674`  
+   which already prints `https://….trycloudflare.com`. The app only needs to spawn, scrape, set `haven.relay.publicURL`, re-announce, and kill the child when the relay stops.
+3. Registration is a simple unauthenticated POST (shape verified live):
+
+   ```http
+   POST https://api.trycloudflare.com/tunnel
+   Content-Type: application/json
+
+   {}
+   ```
+
+   Response includes `hostname`, `id`, `secret` — then the **client** must speak the
+   argotunnel/QUIC (or HTTP/2) edge protocol. That second half is the hard part; the
+   official binary already does it. Reimplementing (C) means owning breakage every time
+   Cloudflare ships a connector change. They document quick tunnels as *testing-only*
+   with no SLA ([CF docs](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/)).
+
+4. **iOS cannot honestly "exec a helper binary"** the way macOS can. App Store apps do not
+   get a general `Process` to launch nested unsigned tools. Options on iPhone are B/C
+   (heavy) or "iOS hosts LAN-only; Mac/desktop does public HTTP" — which already matches
+   Haven's copy that a Mac is best for always-on relay.
+
+### Bundle layout (Path A)
+
+```text
+Haven.app/Contents/MacOS/Haven
+Haven.app/Contents/Helpers/cloudflared   # signed + notarized with the app
+```
+
+Linux/Windows desktop: ship next to the Tauri/binary or under a known resources path.
+`haven-relay` static binary: optional `haven-relay tunnel` subcommand that shells to a
+same-directory `cloudflared`, or vendors it in the .deb.
+
+Lifecycle when "Be this circle's relay" is on and **Auto public URL (Cloudflare)** is on:
+
+1. Start local HTTP on 8674 (existing).
+2. `Process` → `Helpers/cloudflared tunnel --url http://127.0.0.1:8674 --no-autoupdate`
+   (and prefer `--protocol http2` if UDP is flaky).
+3. Read stdout/stderr until a line matches `https://[a-z0-9-]+\.trycloudflare\.com`.
+4. Write `haven.relay.publicURL`, call `reannounceOwnRelay()`.
+5. On relay stop / app quit: terminate the child; clear or keep last URL (clear is safer —
+   the hostname is dead).
+
+Size: one cloudflared per arch is typically on the order of **~20–40 MB**. Fat multi-arch
+macOS builds pay twice unless you thinned-slice. Acceptable for desktop; painful if forced
+into every iOS download for a feature iOS can't run well anyway.
+
+### Legal / product notes
+
+- Cloudflare's terms apply when the connector runs (CF License + Terms + Privacy). Surface
+  a one-time "uses Cloudflare's free tunnel edge; ephemeral URL; not for production SLA"
+  disclosure when the user enables Auto public URL.
+- Quick tunnels: **200 concurrent requests** hard limit; no SSE; hostname dies with the
+  process. Fine for a family circle's sealed media, bad for a public website.
+- Do **not** log the tunnel secret. The public hostname is shareable; credentials are not.
+
+### Why not "compile cloudflared into the Rust binary"
+
+Go and Rust do not produce a single mixed binary without a separate Go artifact (c-archive /
+c-shared) linked at the end. That is still "two runtimes in one process," not a pure Rust
+rewrite. For Haven's already-heavy `haven-ffi` xcframework, spawning a **signed helper**
+keeps crash domains separate (tunnel dies ≠ app jetsam) and matches how many desktop apps
+ship `ffmpeg`, `git`, etc.
+
+A pure-Rust client (C) is only worth it if iOS public HTTP becomes a hard requirement.
+Until then, Mac/desktop helper is the product fit: the always-on mailbox is already
+desktop-class.
+
+---
+
 ## Related
 
 - [`BYO-STORAGE.md`](BYO-STORAGE.md) — media transport order (HTTP → S3 → iroh)

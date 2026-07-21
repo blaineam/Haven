@@ -92,6 +92,8 @@ fn print_help() {
          HTTP MEDIA INTERFACE (default = ON, the reliable cross-NAT media path):\n  \
          --http <bind>             bind address (default 0.0.0.0:8674)\n  \
          --http-url <url>          public URL members reach it at (port-forward/proxy/tunnel)\n  \
+         --tunnel-token <token>    Cloudflare Zero Trust tunnel install token (with --http-url:\n  \
+                                   run bundled cloudflared for your custom domain)\n  \
          --tunnel                  force a free Cloudflare Quick Tunnel (*.trycloudflare.com)\n  \
          --no-tunnel               do not auto-start a quick tunnel (default is ON when no --http-url)\n  \
          --no-http                 disable the HTTP interface\n  \

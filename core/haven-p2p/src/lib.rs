@@ -33,6 +33,8 @@ pub mod groupkey;
 pub mod identity;
 pub mod link;
 pub mod mediaref;
+pub mod mediavariants;
+pub mod pushbanner;
 pub mod selfsync;
 pub mod social;
 pub mod transport;

@@ -148,15 +148,16 @@ final class RelayHost: ObservableObject {
             // Desktop-class hosts: if the operator didn't set a stable public URL, open a free
             // Cloudflare Quick Tunnel so remote members can fetch media without port-forwarding.
             // Ephemeral hostname; killed when hosting stops. iOS skips (no helper binary).
+            // Front door: manual (announce-only), bundled token, or free quick — see CloudflaredTunnel.
             #if os(macOS)
-            // reachableHttpUrls returns only the configured public URL when set — if empty, try tunnel.
-            let configuredPublic = UserDefaults.standard.string(forKey: "haven.relay.publicURL")?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if configuredPublic.isEmpty, CloudflaredTunnel.shared.autoEnabled {
-                if let tunnelURL = await CloudflaredTunnel.shared.start(port: port) {
-                    urls = [tunnelURL] + urls
-                    HavenLog.relay("relay quick tunnel \(tunnelURL)")
-                }
+            let fd = await CloudflaredTunnel.shared.apply(port: port)
+            if let u = fd.announceURL {
+                urls = [u] + urls.filter { $0 != u }
+                HavenLog.relay(
+                    "relay front door \(CloudflaredTunnel.shared.frontDoorMode)"
+                        + (fd.spawnedConnector ? " (cloudflared)" : " (announce-only)")
+                        + " \(u)"
+                )
             }
             #endif
             HavenLog.relay("relay http on :\(port) urls=\(urls.joined(separator: " "))")
@@ -189,9 +190,11 @@ final class RelayHost: ObservableObject {
     /// receipt (`httpInterface` keeps a private address only when we are on that /24), so the useless
     /// case is filtered by the side that can actually tell.
     static func reachableHttpUrls(port: UInt16) -> [String] {
-        if let pub = UserDefaults.standard.string(forKey: "haven.relay.publicURL")?
-            .trimmingCharacters(in: .whitespacesAndNewlines), pub.hasPrefix("http") {
-            return [pub.hasSuffix("/") ? String(pub.dropLast()) : pub]
+        // Prefer normalized public URL (manual / bundled domain). Bare hostnames get https://.
+        if let pub = CloudflaredTunnel.normalizePublicURL(
+            UserDefaults.standard.string(forKey: "haven.relay.publicURL") ?? ""
+        ) {
+            return [pub]
         }
         return lanIPv4s().map { "http://\($0):\(port)" }
     }

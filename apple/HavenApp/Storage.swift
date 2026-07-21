@@ -245,6 +245,17 @@ struct CircleMailboxSection: View {
     let circleId: String
     @ObservedObject private var relay = RelayHost.shared
 
+    private var frontDoorHelp: String {
+        switch CloudflaredTunnel.shared.frontDoorMode {
+        case "manual":
+            return "Manual: you run cloudflared, Caddy, nginx, Tailscale Funnel, etc. against http://127.0.0.1:8674. Haven only announces the HTTPS URL — works even if free Cloudflare tunnels are blocked."
+        case "bundled":
+            return "Bundled: paste domain + Zero Trust install token. In Cloudflare, set the public hostname service to http://127.0.0.1:8674."
+        default:
+            return "Auto: free ephemeral trycloudflare.com when no custom domain is set. Prefer Manual or Bundled for a stable hostname."
+        }
+    }
+
     var body: some View {
         Section {
             Toggle(isOn: Binding(get: { relay.enabled }, set: { relay.setEnabled($0) })) {
@@ -254,28 +265,61 @@ struct CircleMailboxSection: View {
             if relay.serving && !relay.nodeId.isEmpty {
                 Label("This device is relaying · \(String(relay.nodeId.prefix(8)))…", systemImage: "checkmark.circle.fill")
                     .font(.caption).foregroundStyle(.green)
-                // Friends outside your LAN can only hit the plain-HTTP media path if this device
-                // has a reachable URL (Tailscale MagicDNS, a reverse proxy, a free tunnel, etc.).
-                // Without it the iroh blob path is the only cross-NAT option and is less reliable.
+            } else if relay.enabled {
+                Label("Starting…", systemImage: "clock").font(.caption).foregroundStyle(.secondary)
+            }
+            #if os(macOS)
+            // Three first-class modes — Manual survives if free/token Cloudflare paths go away.
+            Picker("Front door", selection: Binding(
+                get: { CloudflaredTunnel.shared.frontDoorMode },
+                set: { CloudflaredTunnel.shared.frontDoorMode = $0 }
+            )) {
+                Text("Free trycloudflare").tag("auto")
+                Text("Custom domain (Haven runs cloudflared)").tag("bundled")
+                Text("Manual / external tunnel").tag("manual")
+            }
+            .font(.caption)
+            TextField("Public URL (https://relay.example.com)", text: Binding(
+                get: { CloudflaredTunnel.shared.configuredPublicURL },
+                set: { v in
+                    CloudflaredTunnel.shared.configuredPublicURL = v
+                    if relay.serving { FeedStore.shared.reannounceOwnRelay() }
+                }
+            ))
+            .autocorrectionDisabled().havenAutocap(.never)
+            .font(.caption)
+            .textContentType(.URL)
+            if CloudflaredTunnel.shared.frontDoorMode == "bundled" {
+                SecureField("Cloudflare tunnel install token", text: Binding(
+                    get: { CloudflaredTunnel.shared.tunnelToken },
+                    set: { CloudflaredTunnel.shared.tunnelToken = $0 }
+                ))
+                .font(.caption)
+            }
+            Text(frontDoorHelp)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            #else
+            // iOS: announce-only public URL (no helper binary).
+            if relay.serving && !relay.nodeId.isEmpty {
                 TextField("Public relay URL (optional)", text: Binding(
                     get: { UserDefaults.standard.string(forKey: "haven.relay.publicURL") ?? "" },
                     set: { v in
                         let t = v.trimmingCharacters(in: .whitespacesAndNewlines)
                         if t.isEmpty { UserDefaults.standard.removeObject(forKey: "haven.relay.publicURL") }
                         else { UserDefaults.standard.set(t, forKey: "haven.relay.publicURL") }
-                        // Re-announce so peers learn the new URL without a restart.
                         if relay.serving { FeedStore.shared.reannounceOwnRelay() }
                     }
                 ))
                 .autocorrectionDisabled().havenAutocap(.never)
                 .font(.caption)
-            } else if relay.enabled {
-                Label("Starting…", systemImage: "clock").font(.caption).foregroundStyle(.secondary)
             }
+            #endif
         } header: {
             Text("Relay")
         } footer: {
-            Text("Where this circle's sealed posts & media live so they reach people who were offline. Leave a device on as the relay (easy), or point at an external relay / your own S3 bucket under Advanced. A Public relay URL (HTTPS) lets friends off your LAN fetch media without the iroh path — Tailscale MagicDNS, or a free Cloudflare Tunnel to port 8674 (see docs/CLOUDFLARE-TUNNEL.md). Blobs stay E2E-sealed; the tunnel only moves ciphertext.")
+            Text("Where this circle's sealed posts & media live so they reach people who were offline. Leave a device on as the relay (easy), or point at an external relay / your own S3 bucket under Advanced. On Mac, set a custom Cloudflare domain + tunnel token so the bundled cloudflared connector serves a stable HTTPS front door (see docs/CLOUDFLARE-TUNNEL.md). Blobs stay E2E-sealed; the tunnel only moves ciphertext.")
                 .fixedSize(horizontal: false, vertical: true)
         }
         RelayPoolSection(circleId: circleId)

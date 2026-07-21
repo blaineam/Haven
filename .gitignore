@@ -53,6 +53,12 @@ docs/SECURITY-AUDIT-*.md
 **/SECURITY-AUDIT-*crypto*.md
 core/.claude/
 
-# cloudflared helpers (fetched by tools/fetch-cloudflared.sh)
+# cloudflared helpers (fetched by tools/fetch-cloudflared.sh — signed in CI, not committed)
 desktop/src-tauri/binaries/cloudflared*
 !desktop/src-tauri/binaries/README.md
+apple/Helpers/cloudflared
+apple/Helpers/cloudflared-*
+apple/Helpers/*.version
+desktop/src-tauri/binaries/*.version
+!apple/Helpers/README.md
+!apple/Helpers/cloudflared.entitlements

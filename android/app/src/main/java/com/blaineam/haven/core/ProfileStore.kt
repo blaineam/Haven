@@ -45,6 +45,31 @@ class ProfileStore private constructor(context: Context) {
         get() = _videoSoundOn.value
         set(v) { _videoSoundOn.value = v; prefs.edit().putBoolean(KEY_VIDEO_SOUND, v).apply() }
 
+    /** Super data saver — posters only, no autoplay (iOS SettingsStore.superDataSaver). Device-local. */
+    private val _superDataSaver = mutableStateOf(prefs.getBoolean(KEY_DATA_SAVER, false))
+    var superDataSaver: Boolean
+        get() = _superDataSaver.value
+        set(v) { _superDataSaver.value = v; prefs.edit().putBoolean(KEY_DATA_SAVER, v).apply() }
+
+    /** Also keep camera original beside optimized video (iOS sendOriginal). Device-local. */
+    private val _sendOriginal = mutableStateOf(prefs.getBoolean(KEY_SEND_ORIGINAL, false))
+    var sendOriginal: Boolean
+        get() = _sendOriginal.value
+        set(v) { _sendOriginal.value = v; prefs.edit().putBoolean(KEY_SEND_ORIGINAL, v).apply() }
+
+    /**
+     * Notification preview detail: "full" | "private" | "minimal" (iOS SharedNotificationPrivacy).
+     * Device-local; applied when posting local banners.
+     */
+    private val _notificationDetail = mutableStateOf(prefs.getString(KEY_NOTIF_DETAIL, "full") ?: "full")
+    var notificationDetail: String
+        get() = _notificationDetail.value
+        set(v) {
+            val n = when (v) { "private", "minimal" -> v; else -> "full" }
+            _notificationDetail.value = n
+            prefs.edit().putString(KEY_NOTIF_DETAIL, n).apply()
+        }
+
     /** Retention as a seconds value for the engine's feed() call (null = keep forever). */
     fun retentionSecs(): ULong? = if (retentionDays <= 0) null else (retentionDays.toLong() * 86_400L).toULong()
 
@@ -204,6 +229,9 @@ class ProfileStore private constructor(context: Context) {
         private const val KEY_SAVE_OTHERS = "saveOthersPosts"
         private const val KEY_OPTIMIZE = "autoOptimize"
         private const val KEY_VIDEO_SOUND = "videoSoundOn"
+        private const val KEY_DATA_SAVER = "superDataSaver"
+        private const val KEY_SEND_ORIGINAL = "sendOriginal"
+        private const val KEY_NOTIF_DETAIL = "notificationDetail"
         private const val KEY_FIELD_TS = "profileFieldTs"
         private const val KEY_SETTING_TS = "settingTs"
         // Synced-setting LWW keys — the iOS storage-key strings, so `setting-at:<key>` interoperates.

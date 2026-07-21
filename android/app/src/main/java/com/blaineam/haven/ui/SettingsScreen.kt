@@ -157,6 +157,30 @@ fun SettingsScreen(onBack: () -> Unit) {
                 SettingSwitch("Save my posts to Photos", profile.saveMyPosts) { profile.saveMyPosts = it }
                 SettingSwitch("Save others' posts to Photos", profile.saveOthersPosts) { profile.saveOthersPosts = it }
                 SettingSwitch("Auto-optimize media (smaller, faster)", profile.autoOptimize) { profile.autoOptimize = it }
+                SettingSwitch("Also send original", profile.sendOriginal) { profile.sendOriginal = it }
+                SettingSwitch("Super data saver", profile.superDataSaver) { profile.superDataSaver = it }
+                Spacer(Modifier.height(8.dp))
+                Text("Notification previews", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Spacer(Modifier.height(4.dp))
+                Text("How much detail banners show on the lock screen (iOS parity).", color = HavenTheme.textSecondary, fontSize = 12.sp)
+                Spacer(Modifier.height(4.dp))
+                val detailOptions = listOf(
+                    "full" to "Full previews",
+                    "private" to "Name and type only",
+                    "minimal" to "Minimal",
+                )
+                detailOptions.forEach { (value, label) ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        androidx.compose.material3.RadioButton(
+                            selected = profile.notificationDetail == value,
+                            onClick = { profile.notificationDetail = value },
+                        )
+                        Text(label, color = HavenTheme.textPrimary, fontSize = 14.sp)
+                    }
+                }
             }
             }  // end Privacy
 

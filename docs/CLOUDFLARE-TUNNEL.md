@@ -35,6 +35,48 @@ No other Haven server is involved.
 
 ---
 
+## Scope: Cloudflare is not a full iroh replacement
+
+Saved for later product/architecture decisions (2026-07).
+
+Cloudflare Tunnel only fronts the relay **plain-HTTP mailbox** on port **8674**:
+
+```text
+peer  →  Cloudflare edge  →  cloudflared  →  localhost:8674
+```
+
+That is the reliable **cross-NAT sealed-media / store-and-forward** path. It is **not**
+a substitute for the whole Haven transport stack.
+
+| Capability | Covered by CF HTTP tunnel? | Who does it today |
+|---|---|---|
+| Cross-NAT **media mailbox** (sealed GET/PUT) | **Yes** — primary purpose | HTTP `:8674` + tunnel / Manual front door |
+| Live DMs / posts / reactions as **direct peer frames** | No | iroh QUIC |
+| Peer discovery (node id → address) | No | iroh / n0 DNS / later gossip |
+| Hole-punch / DERP-style NAT for live links | No | iroh relays |
+| `haven/blob/1` over the P2P overlay | No | iroh |
+| S3-over-iroh tunnel | No | iroh |
+| Nearby mesh (Multipeer / Bluetooth) | No | local only (independent of both) |
+
+`haven-relay` is dual-faced: **iroh overlay + HTTP mailbox**. Cloudflare (or Manual)
+only makes the HTTP face publicly reachable.
+
+### Failure modes (honest limits)
+
+1. **n0 / public iroh flaky** — CF still helps **media** (HTTP can skip iroh). Live
+   peer frames may still struggle until discovery/self-hosted iroh relays improve
+   (see [`RESILIENCE-DESIGN.md`](RESILIENCE-DESIGN.md)).
+2. **Cloudflare blocks free/token tunnels** — **Manual** front door still works
+   (same HTTP mailbox, your nginx/Caddy/Tailscale/etc.).
+3. **“Turn iroh off forever”** — would be a **different architecture** (everything
+   store-and-forward over HTTPS to relays). Haven is not built that way; CF was
+   added so media does **not** lean hard on iroh, not so iroh can be deleted.
+
+**Bottom line:** CF can carry sealed-media mailbox traffic even when direct iroh media
+is bad. It cannot alone cover every feature that currently rides iroh.
+
+---
+
 ## Path A — Zero account: Quick Tunnel (fastest try)
 
 Good for: "prove media works for a friend tonight." Bad for: always-on, because the
@@ -160,12 +202,63 @@ curl -sI https://haven-relay.example.com/ | head
 # expect an HTTP response from the relay (auth may 401/403 — that's fine; TLS is up)
 ```
 
-### 7. Paste into Haven
+### 7. Easy path: paste domain + install token into Haven (bundled cloudflared)
 
-**Public relay URL** = `https://haven-relay.example.com`
+You do **not** need to install `cloudflared` as a system service yourself. Haven ships the
+binary and can run a **named** connector when you give it both:
 
-Leave Haven (or `haven-relay`) running with the local HTTP interface on 8674. The tunnel
-is only a public front door; membership + bearer token still gate the store.
+| Field | Value |
+|---|---|
+| **Custom domain URL** | `https://haven-relay.example.com` |
+| **Tunnel token** | Install token from Zero Trust → Networks → Tunnels → your tunnel → **Install connector** |
+
+**In the Cloudflare dashboard** (Zero Trust → Tunnels → Configure):
+
+1. Public hostname: `haven-relay.example.com`
+2. Service: `http://127.0.0.1:8674` (exact — Haven’s media port)
+
+**In Haven**
+
+| Surface | Where |
+|---|---|
+| Desktop | Settings → Relays → **Public HTTPS (Cloudflare)** |
+| HavenMac | Circle storage → Relay → custom domain + tunnel token |
+| `haven-relay` CLI | `--http-url https://haven-relay.example.com --tunnel-token <token>` |
+
+Then start hosting / run the relay. Haven spawns bundled `cloudflared tunnel run --token …`
+and announces your domain to the circle.
+
+**Front-door modes (first-class — pick one):**
+
+| Mode | When to use | Haven spawns cloudflared? |
+|---|---|---|
+| **Auto** | First-run convenience | Free trycloudflare if no URL |
+| **Bundled** | Stable domain, Haven runs the connector | Yes (`tunnel run --token`) |
+| **Manual** | You (or NAS/Pi) run the tunnel/proxy | **No** — announce URL only |
+
+**Manual is the durable escape hatch.** If Cloudflare ever restricts free trycloudflare or
+token install, set **Manual**, put `https://your.domain` as the public URL, and forward TLS to
+`http://127.0.0.1:8674` with whatever still works (self-hosted cloudflared, Caddy, nginx,
+Tailscale Funnel, a VPS reverse proxy, …). Membership + sealing are unchanged; only the path
+to port 8674 changes.
+
+| Public URL | Tunnel token | Inferred if mode is Auto |
+|---|---|---|
+| empty | empty | Free trycloudflare |
+| set | set | Bundled named |
+| set | empty | **Manual** announce-only |
+| empty | set | Error |
+
+### 8. Manual front door (external tunnel / reverse proxy)
+
+This is a **supported product mode**, not a workaround:
+
+1. Terminate TLS at your edge for `https://relay.example.com`
+2. Proxy to `http://127.0.0.1:8674` on the machine running Haven / `haven-relay`
+3. In Haven: front door = **Manual**, public URL = `https://relay.example.com`  
+   CLI: `haven-relay run --http-url https://relay.example.com` (no `--tunnel-token`)
+
+Haven will **not** spawn cloudflared. It only announces that URL to the circle.
 
 ### Optional: API-token automation (for a future in-app wizard)
 
@@ -371,17 +464,32 @@ Why A wins:
 
 | Surface | How cloudflared arrives | Auto quick tunnel |
 |---|---|---|
-| **Desktop (Tauri)** — Windows MS Store / macOS DMG / Linux | `tools/fetch-cloudflared.sh` → `desktop/src-tauri/binaries/`; Tauri `externalBin` | ON when hosting and no stable `relay_public_url` |
-| **HavenMac (App Store)** | Sign `cloudflared` into `Contents/Helpers/` (CI); falls back to PATH | ON when hosting and no `haven.relay.publicURL` (`CloudflaredTunnel`) |
+| **Desktop (Tauri)** — Windows MS Store / macOS DMG / Linux | `tools/fetch-cloudflared.sh` → `desktop/src-tauri/binaries/`; Tauri `externalBin`. **MSIX** also copies `cloudflared.exe` next to `Haven.exe` in `release.yml` Pack | ON when hosting and no stable `relay_public_url` |
+| **HavenMac (App Store / Xcode Cloud)** | `ci_post_clone` fetches → `apple/Helpers/cloudflared`; HavenMac **post-build** copies to `Contents/Helpers/` and **codesigns** with `EXPANDED_CODE_SIGN_IDENTITY` (`apple/Scripts/embed-cloudflared.sh`) | ON when hosting and no `haven.relay.publicURL` (`CloudflaredTunnel`) |
 | **`haven-relay` CLI** | First tunnel use downloads official binary **next to** the CLI (or into `<data>/bin`) | ON by default when no `--http-url`; `--no-tunnel` / `--tunnel` |
 
 Pinned version: `2026.7.2` (see `haven_net::cfquicktunnel::CLOUDFLARED_VERSION` and the fetch script).
 
+### Updating the pin (and signing — fully automatic)
+
+**You never hand-sign cloudflared after a version update.**
+
+1. Edit **one** string: `CLOUDFLARED_VERSION` in `core/haven-net/src/cfquicktunnel.rs`.
+2. Push / tag as usual. Every pipeline re-downloads that pin and signs as follows:
+
+| Channel | Who signs | Your action after a pin bump |
+|---|---|---|
+| **Microsoft Store (`.msix` / `.msixbundle`)** | Partner Center re-signs the **whole package** on upload | None (upload the new msixbundle when you release) |
+| **Mac App Store (Xcode Cloud)** | HavenMac post-build: `codesign` with `EXPANDED_CODE_SIGN_IDENTITY` | None — next XCC Archive does fetch + sign |
+| **Local Debug** | Ad-hoc or PATH fallback | Optional local fetch only |
+
 ```sh
-# CI / local pack prep
+# Optional local check — CI does this for you on every build
 tools/fetch-cloudflared.sh --all
-# then code-sign each binary with the product identity before store packaging
+tools/fetch-cloudflared.sh --apple-helpers
 ```
+
+`tools/fetch-cloudflared.sh` **reads** `CLOUDFLARED_VERSION` from the Rust source (no second pin to keep in sync).
 
 Lifecycle when hosting with auto-tunnel:
 

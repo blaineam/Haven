@@ -234,6 +234,13 @@ struct PendingEnrollRequest {
     secret: [u8; 32],
 }
 
+/// Result of applying front-door prefs when the relay HTTP interface starts.
+enum DeskFrontDoor {
+    Spawned(haven_net::cfquicktunnel::QuickTunnel),
+    AnnounceOnly(String),
+    LanOnly,
+}
+
 pub struct Engine {
     /// The account master seed — `Some` on a primary/legacy device, `None` on a SEEDLESS device
     /// (seed-drop S4). Making it an `Option` turns every account-key use into a compile-checked
@@ -245,7 +252,8 @@ pub struct Engine {
     app: StdMutex<Option<AppHandle>>,
     node: StdMutex<Option<Arc<HavenNode>>>,
     relay_host: StdMutex<Option<Arc<RelayServerHandle>>>,
-    /// Live Cloudflare Quick Tunnel (trycloudflare). Dropped when hosting stops.
+    /// Live cloudflared process (quick or named). Dropped when hosting stops. Manual front door
+    /// never sets this — operator runs the tunnel externally.
     quick_tunnel: StdMutex<Option<haven_net::cfquicktunnel::QuickTunnel>>,
     prefs: StdMutex<Prefs>,
     dyn_state: StdMutex<DynState>,
@@ -1348,6 +1356,40 @@ impl Engine {
 
     pub fn video_sound_on(&self) -> bool {
         self.prefs.lock().unwrap().video_sound_on
+    }
+
+    /// Device-local privacy prefs (notification lock-screen detail, super data saver, send original).
+    pub fn privacy_prefs(&self) -> (String, bool, bool) {
+        let p = self.prefs.lock().unwrap();
+        (
+            p.notification_detail
+                .clone()
+                .unwrap_or_else(|| "full".into()),
+            p.super_data_saver,
+            p.send_original,
+        )
+    }
+
+    pub fn set_privacy_prefs(
+        self: &Arc<Self>,
+        notification_detail: Option<String>,
+        super_data_saver: Option<bool>,
+        send_original: Option<bool>,
+    ) {
+        let mut p = self.prefs.lock().unwrap();
+        if let Some(d) = notification_detail {
+            p.notification_detail = Some(match d.as_str() {
+                "private" | "minimal" => d,
+                _ => "full".into(),
+            });
+        }
+        if let Some(v) = super_data_saver {
+            p.super_data_saver = v;
+        }
+        if let Some(v) = send_original {
+            p.send_original = v;
+        }
+        let _ = p.save(&self.paths);
     }
 
     pub fn set_video_sound(self: &Arc<Self>, on: bool) {
@@ -2724,6 +2766,8 @@ impl Engine {
                 "video"
             } else if LocalMedia::is_audio(r) {
                 "audio"
+            } else if LocalMedia::is_file_ref(r) {
+                "file"
             } else {
                 "image"
             }
@@ -4084,37 +4128,52 @@ impl Engine {
         // should use it — that is the fast local path and it genuinely works. Remote members discard it
         // on receipt (`relay_http_reachable` keeps a private address only when we are on that /24), so
         // the useless case is filtered by the side that can actually tell.
-        let (configured_public, auto_tunnel) = {
+        let (mode, configured_public, tunnel_token, auto_tunnel) = {
             let p = self.prefs.lock().unwrap();
-            let pub_url = if p.relay_public_url.starts_with("http") {
-                Some(p.relay_public_url.trim_end_matches('/').to_string())
+            let mode = p.front_door_mode();
+            let pub_url = p.relay_public_url.trim();
+            let pub_url = if !pub_url.is_empty() {
+                Some(pub_url.trim_end_matches('/').to_string())
             } else {
                 None
             };
-            (pub_url, p.auto_tunnel())
+            let tok = p.relay_cf_tunnel_token.trim().to_string();
+            let tok = if tok.is_empty() { None } else { Some(tok) };
+            (mode, pub_url, tok, p.auto_tunnel())
         };
         let mut urls = Vec::new();
-        match configured_public {
-            Some(u) => urls.push(u),
-            None if auto_tunnel => {
-                // Free Cloudflare Quick Tunnel — remote members reach media over HTTPS without
-                // port-forwarding. Ephemeral hostname; re-created each host start.
-                match Self::start_desktop_quick_tunnel(port) {
-                    Ok(t) => {
-                        log::info!("relay quick tunnel: {}", t.public_url);
-                        urls.push(t.public_url.clone());
-                        *self.quick_tunnel.lock().unwrap() = Some(t);
-                    }
-                    Err(e) => {
-                        log::warn!("relay quick tunnel unavailable: {e}");
-                        if let Some(ip) = Self::primary_lan_ip() {
-                            urls.push(format!("http://{ip}:{port}"));
-                        }
-                    }
+        // Manual = announce-only (operator's tunnel/proxy). Bundled/Auto may spawn cloudflared.
+        match Self::start_desktop_front_door(
+            port,
+            mode,
+            configured_public.as_deref(),
+            tunnel_token.as_deref(),
+            auto_tunnel,
+        ) {
+            Ok(DeskFrontDoor::Spawned(t)) => {
+                log::info!("relay {} tunnel: {}", t.kind, t.public_url);
+                urls.push(t.public_url.clone());
+                *self.quick_tunnel.lock().unwrap() = Some(t);
+            }
+            Ok(DeskFrontDoor::AnnounceOnly(u)) => {
+                log::info!("relay manual front door (no cloudflared): {u}");
+                urls.push(u);
+            }
+            Ok(DeskFrontDoor::LanOnly) => {
+                if let Some(ip) = Self::primary_lan_ip() {
+                    urls.push(format!("http://{ip}:{port}"));
                 }
             }
-            None => {
-                if let Some(ip) = Self::primary_lan_ip() {
+            Err(e) => {
+                log::warn!("relay front door unavailable: {e}");
+                // Manual URL still announced if we have one (operator's external path).
+                if let Some(u) = configured_public {
+                    if let Ok(n) = haven_net::cfquicktunnel::normalize_public_url(&u) {
+                        urls.push(n);
+                    } else {
+                        urls.push(u);
+                    }
+                } else if let Some(ip) = Self::primary_lan_ip() {
                     urls.push(format!("http://{ip}:{port}"));
                 }
             }
@@ -4129,27 +4188,68 @@ impl Engine {
         }
     }
 
-    /// Locate bundled/PATH cloudflared (download next to resource dir if needed) and open a
-    /// trycloudflare tunnel to the local media port.
-    fn start_desktop_quick_tunnel(port: u16) -> anyhow::Result<haven_net::cfquicktunnel::QuickTunnel> {
-        use haven_net::cfquicktunnel::{ensure_cloudflared, executable_dir, QuickTunnel};
-        let mut search = Vec::new();
-        if let Ok(exe) = executable_dir() {
-            search.push(exe.clone());
-            // Tauri externalBin lands next to the executable or under resources.
-            search.push(exe.join("binaries"));
-            search.push(exe.join("../Resources"));
-            search.push(exe.join("../Helpers"));
+    /// Locate bundled/PATH cloudflared and apply front-door mode (manual never spawns).
+    fn start_desktop_front_door(
+        port: u16,
+        mode: haven_net::cfquicktunnel::FrontDoorMode,
+        public_url: Option<&str>,
+        tunnel_token: Option<&str>,
+        auto_quick: bool,
+    ) -> anyhow::Result<DeskFrontDoor> {
+        use haven_net::cfquicktunnel::{
+            ensure_cloudflared, executable_dir, resolve_front_door, FrontDoorAction, QuickTunnel,
+        };
+        let local = format!("http://127.0.0.1:{port}");
+        match resolve_front_door(mode, public_url, tunnel_token, auto_quick, &local)? {
+            FrontDoorAction::AnnounceOnly { public_url } => {
+                Ok(DeskFrontDoor::AnnounceOnly(public_url))
+            }
+            FrontDoorAction::LanOnly => Ok(DeskFrontDoor::LanOnly),
+            FrontDoorAction::Spawn(spec) => {
+                let mut search = Vec::new();
+                if let Ok(exe) = executable_dir() {
+                    search.push(exe.clone());
+                    search.push(exe.join("binaries"));
+                    search.push(exe.join("../Resources"));
+                    search.push(exe.join("../Helpers"));
+                }
+                if let Ok(res) = std::env::var("TAURI_RESOURCE_DIR") {
+                    search.push(std::path::PathBuf::from(res));
+                }
+                let install = executable_dir()
+                    .unwrap_or_else(|_| std::env::temp_dir())
+                    .join("haven-cloudflared");
+                let bin = ensure_cloudflared(&search, &install, true)?;
+                Ok(DeskFrontDoor::Spawned(QuickTunnel::start_spec(&bin, spec)?))
+            }
         }
-        // resource_dir from Tauri if available via env
-        if let Ok(res) = std::env::var("TAURI_RESOURCE_DIR") {
-            search.push(std::path::PathBuf::from(res));
-        }
-        let install = executable_dir()
-            .unwrap_or_else(|_| std::env::temp_dir())
-            .join("haven-cloudflared");
-        let bin = ensure_cloudflared(&search, &install, true)?;
-        QuickTunnel::start(&bin, &format!("http://127.0.0.1:{port}"))
+    }
+
+    /// Public HTTPS front door settings (device-local prefs).
+    pub fn relay_public_settings(&self) -> (String, String, bool, String) {
+        let p = self.prefs.lock().unwrap();
+        (
+            p.relay_public_url.clone(),
+            p.relay_cf_tunnel_token.clone(),
+            p.auto_tunnel(),
+            p.front_door_mode().as_str().to_string(),
+        )
+    }
+
+    pub fn set_relay_public_settings(
+        self: &Arc<Self>,
+        public_url: String,
+        tunnel_token: String,
+        auto_tunnel: bool,
+        front_door: String,
+    ) {
+        let mut p = self.prefs.lock().unwrap();
+        p.relay_public_url = public_url.trim().trim_end_matches('/').to_string();
+        p.relay_cf_tunnel_token = tunnel_token.trim().to_string();
+        p.relay_auto_tunnel = Some(auto_tunnel);
+        let mode = haven_net::cfquicktunnel::FrontDoorMode::parse(&front_door);
+        p.relay_front_door = Some(mode.as_str().to_string());
+        let _ = p.save(&self.paths);
     }
 
     /// A relay's HTTP interface as seen FROM HERE — `None` means "iroh-only", which is the honest
@@ -5371,11 +5471,51 @@ impl Engine {
             st.notified_dirty = true;
         }
         self.flush_notified();
-        let is_dm = circle_id.starts_with("dm:");
-        self.notify(
-            if is_dm { "New message" } else { "New in your circle" },
-            if is_dm { "You have a new Haven message" } else { "Someone posted in your circle" },
+        // Kind-aware copy (parity with Apple PushBanner / Android notifyInbound).
+        let circle_name = self
+            .social
+            .circles()
+            .into_iter()
+            .find(|c| c.id == circle_id)
+            .map(|c| c.name)
+            .unwrap_or_else(|| "your circle".into());
+        let author = self.display_name(&newest.author_short);
+        let media_refs: Vec<&str> = newest.media.iter().map(|s| s.as_str()).collect();
+        let copy = if newest.story {
+            haven_p2p::pushbanner::for_post(circle_id, &circle_name, &newest.body, &media_refs, true)
+        } else if newest.body.trim().is_empty()
+            && newest.media.is_empty()
+            && !newest.reactions.is_empty()
+        {
+            // Pure reaction bumps leave body empty with a reaction list (Android parity).
+            let emoji = newest
+                .reactions
+                .first()
+                .map(|r| r.emoji.as_str())
+                .unwrap_or("");
+            haven_p2p::pushbanner::for_reaction(emoji, circle_id)
+        } else {
+            haven_p2p::pushbanner::for_post(circle_id, &circle_name, &newest.body, &media_refs, false)
+        };
+        let detail = self
+            .prefs
+            .lock()
+            .unwrap()
+            .notification_detail
+            .clone()
+            .unwrap_or_else(|| "full".into());
+        let (use_name, body) = haven_p2p::pushbanner::display_body(
+            &copy.body,
+            Some(&copy.private_body),
+            Some(copy.kind),
+            &detail,
         );
+        let title = if use_name {
+            if author.is_empty() { "Someone".into() } else { author }
+        } else {
+            "Haven".into()
+        };
+        self.notify(&title, &body);
     }
 
     fn flush_notified(&self) {
@@ -6446,6 +6586,12 @@ impl Engine {
 
     pub fn add_local_audio(&self, circle_id: &str, bytes: &[u8]) -> String {
         self.media.store_kind(&self.social, circle_id, bytes, crate::localmedia::MediaKind::Audio)
+    }
+
+    /// Zip / file attachment (`file_` prefix) — Apple/Android parity.
+    pub fn add_local_file(&self, circle_id: &str, bytes: &[u8]) -> String {
+        self.media
+            .store_kind(&self.social, circle_id, bytes, crate::localmedia::MediaKind::File)
     }
 
     /// Decrypt a stored media ref for display, trying the given circle then any circle.

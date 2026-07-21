@@ -255,6 +255,26 @@ pub struct Prefs {
     /// `Option` so older prefs files without the field resolve to ON via [`Prefs::auto_tunnel`].
     #[serde(default)]
     pub relay_auto_tunnel: Option<bool>,
+    /// Cloudflare Zero Trust tunnel install token. Paired with `relay_public_url` so bundled
+    /// cloudflared runs a **named** connector for a stable custom domain.
+    #[serde(default)]
+    pub relay_cf_tunnel_token: String,
+    /// Front-door mode: `"auto"` | `"manual"` | `"bundled"`.
+    /// - **manual** — operator runs tunnel/proxy; Haven only announces `relay_public_url`
+    ///   (proper path if free/token Cloudflare options go away).
+    /// - **bundled** — Haven runs cloudflared with token + custom domain.
+    /// - **auto** — free trycloudflare when no URL; infer manual/bundled from fields.
+    #[serde(default)]
+    pub relay_front_door: Option<String>,
+    /// Local notification preview detail: "full" | "private" | "minimal" (Apple/Android parity).
+    #[serde(default)]
+    pub notification_detail: Option<String>,
+    /// Super data saver — device-local (Apple parity).
+    #[serde(default)]
+    pub super_data_saver: bool,
+    /// Also send original media companions when attaching (Apple parity).
+    #[serde(default)]
+    pub send_original: bool,
     /// The all-circles DEFAULT relay hex (every present + future circle inherits it). Empty = none.
     /// Mirrors iOS `haven.relay.default`.
     #[serde(default)]
@@ -536,6 +556,26 @@ impl Prefs {
     /// Cloudflare Quick Tunnel when no stable public URL is configured. Default ON.
     pub fn auto_tunnel(&self) -> bool {
         self.relay_auto_tunnel.unwrap_or(true)
+    }
+
+    /// Explicit front-door policy (see `haven_net::cfquicktunnel::FrontDoorMode`).
+    pub fn front_door_mode(&self) -> haven_net::cfquicktunnel::FrontDoorMode {
+        use haven_net::cfquicktunnel::FrontDoorMode;
+        match self.relay_front_door.as_deref() {
+            Some(s) if !s.trim().is_empty() => FrontDoorMode::parse(s),
+            // Legacy: URL without token → manual; token+url → bundled; else auto.
+            None if !self.relay_public_url.trim().is_empty()
+                && self.relay_cf_tunnel_token.trim().is_empty() =>
+            {
+                FrontDoorMode::Manual
+            }
+            None if !self.relay_public_url.trim().is_empty()
+                && !self.relay_cf_tunnel_token.trim().is_empty() =>
+            {
+                FrontDoorMode::Bundled
+            }
+            _ => FrontDoorMode::Auto,
+        }
     }
 
     pub fn load(paths: &Paths) -> Self {

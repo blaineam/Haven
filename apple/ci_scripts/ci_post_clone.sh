@@ -233,7 +233,30 @@ else
   echo "⚠️  apple/Package.resolved missing — Xcode Cloud will fail to resolve packages"
 fi
 
+# ---------------------------------------------------------------------------
+# 5. cloudflared helper for HavenMac (Contents/Helpers/)
+#    Fetched here so the post-build "Embed and sign cloudflared" phase has a binary
+#    to copy + codesign with EXPANDED_CODE_SIGN_IDENTITY (Xcode Cloud automatic
+#    signing — no manual cert). iOS never ships it.
+# ---------------------------------------------------------------------------
+echo "--- cloudflared helper (HavenMac) ---"
+HELPERS_DIR="$APPLE_DIR/Helpers"
+mkdir -p "$HELPERS_DIR"
+# ALWAYS re-fetch (force): a CLOUDFLARED_VERSION bump must never reuse a stale binary.
+# Signing is automatic later — HavenMac post-build codesigns with EXPANDED_CODE_SIGN_IDENTITY.
+# You never hand-sign after a version update.
+if ! bash "$REPO_DIR/tools/fetch-cloudflared.sh" --apple-helpers --force; then
+  echo "⚠️  fetch-cloudflared --apple-helpers failed"
+fi
+if [ -x "$HELPERS_DIR/cloudflared" ]; then
+  xattr -d com.apple.quarantine "$HELPERS_DIR/cloudflared" 2>/dev/null || true
+  echo "  Helpers/cloudflared ✅ ($(du -h "$HELPERS_DIR/cloudflared" | awk '{print $1}')) — unsigned download; post-build will codesign"
+else
+  echo "  ⚠️  Helpers/cloudflared MISSING — HavenMac Release archive will fail the embed script"
+fi
+
 echo "=== ci_post_clone: done ==="
 ls -d "$XCFW" >/dev/null 2>&1 && echo "  HavenFFI.xcframework ✅" || { echo "  HavenFFI.xcframework MISSING ❌"; exit 1; }
 ls -d "$APPLE_DIR/Generated" >/dev/null 2>&1 && echo "  Generated/ ✅" || { echo "  Generated/ MISSING ❌"; exit 1; }
 ls -d "$APPLE_DIR/Haven.xcodeproj" >/dev/null 2>&1 && echo "  Haven.xcodeproj ✅" || { echo "  Haven.xcodeproj MISSING ❌"; exit 1; }
+[ -x "$HELPERS_DIR/cloudflared" ] && echo "  Helpers/cloudflared ✅" || echo "  Helpers/cloudflared (optional until Mac archive) ⚠️"

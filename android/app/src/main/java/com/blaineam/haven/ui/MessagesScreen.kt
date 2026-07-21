@@ -381,7 +381,8 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
             draft = if (draft.isBlank()) staged else "$draft\n$staged"
         }
     }
-    var pendingPhoto by remember { mutableStateOf<String?>(null) }
+    // Full media array for the next send (may include poster/orig markers for videos).
+    var pendingMedia by remember { mutableStateOf<List<String>>(emptyList()) }
     var pendingMusic by remember { mutableStateOf<uniffi.haven_ffi.TrackRefFfi?>(null) }
     var showMusicDialog by remember { mutableStateOf(false) }
     var showVoice by remember { mutableStateOf(false) }
@@ -408,13 +409,16 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
         androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) {
             mediaScope.launch {
-                val ref = com.blaineam.haven.core.MediaProcessing.processing {
-                    if (com.blaineam.haven.core.isVideoUri(context, uri))
-                        com.blaineam.haven.core.readVideoBytes(context, uri)?.let { com.blaineam.haven.core.LocalMedia.store(circleId, it, isVideo = true) }
-                    else
-                        com.blaineam.haven.core.loadAndDownscale(context, uri)?.let { com.blaineam.haven.core.LocalMedia.store(circleId, it) }
+                val refs = com.blaineam.haven.core.MediaProcessing.processing {
+                    if (com.blaineam.haven.core.isVideoUri(context, uri)) {
+                        com.blaineam.haven.core.LocalMedia.prepareVideo(context, uri, circleId).mediaRefs
+                    } else {
+                        com.blaineam.haven.core.loadAndDownscale(context, uri)
+                            ?.let { listOf(com.blaineam.haven.core.LocalMedia.store(circleId, it)) }
+                            ?: emptyList()
+                    }
                 }
-                if (ref != null) pendingPhoto = ref
+                if (refs.isNotEmpty()) pendingMedia = refs
             }
         }
     }
@@ -464,7 +468,7 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
             // looked identical to the picker having silently failed.
             MediaProcessingCard(Modifier.padding(horizontal = 16.dp))
 
-            pendingPhoto?.let { ref ->
+            com.blaineam.haven.core.MediaVariants.displayRefs(pendingMedia).firstOrNull()?.let { ref ->
                 Box(Modifier.padding(start = 16.dp, bottom = 4.dp)) {
                     if (com.blaineam.haven.core.LocalMedia.isVideo(ref))
                         Box(Modifier.size(56.dp).clip(RoundedCornerShape(10.dp)).background(HavenTheme.card),
@@ -535,7 +539,7 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
                         focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink),
                 )
                 Spacer(Modifier.size(8.dp))
-                val canSend = draft.isNotBlank() || pendingPhoto != null || pendingMusic != null
+                val canSend = draft.isNotBlank() || pendingMedia.isNotEmpty() || pendingMusic != null
                 Box(
                     Modifier.size(48.dp).clip(CircleShape).background(HavenTheme.brandHorizontal)
                         .clickable(enabled = canSend) {
@@ -543,9 +547,9 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
                                 com.blaineam.haven.core.SecretMessages.encode(draft.trim()) else draft.trim()
                             val eid = editingId
                             if (eid != null) HavenNet.editPost(circleId, eid, body)
-                            else HavenNet.sendDm(circleId, body, listOfNotNull(pendingPhoto), pendingMusic, disappearSecs)
+                            else HavenNet.sendDm(circleId, body, pendingMedia, pendingMusic, disappearSecs)
                             // disappearSecs stays sticky for the conversation (iOS parity); reset the rest.
-                            draft = ""; pendingPhoto = null; pendingMusic = null; secretMode = false; editingId = null
+                            draft = ""; pendingMedia = emptyList(); pendingMusic = null; secretMode = false; editingId = null
                         },
                     contentAlignment = Alignment.Center,
                     // White-on-brand-gradient — never themed.

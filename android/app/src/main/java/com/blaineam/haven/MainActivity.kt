@@ -16,7 +16,6 @@ import com.blaineam.haven.core.PostLinkInbox
 import com.blaineam.haven.core.ShareInbox
 import com.blaineam.haven.core.isVideoUri
 import com.blaineam.haven.core.loadAndDownscale
-import com.blaineam.haven.core.readVideoBytes
 import com.blaineam.haven.ui.HavenAppTheme
 import com.blaineam.haven.ui.RootScreen
 
@@ -97,9 +96,9 @@ class MainActivity : FragmentActivity() {
      *  life, so copy the bytes now) and hand the refs to the composer. */
     private fun ingestSharedMedia(uris: List<Uri>) {
         val cid = HavenNet.activeCircle.value
-        val refs = uris.mapNotNull { uri ->
-            if (isVideoUri(this, uri)) readVideoBytes(this, uri)?.let { LocalMedia.store(cid, it, isVideo = true) }
-            else loadAndDownscale(this, uri)?.let { LocalMedia.store(cid, it) }
+        val refs = uris.flatMap { uri ->
+            if (isVideoUri(this, uri)) LocalMedia.prepareVideo(this, uri, cid).mediaRefs
+            else loadAndDownscale(this, uri)?.let { listOf(LocalMedia.store(cid, it)) } ?: emptyList()
         }
         ShareInbox.offerMedia(refs)
     }

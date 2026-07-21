@@ -176,6 +176,20 @@ targets:
         CFBundleURLTypes:
           - CFBundleURLName: com.blaineam.kith
             CFBundleURLSchemes: [haven]
+    # Cloudflare Quick Tunnel helper → Contents/Helpers/cloudflared, signed with this build's
+    # identity (Xcode Cloud automatic signing sets EXPANDED_CODE_SIGN_IDENTITY). Binary is
+    # fetched in apple/ci_scripts/ci_post_clone.sh; not committed. See apple/Helpers/README.md.
+    postBuildScripts:
+      - path: Scripts/embed-cloudflared.sh
+        name: Embed and sign cloudflared
+        basedOnDependencyAnalysis: false
+        showEnvVars: false
+        inputFiles:
+          - $(SRCROOT)/Helpers/cloudflared
+          - $(SRCROOT)/Helpers/cloudflared.entitlements
+          - $(SRCROOT)/Scripts/embed-cloudflared.sh
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(FULL_PRODUCT_NAME)/Contents/Helpers/cloudflared
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith
@@ -185,7 +199,9 @@ targets:
         MARKETING_VERSION: "1.1.4"
         CURRENT_PROJECT_VERSION: "318"
         MACOSX_DEPLOYMENT_TARGET: "14.0"
-        ENABLE_USER_SCRIPT_SANDBOXING: YES
+        # OFF so the embed/codesign script can write into the .app and invoke /usr/bin/codesign
+        # (user-script sandboxing blocks both). Only this target — iOS keeps sandboxing on.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
         "EXCLUDED_ARCHS[sdk=macosx*]": x86_64
       configs:
         Debug:

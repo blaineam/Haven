@@ -486,14 +486,32 @@ object HavenNet : InboundListener {
     @Volatile private var lastActivityMs = 0L
     @Volatile private var nextSyncDueMs = 0L
     @Volatile private var nextPollDueMs = 0L
-    /** Base cadence stretched by how long the app has sat idle. Idle <3min = base; <15min = ×3; else ×6. */
+    /**
+     * Base cadence stretched by idle time, thermal pressure, and super data saver
+     * (iOS FeedStore.adaptiveInterval parity).
+     */
     private fun adaptiveInterval(base: Long): Long {
         val idle = System.currentTimeMillis() - lastActivityMs
-        return when {
-            idle < 180_000 -> base
-            idle < 900_000 -> base * 3
-            else -> base * 6
+        var mult = when {
+            idle < 180_000 -> 1L
+            idle < 900_000 -> 3L
+            else -> 6L
         }
+        // Thermal: PowerManager.getCurrentThermalStatus (API 29+)
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            val pm = appContext.getSystemService(android.content.Context.POWER_SERVICE) as? android.os.PowerManager
+            when (pm?.currentThermalStatus) {
+                android.os.PowerManager.THERMAL_STATUS_SEVERE,
+                android.os.PowerManager.THERMAL_STATUS_CRITICAL,
+                android.os.PowerManager.THERMAL_STATUS_EMERGENCY,
+                android.os.PowerManager.THERMAL_STATUS_SHUTDOWN -> mult *= 2
+                android.os.PowerManager.THERMAL_STATUS_MODERATE -> mult = (mult * 3) / 2
+            }
+        }
+        if (runCatching { ProfileStore.get(appContext).superDataSaver }.getOrDefault(false)) {
+            mult = (mult * 3) / 2
+        }
+        return base * mult.coerceAtLeast(1L)
     }
     /** Mark "something is happening" → snap both timers back to their tight base cadence immediately. */
     fun bumpActivity() {
@@ -1278,11 +1296,27 @@ object HavenNet : InboundListener {
         val newest = feed.filter { !it.isMe }.maxByOrNull { it.createdAt } ?: return
         if (nowMs() - newest.createdAt > 600_000uL) return   // 10 min (ULong math; skew-safe enough)
         if (!markNotified("$circleId:${newest.id}")) return
-        val isDm = circleId.startsWith("dm:")
+        // Kind-aware copy (parity with Apple PushBanner / desktop notify_circle). A reaction or
+        // story must never say "Someone posted in your circle".
+        val circleName = runCatching { social.circles() }.getOrDefault(emptyList())
+            .firstOrNull { it.id == circleId }?.name ?: "your circle"
+        val authorName = displayName(newest.authorShort).ifEmpty { "Someone" }
+        val media = newest.media
+        val copy = when {
+            newest.story -> PushBanner.forPost(circleId, circleName, newest.body, media, story = true)
+            // Pure reaction bumps often leave body empty with a reaction list on the item.
+            newest.body.isBlank() && newest.reactions.isNotEmpty() && media.isEmpty() -> {
+                val e = newest.reactions.firstOrNull()?.emoji.orEmpty()
+                PushBanner.forReaction(e, circleId)
+            }
+            else -> PushBanner.forPost(circleId, circleName, newest.body, media, story = false)
+        }
+        val detail = runCatching { ProfileStore.get(appContext).notificationDetail }.getOrDefault("full")
+        val (useName, body) = PushBanner.displayBody(copy.body, copy.privateBody, copy.kind, detail)
         Notifications.notify(
             appContext,
-            title = if (isDm) "New message" else "New in your circle",
-            body = if (isDm) "You have a new Haven message" else "Someone posted in your circle",
+            title = if (useName) authorName else "Haven",
+            body = body,
         )
     }
 

@@ -155,32 +155,48 @@ pub async fn run(cfg: Config) -> Result<()> {
                     .map_err(|e| anyhow!("start http blob interface: {e}"))?;
                 println!("✓ http media interface live on {bind} (port {port}).");
                 let mut public = cfg.http_url.clone();
-                if public.is_none() && cfg.auto_tunnel {
-                    match start_auto_tunnel(port, &cfg.data_dir) {
-                        Ok(t) => {
+                // Manual (--http-url only) / bundled token / free quick — see FrontDoorMode.
+                match start_front_door(port, &cfg) {
+                    Ok(FrontDoorRun::Spawned(t)) => {
+                        if t.kind == "named" {
+                            println!("✓ cloudflare named tunnel: {}", t.public_url);
+                            println!(
+                                "  stable custom domain — connector authenticated with --tunnel-token"
+                            );
+                        } else {
                             println!("✓ cloudflare quick tunnel: {}", t.public_url);
                             println!(
                                 "  ephemeral — hostname changes when this process restarts \
-                                 (use --http-url for a stable front door)."
-                            );
-                            public = Some(t.public_url.clone());
-                            _quick_tunnel = Some(t);
-                        }
-                        Err(e) => {
-                            eprintln!("⚠ auto-tunnel unavailable: {e}");
-                            eprintln!(
-                                "  media still works on the LAN / iroh. Fix cloudflared or pass \
-                                 --http-url / --no-tunnel."
+                                 (use --http-url alone for manual, or + --tunnel-token for bundled)."
                             );
                         }
+                        public = Some(t.public_url.clone());
+                        _quick_tunnel = Some(t);
+                    }
+                    Ok(FrontDoorRun::AnnounceOnly(u)) => {
+                        println!("✓ manual front door (you run the tunnel/proxy): {u}");
+                        println!(
+                            "  Haven will not spawn cloudflared — point your proxy at \
+                             http://127.0.0.1:{port}"
+                        );
+                        public = Some(u);
+                    }
+                    Ok(FrontDoorRun::LanOnly) => {}
+                    Err(e) => {
+                        eprintln!("⚠ front door unavailable: {e}");
+                        eprintln!(
+                            "  media still works on the LAN / iroh. Fix cloudflared or pass \
+                             --http-url (manual) / --tunnel-token (bundled) / --no-tunnel."
+                        );
                     }
                 }
                 match &public {
                     Some(url) => println!("  public URL : {url}"),
                     None => println!(
-                        "  reachable at http://<this-host>:{port} — port-forward / reverse-proxy \
-                         (TLS) / tunnel it to serve members across the internet, then pass \
-                         --http-url <public url> (or omit --no-tunnel for a free trycloudflare URL)."
+                        "  reachable at http://<this-host>:{port} — options:\n\
+                            manual:  --http-url https://relay.example.com  (you run tunnel/proxy)\n\
+                            bundled: --http-url https://… --tunnel-token <token>\n\
+                            free:    omit --http-url (trycloudflare) or --no-tunnel for LAN only"
                     ),
                 }
                 println!("  http token : {}", cfg.http_token);
@@ -240,38 +256,61 @@ pub async fn run(cfg: Config) -> Result<()> {
     Ok(())
 }
 
-/// Install cloudflared next to this binary (or under data_dir) and open a trycloudflare tunnel
-/// to the local HTTP media port.
-fn start_auto_tunnel(
-    port: u16,
-    data_dir: &std::path::Path,
-) -> Result<haven_net::cfquicktunnel::QuickTunnel> {
-    use haven_net::cfquicktunnel::{ensure_cloudflared, executable_dir, QuickTunnel};
-    let mut search = Vec::new();
-    if let Ok(exe_dir) = executable_dir() {
-        search.push(exe_dir.clone());
-    }
-    search.push(data_dir.join("bin"));
-    // Prefer installing next to the haven-relay binary so upgrades leave a stable neighbor;
-    // fall back to <data>/bin when the install dir is not writable (e.g. /usr/bin).
-    let install = executable_dir()
-        .ok()
-        .filter(|d| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(d.join(".haven-write-test"))
-                .map(|f| {
-                    drop(f);
-                    let _ = std::fs::remove_file(d.join(".haven-write-test"));
-                    true
-                })
-                .unwrap_or(false)
-        })
-        .unwrap_or_else(|| data_dir.join("bin"));
-    let bin = ensure_cloudflared(&search, &install, true)?;
+enum FrontDoorRun {
+    Spawned(haven_net::cfquicktunnel::QuickTunnel),
+    AnnounceOnly(String),
+    LanOnly,
+}
+
+/// Apply front-door mode: manual announce-only, or spawn bundled cloudflared.
+fn start_front_door(port: u16, cfg: &Config) -> Result<FrontDoorRun> {
+    use haven_net::cfquicktunnel::{
+        ensure_cloudflared, executable_dir, resolve_front_door, FrontDoorAction, FrontDoorMode,
+        QuickTunnel,
+    };
     let local = format!("http://127.0.0.1:{port}");
-    QuickTunnel::start(&bin, &local)
+    // CLI flags: --http-url alone → Manual; + token → Bundled; neither → Auto.
+    let mode = if cfg.tunnel_token.as_ref().map(|t| !t.is_empty()).unwrap_or(false) {
+        FrontDoorMode::Bundled
+    } else if cfg.http_url.as_ref().map(|u| !u.is_empty()).unwrap_or(false) {
+        FrontDoorMode::Manual
+    } else {
+        FrontDoorMode::Auto
+    };
+    match resolve_front_door(
+        mode,
+        cfg.http_url.as_deref(),
+        cfg.tunnel_token.as_deref(),
+        cfg.auto_tunnel,
+        &local,
+    )? {
+        FrontDoorAction::AnnounceOnly { public_url } => Ok(FrontDoorRun::AnnounceOnly(public_url)),
+        FrontDoorAction::LanOnly => Ok(FrontDoorRun::LanOnly),
+        FrontDoorAction::Spawn(spec) => {
+            let mut search = Vec::new();
+            if let Ok(exe_dir) = executable_dir() {
+                search.push(exe_dir.clone());
+            }
+            search.push(cfg.data_dir.join("bin"));
+            let install = executable_dir()
+                .ok()
+                .filter(|d| {
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(d.join(".haven-write-test"))
+                        .map(|f| {
+                            drop(f);
+                            let _ = std::fs::remove_file(d.join(".haven-write-test"));
+                            true
+                        })
+                        .unwrap_or(false)
+                })
+                .unwrap_or_else(|| cfg.data_dir.join("bin"));
+            let bin = ensure_cloudflared(&search, &install, true)?;
+            Ok(FrontDoorRun::Spawned(QuickTunnel::start_spec(&bin, spec)?))
+        }
+    }
 }
 
 /// Launch `rclone serve s3` bound to loopback only (never a public interface), with

@@ -203,12 +203,16 @@ fun CircleScreen(onAddFriend: () -> Unit) {
         // full decode→encode→mux. Doing it inline froze the app until Android killed it.
         mediaScope.launch {
             uris.forEach { uri ->
-                val ref = com.blaineam.haven.core.MediaProcessing.processing {
-                    if (com.blaineam.haven.core.isVideoUri(context, uri))
-                        com.blaineam.haven.core.readVideoBytes(context, uri)?.let { LocalMedia.store(cid, it, isVideo = true) }
-                    else loadAndDownscale(context, uri)?.let { LocalMedia.store(cid, it) }
+                val refs = com.blaineam.haven.core.MediaProcessing.processing {
+                    if (com.blaineam.haven.core.isVideoUri(context, uri)) {
+                        // Full poster + optional original companions (iOS prepareVideo parity).
+                        LocalMedia.prepareVideo(context, uri, cid).mediaRefs
+                    } else {
+                        loadAndDownscale(context, uri)?.let { listOf(LocalMedia.store(cid, it)) }
+                            ?: emptyList()
+                    }
                 }
-                if (ref != null) pendingMedia.add(ref)
+                pendingMedia.addAll(refs)
             }
         }
     }
@@ -1769,18 +1773,27 @@ fun PostCard(
         // Off-main for the same reason as the post composer's picker — see MediaProcessing.
         scope.launch {
             uris.forEach { uri ->
-                val ref = com.blaineam.haven.core.MediaProcessing.processing {
-                    if (com.blaineam.haven.core.isVideoUri(context, uri))
-                        com.blaineam.haven.core.readVideoBytes(context, uri)?.let { LocalMedia.store(circleId, it, isVideo = true) }
-                    else loadAndDownscale(context, uri)?.let { LocalMedia.store(circleId, it) }
+                val refs = com.blaineam.haven.core.MediaProcessing.processing {
+                    if (com.blaineam.haven.core.isVideoUri(context, uri)) {
+                        LocalMedia.prepareVideo(context, uri, circleId).mediaRefs
+                    } else {
+                        loadAndDownscale(context, uri)?.let { listOf(LocalMedia.store(circleId, it)) }
+                            ?: emptyList()
+                    }
                 }
-                if (ref != null) commentMedia.add(ref)
+                commentMedia.addAll(refs)
             }
         }
     }
     viewerStart?.let { start ->
         FullScreenOverlay(onDismiss = { viewerStart = null }) {
-            MediaViewer(circleId, item.media.filter { !com.blaineam.haven.core.LocationShare.isLocation(it) }, start) { viewerStart = null }
+            MediaViewer(
+                circleId,
+                com.blaineam.haven.core.MediaVariants.displayRefs(
+                    item.media.filter { !com.blaineam.haven.core.LocationShare.isLocation(it) }
+                ),
+                start,
+            ) { viewerStart = null }
         }
     }
 
@@ -1982,7 +1995,10 @@ fun PostCard(
             Spacer(Modifier.height(10.dp))
             LocationChip(ref)
         }
-        val mediaRefs = item.media.filter { !com.blaineam.haven.core.LocationShare.isLocation(it) }
+        // Drop location pins + synthetic poster/orig markers; hide original companions (iOS displayRefs).
+        val mediaRefs = com.blaineam.haven.core.MediaVariants.displayRefs(
+            item.media.filter { !com.blaineam.haven.core.LocationShare.isLocation(it) }
+        )
         if (mediaRefs.isNotEmpty()) {
             Spacer(Modifier.height(10.dp))
             // A card whose viewer is open stops autoplaying underneath it — one decode, not two.
@@ -1991,7 +2007,17 @@ fun PostCard(
             androidx.compose.runtime.CompositionLocalProvider(
                 LocalPostMediaContext provides PostMediaContext(circleId, item.id, item.authorShort, item.isMe)
             ) {
-                MediaGallery(circleId, mediaRefs, videoActive = videoActive && viewerStart == null) { viewerStart = it }
+                // Super data saver: never autoplay video in the feed (tap-to-play only).
+                val dataSaver = runCatching {
+                    com.blaineam.haven.core.ProfileStore.get(
+                        androidx.compose.ui.platform.LocalContext.current
+                    ).superDataSaver
+                }.getOrDefault(false)
+                MediaGallery(
+                    circleId,
+                    mediaRefs,
+                    videoActive = videoActive && viewerStart == null && !dataSaver,
+                ) { viewerStart = it }
             }
         }
 

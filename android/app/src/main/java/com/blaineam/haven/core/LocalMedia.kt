@@ -113,6 +113,7 @@ object LocalMedia {
     }
 
     fun isVideo(ref: String): Boolean = ref.startsWith("vid_") || ref.startsWith("v:")
+    fun isFile(ref: String): Boolean = ref.startsWith("file_")
     fun isAudio(ref: String): Boolean = ref.startsWith("aud_")
 
     /** Does a decrypted playback cache ALREADY exist for [ref]? Used by the re-optimize pass to tell
@@ -162,7 +163,7 @@ object LocalMedia {
     // `MediaStore.bareId` used by `EvictedMediaStore`.
     fun bareId(ref: String): String =
         ref.removePrefix("v:").removePrefix("i:")
-            .removePrefix("img_").removePrefix("vid_").removePrefix("aud_")
+            .removePrefix("img_").removePrefix("vid_").removePrefix("aud_").removePrefix("file_")
 
     /**
      * The on-disk key for [ref] — the content hash QUALIFIED BY KIND, so a photo and a video can
@@ -174,6 +175,7 @@ object LocalMedia {
     private fun storageKey(ref: String): String = when {
         ref.startsWith("img_") || ref.startsWith("i:") -> "img_${bareId(ref)}"
         ref.startsWith("vid_") || ref.startsWith("v:") -> "vid_${bareId(ref)}"
+        ref.startsWith("file_") -> "file_${bareId(ref)}"
         ref.startsWith("aud_") -> "aud_${bareId(ref)}"
         else -> bareId(ref)
     }
@@ -677,7 +679,83 @@ object LocalMedia {
      *  also holds app state that must never be swept). */
     private fun isMediaKeyStem(stem: String): Boolean =
         stem.startsWith("img_") || stem.startsWith("vid_") || stem.startsWith("aud_") ||
+            stem.startsWith("file_") ||
             (stem.length == 64 && stem.all { it in '0'..'9' || it in 'a'..'f' })
+
+    /**
+     * Store a zip (or any file blob) as a sealed `file_` content-addressed ref — parity with Apple
+     * MediaKind.file. Callers zip folders first when needed.
+     */
+    fun storeFile(circleId: String, bytes: ByteArray): String {
+        val ref = "file_" + sha256Hex(bytes)
+        sealToFile(circleId, bytes, mediaFile(ref))
+        return ref
+    }
+
+    /**
+     * Full video attach (iOS `MediaStore.prepareVideo` parity): optimized playable ref + poster
+     * still + optional camera original, with synthetic `poster:`/`orig:` markers via [MediaVariants].
+     * Prefer this at compose time so super-data-saver clients can render without the video bytes.
+     */
+    data class PreparedVideo(
+        val videoRef: String,
+        val posterRef: String?,
+        val originalRef: String?,
+        val mediaRefs: List<String>,
+    ) {
+        val isEmpty: Boolean get() = videoRef.isEmpty()
+    }
+
+    fun prepareVideo(
+        context: android.content.Context,
+        uri: android.net.Uri,
+        circleId: String,
+        forceOptimize: Boolean = false,
+        alsoOriginal: Boolean? = null,
+    ): PreparedVideo {
+        val empty = PreparedVideo("", null, null, emptyList())
+        val optimize = forceOptimize ||
+            runCatching { CircleSettings.optimize(circleId) }.getOrDefault(true)
+        val optimized = readVideoBytes(context, uri, forceOptimize = forceOptimize) ?: return empty
+        val videoRef = store(circleId, optimized, isVideo = true)
+
+        // Poster still from the optimized bytes so data-saver clients can show a card without the clip.
+        var posterRef: String? = null
+        runCatching {
+            val tmp = File.createTempFile("poster", ".mp4", context.cacheDir)
+            try {
+                tmp.writeBytes(optimized)
+                val mmr = android.media.MediaMetadataRetriever()
+                mmr.setDataSource(tmp.absolutePath)
+                val frame = mmr.getFrameAtTime(0, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                mmr.release()
+                if (frame != null) {
+                    val baos = java.io.ByteArrayOutputStream()
+                    frame.compress(android.graphics.Bitmap.CompressFormat.JPEG, 70, baos)
+                    posterRef = store(circleId, baos.toByteArray(), isVideo = false)
+                }
+            } finally {
+                tmp.delete()
+            }
+        }
+
+        val wantOriginal = alsoOriginal
+            ?: (runCatching { ProfileStore.get(context).sendOriginal }.getOrDefault(false) || !optimize)
+        var originalRef: String? = null
+        if (wantOriginal && !forceOptimize) {
+            // Camera original via lossless strip-remux (metadata gone); skip if same bytes as optimized.
+            val orig = stripVideoMetadata(context, uri, MediaTargets.MAX_VIDEO_BYTES)
+                ?: runCatching {
+                    context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                }.getOrNull()
+            if (orig != null && !orig.contentEquals(optimized)) {
+                originalRef = store(circleId, orig, isVideo = true)
+            }
+        }
+
+        val mediaRefs = MediaVariants.composeVideoMedia(posterRef, videoRef, originalRef)
+        return PreparedVideo(videoRef, posterRef, originalRef, mediaRefs)
+    }
 
     /** Remove [ref]'s sealed blob (modern + legacy key) AND its decrypted playback caches (both the
      *  media-plain/ subdir and the legacy loose filesDir location). Only call with refs no live

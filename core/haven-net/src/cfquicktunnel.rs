@@ -13,8 +13,16 @@
 //! | Desktop app (macOS / Windows / Linux) | Ship `cloudflared` next to the app (Tauri `externalBin` / Helpers) |
 //! | `haven-relay` CLI | On first use, download the official binary **next to** `haven-relay` (or into `--data`) |
 //!
-//! App Store / Microsoft Store builds must **code-sign** the helper with the product
-//! identity; the fetch script in `tools/fetch-cloudflared.sh` is what CI runs before pack.
+//! ## Updating the pin (no manual signing)
+//!
+//! Bump [`CLOUDFLARED_VERSION`] only. CI does the rest every build:
+//! - **Xcode Cloud:** `ci_post_clone` re-fetches → HavenMac post-build codesigns with
+//!   `EXPANDED_CODE_SIGN_IDENTITY` (`apple/Scripts/embed-cloudflared.sh`).
+//! - **Microsoft Store MSIX:** `release.yml` embeds `cloudflared.exe`; Partner Center
+//!   re-signs the package on upload (no Authenticode step).
+//!
+//! `tools/fetch-cloudflared.sh` reads this same version string so the CLI/desktop/Apple
+//! helpers never drift.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -25,14 +33,40 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 
-/// Pinned cloudflared release. Bump deliberately — store builds and CLI installers must agree.
+/// Pinned cloudflared release — **single source of truth** (fetch script greps this line).
+/// Bump this string only; never hand-sign the binary after an update.
 pub const CLOUDFLARED_VERSION: &str = "2026.7.2";
 
-/// A running quick tunnel. Dropping this kills `cloudflared` (the trycloudflare hostname dies with it).
+/// How to run the bundled `cloudflared` connector.
+#[derive(Clone, Debug)]
+pub enum TunnelSpec {
+    /// Free ephemeral `*.trycloudflare.com` — hostname changes every restart.
+    Quick {
+        /// e.g. `http://127.0.0.1:8674`
+        local_http: String,
+    },
+    /// Named Cloudflare Tunnel with a **stable custom domain**.
+    ///
+    /// Easy path (Zero Trust dashboard):
+    /// 1. Create a tunnel → add a public hostname (`relay.example.com` → `http://127.0.0.1:8674`)
+    /// 2. Copy the install **token**
+    /// 3. Paste token + `https://relay.example.com` into Haven
+    ///
+    /// Haven runs `cloudflared tunnel run --token …` and announces `public_url` to the circle.
+    NamedToken {
+        token: String,
+        /// What members should use — e.g. `https://relay.example.com`
+        public_url: String,
+    },
+}
+
+/// A running cloudflared process (quick or named). Dropping this kills the child.
 pub struct QuickTunnel {
     child: Child,
-    /// e.g. `https://explicit-valium-park-copies.trycloudflare.com`
+    /// Announced public HTTPS URL (trycloudflare or the user's custom domain).
     pub public_url: String,
+    /// `"quick"` or `"named"`.
+    pub kind: &'static str,
 }
 
 impl Drop for QuickTunnel {
@@ -43,7 +77,17 @@ impl Drop for QuickTunnel {
 }
 
 impl QuickTunnel {
-    /// Start a quick tunnel to `local_http` (typically `http://127.0.0.1:8674`).
+    /// Start from a [`TunnelSpec`] — prefer this over the mode-specific helpers.
+    pub fn start_spec(cloudflared: &Path, spec: TunnelSpec) -> Result<Self> {
+        match spec {
+            TunnelSpec::Quick { local_http } => Self::start(cloudflared, &local_http),
+            TunnelSpec::NamedToken { token, public_url } => {
+                Self::start_named_token(cloudflared, &token, &public_url)
+            }
+        }
+    }
+
+    /// Start a free quick tunnel to `local_http` (typically `http://127.0.0.1:8674`).
     ///
     /// `cloudflared` must already exist at `bin`. Use [`ensure_cloudflared`] first.
     pub fn start(cloudflared: &Path, local_http: &str) -> Result<Self> {
@@ -67,60 +111,304 @@ impl QuickTunnel {
             .spawn()
             .with_context(|| format!("spawn {}", cloudflared.display()))?;
 
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        let (tx, rx) = mpsc::channel::<String>();
+        let public_url = wait_for_log_signal(
+            &mut child,
+            Duration::from_secs(45),
+            |line| extract_trycloudflare_url(line),
+            "cloudflared did not print a trycloudflare.com URL within 45s",
+        )?;
 
-        // cloudflared prints the trycloudflare URL on stderr (historically) and sometimes stdout.
-        let pump = |stream: Option<std::process::ChildStdout>, tx: mpsc::Sender<String>| {
-            if let Some(s) = stream {
-                thread::spawn(move || {
-                    for line in BufReader::new(s).lines().flatten() {
-                        if let Some(url) = extract_trycloudflare_url(&line) {
-                            let _ = tx.send(url);
-                        }
-                    }
-                });
-            }
-        };
-        let pump_err = |stream: Option<std::process::ChildStderr>, tx: mpsc::Sender<String>| {
-            if let Some(s) = stream {
-                thread::spawn(move || {
-                    for line in BufReader::new(s).lines().flatten() {
-                        if let Some(url) = extract_trycloudflare_url(&line) {
-                            let _ = tx.send(url);
-                        }
-                    }
-                });
-            }
-        };
-        pump(stdout, tx.clone());
-        pump_err(stderr, tx);
+        Ok(Self {
+            child,
+            public_url,
+            kind: "quick",
+        })
+    }
 
-        let deadline = Instant::now() + Duration::from_secs(45);
-        let public_url = loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
+    /// Run a **named** Cloudflare Tunnel with a dashboard install token + stable public URL.
+    ///
+    /// The public hostname and origin (`http://127.0.0.1:8674`) must already be configured in the
+    /// Cloudflare Zero Trust tunnel UI — the token only authenticates this connector.
+    pub fn start_named_token(cloudflared: &Path, token: &str, public_url: &str) -> Result<Self> {
+        if !cloudflared.is_file() {
+            bail!("cloudflared not found at {}", cloudflared.display());
+        }
+        let token = token.trim();
+        if token.is_empty() {
+            bail!("cloudflare tunnel token is empty");
+        }
+        let public_url = normalize_public_url(public_url)?;
+        let mut child = Command::new(cloudflared)
+            .args([
+                "tunnel",
+                "--no-autoupdate",
+                "--protocol",
+                "http2",
+                "run",
+                "--token",
+                token,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("spawn named tunnel {}", cloudflared.display()))?;
+
+        // Named tunnels don't print a trycloudflare URL — wait until the connector registers
+        // (or stay healthy for a few seconds if log wording changes).
+        let ready = wait_for_log_signal(
+            &mut child,
+            Duration::from_secs(45),
+            |line| {
+                let l = line.to_ascii_lowercase();
+                if l.contains("registered tunnel connection")
+                    || l.contains("connection registered")
+                    || l.contains("connindex=")
+                    || (l.contains("tunnel") && l.contains("connected"))
+                {
+                    Some(())
+                } else {
+                    None
+                }
+            },
+            "cloudflared named tunnel did not register within 45s — check the token and that the \
+             public hostname's service is http://127.0.0.1:8674 in the Cloudflare dashboard",
+        );
+        match ready {
+            Ok(()) => {}
+            Err(e) => {
+                // Soft path: process still running after a short grace — accept and announce.
+                if child.try_wait().ok().flatten().is_none() {
+                    // Give the edge a moment; many builds log differently.
+                    thread::sleep(Duration::from_secs(3));
+                    if child.try_wait().ok().flatten().is_some() {
+                        return Err(e);
+                    }
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+
+        Ok(Self {
+            child,
+            public_url,
+            kind: "named",
+        })
+    }
+}
+
+/// Normalize a user-entered public URL to `https://host[:port][/path]` without a trailing slash.
+pub fn normalize_public_url(raw: &str) -> Result<String> {
+    let t = raw.trim().trim_end_matches('/');
+    if t.is_empty() {
+        bail!("public URL is empty");
+    }
+    let with_scheme = if t.starts_with("https://") || t.starts_with("http://") {
+        t.to_string()
+    } else {
+        format!("https://{t}")
+    };
+    // Require a host-looking string after the scheme.
+    let host = with_scheme
+        .split("://")
+        .nth(1)
+        .unwrap_or("")
+        .split('/')
+        .next()
+        .unwrap_or("");
+    if host.is_empty() || !host.contains('.') {
+        bail!("public URL needs a real hostname (e.g. https://relay.example.com)");
+    }
+    Ok(with_scheme)
+}
+
+/// How the operator wants the public HTTPS front door to work.
+///
+/// **Manual is intentional and first-class** — if Cloudflare ever restricts free trycloudflare
+/// or token install, operators set a stable URL and run *any* tunnel/proxy themselves
+/// (cloudflared service, Caddy, nginx, Tailscale Funnel, etc.). Haven only announces the URL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrontDoorMode {
+    /// Free ephemeral trycloudflare when no custom URL is set (default for first-run).
+    Auto,
+    /// Operator runs the tunnel/proxy; Haven only announces [`public_url`].
+    Manual,
+    /// Haven runs bundled `cloudflared` with a Zero Trust install token + custom domain.
+    Bundled,
+}
+
+impl FrontDoorMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Manual => "manual",
+            Self::Bundled => "bundled",
+        }
+    }
+
+    /// Parse prefs / CLI / UI values. Unknown → `Auto`.
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "manual" | "external" | "announce" => Self::Manual,
+            "bundled" | "named" | "token" => Self::Bundled,
+            _ => Self::Auto,
+        }
+    }
+}
+
+/// What to do when the relay HTTP interface comes up.
+#[derive(Clone, Debug)]
+pub enum FrontDoorAction {
+    /// Spawn bundled cloudflared (quick or named).
+    Spawn(TunnelSpec),
+    /// Do not spawn cloudflared — announce this public URL only (manual / external front door).
+    AnnounceOnly { public_url: String },
+    /// No public HTTPS — callers use LAN (if any) or iroh.
+    LanOnly,
+}
+
+/// Resolve operator prefs into a concrete front-door action.
+///
+/// Prefer an explicit [`FrontDoorMode`]. When `mode` is `Auto`, flags still infer:
+/// - URL + token → bundled named
+/// - URL only → **manual** (announce-only — proper external-tunnel path)
+/// - neither + `auto_quick` → free trycloudflare
+///
+/// `auto_quick` is ignored for `Manual` and `Bundled` (those modes never fall back to free).
+pub fn resolve_front_door(
+    mode: FrontDoorMode,
+    public_url: Option<&str>,
+    tunnel_token: Option<&str>,
+    auto_quick: bool,
+    local_http: &str,
+) -> Result<FrontDoorAction> {
+    let url_raw = public_url.map(str::trim).filter(|s| !s.is_empty());
+    let token = tunnel_token.map(str::trim).filter(|s| !s.is_empty());
+
+    // Explicit mode wins — this is what keeps Manual correct if free/token paths go away.
+    match mode {
+        FrontDoorMode::Manual => {
+            let u = url_raw.ok_or_else(|| {
+                anyhow!(
+                    "manual front door needs a public URL (e.g. https://relay.example.com) — \
+                     run your own tunnel/proxy to http://127.0.0.1:8674, then paste that HTTPS URL"
+                )
+            })?;
+            Ok(FrontDoorAction::AnnounceOnly {
+                public_url: normalize_public_url(u)?,
+            })
+        }
+        FrontDoorMode::Bundled => {
+            let u = url_raw.ok_or_else(|| {
+                anyhow!("bundled Cloudflare tunnel needs a public URL (your custom domain)")
+            })?;
+            let t = token.ok_or_else(|| {
+                anyhow!(
+                    "bundled mode needs a Cloudflare tunnel install token from the Zero Trust dashboard"
+                )
+            })?;
+            Ok(FrontDoorAction::Spawn(TunnelSpec::NamedToken {
+                token: t.to_string(),
+                public_url: normalize_public_url(u)?,
+            }))
+        }
+        FrontDoorMode::Auto => {
+            // Infer from fields so old prefs (no mode key) keep working.
+            match (url_raw, token) {
+                (Some(u), Some(t)) => Ok(FrontDoorAction::Spawn(TunnelSpec::NamedToken {
+                    token: t.to_string(),
+                    public_url: normalize_public_url(u)?,
+                })),
+                (Some(u), None) => Ok(FrontDoorAction::AnnounceOnly {
+                    public_url: normalize_public_url(u)?,
+                }),
+                (None, Some(_)) => bail!(
+                    "Cloudflare tunnel token needs a public URL (or set front-door mode to bundled)"
+                ),
+                (None, None) if auto_quick => Ok(FrontDoorAction::Spawn(TunnelSpec::Quick {
+                    local_http: local_http.to_string(),
+                })),
+                (None, None) => Ok(FrontDoorAction::LanOnly),
+            }
+        }
+    }
+}
+
+/// Back-compat wrapper: returns a spawnable [`TunnelSpec`] only (Manual / Lan → `None`).
+pub fn resolve_tunnel_spec(
+    public_url: Option<&str>,
+    tunnel_token: Option<&str>,
+    auto_quick: bool,
+    local_http: &str,
+) -> Result<Option<TunnelSpec>> {
+    match resolve_front_door(
+        FrontDoorMode::Auto,
+        public_url,
+        tunnel_token,
+        auto_quick,
+        local_http,
+    )? {
+        FrontDoorAction::Spawn(s) => Ok(Some(s)),
+        FrontDoorAction::AnnounceOnly { .. } | FrontDoorAction::LanOnly => Ok(None),
+    }
+}
+
+fn wait_for_log_signal<T, F>(
+    child: &mut Child,
+    timeout: Duration,
+    match_line: F,
+    timeout_msg: &str,
+) -> Result<T>
+where
+    F: Fn(&str) -> Option<T> + Send + Sync + 'static,
+    T: Send + 'static,
+{
+    use std::sync::Arc;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let (tx, rx) = mpsc::channel::<T>();
+    let match_line = Arc::new(match_line);
+
+    let spawn_pump = |reader: Box<dyn std::io::Read + Send>,
+                      tx: mpsc::Sender<T>,
+                      match_line: Arc<F>| {
+        thread::spawn(move || {
+            for line in BufReader::new(reader).lines().flatten() {
+                if let Some(v) = match_line(&line) {
+                    let _ = tx.send(v);
+                    return;
+                }
+            }
+        });
+    };
+    if let Some(s) = stdout {
+        spawn_pump(Box::new(s), tx.clone(), Arc::clone(&match_line));
+    }
+    if let Some(s) = stderr {
+        spawn_pump(Box::new(s), tx, match_line);
+    }
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("{timeout_msg}");
+        }
+        match rx.recv_timeout(left.min(Duration::from_secs(1))) {
+            Ok(v) => return Ok(v),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Ok(Some(status)) = child.try_wait() {
+                    bail!("cloudflared exited early: {status}");
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let _ = child.kill();
-                let _ = child.wait();
-                bail!("cloudflared did not print a trycloudflare.com URL within 45s");
+                bail!("cloudflared output closed before ready");
             }
-            match rx.recv_timeout(left.min(Duration::from_secs(1))) {
-                Ok(url) => break url,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // Still starting — check the child hasn't died.
-                    if let Ok(Some(status)) = child.try_wait() {
-                        bail!("cloudflared exited early: {status}");
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    let _ = child.kill();
-                    bail!("cloudflared output closed before a URL appeared");
-                }
-            }
-        };
-
-        Ok(Self { child, public_url })
+        }
     }
 }
 
@@ -408,5 +696,111 @@ mod tests {
         );
         assert!(extract_trycloudflare_url("no url here").is_none());
         assert!(extract_trycloudflare_url("https://example.com").is_none());
+    }
+
+    #[test]
+    fn normalize_public_url_adds_https() {
+        assert_eq!(
+            normalize_public_url("relay.example.com").unwrap(),
+            "https://relay.example.com"
+        );
+        assert_eq!(
+            normalize_public_url("https://relay.example.com/").unwrap(),
+            "https://relay.example.com"
+        );
+    }
+
+    #[test]
+    fn resolve_named_needs_url_and_token() {
+        let s = resolve_tunnel_spec(
+            Some("https://relay.example.com"),
+            Some("eyJtoken"),
+            true,
+            "http://127.0.0.1:8674",
+        )
+        .unwrap()
+        .unwrap();
+        match s {
+            TunnelSpec::NamedToken { public_url, .. } => {
+                assert_eq!(public_url, "https://relay.example.com");
+            }
+            _ => panic!("expected named"),
+        }
+        // URL alone → external (Haven does not spawn cloudflared).
+        assert!(resolve_tunnel_spec(
+            Some("https://relay.example.com"),
+            None,
+            true,
+            "http://127.0.0.1:8674",
+        )
+        .unwrap()
+        .is_none());
+        // Auto quick when nothing set.
+        assert!(matches!(
+            resolve_tunnel_spec(None, None, true, "http://127.0.0.1:8674")
+                .unwrap()
+                .unwrap(),
+            TunnelSpec::Quick { .. }
+        ));
+    }
+
+    #[test]
+    fn manual_mode_is_announce_only_never_spawns() {
+        let a = resolve_front_door(
+            FrontDoorMode::Manual,
+            Some("relay.example.com"),
+            Some("should-be-ignored"),
+            true, // auto_quick ignored in manual
+            "http://127.0.0.1:8674",
+        )
+        .unwrap();
+        match a {
+            FrontDoorAction::AnnounceOnly { public_url } => {
+                assert_eq!(public_url, "https://relay.example.com");
+            }
+            _ => panic!("manual must not spawn cloudflared"),
+        }
+        assert!(resolve_front_door(
+            FrontDoorMode::Manual,
+            None,
+            None,
+            true,
+            "http://127.0.0.1:8674",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn bundled_mode_requires_token_and_url() {
+        assert!(resolve_front_door(
+            FrontDoorMode::Bundled,
+            Some("https://relay.example.com"),
+            None,
+            false,
+            "http://127.0.0.1:8674",
+        )
+        .is_err());
+        let a = resolve_front_door(
+            FrontDoorMode::Bundled,
+            Some("https://relay.example.com"),
+            Some("tok"),
+            false,
+            "http://127.0.0.1:8674",
+        )
+        .unwrap();
+        assert!(matches!(a, FrontDoorAction::Spawn(TunnelSpec::NamedToken { .. })));
+    }
+
+    #[test]
+    fn auto_url_only_is_manual_announce() {
+        let a = resolve_front_door(
+            FrontDoorMode::Auto,
+            Some("https://relay.example.com"),
+            None,
+            true,
+            "http://127.0.0.1:8674",
+        )
+        .unwrap();
+        assert!(matches!(a, FrontDoorAction::AnnounceOnly { .. }));
     }
 }

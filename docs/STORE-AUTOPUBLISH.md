@@ -126,6 +126,11 @@ The Store re-signs the package on ingestion, so **no paid code-signing certifica
 one-time developer fee (~$19 individual) is the only cost, and Store apps install with no SmartScreen
 warning.
 
+**Bundled `cloudflared.exe`:** the MSIX Pack step copies Tauri's `externalBin` helper next to
+`Haven.exe` so Quick Tunnel works without a user-installed CLI. It is **not** Authenticode-signed
+in CI — Partner Center re-signs every PE in the package on upload, the same as `Haven.exe`. Do not
+add a `signtool` step for it.
+
 ### Submitting the update (MANUAL — do this by hand in Partner Center)
 
 `msstore publish` is **not run in CI**, because it only supports **free** products over GitHub

@@ -491,6 +491,34 @@ pub fn set_video_sound(engine: Eng, on: bool) {
     engine.set_video_sound(on);
 }
 
+/// Device-local privacy / media prefs (Apple/Android parity). Not self-synced.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct PrivacyPrefsDto {
+    pub notification_detail: String,
+    pub super_data_saver: bool,
+    pub send_original: bool,
+}
+
+#[tauri::command]
+pub fn privacy_prefs(engine: Eng) -> PrivacyPrefsDto {
+    let (notification_detail, super_data_saver, send_original) = engine.privacy_prefs();
+    PrivacyPrefsDto {
+        notification_detail,
+        super_data_saver,
+        send_original,
+    }
+}
+
+#[tauri::command]
+pub fn set_privacy_prefs(
+    engine: Eng,
+    notification_detail: Option<String>,
+    super_data_saver: Option<bool>,
+    send_original: Option<bool>,
+) {
+    engine.set_privacy_prefs(notification_detail, super_data_saver, send_original);
+}
+
 // ---- multi-device roster ----------------------------------------------------------------
 
 #[derive(serde::Serialize)]
@@ -967,6 +995,38 @@ pub fn stop_hosting(engine: Eng) {
     engine.stop_hosting();
 }
 
+/// Public HTTPS front door + optional Cloudflare tunnel token (custom domain with bundled cloudflared).
+#[derive(serde::Serialize)]
+pub struct RelayPublicSettingsDto {
+    pub public_url: String,
+    pub tunnel_token: String,
+    pub auto_tunnel: bool,
+    /// `"auto"` | `"manual"` | `"bundled"` — manual = announce-only (operator runs tunnel).
+    pub front_door: String,
+}
+
+#[tauri::command]
+pub fn relay_public_settings(engine: Eng) -> RelayPublicSettingsDto {
+    let (public_url, tunnel_token, auto_tunnel, front_door) = engine.relay_public_settings();
+    RelayPublicSettingsDto {
+        public_url,
+        tunnel_token,
+        auto_tunnel,
+        front_door,
+    }
+}
+
+#[tauri::command]
+pub fn set_relay_public_settings(
+    engine: Eng,
+    public_url: String,
+    tunnel_token: String,
+    auto_tunnel: bool,
+    front_door: String,
+) {
+    engine.set_relay_public_settings(public_url, tunnel_token, auto_tunnel, front_door);
+}
+
 #[derive(Serialize)]
 pub struct RelayMediaLimitsDto {
     pub max_age_days: u32,
@@ -1177,15 +1237,28 @@ pub fn add_audio(engine: Eng, circle_id: String, data_base64: String) -> R<Strin
 pub fn media_data_url(engine: Eng, circle_id: String, reference: String) -> Option<String> {
     let cid = if circle_id.is_empty() { DEFAULT_CIRCLE.to_string() } else { circle_id };
     let bytes = engine.media_bytes(&cid, &reference)?;
-    let mime = if reference.starts_with("v:") {
+    // Modern img_/vid_/aud_/file_ prefixes (Apple/Android parity) plus legacy v:/a:/i:.
+    let mime = if crate::localmedia::LocalMedia::is_video(&reference) {
         "video/mp4"
-    } else if reference.starts_with("a:") {
+    } else if crate::localmedia::LocalMedia::is_audio(&reference) {
         crate::localmedia::audio_mime(&bytes)
+    } else if crate::localmedia::LocalMedia::is_file_ref(&reference) {
+        "application/zip"
     } else {
         crate::localmedia::image_mime(&bytes)
     };
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Some(format!("data:{mime};base64,{b64}"))
+}
+
+/// Store a zip / file attachment as a `file_` ref (Apple/Android parity).
+#[tauri::command]
+pub fn add_file(engine: Eng, circle_id: String, data_base64: String) -> R<String> {
+    let cid = if circle_id.is_empty() { DEFAULT_CIRCLE.to_string() } else { circle_id };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.trim())
+        .map_err(|e| format!("bad base64: {e}"))?;
+    Ok(engine.add_local_file(&cid, &bytes))
 }
 
 // ---- scheduled messages ------------------------------------------------------------------

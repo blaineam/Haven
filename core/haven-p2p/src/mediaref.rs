@@ -86,8 +86,9 @@ impl MediaKind {
     }
 }
 
-/// Every kind prefix we have ever minted, modern and legacy. The single-letter schemes are what the
-/// desktop store still writes (`v:`/`a:`, bare for images) and what early Android/iOS media carries.
+/// Every kind prefix we have ever minted, modern and legacy. Desktop now mints the modern
+/// `img_`/`vid_`/`aud_`/`file_` scheme (Apple/Android parity); single-letter `v:`/`a:`/`i:` remain
+/// readable for older posts.
 const PREFIXES: [&str; 7] = ["img_", "vid_", "aud_", "file_", "v:", "i:", "a:"];
 
 /// The ref with its kind prefix stripped — the content hash, for a content-addressed ref.

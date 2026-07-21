@@ -40,8 +40,15 @@ Once linked it serves **both** relay roles while the device is online:
    When you don't pass `--http-url`, the relay **auto-starts a free Cloudflare Quick Tunnel**
    (`*.trycloudflare.com`) so remote members can pull media over HTTPS without port-forwarding.
    On first use it downloads the official `cloudflared` binary next to `haven-relay` (or into
-   `<data>/bin`). Use `--http-url https://…` for a stable front door, or `--no-tunnel` to stay
-   LAN/iroh-only. Blobs are circle-sealed; the tunnel only moves ciphertext.
+   `<data>/bin`). For a **stable custom domain** with the bundled connector:
+
+   ```sh
+   haven-relay run --http-url https://relay.example.com --tunnel-token '<cf-install-token>'
+   ```
+
+   (In the Cloudflare Zero Trust tunnel UI, set the public hostname’s service to
+   `http://127.0.0.1:8674`.) URL alone = external tunnel/proxy; `--no-tunnel` = LAN/iroh-only.
+   Blobs are circle-sealed; the tunnel only moves ciphertext.
 
 ### Run it — three steps
 

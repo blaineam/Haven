@@ -64,8 +64,12 @@ pub struct Config {
     pub http_url: Option<String>,
     /// When true and `http_url` is unset, start a Cloudflare Quick Tunnel (`*.trycloudflare.com`)
     /// against the local HTTP interface so remote members can reach media without port-forwarding.
-    /// Default ON for serious always-on deployments; `--no-tunnel` disables; `--http-url` wins.
+    /// Default ON for serious always-on deployments; `--no-tunnel` disables; `--http-url` wins
+    /// unless `--tunnel-token` is also set (named custom domain).
     pub auto_tunnel: bool,
+    /// Cloudflare Zero Trust tunnel **install token** (from the dashboard). With `--http-url`,
+    /// runs bundled/downloaded cloudflared as a named connector for that stable domain.
+    pub tunnel_token: Option<String>,
     /// Bearer token the HTTP interface requires (generated once, persisted next to the seed).
     pub http_token: String,
     /// Operator-chosen store retention (mailbox TTL override + optional media age/size
@@ -103,6 +107,9 @@ struct FileConfig {
     /// Auto Cloudflare Quick Tunnel when http_url is unset (default true).
     #[serde(default)]
     auto_tunnel: Option<bool>,
+    /// Cloudflare tunnel install token for a custom domain (pair with http_url).
+    #[serde(default)]
+    tunnel_token: Option<String>,
     /// Mailbox TTL override in days (default 30).
     #[serde(default)]
     mailbox_ttl_days: Option<u64>,
@@ -186,14 +193,16 @@ impl Config {
             Some(arg_value(args, "--http").unwrap_or_else(|| DEFAULT_HTTP_BIND.to_string()))
         };
         let http_url = arg_value(args, "--http-url");
+        let tunnel_token = arg_value(args, "--tunnel-token");
         // Auto quick-tunnel: ON by default when no explicit public URL. `--no-tunnel` disables;
-        // `--tunnel` forces on even if a stale config said otherwise.
+        // `--tunnel` forces on even if a stale config said otherwise. Named tunnel (url+token)
+        // does not need auto_quick.
         let auto_tunnel = if args.iter().any(|a| a == "--no-tunnel") {
             false
         } else if args.iter().any(|a| a == "--tunnel") {
             true
         } else {
-            http_url.is_none() // default: tunnel when we have no stable public URL
+            http_url.is_none() && tunnel_token.is_none()
         };
 
         // Operator-chosen retention. Absent/0 media limits = today's behavior (never delete).
@@ -211,7 +220,7 @@ impl Config {
         let http_token = load_or_create_http_token(&data_dir)?;
         Ok(Self {
             link, data_dir, seed, backend, s3_port, rclone_bin, rclone_config, peers,
-            http_bind, http_url, auto_tunnel, http_token, retention,
+            http_bind, http_url, auto_tunnel, tunnel_token, http_token, retention,
         })
     }
 
@@ -268,7 +277,10 @@ impl Config {
                 .collect(),
             http_bind,
             http_url: fc.http_url.clone(),
-            auto_tunnel: fc.auto_tunnel.unwrap_or(fc.http_url.is_none()),
+            auto_tunnel: fc.auto_tunnel.unwrap_or(
+                fc.http_url.is_none() && fc.tunnel_token.as_ref().map(|t| t.is_empty()).unwrap_or(true),
+            ),
+            tunnel_token: fc.tunnel_token.filter(|t| !t.trim().is_empty()),
             http_token,
             retention,
         })

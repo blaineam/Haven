@@ -1,8 +1,8 @@
 //! On-device media store, byte-compatible with the iOS `MediaStore` and Android `LocalMedia`:
-//! photos/videos/voice are content-addressed (sha-256 of the plaintext, so the ref is identical
+//! photos/videos/voice/files are content-addressed (sha-256 of the plaintext, so the ref is identical
 //! on every device for the cross-device MediaReq/Chunk fetch) and kept **sealed at rest** to the
-//! circle. Videos carry a `v:` ref prefix and voice notes an `a:` prefix so the feed renders the
-//! right player; bare refs (or `i:`) are images.
+//! circle. Modern prefixes are `img_` / `vid_` / `aud_` / `file_` (Apple/Android parity); legacy
+//! single-letter schemes `v:` / `a:` / `i:` remain readable.
 //!
 //! Being content-addressed was never enough on its own: nothing CHECKED that the bytes behind a ref
 //! were the bytes it named, so a relay operator could serve one member's photo under another's ref
@@ -27,14 +27,17 @@ pub enum MediaKind {
     Image,
     Video,
     Audio,
+    /// Zip / file attachment — modern `file_` prefix (Apple/Android parity).
+    File,
 }
 
 impl MediaKind {
     fn prefix(self) -> &'static str {
         match self {
-            MediaKind::Image => "",
-            MediaKind::Video => "v:",
-            MediaKind::Audio => "a:",
+            MediaKind::Image => "img_",
+            MediaKind::Video => "vid_",
+            MediaKind::Audio => "aud_",
+            MediaKind::File => "file_",
         }
     }
 }
@@ -46,11 +49,20 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 pub fn bare_id(reference: &str) -> &str {
+    for p in ["img_", "vid_", "aud_", "file_", "v:", "a:", "i:"] {
+        if let Some(rest) = reference.strip_prefix(p) {
+            return rest;
+        }
+    }
     reference
-        .strip_prefix("v:")
-        .or_else(|| reference.strip_prefix("a:"))
-        .or_else(|| reference.strip_prefix("i:"))
-        .unwrap_or(reference)
+}
+
+pub fn is_file(reference: &str) -> bool {
+    reference.starts_with("file_")
+}
+
+pub fn is_video(reference: &str) -> bool {
+    reference.starts_with("vid_") || reference.starts_with("v:")
 }
 
 /// Sniff an audio container so the WebView gets a playable `data:` MIME. MediaRecorder in
@@ -93,11 +105,15 @@ impl LocalMedia {
     }
 
     pub fn is_video(reference: &str) -> bool {
-        reference.starts_with("v:")
+        is_video(reference)
     }
 
     pub fn is_audio(reference: &str) -> bool {
-        reference.starts_with("a:")
+        reference.starts_with("aud_") || reference.starts_with("a:")
+    }
+
+    pub fn is_file_ref(reference: &str) -> bool {
+        is_file(reference)
     }
 
     /// True if `reference` is a synthetic, non-fetchable attachment (e.g. a `geo:<lat>,<lon>,<label>`
@@ -670,14 +686,30 @@ mod tests {
         assert_eq!(bare_id("v:deadbeef"), "deadbeef");
         assert_eq!(bare_id("a:deadbeef"), "deadbeef");
         assert_eq!(bare_id("i:deadbeef"), "deadbeef");
+        assert_eq!(bare_id("img_deadbeef"), "deadbeef");
+        assert_eq!(bare_id("vid_deadbeef"), "deadbeef");
+        assert_eq!(bare_id("aud_deadbeef"), "deadbeef");
+        assert_eq!(bare_id("file_deadbeef"), "deadbeef");
         assert_eq!(bare_id("deadbeef"), "deadbeef");
     }
 
     #[test]
     fn kind_prefixes() {
-        assert_eq!(MediaKind::Image.prefix(), "");
-        assert_eq!(MediaKind::Video.prefix(), "v:");
-        assert_eq!(MediaKind::Audio.prefix(), "a:");
+        assert_eq!(MediaKind::Image.prefix(), "img_");
+        assert_eq!(MediaKind::Video.prefix(), "vid_");
+        assert_eq!(MediaKind::Audio.prefix(), "aud_");
+        assert_eq!(MediaKind::File.prefix(), "file_");
+    }
+
+    #[test]
+    fn modern_and_legacy_kind_detection() {
+        assert!(LocalMedia::is_video("vid_abc"));
+        assert!(LocalMedia::is_video("v:abc"));
+        assert!(LocalMedia::is_audio("aud_abc"));
+        assert!(LocalMedia::is_audio("a:abc"));
+        assert!(LocalMedia::is_file_ref("file_abc"));
+        assert!(!LocalMedia::is_video("img_abc"));
+        assert!(!LocalMedia::is_file_ref("img_abc"));
     }
 
     #[test]
@@ -789,10 +821,9 @@ mod tests {
         assert!(part.exists());
         assert!(!m.has(reference), "a partial must not answer has()");
         assert!(m.stored_blobs().is_empty(), "nor appear in the media inventory");
-        // Built on the LOCAL `bare_id` (== `storage_name`), which strips only the legacy `v:`/`a:`/
-        // `i:` schemes — so the part name is derived from exactly the string the finished blob would
-        // be stored under, and the two can never collide.
-        assert_eq!(LocalMedia::part_name(reference), "incoming_p2p_vid_deadbeef.part");
+        // Built on `bare_id` / `storage_name`, which strips modern img_/vid_/aud_/file_ and legacy
+        // v:/a:/i: so the part name matches the on-disk content hash the finished blob is stored under.
+        assert_eq!(LocalMedia::part_name(reference), "incoming_p2p_deadbeef.part");
         assert_eq!(LocalMedia::part_name("v:deadbeef"), "incoming_p2p_deadbeef.part");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -895,11 +926,17 @@ mod tests {
     #[test]
     fn bare_id_matches_prefixed_and_bare_refs() {
         // The evicted/pinned matching in the engine keys on storage_name == bare_id.
+        // On-disk blobs are content hashes only; every kind prefix must strip for lookup.
         assert_eq!(LocalMedia::storage_name("v:deadbeef"), "deadbeef");
         assert_eq!(LocalMedia::storage_name("a:deadbeef"), "deadbeef");
         assert_eq!(LocalMedia::storage_name("i:deadbeef"), "deadbeef");
         assert_eq!(LocalMedia::storage_name("deadbeef"), "deadbeef");
+        assert_eq!(LocalMedia::storage_name("img_deadbeef"), "deadbeef");
+        assert_eq!(LocalMedia::storage_name("vid_deadbeef"), "deadbeef");
+        assert_eq!(LocalMedia::storage_name("aud_deadbeef"), "deadbeef");
+        assert_eq!(LocalMedia::storage_name("file_deadbeef"), "deadbeef");
         assert_eq!(bare_id("v:deadbeef"), "deadbeef");
-        assert_eq!(bare_id("img_deadbeef"), "img_deadbeef"); // img_/vid_/aud_ keep their name
+        assert_eq!(bare_id("img_deadbeef"), "deadbeef");
+        assert_eq!(bare_id("vid_abc"), "abc");
     }
 }

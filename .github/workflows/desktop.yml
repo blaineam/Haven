@@ -28,6 +28,10 @@ jobs:
           workspaces: |
             core
             desktop/src-tauri
+      # Tauri externalBin requires binaries/cloudflared-<triple> to exist at build-script time
+      # (even for `cargo test --lib`). Same pin as release.yml — tools/fetch-cloudflared.sh.
+      - name: Fetch cloudflared for this runner
+        run: tools/fetch-cloudflared.sh --force
       - name: Unit tests (core + desktop wire/call)
         run: |
           cargo test -p haven-s3 --manifest-path core/Cargo.toml
@@ -64,6 +68,11 @@ jobs:
 
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
+
+      # externalBin: binaries/cloudflared — not committed; must fetch before `cargo tauri build`.
+      - name: Fetch cloudflared for this runner
+        shell: bash
+        run: tools/fetch-cloudflared.sh --force
 
       - name: Build (GUI + headless relay)
         working-directory: desktop/src-tauri

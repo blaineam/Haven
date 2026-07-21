@@ -227,7 +227,7 @@ async function loadMedia(node, circleId, ref) {
   try {
     const url = await invoke("media_data_url", { circleId, reference: ref });
     if (url) { node.src = url; return; }
-    const isVideo = ref.startsWith("v:");
+    const isVideo = isVideoRef(ref);
     // Which post this tile sits in, if any — read off the card rather than threaded through every
     // gallery/pager helper in between. Absent for a tile that isn't inside a post (a DM attachment,
     // a profile header), where the ask simply isn't offered rather than guessing at an author.
@@ -310,6 +310,9 @@ const state = {
   // Media refs the CIRCLE flagged sensitive (see sensitiveGuard). Refreshed with each feed/thread
   // render, like reportsByTarget — a Set so the per-item check during render is free.
   sensitive: new Set(),
+  // Device-local (Apple superDataSaver parity) — mute/skip autoplay when true.
+  superDataSaver: false,
+  videoSoundOn: false,
 };
 
 // ---- navigation ------------------------------------------------------------------------
@@ -1277,13 +1280,35 @@ function reserveAspect(node, ref, mode = "ratio", fallback = 4 / 3) {
   return node;
 }
 
+/** Modern img_/vid_/aud_/file_ prefixes (Apple/Android) plus legacy v:/a:/i:. */
+function isVideoRef(ref) { return ref.startsWith("vid_") || ref.startsWith("v:"); }
+function isAudioRef(ref) { return ref.startsWith("aud_") || ref.startsWith("a:"); }
+function isFileRef(ref) { return ref.startsWith("file_"); }
+/** Synthetic markers (poster:/orig:/geo:) and original companions — hide from carousels. */
+function isSyntheticMedia(ref) {
+  const i = ref.indexOf(":");
+  return i > 1; // multi-char scheme: poster:, orig:, geo:, music:, …
+}
+function displayMediaRefs(media) {
+  const originals = new Set();
+  for (const r of media || []) {
+    if (r.startsWith("orig:")) {
+      const rest = r.slice(5);
+      const c = rest.lastIndexOf(":");
+      if (c > 0) originals.add(rest.slice(c + 1));
+    }
+  }
+  return (media || []).filter((r) => !isSyntheticMedia(r) && !originals.has(r));
+}
+
 function mediaNode(ref, imgStyle) {
   // Videos start muted unless the global "play video sound" toggle is on (iOS parity); native controls
   // still let the user override per-video. data-video lets the toggle re-apply across all of them.
   // While a call is ringing/connecting/live — or while any capture UI is up — they render muted
   // regardless (call/capture audio priority).
-  if (ref.startsWith("v:")) return el("video", Object.assign({ "data-ref": ref, "data-video": "1", controls: "" }, state.videoSoundOn && !callAudioActive() && !captureUIOpen() ? {} : { muted: "" }));
-  if (ref.startsWith("a:")) return el("audio", { "data-ref": ref, controls: "", style: "width:100%;margin-top:6px;display:block" });
+  if (isVideoRef(ref)) return el("video", Object.assign({ "data-ref": ref, "data-video": "1", controls: "" }, state.videoSoundOn && !callAudioActive() && !captureUIOpen() && !state.superDataSaver ? {} : { muted: "" }));
+  if (isAudioRef(ref)) return el("audio", { "data-ref": ref, controls: "", style: "width:100%;margin-top:6px;display:block" });
+  if (isFileRef(ref)) return el("div", { class: "tag", "data-ref": ref, style: "padding:12px;margin-top:6px" }, "📎 Attachment");
   // decoding="async" keeps the decode off the thread that's scrolling: a data-URL image decodes
   // synchronously by default, and a multi-photo post paid every one of those decodes in one frame.
   return el("img", Object.assign({ "data-ref": ref, loading: "lazy", decoding: "async" }, imgStyle ? { style: imgStyle } : {}));
@@ -2129,11 +2154,12 @@ function postCard(it, circleId, reports = []) {
     : el("div", { class: "post-body" }, it.body);
 
   const mediaRefs = it.media || [];
-  const audioRefs = mediaRefs.filter((r) => r.startsWith("a:"));
+  const audioRefs = mediaRefs.filter((r) => isAudioRef(r));
   // A `geo:` location ref is NOT real media — split it out so it renders as a map chip above the grid
   // instead of a broken spinner tile (and so a photo+location post doesn't fall into the masonry path).
   const geo = mediaRefs.map(parseGeo).find(Boolean) || null;
-  const visualRefs = mediaRefs.filter((r) => !r.startsWith("a:") && !r.startsWith("geo:"));
+  // Drop synthetic poster:/orig: markers + original companions (Apple MediaVariants.displayRefs).
+  const visualRefs = displayMediaRefs(mediaRefs).filter((r) => !isAudioRef(r) && !r.startsWith("geo:"));
   const mediaCount = visualRefs.length;
   // 2…10 real items → the carousel (any aspect); a bigger set → the masonry grid. The count is of
   // VISUAL refs, never `it.media`: a location-only post has a non-empty media array and no visual
@@ -2880,7 +2906,7 @@ function storySongChip(m) {
  *  toggle) and carry NO native controls, so a tap lands on the pager instead of the scrubber. */
 function storyContentNode(it) {
   const inner = el("div", { class: "col", style: "align-items:center" });
-  const storyRef = (it.media || []).find((r) => !r.startsWith("geo:") && !r.startsWith("a:"));
+  const storyRef = displayMediaRefs(it.media || []).find((r) => !r.startsWith("geo:") && !isAudioRef(r));
   const cap = StoryCaptions.overlay(it.body);
   const tf = StoryCaptions.decode(it.body).spec;
   if (storyRef) {
@@ -2889,10 +2915,10 @@ function storyContentNode(it) {
     // on all three clients. `mute_video` is the author saying so outright — it rode the wire unread
     // until now. Desktop can't play the song itself (see storySongChip), so the pill below is what
     // explains the silence.
-    const songMuted = !!it.music || !!it.mute_video;
-    const m = storyRef.startsWith("v:")
-      ? el("video", Object.assign({ "data-ref": storyRef, "data-video": "1", autoplay: "", loop: "", playsinline: "",
-          style: "max-width:100%;max-height:78vh;border-radius:12px;display:block" },
+    const songMuted = !!it.music || !!it.mute_video || !!state.superDataSaver;
+    const m = isVideoRef(storyRef)
+      ? el("video", Object.assign({ "data-ref": storyRef, "data-video": "1", autoplay: state.superDataSaver ? undefined : "", loop: "", playsinline: "",
+          style: "max-width:100%;max-height:78vh;border-radius:12px;display:block", controls: state.superDataSaver ? "" : undefined },
           state.videoSoundOn && !callAudioActive() && !songMuted ? {} : { muted: "" }))
       : el("img", { "data-ref": storyRef, style: "max-width:100%;max-height:78vh;border-radius:12px;display:block" });
     // The caption's cqh units size it against the MEDIA, like the phones do — but `container-type:
@@ -2921,7 +2947,7 @@ function storyContentNode(it) {
       // An author who zoomed OUT (scale below 1) deliberately stopped short of filling the frame so
       // the item shows WHOLE — it should sit over its own blurred colors, the same treatment a
       // landscape post gets in the feed, rather than over a flat gap.
-      if (tf.mediaScale < 1 && !storyRef.startsWith("v:")) {
+      if (tf.mediaScale < 1 && !isVideoRef(storyRef)) {
         const bg = el("img", { "data-ref": storyRef, "aria-hidden": "true",
           style: "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;"
                + "filter:blur(28px);opacity:0.6;transform:scale(1.1);z-index:-1;pointer-events:none" });
@@ -2948,7 +2974,7 @@ function storyContentNode(it) {
  *  in the flat list). A single item just shows that story. */
 function viewStories(list, startIndex = 0) {
   const stories = (list || []).filter((it) =>
-    (it.media || []).some((r) => !r.startsWith("geo:") && !r.startsWith("a:")) || StoryCaptions.decode(it.body).text);
+    displayMediaRefs(it.media || []).some((r) => !r.startsWith("geo:") && !isAudioRef(r)) || StoryCaptions.decode(it.body).text);
   if (!stories.length) return;
   let index = Math.max(0, Math.min(startIndex, stories.length - 1));
   const author = (i) => (stories[i] && stories[i].author_name) || "";
@@ -3215,11 +3241,18 @@ async function renderThread(root, dm) {
   const chat = el("div", { class: "chat" });
   for (const m of msgs) {
     // A `geo:` ref renders as a map chip, not media (otherwise a broken tile in the bubble).
-    const mediaEls = (m.media || []).map((r) => {
+    const mediaEls = (m.media || []).flatMap((r) => {
       const g = parseGeo(r);
+      if (g) return [geoChip(g)];
+      // Hide poster:/orig: markers and original companions (displayRefs parity).
+      if (isSyntheticMedia(r)) return [];
+      const originals = new Set((m.media || []).filter((x) => x.startsWith("orig:")).map((x) => {
+        const rest = x.slice(5); const c = rest.lastIndexOf(":"); return c > 0 ? rest.slice(c + 1) : "";
+      }).filter(Boolean));
+      if (originals.has(r)) return [];
       // Same reservation as the feed grid: a bubble that grows when its photo lands drags the whole
       // thread down under the reader mid-scroll.
-      return g ? geoChip(g) : guardSensitive(reserveAspect(mediaNode(r, "max-width:240px;border-radius:12px;display:block"), r, "intrinsic"), r);
+      return [guardSensitive(reserveAspect(mediaNode(r, "max-width:240px;border-radius:12px;display:block"), r, "intrinsic"), r)];
     });
 
     // An unsent message is a TOMBSTONE, not a hidden row — macOS renders "Message unsent" in
@@ -3538,7 +3571,77 @@ async function relayLimitsSection(hosting) {
 }
 async function relaySheet() {
   const s = await invoke("relay_status");
+  const pub = await invoke("relay_public_settings").catch(() => ({
+    public_url: "", tunnel_token: "", auto_tunnel: true, front_door: "auto",
+  }));
   const adoptInput = el("input", { placeholder: "Paste a relay node id (64 hex)…" });
+  // Three first-class modes — Manual stays correct if free/token Cloudflare paths go away.
+  let frontDoor = pub.front_door || "auto";
+  const urlInput = el("input", {
+    value: pub.public_url || "",
+    placeholder: "https://relay.example.com",
+  });
+  const tokenInput = el("input", {
+    type: "password",
+    value: pub.tunnel_token || "",
+    placeholder: "Cloudflare tunnel install token",
+    autocomplete: "off",
+  });
+  const modeBox = el("div", { class: "col", style: "gap:4px" });
+  const modes = [
+    ["auto", "Free trycloudflare", "Ephemeral *.trycloudflare.com when no custom domain — may change every restart."],
+    ["bundled", "Custom domain (Haven runs cloudflared)", "Paste domain + Cloudflare install token. Origin in CF dashboard must be http://127.0.0.1:8674."],
+    ["manual", "Manual / external tunnel", "You run cloudflared, Caddy, nginx, Tailscale Funnel, etc. Haven only announces the HTTPS URL — works even if free tunnels are blocked."],
+  ];
+  const syncModeUi = () => {
+    tokenInput.disabled = frontDoor === "manual" || frontDoor === "auto";
+    tokenInput.style.opacity = tokenInput.disabled ? "0.5" : "1";
+    urlInput.placeholder = frontDoor === "auto"
+      ? "optional stable URL (switches to manual when set alone)"
+      : "https://relay.example.com";
+  };
+  for (const [value, label, hint] of modes) {
+    const radio = el("input", { type: "radio", name: "front-door", style: "width:auto" });
+    radio.checked = frontDoor === value;
+    radio.onchange = () => {
+      if (!radio.checked) return;
+      frontDoor = value;
+      syncModeUi();
+    };
+    modeBox.append(
+      el("label", { class: "col", style: "gap:2px;cursor:pointer;padding:4px 0" },
+        el("div", { class: "row", style: "gap:8px;align-items:center" }, radio, el("span", { style: "font-weight:600" }, label)),
+        el("div", { class: "muted small", style: "margin-left:24px" }, hint),
+      ),
+    );
+  }
+  syncModeUi();
+  const savePublic = async () => {
+    try {
+      await invoke("set_relay_public_settings", {
+        publicUrl: urlInput.value.trim(),
+        tunnelToken: tokenInput.value.trim(),
+        autoTunnel: frontDoor === "auto",
+        frontDoor,
+      });
+      toast(s.hosting
+        ? "Saved — restart hosting to apply front-door settings"
+        : "Saved");
+    } catch (e) { toast("" + e); }
+  };
+  const publicCard = el("div", { class: "card col" },
+    el("h3", {}, "Public HTTPS front door"),
+    el("div", { class: "muted small" },
+      "Friends off your LAN need HTTPS to the media port (8674). Blobs stay E2E-sealed — the front door only moves ciphertext."),
+    modeBox,
+    el("label", { class: "muted small", style: "margin-top:8px" }, "Public URL"),
+    urlInput,
+    el("label", { class: "muted small", style: "margin-top:6px" }, "Tunnel token (bundled mode only)"),
+    tokenInput,
+    el("button", { class: "btn small primary", style: "align-self:flex-start;margin-top:8px", onclick: savePublic }, "Save front door"),
+    el("div", { class: "muted small" },
+      "Manual mode is the durable escape hatch: any reverse proxy or tunnel that terminates TLS and forwards to 127.0.0.1:8674 works — Cloudflare free/token paths are optional convenience."),
+  );
   const hostCard = el("div", { class: "card col" },
     el("h3", {}, "Host the relay on this PC"),
     el("div", { class: "muted small" }, "Your circle's relay runs here so posts and media reach friends even when you're both offline. The relay never sees your content — everything is end-to-end sealed."),
@@ -3636,7 +3739,7 @@ async function relaySheet() {
       s3.configured ? el("button", { class: "btn danger small", onclick: async () => { await invoke("erase_relay", { nodeHex: "s3:" + s3.bucket }); await invoke("s3_clear"); toast("S3 relay removed"); renderRelay(); } }, "Remove") : null,
     ),
   );
-  sheet("Relays", el("div", { class: "col", style: "gap:16px" }, hostCard, alwaysOn, adoptCard, s3card, headless));
+  sheet("Relays", el("div", { class: "col", style: "gap:16px" }, hostCard, publicCard, alwaysOn, adoptCard, s3card, headless));
 }
 
 // ---- You / Settings --------------------------------------------------------------------
@@ -3709,7 +3812,7 @@ async function renderYou() {
     const tray = el("div", { class: "story-tray" });
     gallery.forEach((s, idx) => {
       const inner = el("div", {});
-      const cover = (s.media || []).find((r) => !r.startsWith("geo:") && !r.startsWith("a:"));
+      const cover = displayMediaRefs(s.media || []).find((r) => !r.startsWith("geo:") && !isAudioRef(r));
       if (cover) inner.append(el("img", { "data-ref": cover }));
       else inner.append(icon("photo", "story-ph"));
       tray.append(el("button", { class: "story-ring cover", onclick: () => viewStories(gallery, idx) }, el("div", { class: "ring" }, inner)));
@@ -3856,6 +3959,9 @@ async function settingsSheet() {
     group(row("Scheduled messages", "clock", () => scheduledSheet())),
     foot("Posts and DMs waiting to send. Compose one with the + menu's “Send later…”."),
 
+    group(row("Privacy & media", "lock.shield.fill", () => privacyMediaSheet())),
+    foot("Notification lock-screen previews, super data saver, and whether to also send camera originals."),
+
     // The Mac follows the system appearance and offers no toggle; desktop keeps one because
     // Tauri's webview doesn't always inherit the OS theme on Linux/Windows.
     group(row("Appearance", "moon", () => {
@@ -3867,6 +3973,64 @@ async function settingsSheet() {
 
     group(row("Advanced", "wrench", () => advancedSheet())),
     foot("Technical details, your identity, and starting over."),
+  ));
+}
+
+/** Privacy + media prefs (Apple Settings / Android SettingsScreen parity). Device-local. */
+async function privacyMediaSheet() {
+  const prefs = await invoke("privacy_prefs").catch(() => ({
+    notification_detail: "full", super_data_saver: false, send_original: false,
+  }));
+  state.superDataSaver = !!prefs.super_data_saver;
+
+  const toggle = (label, key, on) => {
+    const chk = el("input", { type: "checkbox", style: "width:auto" });
+    chk.checked = !!on;
+    chk.onchange = async () => {
+      const body = { notificationDetail: null, superDataSaver: null, sendOriginal: null };
+      if (key === "super_data_saver") body.superDataSaver = chk.checked;
+      if (key === "send_original") body.sendOriginal = chk.checked;
+      try {
+        await invoke("set_privacy_prefs", body);
+        if (key === "super_data_saver") state.superDataSaver = chk.checked;
+        toast("Saved");
+      } catch (e) { toast("" + e); chk.checked = !chk.checked; }
+    };
+    return el("label", { class: "set-row", style: "cursor:pointer" },
+      el("span", { style: "flex:1" }, label), chk);
+  };
+
+  const detailOpts = [
+    ["full", "Full previews"],
+    ["private", "Name and type only"],
+    ["minimal", "Minimal"],
+  ];
+  const detailBox = el("div", { class: "col", style: "gap:4px" });
+  for (const [value, label] of detailOpts) {
+    const radio = el("input", { type: "radio", name: "notif-detail", style: "width:auto" });
+    radio.checked = (prefs.notification_detail || "full") === value;
+    radio.onchange = async () => {
+      if (!radio.checked) return;
+      try {
+        await invoke("set_privacy_prefs", {
+          notificationDetail: value, superDataSaver: null, sendOriginal: null,
+        });
+        toast("Saved");
+      } catch (e) { toast("" + e); }
+    };
+    detailBox.append(el("label", { class: "row", style: "gap:8px;align-items:center;cursor:pointer" },
+      radio, el("span", {}, label)));
+  }
+
+  sheet("Privacy & media", el("div", { class: "col", style: "gap:10px" },
+    el("div", { class: "set-group" },
+      toggle("Also send original", "send_original", prefs.send_original),
+      toggle("Super data saver", "super_data_saver", prefs.super_data_saver)),
+    el("div", { class: "set-foot" },
+      "Super data saver skips autoplay and prefers poster stills. “Also send original” keeps the camera file beside the optimized video."),
+    el("div", { class: "muted small", style: "font-weight:600" }, "Notification previews"),
+    el("div", { class: "muted small" }, "How much detail banners show on the lock screen (iOS/Android parity)."),
+    el("div", { class: "set-group" }, detailBox),
   ));
 }
 
@@ -4880,6 +5044,10 @@ async function boot() {
 
   try { state.contacts = await invoke("contacts"); } catch (_) {}
   try { state.videoSoundOn = await invoke("video_sound_on"); } catch (_) { state.videoSoundOn = false; }
+  try {
+    const pp = await invoke("privacy_prefs");
+    state.superDataSaver = !!(pp && pp.super_data_saver);
+  } catch (_) { state.superDataSaver = false; }
   listen("haven:changed", async () => {
     await refreshStatus(); await refreshBadges();
     try { state.contacts = await invoke("contacts"); } catch (_) {}

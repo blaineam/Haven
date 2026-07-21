@@ -302,10 +302,12 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
       # Cloudflare Quick Tunnel helper — bundled as Tauri externalBin so hosted relays get a free
-      # HTTPS front door without a user-installed cloudflared. Pinned version; see
-      # tools/fetch-cloudflared.sh + core/haven-net/src/cfquicktunnel.rs.
+      # HTTPS front door without a user-installed cloudflared. Version is CLOUDFLARED_VERSION in
+      # cfquicktunnel.rs (fetch script reads it). Always --force so a pin bump never reuses a stale
+      # binary. Signing: MSIX is Store-re-signed on upload; no manual codesign.
       - name: Fetch cloudflared for this runner
-        run: tools/fetch-cloudflared.sh
+        shell: bash
+        run: tools/fetch-cloudflared.sh --force
       - name: Build
         working-directory: desktop/src-tauri
         run: cargo tauri build
@@ -342,13 +344,36 @@ jobs:
                        Sort-Object FullName -Descending | Select-Object -First 1).FullName
           if (-not $makeappx) { throw "makeappx.exe not found in the Windows SDK" }
 
-          # Stage + pack one arch-specific MSIX from an already-built Haven.exe.
+          # Stage + pack one arch-specific MSIX from an already-built Haven.exe + bundled
+          # cloudflared (Tauri externalBin). The Microsoft Store re-signs the whole package on
+          # Partner Center upload — no Authenticode / signtool step here (by design; see
+          # docs/STORE-AUTOPUBLISH.md). We only need the helper present next to Haven.exe so the
+          # app can spawn a Quick Tunnel without a user-installed cloudflared.
           function Pack([string]$arch, [string]$relDir) {
             $exe = if (Test-Path "$relDir\Haven.exe") { "$relDir\Haven.exe" } else { "$relDir\haven-desktop.exe" }
             if (-not (Test-Path $exe)) { throw "no exe for $arch in $relDir" }
             $stage = "$env:RUNNER_TEMP\msix-$arch"
+            if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
             New-Item -ItemType Directory -Force -Path "$stage\Assets" | Out-Null
             Copy-Item $exe "$stage\Haven.exe" -Force
+
+            # cloudflared: Tauri externalBin lands next to the exe as cloudflared.exe (strip triple).
+            # Fall back to the triple-named file under binaries/ (fetch step). Arm64 package reuses
+            # the amd64 helper — Cloudflare has no windows-arm64 asset for this pin; WoA runs it
+            # under x64 emulation.
+            $cfdCandidates = @(
+              "$relDir\cloudflared.exe",
+              "desktop\src-tauri\binaries\cloudflared-x86_64-pc-windows-msvc.exe",
+              "desktop\src-tauri\binaries\cloudflared.exe"
+            )
+            $cfd = $cfdCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if ($cfd) {
+              Copy-Item $cfd "$stage\cloudflared.exe" -Force
+              Write-Host "  MSIX $arch: bundled cloudflared from $cfd"
+            } else {
+              Write-Host "::warning::MSIX $arch: cloudflared.exe not found — Quick Tunnel will try PATH/download at runtime"
+            }
+
             foreach ($a in 'StoreLogo','Square150x150Logo','Square44x44Logo','Square71x71Logo','Square310x310Logo') {
               Copy-Item "desktop\src-tauri\icons\$a.png" "$stage\Assets\$a.png" -Force
             }

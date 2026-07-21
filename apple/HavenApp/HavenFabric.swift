@@ -40,10 +40,17 @@ final class HavenFabric: ObservableObject {
     /// **calls** may fail while fabric is active; live messaging still uses iroh (+ circle DERP).
     /// LAN / same-subnet peers can still connect via host candidates. Do not add third-party STUN
     /// here without a product decision — see `docs/IROH-RELAY-GOSSIP.md`.
-    func iceServerUrls() -> [String] {
-        if isActive {
-            return []
-        }
+    ///
+    /// `nonisolated` so `WebRTCCall.init` (NSObject, nonisolated) can read ICE without hopping
+    /// to the main actor; source of truth is UserDefaults (also written by `update`).
+    nonisolated func iceServerUrls() -> [String] {
+        Self.iceServerUrlsFromDefaults()
+    }
+
+    /// Same policy without requiring the MainActor singleton (safe from any thread).
+    nonisolated static func iceServerUrlsFromDefaults() -> [String] {
+        let urls = UserDefaults.standard.stringArray(forKey: "haven.fabric.derpUrls") ?? []
+        if !urls.isEmpty { return [] }
         return [
             "stun:stun.l.google.com:19302",
             "stun:stun1.l.google.com:19302",

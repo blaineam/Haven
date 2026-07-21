@@ -68,8 +68,8 @@ final class WebRTCCall: NSObject {
     override init() {
         let config = RTCConfiguration()
         // Haven-first ICE: Google STUN only when no circle-hosted fabric is known
-        // (see HavenFabric.iceServerUrls).
-        let ice = HavenFabric.shared.iceServerUrls()
+        // (UserDefaults — nonisolated; see HavenFabric.iceServerUrlsFromDefaults).
+        let ice = HavenFabric.iceServerUrlsFromDefaults()
         config.iceServers = ice.isEmpty
             ? []
             : [RTCIceServer(urlStrings: ice)]

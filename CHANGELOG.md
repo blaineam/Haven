@@ -225,6 +225,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **iPhone overheats with Haven merely open.** Live-call mailbox LIST no longer runs every 2s
+  while idle; linked-device catch-up / media backfill / relay re-announce are slower and
+  thermal-gated on iOS; Multipeer discovery parks sooner; serious thermal parks radio work
+  until the device cools (push still wakes mailbox).
+
 - **NAS Docker image ships `cloudflared`.** Free trycloudflare auto-tunnel works without
   setting `HAVEN_RELAY_HTTP_URL` (hostname still ephemeral on restart). Optional
   `HAVEN_RELAY_TUNNEL_TOKEN` for named tunnels; `HAVEN_RELAY_NO_TUNNEL=1` for LAN-only.

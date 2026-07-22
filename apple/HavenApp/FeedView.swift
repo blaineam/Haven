@@ -424,10 +424,10 @@ final class FeedStore: ObservableObject {
         pollMailboxNow()
         // 10s heartbeat, but the actual poll only runs when due (30s base, stretching when idle).
         #if os(iOS)
-        // 30s base was too slow when free-CF DNS skips a poll or two — DMs sat on Mac (host)
-        // for a minute+ before iPhone tried HTTP again. 20s still idle-stretches via adaptiveInterval.
-        let pollHeartbeat: TimeInterval = 15
-        let pollBaseMs: UInt64 = 20_000
+        // 30s base + idle stretch. 15s/20s kept the phone listing mailboxes almost continuously
+        // while "just open" — push + activity still force a poll immediately.
+        let pollHeartbeat: TimeInterval = 20
+        let pollBaseMs: UInt64 = 30_000
         #else
         let pollHeartbeat: TimeInterval = 10
         let pollBaseMs: UInt64 = 30_000
@@ -436,24 +436,62 @@ final class FeedStore: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 guard self.now() >= self.nextPollDueMs else { return }
+                #if os(iOS)
+                // When seriously hot, park mailbox LIST entirely until thermal recovers or a push wakes us.
+                switch ProcessInfo.processInfo.thermalState {
+                case .serious, .critical:
+                    self.nextPollDueMs = self.now() + 120_000
+                    return
+                default: break
+                }
+                #endif
                 self.nextPollDueMs = self.now() + self.adaptiveInterval(base: pollBaseMs)
                 self.pollMailboxNow()
                 self.dailyMailboxRefreshIfDue()   // long-lived sessions refresh without a relaunch
             }
         }
-        // Fast live-call lane (2s): invite/accept/sdp must land inside the ring window when iroh dial is down.
+        // Live-call HTTP poll: 2s only while a call is active (ring/connect/in-call). Idle phones
+        // used to LIST every circle mailbox every 2s forever — major heat with the app merely open.
         liveCallTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.pollLiveCallFramesNow() }
+            Task { @MainActor in
+                guard let self else { return }
+                // Off-call: poll at most every 12s so a ringing invite can still land without
+                // continuous HTTP LIST heat.
+                if !CallManager.shared.callInProgress {
+                    let nowMs = self.now()
+                    guard nowMs &- self.lastIdleLiveCallPollMs > 12_000 else { return }
+                    self.lastIdleLiveCallPollMs = nowMs
+                }
+                await self.pollLiveCallFramesNow()
+            }
         }
     }
+
+    private var lastIdleLiveCallPollMs: UInt64 = 0
 
     /// Pull HTTP-mailbox live-call frames addressed to this device/account and dispatch as inbound frames.
     @MainActor
     func pollLiveCallFramesNow() async {
         guard social != nil else { return }
+        // Skip entirely when seriously hot and not in a call — iroh invite still works for on-net peers.
+        #if os(iOS)
+        if !CallManager.shared.callInProgress {
+            switch ProcessInfo.processInfo.thermalState {
+            case .serious, .critical: return
+            default: break
+            }
+        }
+        #endif
         var mine = [myNodeHex.lowercased()]
         if let d = social?.myDeviceNodeHex().lowercased(), d.count == 64 { mine.append(d) }
-        let frames = await SharedStore.pollLiveCallFrames(circleIds: circles.map(\.id), myHexes: mine)
+        // While idle, only poll DM + default circles — full circle fan-out was LIST×N every few seconds.
+        let cids: [String] = {
+            if CallManager.shared.callInProgress { return circles.map(\.id) }
+            var ids = circles.map(\.id).filter { $0.hasPrefix("dm:") || $0 == "default" }
+            if ids.isEmpty { ids = Array(circles.prefix(3).map(\.id)) }
+            return ids
+        }()
+        let frames = await SharedStore.pollLiveCallFrames(circleIds: cids, myHexes: mine)
         for (key, data) in frames {
             guard !data.isEmpty else { continue }
             // Full wire frame: [type][payload] — same shape as iroh inbound.
@@ -1337,7 +1375,9 @@ final class FeedStore: ObservableObject {
                 // if nobody connects. Live sessions keep working; send path is rate-limited so neither
                 // side can flood (Mac→iPhone history dump was the field heat source).
                 #if os(iOS)
-                nt.start(parkAfter: 60)
+                // Short discovery window — if Mac isn't nearby in 30s, park Bonjour. Continuous
+                // Multipeer advertise/browse with a linked Mac was a top field heat source.
+                nt.start(parkAfter: 30)
                 #else
                 nt.start(parkAfter: 120)
                 #endif
@@ -1604,6 +1644,21 @@ final class FeedStore: ObservableObject {
                 let base = syncBaseMs
                 #endif
                 self.nextSyncDueMs = self.now() + self.adaptiveInterval(base: base)
+                #if os(iOS)
+                // Serious heat: stop Multipeer discovery and skip the expensive contact fan-out.
+                // Push + mailbox recover traffic; cooking the SoC helps nobody.
+                switch ProcessInfo.processInfo.thermalState {
+                case .serious, .critical:
+                    // Park discovery only — don't tear down live Multipeer sessions mid-transfer.
+                    self.nearby?.parkDiscovery()
+                    self.nextSyncDueMs = self.now() + 180_000
+                    return
+                case .fair:
+                    // Don't re-open Multipeer discovery while already warm.
+                    break
+                default: break
+                }
+                #endif
                 // requestMissingMedia runs inside syncWithContacts (already throttled) — do not
                 // call it again here or every tick doubles the media-scan + restore Tasks.
                 self.syncWithContacts()
@@ -2347,31 +2402,47 @@ final class FeedStore: ObservableObject {
         // BOUNDED, deliberately: only when I actually have other devices, at most 50 events per
         // circle, and no more than every 5 minutes — this re-seals per envelope, so it is real CPU
         // and must not ride the 20s tick. Siblings dedupe, so a repeat sweep is harmless.
-        // Linked-device catch-up: 90s while hosting (Mac relay is often the device that has the
-        // message the phone is missing); 3 min otherwise. Was 5 min — two newest Mac DMs could sit
-        // on the host until the next slow sweep while the phone only saw older history.
-        let catchupEvery: UInt64 = RelayHost.shared.serving ? 90_000 : 180_000
-        if nowMs - lastOwnDeviceCatchupMs > catchupEvery, !myOtherDeviceTargets().isEmpty {
+        // Linked-device catch-up. Mac host: 2 min. iPhone: 5 min and much smaller — exporting
+        // 24 envs × every circle + liveDeliver + APNs syncSelf every 90–180s cooked open phones.
+        #if os(iOS)
+        let catchupEvery: UInt64 = 300_000
+        let catchupLimit = 6
+        let syncSelfCap = 2
+        // Skip entirely when the phone is already warm/hot — mailbox + push cover delivery.
+        let thermalBlocksCatchup: Bool = {
+            switch ProcessInfo.processInfo.thermalState {
+            case .fair, .serious, .critical: return true
+            default: return false
+            }
+        }()
+        #else
+        let catchupEvery: UInt64 = RelayHost.shared.serving ? 120_000 : 300_000
+        let catchupLimit = 16
+        let syncSelfCap = 4
+        let thermalBlocksCatchup = false
+        #endif
+        if !thermalBlocksCatchup,
+           nowMs - lastOwnDeviceCatchupMs > catchupEvery,
+           !myOtherDeviceTargets().isEmpty {
             lastOwnDeviceCatchupMs = nowMs
-            let cidsForDevices = circles.map(\.id)
+            // Prefer DMs + default — full circle export was the heat spike with many circles.
+            let cidsForDevices = circles.map(\.id).filter { $0.hasPrefix("dm:") || $0 == "default" }
+                + circles.map(\.id).filter { !$0.hasPrefix("dm:") && $0 != "default" }.prefix(2)
             Task.detached(priority: .utility) { [weak self, social] in
                 var work: [(String, [Data])] = []
                 for cid in cidsForDevices {
-                    // ALL authors — the point is my friends' messages that reached one device only.
-                    // Prefer the newest slice: 50 was fine for history; 24 keeps the push budget
-                    // small when we also silent-syncSelf the freshest ones below.
-                    let envs = social.exportRecentEnvelopes(circleId: cid, limit: 24)
+                    let envs = social.exportRecentEnvelopes(circleId: cid, limit: UInt32(catchupLimit))
                     if !envs.isEmpty { work.append((cid, envs)) }
                 }
                 let workFinal = work
                 await MainActor.run { [weak self] in
                     guard let self else { return }
+                    var pushed = 0
                     for (cid, envs) in workFinal {
-                        self.liveDeliverManyToMyDevices(1, envs.map { self.eventPayload(cid, $0) })
-                        // iroh live only reaches an awake sibling. Sleeping/cellular iPhone needs
-                        // silent APNs self-sync for the newest few (same hole as mailbox ingest).
-                        for env in envs.suffix(6) where env.count < 3_500 {
+                        self.liveDeliverManyToMyDevices(1, envs.suffix(catchupLimit).map { self.eventPayload(cid, $0) })
+                        for env in envs.suffix(3) where env.count < 3_500 && pushed < syncSelfCap {
                             PushManager.shared.syncSelf(event: env.base64EncodedString())
+                            pushed += 1
                         }
                     }
                 }
@@ -2379,21 +2450,40 @@ final class FeedStore: ObservableObject {
         }
         // Frame-19 re-announce: throttle hard. Every sync tick used to seal + fan-out relay ids to
         // every member (iroh + nearby + mesh), which kept the radio warm even when nothing changed.
-        // Hosting: 45s so friends who just opened Haven learn the relay (and its public media URL)
-        // quickly. Non-host: 3 min is enough for peers who missed the host-start one-shot.
+        // Hosting: 45s. iPhone non-host: 10 min (was 3) — each reannounce seals + fans out + may
+        // HTTP-PUT durable __relay__ keys; doing that often on a phone was pure heat.
+        #if os(iOS)
+        let reannounceEvery: UInt64 = RelayHost.shared.serving ? 60_000 : 600_000
+        #else
         let reannounceEvery: UInt64 = RelayHost.shared.serving ? 45_000 : 180_000
+        #endif
         if nowMs &- lastRelayReannounceMs > reannounceEvery {
             lastRelayReannounceMs = nowMs
             reannounceOwnRelay()
         }
-        // Push MY media up to every circle relay periodically. The nearby request/response (frame 3→5) was
-        // unreliable (0 chunks served), so instead each device durably mirrors its own media to the relays
-        // it knows — including a sibling's hosted relay — and the other side reads it locally via poll OWN.
-        // backup() is idempotent (skips blobs already on a relay), so this just fills gaps. Throttled.
-        // 60s (was 120): cross-device "why isn't my photo on the other phone yet" felt broken at 2 min.
-        if nowMs - lastMediaBackfillMs > 60_000 {
+        // Push MY media up to every circle relay periodically. Throttled harder on iOS when idle —
+        // 60s forever made an open phone re-scan/upload constantly even with nothing new.
+        #if os(iOS)
+        let mediaEvery: UInt64 = (nowMs &- lastActivityMs) > 60_000 ? 300_000 : 120_000
+        #else
+        let mediaEvery: UInt64 = 60_000
+        #endif
+        if nowMs - lastMediaBackfillMs > mediaEvery {
             lastMediaBackfillMs = nowMs
+            #if os(iOS)
+            // Don't thrash media backup while the SoC is already warm.
+            let hot: Bool = {
+                switch ProcessInfo.processInfo.thermalState {
+                case .fair, .serious, .critical: return true
+                default: return false
+                }
+            }()
+            if !hot {
+                backfillMailboxMedia(circleIds: circles.map { $0.id })
+            }
+            #else
             backfillMailboxMedia(circleIds: circles.map { $0.id })
+            #endif
             // Re-publish our account-signed device roster to every known relay, so a HEADLESS relay
             // (which only knows account ids from its link) authorizes THIS device's id and stops
             // ERR-forbidding our mailbox ops — the "my own NAS relay rejects my phone" fix.
@@ -2448,9 +2538,11 @@ final class FeedStore: ObservableObject {
                 for m in members { sendIroh(19, p, to: m) }
                 originateRelay(dests: members, inner: frame(19, p))
                 // Durable path: friends who miss live iroh still LIST the mailbox over HTTP and
-                // learn the relay (same shape as __hello__). Content-addressed key so a rotated
-                // free-CF URL publishes a NEW key rather than leaving friends stuck on a seen cursor.
-                Task { await SharedStore.putRelayAnnounce(circleId: ci.id, nodeHex: hex, payload: p) }
+                // learn the relay. Only the HOST (or Mac) should PUT these — every phone doing it
+                // each reannounce cycle was continuous HTTP put heat.
+                if RelayHost.shared.serving {
+                    Task { await SharedStore.putRelayAnnounce(circleId: ci.id, nodeHex: hex, payload: p) }
+                }
             }
         }
     }

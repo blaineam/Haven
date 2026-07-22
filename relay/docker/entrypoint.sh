@@ -1,43 +1,102 @@
 #!/bin/sh
 # On the FIRST run, attach to your circle from HAVEN_RELAY_LINK (saved into /data). On every
-# later run the saved link is reused and HAVEN_RELAY_LINK is IGNORED — see the long note below;
-# re-applying it every start is a footgun, not a convenience. Any extra args (e.g. --no-storage)
-# pass straight through.
+# later run the saved link is reused and HAVEN_RELAY_LINK is IGNORED — see the long note below.
 set -eu
 
+export PATH="/usr/local/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+HAVEN_RELAY_DIR="${HAVEN_RELAY_DIR:-/data}"
+export HAVEN_CLOUDFLARED_LOG_DIR="${HAVEN_CLOUDFLARED_LOG_DIR:-$HAVEN_RELAY_DIR/logs}"
+mkdir -p "$HAVEN_CLOUDFLARED_LOG_DIR" 2>/dev/null || true
+CF_LOG="$HAVEN_CLOUDFLARED_LOG_DIR/cloudflared-quick.log"
+
 # ── Public media URL / cloudflared front door ────────────────────────────────
+# DEFAULT: free trycloudflare via bundled cloudflared (hostname changes on restart).
+# Stable:  HAVEN_RELAY_HTTP_URL + optional HAVEN_RELAY_TUNNEL_TOKEN
+# LAN:     HAVEN_RELAY_NO_TUNNEL=1
 #
-# Default (no HAVEN_RELAY_HTTP_URL): haven-relay auto-starts a free Cloudflare Quick Tunnel
-# using the cloudflared binary shipped in this image (`*.trycloudflare.com`). Hostname is
-# ephemeral — it changes on container restart; the app re-learns it via frame 19.
-#
-# Stable production NAS:
-#   HAVEN_RELAY_HTTP_URL=https://relay.example.com
-#   HAVEN_RELAY_TUNNEL_TOKEN=<cf install token>   # optional: spawn named tunnel in-process
-#   # or leave token unset and run your own reverse proxy / host cloudflared
-#
-# LAN-only (no internet media):
-#   HAVEN_RELAY_NO_TUNNEL=1
-#   HAVEN_RELAY_HTTP_URL=http://192.168.1.50:8674   # optional LAN advertise
-#
+# Older haven-relay release binaries (e.g. 1.1.3) do not auto-spawn cloudflared.
+# This entrypoint starts the free tunnel (or named token tunnel) and passes --http-url
+# so the relay announces a real public origin to the circle.
+CF_PID=""
+cleanup() {
+  if [ -n "${CF_PID:-}" ] && kill -0 "$CF_PID" 2>/dev/null; then
+    kill "$CF_PID" 2>/dev/null || true
+    wait "$CF_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+if command -v cloudflared >/dev/null 2>&1; then
+  echo "▸ cloudflared: $(command -v cloudflared) ($(cloudflared version 2>/dev/null | head -1 || echo present))"
+else
+  echo "⚠ cloudflared not on PATH — free auto-tunnel unavailable"
+fi
+
+# Named tunnel (stable domain): spawn connector; operator sets HTTP_URL to that domain.
+if [ -n "${HAVEN_RELAY_TUNNEL_TOKEN:-}" ] && [ "${HAVEN_RELAY_NO_TUNNEL:-0}" != "1" ]; then
+  if command -v cloudflared >/dev/null 2>&1; then
+    echo "▸ starting named Cloudflare tunnel (install token)…"
+    : >"$CF_LOG"
+    cloudflared tunnel --no-autoupdate run --token "$HAVEN_RELAY_TUNNEL_TOKEN" \
+      >>"$CF_LOG" 2>&1 &
+    CF_PID=$!
+    sleep 2
+  fi
+fi
+
+# Free quick tunnel when no public URL configured.
+if [ -z "${HAVEN_RELAY_HTTP_URL:-}" ] \
+  && [ -z "${HAVEN_RELAY_TUNNEL_TOKEN:-}" ] \
+  && [ "${HAVEN_RELAY_NO_TUNNEL:-0}" != "1" ] \
+  && command -v cloudflared >/dev/null 2>&1; then
+  echo "▸ starting free Cloudflare Quick Tunnel → http://127.0.0.1:8674 …"
+  : >"$CF_LOG"
+  # Media only on free origin (one hostname per quick tunnel). DERP can use path proxy later.
+  cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8674 \
+    >>"$CF_LOG" 2>&1 &
+  CF_PID=$!
+  # Scrape https://….trycloudflare.com (up to ~45s)
+  i=0
+  PUBLIC=""
+  while [ $i -lt 45 ]; do
+    if ! kill -0 "$CF_PID" 2>/dev/null; then
+      echo "⚠ cloudflared exited early — see $CF_LOG"
+      tail -20 "$CF_LOG" 2>/dev/null || true
+      CF_PID=""
+      break
+    fi
+    PUBLIC=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' "$CF_LOG" 2>/dev/null | head -1 || true)
+    if [ -n "$PUBLIC" ]; then
+      echo "✓ free tunnel ready: $PUBLIC"
+      echo "  (hostname is ephemeral — changes when this container restarts; apps re-learn via frame 19)"
+      HAVEN_RELAY_HTTP_URL="$PUBLIC"
+      export HAVEN_RELAY_HTTP_URL
+      break
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+  if [ -z "${HAVEN_RELAY_HTTP_URL:-}" ] && [ -n "$CF_PID" ]; then
+    echo "⚠ timed out waiting for trycloudflare URL — see $CF_LOG"
+    tail -30 "$CF_LOG" 2>/dev/null || true
+  fi
+fi
+
 if [ -n "${HAVEN_RELAY_HTTP_URL:-}" ]; then
   set -- --http-url "$HAVEN_RELAY_HTTP_URL" "$@"
 fi
+# If binary supports --tunnel-token and we have one, pass through (1.1.4+).
 if [ -n "${HAVEN_RELAY_TUNNEL_TOKEN:-}" ]; then
-  set -- --tunnel-token "$HAVEN_RELAY_TUNNEL_TOKEN" "$@"
+  set -- --tunnel-token "$HAVEN_RELAY_TUNNEL_TOKEN" "$@" 2>/dev/null || true
 fi
 if [ "${HAVEN_RELAY_NO_TUNNEL:-0}" = "1" ]; then
-  set -- --no-tunnel "$@"
+  set -- --no-tunnel "$@" 2>/dev/null || true
 fi
 
 # Haven fabric: circle-hosted iroh DERP (HTTPS front door → :3340) + TURN (UDP :3478).
-# See docs/NAS-FABRIC-RELAY.md. Flags are ignored by older binaries (unknown flag → fail);
-# use a fabric-capable build (feature/iroh-relay-gossip or newer release).
 if [ -n "${HAVEN_RELAY_DERP_URL:-}" ]; then
   set -- --derp-url "$HAVEN_RELAY_DERP_URL" "$@"
 fi
-# Default DERP bind is 127.0.0.1 — useless behind Docker port publish. Listen on all interfaces
-# unless the operator overrides (HAVEN_RELAY_DERP_BIND=127.0.0.1:3340 to keep it loopback).
 if [ -n "${HAVEN_RELAY_DERP_BIND:-}" ]; then
   set -- --derp-bind "$HAVEN_RELAY_DERP_BIND" "$@"
 else
@@ -59,51 +118,29 @@ if [ "${HAVEN_RELAY_NO_TURN:-0}" = "1" ]; then
   set -- --no-turn "$@"
 fi
 
-# Ensure bundled cloudflared is first on PATH (Dockerfile installs to /usr/local/bin).
-export PATH="/usr/local/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
-if command -v cloudflared >/dev/null 2>&1; then
-  echo "▸ cloudflared: $(command -v cloudflared) ($(cloudflared version 2>/dev/null | head -1 || echo present))"
-else
-  echo "⚠ cloudflared not on PATH — free auto-tunnel will try download (may fail without curl)"
-fi
-
-# HAVEN_RELAY_LINK is applied ONLY on the first run — i.e. only while no link is saved in the data
-# dir yet.
-#
-# It used to be re-applied on EVERY container start, and `--link` persists, so the value sitting in
-# `.env` silently overwrote the relay's saved link each time the container came up. A user whose
-# relay was serving one stale circle re-linked it by hand, watched it work, restarted the container
-# for an unrelated reason, and was quietly reverted to the stale link — with nothing in the log to
-# say so. Re-pasting a link was the only known fix for a frozen relay at the time, so this turned a
-# fixable problem into a permanent one.
-#
-# It is also no longer needed: a relay now LEARNS circles from the members it is already paired with
-# (the ENROLL control op), so the link is a one-time pairing handshake rather than a policy that has
-# to be kept fresh in an env file.
-#
-# To deliberately re-link (e.g. pairing this relay with a different account), either set
-# HAVEN_RELAY_LINK_FORCE=1 for one start, or delete the saved link:
-#     docker compose exec haven-relay rm /data/link.json
-HAVEN_RELAY_DIR="${HAVEN_RELAY_DIR:-/data}"
 SAVED_LINK="$HAVEN_RELAY_DIR/link.json"
-# Point cloudflared log dir at the data volume so free-tunnel failures are inspectable.
-export HAVEN_CLOUDFLARED_LOG_DIR="${HAVEN_CLOUDFLARED_LOG_DIR:-$HAVEN_RELAY_DIR/logs}"
-mkdir -p "$HAVEN_CLOUDFLARED_LOG_DIR" 2>/dev/null || true
 
 if [ -n "${HAVEN_RELAY_LINK:-}" ] && [ -f "$SAVED_LINK" ] && [ "${HAVEN_RELAY_LINK_FORCE:-0}" != "1" ]; then
   echo "▸ HAVEN_RELAY_LINK is set, but this relay already has a saved link ($SAVED_LINK)."
-  echo "  IGNORING the environment link and keeping the saved one — re-applying it on every start"
-  echo "  is how a hand-fixed relay silently reverted to a stale circle list after a restart."
-  echo "  The relay also learns new circles from its paired members, so the link does not need to"
-  echo "  stay current. To re-link on purpose: set HAVEN_RELAY_LINK_FORCE=1 for one start, or"
-  echo "  'rm $SAVED_LINK' and restart."
-  exec haven-relay run "$@"
+  echo "  IGNORING the environment link and keeping the saved one."
+  # Don't use exec — cloudflared child must outlive the shell; run in foreground and wait.
+  haven-relay run "$@" &
+  RELAY_PID=$!
+  wait "$RELAY_PID"
+  exit $?
 fi
 
 if [ -n "${HAVEN_RELAY_LINK:-}" ]; then
   if [ -f "$SAVED_LINK" ]; then
     echo "▸ HAVEN_RELAY_LINK_FORCE=1 — OVERWRITING the saved link with the one from the environment."
   fi
-  exec haven-relay run --link "$HAVEN_RELAY_LINK" "$@"
+  haven-relay run --link "$HAVEN_RELAY_LINK" "$@" &
+  RELAY_PID=$!
+  wait "$RELAY_PID"
+  exit $?
 fi
-exec haven-relay run "$@"
+
+haven-relay run "$@" &
+RELAY_PID=$!
+wait "$RELAY_PID"
+exit $?

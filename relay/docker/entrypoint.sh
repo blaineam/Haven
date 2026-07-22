@@ -5,21 +5,29 @@
 # pass straight through.
 set -eu
 
-# HAVEN_RELAY_HTTP_URL → --http-url. This matters far more in a container than the "optional,
-# for a reverse proxy" framing suggests.
+# ── Public media URL / cloudflared front door ────────────────────────────────
 #
-# The relay advertises its HTTP media interface by listing its own network addresses. Under Docker's
-# default bridge networking that is the CONTAINER's address (172.x.y.z) — which nothing else on the
-# LAN can reach. So peers get an unusable URL, silently fall back to the iroh blob dial, and every
-# put and fetch times out: media stops syncing entirely while the relay looks perfectly healthy from
-# the inside. Set this to how members actually reach this box:
+# Default (no HAVEN_RELAY_HTTP_URL): haven-relay auto-starts a free Cloudflare Quick Tunnel
+# using the cloudflared binary shipped in this image (`*.trycloudflare.com`). Hostname is
+# ephemeral — it changes on container restart; the app re-learns it via frame 19.
 #
-#     HAVEN_RELAY_HTTP_URL=http://192.168.1.50:8674     (its LAN address)
+# Stable production NAS:
+#   HAVEN_RELAY_HTTP_URL=https://relay.example.com
+#   HAVEN_RELAY_TUNNEL_TOKEN=<cf install token>   # optional: spawn named tunnel in-process
+#   # or leave token unset and run your own reverse proxy / host cloudflared
 #
-# `network_mode: host` in the compose file is the other fix — then the relay sees the host's real
-# addresses and works this out itself.
+# LAN-only (no internet media):
+#   HAVEN_RELAY_NO_TUNNEL=1
+#   HAVEN_RELAY_HTTP_URL=http://192.168.1.50:8674   # optional LAN advertise
+#
 if [ -n "${HAVEN_RELAY_HTTP_URL:-}" ]; then
   set -- --http-url "$HAVEN_RELAY_HTTP_URL" "$@"
+fi
+if [ -n "${HAVEN_RELAY_TUNNEL_TOKEN:-}" ]; then
+  set -- --tunnel-token "$HAVEN_RELAY_TUNNEL_TOKEN" "$@"
+fi
+if [ "${HAVEN_RELAY_NO_TUNNEL:-0}" = "1" ]; then
+  set -- --no-tunnel "$@"
 fi
 
 # Haven fabric: circle-hosted iroh DERP (HTTPS front door → :3340) + TURN (UDP :3478).
@@ -51,6 +59,14 @@ if [ "${HAVEN_RELAY_NO_TURN:-0}" = "1" ]; then
   set -- --no-turn "$@"
 fi
 
+# Ensure bundled cloudflared is first on PATH (Dockerfile installs to /usr/local/bin).
+export PATH="/usr/local/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+if command -v cloudflared >/dev/null 2>&1; then
+  echo "▸ cloudflared: $(command -v cloudflared) ($(cloudflared version 2>/dev/null | head -1 || echo present))"
+else
+  echo "⚠ cloudflared not on PATH — free auto-tunnel will try download (may fail without curl)"
+fi
+
 # HAVEN_RELAY_LINK is applied ONLY on the first run — i.e. only while no link is saved in the data
 # dir yet.
 #
@@ -70,6 +86,9 @@ fi
 #     docker compose exec haven-relay rm /data/link.json
 HAVEN_RELAY_DIR="${HAVEN_RELAY_DIR:-/data}"
 SAVED_LINK="$HAVEN_RELAY_DIR/link.json"
+# Point cloudflared log dir at the data volume so free-tunnel failures are inspectable.
+export HAVEN_CLOUDFLARED_LOG_DIR="${HAVEN_CLOUDFLARED_LOG_DIR:-$HAVEN_RELAY_DIR/logs}"
+mkdir -p "$HAVEN_CLOUDFLARED_LOG_DIR" 2>/dev/null || true
 
 if [ -n "${HAVEN_RELAY_LINK:-}" ] && [ -f "$SAVED_LINK" ] && [ "${HAVEN_RELAY_LINK_FORCE:-0}" != "1" ]; then
   echo "▸ HAVEN_RELAY_LINK is set, but this relay already has a saved link ($SAVED_LINK)."

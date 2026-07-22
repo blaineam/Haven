@@ -225,6 +225,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **NAS Docker image ships `cloudflared`.** Free trycloudflare auto-tunnel works without
+  setting `HAVEN_RELAY_HTTP_URL` (hostname still ephemeral on restart). Optional
+  `HAVEN_RELAY_TUNNEL_TOKEN` for named tunnels; `HAVEN_RELAY_NO_TUNNEL=1` for LAN-only.
+
 - **Linked iPhone missing newest Mac messages.** Own-device catch-up was iroh-only every 5 min.
   Host Mac now re-pushes the newest envelopes over silent APNs self-sync as well, on a 90s
   cadence while hosting (3 min otherwise).

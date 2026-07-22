@@ -2,28 +2,21 @@
 # release (no Rust toolchain needed) and runs it. The binary is fully static and bundles
 # its own TLS roots (webpki-roots), so it needs nothing from the OS but a place to store data.
 #
+# Ships official `cloudflared` next to haven-relay so free trycloudflare / named-token tunnels
+# work out of the box (same model as Mac/desktop). Without it, Alpine has no curl at runtime
+# and auto-download fails silently → LAN-only media URL and remote members never get media.
+#
 # Multi-arch: BuildKit/buildx sets TARGETARCH; the LEGACY builder (older NAS Docker) does NOT —
 # there the declared-but-unset ARG tripped `set -u` (exit 2) before wget even ran, so we default
 # it to "" and fall back to `uname -m` on the build machine (NAS builds are native-arch anyway).
-# The default tracks the newest RELEASE, deliberately. It used to pin v0.1.0-beta.23, which meant
-# anyone following the README got a relay from before 1.0 and kept it indefinitely — a relay is
-# invisible when it works, so nothing ever prompted a rebuild. Relay-side protocol fixes (e.g. 1.1.2,
-# where a link granted only ONE circle so a default relay served one and refused the rest) then never
-# reached the boxes that needed them. Pin a specific tag with
+# The default tracks the newest RELEASE, deliberately. Pin a specific tag with
 # `--build-arg HAVEN_RELAY_VERSION=v1.1.2` when you want to hold a version on purpose.
 # ── SOURCE mode ────────────────────────────────────────────────────────────────────────────
 # `--build-arg HAVEN_RELAY_SOURCE=1` builds the relay from GitHub at `HAVEN_RELAY_REF` (a branch,
 # tag or commit sha) instead of downloading a release asset — so a relay fix can be tested on the
 # box that actually has the problem WITHOUT cutting a release for every iteration.
 #
-# It fetches the source itself rather than needing the repo in the build context, because the
-# machine that runs a relay (a NAS) is usually not the machine that has a checkout. Nothing but the
-# Dockerfile has to be present:
-#
 #     docker compose build --build-arg HAVEN_RELAY_SOURCE=1 --build-arg HAVEN_RELAY_REF=main
-#
-# The result is statically linked against musl exactly like the released binary, and
-# `haven-relay version` reports the crate version it was built from.
 #
 # Be warned this is a REAL Rust build (the relay pulls in iroh and the whole net stack): minutes on
 # a fast machine, considerably longer on a NAS CPU, and it wants a couple of GB of RAM. The default
@@ -42,20 +35,15 @@ RUN set -eux; \
     cp core/target/release/haven-relay /haven-relay
 
 FROM alpine:3.20
+# Keep in sync with core/haven-net/src/cfquicktunnel.rs CLOUDFLARED_VERSION.
+ARG CLOUDFLARED_VERSION=2026.7.2
 ARG HAVEN_RELAY_VERSION=latest
 ARG HAVEN_RELAY_SOURCE=0
 ARG TARGETARCH=""
 COPY --from=build /haven-relay /tmp/haven-relay-src
 RUN set -eux; \
-    if [ "$HAVEN_RELAY_SOURCE" = "1" ]; then \
-      install -m 0755 /tmp/haven-relay-src /usr/local/bin/haven-relay; \
-      rm -f /tmp/haven-relay-src; \
-      mkdir -p /data; \
-      /usr/local/bin/haven-relay version; \
-      exit 0; \
-    fi; \
-    rm -f /tmp/haven-relay-src; \
-    apk add --no-cache wget; \
+    apk add --no-cache ca-certificates wget; \
+    update-ca-certificates; \
     arch="$TARGETARCH"; \
     if [ -z "$arch" ]; then \
       case "$(uname -m)" in \
@@ -64,19 +52,40 @@ RUN set -eux; \
         armv7l|armv6l|armhf) arch=arm ;; \
       esac; \
     fi; \
-    case "$arch" in \
-      amd64) asset="haven-relay-x86_64-unknown-linux-musl" ;; \
-      arm64) asset="haven-relay-aarch64-unknown-linux-musl" ;; \
-      arm)   asset="haven-relay-armv7-unknown-linux-musleabihf" ;; \
-      *) echo "unsupported arch: '$arch' (uname -m: $(uname -m)) — set --build-arg TARGETARCH=amd64|arm64|arm" >&2; exit 1 ;; \
-    esac; \
-    if [ "$HAVEN_RELAY_VERSION" = "latest" ]; then \
-      url="https://github.com/blaineam/haven/releases/latest/download/$asset"; \
+    # ── haven-relay binary ──────────────────────────────────────────────────
+    if [ "$HAVEN_RELAY_SOURCE" = "1" ]; then \
+      install -m 0755 /tmp/haven-relay-src /usr/local/bin/haven-relay; \
+      rm -f /tmp/haven-relay-src; \
     else \
-      url="https://github.com/blaineam/haven/releases/download/$HAVEN_RELAY_VERSION/$asset"; \
+      rm -f /tmp/haven-relay-src; \
+      case "$arch" in \
+        amd64) asset="haven-relay-x86_64-unknown-linux-musl" ;; \
+        arm64) asset="haven-relay-aarch64-unknown-linux-musl" ;; \
+        arm)   asset="haven-relay-armv7-unknown-linux-musleabihf" ;; \
+        *) echo "unsupported arch: '$arch' (uname -m: $(uname -m)) — set --build-arg TARGETARCH=amd64|arm64|arm" >&2; exit 1 ;; \
+      esac; \
+      if [ "$HAVEN_RELAY_VERSION" = "latest" ]; then \
+        url="https://github.com/blaineam/haven/releases/latest/download/$asset"; \
+      else \
+        url="https://github.com/blaineam/haven/releases/download/$HAVEN_RELAY_VERSION/$asset"; \
+      fi; \
+      wget -O /usr/local/bin/haven-relay "$url"; \
+      chmod 0755 /usr/local/bin/haven-relay; \
     fi; \
-    wget -O /usr/local/bin/haven-relay "$url"; \
-    chmod 0755 /usr/local/bin/haven-relay; \
+    /usr/local/bin/haven-relay version; \
+    # ── cloudflared (official CF release; Apache-2.0) ───────────────────────
+    # Placed next to haven-relay so ensure_cloudflared finds it via PATH / exe dir
+    # without a runtime download (Alpine has no curl after we strip the build tools).
+    case "$arch" in \
+      amd64) cf_asset="cloudflared-linux-amd64" ;; \
+      arm64) cf_asset="cloudflared-linux-arm64" ;; \
+      arm)   cf_asset="cloudflared-linux-arm" ;; \
+      *) echo "unsupported arch for cloudflared: $arch" >&2; exit 1 ;; \
+    esac; \
+    wget -O /usr/local/bin/cloudflared \
+      "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/${cf_asset}"; \
+    chmod 0755 /usr/local/bin/cloudflared; \
+    /usr/local/bin/cloudflared version; \
     apk del wget; \
     mkdir -p /data
 
@@ -89,9 +98,11 @@ RUN chmod 0755 /entrypoint.sh
 
 # Persisted store (identity + sealed-blob mailbox); HAVEN_RELAY_DIR points the relay at it.
 ENV HAVEN_RELAY_DIR=/data
+# Ensure bundled cloudflared is found even if PATH is minimal.
+ENV PATH="/usr/local/bin:${PATH}"
 VOLUME ["/data"]
-# Media HTTP, iroh DERP (TCP), circle TURN (UDP).
-EXPOSE 8674 3340 3478/udp
+# Media HTTP, iroh DERP (TCP), circle TURN (UDP). Path proxy may use 8675 when fabric is on.
+EXPOSE 8674 8675 3340 3478/udp
 # Runs as root by default — the pragmatic choice for a NAS: it can always read /entrypoint.sh and
 # write /data whether that's a named volume OR a bind mount to a NAS share (a non-root UID usually
 # can't write a bind-mounted share, and UID mapping across NAS platforms is a mess). This is a

@@ -48,26 +48,30 @@ services:
       # re-adopt the relay. Without it the id comes from /data/identity.json and lives only as long
       # as that volume. Put HAVEN_RELAY_SEED=… in your .env next to this file.
       HAVEN_RELAY_SEED: ${HAVEN_RELAY_SEED:-}
-      # ── SET THIS if anyone reaches this relay over the INTERNET. Media cannot move without it.
+      # ── Public media front door ────────────────────────────────────────────
+      # DEFAULT (leave both unset): image ships cloudflared and auto-starts a free
+      # Cloudflare Quick Tunnel (*.trycloudflare.com). Hostname changes on restart;
+      # apps re-learn it via frame 19. Good enough for home NAT without port-forward.
       #
-      # The HTTP interface is not a nicety — it is the ONLY working media transport across NAT. The
-      # iroh blob path drops its datagrams over a pure-relay cross-NAT route, so a blob dial that
-      # must cross a NAT stalls ~30s and dies, WHILE MESSAGING KEEPS WORKING. That asymmetry is what
-      # the failure looks like from the outside: posts and messages arrive, media never does, and
-      # the logs say only "relay put timed out".
+      # Stable custom domain (preferred for always-on NAS):
+      #   HAVEN_RELAY_HTTP_URL=https://relay.example.com
+      #   HAVEN_RELAY_TUNNEL_TOKEN=<Cloudflare Zero Trust install token>
+      #   # Zero Trust origin → http://127.0.0.1:8674 (or path proxy :8675)
       #
-      # The relay advertises this interface by enumerating its own addresses, which under Docker
-      # bridge networking is the CONTAINER's (172.x.y.z) — unreachable by anyone. A LAN address is
-      # no better for a remote member. It must be the address members ACTUALLY use:
-      #   HAVEN_RELAY_HTTP_URL=https://relay.example.com        (reverse proxy / tunnel — preferred)
-      #   HAVEN_RELAY_HTTP_URL=http://203.0.113.10:8674         (port-forward 8674 to this box)
-      #   HAVEN_RELAY_HTTP_URL=http://192.168.1.50:8674         (LAN-only relay, no remote members)
+      # You run the tunnel/proxy yourself (named tunnel on the host, Caddy, etc.):
+      #   HAVEN_RELAY_HTTP_URL=https://relay.example.com
+      #   # do NOT set TUNNEL_TOKEN — relay only announces the URL
       #
-      # Everything it serves is already end-to-end sealed, so plain HTTP exposes ciphertext only —
-      # but a proxy with TLS is still the tidier answer if you have one.
-      # `network_mode: host` fixes ONLY the container-address half; a remote member still needs a
-      # publicly reachable URL here.
+      # LAN-only (disable free tunnel):
+      #   HAVEN_RELAY_NO_TUNNEL=1
+      #   HAVEN_RELAY_HTTP_URL=http://192.168.1.50:8674
+      #
+      # Media cannot cross NAT without a reachable HTTPS (or port-forwarded HTTP) URL.
+      # Under Docker bridge networking the container's 172.x address is unreachable —
+      # free auto-tunnel or an explicit public URL is required for remote members.
       HAVEN_RELAY_HTTP_URL: ${HAVEN_RELAY_HTTP_URL:-}
+      HAVEN_RELAY_TUNNEL_TOKEN: ${HAVEN_RELAY_TUNNEL_TOKEN:-}
+      HAVEN_RELAY_NO_TUNNEL: ${HAVEN_RELAY_NO_TUNNEL:-}
       # Haven fabric (DERP + TURN). Requires a binary built with fabric support
       # (feature/iroh-relay-gossip or a release that includes it). See docs/NAS-FABRIC-RELAY.md.
       # DERP public HTTPS URL (proxy → container :3340). Optional if LAN-only.
@@ -84,6 +88,7 @@ services:
     # network_mode: host
     ports:
       - "8674:8674"          # TCP — plain-HTTP media interface
+      - "8675:8675"          # TCP — path proxy (media + DERP on one origin when fabric on)
       - "3340:3340"          # TCP — iroh DERP (Haven fabric; proxy TLS terminates in front)
       - "3478:3478/udp"      # UDP — circle TURN (WebRTC ICE; not fronted by trycloudflare)
     volumes:

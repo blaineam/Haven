@@ -81,24 +81,43 @@ The startup log shows what the relay is serving:
 > including every DM circle, which is why DMs had no store-and-forward and only arrived when both
 > devices happened to be online at once. Rebuild to fix it.
 
-## If members reach this relay over the internet, set `HAVEN_RELAY_HTTP_URL`
+## Public media URL / cloudflared (shipped in the image)
 
-**Media cannot cross NAT without it.** The plain-HTTP interface is not an optimisation — it is the
-only working media transport between networks. The iroh blob path drops its datagrams over a
-pure-relay cross-NAT route, so a blob dial that must cross a NAT stalls ~30s and dies, *while
-messaging keeps working*. That asymmetry is exactly what the failure looks like from outside: posts
-and messages arrive normally, media never does, and the log says only `relay put timed out`.
+**Media cannot cross NAT without a reachable public URL.** Messaging may still work over iroh;
+media needs the plain-HTTP interface on `:8674` (or the path proxy) advertised as something peers
+can open from the internet.
 
-The relay advertises this interface by enumerating its own addresses — under Docker that is the
-container's `172.x.y.z`, which nobody can reach, and a LAN address is no better for a remote member.
-Set it to the address members actually use:
+The Docker image **ships official `cloudflared`**. Behaviour:
+
+| Env | What happens |
+|---|---|
+| *(default — both unset)* | Free Cloudflare Quick Tunnel (`*.trycloudflare.com`). Auto-starts. Hostname **changes on restart**; apps re-learn via frame 19. |
+| `HAVEN_RELAY_HTTP_URL=https://…` + `HAVEN_RELAY_TUNNEL_TOKEN=…` | Named Cloudflare tunnel (stable domain). Zero Trust origin → `http://127.0.0.1:8674` (or `:8675` path proxy). |
+| `HAVEN_RELAY_HTTP_URL=https://…` only | You run the tunnel/proxy yourself; relay only **announces** the URL. |
+| `HAVEN_RELAY_NO_TUNNEL=1` | No cloudflared. LAN / port-forward only. |
 
 ```sh
-# .env next to docker-compose.yml
-HAVEN_RELAY_HTTP_URL=https://relay.example.com     # reverse proxy / tunnel — preferred
-# HAVEN_RELAY_HTTP_URL=http://203.0.113.10:8674    # or port-forward 8674 to this box
-# HAVEN_RELAY_HTTP_URL=http://192.168.1.50:8674    # LAN-only relay, no remote members
+# .env — free auto tunnel (default): leave HTTP_URL unset
+
+# .env — stable custom domain (recommended for always-on NAS):
+# HAVEN_RELAY_HTTP_URL=https://relay.example.com
+# HAVEN_RELAY_TUNNEL_TOKEN=<install token from Cloudflare Zero Trust>
+
+# .env — LAN only:
+# HAVEN_RELAY_NO_TUNNEL=1
+# HAVEN_RELAY_HTTP_URL=http://192.168.1.50:8674
 ```
+
+On a healthy free-tunnel start you should see:
+
+```text
+▸ cloudflared: /usr/local/bin/cloudflared (…)
+✓ cloudflare quick tunnel: https://….trycloudflare.com
+  public URL : https://….trycloudflare.com
+```
+
+If you only see `reachable at http://<this-host>:8674` with no `public URL`, the tunnel did not
+start — check `/data/logs` inside the container and rebuild so the image includes cloudflared.
 
 then `docker compose up -d`. Within a minute the members' logs should show `http-put OK` instead of
 `relay put timed out`.

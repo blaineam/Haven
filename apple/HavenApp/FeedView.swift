@@ -4158,14 +4158,16 @@ final class FeedStore: ObservableObject {
                     if chunk.isEmpty { break }
                     guard let sealed = try? AES.GCM.seal(chunk, using: ownKey).combined else { break }
                     let frame = Self.chunkFrame(refData: refData, index: index, total: total, sealed: sealed)
-                    // Bulk + rate limiter (~64 KB/s); drop if flooded — resume path refills holes.
-                    if mesh?.broadcast(Data([5]) + frame, class: .bulk) != true {
-                        Thread.sleep(forTimeInterval: 0.050)
-                        // One retry after brief wait for tokens; then stop this pass.
-                        if mesh?.broadcast(Data([5]) + frame, class: .bulk) != true { break }
+                    // Wait for rate tokens — do NOT abort mid-video after one miss (photos fit the
+                    // burst; multi‑MB videos did not and left partial reassemblies).
+                    if mesh?.broadcastWaiting(Data([5]) + frame, class: .bulk, maxWaitMs: 8_000) != true {
+                        HavenLog.net("media serve ref=\(ref.prefix(12)): rate-limit give-up at chunk \(index)/\(total)")
+                        break
                     }
-                    // Stop early if the send backlog is already high — the rest re-pushes next tick.
-                    if (mesh?.sendBacklogHigh ?? false) { break }
+                    // Soft backpressure: pause if Multipeer backlog is high, but keep going.
+                    if mesh?.sendBacklogHigh == true {
+                        Thread.sleep(forTimeInterval: 0.20)
+                    }
                 }
             }
             return
@@ -4190,12 +4192,15 @@ final class FeedStore: ObservableObject {
                     break
                 }
                 let out = Data([5]) + Self.chunkFrame(refData: refData, index: index, total: total, sealed: sealed)
-                if nearby?.broadcast(out, class: .bulk) != true {
-                    try? await Task.sleep(nanoseconds: 50_000_000)
-                    if nearby?.broadcast(out, class: .bulk) != true { break }
+                // Same wait-for-tokens path as own-device serve — friend videos must not abort early.
+                let sent: Bool = await Task.detached {
+                    nearby?.broadcastWaiting(out, class: .bulk, maxWaitMs: 8_000) ?? false
+                }.value
+                if !sent {
+                    HavenLog.net("media serve ref=\(ref.prefix(12)) → \(requesterHex.prefix(8)): rate-limit give-up at chunk \(index)/\(total)")
+                    break
                 }
                 if let node { Task.detached { try? await node.sendToNode(nodeIdHex: requesterHex, payload: out) } }
-                try? await Task.sleep(nanoseconds: 12_000_000)
             }
         }
     }

@@ -32,6 +32,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Nearby videos abort mid-transfer (Apple).** Multipeer rate-limit (~64 KB/s + one 50 ms retry then
+  `break`) finished photos (fit the burst) but **stopped multi‑MB videos after a few chunks**. Media
+  serve now waits for tokens (`broadcastWaiting`), raises the bulk ceiling to ~256 KB/s, and soft-
+  paces backlog instead of hard-aborting. Resume still fills any remaining holes.
+- **Internet media stuck behind a dead NAS while Mac CF is live (Apple).** Media/mailbox dest order
+  preferred pool order, so a long-dead NAS was probed (60s timeout) before the live Mac Cloudflare
+  front door. Destinations are now sorted (own host → public HTTP → proven-alive → others), HTTP
+  GET timeout is 20s, and all-URL failure records `RelayHealth` failure so dead relays drop down the
+  list and stop looking "online" in Storage ("Listed · not proven online").
 - **HTTP live-call lane when iroh dial is dead (Android + iOS).** Call invite / accept / SDP / ICE
   frames fan out under `haven/mailbox/<circle>/__live__/<dest>/` and poll every 2s, so two-way
   video still connects on HTTP-mailbox-only relays (HavenStub, free CF) instead of hanging forever

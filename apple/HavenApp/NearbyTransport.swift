@@ -30,13 +30,15 @@ final class NearbyTransport: NSObject {
 
     // MARK: - Rate limit (token bucket)
 
-    /// Sustained outbound budget — enough for hello/catch-up, far below field flood rates.
-    /// ~64 KB/s sustained, burst 192 KB. Media chunks (32 KB) ≈ 2/s peak.
-    private static let bytesPerSecond: Double = 64 * 1024
-    private static let burstBytes: Double = 192 * 1024
+    /// Sustained outbound budget. Field heat needed a ceiling, but media chunks are 32 KB sealed
+    /// (~34–40 KB frames): at 64 KB/s a multi‑MB video finished the 192 KB burst then **hard-aborted**
+    /// (one 50 ms retry could never refill a full chunk). Photos fit the burst; videos did not.
+    /// ~256 KB/s keeps Multipeer well below the kpkt/s flood while finishing videos in reasonable time.
+    private static let bytesPerSecond: Double = 256 * 1024
+    private static let burstBytes: Double = 512 * 1024
     /// Cap control-ish frames so a hello storm still can't fill the queue.
-    private static let maxFramesPerSecond: Double = 12
-    private static let burstFrames: Double = 24
+    private static let maxFramesPerSecond: Double = 24
+    private static let burstFrames: Double = 48
 
     private let rateLock = NSLock()
     private var byteTokens: Double = NearbyTransport.burstBytes
@@ -168,6 +170,31 @@ final class NearbyTransport: NSObject {
 
         enqueuePaced(frame, waitMs: sendClass == .bulk && frame.count > 4096 ? 12 : 0)
         return true
+    }
+
+    /// Send bulk/media frames **waiting** for rate tokens instead of aborting the stream.
+    /// Media serve must not `break` after a single rate-limit miss — that left requesters with
+    /// partial videos forever (photos still worked: they fit the burst).
+    @discardableResult
+    func broadcastWaiting(_ frame: Data, class sendClass: SendClass = .bulk, maxWaitMs: Int = 8_000) -> Bool {
+        let deadline = Date().addingTimeInterval(Double(maxWaitMs) / 1_000.0)
+        var attempt = 0
+        while Date() < deadline {
+            if broadcast(frame, class: sendClass) { return true }
+            attempt += 1
+            // Sleep long enough to refill roughly this frame (plus a little slack).
+            let need = max(Double(frame.count), 1024)
+            let sec = min(0.35, max(0.04, need / Self.bytesPerSecond))
+            Thread.sleep(forTimeInterval: sec)
+            // Backlog full: wait a bit longer for Multipeer to drain rather than spinning.
+            if sendBacklogHigh {
+                Thread.sleep(forTimeInterval: 0.15)
+            }
+            if attempt == 1 || attempt % 20 == 0 {
+                NSLog("haven nearby: waiting for rate tokens size=%d attempt=%d", frame.count, attempt)
+            }
+        }
+        return false
     }
 
     private func refillTokensLocked() {

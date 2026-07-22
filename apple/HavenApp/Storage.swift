@@ -757,7 +757,10 @@ struct RelaysView: View {
         if e.isS3 { return "S3 bucket · store-and-forward" }
         if isSelf { return "This device · \(backedOff ? "backing off" : "reachable")" }
         if proven { return "Reachable" }
-        return backedOff ? "Unreachable — retrying" : "Not verified recently"
+        // Active-in-pool ≠ online. A powered-off NAS stays listed until you deactivate it;
+        // only provenAlive (recent successful op) paints green.
+        if backedOff { return "Unreachable — retrying (still listed)" }
+        return "Listed · not proven online (may be off)"
     }
 }
 

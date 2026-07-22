@@ -331,9 +331,32 @@ enum SharedStore {
     }
 
     /// The relay node ids serving a circle (the common path) — posts are mirrored to ALL of them
-    /// and read from any (graceful fallback if one is down).
+    /// and read from any (graceful fallback if one is down). Ordered so live public HTTP (Mac CF
+    /// tunnel) is tried before a long-dead NAS that still sits in the active pool.
     private static func relayNodes(_ circleId: String) -> [String] {
-        RelayMailboxStore.shared.relays(forCircle: circleId)
+        preferLiveRelays(RelayMailboxStore.shared.relays(forCircle: circleId))
+    }
+
+    /// Sort relays: own host → public HTTP → proven alive → others; mid-backoff last.
+    private static func preferLiveRelays(_ nodes: [String]) -> [String] {
+        let own = RelayHost.shared.serving ? RelayHost.shared.nodeId.lowercased() : ""
+        func score(_ n: String) -> Int {
+            var s = 0
+            let nl = n.lowercased()
+            if !own.isEmpty, nl == own { s += 1_000 }
+            if let http = RelayMailboxStore.shared.httpInterface(n) {
+                if http.urls.contains(where: { RelayMailboxStore.urlReachableByOthers($0) }) { s += 200 }
+                else { s += 40 }
+            }
+            if RelayHealth.shared.provenAlive(n, withinMs: 900_000) { s += 100 }
+            else if !RelayHealth.shared.available(n) { s -= 80 }
+            return s
+        }
+        return nodes.sorted { a, b in
+            let sa = score(a), sb = score(b)
+            if sa != sb { return sa > sb }
+            return a < b
+        }
     }
     /// First configured relay — for "does this circle have a relay at all" checks.
     private static func relayNode(_ circleId: String) -> String? {
@@ -355,11 +378,13 @@ enum SharedStore {
     /// relays once they return; a friend who shares any of these relays fetches it directly. `allRelays`
     /// is already active-only (deleted/forgotten relays excluded); s3: pseudo-nodes are handled by S3.
     private static func mediaDests(_ circleId: String) -> [String] {
+        // relayNodes already preferLiveRelays; append other known relays the same way.
         var nodes = relayNodes(circleId).filter { !$0.hasPrefix("s3:") }
+        var extra: [String] = []
         for r in RelayMailboxStore.shared.allRelays() where !r.hasPrefix("s3:") && !nodes.contains(r) {
-            nodes.append(r)
+            extra.append(r)
         }
-        return nodes
+        return nodes + preferLiveRelays(extra)
     }
     /// This device's OWN S3 bucket (the owner uses its credentials directly).
     static func ownerS3() -> S3Client? { S3Client(StorageStore.shared) }
@@ -1044,7 +1069,9 @@ enum SharedStore {
     private static func httpGet(_ base: String, _ token: String, _ key: String) async -> Result<Data?, Error> {
         guard let url = httpKeyURL(base, key) else { return .failure(URLError(.badURL)) }
         guard let auth = httpAuth(token, "GET", key, Data()) else { return .failure(URLError(.userAuthenticationRequired)) }
-        var req = URLRequest(url: url, timeoutInterval: 60)
+        // 20s not 60s: a dead NAS / expired trycloudflare was burning a full minute *before*
+        // the live Mac Cloudflare front door was tried, so media looked permanently stuck.
+        var req = URLRequest(url: url, timeoutInterval: 20)
         req.setValue(auth, forHTTPHeaderField: "Authorization")
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
@@ -1106,9 +1133,15 @@ enum SharedStore {
                 for node in mediaDests(cid) {
                     if RelayHost.shared.serving, node == RelayHost.shared.nodeId { continue }
                     guard let http = RelayMailboxStore.shared.httpInterface(node) else { continue }
+                    var anyBase = false
+                    var nodeFailedAll = true
                     for base in http.urls where !httpUrlBad(base) {
+                        anyBase = true
                         switch await httpGet(base, http.token, key(ref)) {
                         case .success(let s):
+                            nodeFailedAll = false
+                            // Reachable over HTTP = proof-of-life (green in Storage).
+                            RelayHealth.shared.recordSuccess(node)
                             if let s {
                                 RelayMailboxStore.shared.markSeen(node)
                                 head = s; chosen = .http(base, http.token); src = "http:\(node.prefix(8))"
@@ -1116,6 +1149,7 @@ enum SharedStore {
                             }
                             httpMissed.insert(node)   // reachable, doesn't hold it
                         case .failure(is RelayForbidden):
+                            nodeFailedAll = false
                             // NOT a miss: never add to `httpMissed`, or the iroh fallback below is
                             // skipped too and a refusal is laundered into "nobody has it".
                             noteRefused(node, "media fetch \(ref.prefix(10))")
@@ -1125,6 +1159,11 @@ enum SharedStore {
                             continue
                         }
                         break   // reached the relay (miss) → don't try its other URLs
+                    }
+                    // Dead front door (stale trycloudflare / offline NAS): backoff so we stop
+                    // burning 60s timeouts before the live Mac tunnel on every restore.
+                    if anyBase && nodeFailedAll {
+                        RelayHealth.shared.recordFailure(node)
                     }
                 }
             }

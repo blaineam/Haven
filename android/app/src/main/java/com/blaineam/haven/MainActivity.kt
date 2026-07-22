@@ -18,6 +18,7 @@ import com.blaineam.haven.core.isVideoUri
 import com.blaineam.haven.core.loadAndDownscale
 import com.blaineam.haven.ui.HavenAppTheme
 import com.blaineam.haven.ui.RootScreen
+import com.blaineam.haven.BuildConfig
 
 class MainActivity : FragmentActivity() {
     // Nearby (Bluetooth/Wi-Fi mesh) is default-ON, but the Settings toggle only requests its runtime
@@ -40,11 +41,75 @@ class MainActivity : FragmentActivity() {
                 RootScreen()
             }
         }
+        // DEBUG matrix QA: retry until HavenNet is ready (init is async from Application).
+        if (BuildConfig.DEBUG) scheduleQaExtras(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         handleShare(intent)
+        if (BuildConfig.DEBUG) scheduleQaExtras(intent)
+    }
+
+    /** Poll until [HavenNet.isReady], then run [handleQaExtras] (DEBUG matrix only). */
+    private fun scheduleQaExtras(intent: Intent?, attempt: Int = 0) {
+        if (!BuildConfig.DEBUG || intent == null) return
+        if (HavenNet.isReady) {
+            handleQaExtras(intent)
+            return
+        }
+        if (attempt > 50) {
+            android.util.Log.w("HavenQA", "gave up waiting for HavenNet.isReady")
+            return
+        }
+        window.decorView.postDelayed({ scheduleQaExtras(intent, attempt + 1) }, 200)
+    }
+
+    /**
+     * Matrix / multi-device QA hooks (DEBUG only). Launch with e.g.:
+     *   adb shell am start -n com.blaineam.haven/.MainActivity \
+     *     --es haven_qa_story 'StoryMtx_120000' \
+     *     --es haven_qa_dm_to 7cef8803… --es haven_qa_dm 'DmMtx_120000'
+     * Avoids fragile camera automation for stories and contact-picker automation for DMs.
+     */
+    private fun handleQaExtras(intent: Intent?) {
+        if (!BuildConfig.DEBUG || intent == null) return
+        android.util.Log.i("HavenQA", "handleQaExtras ready=${HavenNet.isReady}")
+        intent.getStringExtra("haven_qa_story")?.trim()?.takeIf { it.isNotEmpty() }?.let { body ->
+            runCatching { HavenNet.postStory(body, null) }
+            android.util.Log.i("HavenQA", "postStory body=${body.take(40)}")
+        }
+        intent.getStringExtra("haven_qa_post")?.trim()?.takeIf { it.isNotEmpty() }?.let { body ->
+            runCatching { HavenNet.post(HavenNet.activeCircle.value, body) }
+            android.util.Log.i("HavenQA", "post body=${body.take(40)}")
+        }
+        val dmTo = intent.getStringExtra("haven_qa_dm_to")?.trim()?.lowercase().orEmpty()
+        val dmBody = intent.getStringExtra("haven_qa_dm")?.trim().orEmpty()
+        if (dmTo.length == 64 && dmBody.isNotEmpty()) {
+            runCatching {
+                val contact = HavenNet.contacts.firstOrNull { it.idHex.equals(dmTo, ignoreCase = true) }
+                    ?: run {
+                        android.util.Log.w("HavenQA", "dm: no contact ${dmTo.take(8)} — add via qa-peer/HELLO first")
+                        return@runCatching
+                    }
+                val cid = HavenNet.startDm(contact)
+                HavenNet.post(cid, dmBody)
+                android.util.Log.i("HavenQA", "dm to=${dmTo.take(8)} circle=${cid.take(24)} body=${dmBody.take(40)}")
+            }.onFailure { android.util.Log.w("HavenQA", "dm failed: ${it.message}") }
+        }
+        intent.getStringExtra("haven_qa_call_to")?.trim()?.lowercase()?.takeIf { it.length == 64 }?.let { peer ->
+            runCatching {
+                val contact = HavenNet.contacts.firstOrNull { it.idHex.equals(peer, ignoreCase = true) }
+                    ?: run {
+                        android.util.Log.w("HavenQA", "call: no contact ${peer.take(8)}")
+                        return@runCatching
+                    }
+                val name = contact.name.ifBlank { "Friend" }
+                com.blaineam.haven.core.CallManager.startCall(listOf(peer), name)
+                android.util.Log.i("HavenQA", "call_to=${peer.take(8)} name=$name")
+            }.onFailure { android.util.Log.w("HavenQA", "call failed: ${it.message}") }
+        }
     }
 
     /** Ask for the nearby-mesh perms once (per install) when nearby is wanted but not yet granted,

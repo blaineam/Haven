@@ -108,11 +108,26 @@ export default {
       files: ['desktop/ui/app.js'],
       description: 'desktop web UI syntax check',
     },
+
+    // ── Fabric / path-proxy / WebSocket hairpin (Mac host + sim/emu consumers).
+    //    Automated gate for Haven-first policy + free-CF-compatible call hairpin.
+    //    Multi-device (iOS sim / Android emu / Mac) points at the Mac host path proxy;
+    //    this suite proves the server side without requiring a physical device farm.
+    fabric: {
+      type: 'cargo',
+      cwd: 'core',
+      package: 'haven-net',
+      args: ['--test', 'path_proxy_hairpin'],
+      description: 'Path proxy + WebSocket hairpin + Haven-first DERP policy',
+      tags: ['fabric', 'relay'],
+    },
   },
 
   // `soren migrate Haven` runs these (the FFI migration harness rides in both).
   migration: ['migrate', 'core'],
 
   // Suites whose green is the release gate (documented in docs/QA.md).
-  release: { requireGreen: ['core', 'ios', 'macos', 'android', 'desktop', 'desktop-ui'] },
+  release: {
+    requireGreen: ['core', 'fabric', 'ios', 'macos', 'android', 'desktop', 'desktop-ui'],
+  },
 };

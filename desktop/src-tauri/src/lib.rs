@@ -506,18 +506,66 @@ pub fn run_headless() {
         engine.start().await;
         // Attach the relay to the engine's messaging node (ONE iroh node, two ALPNs) — a separate relay
         // node in the same process is what made iroh churn paths unboundedly (the tens-of-GB leak).
+        // `start_hosting` also starts media HTTP + embedded DERP (dual free trycloudflare when auto)
+        // and writes `<relay_dir>/interface.json` (CLI parity).
         let node_hex = engine.start_hosting().await.expect("attach relay host");
 
         let prefs = store::Prefs::load(&paths);
         let members: Vec<String> = prefs.contacts.iter().map(|c| c.id_hex.clone()).collect();
         let link = haven_ffi::make_relay_link(node_hex.clone(), members);
         let pending = engine.list_scheduled().len();
+        let (http_urls, http_token, derp, turn_urls, turn_user, turn_pass) = {
+            let e = prefs.relay_entries.get(&node_hex);
+            let urls = e.map(|r| r.http_urls.clone()).unwrap_or_default();
+            let token = e
+                .map(|r| r.http_token.clone())
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| prefs.relay_http_token.clone());
+            let derp = e.map(|r| r.derp_url.clone()).unwrap_or_default();
+            let turn_urls = e.map(|r| r.turn_urls.clone()).unwrap_or_default();
+            let turn_user = e.map(|r| r.turn_user.clone()).unwrap_or_default();
+            let turn_pass = e.map(|r| r.turn_pass.clone()).unwrap_or_default();
+            (urls, token, derp, turn_urls, turn_user, turn_pass)
+        };
+        let interface_path = dir.join("interface.json");
 
         println!("Haven relay + scheduler running.");
         println!("  relay node id : {node_hex}");
         println!("  relay link    : {link}");
         println!("  storage       : {}", dir.display());
+        if !http_urls.is_empty() {
+            println!("  media URLs    : {}", http_urls.join(", "));
+        }
+        if !derp.is_empty() {
+            println!("  derp public   : {derp}");
+            println!("  (circle clients prefer this DERP over n0 once they learn it)");
+        } else {
+            println!("  derp          : listening locally — set relay_derp_url / public front door for fabric");
+        }
+        if !turn_urls.is_empty() {
+            println!("  turn urls     : {}", turn_urls.join(", "));
+            println!("  turn auth     : user={turn_user}");
+        } else {
+            println!("  turn          : not announced — check UDP 3478 / port-forward");
+        }
         println!("  scheduled     : {pending} message(s) queued — they'll send while this runs");
+        // Same paste blob as `haven-relay run` (also on disk from start_hosting).
+        let mut interface = serde_json::json!({
+            "node": node_hex,
+            "urls": http_urls,
+            "token": http_token,
+            "derp": derp,
+        });
+        if !turn_urls.is_empty() {
+            interface["turn"] = serde_json::json!(turn_urls);
+            interface["turnUser"] = serde_json::json!(turn_user);
+            interface["turnPass"] = serde_json::json!(turn_pass);
+        }
+        if let Ok(line) = serde_json::to_string(&interface) {
+            println!("\n  ── paste this into Haven (Storage → Connect external relay) ──");
+            println!("  {line}");
+            println!("  (also written to {})", interface_path.display());
+        }
         println!("Share the relay link with your circle, then leave this running. Ctrl-C to stop.");
 
         let _ = tokio::signal::ctrl_c().await;

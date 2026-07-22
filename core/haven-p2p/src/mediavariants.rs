@@ -46,15 +46,26 @@ pub fn poster_for<'a>(video: &str, media: &'a [String]) -> Option<&'a str> {
     None
 }
 
-/// Refs to show in a carousel (drop markers + original companions).
+/// Refs to show in a carousel (drop markers, original companions, and video poster stills).
+/// Poster images ride with the video page as its still — not as their own slide — so a super
+/// data-saver tap hits the video page (download + play) instead of zooming a dead still.
 pub fn display_refs(media: &[String]) -> Vec<String> {
     let originals: std::collections::HashSet<&str> = media
         .iter()
         .filter_map(|r| parse_original(r).map(|(_, o)| o))
         .collect();
+    let poster_images: std::collections::HashSet<&str> = media
+        .iter()
+        .filter_map(|r| parse_poster(r).map(|(_, p)| p))
+        .collect();
     media
         .iter()
-        .filter(|r| parse_poster(r).is_none() && parse_original(r).is_none() && !originals.contains(r.as_str()))
+        .filter(|r| {
+            parse_poster(r).is_none()
+                && parse_original(r).is_none()
+                && !originals.contains(r.as_str())
+                && !poster_images.contains(r.as_str())
+        })
         .cloned()
         .collect()
 }
@@ -174,7 +185,7 @@ mod tests {
         assert_eq!(media, expected);
         assert_eq!(
             display_refs(&media),
-            vec![String::from("img_p"), String::from("vid_v")]
+            vec![String::from("vid_v")] // poster still is not its own slide
         );
         let pref = data_saver_prefetch_refs(&media);
         assert!(pref.iter().any(|x| x == "img_p"));

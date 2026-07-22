@@ -15,17 +15,37 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use data_encoding::BASE32_NOPAD;
 use iroh::{
-    endpoint::{presets::N0, Connection, Endpoint},
+    endpoint::{Connection, Endpoint},
     EndpointAddr, EndpointId, SecretKey,
 };
 
 pub mod blobstore;
 pub mod cfquicktunnel;
+pub mod derp;
 pub mod discovery;
+pub mod endpoint_builder;
 pub mod httprelay;
 pub mod livedelivery;
+pub mod path_router;
 pub mod relay;
 pub mod s3tunnel;
+pub mod turn;
+pub mod ws_hairpin;
+
+pub use derp::{DerpConfig, DerpServer, DEFAULT_DERP_BIND};
+pub use endpoint_builder::{
+    active_derp_urls, apply_book_to_policy, apply_derp_urls, derp_urls_from_book, endpoint_policy,
+    haven_endpoint_builder, haven_fabric_active, merge_derp_urls, set_endpoint_policy,
+    EndpointPolicy,
+};
+pub use path_router::{
+    classify_path, PathRouter, PathRouterConfig, RouteKind, DEFAULT_PATH_ROUTER_BIND,
+};
+pub use ws_hairpin::HairpinHub;
+pub use turn::{
+    host_from_http_url, parse_turn_urls, suggest_turn_urls, turn_url, TurnConfig, TurnServer,
+    DEFAULT_TURN_BIND, DEFAULT_TURN_REALM, DEFAULT_TURN_USER,
+};
 
 const ALPN: &[u8] = b"haven/social/0";
 const MAX_PAYLOAD: usize = 256 * 1024 * 1024;
@@ -74,9 +94,46 @@ struct RelayCfg {
 /// at all times. That constant path churn floods our own home-relay connection so badly that INBOUND
 /// relay-path handshakes never complete (proven: a quiet scratch node accepts relay dials in ~200ms
 /// while the churning app times out every dial at 30s), on top of the CPU/battery/warn-spam cost.
+///
+/// Field log (iPhone 17 Pro Max, app open ~5–14 min): single UDP4 flows of ~350k rx + ~339k tx
+/// packets (~0.5 GB) and thermal HIGH_TEMP_ACTIVE / multi-% battery burn — same family as the
+/// historical path-discovery / home-relay-flap leak. Backoff must outlast the app sync tick.
 struct DialGate {
     fails: u32,
     until: std::time::Instant,
+}
+
+/// Cooldown after `fails` consecutive dial failures / short-lived flaps.
+///
+/// Mobile starts higher and caps longer so a 20–30s sync fan-out cannot re-arm doomed dials as
+/// soon as a short floor expires (UDP path-probe storm). Desktop is still exponential but a bit
+/// snappier for interactive "friend came online" recovery.
+fn dial_backoff_secs(fails: u32) -> u64 {
+    let f = fails.max(1);
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        // 2m, 4m, 8m, 16m, 30m…
+        (120u64 << (f.min(5) - 1)).min(1_800)
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        // 60s, 2m, 4m, 8m, 15m…
+        (60u64 << (f.min(5) - 1)).min(900)
+    }
+}
+
+/// Record a dial failure / short-lived flap on `id` (shared by connect-err and read_loop).
+fn strike_dial_gate(gate: &mut HashMap<EndpointId, DialGate>, id: EndpointId) {
+    let g = gate.entry(id).or_insert(DialGate {
+        fails: 0,
+        until: std::time::Instant::now(),
+    });
+    g.fails = g.fails.saturating_add(1);
+    g.until = std::time::Instant::now() + std::time::Duration::from_secs(dial_backoff_secs(g.fails));
+    if gate.len() > 512 {
+        let now = std::time::Instant::now();
+        gate.retain(|_, g| g.until > now);
+    }
 }
 
 /// A peer-to-peer node.
@@ -137,10 +194,11 @@ impl Node {
         // rides this path (it uses the relay HTTP / S3 transports), so cross-NAT reliability no
         // longer depends on suppressing direct paths — keep them, and let the LAN be the LAN.
         // Multipath stays on (min 13) so a connection can hold a relay + a direct path at once.
-        let endpoint = Endpoint::builder(N0)
+        // All transport policy (n0 vs circle DERP map, multipath) goes through one chokepoint —
+        // see `endpoint_builder`. Do not call `Endpoint::builder(N0)` directly here.
+        let endpoint = haven_endpoint_builder()
             .secret_key(SecretKey::from_bytes(&secret))
             .alpns(vec![ALPN.to_vec(), blobstore::BLOB_ALPN.to_vec()])
-            .transport_config(iroh::endpoint::QuicTransportConfig::builder().max_concurrent_multipath_paths(16).build())
             .bind()
             .await
             .ah()?;
@@ -488,9 +546,10 @@ impl Node {
             }
         }
         // Per-peer backoff: an id that just failed to connect is NOT redialed until its cooldown
-        // expires (30s doubling to 10min). A live connection resets it; ids that are permanently
-        // dead (account ids under device-seed transport) settle at one cheap attempt per 10min
-        // instead of a continuous handshake storm that drowns our own relay path.
+        // expires (`dial_backoff_secs` — mobile 2m…30m, desktop 1m…15m). A live connection that
+        // proves healthy (≥30s) clears it; permanently dead ids (account ids under device-seed
+        // transport) settle at one cheap attempt per cooldown instead of a continuous handshake
+        // storm that drowns our own relay path / burns phone battery.
         // (…or, if the winner FAILED, its strike below is now visible and gates the whole queue.)
         {
             let gate = lock(&self.dial_gate);
@@ -519,17 +578,10 @@ impl Node {
                 Ok(conn)
             }
             Err(e) => {
-                let mut gate = lock(&self.dial_gate);
-                let g = gate.entry(id).or_insert(DialGate { fails: 0, until: std::time::Instant::now() });
-                g.fails = g.fails.saturating_add(1);
-                let secs = (30u64 << (g.fails.min(5) - 1)).min(600); // 30s, 60s, … capped at 10min
-                g.until = std::time::Instant::now() + std::time::Duration::from_secs(secs);
-                if gate.len() > 512 {
-                    // Bound the map (stale entries for ids we no longer dial).
-                    let now = std::time::Instant::now();
-                    gate.retain(|_, g| g.until > now);
+                {
+                    let mut gate = lock(&self.dial_gate);
+                    strike_dial_gate(&mut gate, id);
                 }
-                drop(gate);
                 // Bound the single-flight map the same way: entries nobody currently holds
                 // (strong_count == 1 → only the map's own Arc) are stale and safe to drop —
                 // a racing sender simply re-inserts a fresh lock.
@@ -589,8 +641,20 @@ impl Node {
         self.send(addr, payload).await
     }
 
+    /// Fully close this endpoint (accept loop exits, UDP released) so a later
+    /// [`Node::spawn`] with the **same secret** is safe. iroh same-key dual endpoints
+    /// are a known path-churn scar — callers must await this before rebinding.
+    pub async fn shutdown(&self) {
+        self.disable_relay();
+        self.blob_clients.lock().await.clear();
+        lock(&self.conns).clear();
+        if !self.endpoint.is_closed() {
+            self.endpoint.close().await;
+        }
+    }
+
     pub async fn close(self) {
-        self.endpoint.close().await;
+        self.shutdown().await;
     }
 }
 
@@ -810,7 +874,7 @@ async fn accept_loop(
 
 /// Read every uni stream on a connection as one message, for the connection's life.
 /// `dial_gate` (outbound connections only) makes the per-peer backoff flap-aware: a connection
-/// that dies within 30s counts as a FAILURE (strike → 30s..10min cooldown), one that lives
+/// that dies within 30s counts as a FAILURE (strike → `dial_backoff_secs`), one that lives
 /// longer clears the gate. Without this, connect-success reset the backoff every time, so a
 /// flapping peer was redialed each sync tick and every short-lived connection fed iroh's
 /// path-churn loop (the +2.8GB-in-100s runaway).
@@ -849,10 +913,9 @@ async fn read_loop(
         if started.elapsed() >= std::time::Duration::from_secs(30) {
             gate.remove(&id); // proved healthy — a future dial starts fresh
         } else {
-            let g = gate.entry(id).or_insert(DialGate { fails: 0, until: std::time::Instant::now() });
-            g.fails = g.fails.saturating_add(1);
-            let secs = (30u64 << (g.fails.min(5) - 1)).min(600);
-            g.until = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+            // Same aggressive schedule as connect-err — a flapping peer used to re-enter the
+            // dial set every ~30s and feed open_path churn (jetsam / heat).
+            strike_dial_gate(&mut gate, id);
         }
     }
     let mut map = lock(&conns);

@@ -72,7 +72,11 @@ struct StorageSettingsView: View {
                         Label("Relaying for your circles · \(String(relay.nodeId.prefix(8)))…", systemImage: "checkmark.circle.fill")
                             .font(.caption).foregroundStyle(.green)
                     } else if relay.enabled {
-                        Label("Starting…", systemImage: "clock").font(.caption).foregroundStyle(.secondary)
+                        Label(FeedStore.shared.transportNode == nil
+                              ? "Waiting for network…"
+                              : "Starting…",
+                              systemImage: "clock")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                     // Mac-only: keep the relay always-on by relaunching Haven at login. Catalyst
                     // can't run a true headless/menu-bar agent, so the best achievable is to
@@ -260,11 +264,11 @@ struct RelayFrontDoorControls: View {
     private var help: String {
         switch tunnel.frontDoorMode {
         case "manual":
-            return "Manual: you run cloudflared, Caddy, nginx, Tailscale Funnel, etc. against http://127.0.0.1:8674. Haven only announces the HTTPS URL — works even if free Cloudflare tunnels are blocked."
+            return "Manual: point your proxy at http://127.0.0.1:8675 (path router: media + DERP) or :8674/:3340 separately. Haven only announces the HTTPS URL(s) — works even if free Cloudflare tunnels are blocked."
         case "bundled":
-            return "Custom domain: paste domain + Zero Trust install token. In the Cloudflare dashboard, set the public hostname service to http://127.0.0.1:8674."
+            return "Custom domain: paste media domain + Zero Trust install token. CF origin → http://127.0.0.1:8675 (path router fronts media + DERP). Optional sibling DERP URL if you dual-route without the path router."
         default:
-            return "Auto: free ephemeral trycloudflare.com when the relay starts. Hostname changes if cloudflared restarts — use Custom domain or Manual for a stable always-on relay."
+            return "Auto: free ephemeral trycloudflare.com for media + a second free tunnel for DERP fabric. Hostnames change on restart — use Custom domain or Manual for stable always-on."
         }
     }
 
@@ -278,7 +282,7 @@ struct RelayFrontDoorControls: View {
             Text("Manual / external tunnel").tag("manual")
         }
         if tunnel.frontDoorMode != "auto" {
-            TextField("Public URL (https://relay.example.com)", text: Binding(
+            TextField("Media public URL (https://relay.example.com)", text: Binding(
                 get: { tunnel.configuredPublicURL },
                 set: { v in
                     tunnel.configuredPublicURL = v
@@ -287,6 +291,31 @@ struct RelayFrontDoorControls: View {
             ))
             .autocorrectionDisabled().havenAutocap(.never)
             .textContentType(.URL)
+            // Optional dedicated DERP fabric URL when media and DERP use different public hosts.
+            TextField("DERP fabric URL (optional)", text: Binding(
+                get: { UserDefaults.standard.string(forKey: "haven.relay.derpURL") ?? "" },
+                set: { v in
+                    let t = v.trimmingCharacters(in: .whitespacesAndNewlines)
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                    if t.isEmpty {
+                        UserDefaults.standard.removeObject(forKey: "haven.relay.derpURL")
+                    } else {
+                        UserDefaults.standard.set(t, forKey: "haven.relay.derpURL")
+                    }
+                    // Announce immediately when hosting; process fabric policy updates for peers.
+                    // Local DERP listen is already up — public URL is gossip only.
+                    if relay.serving, !relay.nodeId.isEmpty {
+                        RelayMailboxStore.shared.setDerpUrl(relay.nodeId, url: t.isEmpty ? nil : t)
+                        FeedStore.shared.reannounceOwnRelay()
+                    }
+                }
+            ))
+            .autocorrectionDisabled().havenAutocap(.never)
+            .textContentType(.URL)
+            Text("Leave DERP empty to reuse the media URL (path router unifies both on :8675). Sibling hostname example: https://derp.example.com → http://127.0.0.1:3340.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         if tunnel.frontDoorMode == "bundled" {
             SecureField("Cloudflare tunnel install token", text: Binding(
@@ -323,7 +352,11 @@ struct CircleMailboxSection: View {
                 Label("This device is relaying · \(String(relay.nodeId.prefix(8)))…", systemImage: "checkmark.circle.fill")
                     .font(.caption).foregroundStyle(.green)
             } else if relay.enabled {
-                Label("Starting…", systemImage: "clock").font(.caption).foregroundStyle(.secondary)
+                Label(FeedStore.shared.transportNode == nil
+                      ? "Waiting for network…"
+                      : "Starting…",
+                      systemImage: "clock")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             #if os(macOS)
             if relay.enabled {
@@ -393,28 +426,33 @@ struct AdvancedStorageView: View {
                               systemImage: linkCopied ? "checkmark.circle.fill" : "doc.on.doc")
                             .foregroundStyle(linkCopied ? Color.green : HavenTheme.pink)
                     }
-                    TextField("2. Paste the daemon's node id (64 hex)", text: $relayNodeInput)
+                    TextField("2. Paste node id (64 hex) or interface JSON", text: $relayNodeInput)
                         .autocorrectionDisabled().havenAutocap(.never)
                         .font(.system(.footnote, design: .monospaced))
                     Toggle("Use for all my circles (now & future)", isOn: $applyToAll).tint(HavenTheme.pink)
                     Button {
-                        let id = relayNodeInput.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                        guard id.count == 64, id.allSatisfy({ $0.isHexDigit }) else { return }
+                        let raw = relayNodeInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let okBare = raw.count == 64 && raw.allSatisfy({ $0.isHexDigit })
+                        let okJson = raw.hasPrefix("{") && raw.contains("node")
+                        guard okBare || okJson else { return }
                         let targets = applyToAll ? FeedStore.shared.circles.map(\.id) : [cid]
-                        FeedStore.shared.adoptRelayNode(id, circleIds: targets, setDefault: applyToAll)
+                        FeedStore.shared.adoptRelayNode(raw, circleIds: targets, setDefault: applyToAll)
                         relayAdopted = true; relayNodeInput = ""
                     } label: {
                         Label(applyToAll ? "Connect for all my circles" : "Connect for this circle",
                               systemImage: "antenna.radiowaves.left.and.right")
                     }
-                    .disabled(relayNodeInput.trimmingCharacters(in: .whitespacesAndNewlines).count != 64)
+                    .disabled({
+                        let t = relayNodeInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                        return !(t.count == 64 || (t.hasPrefix("{") && t.contains("node")))
+                    }())
                     if relayAdopted {
                         Label("Connected — used as the relay", systemImage: "checkmark.circle.fill")
                             .font(.caption).foregroundStyle(.green)
                     }
                 } header: { Text("Connect an external relay") }
                 footer: {
-                    Text("Running `haven-relay` on a Mac, Linux box, or a spare device? Copy the link above and start it with `haven-relay run --link <link>`, then paste back the node id it shows (`haven-relay id`). No cloud, no credentials.")
+                    Text("Running `haven-relay` on a Mac, Linux box, or a spare device? Copy the link above and start it with `haven-relay run --link <link>`, then paste back the interface JSON it prints (or the bare node id from `haven-relay id`). The JSON also carries media URL + Haven fabric DERP so n0 is not required. No cloud, no credentials.")
                 }
 
                 Section {
@@ -591,7 +629,13 @@ struct RelaysView: View {
                         Label("Relaying · \(String(relay.nodeId.prefix(8)))…", systemImage: "checkmark.circle.fill")
                             .font(.caption).foregroundStyle(.green)
                     } else if relay.enabled {
-                        Label("Starting…", systemImage: "clock").font(.caption).foregroundStyle(.secondary)
+                        // Distinct copy so a stuck wait for the messaging node is diagnosable
+                        // (was just "Starting…" forever after a failed fabric rebind).
+                        Label(FeedStore.shared.transportNode == nil
+                              ? "Waiting for network…"
+                              : "Starting…",
+                              systemImage: "clock")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                     RelayRetentionControls()
                     // Mac hosts need front-door controls here too — this is the path Circle settings
@@ -776,11 +820,11 @@ struct AddRelaySheet: View {
                         footer: { Text("For a `haven-relay` daemon or the Docker relay: copy this link, start the relay with it (`haven-relay run --link <link>`), then paste back the node id it prints below.") }
 
                         Section {
-                            TextField("Relay node id (64 hex)", text: $nodeInput)
+                            TextField("Node id (64 hex) or interface JSON", text: $nodeInput)
                                 .autocorrectionDisabled().havenAutocap(.never)
                                 .font(.system(.footnote, design: .monospaced))
                         } header: { Text("Haven relay") }
-                        footer: { Text("Paste the node id printed by a `haven-relay` daemon (`haven-relay id`), or another device that's acting as a relay. Connects over iroh — a live P2P relay.") }
+                        footer: { Text("Paste the interface JSON (or bare node id) printed by a `haven-relay` daemon, or another device that's acting as a relay. JSON includes media + Haven DERP fabric so the circle can drop n0.") }
                     } else {
                         Section {
                             TextField("Endpoint (e.g. s3.amazonaws.com)", text: $endpoint).autocorrectionDisabled().havenAutocap(.never)
@@ -816,10 +860,17 @@ struct AddRelaySheet: View {
     private func add() {
         let circles = FeedStore.shared.circles.map(\.id)
         if kind == .haven {
-            let id = nodeInput.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            FeedStore.shared.adoptRelayNode(id, circleIds: circles, setDefault: makeDefault)
-            if !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                RelayMailboxStore.shared.rename(id, to: name)
+            let raw = nodeInput.trimmingCharacters(in: .whitespacesAndNewlines)
+            FeedStore.shared.adoptRelayNode(raw, circleIds: circles, setDefault: makeDefault)
+            // Rename uses the resolved node hex (JSON paste stores under "node").
+            var hex = raw.lowercased()
+            if raw.hasPrefix("{"),
+               let obj = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
+               let n = obj["node"] as? String {
+                hex = n.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            }
+            if !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, hex.count == 64 {
+                RelayMailboxStore.shared.rename(hex, to: name)
             }
         } else {
             let cfg = S3Config(endpoint: endpoint, region: region.isEmpty ? "us-east-1" : region,

@@ -20,6 +20,7 @@
 //!   haven-relay id [--data DIR]      # print this relay's node id (for the app's storage config)
 
 mod config;
+mod derp;
 mod link;
 mod qr;
 mod runner;
@@ -99,6 +100,27 @@ fn print_help() {
          --no-http                 disable the HTTP interface\n  \
          Requests need the bearer token printed at start (persisted in <data>/http_token).\n  \
          On first tunnel use, cloudflared is downloaded next to this binary (or into <data>/bin).\n\n\
+         HAVEN FABRIC / iroh DERP (default ON for local-disk — replaces n0 when members use your link):\n  \
+         --derp                    force-enable embedded iroh-relay (default on for --local)\n  \
+         --no-derp                 disable embedded DERP (n0 remains the only NAT fallback)\n  \
+         --derp-bind <addr>        local iroh-relay bind (default 127.0.0.1:3340)\n  \
+         --derp-url <https://…>    public HTTPS URL for DERP (defaults to media front-door URL)\n  \
+         PATH PROXY (default ON with HTTP — one origin routes by path):\n  \
+         --proxy-bind <addr>       local path-proxy bind (default 127.0.0.1:8675)\n  \
+         --no-proxy                disable path proxy (tunnel media :8674 only; dual-origin DERP)\n  \
+           /k/* /l/* /t/*          → media mailbox\n  \
+           /relay /derp /ping      → fabric (iroh DERP; call-signaling hairpin)\n  \
+           /  /_haven              → status JSON (route table)\n  \
+         Point cloudflared / nginx at the proxy bind. Sibling --derp-url skips the proxy.\n  \
+         Peers learn URLs from the circle announce after someone pastes the relay link / hosts once.\n\n\
+         CIRCLE TURN / WebRTC ICE (default ON for local-disk — preferred media relay for calls):\n  \
+         --turn                    force-enable embedded TURN (default on for local-disk)\n  \
+         --no-turn                 disable TURN (clients use STUN + host ICE; signaling still uses fabric)\n  \
+         --turn-bind <addr>        local UDP bind (default 0.0.0.0:3478)\n  \
+         --turn-public-ip <ip>     IP advertised in ALLOCATE (defaults to LAN / media host)\n  \
+         --turn-url <turn:host:p>  public TURN URI to announce (repeatable)\n  \
+         Auth: username `haven` + long-lived secret in <data>/turn_token (like http_token).\n  \
+         UDP cannot ride free trycloudflare — port-forward 3478 or use LAN for local peers.\n\n\
          RETENTION (your choice; default = keep media forever, prune mailbox after 30 days):\n  \
          --media-max-age-days N    prune media not touched for N days (0 = keep forever)\n  \
          --media-max-bytes SIZE    cap the media store, oldest deleted first (50G, 500M; 0 = unbounded)\n  \

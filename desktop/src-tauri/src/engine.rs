@@ -252,9 +252,17 @@ pub struct Engine {
     app: StdMutex<Option<AppHandle>>,
     node: StdMutex<Option<Arc<HavenNode>>>,
     relay_host: StdMutex<Option<Arc<RelayServerHandle>>>,
-    /// Live cloudflared process (quick or named). Dropped when hosting stops. Manual front door
-    /// never sets this — operator runs the tunnel externally.
+    /// Live cloudflared process (quick or named) for the **public front door** (media, or
+    /// path-router when fabric is unified). Dropped when hosting stops. Manual never sets this.
     quick_tunnel: StdMutex<Option<haven_net::cfquicktunnel::QuickTunnel>>,
+    /// Second free trycloudflare only when dual-origin DERP (sibling hostname / path-router off).
+    derp_tunnel: StdMutex<Option<haven_net::cfquicktunnel::QuickTunnel>>,
+    /// Embedded iroh-relay (DERP) — separate listen socket; drop stops the fabric role.
+    derp_server: StdMutex<Option<haven_net::DerpServer>>,
+    /// Local path router: one origin → media + DERP by path (`/relay` → fabric).
+    path_router: StdMutex<Option<haven_net::PathRouter>>,
+    /// Embedded circle TURN for WebRTC ICE — own UDP socket (not a second Endpoint).
+    turn_server: StdMutex<Option<haven_net::TurnServer>>,
     prefs: StdMutex<Prefs>,
     dyn_state: StdMutex<DynState>,
     scheduled: StdMutex<crate::scheduled::ScheduledStore>,
@@ -295,6 +303,19 @@ pub struct Engine {
     /// A roster is ~30 KB and this ran against every relay on every sync tick regardless of change —
     /// which is what produced `relay put timed out` / ConnectionLost. See `publish_device_roster`.
     roster_published: StdMutex<HashMap<String, (u64, u64)>>,
+    /// Live iroh soft-rebind when Haven fabric DERP URLs are learned mid-session (RelayMap is bind-time).
+    fabric_rebind: StdMutex<FabricRebindState>,
+}
+
+/// Tracks messaging-node fabric rebind so we never dual-bind the same key or flap forever.
+#[derive(Default)]
+struct FabricRebindState {
+    /// True while stop+start is running (blocks concurrent rebind).
+    in_flight: bool,
+    /// Debounce generation — each schedule bumps; only the latest gen runs after 2s.
+    debounce_gen: u64,
+    /// DERP URLs the live messaging `HavenNode` was last bound with (empty = n0-only bind).
+    bound_derp_urls: Vec<String>,
 }
 
 /// Why a relay HTTP request failed. The two demand OPPOSITE remedies — a dead endpoint should be
@@ -455,6 +476,21 @@ impl Engine {
             crate::roster::DeviceRoster::device_name(),
             now_ms() / 1000,
         );
+        // Matrix QA: optional peer public bundle at `qa-peer-bundle.bin` (parity with Android
+        // `ingestQaPeerBundleIfPresent`). Lets circle crypto form when HELLO cannot dial and the
+        // Mac is a second device of the iOS account that needs the Android friend in members.
+        if let Ok(bundle) = std::fs::read(paths.root.join("qa-peer-bundle.bin")) {
+            if bundle.len() >= 32 {
+                if let Ok(hex) = social.add_contact_bundle("default".into(), bundle) {
+                    let name = std::fs::read_to_string(paths.root.join("qa-peer-name.txt"))
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "QA Peer".into());
+                    eprintln!("qa-peer-bundle ingested contact={} name={name}", &hex[..hex.len().min(8)]);
+                }
+            }
+        }
         // Switch-Flip 1.0.7: turn the new crypto ON (seed-drop retirement + MLS keying). Both are
         // GATED in-core — inert (byte-identical to 1.0.6) until a circle is fully capable — and NOT
         // persisted, so they're set here after `register_device` and re-applied every launch in
@@ -498,6 +534,10 @@ impl Engine {
             node: StdMutex::new(None),
             relay_host: StdMutex::new(None),
             quick_tunnel: StdMutex::new(None),
+            derp_tunnel: StdMutex::new(None),
+            derp_server: StdMutex::new(None),
+            path_router: StdMutex::new(None),
+            turn_server: StdMutex::new(None),
             prefs: StdMutex::new(prefs),
             dyn_state: StdMutex::new(dyn_state),
             scheduled: StdMutex::new(scheduled),
@@ -521,6 +561,7 @@ impl Engine {
             roster_needed: StdMutex::new(std::collections::HashSet::new()),
             last_heal_ms: StdMutex::new(0),
             roster_published: StdMutex::new(HashMap::new()),
+            fabric_rebind: StdMutex::new(FabricRebindState::default()),
         }))
     }
 
@@ -599,6 +640,10 @@ impl Engine {
             node: StdMutex::new(None),
             relay_host: StdMutex::new(None),
             quick_tunnel: StdMutex::new(None),
+            derp_tunnel: StdMutex::new(None),
+            derp_server: StdMutex::new(None),
+            path_router: StdMutex::new(None),
+            turn_server: StdMutex::new(None),
             prefs: StdMutex::new(prefs),
             dyn_state: StdMutex::new(dyn_state),
             scheduled: StdMutex::new(scheduled),
@@ -622,6 +667,7 @@ impl Engine {
             roster_needed: StdMutex::new(std::collections::HashSet::new()),
             last_heal_ms: StdMutex::new(0),
             roster_published: StdMutex::new(HashMap::new()),
+            fabric_rebind: StdMutex::new(FabricRebindState::default()),
         }))
     }
 
@@ -920,6 +966,10 @@ impl Engine {
         // Switch-Flip 1.0.7 §§2-5: re-apply the non-persisted crypto switches every launch (master
         // keying/retire + per-circle creator pin + DM live-lane). Cheap, gated in-core.
         self.reapply_crypto_switches();
+        // Haven fabric BEFORE bind: iroh takes RelayMap at Endpoint construct time. Applying after
+        // HavenNode::start left the main node on n0 for the whole session even when prefs already
+        // knew circle DERP URLs. Late learns still call refresh_haven_fabric for the next bind.
+        self.refresh_haven_fabric();
         let listener: Arc<dyn InboundListener> = Arc::new(NodeListener {
             engine: Arc::downgrade(self),
         });
@@ -929,6 +979,9 @@ impl Engine {
         match HavenNode::start(device_seed, listener).await {
             Ok(node) => {
                 *self.node.lock().unwrap() = Some(node);
+                // Record which fabric map this bind used so mid-session learns can soft-rebind only
+                // when the set actually changes (not on every refresh).
+                self.fabric_rebind.lock().unwrap().bound_derp_urls = haven_net::active_derp_urls();
                 self.dyn_state.lock().unwrap().started = true;
                 self.emit_changed();
                 self.sync_with_contacts();
@@ -3931,11 +3984,15 @@ impl Engine {
         let Some(opened) = self.social.open_circle_media_sender(circle_id.clone(), sealed) else { return };
         let announcer_hex = opened.sender_hex.to_lowercase(); // authenticated envelope sender (account id)
         let text = String::from_utf8_lossy(&opened.data).trim().to_string();
-        // Extended announce: JSON {node, urls, token} also carries the relay's plain-HTTP media
-        // interface (the reliable cross-NAT path). Legacy announces are the bare 64-hex id.
+        // Extended announce: JSON {node, urls, token, derp, turn, turnUser, turnPass}.
+        // Legacy announces are the bare 64-hex id.
         let mut announced_urls: Vec<String> = Vec::new();
         let mut announced_token = String::new();
         let mut announced_added_at: u64 = 0;
+        let mut announced_derp: Option<String> = None;
+        let mut announced_turn: Vec<String> = Vec::new();
+        let mut announced_turn_user = String::new();
+        let mut announced_turn_pass = String::new();
         let node_hex = if text.starts_with('{') {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return };
             announced_urls = v["urls"]
@@ -3950,6 +4007,23 @@ impl Engine {
                 .unwrap_or_default();
             announced_token = v["token"].as_str().unwrap_or_default().to_string();
             announced_added_at = v["addedAt"].as_u64().unwrap_or(0);
+            if let Some(d) = v["derp"].as_str() {
+                let d = d.trim().trim_end_matches('/');
+                if d.starts_with("http") {
+                    announced_derp = Some(d.to_string());
+                }
+            }
+            announced_turn = haven_net::parse_turn_urls(&v["turn"]);
+            announced_turn_user = v["turnUser"].as_str().unwrap_or_default().to_string();
+            announced_turn_pass = v["turnPass"].as_str().unwrap_or_default().to_string();
+            // Fallback: reuse media token as TURN password when user/pass omitted.
+            if announced_turn_user.is_empty() && !announced_turn.is_empty() {
+                announced_turn_user = haven_net::DEFAULT_TURN_USER.to_string();
+            }
+            if announced_turn_pass.is_empty() && !announced_turn.is_empty() && !announced_token.is_empty()
+            {
+                announced_turn_pass = announced_token.clone();
+            }
             v["node"].as_str().unwrap_or_default().trim().to_lowercase()
         } else {
             text.to_lowercase()
@@ -4012,6 +4086,17 @@ impl Engine {
             if !announced_urls.is_empty() && !announced_token.is_empty() {
                 p.set_relay_http(&node_hex, announced_urls.clone(), announced_token.clone());
             }
+            if let Some(derp) = announced_derp {
+                p.set_relay_derp(&node_hex, &derp);
+            }
+            if !announced_turn.is_empty() {
+                p.set_relay_turn(
+                    &node_hex,
+                    announced_turn,
+                    &announced_turn_user,
+                    &announced_turn_pass,
+                );
+            }
             let _ = p.save(&self.paths);
             // Clear any stale backoff so a just-reactivated relay is retried immediately.
             if was_suppressed_or_inactive {
@@ -4019,6 +4104,7 @@ impl Engine {
                 self.relay_health.lock().unwrap().remove(&node_hex);
             }
         }
+        self.refresh_haven_fabric();
         self.backfill_mailbox(&circle_id).await;
         self.poll_mailbox().await;
     }
@@ -4128,7 +4214,7 @@ impl Engine {
         // should use it — that is the fast local path and it genuinely works. Remote members discard it
         // on receipt (`relay_http_reachable` keeps a private address only when we are on that /24), so
         // the useless case is filtered by the side that can actually tell.
-        let (mode, configured_public, tunnel_token, auto_tunnel) = {
+        let (mode, configured_public, tunnel_token, auto_tunnel, configured_derp) = {
             let p = self.prefs.lock().unwrap();
             let mode = p.front_door_mode();
             let pub_url = p.relay_public_url.trim();
@@ -4139,24 +4225,80 @@ impl Engine {
             };
             let tok = p.relay_cf_tunnel_token.trim().to_string();
             let tok = if tok.is_empty() { None } else { Some(tok) };
-            (mode, pub_url, tok, p.auto_tunnel())
+            let d = p.relay_derp_url.trim().trim_end_matches('/').to_string();
+            let derp = if d.is_empty() { None } else { Some(d) };
+            (mode, pub_url, tok, p.auto_tunnel(), derp)
         };
+
+        // Start DERP first so the path router can unify media + fabric on one public origin.
+        let derp_local = self.spawn_desktop_derp_local().await;
+
+        // Sibling hostname = dedicated derp URL that differs from media public URL.
+        let sibling_derp: Option<String> = configured_derp.as_ref().and_then(|d| {
+            let is_sibling = configured_public
+                .as_ref()
+                .map(|m| m != d)
+                .unwrap_or(true);
+            if is_sibling {
+                Some(d.clone())
+            } else {
+                None
+            }
+        });
+        let mut front_port = port;
+        let mut path_routed = false;
+        if let Some(dport) = derp_local {
+            if sibling_derp.is_none() {
+                let rcfg = haven_net::PathRouterConfig {
+                    bind: haven_net::DEFAULT_PATH_ROUTER_BIND.into(),
+                    media_backend: format!("127.0.0.1:{port}"),
+                    derp_backend: format!("127.0.0.1:{dport}"),
+                    http_token: token.clone(),
+                };
+                match haven_net::PathRouter::spawn(&rcfg).await {
+                    Ok(Some(router)) => {
+                        front_port = router.local_port();
+                        path_routed = true;
+                        log::info!(
+                            "path router on {} — single origin media+DERP",
+                            router.local_addr
+                        );
+                        *self.path_router.lock().unwrap() = Some(router);
+                    }
+                    Ok(None) => {}
+                    Err(e) => log::warn!("path router failed: {e:#}"),
+                }
+            }
+        }
+
         let mut urls = Vec::new();
-        // Manual = announce-only (operator's tunnel/proxy). Bundled/Auto may spawn cloudflared.
+        // Manual = announce-only. Bundled/Auto may spawn cloudflared → path router when unified.
         match Self::start_desktop_front_door(
-            port,
+            front_port,
             mode,
             configured_public.as_deref(),
             tunnel_token.as_deref(),
             auto_tunnel,
         ) {
             Ok(DeskFrontDoor::Spawned(t)) => {
-                log::info!("relay {} tunnel: {}", t.kind, t.public_url);
+                log::info!(
+                    "relay {} tunnel{}: {}",
+                    t.kind,
+                    if path_routed { " (media+DERP path router)" } else { " (media)" },
+                    t.public_url
+                );
                 urls.push(t.public_url.clone());
                 *self.quick_tunnel.lock().unwrap() = Some(t);
             }
             Ok(DeskFrontDoor::AnnounceOnly(u)) => {
-                log::info!("relay manual front door (no cloudflared): {u}");
+                log::info!(
+                    "relay manual front door (no cloudflared): {u}{}",
+                    if path_routed {
+                        format!(" — point proxy at http://127.0.0.1:{front_port}")
+                    } else {
+                        String::new()
+                    }
+                );
                 urls.push(u);
             }
             Ok(DeskFrontDoor::LanOnly) => {
@@ -4166,7 +4308,6 @@ impl Engine {
             }
             Err(e) => {
                 log::warn!("relay front door unavailable: {e}");
-                // Manual URL still announced if we have one (operator's external path).
                 if let Some(u) = configured_public {
                     if let Ok(n) = haven_net::cfquicktunnel::normalize_public_url(&u) {
                         urls.push(n);
@@ -4178,14 +4319,243 @@ impl Engine {
                 }
             }
         }
-        log::info!("relay http on :{port} urls={urls:?}");
-        if urls.is_empty() {
+        log::info!("relay http on :{port} front=:{front_port} path_routed={path_routed} urls={urls:?}");
+
+        // Resolve public DERP URL (single-origin shares media URL so call signaling hairpins).
+        let derp_url = self
+            .finalize_desktop_derp_public(
+                path_routed,
+                urls.first().cloned(),
+                configured_derp,
+                sibling_derp,
+            )
+            .await;
+
+        let turn_info = self.start_desktop_turn(&urls).await;
+
+        // Always record HTTP when we have URLs; DERP can land even on LAN-only media
+        // (local DERP still useful, public DERP only if we resolved a URL).
+        if urls.is_empty() && derp_url.is_none() && turn_info.is_none() {
             return;
         }
         let mut p = self.prefs.lock().unwrap();
-        if p.set_relay_http(node_hex, urls, token) {
+        let mut changed = if !urls.is_empty() {
+            p.set_relay_http(node_hex, urls.clone(), token.clone())
+        } else {
+            false
+        };
+        if let Some(ref d) = derp_url {
+            changed |= p.set_relay_derp(node_hex, d);
+        }
+        if let Some((ref turn_urls, ref user, ref pass)) = turn_info {
+            changed |= p.set_relay_turn(node_hex, turn_urls.clone(), user, pass);
+        }
+        if changed {
             let _ = p.save(&self.paths);
         }
+        drop(p);
+        self.refresh_haven_fabric();
+        self.write_host_interface_json(
+            node_hex,
+            &urls,
+            &token,
+            derp_url.as_deref(),
+            turn_info.as_ref(),
+        );
+    }
+
+    /// Paste-ready interface blob (CLI parity) so headless / operators can copy media + DERP + TURN.
+    fn write_host_interface_json(
+        &self,
+        node_hex: &str,
+        urls: &[String],
+        token: &str,
+        derp: Option<&str>,
+        turn: Option<&(Vec<String>, String, String)>,
+    ) {
+        let mut interface = serde_json::json!({
+            "node": node_hex,
+            "urls": urls,
+            "token": token,
+            "derp": derp.unwrap_or(""),
+        });
+        if let Some((turn_urls, user, pass)) = turn {
+            if !turn_urls.is_empty() {
+                interface["turn"] = serde_json::json!(turn_urls);
+                interface["turnUser"] = serde_json::json!(user);
+                interface["turnPass"] = serde_json::json!(pass);
+            }
+        }
+        let path = self.paths.relay_dir().join("interface.json");
+        if let Ok(bytes) = serde_json::to_vec_pretty(&interface) {
+            let _ = std::fs::write(&path, bytes);
+            log::info!("relay interface written to {}", path.display());
+        }
+    }
+
+    /// Bind local iroh-relay only; public URL is filled after the front door / path router is up.
+    async fn spawn_desktop_derp_local(self: &Arc<Self>) -> Option<u16> {
+        let dcfg = haven_net::DerpConfig {
+            enabled: true,
+            bind: haven_net::DEFAULT_DERP_BIND.into(),
+            public_url: String::new(),
+        };
+        match haven_net::DerpServer::spawn(&dcfg).await {
+            Ok(Some(srv)) => {
+                let port = srv.local_port();
+                log::info!("iroh DERP fabric on {}", srv.local_addr);
+                *self.derp_server.lock().unwrap() = Some(srv);
+                Some(port)
+            }
+            Ok(None) => None,
+            Err(e) => {
+                log::warn!("iroh DERP failed to start: {e:#}");
+                None
+            }
+        }
+    }
+
+    /// Set public DERP URL for frame-19: path-routed single origin shares media URL (call hairpin);
+    /// sibling hostname uses configured URL; free dual-origin only when path router is off.
+    async fn finalize_desktop_derp_public(
+        self: &Arc<Self>,
+        path_routed: bool,
+        media_public: Option<String>,
+        configured_derp: Option<String>,
+        sibling_derp: Option<String>,
+    ) -> Option<String> {
+        let mut guard = self.derp_server.lock().unwrap();
+        let Some(srv) = guard.as_mut() else {
+            return None;
+        };
+        if let Some(sib) = sibling_derp {
+            srv.public_url = sib;
+        } else if path_routed {
+            if let Some(u) = media_public {
+                srv.public_url = u;
+            }
+        } else if let Some(d) = configured_derp {
+            srv.public_url = d;
+        } else if let Some(u) = media_public.clone() {
+            if !u.contains("trycloudflare") {
+                srv.public_url = u;
+            }
+        }
+        if srv.public_url.is_empty() {
+            let port = srv.local_port();
+            drop(guard);
+            match Self::start_desktop_derp_quick_tunnel(port) {
+                Ok(t) => {
+                    log::info!("relay quick tunnel (DERP dual-origin): {}", t.public_url);
+                    let url = t.public_url.clone();
+                    *self.derp_tunnel.lock().unwrap() = Some(t);
+                    if let Some(srv) = self.derp_server.lock().unwrap().as_mut() {
+                        srv.public_url = url.clone();
+                    }
+                    return Some(url);
+                }
+                Err(e) => {
+                    log::warn!("DERP quick tunnel failed: {e:#}");
+                    return None;
+                }
+            }
+        }
+        let out = if srv.public_url.is_empty() {
+            None
+        } else {
+            Some(srv.public_url.clone())
+        };
+        if path_routed {
+            if let Some(ref u) = out {
+                log::info!(
+                    "DERP public={u} (single-tunnel fabric — call signaling hairpins over HTTPS /relay)"
+                );
+            }
+        }
+        out
+    }
+
+    /// Start embedded TURN for WebRTC ICE. Own UDP socket — not a second iroh Endpoint.
+    /// Returns `(urls, user, pass)` when running.
+    async fn start_desktop_turn(
+        self: &Arc<Self>,
+        media_urls: &[String],
+    ) -> Option<(Vec<String>, String, String)> {
+        let secret = {
+            let mut p = self.prefs.lock().unwrap();
+            if p.relay_turn_token.is_empty() {
+                use rand::RngCore;
+                let mut bytes = [0u8; 16];
+                rand::rngs::OsRng.fill_bytes(&mut bytes);
+                p.relay_turn_token = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                let _ = p.save(&self.paths);
+            }
+            p.relay_turn_token.clone()
+        };
+        let lan = Self::primary_lan_ip();
+        let public_ip = lan
+            .clone()
+            .or_else(|| {
+                media_urls
+                    .iter()
+                    .find_map(|u| haven_net::host_from_http_url(u))
+                    .filter(|h| !h.contains("trycloudflare.com"))
+            })
+            .unwrap_or_else(|| "127.0.0.1".into());
+        let public_urls =
+            haven_net::suggest_turn_urls(media_urls, lan.as_deref(), 3478);
+        let tcfg = haven_net::TurnConfig {
+            enabled: true,
+            bind: haven_net::DEFAULT_TURN_BIND.into(),
+            public_ip,
+            secret,
+            public_urls,
+        };
+        match haven_net::TurnServer::spawn(&tcfg).await {
+            Ok(Some(srv)) => {
+                log::info!(
+                    "circle TURN on {} urls={:?}",
+                    srv.local_addr,
+                    srv.public_urls
+                );
+                let out = (
+                    srv.public_urls.clone(),
+                    srv.username.clone(),
+                    srv.password.clone(),
+                );
+                *self.turn_server.lock().unwrap() = Some(srv);
+                Some(out)
+            }
+            Ok(None) => None,
+            Err(e) => {
+                log::warn!("circle TURN failed to start: {e:#}");
+                None
+            }
+        }
+    }
+
+    fn start_desktop_derp_quick_tunnel(
+        port: u16,
+    ) -> anyhow::Result<haven_net::cfquicktunnel::QuickTunnel> {
+        use haven_net::cfquicktunnel::{
+            ensure_cloudflared, executable_dir, QuickTunnel, TunnelSpec,
+        };
+        let local = format!("http://127.0.0.1:{port}");
+        let mut search = Vec::new();
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(d) = exe.parent() {
+                search.push(d.to_path_buf());
+            }
+        }
+        if let Ok(d) = executable_dir() {
+            search.push(d);
+        }
+        let install = search
+            .first()
+            .cloned()
+            .unwrap_or_else(|| std::env::temp_dir().join("haven-cloudflared"));
+        let bin = ensure_cloudflared(&search, &install, true)?;
+        QuickTunnel::start_spec(&bin, TunnelSpec::Quick { local_http: local })
     }
 
     /// Locate bundled/PATH cloudflared and apply front-door mode (manual never spawns).
@@ -4226,13 +4596,15 @@ impl Engine {
     }
 
     /// Public HTTPS front door settings (device-local prefs).
-    pub fn relay_public_settings(&self) -> (String, String, bool, String) {
+    /// Returns `(media_url, tunnel_token, auto_tunnel, front_door, derp_url)`.
+    pub fn relay_public_settings(&self) -> (String, String, bool, String, String) {
         let p = self.prefs.lock().unwrap();
         (
             p.relay_public_url.clone(),
             p.relay_cf_tunnel_token.clone(),
             p.auto_tunnel(),
             p.front_door_mode().as_str().to_string(),
+            p.relay_derp_url.clone(),
         )
     }
 
@@ -4242,6 +4614,7 @@ impl Engine {
         tunnel_token: String,
         auto_tunnel: bool,
         front_door: String,
+        derp_url: String,
     ) {
         let mut p = self.prefs.lock().unwrap();
         p.relay_public_url = public_url.trim().trim_end_matches('/').to_string();
@@ -4249,6 +4622,7 @@ impl Engine {
         p.relay_auto_tunnel = Some(auto_tunnel);
         let mode = haven_net::cfquicktunnel::FrontDoorMode::parse(&front_door);
         p.relay_front_door = Some(mode.as_str().to_string());
+        p.relay_derp_url = derp_url.trim().trim_end_matches('/').to_string();
         let _ = p.save(&self.paths);
     }
 
@@ -4315,28 +4689,253 @@ impl Engine {
         Some(ip.to_string())
     }
 
-    /// The frame-19 announce body for one relay: the legacy bare 64-hex node id, or — once the
-    /// relay's plain-HTTP interface is known — JSON `{"node":hex,"urls":[…],"token":…}` so members
-    /// also learn the reliable cross-NAT media path. A legacy receiver ignores the JSON form.
+    /// The frame-19 announce body for one relay: bare 64-hex, or JSON
+    /// `{"node","urls","token","derp","turn","turnUser","turnPass"}` when media/fabric/TURN known.
     fn relay_announce_body(&self, hex: &str) -> Vec<u8> {
         let p = self.prefs.lock().unwrap();
         let added_at = p.relay_entries.get(hex).map(|e| e.added_at_ms).unwrap_or(0);
         let http = p.relay_http(hex);
+        let entry = p.relay_entries.get(hex);
+        let derp = entry
+            .map(|e| e.derp_url.clone())
+            .filter(|u| !u.is_empty());
+        let turn_urls = entry.map(|e| e.turn_urls.clone()).unwrap_or_default();
+        let turn_user = entry.map(|e| e.turn_user.clone()).unwrap_or_default();
+        let turn_pass = entry.map(|e| e.turn_pass.clone()).unwrap_or_default();
         drop(p);
         // Always carry the adoption timestamp so receivers can LWW a stale tombstone. Use the JSON form
-        // whenever we have EITHER an HTTP interface or a non-zero adoption stamp; a legacy receiver ignores
+        // whenever we have HTTP, DERP, TURN, or a non-zero adoption stamp; a legacy receiver ignores
         // JSON it can't read as a bare hex (wrong length), so mixed versions stay compatible.
-        if http.is_some() || added_at > 0 {
+        if http.is_some() || derp.is_some() || !turn_urls.is_empty() || added_at > 0 {
             let mut obj = serde_json::json!({ "node": hex, "addedAt": added_at });
             if let Some((urls, token)) = http {
                 obj["urls"] = serde_json::json!(urls);
                 obj["token"] = serde_json::json!(token);
+            }
+            if let Some(d) = derp {
+                obj["derp"] = serde_json::json!(d);
+            }
+            if !turn_urls.is_empty() {
+                obj["turn"] = serde_json::json!(turn_urls);
+                if !turn_user.is_empty() {
+                    obj["turnUser"] = serde_json::json!(turn_user);
+                }
+                if !turn_pass.is_empty() {
+                    obj["turnPass"] = serde_json::json!(turn_pass);
+                }
             }
             if let Ok(json) = serde_json::to_vec(&obj) {
                 return json;
             }
         }
         hex.as_bytes().to_vec()
+    }
+
+    /// Apply known circle DERP URLs as the process-wide Haven fabric (n0 off when non-empty)
+    /// and surface them to the WebView for WebRTC ICE policy.
+    ///
+    /// Safe anytime (launch, frame-19 learn, adopt, host DERP start). Process policy updates
+    /// immediately. When fabric becomes active (or the DERP URL set changes) while a messaging
+    /// node is already running, schedules a debounced soft rebind so the next bind uses Haven
+    /// RelayMap without requiring a full app restart.
+    pub fn refresh_haven_fabric(self: &Arc<Self>) {
+        let urls = self.prefs.lock().unwrap().all_derp_urls();
+        haven_net::apply_derp_urls(urls.clone());
+        let target = if haven_net::haven_fabric_active() {
+            haven_net::active_derp_urls()
+        } else {
+            Vec::new()
+        };
+        let node_up = self.node.lock().unwrap().is_some();
+        let (bound, in_flight) = {
+            let st = self.fabric_rebind.lock().unwrap();
+            (st.bound_derp_urls.clone(), st.in_flight)
+        };
+        // Soft-rebind only when we have a non-empty fabric the live node was not bound with.
+        // Empty → n0: do not rebind mid-session (disruptive; cold start is fine).
+        let need_rebind = node_up && !target.is_empty() && target != bound && !in_flight;
+        let rebind_pending = need_rebind || in_flight;
+        self.emit_haven_fabric(&urls, rebind_pending);
+        if need_rebind {
+            self.schedule_fabric_rebind();
+        }
+    }
+
+    fn emit_haven_fabric(&self, urls: &[String], rebind_pending: bool) {
+        let (turn_urls, turn_user, turn_pass) = self.prefs.lock().unwrap().all_turn_ice();
+        if let Some(app) = self.app.lock().unwrap().as_ref() {
+            let _ = app.emit(
+                "haven-fabric",
+                serde_json::json!({
+                    "derpUrls": urls,
+                    "turnUrls": turn_urls,
+                    "turnUser": turn_user,
+                    "turnPass": turn_pass,
+                    "rebindPending": rebind_pending,
+                }),
+            );
+        }
+    }
+
+    /// Debounce 2s so flapping frame-19 / multi-relay learn coalesces into one stop+start.
+    fn schedule_fabric_rebind(self: &Arc<Self>) {
+        let gen = {
+            let mut st = self.fabric_rebind.lock().unwrap();
+            st.debounce_gen = st.debounce_gen.wrapping_add(1);
+            st.debounce_gen
+        };
+        let eng = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if eng.fabric_rebind.lock().unwrap().debounce_gen != gen {
+                return; // superseded by a newer schedule
+            }
+            eng.rebind_transport_for_fabric().await;
+        });
+    }
+
+    /// Stop the messaging node cleanly, re-apply fabric policy, start again with the same device
+    /// seed, re-attach relay host if we were hosting, re-authorize membership and re-announce.
+    ///
+    /// Guarantees: old endpoint is fully shut down before the new spawn (no same-key dual endpoint).
+    pub async fn rebind_transport_for_fabric(self: &Arc<Self>) {
+        {
+            let mut st = self.fabric_rebind.lock().unwrap();
+            if st.in_flight {
+                return;
+            }
+            st.in_flight = true;
+        }
+        let urls = self.prefs.lock().unwrap().all_derp_urls();
+        self.emit_haven_fabric(&urls, true);
+
+        let outcome = self.rebind_transport_for_fabric_inner().await;
+
+        let urls_after = self.prefs.lock().unwrap().all_derp_urls();
+        match outcome {
+            Ok(()) => {
+                log::info!(
+                    "fabric rebind ok — messaging node on Haven RelayMap ({})",
+                    haven_net::active_derp_urls().join(", ")
+                );
+                self.fabric_rebind.lock().unwrap().in_flight = false;
+                self.emit_haven_fabric(&urls_after, false);
+                self.emit_changed();
+                // Learns that arrived while we were rebound: schedule another pass if the map moved.
+                self.refresh_haven_fabric();
+            }
+            Err(e) => {
+                log::error!("fabric rebind failed: {e:#}");
+                self.fabric_rebind.lock().unwrap().in_flight = false;
+                // Still pending so UI can hint; a later refresh or next launch recovers.
+                self.emit_haven_fabric(&urls_after, true);
+            }
+        }
+    }
+
+    async fn rebind_transport_for_fabric_inner(self: &Arc<Self>) -> Result<()> {
+        let target = {
+            haven_net::apply_derp_urls(self.prefs.lock().unwrap().all_derp_urls());
+            if haven_net::haven_fabric_active() {
+                haven_net::active_derp_urls()
+            } else {
+                Vec::new()
+            }
+        };
+        if target.is_empty() {
+            return Ok(()); // nothing to rebind onto
+        }
+        {
+            let bound = self.fabric_rebind.lock().unwrap().bound_derp_urls.clone();
+            if bound == target {
+                return Ok(()); // already on this map (debounce race)
+            }
+        }
+        if self.node.lock().unwrap().is_none() {
+            // Not started yet — next `start()` applies fabric before bind.
+            self.fabric_rebind.lock().unwrap().bound_derp_urls = target;
+            return Ok(());
+        }
+
+        // Detach relay host first (same endpoint as messaging — must not outlive the node).
+        // Keep cloudflared + embedded DERP: they are separate sockets and still front the same ports.
+        let was_hosting = {
+            let mut g = self.relay_host.lock().unwrap();
+            if let Some(h) = g.take() {
+                h.disable();
+                true
+            } else {
+                false
+            }
+        };
+
+        // Drop warm relay clients (bound to the old endpoint).
+        self.relay_clients.lock().await.clear();
+
+        // Fully close the old endpoint before same-seed spawn.
+        let old = self.node.lock().unwrap().take();
+        if let Some(old) = old {
+            old.shutdown().await;
+            // Brief pause so OS UDP / iroh internals finish teardown.
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+
+        // Policy again (may have learned more during debounce), then bind.
+        haven_net::apply_derp_urls(self.prefs.lock().unwrap().all_derp_urls());
+        let listener: Arc<dyn InboundListener> = Arc::new(NodeListener {
+            engine: Arc::downgrade(self),
+        });
+        let device_seed = self.roster.lock().unwrap().device_seed.clone();
+        let node = HavenNode::start(device_seed, listener)
+            .await
+            .map_err(|e| anyhow::anyhow!("HavenNode::start after fabric rebind: {e}"))?;
+        *self.node.lock().unwrap() = Some(node);
+        self.fabric_rebind.lock().unwrap().bound_derp_urls = haven_net::active_derp_urls();
+        self.dyn_state.lock().unwrap().started = true;
+
+        if was_hosting {
+            if let Err(e) = self.reattach_hosting_after_rebind().await {
+                log::error!("fabric rebind: re-attach relay host failed: {e:#}");
+                self.dyn_state.lock().unwrap().hosting = false;
+            }
+        }
+
+        // Re-push membership + announce so peers learn we are back on fabric.
+        self.authorize_membership();
+        self.reannounce_own_relay();
+        // Warm path again after a brief settle.
+        self.sync_with_contacts();
+        Ok(())
+    }
+
+    /// Re-attach in-process mailbox to the new messaging node without re-spawning tunnels/DERP.
+    async fn reattach_hosting_after_rebind(self: &Arc<Self>) -> Result<()> {
+        let Some(node) = self.node.lock().unwrap().clone() else {
+            return Err(anyhow::anyhow!("messaging node missing after rebind"));
+        };
+        let dir = self.paths.relay_dir();
+        std::fs::create_dir_all(&dir).ok();
+        let (max_age_days, max_bytes) = self.prefs.lock().unwrap().relay_media_limits();
+        let handle = RelayServerHandle::attach_with_limits(
+            node,
+            dir.to_string_lossy().to_string(),
+            max_age_days,
+            max_bytes,
+        );
+        let token = self.prefs.lock().unwrap().relay_http_token.clone();
+        if !token.is_empty() {
+            // Prefer the well-known port so existing cloudflared front doors keep working.
+            if let Err(e) = handle.serve_http("0.0.0.0:8674".into(), token.clone()).await {
+                log::warn!("reattach http :8674 failed ({e}); trying ephemeral");
+                let _ = handle
+                    .serve_http("0.0.0.0:0".into(), token)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("reattach http: {e}"))?;
+            }
+        }
+        *self.relay_host.lock().unwrap() = Some(handle);
+        self.dyn_state.lock().unwrap().hosting = true;
+        Ok(())
     }
 
     /// A contact's signed device roster (frame 27): learn which DEVICE ids to dial/seal for them,
@@ -4384,6 +4983,10 @@ impl Engine {
         *self.relay_host.lock().unwrap() = None;
         // Drop kills cloudflared; the trycloudflare hostname dies with it.
         *self.quick_tunnel.lock().unwrap() = None;
+        *self.derp_tunnel.lock().unwrap() = None;
+        *self.derp_server.lock().unwrap() = None;
+        *self.path_router.lock().unwrap() = None;
+        *self.turn_server.lock().unwrap() = None;
         self.dyn_state.lock().unwrap().hosting = false;
         self.emit_changed();
     }
@@ -4709,9 +5312,45 @@ impl Engine {
     }
 
     /// Adopt a relay node for all circles (ADDED to the redundant set, not replacing existing
-    /// relays) + tell contacts via frame 19. Adopt several for redundancy.
+    /// relays) + tell contacts via frame 19. Accepts a bare 64-hex id **or** the JSON interface
+    /// blob printed by `haven-relay` (`{"node","urls","token","derp","turn",…}`) so one paste
+    /// learns media HTTP + Haven DERP fabric + TURN and re-announces them to the circle.
     pub async fn adopt_relay(self: &Arc<Self>, node_hex: String) {
-        let hex = node_hex.trim().to_lowercase();
+        let raw = node_hex.trim();
+        let mut hex = raw.to_lowercase();
+        let mut urls: Vec<String> = Vec::new();
+        let mut token = String::new();
+        let mut derp = String::new();
+        let mut turn_urls: Vec<String> = Vec::new();
+        let mut turn_user = String::new();
+        let mut turn_pass = String::new();
+        if raw.starts_with('{') {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else { return };
+            hex = v["node"].as_str().unwrap_or_default().trim().to_lowercase();
+            urls = v["urls"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|u| u.as_str())
+                        .filter(|u| u.starts_with("http"))
+                        .map(|u| u.to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            token = v["token"].as_str().unwrap_or_default().to_string();
+            if let Some(d) = v["derp"].as_str() {
+                derp = d.trim().trim_end_matches('/').to_string();
+            }
+            turn_urls = haven_net::parse_turn_urls(&v["turn"]);
+            turn_user = v["turnUser"].as_str().unwrap_or_default().to_string();
+            turn_pass = v["turnPass"].as_str().unwrap_or_default().to_string();
+            if turn_user.is_empty() && !turn_urls.is_empty() {
+                turn_user = haven_net::DEFAULT_TURN_USER.to_string();
+            }
+            if turn_pass.is_empty() && !turn_urls.is_empty() && !token.is_empty() {
+                turn_pass = token.clone();
+            }
+        }
         if hex.len() != 64 {
             return;
         }
@@ -4722,8 +5361,18 @@ impl Engine {
             p.relay_clear_forget(&hex);        // explicit adoption clears the deletion stamp + records re-add
             p.ensure_relay_entry(&hex, None, false, true);
             p.set_relay_added_at(&hex, 0);     // fresh adoption stamp = now()
+            if !urls.is_empty() && !token.is_empty() {
+                p.set_relay_http(&hex, urls, token);
+            }
+            if !derp.is_empty() {
+                p.set_relay_derp(&hex, &derp);
+            }
+            if !turn_urls.is_empty() {
+                p.set_relay_turn(&hex, turn_urls, &turn_user, &turn_pass);
+            }
             let _ = p.save(&self.paths);
         }
+        self.refresh_haven_fabric();
         for c in self.social.circles() {
             {
                 let mut p = self.prefs.lock().unwrap();

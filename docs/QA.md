@@ -58,8 +58,50 @@ npm link`), it's just `soren run Haven`.
 | `android` | gradle | `testDebugUnitTest` always; `connectedDebugAndroidTest` after reusing/booting the `haven_phone` AVD (skipped, never hung, if it can't boot) | JDK 17, Android SDK/NDK, the Rust `.so` from `android/build-rust.sh` |
 | `desktop` | cargo | the Tauri Rust side (`desktop/src-tauri`) | Rust + (Linux) the WebKitGTK build deps |
 | `desktop-ui` | node-check | `desktop/ui/app.js` syntax gate | node |
+| `fabric` | cargo | Path proxy + WebSocket hairpin + Haven-first DERP policy (`haven-net` integration) | Rust |
 | `vm-linux` | utm | **launches** the `haven-linux` UTM VM and confirms it reaches `started` (reuses an already-running VM) | UTM + the VM present |
 | `vm-windows` | utm | **launches** the `Windows` UTM VM and confirms `started` | UTM + the VM present |
+
+### Multi-device fabric (Mac + iOS Simulator + Android Emulator)
+
+#### What Soren **does** prove (release gate)
+
+| Suite | Actually exercises |
+|---|---|
+| `core` / `fabric` / `desktop` | Rust unit + path-proxy/hairpin **integration** (no UI) |
+| `android` | JVM unit + **instrumented** tests on AVD (installs *test* APK; may not leave Haven as your launcher app) |
+| `ios` | XCUITest on simulator (launches Haven for those tests only) |
+| `macos` | **xcodebuild build only** — does **not** launch the Mac app |
+
+**Soren green is not “three devices held a mesh call through a Haven relay.”** Treating it as that is a false positive.
+
+#### Live multi-device smoke (required before claiming device QA)
+
+```sh
+# Installs + launches real Haven on emu + sim + Mac, starts path proxy, screenshots:
+Scripts/live-multi-device-smoke.sh
+# Artifacts under build/live-smoke-*/
+```
+
+This script **fails** if Haven is not running on a surface. It still **skips** full mesh call automation (`CALL_E2E` not wired).
+
+Also:
+
+```sh
+cargo test -p haven-net --test path_proxy_hairpin
+Scripts/fabric-multi-device-qa.sh
+node ../_shared/soren/soren.mjs run Haven fabric
+```
+
+**Pointing clients at the Mac host’s path proxy:**
+
+| Client | Path-proxy base |
+|---|---|
+| iOS Simulator | `http://127.0.0.1:8675` |
+| Android Emulator | `http://10.0.2.2:8675` |
+| Physical device | `http://<Mac-LAN-IP>:8675` |
+
+Probe: `curl -s http://127.0.0.1:8675/_haven`. Hairpin: `wss://…/webrtc/hairpin`.
 
 `soren migrate Haven` runs `migrate` + `core` (both carry the migration harness).
 Locally verified: `soren run Haven core` → **182 passed, 0 failed**.

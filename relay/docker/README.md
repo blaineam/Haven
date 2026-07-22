@@ -166,12 +166,25 @@ id is unchanged and nobody has to re-adopt it.
 > takes precedence over `/data/identity.json`, so the same node id survives restarts, image rebuilds,
 > and even a wiped volume. Keep the seed secret — it *is* the relay's identity.
 
+## Haven fabric (DERP + TURN) — n0 / Google only as fallback
+
+Full walkthrough: **[`docs/NAS-FABRIC-RELAY.md`](../../docs/NAS-FABRIC-RELAY.md)**.
+
+| Port | Role |
+|---|---|
+| TCP **8674** | Media mailbox (HTTPS via your proxy) |
+| TCP **3340** | iroh DERP fabric |
+| UDP **3478** | WebRTC TURN (not via free trycloudflare) |
+
+In `.env` set `HAVEN_RELAY_HTTP_URL`, `HAVEN_RELAY_DERP_URL`, `HAVEN_RELAY_TURN_URL`,
+`HAVEN_RELAY_TURN_PUBLIC_IP`, then paste **`/data/interface.json`** (not only the node id) into
+the app. Until a release ships fabric, build with
+`HAVEN_RELAY_SOURCE=1` and `HAVEN_RELAY_REF=feature/iroh-relay-gossip`.
+
 ## Notes
 
-- **Ports:** `8674` is the plain-HTTP media interface — the fast path peers use to pull media when
-  they can reach this box (same LAN, or via a port-forward/reverse-proxy you set up). The relay
-  also works with **no** inbound port at all: it dials out over Haven Net (iroh/QUIC + DERP) and is
-  reachable through that even behind NAT.
+- **Ports:** `8674` media, `3340` DERP, `3478/udp` TURN. Messaging can still fall back to n0 if
+  DERP is not public; fabric is the path that makes **your** box primary.
 - **Storage location:** to store the sealed-blob mailbox on a specific NAS share instead of a Docker
   volume, swap the volume line in `docker-compose.yml` for a bind mount, e.g.
   `- /volume1/docker/haven-relay:/data`.

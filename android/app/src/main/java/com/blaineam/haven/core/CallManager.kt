@@ -99,10 +99,35 @@ object CallManager {
      *  those may re-ring a session we've already left. */
     private val endedSessions = HashMap<String, Long>()
 
-    private val iceServers = listOf(
-        PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
-        PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer(),
-    )
+    /**
+     * Haven-first ICE — parity with Apple [HavenFabric].
+     * Prefs `haven.fabric.derpUrls` + `turnUrls`/`turnUser`/`turnPass`.
+     *
+     * Fabric + TURN → circle TURN.
+     * Fabric without TURN → empty (host + WebSocket hairpin; **no Google STUN**).
+     * No fabric → Google STUN as fallback only.
+     * Call *signaling* rides sealed iroh over fabric DERP / direct QUIC.
+     */
+    private fun iceServers(): List<PeerConnection.IceServer> {
+        val prefs = appContext.getSharedPreferences("haven.fabric", android.content.Context.MODE_PRIVATE)
+        val derp = prefs.getStringSet("derpUrls", emptySet()).orEmpty()
+        val turn = prefs.getStringSet("turnUrls", emptySet()).orEmpty()
+        val user = prefs.getString("turnUser", "") ?: ""
+        val pass = prefs.getString("turnPass", "") ?: ""
+        val policy = FabricIcePolicy.resolve(derp, turn, user, pass)
+        if (policy.turnUrls.isNotEmpty()) {
+            return listOf(
+                PeerConnection.IceServer.builder(policy.turnUrls)
+                    .setUsername(policy.turnUser)
+                    .setPassword(policy.turnPass)
+                    .createIceServer(),
+            )
+        }
+        if (policy.hostOnly) return emptyList()
+        return FabricIcePolicy.googleStunUrls.map {
+            PeerConnection.IceServer.builder(it).createIceServer()
+        }
+    }
 
     fun init(context: Context, myNodeHex: String) {
         if (this::appContext.isInitialized) { myHex = myNodeHex; return }
@@ -473,7 +498,7 @@ object CallManager {
         WebRTCPeer(
             peerHex = peer,
             factory = ensureFactory(),
-            iceServers = iceServers,
+            iceServers = iceServers(),
             localAudio = audioTrack,
             localVideo = localVideo,
             onLocalSdp = { type, sdp ->

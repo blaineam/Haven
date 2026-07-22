@@ -36,10 +36,9 @@ enum SilentSwitch {
 
     // MARK: - Continuous monitoring
 
-    /// How often the switch is re-probed while the app is in the foreground. Flipping the physical switch
-    /// takes effect within this window rather than requiring the app to be force-quit and relaunched.
-    private static let pollSeconds = 2.0
-
+    /// Continuous re-probe was cut: each probe wakes AudioSession for a system sound. Once at
+    /// foreground entry is enough for autoplay defaults; users who flip the switch mid-session can
+    /// still use the in-app mute control. (Was 2s → 15s → now once-on-resume only.)
     @MainActor private static var timer: Timer?
     @MainActor private static var probing = false
     /// The last switch position we observed. Changes are applied EDGE-triggered: flipping the physical
@@ -47,15 +46,10 @@ enum SilentSwitch {
     /// stomp an explicit in-app mute/unmute tap (tapping unmute while the phone is on silent has to stick).
     @MainActor private static var lastSilenced: Bool?
 
-    /// Begin (or restart) foreground monitoring. Safe to call repeatedly — it replaces any existing timer.
+    /// Begin (or restart) foreground monitoring. Probes **once** on resume — no repeating timer.
     @MainActor static func startMonitoring() {
         stopMonitoring()
         poll()
-        let t = Timer.scheduledTimer(withTimeInterval: pollSeconds, repeats: true) { _ in
-            MainActor.assumeIsolated { poll() }   // scheduled on the main run loop, so this is genuine
-        }
-        RunLoop.main.add(t, forMode: .common)   // keep probing while a scroll is tracking
-        timer = t
     }
 
     /// Stop monitoring (backgrounded) — no reason to keep playing probe sounds off-screen.

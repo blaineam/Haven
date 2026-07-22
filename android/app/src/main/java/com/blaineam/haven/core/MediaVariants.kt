@@ -30,10 +30,17 @@ object MediaVariants {
     fun allOriginals(media: List<String>): List<String> =
         media.mapNotNull { parseOriginal(it)?.second }
 
+    /**
+     * Refs to show in a carousel. Drops markers, original companions, and **poster stills that
+     * belong to a video** — the poster rides with the video page as its still (super data saver
+     * shows still + play until the user taps to download). A separate poster slide made the first
+     * page a dead image: tap zoomed the still and never pulled the video.
+     */
     fun displayRefs(media: List<String>): List<String> {
         val originals = allOriginals(media).toSet()
+        val posterImages = media.mapNotNull { parsePoster(it)?.second }.toSet()
         return media.filter {
-            parsePoster(it) == null && parseOriginal(it) == null && it !in originals
+            parsePoster(it) == null && parseOriginal(it) == null && it !in originals && it !in posterImages
         }
     }
 

@@ -32,6 +32,19 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **HTTP live-call lane when iroh dial is dead (Android + iOS).** Call invite / accept / SDP / ICE
+  frames fan out under `haven/mailbox/<circle>/__live__/<dest>/` and poll every 2s, so two-way
+  video still connects on HTTP-mailbox-only relays (HavenStub, free CF) instead of hanging forever
+  on `dial backoff … unreachable`. Companion fixes: claim-before-dispatch markSeen (no double
+  ingest), never markSeen on put (callee must still ingest), ignore duplicate remote answers once
+  WebRTC is stable, and live dests are account + roster only (not every historical device hint).
+- **Peer epoch keys update on re-seal (core).** `receive_key_commit` always adopts a successfully
+  opened commit instead of first-wins `or_insert`, so a peer who re-sealed the same epoch after a
+  membership change no longer permanently bricks reverse-path open of later posts/stories/DMs.
+- **Video poster stills are not their own carousel slides (core + all UIs).** The poster rides with
+  the video page so super data saver / Places tap downloads and plays the clip instead of zooming a
+  dead still.
+- **Android targets API 36** (`compileSdk` / `targetSdk`) so Play Console accepts new uploads.
 - **Push banners name the real activity.** Reactions no longer say "Posted in the Circle", stories
   say "Shared a story…", DMs show a short message preview (or "Sent a photo" / voice note), and
   comments include a clipped preview. The NSE still only decrypts a tiny sealed JSON — richness is

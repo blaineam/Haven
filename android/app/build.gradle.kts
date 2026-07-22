@@ -6,12 +6,13 @@ plugins {
 
 android {
     namespace = "com.blaineam.haven"
-    compileSdk = 35
+    // Play Console requires target API 36+ (Android 16) for new uploads / updates.
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.blaineam.haven"
         minSdk = 29
-        targetSdk = 35
+        targetSdk = 36
         // CI overrides these per release so every Play upload has a unique, increasing versionCode
         // (Play rejects a re-used code). Locally they default to the baseline below.
         //   ./gradlew bundleRelease -PhavenVersionCode=<n> -PhavenVersionName=<x.y.z>

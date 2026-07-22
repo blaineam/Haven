@@ -1291,14 +1291,21 @@ function isSyntheticMedia(ref) {
 }
 function displayMediaRefs(media) {
   const originals = new Set();
+  const posterImages = new Set();
   for (const r of media || []) {
     if (r.startsWith("orig:")) {
       const rest = r.slice(5);
       const c = rest.lastIndexOf(":");
       if (c > 0) originals.add(rest.slice(c + 1));
     }
+    if (r.startsWith("poster:")) {
+      const rest = r.slice(7);
+      const c = rest.lastIndexOf(":");
+      if (c > 0) posterImages.add(rest.slice(c + 1));
+    }
   }
-  return (media || []).filter((r) => !isSyntheticMedia(r) && !originals.has(r));
+  // Poster stills ride with the video page (data-saver still + play) — not as their own slide.
+  return (media || []).filter((r) => !isSyntheticMedia(r) && !originals.has(r) && !posterImages.has(r));
 }
 
 function mediaNode(ref, imgStyle) {
@@ -3572,14 +3579,18 @@ async function relayLimitsSection(hosting) {
 async function relaySheet() {
   const s = await invoke("relay_status");
   const pub = await invoke("relay_public_settings").catch(() => ({
-    public_url: "", tunnel_token: "", auto_tunnel: true, front_door: "auto",
+    public_url: "", tunnel_token: "", auto_tunnel: true, front_door: "auto", derp_url: "",
   }));
-  const adoptInput = el("input", { placeholder: "Paste a relay node id (64 hex)…" });
+  const adoptInput = el("input", { placeholder: "Paste node id (64 hex) or haven-relay interface JSON…" });
   // Three first-class modes — Manual stays correct if free/token Cloudflare paths go away.
   let frontDoor = pub.front_door || "auto";
   const urlInput = el("input", {
     value: pub.public_url || "",
     placeholder: "https://relay.example.com",
+  });
+  const derpInput = el("input", {
+    value: pub.derp_url || "",
+    placeholder: "optional — https://derp.example.com (sibling host for :3340)",
   });
   const tokenInput = el("input", {
     type: "password",
@@ -3589,16 +3600,21 @@ async function relaySheet() {
   });
   const modeBox = el("div", { class: "col", style: "gap:4px" });
   const modes = [
-    ["auto", "Free trycloudflare", "Ephemeral *.trycloudflare.com when no custom domain — may change every restart."],
-    ["bundled", "Custom domain (Haven runs cloudflared)", "Paste domain + Cloudflare install token. Origin in CF dashboard must be http://127.0.0.1:8674."],
-    ["manual", "Manual / external tunnel", "You run cloudflared, Caddy, nginx, Tailscale Funnel, etc. Haven only announces the HTTPS URL — works even if free tunnels are blocked."],
+    ["auto", "Free trycloudflare", "Ephemeral *.trycloudflare.com when no custom domain — may change every restart. Media + DERP each get their own free tunnel."],
+    ["bundled", "Custom domain (Haven runs cloudflared)", "Paste media domain + Cloudflare install token. Origin in CF dashboard: :8674 for media; path-route or sibling host → :3340 for DERP fabric."],
+    ["manual", "Manual / external tunnel", "You run cloudflared, Caddy, nginx, Tailscale Funnel, etc. Haven only announces the HTTPS URL(s) — works even if free tunnels are blocked."],
   ];
+  const derpLabel = el("label", { class: "muted small", style: "margin-top:6px" }, "DERP fabric URL (optional, distinct from media)");
   const syncModeUi = () => {
     tokenInput.disabled = frontDoor === "manual" || frontDoor === "auto";
     tokenInput.style.opacity = tokenInput.disabled ? "0.5" : "1";
     urlInput.placeholder = frontDoor === "auto"
-      ? "optional stable URL (switches to manual when set alone)"
+      ? "optional stable media URL (switches to manual when set alone)"
       : "https://relay.example.com";
+    // Dedicated DERP URL is most useful for named/manual dual-role; free auto uses a second tunnel.
+    const hideDerp = frontDoor === "auto";
+    derpInput.style.display = hideDerp ? "none" : "";
+    derpLabel.style.display = hideDerp ? "none" : "";
   };
   for (const [value, label, hint] of modes) {
     const radio = el("input", { type: "radio", name: "front-door", style: "width:auto" });
@@ -3623,6 +3639,7 @@ async function relaySheet() {
         tunnelToken: tokenInput.value.trim(),
         autoTunnel: frontDoor === "auto",
         frontDoor,
+        derpUrl: derpInput.value.trim(),
       });
       toast(s.hosting
         ? "Saved — restart hosting to apply front-door settings"
@@ -3632,15 +3649,17 @@ async function relaySheet() {
   const publicCard = el("div", { class: "card col" },
     el("h3", {}, "Public HTTPS front door"),
     el("div", { class: "muted small" },
-      "Friends off your LAN need HTTPS to the media port (8674). Blobs stay E2E-sealed — the front door only moves ciphertext."),
+      "Friends off your LAN need HTTPS to the media port (8674) and (for circle-hosted NAT fabric) DERP on 3340. Blobs stay E2E-sealed — the front door only moves ciphertext."),
     modeBox,
-    el("label", { class: "muted small", style: "margin-top:8px" }, "Public URL"),
+    el("label", { class: "muted small", style: "margin-top:8px" }, "Media public URL"),
     urlInput,
+    derpLabel,
+    derpInput,
     el("label", { class: "muted small", style: "margin-top:6px" }, "Tunnel token (bundled mode only)"),
     tokenInput,
     el("button", { class: "btn small primary", style: "align-self:flex-start;margin-top:8px", onclick: savePublic }, "Save front door"),
     el("div", { class: "muted small" },
-      "Manual mode is the durable escape hatch: any reverse proxy or tunnel that terminates TLS and forwards to 127.0.0.1:8674 works — Cloudflare free/token paths are optional convenience."),
+      "Named/Manual dual role: point media at :8674 and either path-route DERP on the same host or set a sibling hostname for :3340 in the DERP field. Empty DERP field reuses the media URL (path-route required). Free auto uses two trycloudflare origins."),
   );
   const hostCard = el("div", { class: "card col" },
     el("h3", {}, "Host the relay on this PC"),
@@ -3696,7 +3715,19 @@ async function relaySheet() {
     ));
   }
   if (!relayList.length) adoptCard.append(el("div", { class: "muted small" }, "No relays yet — host one above, adopt a friend's, or add an S3 bucket below."));
-  adoptCard.append(el("div", { class: "row" }, adoptInput, el("button", { class: "btn primary", onclick: async () => { if (adoptInput.value.trim().length === 64) { await invoke("adopt_relay", { nodeHex: adoptInput.value.trim() }); toast("Relay added"); adoptInput.value = ""; renderRelay(); } else toast("That's not a 64-hex node id"); } }, "Add Haven relay")));
+  adoptCard.append(el("div", { class: "row" }, adoptInput, el("button", { class: "btn primary", onclick: async () => {
+    const v = adoptInput.value.trim();
+    const okBare = v.length === 64 && /^[0-9a-fA-F]+$/.test(v);
+    const okJson = v.startsWith("{") && v.includes("node");
+    if (okBare || okJson) {
+      await invoke("adopt_relay", { nodeHex: v });
+      toast("Relay added");
+      adoptInput.value = "";
+      renderRelay();
+    } else {
+      toast("Paste a 64-hex node id or the JSON block from haven-relay");
+    }
+  } }, "Add Haven relay")));
   const au = await invoke("autostart_status").catch(() => ({ login_item: false, host_on_launch: false }));
   const loginChk = el("input", { type: "checkbox", style: "width:auto" }); loginChk.checked = au.login_item;
   const hostChk = el("input", { type: "checkbox", style: "width:auto" }); hostChk.checked = au.host_on_launch;
@@ -4325,7 +4356,166 @@ const line = (label, ok) => el("div", { class: "row" }, el("span", { style: "fle
 // participant opens one RTCPeerConnection to every other (full mesh, no SFU). 1:1 is a
 // 2-person group. The lexicographically smaller hex offers (glare-free). SDP/ICE ride the
 // sealed iroh channel via the call_signal command; media is DTLS-SRTP in the WebView.
-const ICE_SERVERS = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
+// Haven-first ICE — parity with Apple HavenFabric / Android CallManager.
+// Fabric + circle TURN → TURN only. Fabric without TURN → empty ICE (host + WSS hairpin;
+// no Google STUN). No fabric → Google STUN as fallback only. Signaling uses iroh/fabric DERP.
+function iceServers() {
+  const derp = (window.__havenFabricDerp && window.__havenFabricDerp.length)
+    ? window.__havenFabricDerp
+    : [];
+  const turn = window.__havenFabricTurn || {};
+  const turnUrls = Array.isArray(turn.urls) ? turn.urls.filter(Boolean) : [];
+  if (turnUrls.length > 0 && turn.user && turn.pass) {
+    return [{
+      urls: turnUrls,
+      username: turn.user,
+      credential: turn.pass,
+    }];
+  }
+  if (derp.length > 0 || turnUrls.length > 0) {
+    return []; // fabric on — never Google as first path
+  }
+  return [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
+}
+
+// ---- WebSocket call-media hairpin (path proxy /webrtc/hairpin) ----------------------------
+// Free Cloudflare tunnels carry HTTPS + WebSocket, not UDP TURN. When the circle fabric has a
+// public HTTPS origin (same host as DERP after path-proxy), open a WSS hairpin per peer so
+// media can bipipe over TCP/TLS. Binary frames are opaque; v1 uses a tiny PCM audio bridge
+// when WebRTC ICE fails for that peer.
+function fabricPublicBase() {
+  const derp = (window.__havenFabricDerp && window.__havenFabricDerp[0]) || "";
+  const u = (derp || "").trim().replace(/\/$/, "");
+  if (u.startsWith("https://") || u.startsWith("http://")) return u;
+  return "";
+}
+function hairpinWsUrl() {
+  const base = fabricPublicBase();
+  if (!base) return "";
+  try {
+    const u = new URL(base);
+    u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+    u.pathname = "/webrtc/hairpin";
+    u.search = "";
+    u.hash = "";
+    return u.toString();
+  } catch (_) {
+    return "";
+  }
+}
+const hairpin = {
+  /// peerHex → { ws, paired, usingMedia, audioCtx, processor, remoteGain, playQueue }
+  byPeer: new Map(),
+};
+function closeHairpinAll() {
+  for (const [, h] of hairpin.byPeer) {
+    try { h.ws && h.ws.close(); } catch (_) {}
+    try { h.processor && h.processor.disconnect(); } catch (_) {}
+    try { h.audioCtx && h.audioCtx.close(); } catch (_) {}
+  }
+  hairpin.byPeer.clear();
+}
+function openHairpinForPeer(peer) {
+  if (!call.session || !call.me || !peer || peer === call.me) return;
+  if (hairpin.byPeer.has(peer)) return;
+  const url = hairpinWsUrl();
+  if (!url) return;
+  let ws;
+  try { ws = new WebSocket(url); } catch (e) {
+    console.warn("hairpin open failed", e);
+    return;
+  }
+  ws.binaryType = "arraybuffer";
+  const slot = { ws, paired: false, usingMedia: false, audioCtx: null, processor: null, remoteGain: null };
+  hairpin.byPeer.set(peer, slot);
+  ws.onopen = () => {
+    ws.send(JSON.stringify({
+      v: 1,
+      session: call.session,
+      peer: call.me,
+      remote: peer,
+    }));
+  };
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === "string") {
+      try {
+        const j = JSON.parse(ev.data);
+        if (j.paired || (j.ok && !j.waiting)) {
+          slot.paired = true;
+          console.info("hairpin paired", peer);
+        }
+        if (j.err) console.warn("hairpin", peer, j.err);
+      } catch (_) {}
+      return;
+    }
+    // Binary: PCM s16le mono 16kHz packets from peer (media fallback).
+    if (slot.usingMedia && ev.data instanceof ArrayBuffer) {
+      hairpinPlayPcm(slot, ev.data);
+    }
+  };
+  ws.onclose = () => {
+    if (hairpin.byPeer.get(peer) === slot) hairpin.byPeer.delete(peer);
+  };
+  ws.onerror = () => {};
+}
+function ensureHairpins() {
+  invitees().forEach(openHairpinForPeer);
+}
+/** Start PCM media over hairpin for a peer whose WebRTC ICE failed. */
+async function hairpinStartMedia(peer) {
+  const slot = hairpin.byPeer.get(peer);
+  if (!slot || !slot.paired || slot.usingMedia || !call.localStream) return;
+  slot.usingMedia = true;
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    slot.audioCtx = ctx;
+    const src = ctx.createMediaStreamSource(call.localStream);
+    // ScriptProcessor is deprecated but widely available in Tauri webview; keep buffer small.
+    const proc = ctx.createScriptProcessor(2048, 1, 1);
+    slot.processor = proc;
+    proc.onaudioprocess = (e) => {
+      if (!slot.usingMedia || !slot.ws || slot.ws.readyState !== 1) return;
+      const input = e.inputBuffer.getChannelData(0);
+      const pcm = new Int16Array(input.length);
+      for (let i = 0; i < input.length; i++) {
+        const s = Math.max(-1, Math.min(1, input[i]));
+        pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+      try { slot.ws.send(pcm.buffer); } catch (_) {}
+    };
+    src.connect(proc);
+    proc.connect(ctx.destination); // keep processor alive (output is near-silent if we zero? we don't mute)
+    // Avoid local echo: disconnect from destination, connect to a zero-gain node instead.
+    proc.disconnect();
+    const mute = ctx.createGain();
+    mute.gain.value = 0;
+    proc.connect(mute);
+    mute.connect(ctx.destination);
+    slot.remoteGain = ctx.createGain();
+    slot.remoteGain.connect(ctx.destination);
+    console.info("hairpin media fallback on", peer);
+    toast("Call media via fabric tunnel (TCP hairpin)");
+  } catch (e) {
+    console.warn("hairpin media start failed", e);
+    slot.usingMedia = false;
+  }
+}
+function hairpinPlayPcm(slot, ab) {
+  try {
+    if (!slot.audioCtx || !slot.remoteGain) return;
+    const pcm = new Int16Array(ab);
+    if (!pcm.length) return;
+    const f32 = new Float32Array(pcm.length);
+    for (let i = 0; i < pcm.length; i++) f32[i] = pcm[i] / (pcm[i] < 0 ? 0x8000 : 0x7fff);
+    const buf = slot.audioCtx.createBuffer(1, f32.length, 16000);
+    buf.copyToChannel(f32, 0);
+    const src = slot.audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(slot.remoteGain);
+    src.start();
+  } catch (_) {}
+}
+
 const call = {
   session: "", me: "", name: "", roster: new Set(), pcs: new Map(),
   localStream: null, micOn: true, camOn: true,
@@ -4493,24 +4683,33 @@ async function startMesh() {
     call.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false }).catch(() => null);
   }
   call.connecting = call.connecting && !call.inCall;
+  ensureHairpins(); // TCP/WSS media path through free CF path proxy (pairs while ICE runs)
   invitees().forEach(connectPeerIfNeeded);
   renderCallOverlay();
 }
 
 function pcFor(peer) {
   if (call.pcs.has(peer)) return call.pcs.get(peer);
-  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  const pc = new RTCPeerConnection({ iceServers: iceServers() });
   if (call.localStream) call.localStream.getTracks().forEach((t) => pc.addTrack(t, call.localStream));
   pc.onicecandidate = (e) => {
     if (e.candidate) invoke("call_signal", { kind: "ice", sessionId: call.session, to: peer, json: JSON.stringify({ c: e.candidate.candidate, m: e.candidate.sdpMLineIndex, i: e.candidate.sdpMid }) });
   };
   pc.ontrack = (e) => { call.remote = call.remote || {}; call.remote[peer] = e.streams[0]; renderCallOverlay(); };
-  pc.onconnectionstatechange = () => { if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {} };
+  pc.onconnectionstatechange = () => {
+    const st = pc.connectionState;
+    // When ICE cannot path, fall back to path-proxy WebSocket hairpin (works over free CF).
+    if (st === "failed" || st === "disconnected") {
+      openHairpinForPeer(peer);
+      hairpinStartMedia(peer);
+    }
+  };
   call.pcs.set(peer, pc);
   return pc;
 }
 
 async function connectPeerIfNeeded(peer) {
+  openHairpinForPeer(peer);
   const pc = pcFor(peer);
   if (call.me < peer && call.localStream) {
     const offer = await pc.createOffer();
@@ -4617,6 +4816,7 @@ function teardownCall() {
     }
   }
   clearTimeout(call.ringTimer); call.ringTimer = null;
+  closeHairpinAll();
   if (call.screenStream) { call.screenStream.getTracks().forEach((t) => t.stop()); call.screenStream = null; }
   call.screenOn = false; call.camTrack = null; call.camOff = {};
   call.pcs.forEach((pc) => pc.close()); call.pcs.clear();
@@ -5056,6 +5256,26 @@ async function boot() {
     const ae = document.activeElement;
     if (state.view === "you" && ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA") && $("#view-you").contains(ae)) return;
     await render();
+  });
+  // Haven fabric: circle-hosted DERP (+ TURN for WebRTC media; else STUN). Signaling uses fabric.
+  // rebindPending: soft rebind in progress (Engine stops + restarts HavenNode onto Haven RelayMap).
+  listen("haven-fabric", (e) => {
+    const urls = (e.payload && e.payload.derpUrls) || [];
+    window.__havenFabricDerp = Array.isArray(urls) ? urls : [];
+    window.__havenFabricTurn = {
+      urls: Array.isArray(e.payload && e.payload.turnUrls) ? e.payload.turnUrls : [],
+      user: (e.payload && e.payload.turnUser) || "",
+      pass: (e.payload && e.payload.turnPass) || "",
+    };
+    const pending = !!(e.payload && e.payload.rebindPending);
+    if (pending && !window.__havenFabricRebindHinted) {
+      window.__havenFabricRebindHinted = true;
+      toast("Haven fabric ready — reconnecting this session onto circle DERP…");
+    }
+    if (!pending && window.__havenFabricRebindHinted && !window.__havenFabricRebindDone) {
+      window.__havenFabricRebindDone = true;
+      toast("Connected on Haven fabric (circle DERP)");
+    }
   });
   // A notification carrying a deepLink is ABOUT something openable — make the toast take you there
   // rather than just announcing it. Routed through routeDeepLink, the same parser a pasted or

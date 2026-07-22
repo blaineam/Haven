@@ -120,6 +120,49 @@ impl AddrRecord {
         Self { node, seq, expires: now() + DEFAULT_TTL_SECS, addrs }
     }
 
+    /// Format a public DERP / iroh-relay base URL as an `addrs` entry (`"relay:<url>"`).
+    ///
+    /// Light R3: discovery records can carry Haven fabric hints in the existing wire shape
+    /// without a full iroh `AddressLookup` shim. Prefer HTTPS bases peers already gossip via
+    /// frame 19 `derp`.
+    pub fn relay_addr(url: &str) -> String {
+        let u = url.trim().trim_end_matches('/');
+        format!("relay:{u}")
+    }
+
+    /// HTTPS (or http) bases extracted from `"relay:<url>"` addrs — circle DERP fabric hints.
+    /// Empty when the record only has `ip:…` paths. Does **not** touch process policy; callers
+    /// that resolve a record can feed this into [`crate::merge_derp_urls`].
+    pub fn derp_urls(&self) -> Vec<String> {
+        let mut urls: Vec<String> = self
+            .addrs
+            .iter()
+            .filter_map(|a| {
+                let rest = a.strip_prefix("relay:")?;
+                let u = rest.trim().trim_end_matches('/');
+                if u.starts_with("https://") || u.starts_with("http://") {
+                    Some(u.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        urls.sort();
+        urls.dedup();
+        urls
+    }
+
+    /// Append a DERP base if not already present (idempotent).
+    pub fn push_derp_url(&mut self, url: &str) {
+        let entry = Self::relay_addr(url);
+        if entry == "relay:" {
+            return;
+        }
+        if !self.addrs.iter().any(|a| a == &entry) {
+            self.addrs.push(entry);
+        }
+    }
+
     /// The node id as hex — this is the store key suffix.
     pub fn node_hex(&self) -> String {
         hex(&self.node)
@@ -275,6 +318,11 @@ pub struct RelayEntry {
     pub node_hex: String,
     /// `host:port` for the plain-HTTP blob/discovery interface (default port 8674).
     pub http: String,
+    /// Public HTTPS base of this relay's **iroh-relay (DERP)** role, when hosted
+    /// (e.g. `https://relay.example.com` or an ephemeral `https://….trycloudflare.com`).
+    /// Empty when the operator only runs the mailbox/HTTP path. Circle gossip re-publishes
+    /// this on every tunnel restart so ephemeral hostnames stay fresh (gen LWW).
+    pub derp_url: String,
     /// Human label, for the settings UI only. Never trusted for anything.
     pub label: String,
     /// **Explicit** presence. `false` is a tombstone, not an omission.
@@ -329,6 +377,7 @@ impl RelayBook {
         let e = self.entries.entry(node_hex.to_string()).or_insert_with(|| RelayEntry {
             node_hex: node_hex.to_string(),
             http: String::new(),
+            derp_url: String::new(),
             label: String::new(),
             present: true,
             gen: 0,
@@ -338,13 +387,17 @@ impl RelayBook {
     }
 
     /// Add or update a relay, bumping its generation so the change wins over what peers hold.
-    pub fn upsert(&mut self, node_hex: &str, http: &str, label: &str) {
+    ///
+    /// `derp_url` is the public HTTPS front door for the optional embedded iroh-relay role
+    /// (cloudflared/Manual). Pass `""` when unknown; a later upsert with a real URL wins by gen.
+    pub fn upsert(&mut self, node_hex: &str, http: &str, label: &str, derp_url: &str) {
         let gen = self.entries.get(node_hex).map(|e| e.gen + 1).unwrap_or(1);
         self.entries.insert(
             node_hex.to_string(),
             RelayEntry {
                 node_hex: node_hex.to_string(),
                 http: http.to_string(),
+                derp_url: derp_url.trim().trim_end_matches('/').to_string(),
                 label: label.to_string(),
                 present: true,
                 gen,
@@ -497,9 +550,27 @@ mod tests {
     fn round_trips() {
         let (sec, pubk) = key(1);
         let rec = AddrRecord::new(pubk, 7, vec!["relay:https://r.example".into(), "ip:1.2.3.4:9".into()]);
+        assert_eq!(rec.derp_urls(), vec!["https://r.example".to_string()]);
         let wire = rec.sign(&sec).unwrap();
         let got = AddrRecord::verify(&hex(&pubk), &wire).expect("verifies");
         assert_eq!(got, rec);
+    }
+
+    #[test]
+    fn derp_helpers_format_and_push() {
+        let (_, pubk) = key(9);
+        let mut rec = AddrRecord::new(pubk, 1, vec!["ip:1.2.3.4:9".into()]);
+        assert!(rec.derp_urls().is_empty());
+        rec.push_derp_url("https://derp.example.com/");
+        rec.push_derp_url("https://derp.example.com"); // idempotent
+        assert_eq!(
+            rec.derp_urls(),
+            vec!["https://derp.example.com".to_string()]
+        );
+        assert_eq!(
+            AddrRecord::relay_addr("https://x.example/"),
+            "relay:https://x.example"
+        );
     }
 
     #[test]
@@ -579,6 +650,7 @@ mod tests {
                 RelayEntry {
                     node_hex: (*id).into(),
                     http: "h:8674".into(),
+                    derp_url: String::new(),
                     label: String::new(),
                     present: *present,
                     gen: *gen,
@@ -627,11 +699,12 @@ mod tests {
     #[test]
     fn upsert_bumps_generation_so_the_change_wins() {
         let mut b = RelayBook::default();
-        b.upsert("a", "h:8674", "home");
+        b.upsert("a", "h:8674", "home", "");
         let g1 = b.entries["a"].gen;
-        b.upsert("a", "h2:8674", "home2");
+        b.upsert("a", "h2:8674", "home2", "https://derp.example.com");
         assert!(b.entries["a"].gen > g1);
         assert_eq!(b.entries["a"].http, "h2:8674");
+        assert_eq!(b.entries["a"].derp_url, "https://derp.example.com");
     }
 
     #[test]

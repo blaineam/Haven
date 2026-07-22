@@ -1003,16 +1003,19 @@ pub struct RelayPublicSettingsDto {
     pub auto_tunnel: bool,
     /// `"auto"` | `"manual"` | `"bundled"` — manual = announce-only (operator runs tunnel).
     pub front_door: String,
+    /// Optional dedicated DERP fabric public URL (sibling host / path-routed `:3340`).
+    pub derp_url: String,
 }
 
 #[tauri::command]
 pub fn relay_public_settings(engine: Eng) -> RelayPublicSettingsDto {
-    let (public_url, tunnel_token, auto_tunnel, front_door) = engine.relay_public_settings();
+    let (public_url, tunnel_token, auto_tunnel, front_door, derp_url) = engine.relay_public_settings();
     RelayPublicSettingsDto {
         public_url,
         tunnel_token,
         auto_tunnel,
         front_door,
+        derp_url,
     }
 }
 
@@ -1023,8 +1026,9 @@ pub fn set_relay_public_settings(
     tunnel_token: String,
     auto_tunnel: bool,
     front_door: String,
+    derp_url: String,
 ) {
-    engine.set_relay_public_settings(public_url, tunnel_token, auto_tunnel, front_door);
+    engine.set_relay_public_settings(public_url, tunnel_token, auto_tunnel, front_door, derp_url);
 }
 
 #[derive(Serialize)]

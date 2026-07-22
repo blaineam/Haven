@@ -1124,12 +1124,23 @@ private fun ImageBitmap.downscaled(maxDim: Int): ImageBitmap {
 private fun MediaPage(circleId: String, ref: String, containerAspect: Float?, playing: Boolean, onOpen: () -> Unit) {
     val aspect = rememberAspect(circleId, ref)
     val isVideo = LocalMedia.isVideo(ref)
+    val dataSaver = runCatching {
+        com.blaineam.haven.core.ProfileStore.get(
+            androidx.compose.ui.platform.LocalContext.current
+        ).superDataSaver
+    }.getOrDefault(false)
+    // Observe download progress so a super-data-saver poster tap re-renders into play once bytes land.
+    com.blaineam.haven.core.HavenNet.downloadingMedia
+    com.blaineam.haven.core.HavenNet.feedVersion.value
+    val hasBytes = remember(ref, com.blaineam.haven.core.HavenNet.feedVersion.value) { LocalMedia.has(ref) }
+    val downloading = com.blaineam.haven.core.HavenNet.downloadingMedia.contains(ref)
     // Decrypting is what MAKES the poster + backdrop possible (videoPoster can only read an already
     // decrypted cache file), so the active page decrypts here rather than only inside VideoTile —
     // whose own videoFile() then just hits the cache. Never eager: only the ONE active page pays it.
+    // Super data saver: never decrypt for autoplay — only after the user opens the viewer (onOpen).
     var vid by remember(ref, circleId) { mutableStateOf<java.io.File?>(null) }
-    LaunchedEffect(ref, circleId, playing) {
-        if (!playing || !isVideo || vid != null) return@LaunchedEffect
+    LaunchedEffect(ref, circleId, playing, dataSaver) {
+        if (!playing || !isVideo || vid != null || dataSaver) return@LaunchedEffect
         // Scroll away first and this coroutine is cancelled — the assignment never lands and no
         // player is ever built for a page that's no longer active.
         vid = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -1151,7 +1162,16 @@ private fun MediaPage(circleId: String, ref: String, containerAspect: Float?, pl
         else -> kotlin.math.abs(aspect - containerAspect) > 0.02f
     }
     // clip() keeps the fill copy from bleeding onto the neighbouring page.
-    Box(Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)).clickable { onOpen() }) {
+    Box(
+        Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)).clickable {
+            // Super data saver / not-yet-fetched video: tap play means pull the bytes, then open
+            // the viewer so it actually plays. Without this, a poster still was a dead end.
+            if (isVideo && !hasBytes) {
+                com.blaineam.haven.core.HavenNet.downloadEvicted(ref)
+            }
+            onOpen()
+        },
+    ) {
       // Honors a flag federated by a member whose platform has an analyzer (iOS parity). A covered
       // video must NOT autoplay: a blur hides the picture but not the sound.
       SensitiveGuard(circleId, ref, cornerRadius = 16) { covered ->
@@ -1166,14 +1186,20 @@ private fun MediaPage(circleId: String, ref: String, containerAspect: Float?, pl
                 VideoTile(circleId, ref, Modifier.matchParentSize(), resolved = vid)
             } else {
                 MediaBitmapContent(circleId, ref, bmp, done, Modifier.fillMaxSize(), ContentScale.Fit)
-                // Suppress the play glyph while the bytes are absent — the missing-media placeholder
-                // (Download / loading / unavailable) owns the tile then; a glyph on top would misread.
-                if (isVideo && LocalMedia.has(ref)) {
+                // Super data saver: always show a play affordance on a video still (poster) so the
+                // user can opt into the download. When bytes are already local, same glyph.
+                // Suppress only when the missing-media placeholder owns the tile (no still yet).
+                if (isVideo && (hasBytes || bmp != null || downloading)) {
                     // A scrim only behind the glyph — a full-page one would grey out the backdrop we just drew.
                     Box(Modifier.align(Alignment.Center).size(52.dp).clip(CircleShape)
                         .background(Color.Black.copy(alpha = 0.35f)), contentAlignment = Alignment.Center) {
-                        // White-on-scrim over media — not a theme surface.
-                        Icon(Icons.Filled.PlayCircle, "Play", tint = Color.White, modifier = Modifier.size(40.dp))
+                        if (downloading && !hasBytes) {
+                            androidx.compose.material3.CircularProgressIndicator(
+                                color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(28.dp))
+                        } else {
+                            // White-on-scrim over media — not a theme surface.
+                            Icon(Icons.Filled.PlayCircle, "Play", tint = Color.White, modifier = Modifier.size(40.dp))
+                        }
                     }
                 }
             }
@@ -1607,6 +1633,19 @@ fun VideoTile(
             LocalMedia.videoFile(circleId, ref)
         }
         android.util.Log.i("VideoTile", "FILE ref=$ref file=${file?.absolutePath ?: "NULL"} exists=${file?.exists() == true} size=${file?.length() ?: -1}")
+        // Super data saver / missing bytes: the feed poster tap may open the viewer before the
+        // download finishes. Kick the fetch and wait for feedVersion so we decrypt once it lands.
+        if (file == null && !LocalMedia.has(ref)) {
+            com.blaineam.haven.core.HavenNet.downloadEvicted(ref)
+        }
+    }
+    // Re-try decrypt when a background download completes.
+    val feedV = com.blaineam.haven.core.HavenNet.feedVersion.value
+    LaunchedEffect(ref, circleId, feedV) {
+        if (file != null || !LocalMedia.has(ref)) return@LaunchedEffect
+        file = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            LocalMedia.videoFile(circleId, ref)
+        }
     }
     // The feed swaps tiles in and out on every scroll, so a MediaPlayer that outlives its composable
     // would be a per-post decode leak. onSurfaceTextureDestroyed already releases, but it's the

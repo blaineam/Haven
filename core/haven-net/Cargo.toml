@@ -8,6 +8,8 @@ description = "Haven networking: iroh-backed P2P transport carrying sealed socia
 [dependencies]
 haven-p2p = { path = "../haven-p2p" }
 iroh = { version = "1", features = ["unstable-custom-transports"] }
+# Embedded circle-hosted DERP (Haven fabric) — separate listen socket, not a second Endpoint.
+iroh-relay = { version = "1", default-features = false, features = ["server", "tls-ring"] }
 tokio = { version = "1", features = ["full"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 anyhow = "1"
@@ -18,6 +20,11 @@ rand = "0.8"
 # verifying a request signature is how that transport learns who the caller is (`httprelay`).
 ed25519-dalek = "2"
 blake3 = "1"
+# Embedded circle TURN for WebRTC ICE (own UDP socket — not a second iroh Endpoint).
+turn = "0.17"
+webrtc-util = { version = "0.17", default-features = false, features = ["conn", "vnet"] }
+# WebSocket accept key (RFC 6455) for the path-proxy call hairpin.
+sha1 = "0.10"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

@@ -153,23 +153,47 @@ final class FeedStore: ObservableObject {
     private var lastActivityMs: UInt64 = 0
     private var nextSyncDueMs: UInt64 = 0
     private var nextPollDueMs: UInt64 = 0
+    /// Last time we re-announced circle relays (frame 19). Must NOT ride every sync tick —
+    /// sealing + fan-out to every member is real radio work and kept phones hot.
+    private var lastRelayReannounceMs: UInt64 = 0
+    /// Last Multipeer `connected` callback — flaps reconnect every few seconds on BLE and used
+    /// to re-arm tight sync + re-export history each time (device log: DTLS broken-pipe storms).
+    private var lastNearbyConnectMs: UInt64 = 0
+    /// Last Multipeer media push on the sync path (not connect path). Mac→iPhone flood fix.
+    private var lastNearbyMediaPushMs: UInt64 = 0
+    /// Fabric soft-rebind: DERP URLs the live messaging node was bound with + debounce/guard.
+    private var fabricBoundUrls: [String] = []
+    private var fabricRebindGen: UInt64 = 0
+    private var fabricRebindInFlight = false
     /// Base cadences and the idle multipliers. Idle <3min = base; <15min = ×3; else ×6.
     /// Thermal pressure and super data saver stretch further so a warm phone (or one the user
     /// asked to go easy on the radio) isn't also blasting hello+roster at the tight cadence.
+    ///
+    /// iOS starts stretching sooner (60s / 5min) — field log: hundreds of MB of UDP in minutes
+    /// while the app was merely open and "idle" by user perception but still at base cadence.
     private func adaptiveInterval(base: UInt64) -> UInt64 {
         let idle = now() &- lastActivityMs
         var mult: UInt64
+        #if os(iOS)
+        // Aggressive stretch: phone was still warm with 60s base stretch. After 30s idle
+        // slow down; after 2 min crawl; after 10 min almost park the radio.
+        if idle < 30_000 { mult = 1 }
+        else if idle < 120_000 { mult = 4 }
+        else if idle < 600_000 { mult = 10 }
+        else { mult = 20 }
+        #else
         if idle < 180_000 { mult = 1 }
         else if idle < 900_000 { mult = 3 }
         else { mult = 6 }
+        #endif
         #if os(iOS)
         switch ProcessInfo.processInfo.thermalState {
-        case .serious, .critical: mult *= 2
-        case .fair: mult = (mult * 3) / 2
+        case .serious, .critical: mult *= 4
+        case .fair: mult *= 2
         default: break
         }
         #endif
-        if SettingsStore.shared.superDataSaver { mult = (mult * 3) / 2 }
+        if SettingsStore.shared.superDataSaver { mult = mult * 2 }
         return base * max(1, mult)
     }
     /// Mark "something is happening" → snap both timers back to their tight base cadence immediately.
@@ -177,6 +201,8 @@ final class FeedStore: ObservableObject {
         lastActivityMs = now()
         nextSyncDueMs = 0
         nextPollDueMs = 0
+        // Multipeer discovery is NOT re-opened on every scroll — only forceSync / cold start /
+        // peer-left rediscovery. That prevented discovery from staying warm all day.
     }
 
     // Chunked media reassembly: ref → temp file + which chunk indices we've received.
@@ -236,8 +262,28 @@ final class FeedStore: ObservableObject {
             configure(mode: .seedless(accountBundle: bundle, deviceSeed: DeviceKeyStore.deviceAccount().secretSeed()))
         } else if let seed = AccountStore.storedSeed() {
             configure(seed: seed)
+        } else {
+            // No keychain seed (locked, missing entitlement on unsigned sim builds, or first-run race).
+            // Without a configure(), `online` stays false forever and the feed is a dead Offline shell.
+            // Prefer a *stable* fallback seed in UserDefaults so restarts don't mint a new identity
+            // (which breaks circle crypto / peer contacts under matrix QA). Keychain remains preferred.
+            let udKey = "haven.ephemeralSeed.v1"
+            let seed: Data
+            if let b64 = UserDefaults.standard.string(forKey: udKey),
+               let existing = Data(base64Encoded: b64), existing.count == 32 {
+                HavenLog.net("configureForCurrentIdentity: no keychain seed — reusing UserDefaults ephemeral seed")
+                seed = existing
+            } else {
+                HavenLog.net("configureForCurrentIdentity: no keychain seed — minting UserDefaults ephemeral seed")
+                var bytes = [UInt8](repeating: 0, count: 32)
+                _ = SecRandomCopyBytes(kSecRandomDefault, 32, &bytes)
+                seed = Data(bytes)
+                UserDefaults.standard.set(seed.base64EncodedString(), forKey: udKey)
+            }
+            configure(seed: seed)
         }
     }
+
 
     func configure(mode: BootMode) {
         guard social == nil else { return }
@@ -359,18 +405,47 @@ final class FeedStore: ObservableObject {
         relayReachable = true
     }
 
+    private var liveCallTimer: Timer?
     private func startMailboxPolling() {
         mailboxTimer?.invalidate()
+        liveCallTimer?.invalidate()
         pollMailboxNow()
         // 10s heartbeat, but the actual poll only runs when due (30s base, stretching when idle).
-        mailboxTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+        #if os(iOS)
+        let pollHeartbeat: TimeInterval = 20
+        let pollBaseMs: UInt64 = 60_000
+        #else
+        let pollHeartbeat: TimeInterval = 10
+        let pollBaseMs: UInt64 = 30_000
+        #endif
+        mailboxTimer = Timer.scheduledTimer(withTimeInterval: pollHeartbeat, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 guard self.now() >= self.nextPollDueMs else { return }
-                self.nextPollDueMs = self.now() + self.adaptiveInterval(base: 30_000)
+                self.nextPollDueMs = self.now() + self.adaptiveInterval(base: pollBaseMs)
                 self.pollMailboxNow()
                 self.dailyMailboxRefreshIfDue()   // long-lived sessions refresh without a relaunch
             }
+        }
+        // Fast live-call lane (2s): invite/accept/sdp must land inside the ring window when iroh dial is down.
+        liveCallTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.pollLiveCallFramesNow() }
+        }
+    }
+
+    /// Pull HTTP-mailbox live-call frames addressed to this device/account and dispatch as inbound frames.
+    @MainActor
+    func pollLiveCallFramesNow() async {
+        guard social != nil else { return }
+        var mine = [myNodeHex.lowercased()]
+        if let d = social?.myDeviceNodeHex().lowercased(), d.count == 64 { mine.append(d) }
+        let frames = await SharedStore.pollLiveCallFrames(circleIds: circles.map(\.id), myHexes: mine)
+        for (key, data) in frames {
+            guard !data.isEmpty else { continue }
+            // Full wire frame: [type][payload] — same shape as iroh inbound.
+            handleInbound(data, viaNearby: false, senderDevice: nil)
+            SharedStore.markSeenPublic(key)
+            HavenLog.call("live-call http-ingest type=\(data[0]) key=\(key.split(separator: "/").last.map(String.init)?.prefix(12) ?? "?")")
         }
     }
 
@@ -809,6 +884,8 @@ final class FeedStore: ObservableObject {
         persist(); refreshCircles()
         if let hello = helloPayload(circleId: "default", circleName: "Your circle") {
             sendIroh(0, hello, to: req.idHex); nearbyBroadcast(0, hello)
+            let meHex = social.myNodeHex()
+            Task { await SharedStore.putHello(circleId: "default", toHex: req.idHex, fromHex: meHex, hello: hello) }
         }
         if shareHistory {
             // Back-fill your past posts to them (and ensure the shared store has them).
@@ -1231,7 +1308,14 @@ final class FeedStore: ObservableObject {
                 onInbound: { [weak self] data in Task { @MainActor in self?.handleInbound(data, viaNearby: true) } },
                 onPeerConnected: { [weak self] in Task { @MainActor in self?.nearbyPeerConnected() } }
             )
-            nt.start()
+            // iOS + Mac: start Multipeer for a bounded discovery window, then park advertise/browse
+            // if nobody connects. Live sessions keep working; send path is rate-limited so neither
+            // side can flood (Mac→iPhone history dump was the field heat source).
+            #if os(iOS)
+            nt.start(parkAfter: 60)
+            #else
+            nt.start(parkAfter: 120)
+            #endif
             nearby = nt
             online = true
         }
@@ -1246,43 +1330,135 @@ final class FeedStore: ObservableObject {
                 // account id is the sealing/trust anchor + contact handle only. The self-connect leak this
                 // re-triggered is defended at the CORE chokepoint now (haven-net Node refuses to open a
                 // connection to our OWN node id), so no app-level dial path can loop it.
-                // DIAGNOSTIC: capture iroh/noq connection-level logs to Application Support/iroh-trace.log
-                // BEFORE the node starts, so we can compare both sides of the multipath handshake.
-                if let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+                // iroh-trace.debug logging is **off by default** — full `iroh=debug` tracing
+                // writes continuously during path discovery and was a real heat/battery source
+                // on daily-driver phones (unbounded append + CPU). Opt-in only:
+                // UserDefaults `haven.debug.irohTrace` = true (or set in a debug menu later).
+                #if DEBUG
+                let wantIrohTrace = UserDefaults.standard.object(forKey: "haven.debug.irohTrace") as? Bool ?? false
+                #else
+                let wantIrohTrace = UserDefaults.standard.bool(forKey: "haven.debug.irohTrace")
+                #endif
+                if wantIrohTrace,
+                   let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
                     initLogging(dir: dir.path)
                 }
                 let deviceSeed = DeviceKeyStore.deviceAccount().secretSeed()
+                // Fabric before bind: prefs/UserDefaults may already know circle DERP from a prior
+                // session. apply_derp_urls is process-wide and only affects this HavenNode if set
+                // before start (iroh RelayMap is construct-time).
+                RelayMailboxStore.refreshHavenFabric()
                 let n = try await HavenNode.start(accountSeed: deviceSeed, listener: bridge)
                 self.node = n
+                self.fabricBoundUrls = RelayMailboxStore.shared.allDerpUrls()
                 self.internetReady = true
                 self.online = true
                 HavenLog.net("node started id=\(n.nodeIdHex().prefix(10)) account=\(social?.myNodeHex().prefix(10) ?? "?")")
-                // The node's reachable address (direct addrs + iroh relay url). If this is empty or has no
-                // relay, NOTHING can reach us regardless of identity — that's a network/discovery problem.
-                Task {
-                    // REACHABILITY PROBE: keep re-reading the ticket (discovery + DERP take a few seconds to
-                    // populate) and dump it to a readable file so we can SEE whether this device node has an
-                    // internet-reachable path (a DERP relay url in the ticket) at all — the fact that decides
-                    // whether relay timeouts are the network or a node-publish bug. Remove once settled.
-                    for delay in [0.0, 3.0, 8.0, 20.0] {
-                        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                        let t = (try? await n.ticket()) ?? ""
-                        let report = "nodeId=\(n.nodeIdHex())\naccount=\(social?.myNodeHex() ?? "?")\nticketLen=\(t.count)\nticket=\(t)\n"
-                        if let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-                            try? report.write(to: dir.appendingPathComponent("haven-node-ticket.txt"), atomically: true, encoding: .utf8)
-                        }
-                        HavenLog.net(t.isEmpty ? "node TICKET = EMPTY (no reachable path)" : "node TICKET len=\(t.count)")
+                // Matrix QA: dump public identity bundle so Scripts/qa-exchange-bundles.sh can seed
+                // the Android peer when HELLO cannot dial (HTTP-mailbox-only stub path).
+                if let b = social?.myBundle(), !b.isEmpty {
+                    let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+                    if let url = dir?.appendingPathComponent("qa-my-bundle.bin") {
+                        try? b.write(to: url, options: .atomic)
+                        let name = ProfileStore.shared.displayName.isEmpty ? "SimPeer" : ProfileStore.shared.displayName
+                        try? Data(name.utf8).write(to: dir!.appendingPathComponent("qa-my-name.txt"), options: .atomic)
+                        HavenLog.net("qa-my-bundle written bytes=\(b.count) name=\(name)")
                     }
                 }
+                // One delayed ticket snapshot for diagnostics — not a multi-probe heat loop.
+                Task {
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    let t = (try? await n.ticket()) ?? ""
+                    HavenLog.net(t.isEmpty ? "node TICKET = EMPTY (no reachable path)" : "node TICKET len=\(t.count)")
+                }
                 self.startSyncTimer()
-                // Sync soon (discovery needs a moment to resolve), then keep retrying.
-                for delay in [1.0, 4.0, 10.0] {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                        self.syncWithContacts()
-                    }
+                // One boot sync after discovery settles — not three stacked fan-outs at 1/4/10s.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    self.syncWithContacts()
                 }
             } catch {
                 self.nodeError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Called when circle DERP URLs change (frame 19 / adopt / host). If the messaging node is
+    /// already live on a different map, debounce and soft-rebind (iroh RelayMap is bind-time).
+    func noteFabricUrlsChanged(_ urls: [String]) {
+        let target = urls.sorted()
+        guard node != nil, !target.isEmpty, target != fabricBoundUrls, !fabricRebindInFlight else { return }
+        fabricRebindGen &+= 1
+        let gen = fabricRebindGen
+        HavenLog.net("fabric rebind scheduled (urls=\(target.count))")
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard gen == fabricRebindGen else { return }
+            await rebindTransportForFabric()
+        }
+    }
+
+    /// Stop messaging node cleanly, re-apply fabric, start again, re-attach relay host if needed.
+    private func rebindTransportForFabric() async {
+        guard !fabricRebindInFlight else { return }
+        let target = RelayMailboxStore.shared.allDerpUrls().sorted()
+        guard !target.isEmpty, target != fabricBoundUrls else { return }
+        fabricRebindInFlight = true
+        defer { fabricRebindInFlight = false }
+        HavenLog.net("fabric rebind starting…")
+        let wasHosting = RelayHost.shared.serving || RelayHost.shared.enabled
+        let hostingWasLive = RelayHost.shared.serving
+        if hostingWasLive {
+            RelayHost.shared.detachForFabricRebind()
+        }
+        if let old = node {
+            await old.shutdown()
+            node = nil
+            internetReady = false
+            // Let OS / accept loop finish teardown before same-seed spawn.
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        guard let bridge = listener else {
+            HavenLog.net("fabric rebind aborted — no inbound listener")
+            return
+        }
+        do {
+            RelayMailboxStore.refreshHavenFabric()
+            let deviceSeed = DeviceKeyStore.deviceAccount().secretSeed()
+            let n = try await HavenNode.start(accountSeed: deviceSeed, listener: bridge)
+            node = n
+            fabricBoundUrls = RelayMailboxStore.shared.allDerpUrls().sorted()
+            internetReady = true
+            online = true
+            HavenLog.net("fabric rebind ok id=\(n.nodeIdHex().prefix(10)) urls=\(fabricBoundUrls.count)")
+            if wasHosting {
+                RelayHost.shared.reattachAfterFabricRebind()
+            }
+            reannounceOwnRelay()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.syncWithContacts()
+            }
+            // Catch learns that arrived during rebind.
+            noteFabricUrlsChanged(RelayMailboxStore.shared.allDerpUrls())
+        } catch {
+            nodeError = error.localizedDescription
+            HavenLog.net("fabric rebind failed: \(error.localizedDescription)")
+            // Detach left the host in enabled-but-not-serving ("Starting…") with no node.
+            // Bring the messaging node back (best effort) and re-attach the relay so a failed
+            // fabric rebind can't permanently brick hosting until app restart.
+            if node == nil, let bridge = listener {
+                do {
+                    let deviceSeed = DeviceKeyStore.deviceAccount().secretSeed()
+                    let n = try await HavenNode.start(accountSeed: deviceSeed, listener: bridge)
+                    node = n
+                    internetReady = true
+                    online = true
+                    HavenLog.net("fabric rebind recovery node ok id=\(n.nodeIdHex().prefix(10))")
+                } catch {
+                    HavenLog.net("fabric rebind recovery node failed: \(error.localizedDescription)")
+                }
+            }
+            if wasHosting {
+                RelayHost.shared.reattachAfterFabricRebind()
             }
         }
     }
@@ -1302,6 +1478,20 @@ final class FeedStore: ObservableObject {
     func isConnected(_ idHex: String) -> Bool {
         guard let t = lastHeard[idHex] else { return false }
         return Date().timeIntervalSince(t) < 120
+    }
+
+    /// Prefix-tolerant "heard within window" check for keep-alive skip. `lastHeard` keys may be
+    /// full device ids, account ids, or short prefixes depending on the inbound path.
+    private func recentlyHeard(_ nodeHex: String, withinMs: UInt64, nowMs: UInt64) -> Bool {
+        let needle = nodeHex.lowercased()
+        guard !needle.isEmpty else { return false }
+        for (k, date) in lastHeard {
+            let key = k.lowercased()
+            guard key.hasPrefix(needle) || needle.hasPrefix(key) else { continue }
+            let heardMs = UInt64(max(0, date.timeIntervalSince1970) * 1000)
+            if nowMs >= heardMs, nowMs &- heardMs < withinMs { return true }
+        }
+        return false
     }
 
     private let lastHeardKey = "haven.lastHeard"
@@ -1326,29 +1516,150 @@ final class FeedStore: ObservableObject {
         guard let raw = UserDefaults.standard.dictionary(forKey: lastHeardKey) as? [String: Double] else { return }
         lastHeard = raw.mapValues { Date(timeIntervalSince1970: $0) }
     }
-    func forceSync() { bumpActivity(); ingestPushInbox(); syncWithContacts(); forceSelfSyncNextPoll(); pollMailboxNow() }
+    func forceSync() {
+        bumpActivity()
+        // Open a short Multipeer discovery window when the user asks to sync (needed local mesh).
+        nearby?.nudgeDiscovery(parkAfter: 45)
+        ingestPushInbox()
+        syncWithContacts()
+        forceSelfSyncNextPoll()
+        pollMailboxNow()
+    }
 
     private func startSyncTimer() {
         syncTimer?.invalidate()
         // 10s heartbeat, but the expensive fan-out (hello+roster to every contact, relay re-announce,
         // mesh dials) only runs when due — 20s base, stretching to 60s/120s as the app sits idle. This
         // is the primary device-heat fix: an open-but-idle phone no longer blasts the radio every 20s.
-        syncTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+        // Heartbeat: 15s on iOS (was 10) so idle phones wake the main actor less often; due-gate
+        // still decides when expensive work runs (base 30s on iOS, 20s elsewhere).
+        #if os(iOS)
+        let syncHeartbeat: TimeInterval = 20
+        let syncBaseMs: UInt64 = 45_000
+        #else
+        let syncHeartbeat: TimeInterval = 10
+        let syncBaseMs: UInt64 = 20_000
+        #endif
+        syncTimer = Timer.scheduledTimer(withTimeInterval: syncHeartbeat, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 guard self.now() >= self.nextSyncDueMs else { return }
-                self.nextSyncDueMs = self.now() + self.adaptiveInterval(base: 20_000)
+                self.nextSyncDueMs = self.now() + self.adaptiveInterval(base: syncBaseMs)
+                // requestMissingMedia runs inside syncWithContacts (already throttled) — do not
+                // call it again here or every tick doubles the media-scan + restore Tasks.
                 self.syncWithContacts()
-                // Persistently retry any media an interrupted nearby/iroh transfer left incomplete —
-                // re-request direct from contacts AND pull from the circle relay if one exists.
-                self.requestMissingMedia()
-                RelayHost.shared.meshSyncTick()   // if we host a relay, pull from sibling relays
+                // Mesh tick only when we host a relay (avoid empty work every cycle on phones).
+                if RelayHost.shared.serving {
+                    RelayHost.shared.meshSyncTick()
+                }
                 RelayMailboxStore.shared.purgeStale()   // GC relays inactive + unseen > 7 days
                 self.maybeWeeklyMediaSweep()      // orphaned media blobs (at most once a week)
                 self.enforceLocalLimits()         // device-local age/size caps (throttled ~10 min; no-op if off)
             }
         }
+        #if DEBUG
+        startMatrixQaPoller()
+        #endif
     }
+
+    #if DEBUG
+    /// Matrix multi-device QA: poll Application Support for `qa-cmd.json` and honor
+    /// `haven://qa?...` deep links (post / story / dm / call) without camera or picker automation.
+    ///
+    /// Drop file shape (deleted after one consume):
+    /// ```json
+    /// {"post":"…","story":"…","dm_to":"<64hex>","dm":"…","call_to":"<64hex>"}
+    /// ```
+    private var matrixQaTimer: Timer?
+    private func startMatrixQaPoller() {
+        matrixQaTimer?.invalidate()
+        matrixQaTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.processMatrixQaDropFile() }
+        }
+        // Also honor one-shot launch env (relaunch-driven automation).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.processMatrixQaEnvironment()
+        }
+    }
+
+    /// Handle `haven://qa?post=&story=&dm_to=&dm=&call_to=` from `onOpenURL`.
+    @discardableResult
+    func handleMatrixQaURL(_ url: URL) -> Bool {
+        guard url.scheme == "haven", url.host == "qa" else { return false }
+        var items: [String: String] = [:]
+        URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?
+            .forEach { if let v = $0.value, !v.isEmpty { items[$0.name] = v } }
+        applyMatrixQa(items)
+        return true
+    }
+
+    private func processMatrixQaDropFile() {
+        guard let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
+        let url = dir.appendingPathComponent("qa-cmd.json")
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return }
+        try? FileManager.default.removeItem(at: url)
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            HavenLog.net("matrix-qa drop: invalid JSON")
+            return
+        }
+        var items: [String: String] = [:]
+        for (k, v) in obj {
+            if let s = v as? String, !s.isEmpty { items[k] = s }
+        }
+        applyMatrixQa(items)
+    }
+
+    private func processMatrixQaEnvironment() {
+        let e = ProcessInfo.processInfo.environment
+        var items: [String: String] = [:]
+        if let v = e["HAVEN_QA_POST"], !v.isEmpty { items["post"] = v }
+        if let v = e["HAVEN_QA_STORY"], !v.isEmpty { items["story"] = v }
+        if let v = e["HAVEN_QA_DM"], !v.isEmpty { items["dm"] = v }
+        if let v = e["HAVEN_QA_DM_TO"], !v.isEmpty { items["dm_to"] = v }
+        if let v = e["HAVEN_QA_CALL_TO"], !v.isEmpty { items["call_to"] = v }
+        guard !items.isEmpty else { return }
+        applyMatrixQa(items)
+    }
+
+    private func applyMatrixQa(_ items: [String: String]) {
+        guard social != nil else {
+            HavenLog.net("matrix-qa deferred — social not ready")
+            return
+        }
+        if let body = items["post"], !body.isEmpty {
+            post(body)
+            HavenLog.net("matrix-qa post body=\(body.prefix(40))")
+        }
+        // Text-only story matches Android DEBUG postStory(body, null) — state story=true.
+        if let body = items["story"], !body.isEmpty {
+            post(body, media: [], music: nil, retentionSecs: 86_400, story: true)
+            HavenLog.net("matrix-qa story body=\(body.prefix(40))")
+        }
+        let dmTo = (items["dm_to"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let dmBody = items["dm"] ?? ""
+        if dmTo.count == 64, !dmBody.isEmpty {
+            let name = ContactsStore.shared.name(forNodePrefix: dmTo) ?? "Friend"
+            let cid = startDM(with: dmTo, name: name)
+            post(dmBody, toCircle: cid)
+            HavenLog.net("matrix-qa dm to=\(dmTo.prefix(8)) circle=\(cid.prefix(24)) body=\(dmBody.prefix(40))")
+        }
+        let callTo = (items["call_to"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if callTo.count == 64 {
+            let name = ContactsStore.shared.name(forNodePrefix: callTo) ?? "Friend"
+            CallManager.shared.startCall(peerHex: callTo, name: name)
+            HavenLog.net("matrix-qa call to=\(callTo.prefix(8))")
+        }
+        if items["call_accept"] == "1" || (items["call_accept"] ?? "").lowercased() == "true" {
+            CallManager.shared.accept()
+            HavenLog.net("matrix-qa call_accept")
+        }
+        if items["call_hangup"] == "1" || (items["call_hangup"] ?? "").lowercased() == "true" {
+            CallManager.shared.endCall()
+            HavenLog.net("matrix-qa call_hangup")
+        }
+    }
+    #endif
 
     private func now() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
     /// Stale-result guard for the off-main feed rebuild: only the newest refresh may publish.
@@ -1691,6 +2002,11 @@ final class FeedStore: ObservableObject {
         // The nearby broadcast is a single LOCAL fan-out (not × contacts) and is the own-device
         // (iPhone↔Mac) sync path, so it stays every cycle.
         let resendHistory = nowMs - lastHistoryResendMs > 180_000   // ~3 min; gates the WHOLE history re-send
+        // When the app is open but quiet, skip keep-alive hello/roster to peers we heard from
+        // recently. Real posts still go out via broadcastEvent; mailbox/poll covers the offline case.
+        // Without this, every sync tick redials every warm peer (iroh path discovery / radio heat).
+        // 30s idle (was 60s): warm peers don't need hello storms while you're just reading the feed.
+        let skipWarmKeepalives = (nowMs &- lastActivityMs) > 30_000
         for circle in circles {
             guard let hello = helloPayload(circleId: circle.id, circleName: circle.name) else { continue }
             // syncEnvelopes RE-SEALS every one of my events — expensive. Calling it for every circle on every
@@ -1705,13 +2021,22 @@ final class FeedStore: ObservableObject {
             if circle.id == "default" {
                 for c in ContactsStore.shared.contacts { targets.insert(c.idHex) }
             }
+            let meHex = social.myNodeHex()
             for nodeHex in targets {
+                if skipWarmKeepalives, recentlyHeard(nodeHex, withinMs: 120_000, nowMs: nowMs) {
+                    continue
+                }
                 sendIroh(0, hello, to: nodeHex)
+                // HTTP mailbox HELLO when iroh cannot dial (matrix stub / cross-NAT).
+                Task { await SharedStore.putHello(circleId: circle.id, toHex: nodeHex, fromHex: meHex, hello: hello) }
                 if !rosterWire.isEmpty { sendIroh(27, rosterWire, to: nodeHex) }   // announce my device roster
                 // Per-contact history re-send is the flood — throttle it (offline members get history
                 // from the mailbox; new contacts via the share-history flow).
                 if !envs.isEmpty, ConnectionsStore.shared.sharesHistory(nodeHex) {
-                    for env in envs { sendIroh(1, eventPayload(circle.id, env), to: nodeHex) }
+                    for env in envs {
+                        sendIroh(1, eventPayload(circle.id, env), to: nodeHex)
+                        Task { await SharedStore.uploadEvent(circleId: circle.id, env: env) }
+                    }
                 }
             }
             // Bootstrap the device-id exchange over the RELAY. When a friend flips to the per-device
@@ -1719,7 +2044,8 @@ final class FeedStore: ObservableObject {
             // roster — but their relay node (== their device messaging endpoint, one-endpoint design) IS
             // reachable. Push my roster there so the relay-hosting friend learns + authorizes my device id
             // (that's what lets me then read their mailbox). Skip my own hosted relay.
-            if !rosterWire.isEmpty {
+            // When idle, skip warm relays too — re-publishing every sync tick was pure dial heat.
+            if !rosterWire.isEmpty, !skipWarmKeepalives {
                 // Exclude OUR OWN ids: sending to our device id (RelayHost.nodeId) or our account id is a
                 // self-dial. A stale relay-list entry == our account id (pre-device-seed leftover) that
                 // resolves back to us sends iroh path discovery into the runaway loop (the 100GB leak). We
@@ -1735,10 +2061,19 @@ final class FeedStore: ObservableObject {
             // Only the OPEN default circle broadcasts its handshake to nearby. Custom + DM
             // circles must NOT — a broadcast Hello let any nearby contact handshake their way
             // into a circle they were never added to (membership contamination).
-            if circle.id == "default" { nearbyBroadcast(0, hello) }
+            // Skip when idle with no connected peers (radio heat for nobody).
+            if circle.id == "default", !skipWarmKeepalives || (nearby?.hasConnectedPeers == true) {
+                nearbyBroadcast(0, hello)
+            }
             // (Own-device nearby catch-up of events moved below — every cycle, off-main.)
             // Mesh: let a relay carry our handshake to members we can't reach directly.
-            originateRelay(dests: Array(targets), inner: frame(0, hello))
+            // When idle, only mesh-originate to cold targets (same filter as the iroh keep-alives).
+            let meshDests: [String] = skipWarmKeepalives
+                ? targets.filter { !recentlyHeard($0, withinMs: 120_000, nowMs: nowMs) }
+                : Array(targets)
+            if !meshDests.isEmpty {
+                originateRelay(dests: meshDests, inner: frame(0, hello))
+            }
         }
         if resendHistory { lastHistoryResendMs = nowMs }
         // PULL the rosters we're missing. Announcing ours (frame 27, above) only works when the
@@ -1778,27 +2113,11 @@ final class FeedStore: ObservableObject {
         // waiting for the 3-min full re-send. Re-seal (the expensive part) runs OFF the main thread; only the
         // cheap fan-out hops back to main. Capped to recent events so it isn't a congestion/CPU sink. The
         // receiver dedups known events, so re-broadcasting is harmless.
-        // Own-device nearby catch-up RE-SEALS up to 50 events per circle (a hybrid signature each) —
-        // real CPU. Only worth doing when a nearby sibling is actually connected to receive it;
-        // otherwise it was pure heat every 20s on a phone with no Mac nearby. When no nearby peer is
-        // present the internet + mailbox paths already carry everything.
-        if nearby?.hasConnectedPeers == true {
-            let cidsForNearby = circles.map(\.id)
-            Task.detached(priority: .utility) { [weak self, social] in
-                var work: [(String, [Data])] = []
-                for cid in cidsForNearby {
-                    // export_recent_envelopes = ALL authors (mine + received), so a sibling catches up on friends'
-                    // posts/DMs I received too — not just my own (which syncEnvelopes was limited to).
-                    let envs = social.exportRecentEnvelopes(circleId: cid, limit: 50)
-                    if !envs.isEmpty { work.append((cid, envs)) }
-                }
-                let workFinal = work
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
-                    for (cid, envs) in workFinal { for env in envs { self.nearbyBroadcast(1, self.eventPayload(cid, env)) } }
-                }
-            }
-        }
+        // Own-device nearby catch-up of history belongs on **connect** (`nearbyPeerConnected`), NOT
+        // every sync tick. Mac used to re-export 50 envelopes × every circle over Multipeer every
+        // ~20s while the iPhone was connected — field log: continuous IncomingPacket / 32KB frames
+        // and a hot phone. Internet own-device catch-up below covers multi-device when not nearby.
+        // (Intentionally no periodic Multipeer history dump here.)
         // Own-device catch-up over the INTERNET. The nearby sweep above only runs when a sibling is
         // physically connected — so two devices on different networks never reconciled, and anything
         // that reached only ONE of them stayed there. That is the "a DM landed on my Mac and never on
@@ -1827,7 +2146,14 @@ final class FeedStore: ObservableObject {
                 }
             }
         }
-        reannounceOwnRelay()   // frame 19 was a one-shot at relay start; re-emit so peers reliably learn it
+        // Frame-19 re-announce: throttle hard. Every sync tick used to seal + fan-out relay ids to
+        // every member (iroh + nearby + mesh), which kept the radio warm even when nothing changed.
+        // 3 min is enough for peers who missed the host-start one-shot; fresh peers still get it
+        // on nearby connect / adopt.
+        if nowMs &- lastRelayReannounceMs > 180_000 {
+            lastRelayReannounceMs = nowMs
+            reannounceOwnRelay()
+        }
         // Push MY media up to every circle relay periodically. The nearby request/response (frame 3→5) was
         // unreliable (0 chunks served), so instead each device durably mirrors its own media to the relays
         // it knows — including a sibling's hosted relay — and the other side reads it locally via poll OWN.
@@ -1840,8 +2166,12 @@ final class FeedStore: ObservableObject {
             // ERR-forbidding our mailbox ops — the "my own NAS relay rejects my phone" fix.
             Task { await SharedStore.publishDeviceRoster(social: social) }
         }
-        // Only push media over nearby when a sibling is actually connected (else it's idle work).
-        if nearby?.hasConnectedPeers == true { pushOwnMediaNearby() }
+        // Multipeer media: at most every 5 min on the sync path (connect still pushes once).
+        // Every-tick pushOwnMediaNearby from Mac was a major iPhone heat source.
+        if nearby?.hasConnectedPeers == true, nowMs &- lastNearbyMediaPushMs > 300_000 {
+            lastNearbyMediaPushMs = nowMs
+            pushOwnMediaNearby()
+        }
         requestMissingMedia()
     }
 
@@ -1851,7 +2181,10 @@ final class FeedStore: ObservableObject {
     /// the iPhone "sees the Mac nearby but won't show its relay", and why an adopted EXTERNAL relay
     /// (NAS docker daemon) never reached circle members at all: only the self-hosted relay was ever
     /// re-announced. Android already re-announces all circle relays per hello — this is that parity.
-    /// Cheap (one small sealed announce per relay per circle), so it's safe every sync tick.
+    ///
+    /// Callers: host start / nearby connect / adopt may fire immediately; the periodic sync path
+    /// must throttle via `lastRelayReannounceMs` (not every tick — each call fans out sealed
+    /// frame-19 to every member over iroh and re-arms dials to unreachable ids).
     func reannounceOwnRelay() {
         guard let social else { return }
         for ci in circles {
@@ -1883,19 +2216,28 @@ final class FeedStore: ObservableObject {
         }
     }
 
-    /// The frame-19 announce body for one relay: the legacy bare 64-hex node id, or — once the
-    /// relay's plain-HTTP interface is known — JSON `{"node":hex,"urls":[…],"token":…}` so members
-    /// also learn the reliable cross-NAT media path. Sealed to the circle either way; a legacy
-    /// receiver that expects a bare hex simply ignores the JSON form (wrong length).
+    /// The frame-19 announce body for one relay: bare 64-hex, or JSON with media/DERP/TURN.
     private func relayAnnounceData(_ hex: String) -> Data {
         // Always carry the relay's adoption timestamp so receivers can LWW a stale tombstone. Use the
         // JSON form whenever we have EITHER an HTTP interface or a non-zero adoption stamp; a legacy
         // receiver ignores JSON it can't parse as a bare hex (wrong length), so this stays compatible.
         let addedAt = RelayMailboxStore.shared.addedAtMs(hex)
         let http = RelayMailboxStore.shared.httpInterface(hex)
-        if http != nil || addedAt > 0 {
+        let entry = RelayMailboxStore.shared.entries[hex.lowercased()]
+            ?? RelayMailboxStore.shared.entries[hex]
+        let derp = entry?.derpUrl
+        let turnUrls = entry?.turnUrls ?? []
+        let turnUser = entry?.turnUser ?? ""
+        let turnPass = entry?.turnPass ?? ""
+        if http != nil || addedAt > 0 || (derp?.isEmpty == false) || !turnUrls.isEmpty {
             var obj: [String: Any] = ["node": hex, "addedAt": addedAt]
             if let http { obj["urls"] = http.urls; obj["token"] = http.token }
+            if let derp, !derp.isEmpty { obj["derp"] = derp }
+            if !turnUrls.isEmpty {
+                obj["turn"] = turnUrls
+                if !turnUser.isEmpty { obj["turnUser"] = turnUser }
+                if !turnPass.isEmpty { obj["turnPass"] = turnPass }
+            }
             if let json = try? JSONSerialization.data(withJSONObject: obj) { return json }
         }
         return Data(hex.utf8)
@@ -1905,26 +2247,41 @@ final class FeedStore: ObservableObject {
     private func nearbyPeerConnected() {
         guard let social else { return }
         nearbyActive = true
-        bumpActivity()   // a peer just appeared → sync tight for the catch-up burst
-        // S4: if this device is mid seedless-enrollment, a primary that only just came into range now
-        // gets our frame-28 request (the ticket is single-use but the request is safe to resend).
+        // Multipeer flaps (connect → broken-pipe → reconnect) were observed live on device: each
+        // transition re-armed tight sync cadence + re-exported 150 envelopes/circle + re-announced
+        // relays. Debounce the heavy catch-up to once per 45s; light enroll still retries.
+        let nowMs = now()
+        let flap = lastNearbyConnectMs > 0 && (nowMs &- lastNearbyConnectMs) < 45_000
+        lastNearbyConnectMs = nowMs
         if pendingEnrollTicket != nil { sendEnrollRequest() }
+        if flap { return }
+        bumpActivity()   // a peer just appeared → sync tight for the catch-up burst
         reannounceOwnRelay()   // a freshly-connected sibling/friend immediately learns this host's relay
         // FIRST: offer this device's sealed self-sync slot to nearby peers. ONLY our own devices (same
         // seed) can open it — it's how a linked Mac/phone bootstraps circles + profile + posts LOCALLY,
         // with no relay or S3 at all (the local "handshake" sync). Sent before the post events below so
         // the receiver learns the circles before their posts arrive.
-        if let slot = SelfSyncCoordinator.shared.sealedLocalSlot(social: social) { nearbyBroadcast(23, slot) }
+        if let slot = SelfSyncCoordinator.shared.sealedLocalSlot(social: social) {
+            nearbyBroadcast(23, slot, class: .control)
+        }
+        // Bounded catch-up — rate-limited bulk path; never 150×circles flood (Mac→iPhone heat).
+        #if os(iOS)
+        let nearbyCatchupLimit: UInt32 = 40
+        #else
+        let nearbyCatchupLimit: UInt32 = 80
+        #endif
         for circle in circles {
             guard let hello = helloPayload(circleId: circle.id, circleName: circle.name) else { continue }
-            if circle.id == "default" { nearbyBroadcast(0, hello) }   // only the open circle broadcasts handshake
-            // DMs + RECEIVED events included — export_recent_envelopes re-broadcasts ALL authors' recent
-            // events (not just mine), so a freshly-connected sibling catches up on friends' posts/DMs I
-            // received too. Sealed, so a nearby non-member just drops it.
-            for env in social.exportRecentEnvelopes(circleId: circle.id, limit: 150) { nearbyBroadcast(1, eventPayload(circle.id, env)) }
+            if circle.id == "default" { nearbyBroadcast(0, hello, class: .control) }
+            // DMs + RECEIVED events — sealed; non-members drop. Rate limiter paces bulk sends.
+            for env in social.exportRecentEnvelopes(circleId: circle.id, limit: nearbyCatchupLimit) {
+                nearbyBroadcast(1, eventPayload(circle.id, env), class: .bulk)
+            }
         }
-        pushOwnMediaNearby(freshPeer: true)   // a newly-connected sibling has nothing — push it my media now
+        pushOwnMediaNearby(freshPeer: true)   // paced bulk media via rate limiter
         refresh()
+        // Keep the Multipeer **session** for live nearby delivery; discovery is already parked
+        // on connect. Do not disconnect — that forced internet-only and broke local mesh UX.
     }
 
     /// A self-sync slot arrived from another of the user's OWN devices over the nearby mesh (only our
@@ -2084,13 +2441,37 @@ final class FeedStore: ObservableObject {
         guard let social, ids.contains(where: { SharedStore.hasMailbox($0) }) else { return }
         let msgs = await SharedStore.pollMailbox(circleIds: ids)
         guard !msgs.isEmpty else { return }
+        let me = social.myNodeHex().lowercased()
+        // HELLOs over HTTP mailbox first (membership / keys before content).
+        // LIST order is filesystem walk — flat blobs often precede __hello__/ subdirs.
+        var helloIngested = false
+        let sorted = msgs.sorted { a, b in
+            let ah = a.1.contains("/__hello__/"); let bh = b.1.contains("/__hello__/")
+            if ah != bh { return ah && !bh }
+            return false
+        }
+        for (cid, key, data) in sorted where key.contains("/__hello__/") {
+            let parts = key.split(separator: "/").map(String.init)
+            if let i = parts.firstIndex(of: "__hello__"), parts.count > i + 1 {
+                let to = parts[i + 1].lowercased()
+                guard to == me else { SharedStore.markSeenPublic(key); continue }
+            }
+            handleHello(data, viaNearby: false, senderDevice: nil)
+            SharedStore.markSeenPublic(key)
+            helloIngested = true
+            HavenLog.net("hello http-ingest circle=\(cid.prefix(12))")
+        }
+        let content = sorted.filter { !$0.1.contains("/__hello__/") }
         // receive() does real crypto per envelope; a backlog drain used to run the whole loop on
         // the main actor and freeze the UI for the duration. Ingest the batch off-main, then hop
         // back once with the circles that changed.
         let ingested: [String] = await Task.detached(priority: .utility) {
             var changed: [String] = []
-            for (cid, env) in msgs where (try? social.receive(circleId: cid, envelope: env)) == true {
-                changed.append(cid)
+            for (cid, key, env) in content {
+                if (try? social.receive(circleId: cid, envelope: env)) == true {
+                    SharedStore.markSeenPublic(key)
+                    changed.append(cid)
+                }
             }
             return changed
         }.value
@@ -2100,6 +2481,7 @@ final class FeedStore: ObservableObject {
         // here, a kill before the key arrives loses the buffered event forever (the exact
         // random-non-delivery failure). Cheap: msgs is only non-empty when the mailbox served bytes.
         persist()
+        if helloIngested { refresh(); syncWithContacts() }
         guard !ingested.isEmpty else { return }
         bumpActivity()   // a message arrived → keep sync tight while the conversation is live
         var dmIngested = false
@@ -2279,8 +2661,18 @@ final class FeedStore: ObservableObject {
         }
     }
 
-    private func nearbyBroadcast(_ type: UInt8, _ payload: Data) {
-        nearby?.broadcast(frame(type, payload))
+    /// Multipeer fan-out with rate class. Control = hello/announce/signals; bulk = history/media.
+    private func nearbyBroadcast(_ type: UInt8, _ payload: Data, class sendClass: NearbyTransport.SendClass = .control) {
+        // Large frames (media chunks / fat envelopes) are bulk by default if caller left default.
+        let cls: NearbyTransport.SendClass = {
+            if sendClass != .control { return sendClass }
+            // Heuristic: frames > 2 KB are bulk even if tagged control (defensive).
+            if payload.count > 2048 { return .bulk }
+            // Explicit bulk types: event history (1) can be large; media (5) always bulk.
+            if type == 5 { return .bulk }
+            return sendClass
+        }()
+        nearby?.broadcast(frame(type, payload), class: cls)
     }
 
     /// `senderDevice` = the AUTHENTICATED transport id the frame arrived from (nil for nearby /
@@ -2845,11 +3237,50 @@ final class FeedStore: ObservableObject {
 
     /// Adopt a relay node as the mailbox for specific circles (and optionally make it the default
     /// every present + future circle inherits). Each circle's members are told over frame 19.
+    /// Adopt a relay. Accepts a bare 64-hex node id, or the JSON interface blob printed by
+    /// `haven-relay` (`{"node","urls","token","derp","turn",…}`) so media + fabric + TURN are
+    /// learned in one paste and re-announced to the circle (frame 19).
     func adoptRelayNode(_ nodeHex: String, circleIds: [String], setDefault: Bool) {
-        let hex = nodeHex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var hex = nodeHex.trimmingCharacters(in: .whitespacesAndNewlines)
+        var announcedUrls: [String] = []
+        var announcedToken = ""
+        var announcedDerp: String?
+        var announcedTurn: [String] = []
+        var announcedTurnUser = ""
+        var announcedTurnPass = ""
+        if hex.hasPrefix("{"),
+           let obj = try? JSONSerialization.jsonObject(with: Data(hex.utf8)) as? [String: Any] {
+            announcedUrls = (obj["urls"] as? [String] ?? []).filter { $0.hasPrefix("http") }
+            announcedToken = obj["token"] as? String ?? ""
+            if let d = obj["derp"] as? String, d.hasPrefix("http") {
+                announcedDerp = d.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            }
+            if let arr = obj["turn"] as? [String] {
+                announcedTurn = arr.filter { $0.hasPrefix("turn:") || $0.hasPrefix("turns:") }
+            } else if let s = obj["turn"] as? String, s.hasPrefix("turn:") || s.hasPrefix("turns:") {
+                announcedTurn = [s]
+            }
+            announcedTurnUser = obj["turnUser"] as? String ?? ""
+            announcedTurnPass = obj["turnPass"] as? String ?? ""
+            if announcedTurnUser.isEmpty, !announcedTurn.isEmpty { announcedTurnUser = "haven" }
+            if announcedTurnPass.isEmpty, !announcedTurn.isEmpty, !announcedToken.isEmpty {
+                announcedTurnPass = announcedToken
+            }
+            hex = (obj["node"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        hex = hex.lowercased()
         guard let social, hex.count == 64 else { return }
-        let data = relayAnnounceData(hex)
         RelayMailboxStore.shared.unforget(hex)   // explicit adoption overrides a prior Forget
+        if !announcedUrls.isEmpty, !announcedToken.isEmpty {
+            RelayMailboxStore.shared.setHttpInterface(hex, urls: announcedUrls, token: announcedToken)
+        }
+        if let announcedDerp {
+            RelayMailboxStore.shared.setDerpUrl(hex, url: announcedDerp)
+        }
+        if !announcedTurn.isEmpty {
+            RelayMailboxStore.shared.setTurn(hex, urls: announcedTurn, user: announcedTurnUser, pass: announcedTurnPass)
+        }
+        let data = relayAnnounceData(hex)
         if setDefault { RelayMailboxStore.shared.defaultNodeHex = hex }
         for cid in circleIds {
             RelayMailboxStore.shared.add(circleId: cid, nodeHex: hex)   // ADD (append), don't replace
@@ -2968,11 +3399,27 @@ final class FeedStore: ObservableObject {
         var announcedUrls: [String] = []
         var announcedToken = ""
         var announcedAddedAt: UInt64 = 0
+        var announcedDerp: String?
+        var announcedTurn: [String] = []
+        var announcedTurnUser = ""
+        var announcedTurnPass = ""
         if nodeHex.hasPrefix("{"),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             announcedUrls = (obj["urls"] as? [String] ?? []).filter { $0.hasPrefix("http") }
             announcedToken = obj["token"] as? String ?? ""
             announcedAddedAt = (obj["addedAt"] as? NSNumber)?.uint64Value ?? 0
+            if let d = obj["derp"] as? String, d.hasPrefix("http") { announcedDerp = d }
+            if let arr = obj["turn"] as? [String] {
+                announcedTurn = arr.filter { $0.hasPrefix("turn:") || $0.hasPrefix("turns:") }
+            } else if let s = obj["turn"] as? String, s.hasPrefix("turn:") || s.hasPrefix("turns:") {
+                announcedTurn = [s]
+            }
+            announcedTurnUser = obj["turnUser"] as? String ?? ""
+            announcedTurnPass = obj["turnPass"] as? String ?? ""
+            if announcedTurnUser.isEmpty, !announcedTurn.isEmpty { announcedTurnUser = "haven" }
+            if announcedTurnPass.isEmpty, !announcedTurn.isEmpty, !announcedToken.isEmpty {
+                announcedTurnPass = announcedToken
+            }
             nodeHex = (obj["node"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         }
         guard nodeHex.count == 64 else { return }
@@ -3003,6 +3450,13 @@ final class FeedStore: ObservableObject {
         // Record the relay's announced HTTP media interface (the reliable cross-NAT path).
         if !announcedUrls.isEmpty, !announcedToken.isEmpty {
             RelayMailboxStore.shared.setHttpInterface(lower, urls: announcedUrls, token: announcedToken)
+        }
+        // Haven fabric: DERP URL so peers prefer this box over n0 for live NAT.
+        if let announcedDerp {
+            RelayMailboxStore.shared.setDerpUrl(lower, url: announcedDerp)
+        }
+        if !announcedTurn.isEmpty {
+            RelayMailboxStore.shared.setTurn(lower, urls: announcedTurn, user: announcedTurnUser, pass: announcedTurnPass)
         }
         // SUPERSEDE stale account-id relays. Under the per-device transport a relay is ALWAYS a device id,
         // never an account id. A relay-list entry equal to a member's (or our own) ACCOUNT id is a dead
@@ -3221,15 +3675,26 @@ final class FeedStore: ObservableObject {
             HavenLog.call("call frame type=\(type) NOT SENT to \(nodeHex.prefix(8)) — seal failed (recipient unresolvable: \(known) known device id(s), \(sealedOpt == nil ? "threw" : "empty"))")
             return
         }
+        let wire = frame(type, sealed)
         sendIroh(type, sealed, to: nodeHex)
         // Cross-NAT fallback: hop the same SEALED frame LIVE through the circle relays (frame 9 — the
         // relay host unwraps + sends it onward over its own connections). The nearby originateRelay
         // flood never leaves the room, so a callee whose direct dial back to the caller failed had
         // NO way to deliver the ACCEPT — the push rang her, but the answer died in the NAT. The relay
         // only ever handles the sealed blob; it cannot read or alter the signaling.
-        var dests = social?.deviceNodeIdsFor(accountHex: nodeHex) ?? [nodeHex]
-        for h in deviceHints(for: nodeHex) where !dests.contains(where: { $0.lowercased() == h }) { dests.append(h) }
-        originateRelayInternet(dests: dests, inner: frame(type, sealed))
+        var dests = social?.deviceNodeIdsFor(accountHex: nodeHex) ?? []
+        if !dests.contains(where: { $0.lowercased() == nodeHex.lowercased() }) { dests.append(nodeHex) }
+        if dests.count <= 1 {
+            for h in deviceHints(for: nodeHex) where !dests.contains(where: { $0.lowercased() == h }) {
+                dests.append(h)
+                if dests.count >= 3 { break }
+            }
+        }
+        originateRelayInternet(dests: dests, inner: wire)
+        // HTTP live-lane: account + roster devices only (avoid flooding every historical hint).
+        let liveDests = dests
+        let cids = self.circles.map(\.id)
+        Task { await SharedStore.uploadLiveCallFrames(circleIds: cids, dests: liveDests, frame: wire) }
     }
 
     /// Originate a frame-9 live forward of `inner` to `dests` via up to 3 adopted INTERNET relays
@@ -3300,7 +3765,7 @@ final class FeedStore: ObservableObject {
         p.append(UInt8(min(destBytes.count, 255)))
         for d in destBytes.prefix(255) { p.append(d) }
         p.append(inner)
-        nearby?.broadcast(frame(9, p))
+        nearby?.broadcast(frame(9, p), class: .control)
     }
 
     private func handleRelay(_ payload: Data) {
@@ -3693,8 +4158,12 @@ final class FeedStore: ObservableObject {
                     if chunk.isEmpty { break }
                     guard let sealed = try? AES.GCM.seal(chunk, using: ownKey).combined else { break }
                     let frame = Self.chunkFrame(refData: refData, index: index, total: total, sealed: sealed)
-                    mesh?.broadcast(Data([5]) + frame)
-                    Thread.sleep(forTimeInterval: 0.030)   // pace so we don't outrun a slow link → unbounded send backlog
+                    // Bulk + rate limiter (~64 KB/s); drop if flooded — resume path refills holes.
+                    if mesh?.broadcast(Data([5]) + frame, class: .bulk) != true {
+                        Thread.sleep(forTimeInterval: 0.050)
+                        // One retry after brief wait for tokens; then stop this pass.
+                        if mesh?.broadcast(Data([5]) + frame, class: .bulk) != true { break }
+                    }
                     // Stop early if the send backlog is already high — the rest re-pushes next tick.
                     if (mesh?.sendBacklogHigh ?? false) { break }
                 }
@@ -3721,7 +4190,10 @@ final class FeedStore: ObservableObject {
                     break
                 }
                 let out = Data([5]) + Self.chunkFrame(refData: refData, index: index, total: total, sealed: sealed)
-                nearby?.broadcast(out)
+                if nearby?.broadcast(out, class: .bulk) != true {
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                    if nearby?.broadcast(out, class: .bulk) != true { break }
+                }
                 if let node { Task.detached { try? await node.sendToNode(nodeIdHex: requesterHex, payload: out) } }
                 try? await Task.sleep(nanoseconds: 12_000_000)
             }
@@ -3980,10 +4452,13 @@ final class FeedStore: ObservableObject {
         if let hello = helloPayload(circleId: circleId, circleName: circleName) {
             sendIroh(0, hello, to: idHex)
             if circleId == "default" { nearbyBroadcast(0, hello) }
+            let meHex = social.myNodeHex()
+            Task { await SharedStore.putHello(circleId: circleId, toHex: idHex, fromHex: meHex, hello: hello) }
         }
         for env in social.syncEnvelopes(circleId: circleId) {
             sendIroh(1, eventPayload(circleId, env), to: idHex)
             if !isDM { nearbyBroadcast(1, eventPayload(circleId, env)) }
+            Task { await SharedStore.uploadEvent(circleId: circleId, env: env) }
         }
         refresh()
     }
@@ -4934,6 +5409,9 @@ struct PostCard: View {
     @State private var showReactionDetail = false
     /// A "share this post as a story" composer session (nil = not sharing).
     @State private var storyShare: StoryShareTarget?
+    /// Super data saver: video refs the user explicitly tapped play for. We pull those bytes and
+    /// auto-start once they land (normal data-saver mode never autoplays).
+    @State private var dataSaverPendingPlay: Set<String> = []
 
     private var isActive: Bool { audio.centeredPostId == item.id }
 
@@ -4952,12 +5430,14 @@ struct PostCard: View {
     }
 
     private var primaryVideoPlayer: AVPlayer? {
-        guard item.media.count == 1, let ref = item.media.first, isVideo(ref) else { return nil }
+        let media = realMedia
+        guard media.count == 1, let ref = media.first, isVideo(ref) else { return nil }
         return players[ref]
     }
     /// A post that is exactly one video — the GestureVideoPlayer owns all of its gestures.
     private var isSingleVideoPost: Bool {
-        item.media.count == 1 && (item.media.first.map(isVideo) ?? false)
+        let media = realMedia
+        return media.count == 1 && (media.first.map(isVideo) ?? false)
     }
     /// Kind from the REF (a cheap string parse — refs encode img_/vid_/aud_), never `item(ref)`. `item(_:)`
     /// decodes the bitmap / generates the video poster on the main thread on a cache miss, and this is
@@ -5348,33 +5828,49 @@ struct PostCard: View {
         // play affordance. Tapping play requests the video bytes and only then builds an AVPlayer.
         if dataSaver, MediaKind(ref: ref) == .video, !hasVideo {
             let poster = MediaVariants.poster(for: ref, in: item.media)
+            let waiting = dataSaverPendingPlay.contains(ref)
             ZStack {
                 if let poster, MediaStore.shared.hasLocalFile(poster) {
                     FeedImage(ref: poster, maxDimension: 1200, contentMode: .fit) { mediaLoadingPlaceholder(ref) }
                 } else {
                     mediaLoadingPlaceholder(ref)
                 }
-                Image(systemName: "play.circle.fill").font(.system(size: 56))
-                    .foregroundStyle(.white.opacity(0.92)).shadow(radius: 6)
+                if waiting {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(.white)
+                        .scaleEffect(1.4)
+                        .padding(18)
+                        .background(Circle().fill(Color.black.opacity(0.4)))
+                } else {
+                    Image(systemName: "play.circle.fill").font(.system(size: 56))
+                        .foregroundStyle(.white.opacity(0.92)).shadow(radius: 6)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
             .onTapGesture {
-                // Explicit play → download the video (and only the video).
+                // Explicit play → download the video (and only the video), then start once it lands.
+                dataSaverPendingPlay.insert(ref)
                 feed.requestMedia(ref, circleId: feed.activeCircleId)
             }
             .background { pageBackdrop(poster ?? ref, containerAspect: containerAspect) }
         } else if hasVideo {
             if MediaKind(ref: ref) == .video, let url = MediaStore.shared.storagePath(for: ref) {
-                // Data saver with local video: still don't autoplay — GestureVideoPlayer starts paused
-                // when superDataSaver is on via playVisibleVideo; the user taps to start.
+                // Data saver with local video: don't autoplay until the user asked (pending play
+                // from a poster tap, or a first tap on an already-local clip). Tap then toggles mute.
                 let player = playerFor(ref, url)
                 GestureVideoPlayer(player: player,
-                                   onTap: { togglePostMute() },
+                                   onTap: { dataSaverVideoTap(ref, player) },
                                    onDoubleTap: { heartIt() },
                                    inCarousel: inCarousel,
                                    onScrubbing: onScrubbing)
                     .background { pageBackdrop(ref, containerAspect: containerAspect) }
+                    .onAppear {
+                        if dataSaver, dataSaverPendingPlay.contains(ref) {
+                            startDataSaverPlayback(ref, player)
+                        }
+                    }
             } else if MediaKind(ref: ref) == .file {
                 fileAttachmentPage(ref)
             } else {
@@ -5390,6 +5886,29 @@ struct PostCard: View {
             // Referenced but not here yet — it's still coming from the sender / mailbox.
             mediaLoadingPlaceholder(ref)
         }
+    }
+
+    /// Super data saver (and normal) single-tap on an inline video.
+    /// Under data saver a paused clip's first tap means "play" — mute alone left posters dead after
+    /// download because `playVisibleVideo` never auto-starts in that mode.
+    private func dataSaverVideoTap(_ ref: String, _ player: AVPlayer) {
+        if SettingsStore.shared.superDataSaver, player.rate == 0 {
+            startDataSaverPlayback(ref, player)
+            return
+        }
+        togglePostMute()
+    }
+
+    private func startDataSaverPlayback(_ ref: String, _ player: AVPlayer) {
+        dataSaverPendingPlay.remove(ref)
+        if audio.activePostId != item.id {
+            audio.start(postId: item.id, track: nil, video: player, muteVideo: item.muteVideo, immediateMusic: false)
+        }
+        #if os(iOS)
+        ensureHavenPlaybackSession()
+        #endif
+        player.seek(to: .zero)
+        player.play()
     }
 
     /// A `file_` zip attachment: document chip with share/save affordance.
@@ -5701,15 +6220,26 @@ private struct KillHorizontalScroller: NSViewRepresentable {
 
     private func playVisibleVideo() {
         guard isActive else { return }
-        // Super data saver: never autoplay. The still (poster) is already on screen; the user
-        // taps play when they want the bytes + the decode heat.
+        // Index against display refs (not raw item.media) so carousel page maps to the video slide.
+        let media = realMedia
+        let visibleRef: String? = media.isEmpty
+            ? nil
+            : media[min(max(currentPage, 0), media.count - 1)]
+        // Super data saver: never autoplay *unless* the user explicitly tapped play on this ref
+        // (poster → download → pending). Keep a clip they already started; pause everything else.
         if SettingsStore.shared.superDataSaver {
-            for (_, player) in players { player.pause() }
+            for (ref, player) in players {
+                let isVisible = ref == visibleRef
+                if isVisible, dataSaverPendingPlay.contains(ref) {
+                    startDataSaverPlayback(ref, player)
+                } else if isVisible, player.rate > 0 {
+                    // User-started — leave playing.
+                } else if !isVisible {
+                    player.pause()
+                }
+            }
             return
         }
-        let visibleRef: String? = item.media.isEmpty
-            ? nil
-            : item.media[min(max(currentPage, 0), item.media.count - 1)]
         #if os(iOS)
         // A post's music plays on the system music player; without mixing, that music takes the audio
         // session and INTERRUPTS the video's AVPlayer, so the (muted) video just froze. Mix so the video

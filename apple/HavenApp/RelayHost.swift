@@ -26,6 +26,10 @@ final class RelayHost: ObservableObject {
     @Published private(set) var nodeId = ""
 
     private var handle: RelayServerHandle?
+    /// Embedded iroh-relay (DERP) fabric — desktop-class hosts only; held while hosting.
+    private var derpHandle: DerpServerHandle?
+    /// Single-origin path router (media + DERP by path) — tunnel targets this port when set.
+    private var pathRouterHandle: PathRouterHandle?
     /// The same handle, reachable OFF the main actor.
     ///
     /// RelayHost is @MainActor, so every local-store accessor below used to force its caller onto the
@@ -93,27 +97,111 @@ final class RelayHost: ObservableObject {
         return dir.path
     }
 
+    /// Retries while waiting for `FeedStore.transportNode` (shows as "Starting…" in the Relays UI).
+    private var startWaitAttempts = 0
+
     func setEnabled(_ on: Bool) {
-        enabled = on
-        d.set(on, forKey: enabledKey)
-        if on { start() } else { stop() }
+        if on {
+            // Stuck "Starting…" (toggle on, never serving) — force a clean restart rather than
+            // no-op'ing into the same failed half-state (fabric rebind detaches then fails reattach).
+            if enabled && !serving {
+                HavenLog.relay("host toggle on while stuck Starting — force stop+start")
+                stop()
+            }
+            enabled = true
+            d.set(true, forKey: enabledKey)
+            start()
+        } else {
+            enabled = false
+            d.set(false, forKey: enabledKey)
+            stop()
+        }
     }
 
     /// Restart the relay at launch if the user had it on.
     func startIfEnabled() { if enabled && handle == nil { start() } }
 
+    /// Detach mailbox from the messaging node without killing cloudflared / embedded DERP —
+    /// used by fabric soft-rebind (same-key endpoint must fully stop before re-spawn).
+    func detachForFabricRebind() {
+        handle?.disable()
+        setHandle(nil)
+        serving = false
+        // Keep nodeId so reannounce still has a stable id; reattach refreshes it.
+        HavenLog.relay("host detached for fabric rebind (will reattach when node is back)")
+    }
+
+    /// Re-attach after `FeedStore` restarted the messaging node onto Haven RelayMap.
+    func reattachAfterFabricRebind() {
+        guard enabled, handle == nil else { return }
+        guard let node = FeedStore.shared.transportNode else {
+            startWaitAttempts += 1
+            if startWaitAttempts <= 30 || startWaitAttempts % 10 == 0 {
+                HavenLog.relay("reattach waiting for messaging node (attempt \(startWaitAttempts))")
+            }
+            // Cap silent wait — after ~15s fall through to full start() which has the same wait,
+            // but keeps UI honest and recovers if rebind left us stranded.
+            if startWaitAttempts > 30 {
+                HavenLog.relay("reattach gave up waiting — full start()")
+                start()
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.reattachAfterFabricRebind()
+            }
+            return
+        }
+        startWaitAttempts = 0
+        #if os(macOS)
+        PlatformIdle.disabled = true
+        #endif
+        let h = RelayServerHandle.attachWithLimits(node: node, dir: storeDir,
+                                                   mediaMaxAgeDays: UInt32(max(0, mediaMaxAgeDays)),
+                                                   mediaMaxBytes: mediaMaxBytes)
+        setHandle(h)
+        nodeId = h.nodeIdHex()
+        serving = true
+        authorizeMembership()
+        // HTTP only — tunnels/DERP already running from the original start.
+        Task { [weak self] in
+            guard let self else { return }
+            let token = self.httpToken()
+            var port: UInt16?
+            do { port = try await h.serveHttp(bind: "0.0.0.0:8674", token: token) }
+            catch { port = try? await h.serveHttp(bind: "0.0.0.0:0", token: token) }
+            guard let port else { HavenLog.relay("reattach http FAILED"); return }
+            let urls = Self.reachableHttpUrls(port: port)
+            if !urls.isEmpty, !self.nodeId.isEmpty {
+                RelayMailboxStore.shared.setHttpInterface(self.nodeId, urls: urls, token: token)
+            }
+            FeedStore.shared.reannounceOwnRelay()
+            HavenLog.relay("reattach after fabric rebind relay=\(self.nodeId.prefix(10)) :\(port)")
+        }
+    }
+
     private func start() {
+        guard enabled else { return }
         guard handle == nil else { return }
         // The relay now ATTACHES to the messaging node's endpoint (one iroh node, two ALPNs) — running a
         // second in-process iroh node is what made iroh churn paths unboundedly (the tens-of-GB leak).
         guard let node = FeedStore.shared.transportNode else {
             // Node not up yet — retry shortly; the relay can't exist without the node to attach to.
+            startWaitAttempts += 1
+            if startWaitAttempts == 1 || startWaitAttempts % 5 == 0 {
+                HavenLog.relay("host waiting for messaging node (attempt \(startWaitAttempts))")
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in self?.start() }
             return
         }
-        // Keep the device awake while relaying: screen-on on iOS (relaying stops when the app
-        // suspends), system-sleep prevention on Mac (the display may sleep; the app keeps serving).
+        startWaitAttempts = 0
+        // Mac: prevent system sleep so a laptop left closed as a relay keeps serving.
+        // iPhone/iPad: NEVER pin the idle timer — keeping the screen awake for hosting was a
+        // major battery/heat source (user field: multi-% drain in minutes while "just open").
+        // iOS already suspends background work when the screen dims; that's the right trade-off
+        // for a phone. Desktop-class is the always-on path.
+        #if os(macOS)
         PlatformIdle.disabled = true
+        #endif
         let h = RelayServerHandle.attachWithLimits(node: node, dir: storeDir,
                                                    mediaMaxAgeDays: UInt32(max(0, mediaMaxAgeDays)),
                                                    mediaMaxBytes: mediaMaxBytes)
@@ -144,28 +232,120 @@ final class RelayHost: ObservableObject {
             do { port = try await h.serveHttp(bind: "0.0.0.0:8674", token: token) }
             catch { port = try? await h.serveHttp(bind: "0.0.0.0:0", token: token) }   // port taken → ephemeral
             guard let self, let port else { HavenLog.relay("relay http serve FAILED"); return }
-            var urls = Self.reachableHttpUrls(port: port)
-            // Desktop-class hosts: if the operator didn't set a stable public URL, open a free
-            // Cloudflare Quick Tunnel so remote members can fetch media without port-forwarding.
-            // Ephemeral hostname; killed when hosting stops. iOS skips (no helper binary).
-            // Front door: manual (announce-only), bundled token, or free quick — see CloudflaredTunnel.
+
+            // Tunnel targets this port (path router when fabric is unified, else media).
+            var frontPort = port
+            var pathRouted = false
+
             #if os(macOS)
-            let fd = await CloudflaredTunnel.shared.apply(port: port)
+            // Start DERP before the front door so a single-origin path router can front both.
+            let configuredDerp = (UserDefaults.standard.string(forKey: "haven.relay.derpURL") ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let mediaPublicPref = (UserDefaults.standard.string(forKey: "haven.relay.publicURL") ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let siblingDerp = !configuredDerp.isEmpty
+                && (mediaPublicPref.isEmpty || configuredDerp != mediaPublicPref)
+            var derpLocalPort: UInt16?
+            do {
+                let derp = try await DerpServerHandle.spawn(bind: "127.0.0.1:3340", publicUrl: "")
+                self.derpHandle = derp
+                derpLocalPort = derp.localPort()
+                HavenLog.relay("relay DERP fabric local=\(derp.localAddr())")
+            } catch {
+                HavenLog.relay("relay DERP failed: \(error.localizedDescription)")
+            }
+            if let dport = derpLocalPort, !siblingDerp {
+                do {
+                    let router = try await PathRouterHandle.spawn(
+                        bind: "127.0.0.1:8675",
+                        mediaBackend: "127.0.0.1:\(port)",
+                        derpBackend: "127.0.0.1:\(dport)",
+                        httpToken: token
+                    )
+                    self.pathRouterHandle = router
+                    frontPort = router.localPort()
+                    pathRouted = true
+                    HavenLog.relay(
+                        "path router on \(router.localAddr()) — single origin media+DERP"
+                    )
+                } catch {
+                    HavenLog.relay("path router failed: \(error.localizedDescription)")
+                }
+            }
+            #endif
+
+            var urls = Self.reachableHttpUrls(port: port)
+            // Desktop-class hosts: free / named / manual front door — see CloudflaredTunnel.
+            #if os(macOS)
+            let fd = await CloudflaredTunnel.shared.apply(port: frontPort)
             if let u = fd.announceURL {
                 urls = [u] + urls.filter { $0 != u }
                 HavenLog.relay(
                     "relay front door \(CloudflaredTunnel.shared.frontDoorMode)"
                         + (fd.spawnedConnector ? " (cloudflared)" : " (announce-only)")
+                        + (pathRouted ? " path-router" : "")
                         + " \(u)"
                 )
             }
             #endif
-            HavenLog.relay("relay http on :\(port) urls=\(urls.joined(separator: " "))")
+            HavenLog.relay(
+                "relay http on :\(port) front=:\(frontPort) pathRouted=\(pathRouted) urls=\(urls.joined(separator: " "))"
+            )
             guard !urls.isEmpty, !self.nodeId.isEmpty else { return }
             RelayMailboxStore.shared.setHttpInterface(self.nodeId, urls: urls, token: token)
+
+            #if os(macOS)
+            // Public DERP: single-origin shares media URL (call signaling hairpins over /relay);
+            // sibling hostname uses configured URL; dual free tunnel only when path router is off.
+            await self.finalizeDerpPublic(
+                mediaUrls: urls,
+                pathRouted: pathRouted,
+                configuredDerp: configuredDerp,
+                siblingDerp: siblingDerp
+            )
+            #endif
             FeedStore.shared.reannounceOwnRelay()   // re-announce WITH the http interface attached
         }
     }
+
+    #if os(macOS)
+    /// Record public DERP URL on our RelayEntry after the front door is known.
+    private func finalizeDerpPublic(
+        mediaUrls: [String],
+        pathRouted: Bool,
+        configuredDerp: String,
+        siblingDerp: Bool
+    ) async {
+        guard derpHandle != nil else { return }
+        var derpPublic: String?
+        if siblingDerp {
+            derpPublic = configuredDerp
+        } else if pathRouted {
+            // Same public origin as media — HTTPS fabric for live frames + call signaling.
+            derpPublic = mediaUrls.first
+        } else if !configuredDerp.isEmpty {
+            derpPublic = configuredDerp
+        } else if let u = mediaUrls.first(where: {
+            $0.hasPrefix("https://") && !$0.contains("trycloudflare")
+        }) {
+            derpPublic = u
+        } else if let port = derpHandle?.localPort() {
+            // Dual free tunnel fallback when path router failed.
+            derpPublic = await CloudflaredTunnel.shared.startQuickDerp(port: port)
+        }
+        if let d = derpPublic, !d.isEmpty {
+            RelayMailboxStore.shared.setDerpUrl(self.nodeId, url: d)
+            HavenLog.relay(
+                "relay DERP fabric public=\(d)"
+                    + (pathRouted ? " (single-tunnel hairpin)" : "")
+            )
+        } else {
+            HavenLog.relay("relay DERP listening — no public URL yet")
+        }
+    }
+    #endif
 
     /// The persisted bearer token for OUR hosted relay's HTTP interface (generated once).
     private func httpToken() -> String {
@@ -247,12 +427,16 @@ final class RelayHost: ObservableObject {
     private func stop() {
         #if os(macOS)
         CloudflaredTunnel.shared.stop()
+        pathRouterHandle = nil  // drops unified media+DERP front door
+        derpHandle = nil   // drops embedded iroh-relay
         #endif
         handle?.disable()      // detach the relay from the node's endpoint
         setHandle(nil)         // releases the FFI handle (best-effort; OS reclaims on exit)
         serving = false
         nodeId = ""
+        #if os(macOS)
         PlatformIdle.disabled = false
+        #endif
     }
 
     /// Mesh anti-entropy: while we're hosting, pull every sealed blob each SIBLING relay holds that
@@ -387,6 +571,16 @@ struct RelayEntry: Codable, Identifiable, Equatable {
     /// Shared relay secret folded into each request signature (travels ONLY inside sealed announces,
     /// and is never put on the wire — see SharedStore.httpAuth).
     var httpToken: String?
+    /// Public HTTPS URL of this relay's embedded iroh-relay (DERP) fabric role. When set, peers
+    /// prefer it over n0 for NAT fallback. Empty = use n0 (or another relay's DERP).
+    var derpUrl: String?
+    /// Public TURN URLs for WebRTC ICE (`turn:host:port`). When fabric is active and non-empty,
+    /// clients use these for WebRTC media ICE (else STUN for srflx).
+    var turnUrls: [String]?
+    /// TURN username (default `haven`).
+    var turnUser: String?
+    /// TURN password (long-lived secret). Travels only inside sealed announces.
+    var turnPass: String?
     /// When this relay was last (re-)ADOPTED into a circle (unix ms). Rides the announce so a member
     /// who FORGOT it earlier reactivates on a NEWER re-add (LWW), while a stale third-party echo —
     /// which carries the original, older timestamp — loses and stays forgotten. Defaulted (0) so old
@@ -543,6 +737,10 @@ final class RelayMailboxStore: ObservableObject {
             entries = decoded
         }
         migrateEntries()
+        // Do NOT call refreshHavenFabric() here. That path reads `RelayMailboxStore.shared`,
+        // which is still inside this dispatch_once init → recursive lock → SIGTRAP on launch
+        // (libdispatch: "trying to lock recursively"). Push fabric after init returns.
+        DispatchQueue.main.async { Self.refreshHavenFabric() }
     }
 
     /// Ensure every relay referenced by relaysByCircle / the default has a RelayEntry record.
@@ -643,6 +841,83 @@ final class RelayMailboxStore: ObservableObject {
         entries[hex] = e
         persistEntries()
         objectWillChange.send()
+    }
+
+    /// Record a relay's public iroh-relay (DERP) URL for Haven-first fabric (n0 only when empty).
+    func setDerpUrl(_ hex: String, url: String?) {
+        ensureEntry(hex, activate: true)
+        guard var e = entries[hex] else { return }
+        let t = url?.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let next = (t?.isEmpty == false) ? t : nil
+        if e.derpUrl == next { return }
+        e.derpUrl = next
+        entries[hex] = e
+        persistEntries()
+        objectWillChange.send()
+        pushHavenFabric()
+    }
+
+    /// Record a relay's circle TURN URLs + credentials for WebRTC ICE.
+    func setTurn(_ hex: String, urls: [String], user: String, pass: String) {
+        ensureEntry(hex, activate: true)
+        guard var e = entries[hex] else { return }
+        let cleaned = urls.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.hasPrefix("turn:") || $0.hasPrefix("turns:") }
+        let u = user.trimmingCharacters(in: .whitespacesAndNewlines)
+        let p = pass.trimmingCharacters(in: .whitespacesAndNewlines)
+        if e.turnUrls == cleaned, e.turnUser == u, e.turnPass == p { return }
+        e.turnUrls = cleaned.isEmpty ? nil : cleaned
+        e.turnUser = u.isEmpty ? nil : u
+        e.turnPass = p.isEmpty ? nil : p
+        entries[hex] = e
+        persistEntries()
+        objectWillChange.send()
+        pushHavenFabric()
+    }
+
+    /// Every live DERP URL we know — feeds iroh RelayMap (Haven-first) and WebRTC ICE preference.
+    func allDerpUrls() -> [String] {
+        entries.values.compactMap { e -> String? in
+            guard e.active, let u = e.derpUrl, !u.isEmpty else { return nil }
+            return u
+        }.sorted()
+    }
+
+    /// Union of live TURN URLs + first non-empty credentials across active relays.
+    func allTurnIce() -> (urls: [String], user: String, pass: String) {
+        var urls: [String] = []
+        var user = ""
+        var pass = ""
+        for e in entries.values where e.active {
+            guard let t = e.turnUrls, !t.isEmpty else { continue }
+            for u in t where !urls.contains(u) { urls.append(u) }
+            if user.isEmpty, let uu = e.turnUser, let pp = e.turnPass, !uu.isEmpty, !pp.isEmpty {
+                user = uu; pass = pp
+            }
+        }
+        return (urls.sorted(), user, pass)
+    }
+
+    /// Push known DERP URLs into the process fabric policy (Rust `apply_derp_urls`) for the **next**
+    /// `HavenNode.start` bind, and into UserDefaults / `HavenFabric` for WebRTC ICE. When a live
+    /// messaging node is already up and the fabric set changed, `FeedStore` soft-rebinds (stop + start).
+    ///
+    /// Prefer the instance form when you already hold `self` (avoids re-entering `.shared`).
+    func pushHavenFabric() {
+        let urls = allDerpUrls()
+        UserDefaults.standard.set(urls, forKey: "haven.fabric.derpUrls")
+        HavenFabric.shared.update(derpUrls: urls)
+        let turn = allTurnIce()
+        HavenFabric.shared.updateTurn(urls: turn.urls, user: turn.user, pass: turn.pass)
+        applyDerpUrls(urls: urls)
+        // Soft-rebind if the messaging node is live on a stale RelayMap (MainActor FeedStore).
+        Task { @MainActor in
+            FeedStore.shared.noteFabricUrlsChanged(urls)
+        }
+    }
+
+    static func refreshHavenFabric() {
+        shared.pushHavenFabric()
     }
 
     /// The relay's HTTP interface (urls + token), or nil for an iroh-only relay.

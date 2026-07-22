@@ -141,7 +141,16 @@ final class CallManager: NSObject, ObservableObject {
     #endif
     private var callUUID: UUID?
     #if !os(macOS)
-    private var useCallKit: Bool { provider != nil }
+    /// CallKit on the iOS Simulator often settles then immediately drops the call (no usable
+    /// accept UI in sim screenshots; FaceTime launch ends the ring in ~100ms). Use the in-app
+    /// overlay there so multi-device QA can actually answer. Real devices keep CallKit.
+    private var useCallKit: Bool {
+        #if targetEnvironment(simulator)
+        return false
+        #else
+        return provider != nil
+        #endif
+    }
     #else
     private var useCallKit: Bool { false }   // native macOS: in-app flow drives everything
     #endif
@@ -685,6 +694,8 @@ final class CallManager: NSObject, ObservableObject {
         UIApplication.shared.isIdleTimerDisabled = true
         #endif
         configureAudioSession()
+        // TCP/WSS media hairpin via path proxy (works over free Cloudflare) — pairs while ICE runs.
+        CallHairpin.shared.openForRoster(sessionId: sessionId, me: myHex, others: invitees())
         for p in invitees() { connectPeerIfNeeded(p) }
         startSpeakerDetection()
     }
@@ -1219,6 +1230,7 @@ final class CallManager: NSObject, ObservableObject {
         CallTones.shared.stop()
         stopInAppRinging()
         stopSpeakerDetection()
+        CallHairpin.shared.closeAll()
         #if !os(macOS)
         UIApplication.shared.isIdleTimerDisabled = false
         #endif

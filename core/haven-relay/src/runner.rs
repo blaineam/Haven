@@ -56,6 +56,15 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut _s3_guard: Option<std::sync::Arc<S3Server>> = None;
     let mut _rclone_guard: Option<RcloneChild> = None;
     let mut _quick_tunnel: Option<haven_net::cfquicktunnel::QuickTunnel> = None;
+    // Legacy second free trycloudflare for DERP when path-router is off (sibling hostname mode).
+    let mut _derp_tunnel: Option<haven_net::cfquicktunnel::QuickTunnel> = None;
+    let mut _derp_guard: Option<crate::derp::DerpServer> = None;
+    let mut _path_router: Option<haven_net::PathRouter> = None;
+    let mut _turn_guard: Option<haven_net::TurnServer> = None;
+    let mut derp_public: Option<String> = cfg.derp_url.clone();
+    let mut turn_public: Vec<String> = cfg.turn_urls.clone();
+    let mut turn_user = haven_net::DEFAULT_TURN_USER.to_string();
+    let mut turn_pass = cfg.turn_token.clone();
 
     match &cfg.backend {
         StoreBackend::Local => {
@@ -154,17 +163,132 @@ pub async fn run(cfg: Config) -> Result<()> {
                     .await
                     .map_err(|e| anyhow!("start http blob interface: {e}"))?;
                 println!("✓ http media interface live on {bind} (port {port}).");
+
+                // Haven fabric: embed iroh-relay BEFORE the public front door so a single-origin
+                // path router can front media + DERP on one cloudflared process.
+                let mut derp_local_port: Option<u16> = None;
+                if cfg.derp_enabled {
+                    let seed = cfg.derp_url.clone().unwrap_or_default();
+                    let dcfg = crate::derp::DerpConfig {
+                        enabled: true,
+                        bind: cfg.derp_bind.clone(),
+                        public_url: seed,
+                    };
+                    match crate::derp::DerpServer::spawn(&dcfg).await {
+                        Ok(Some(srv)) => {
+                            derp_local_port = Some(srv.local_port());
+                            println!(
+                                "✓ iroh DERP fabric live on {} (port {})",
+                                srv.local_addr,
+                                srv.local_port()
+                            );
+                            _derp_guard = Some(srv);
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            eprintln!("⚠ iroh DERP failed to start: {e:#}");
+                            eprintln!(
+                                "  media still works; live NAT falls back to n0 until DERP is up."
+                            );
+                        }
+                    }
+                }
+
+                // Path proxy (default): one public origin routes by path —
+                //   /k /l /t     → media
+                //   /relay /derp /ping → fabric (DERP)
+                //   /  /_haven   → status JSON
+                // Sibling --derp-url (≠ media URL) skips the proxy for dual-origin setups.
+                let sibling_derp = cfg
+                    .derp_url
+                    .as_ref()
+                    .map(|u| u.trim().trim_end_matches('/').to_string())
+                    .filter(|u| !u.is_empty())
+                    .filter(|u| {
+                        let media = cfg
+                            .http_url
+                            .as_ref()
+                            .map(|m| m.trim().trim_end_matches('/').to_string())
+                            .unwrap_or_default();
+                        media.is_empty() || u != &media
+                    });
+                let mut front_port = port;
+                let mut path_routed = false;
+                let want_proxy = cfg.proxy_bind.is_some() && sibling_derp.is_none();
+                if want_proxy {
+                    let proxy_bind = cfg
+                        .proxy_bind
+                        .clone()
+                        .unwrap_or_else(|| haven_net::DEFAULT_PATH_ROUTER_BIND.into());
+                    let derp_backend = derp_local_port
+                        .map(|p| format!("127.0.0.1:{p}"))
+                        .unwrap_or_default();
+                    let rcfg = haven_net::PathRouterConfig {
+                        bind: proxy_bind,
+                        media_backend: format!("127.0.0.1:{port}"),
+                        derp_backend,
+                        http_token: cfg.http_token.clone(),
+                    };
+                    match haven_net::PathRouter::spawn(&rcfg).await {
+                        Ok(Some(router)) => {
+                            front_port = router.local_port();
+                            path_routed = true;
+                            println!(
+                                "✓ path proxy on {} — route by path:\n\
+                                 \t media   /k/* /l/* /t/*     → 127.0.0.1:{port}\n\
+                                 \t fabric  /relay /derp /ping → {}\n\
+                                 \t hairpin /webrtc/hairpin    → WebSocket call media (free CF OK)\n\
+                                 \t status  /  /_haven         → (local)",
+                                router.local_addr,
+                                if derp_local_port.is_some() {
+                                    format!(
+                                        "127.0.0.1:{}",
+                                        derp_local_port.unwrap()
+                                    )
+                                } else {
+                                    "(offline)".into()
+                                }
+                            );
+                            _path_router = Some(router);
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            eprintln!("⚠ path proxy failed: {e:#}");
+                            eprintln!(
+                                "  falling back to dual-origin / media-only tunnel; \
+                                 set --derp-url or multi-ingress if DERP must be public"
+                            );
+                        }
+                    }
+                }
+
                 let mut public = cfg.http_url.clone();
                 // Manual (--http-url only) / bundled token / free quick — see FrontDoorMode.
-                match start_front_door(port, &cfg) {
+                // When path-routed, tunnel targets the router port (media + DERP by path).
+                match start_front_door(front_port, &cfg) {
                     Ok(FrontDoorRun::Spawned(t)) => {
                         if t.kind == "named" {
                             println!("✓ cloudflare named tunnel: {}", t.public_url);
-                            println!(
-                                "  stable custom domain — connector authenticated with --tunnel-token"
-                            );
+                            if path_routed {
+                                println!(
+                                    "  set Zero Trust origin to http://127.0.0.1:{front_port} \
+                                     (path proxy — media + fabric on one hostname)"
+                                );
+                            } else {
+                                println!(
+                                    "  stable custom domain — connector authenticated with --tunnel-token"
+                                );
+                            }
                         } else {
-                            println!("✓ cloudflare quick tunnel: {}", t.public_url);
+                            println!(
+                                "✓ cloudflare quick tunnel{}: {}",
+                                if path_routed {
+                                    " (media + fabric via path proxy)"
+                                } else {
+                                    " (media)"
+                                },
+                                t.public_url
+                            );
                             println!(
                                 "  ephemeral — hostname changes when this process restarts \
                                  (use --http-url alone for manual, or + --tunnel-token for bundled)."
@@ -175,10 +299,17 @@ pub async fn run(cfg: Config) -> Result<()> {
                     }
                     Ok(FrontDoorRun::AnnounceOnly(u)) => {
                         println!("✓ manual front door (you run the tunnel/proxy): {u}");
-                        println!(
-                            "  Haven will not spawn cloudflared — point your proxy at \
-                             http://127.0.0.1:{port}"
-                        );
+                        if path_routed {
+                            println!(
+                                "  point your proxy at http://127.0.0.1:{front_port} \
+                                 (path proxy: /k… → media, /relay → fabric)"
+                            );
+                        } else {
+                            println!(
+                                "  Haven will not spawn cloudflared — point your proxy at \
+                                 http://127.0.0.1:{port} (media) and derp bind for fabric"
+                            );
+                        }
                         public = Some(u);
                     }
                     Ok(FrontDoorRun::LanOnly) => {}
@@ -190,6 +321,143 @@ pub async fn run(cfg: Config) -> Result<()> {
                         );
                     }
                 }
+
+                // Resolve public DERP URL for frame-19 / interface.json.
+                if let Some(srv) = _derp_guard.as_mut() {
+                    if let Some(sib) = sibling_derp.clone() {
+                        // Dual-origin: dedicated sibling hostname (or free second tunnel).
+                        srv.public_url = sib;
+                        // Free auto + sibling not set via --derp-url already handled; if operator
+                        // wanted dual free tunnels without path router they set --derp-url empty
+                        // but sibling_derp is None when path router works. Only open a second
+                        // tunnel when path router is off and we still lack a public URL.
+                    } else if path_routed {
+                        // Single origin: same public URL as media — call signaling / live frames
+                        // hairpin over HTTPS fabric on this host.
+                        if let Some(ref u) = public {
+                            srv.public_url = u.clone();
+                        }
+                    } else if srv.public_url.is_empty() {
+                        if let Some(ref u) = public {
+                            // Named/manual without path router: assume operator multi-ingress.
+                            if !u.contains("trycloudflare") {
+                                srv.public_url = u.clone();
+                            }
+                        }
+                    }
+                    // Last resort for free quick without path router: second origin.
+                    if srv.public_url.is_empty() {
+                        match start_quick_tunnel_for_port(srv.local_port(), &cfg) {
+                            Ok(t) => {
+                                println!(
+                                    "✓ cloudflare quick tunnel (DERP fabric, dual-origin): {}",
+                                    t.public_url
+                                );
+                                srv.public_url = t.public_url.clone();
+                                _derp_tunnel = Some(t);
+                            }
+                            Err(e) => {
+                                eprintln!("⚠ DERP quick tunnel failed: {e:#}");
+                                eprintln!(
+                                    "  set --derp-url or enable path router for single-tunnel fabric"
+                                );
+                            }
+                        }
+                    }
+                    if !srv.public_url.is_empty() {
+                        derp_public = Some(srv.public_url.clone());
+                        println!("  derp public : {}", srv.public_url);
+                        if path_routed {
+                            println!(
+                                "  path-proxied fabric — call signaling hairpins over this HTTPS host \
+                                 (/relay WebSocket); clients drop n0 once they learn it (frame 19)."
+                            );
+                        } else {
+                            println!(
+                                "  clients prefer this DERP over n0 once they learn it (frame 19 / paste)."
+                            );
+                        }
+                    } else {
+                        println!(
+                            "  derp local only ({}) — set --derp-url or open a public front door",
+                            srv.local_addr
+                        );
+                    }
+                }
+
+                // Circle TURN: own UDP socket for WebRTC ICE (not a second iroh Endpoint).
+                if cfg.turn_enabled {
+                    let lan = primary_lan_ip();
+                    let public_ip = cfg
+                        .turn_public_ip
+                        .clone()
+                        .or_else(|| lan.clone())
+                        .or_else(|| {
+                            public
+                                .as_ref()
+                                .and_then(|u| haven_net::host_from_http_url(u))
+                                .filter(|h| !h.contains("trycloudflare.com"))
+                        })
+                        .unwrap_or_else(|| "127.0.0.1".into());
+                    let media_list: Vec<String> = public.iter().cloned().collect();
+                    let suggested = if cfg.turn_urls.is_empty() {
+                        haven_net::suggest_turn_urls(
+                            &media_list,
+                            lan.as_deref(),
+                            // Port from bind string if present, else default 3478.
+                            cfg.turn_bind
+                                .rsplit(':')
+                                .next()
+                                .and_then(|p| p.parse().ok())
+                                .unwrap_or(3478),
+                        )
+                    } else {
+                        cfg.turn_urls.clone()
+                    };
+                    let tcfg = haven_net::TurnConfig {
+                        enabled: true,
+                        bind: cfg.turn_bind.clone(),
+                        public_ip: public_ip.clone(),
+                        secret: cfg.turn_token.clone(),
+                        public_urls: suggested,
+                    };
+                    match haven_net::TurnServer::spawn(&tcfg).await {
+                        Ok(Some(srv)) => {
+                            turn_public = srv.public_urls.clone();
+                            turn_user = srv.username.clone();
+                            turn_pass = srv.password.clone();
+                            println!(
+                                "✓ circle TURN live on {} (UDP) — preferred WebRTC ICE media relay",
+                                srv.local_addr
+                            );
+                            if !turn_public.is_empty() {
+                                println!("  turn urls   : {}", turn_public.join(", "));
+                                println!(
+                                    "  turn auth   : user={} (password in turn_token / interface.json)",
+                                    turn_user
+                                );
+                            } else {
+                                println!(
+                                    "  turn local only — set --turn-url or open UDP {} to peers",
+                                    public_ip
+                                );
+                            }
+                            println!(
+                                "  note: free trycloudflare cannot front UDP TURN; port-forward 3478 for WAN. \
+                                 Without TURN, clients use STUN + host ICE; call signaling still uses fabric."
+                            );
+                            _turn_guard = Some(srv);
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            eprintln!("⚠ circle TURN failed to start: {e:#}");
+                            eprintln!(
+                                "  clients fall back to STUN + host ICE; call signaling still hairpins over fabric."
+                            );
+                        }
+                    }
+                }
+
                 match &public {
                     Some(url) => println!("  public URL : {url}"),
                     None => println!(
@@ -199,7 +467,38 @@ pub async fn run(cfg: Config) -> Result<()> {
                             free:    omit --http-url (trycloudflare) or --no-tunnel for LAN only"
                     ),
                 }
+                if path_routed {
+                    println!(
+                        "  front door  : path proxy :{front_port} (CF/Manual origin → this port)"
+                    );
+                    println!(
+                        "  probe       : GET http://127.0.0.1:{front_port}/_haven  (route table JSON)"
+                    );
+                }
                 println!("  http token : {}", cfg.http_token);
+
+                // Write a paste-ready interface blob so the app learns media URL + DERP fabric +
+                // TURN in one adopt (then re-announces frame 19 to the circle). Also on disk.
+                let mut interface = serde_json::json!({
+                    "node": my_hex,
+                    "urls": public.as_ref().map(|u| vec![u.clone()]).unwrap_or_default(),
+                    "token": cfg.http_token,
+                    "derp": derp_public.clone().unwrap_or_default(),
+                });
+                if !turn_public.is_empty() {
+                    interface["turn"] = serde_json::json!(turn_public);
+                    interface["turnUser"] = serde_json::json!(turn_user);
+                    interface["turnPass"] = serde_json::json!(turn_pass);
+                }
+                let path = cfg.data_dir.join("interface.json");
+                if let Ok(bytes) = serde_json::to_vec_pretty(&interface) {
+                    let _ = std::fs::write(&path, bytes);
+                }
+                if let Ok(line) = serde_json::to_string(&interface) {
+                    println!("\n  ── paste this into Haven (Storage → Connect external relay) ──");
+                    println!("  {line}");
+                    println!("  (also written to {})", path.display());
+                }
             }
         }
         StoreBackend::S3 | StoreBackend::Rclone { .. } => {
@@ -249,11 +548,50 @@ pub async fn run(cfg: Config) -> Result<()> {
     println!("═══════════════════════════════════════════════════════════════\n");
 
     // Idle until Ctrl-C; the relay's accept/forward loops run in the background.
-    // `_quick_tunnel` Drop kills cloudflared on exit.
-    let _ = (&relay, &_quick_tunnel);
+    // Tunnel Drop kills cloudflared on exit.
+    let _ = (&relay, &_quick_tunnel, &_derp_tunnel, &_derp_guard, &_turn_guard);
     tokio::signal::ctrl_c().await.ok();
     println!("▸ shutting down.");
     Ok(())
+}
+
+/// This machine's primary LAN IPv4 (UDP-connect trick — no packet is actually sent).
+fn primary_lan_ip() -> Option<String> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("8.8.8.8:80").ok()?;
+    let ip = s.local_addr().ok()?.ip();
+    if ip.is_loopback() {
+        return None;
+    }
+    Some(ip.to_string())
+}
+
+/// Second free trycloudflare for the DERP bind (media already has its own origin).
+fn start_quick_tunnel_for_port(port: u16, cfg: &Config) -> Result<haven_net::cfquicktunnel::QuickTunnel> {
+    use haven_net::cfquicktunnel::{ensure_cloudflared, executable_dir, QuickTunnel, TunnelSpec};
+    let local = format!("http://127.0.0.1:{port}");
+    let mut search = Vec::new();
+    if let Ok(exe_dir) = executable_dir() {
+        search.push(exe_dir.clone());
+    }
+    search.push(cfg.data_dir.join("bin"));
+    let install = executable_dir()
+        .ok()
+        .filter(|d| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(d.join(".haven-write-test"))
+                .map(|f| {
+                    drop(f);
+                    let _ = std::fs::remove_file(d.join(".haven-write-test"));
+                    true
+                })
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| cfg.data_dir.join("bin"));
+    let bin = ensure_cloudflared(&search, &install, true)?;
+    QuickTunnel::start_spec(&bin, TunnelSpec::Quick { local_http: local })
 }
 
 enum FrontDoorRun {

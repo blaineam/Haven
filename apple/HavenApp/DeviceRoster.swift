@@ -43,6 +43,14 @@ enum DeviceKeyStore {
             return acct
         case .notFound:
             // Genuinely no seed → first run on this device. The ONLY case allowed to write.
+            // Prefer a stable UserDefaults seed when keychain cannot persist (unsigned sim / matrix QA)
+            // so HTTP mailbox auth does not remint a new device id every launch.
+            if let stable = loadOrMintUserDefaultsSeed(), let acct = try? Account.fromSeed(seed: stable) {
+                // Best-effort: also write keychain so a later signed install upgrades.
+                saveSeed(stable)
+                cached = acct; usingTemporaryIdentity = false
+                return acct
+            }
             let fresh = Account.generate()
             saveSeed(fresh.secretSeed())
             cached = fresh; usingTemporaryIdentity = false
@@ -52,10 +60,32 @@ enum DeviceKeyStore {
         }
     }
 
+    /// Stable device seed when the data-protection keychain is unavailable (unsigned Simulator builds
+    /// under matrix QA). Without this, every cold start mints a new device id → HTTP relay REFUSED
+    /// until a (then-stale) roster lands, and reverse-path delivery dies.
+    private static let udSeedKey = "haven.deviceKeySeed.v1"
+    private static func loadOrMintUserDefaultsSeed() -> Data? {
+        if let b64 = UserDefaults.standard.string(forKey: udSeedKey),
+           let existing = Data(base64Encoded: b64), existing.count == 32 {
+            return existing
+        }
+        var bytes = [UInt8](repeating: 0, count: 32)
+        guard SecRandomCopyBytes(kSecRandomDefault, 32, &bytes) == errSecSuccess else { return nil }
+        let seed = Data(bytes)
+        UserDefaults.standard.set(seed.base64EncodedString(), forKey: udSeedKey)
+        return seed
+    }
+
     /// A throwaway used only while the real seed is unreadable. Never saved, and cached so this
     /// process keeps one stable id instead of minting a fresh key on every call.
+    /// Falls back to UserDefaults stable seed so locked-keychain + unsigned sim still dials with a
+    /// stable device id (matrix QA / Simulator entitlement gaps).
     private static func temporaryIdentity() -> Account {
         if let acct = cached, usingTemporaryIdentity { return acct }
+        if let stable = loadOrMintUserDefaultsSeed(), let acct = try? Account.fromSeed(seed: stable) {
+            cached = acct; usingTemporaryIdentity = true
+            return acct
+        }
         let temp = Account.generate()
         cached = temp; usingTemporaryIdentity = true
         return temp

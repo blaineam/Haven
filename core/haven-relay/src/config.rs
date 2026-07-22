@@ -75,6 +75,26 @@ pub struct Config {
     /// Operator-chosen store retention (mailbox TTL override + optional media age/size
     /// limits). Defaults to today's behavior: 30-day mailbox TTL, media never deleted.
     pub retention: haven_net::blobstore::Retention,
+    /// Embed open-source iroh-relay (DERP) so the circle can use this box as the transport
+    /// fabric instead of n0. Default ON for local-disk always-on relays.
+    pub derp_enabled: bool,
+    /// Local bind for iroh-relay HTTP (TLS off — front door terminates). Default 127.0.0.1:3340.
+    pub derp_bind: String,
+    /// Public HTTPS URL for DERP (defaults to the media `http_url` / tunnel URL when empty).
+    pub derp_url: Option<String>,
+    /// Path proxy bind — single origin that routes by path to media + fabric.
+    /// Default `127.0.0.1:8675`. `None` = disabled (`--no-proxy`).
+    pub proxy_bind: Option<String>,
+    /// Embed circle TURN for WebRTC ICE (default ON for local-disk). Own UDP socket.
+    pub turn_enabled: bool,
+    /// Local UDP bind for TURN (default 0.0.0.0:3478).
+    pub turn_bind: String,
+    /// IP advertised in TURN ALLOCATE responses (defaults to LAN IP / host of media URL).
+    pub turn_public_ip: Option<String>,
+    /// Explicit TURN URLs to announce (e.g. `turn:relay.example.com:3478`). Empty = suggest.
+    pub turn_urls: Vec<String>,
+    /// Long-lived TURN password (username `haven`), persisted like `http_token`.
+    pub turn_token: String,
 }
 
 /// On-disk JSON config (the `--config` form), all fields optional except `link`.
@@ -110,6 +130,25 @@ struct FileConfig {
     /// Cloudflare tunnel install token for a custom domain (pair with http_url).
     #[serde(default)]
     tunnel_token: Option<String>,
+    /// Embed iroh-relay DERP (default true for local storage).
+    #[serde(default)]
+    derp: Option<bool>,
+    #[serde(default)]
+    derp_bind: Option<String>,
+    #[serde(default)]
+    derp_url: Option<String>,
+    /// Path proxy bind (`127.0.0.1:8675` default; `"off"` disables).
+    #[serde(default)]
+    proxy_bind: Option<String>,
+    /// Embed TURN for WebRTC (default true for local storage).
+    #[serde(default)]
+    turn: Option<bool>,
+    #[serde(default)]
+    turn_bind: Option<String>,
+    #[serde(default)]
+    turn_public_ip: Option<String>,
+    #[serde(default)]
+    turn_urls: Option<Vec<String>>,
     /// Mailbox TTL override in days (default 30).
     #[serde(default)]
     mailbox_ttl_days: Option<u64>,
@@ -216,11 +255,56 @@ impl Config {
             arg_value(args, "--media-max-bytes").as_deref(),
         )?;
 
+        // Haven fabric (iroh DERP): default ON for local-disk relays so a linked Mac/Linux/CLI
+        // box can replace n0. `--no-derp` disables; `--derp-bind` / `--derp-url` override.
+        let derp_enabled = if args.iter().any(|a| a == "--no-derp") {
+            false
+        } else if args.iter().any(|a| a == "--derp") {
+            true
+        } else {
+            matches!(backend, StoreBackend::Local)
+        };
+        let derp_bind =
+            arg_value(args, "--derp-bind").unwrap_or_else(|| "127.0.0.1:3340".to_string());
+        let derp_url = arg_value(args, "--derp-url");
+
+        // Path proxy: single origin that routes by path (media / fabric / status).
+        // Default ON whenever HTTP is on. `--no-proxy` disables; `--proxy-bind` overrides.
+        let proxy_bind = if args.iter().any(|a| a == "--no-proxy") || http_bind.is_none() {
+            None
+        } else {
+            Some(
+                arg_value(args, "--proxy-bind")
+                    .unwrap_or_else(|| haven_net::DEFAULT_PATH_ROUTER_BIND.to_string()),
+            )
+        };
+
+        // Circle TURN (WebRTC ICE): default ON for local-disk. Own UDP socket (not a second Endpoint).
+        let turn_enabled = if args.iter().any(|a| a == "--no-turn") {
+            false
+        } else if args.iter().any(|a| a == "--turn") {
+            true
+        } else {
+            matches!(backend, StoreBackend::Local)
+        };
+        let turn_bind =
+            arg_value(args, "--turn-bind").unwrap_or_else(|| "0.0.0.0:3478".to_string());
+        let turn_public_ip = arg_value(args, "--turn-public-ip");
+        let turn_urls: Vec<String> = args
+            .windows(2)
+            .filter(|w| w[0] == "--turn-url")
+            .map(|w| w[1].trim().to_string())
+            .filter(|u| u.starts_with("turn:") || u.starts_with("turns:"))
+            .collect();
+
         let seed = load_or_create_seed(&data_dir)?;
         let http_token = load_or_create_http_token(&data_dir)?;
+        let turn_token = load_or_create_turn_token(&data_dir)?;
         Ok(Self {
             link, data_dir, seed, backend, s3_port, rclone_bin, rclone_config, peers,
             http_bind, http_url, auto_tunnel, tunnel_token, http_token, retention,
+            derp_enabled, derp_bind, derp_url, proxy_bind,
+            turn_enabled, turn_bind, turn_public_ip, turn_urls, turn_token,
         })
     }
 
@@ -260,6 +344,26 @@ impl Config {
             fc.media_max_age_days,
             fc.media_max_bytes.as_deref(),
         )?;
+        let derp_enabled = fc.derp.unwrap_or(matches!(&backend, StoreBackend::Local));
+        let derp_bind = fc.derp_bind.unwrap_or_else(|| "127.0.0.1:3340".to_string());
+        let derp_url = fc.derp_url.filter(|u| !u.trim().is_empty());
+        let proxy_bind = match fc.proxy_bind.as_deref() {
+            Some("off") | Some("none") => None,
+            Some(b) => Some(b.to_string()),
+            None if http_bind.is_some() => Some(haven_net::DEFAULT_PATH_ROUTER_BIND.to_string()),
+            None => None,
+        };
+        let turn_enabled = fc.turn.unwrap_or(matches!(&backend, StoreBackend::Local));
+        let turn_bind = fc.turn_bind.unwrap_or_else(|| "0.0.0.0:3478".to_string());
+        let turn_public_ip = fc.turn_public_ip.filter(|u| !u.trim().is_empty());
+        let turn_urls = fc
+            .turn_urls
+            .unwrap_or_default()
+            .into_iter()
+            .map(|u| u.trim().to_string())
+            .filter(|u| u.starts_with("turn:") || u.starts_with("turns:"))
+            .collect();
+        let turn_token = load_or_create_turn_token(&data_dir)?;
         Ok(Self {
             link,
             data_dir,
@@ -283,6 +387,15 @@ impl Config {
             tunnel_token: fc.tunnel_token.filter(|t| !t.trim().is_empty()),
             http_token,
             retention,
+            derp_enabled,
+            derp_bind,
+            derp_url,
+            proxy_bind,
+            turn_enabled,
+            turn_bind,
+            turn_public_ip,
+            turn_urls,
+            turn_token,
         })
     }
 }
@@ -346,9 +459,18 @@ pub const DEFAULT_HTTP_BIND: &str = "0.0.0.0:8674";
 /// The HTTP bearer token, generated once and persisted (owner-only) next to the seed so the
 /// relay's token — like its node id — is stable across restarts.
 pub fn load_or_create_http_token(data_dir: &(impl AsRef<Path> + ?Sized)) -> Result<String> {
+    load_or_create_hex_secret(data_dir, "http_token")
+}
+
+/// Long-lived TURN password (username `haven`), same persistence model as [`load_or_create_http_token`].
+pub fn load_or_create_turn_token(data_dir: &(impl AsRef<Path> + ?Sized)) -> Result<String> {
+    load_or_create_hex_secret(data_dir, "turn_token")
+}
+
+fn load_or_create_hex_secret(data_dir: &(impl AsRef<Path> + ?Sized), filename: &str) -> Result<String> {
     let dir = data_dir.as_ref();
     std::fs::create_dir_all(dir).map_err(|e| anyhow!("create {}: {e}", dir.display()))?;
-    let path = dir.join("http_token");
+    let path = dir.join(filename);
     if let Ok(raw) = std::fs::read_to_string(&path) {
         let tok = raw.trim().to_string();
         if !tok.is_empty() {
@@ -358,7 +480,7 @@ pub fn load_or_create_http_token(data_dir: &(impl AsRef<Path> + ?Sized)) -> Resu
     let mut bytes = [0u8; 16];
     OsRng.fill_bytes(&mut bytes);
     let tok: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    std::fs::write(&path, &tok).map_err(|e| anyhow!("write http token: {e}"))?;
+    std::fs::write(&path, &tok).map_err(|e| anyhow!("write {filename}: {e}"))?;
     set_owner_only(&path);
     Ok(tok)
 }

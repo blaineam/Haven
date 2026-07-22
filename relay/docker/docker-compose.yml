@@ -68,16 +68,28 @@ services:
       # `network_mode: host` fixes ONLY the container-address half; a remote member still needs a
       # publicly reachable URL here.
       HAVEN_RELAY_HTTP_URL: ${HAVEN_RELAY_HTTP_URL:-}
+      # Haven fabric (DERP + TURN). Requires a binary built with fabric support
+      # (feature/iroh-relay-gossip or a release that includes it). See docs/NAS-FABRIC-RELAY.md.
+      # DERP public HTTPS URL (proxy → container :3340). Optional if LAN-only.
+      HAVEN_RELAY_DERP_URL: ${HAVEN_RELAY_DERP_URL:-}
+      # TURN public URI(s) and the IP TURN advertises in ALLOCATE. UDP 3478 must reach this box.
+      HAVEN_RELAY_TURN_URL: ${HAVEN_RELAY_TURN_URL:-}
+      HAVEN_RELAY_TURN_PUBLIC_IP: ${HAVEN_RELAY_TURN_PUBLIC_IP:-}
+      # Set to 1 to disable embedded DERP / TURN (n0 + Google STUN remain fallbacks for clients).
+      HAVEN_RELAY_NO_DERP: ${HAVEN_RELAY_NO_DERP:-}
+      HAVEN_RELAY_NO_TURN: ${HAVEN_RELAY_NO_TURN:-}
     # Alternative to setting HAVEN_RELAY_HTTP_URL: host networking, where the relay sees the
     # box's real LAN addresses and advertises them correctly on its own. Drop `ports:` if you
     # use it (host networking publishes directly). Linux/most NAS only — not Docker Desktop.
     # network_mode: host
     ports:
-      - "8674:8674"        # plain-HTTP media interface (fast cross-NAT / LAN media path)
+      - "8674:8674"          # TCP — plain-HTTP media interface
+      - "3340:3340"          # TCP — iroh DERP (Haven fabric; proxy TLS terminates in front)
+      - "3478:3478/udp"      # UDP — circle TURN (WebRTC ICE; not fronted by trycloudflare)
     volumes:
       - haven-relay-data:/data   # identity + sealed-blob mailbox — keep to stay the same relay
-    # The relay dials OUT over Haven Net (iroh/QUIC + DERP) and needs no inbound port to work;
-    # 8674 is published only so peers who can reach this box pull media over the fast HTTP path.
+    # The relay dials OUT over Haven Net and needs no inbound port for *messaging* via n0 fallback;
+    # publishing 8674/3340/3478 is what makes *your* fabric the primary path.
     #
     # Prefer a bind mount to a specific NAS share? Replace the volume line with, e.g.:
     #   - /volume1/docker/haven-relay:/data

@@ -572,36 +572,68 @@ struct DMThreadView: View {
                     .buttonStyle(.plain)
                 }
             }
-            if !visual.isEmpty { dmVisualMedia(visual, isMe: m.isMe) }
+            if !visual.isEmpty { dmVisualMedia(visual, isMe: m.isMe, postMedia: m.media) }
         }
     }
 
-    @ViewBuilder private func dmVisualMedia(_ refs: [String], isMe: Bool) -> some View {
-        if refs.count == 1, let ref = refs.first, let img = MediaStore.shared.item(ref)?.image {
-            Image(platformImage: img).resizable().scaledToFill()
-                .frame(maxWidth: 220, maxHeight: 280).clipShape(RoundedRectangle(cornerRadius: 14))
-                .overlay(alignment: .center) {
-                    if MediaStore.shared.item(ref)?.kind == .video {
-                        Image(systemName: "play.circle.fill").font(.largeTitle).foregroundStyle(.white)
-                    }
-                }
-                .sensitiveContentGuard(ref: ref, circleId: circleId, scan: !isMe, cornerRadius: 14)
-                .onTapGesture { zoom = ZoomTarget(refs: refs, index: 0) }
+    @ViewBuilder private func dmVisualMedia(_ refs: [String], isMe: Bool, postMedia: [String] = []) -> some View {
+        if refs.count == 1, let ref = refs.first {
+            dmVisualTile(ref, postMedia: postMedia, isMe: isMe, maxW: 220, maxH: 280, corner: 14) {
+                zoom = ZoomTarget(refs: refs, index: 0)
+            }
         } else if !refs.isEmpty {
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 4), GridItem(.flexible())], spacing: 4) {
                 ForEach(Array(refs.enumerated()), id: \.offset) { i, ref in
-                    if let img = MediaStore.shared.item(ref)?.image {
-                        Image(platformImage: img).resizable().scaledToFill().frame(width: 104, height: 104)
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
-                            .overlay(alignment: .center) {
-                                if MediaStore.shared.item(ref)?.kind == .video { Image(systemName: "play.circle.fill").foregroundStyle(.white) }
-                            }
-                            .sensitiveContentGuard(ref: ref, circleId: circleId, scan: !isMe)
-                            .onTapGesture { zoom = ZoomTarget(refs: refs, index: i) }
+                    dmVisualTile(ref, postMedia: postMedia, isMe: isMe, maxW: 104, maxH: 104, corner: 10) {
+                        zoom = ZoomTarget(refs: refs, index: i)
                     }
                 }
             }
             .frame(width: 216)
+        }
+    }
+
+    /// One DM attachment tile. Super data saver may only have the poster still for a video —
+    /// show that + play, and on tap request the video then open the zoom player.
+    @ViewBuilder private func dmVisualTile(_ ref: String, postMedia: [String], isMe: Bool,
+                                          maxW: CGFloat, maxH: CGFloat, corner: CGFloat,
+                                          onOpen: @escaping () -> Void) -> some View {
+        let isVid = MediaKind(ref: ref) == .video
+        let hasFile = MediaStore.shared.hasLocalFile(ref)
+        let posterRef = isVid ? MediaVariants.poster(for: ref, in: postMedia) : nil
+        let img = MediaStore.shared.item(ref)?.image
+            ?? posterRef.flatMap { MediaStore.shared.item($0)?.image }
+        if let img {
+            Image(platformImage: img).resizable().scaledToFill()
+                .frame(maxWidth: maxW, maxHeight: maxH)
+                .frame(width: maxW == 104 ? 104 : nil, height: maxH == 104 ? 104 : nil)
+                .clipShape(RoundedRectangle(cornerRadius: corner))
+                .overlay(alignment: .center) {
+                    if isVid {
+                        Image(systemName: "play.circle.fill")
+                            .font(maxW >= 200 ? .largeTitle : .title2)
+                            .foregroundStyle(.white)
+                    }
+                }
+                .sensitiveContentGuard(ref: ref, circleId: circleId, scan: !isMe, cornerRadius: corner)
+                .onTapGesture {
+                    if isVid, !hasFile {
+                        store.requestMedia(ref, circleId: circleId)
+                    }
+                    onOpen()
+                }
+        } else if isVid, !hasFile {
+            // Poster not in yet either — still offer a tappable download affordance.
+            RoundedRectangle(cornerRadius: corner)
+                .fill(Color(.secondarySystemFill))
+                .frame(width: maxW == 104 ? 104 : 160, height: maxH == 104 ? 104 : 120)
+                .overlay {
+                    Image(systemName: "play.circle.fill").font(.largeTitle).foregroundStyle(.secondary)
+                }
+                .onTapGesture {
+                    store.requestMedia(ref, circleId: circleId)
+                    onOpen()
+                }
         }
     }
 

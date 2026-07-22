@@ -67,10 +67,18 @@ final class WebRTCCall: NSObject {
 
     override init() {
         let config = RTCConfiguration()
-        config.iceServers = [RTCIceServer(urlStrings: [
-            "stun:stun.l.google.com:19302",
-            "stun:stun1.l.google.com:19302",
-        ])]
+        // Haven-first ICE: circle TURN when known; fabric without TURN → host-only (no Google);
+        // no fabric → Google STUN fallback. Media may use /webrtc/hairpin when ICE fails.
+        let iceDicts = HavenFabric.iceServersFromDefaults()
+        config.iceServers = iceDicts.compactMap { d -> RTCIceServer? in
+            let urls = d["urls"] as? [String] ?? []
+            guard !urls.isEmpty else { return nil }
+            if let user = d["username"] as? String, let pass = d["credential"] as? String,
+               !user.isEmpty, !pass.isEmpty {
+                return RTCIceServer(urlStrings: urls, username: user, credential: pass)
+            }
+            return RTCIceServer(urlStrings: urls)
+        }
         config.sdpSemantics = .unifiedPlan
         config.continualGatheringPolicy = .gatherContinually
         let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
@@ -144,7 +152,13 @@ final class WebRTCCall: NSObject {
     }
 
     func setRemoteAnswer(_ sdp: RTCSessionDescription) {
-        pc.setRemoteDescription(sdp) { [weak self] _ in self?.onRemoteReady?() }
+        // HTTP live-lane can redeliver the same (or a prior session's) answer; a second
+        // setRemoteDescription while already stable fails and is noise.
+        if pc.remoteDescription != nil { return }
+        pc.setRemoteDescription(sdp) { [weak self] err in
+            if let err { HavenLog.call("answer set fail: \(err.localizedDescription)"); return }
+            self?.onRemoteReady?()
+        }
     }
 
     func addRemoteCandidate(_ candidate: RTCIceCandidate) {

@@ -122,6 +122,20 @@ pub struct RelayEntry {
     /// 0 = unknown (legacy). Mirrors iOS/Android `addedAtMs`.
     #[serde(default)]
     pub added_at_ms: u64,
+    /// Public HTTPS URL of this relay's embedded iroh-relay (DERP) fabric role. When set, peers
+    /// prefer it over n0 for NAT fallback. Empty = use n0 (or another relay's DERP).
+    #[serde(default)]
+    pub derp_url: String,
+    /// Public TURN URLs for WebRTC ICE (`turn:host:port`). When fabric is active and non-empty,
+    /// clients use these for WebRTC media ICE (else STUN for srflx).
+    #[serde(default)]
+    pub turn_urls: Vec<String>,
+    /// TURN username (default `haven`).
+    #[serde(default)]
+    pub turn_user: String,
+    /// TURN password (long-lived secret from the relay). Travels only inside sealed announces.
+    #[serde(default)]
+    pub turn_pass: String,
 }
 
 /// Erase an inactive+unseen relay entry after this long (7 days), matching iOS `staleAfterMs`.
@@ -246,6 +260,10 @@ pub struct Prefs {
     /// host). A pre-filter mixed into request signatures — membership is what authorizes.
     #[serde(default)]
     pub relay_http_token: String,
+    /// Long-lived TURN password for OUR hosted relay (username `haven`). Generated once, like
+    /// [`relay_http_token`]. Travels only inside sealed frame-19 / interface.json.
+    #[serde(default)]
+    pub relay_turn_token: String,
     /// Optional public URL for OUR hosted relay's HTTP interface (port-forward / reverse proxy /
     /// tunnel) — announced ahead of the LAN address when set.
     #[serde(default)]
@@ -266,6 +284,12 @@ pub struct Prefs {
     /// - **auto** — free trycloudflare when no URL; infer manual/bundled from fields.
     #[serde(default)]
     pub relay_front_door: Option<String>,
+    /// Optional dedicated public HTTPS base for OUR hosted iroh-relay (DERP) fabric role.
+    /// Distinct from [`relay_public_url`] (media `:8674`) when the operator uses a sibling
+    /// hostname or separate path-routed front door for `:3340`. Empty → named/manual reuse the
+    /// media URL; free auto still spins a second trycloudflare origin.
+    #[serde(default)]
+    pub relay_derp_url: String,
     /// Local notification preview detail: "full" | "private" | "minimal" (Apple/Android parity).
     #[serde(default)]
     pub notification_detail: Option<String>,
@@ -758,6 +782,10 @@ impl Prefs {
                         http_urls: Vec::new(),
                         http_token: String::new(),
                         added_at_ms: now,
+                        derp_url: String::new(),
+                        turn_urls: Vec::new(),
+                        turn_user: String::new(),
+                        turn_pass: String::new(),
                         hex,
                     },
                 );
@@ -930,6 +958,10 @@ impl Prefs {
                         http_urls: Vec::new(),
                         http_token: String::new(),
                         added_at_ms: now,
+                        derp_url: String::new(),
+                        turn_urls: Vec::new(),
+                        turn_user: String::new(),
+                        turn_pass: String::new(),
                     },
                 );
             }
@@ -949,6 +981,86 @@ impl Prefs {
             return true;
         }
         false
+    }
+
+    /// Record a relay's public iroh-relay (DERP) fabric URL. Empty clears it.
+    pub fn set_relay_derp(&mut self, hex: &str, derp_url: &str) -> bool {
+        self.ensure_relay_entry(hex, None, hex.starts_with("s3:"), true);
+        let next = derp_url.trim().trim_end_matches('/').to_string();
+        if let Some(e) = self.relay_entries.get_mut(hex) {
+            if e.derp_url == next {
+                return false;
+            }
+            e.derp_url = next;
+            return true;
+        }
+        false
+    }
+
+    /// Every live DERP URL across active relays — Haven-first fabric map.
+    pub fn all_derp_urls(&self) -> Vec<String> {
+        let mut urls: Vec<String> = self
+            .relay_entries
+            .values()
+            .filter(|e| e.active && !e.derp_url.is_empty())
+            .map(|e| e.derp_url.clone())
+            .collect();
+        urls.sort();
+        urls.dedup();
+        urls
+    }
+
+    /// Record a relay's circle TURN URLs + credentials for WebRTC ICE.
+    pub fn set_relay_turn(
+        &mut self,
+        hex: &str,
+        urls: Vec<String>,
+        user: &str,
+        pass: &str,
+    ) -> bool {
+        self.ensure_relay_entry(hex, None, hex.starts_with("s3:"), true);
+        let cleaned: Vec<String> = urls
+            .into_iter()
+            .map(|u| u.trim().to_string())
+            .filter(|u| u.starts_with("turn:") || u.starts_with("turns:"))
+            .collect();
+        let user = user.trim().to_string();
+        let pass = pass.trim().to_string();
+        if let Some(e) = self.relay_entries.get_mut(hex) {
+            if e.turn_urls == cleaned && e.turn_user == user && e.turn_pass == pass {
+                return false;
+            }
+            e.turn_urls = cleaned;
+            e.turn_user = user;
+            e.turn_pass = pass;
+            return true;
+        }
+        false
+    }
+
+    /// Union of live TURN URLs + first non-empty credentials across active relays.
+    /// Returns `(urls, user, pass)`.
+    pub fn all_turn_ice(&self) -> (Vec<String>, String, String) {
+        let mut urls: Vec<String> = Vec::new();
+        let mut user = String::new();
+        let mut pass = String::new();
+        for e in self.relay_entries.values() {
+            if !e.active || e.turn_urls.is_empty() {
+                continue;
+            }
+            for u in &e.turn_urls {
+                if !urls.contains(u) {
+                    urls.push(u.clone());
+                }
+            }
+            if user.is_empty() && !e.turn_user.is_empty() && !e.turn_pass.is_empty() {
+                user = e.turn_user.clone();
+                pass = e.turn_pass.clone();
+            }
+        }
+        urls.sort();
+        urls.dedup();
+        (urls, user, pass)
     }
 
     /// The relay's HTTP interface (urls, token), or None for an iroh-only relay.
@@ -999,7 +1111,15 @@ impl Prefs {
 /// Load the 32-byte master seed from the secure store, or `None` if there isn't one yet.
 /// Distinguishes "no entry" (new device → caller generates) from a locked/error read, so
 /// we never clobber an existing identity by treating a transient failure as "new".
+///
+/// Matrix QA: if `HAVEN_QA_SEED_B64` is set (standard base64 of 32 bytes), or
+/// `HAVEN_QA_SEED_FILE` points at a file whose first line is `haven-seed:<b64>` / raw b64,
+/// that seed wins — skips the macOS keychain prompt so automation can link Tauri to the
+/// iOS Simulator identity without a human clicking Always Allow.
 pub fn load_seed() -> Result<Option<[u8; 32]>> {
+    if let Some(seed) = qa_seed_override()? {
+        return Ok(Some(seed));
+    }
     let entry = keyring::Entry::new(SERVICE, SEED_ACCOUNT).context("open keyring entry")?;
     match entry.get_password() {
         Ok(b64) => {
@@ -1014,6 +1134,30 @@ pub fn load_seed() -> Result<Option<[u8; 32]>> {
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(anyhow!("keyring read failed: {e}")),
     }
+}
+
+/// Decode a 32-byte seed from matrix-QA env vars (never used in production packaging).
+fn qa_seed_override() -> Result<Option<[u8; 32]>> {
+    let mut s = std::env::var("HAVEN_QA_SEED_B64").ok().unwrap_or_default();
+    if s.is_empty() {
+        if let Ok(path) = std::env::var("HAVEN_QA_SEED_FILE") {
+            s = fs::read_to_string(path).unwrap_or_default();
+        }
+    }
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    let s = s.strip_prefix("haven-seed:").unwrap_or(s).trim();
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(s)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(s))
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(s))
+        .context("HAVEN_QA_SEED_* base64")?;
+    let seed: [u8; 32] = raw
+        .try_into()
+        .map_err(|_| anyhow!("HAVEN_QA_SEED is not 32 bytes"))?;
+    Ok(Some(seed))
 }
 
 /// Persist the master seed to the secure store.

@@ -89,6 +89,10 @@ object HavenNet : InboundListener {
     private lateinit var social: HavenSocial
     private var node: HavenNode? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /** DERP URLs the live messaging node was bound with (fabric soft-rebind). */
+    @Volatile private var fabricBoundUrls: List<String> = emptyList()
+    @Volatile private var fabricRebindGen: Long = 0
+    @Volatile private var fabricRebindInFlight: Boolean = false
 
     // Observable UI state.
     val contacts: SnapshotStateList<Contact> = mutableStateListOf()
@@ -150,6 +154,15 @@ object HavenNet : InboundListener {
          *  it earlier reactivates only on a NEWER re-add (LWW); a stale echo carries the older stamp and
          *  loses. 0 = unknown (legacy). Mirrors iOS `RelayEntry.addedAtMs`. */
         val addedAtMs: Long = 0,
+        /** Public HTTPS URL of this relay's embedded iroh-relay (DERP) fabric role. When set, peers
+         *  prefer it over n0 for NAT fallback. Empty = use n0 (or another relay's DERP). */
+        val derpUrl: String = "",
+        /** Public TURN URLs for WebRTC ICE (`turn:host:port`). */
+        val turnUrls: List<String> = emptyList(),
+        /** TURN username (default `haven`). */
+        val turnUser: String = "",
+        /** TURN password (long-lived secret). Travels only inside sealed announces. */
+        val turnPass: String = "",
     )
     /** Per-relay metadata records, keyed by hex. The config survives deactivation here. */
     private val relayEntries = HashMap<String, RelayEntry>()
@@ -176,13 +189,23 @@ object HavenNet : InboundListener {
     /** Record a mailbox key as seen and schedule one debounced save for the burst. */
     private fun markMailboxSeen(key: String) {
         ensureSeenMailboxLoaded()
-        if (!seenMailbox.add(key) || seenMailboxSavePending) return
+        // Always insert into the in-memory set first so concurrent 2s live-call pollers cannot
+        // re-process the same key while a disk save is pending.
+        val inserted = synchronized(seenMailbox) { seenMailbox.add(key) }
+        if (!inserted) return
+        if (seenMailboxSavePending) return
         seenMailboxSavePending = true
         scope.launch {
             kotlinx.coroutines.delay(2_000)
             seenMailboxSavePending = false
-            runCatching { seenMailboxFile.writeText(seenMailbox.joinToString("\n")) }
+            val snap = synchronized(seenMailbox) { seenMailbox.joinToString("\n") }
+            runCatching { seenMailboxFile.writeText(snap) }
         }
+    }
+
+    private fun isMailboxSeen(key: String): Boolean {
+        ensureSeenMailboxLoaded()
+        return synchronized(seenMailbox) { seenMailbox.contains(key) }
     }
 
     /**
@@ -447,9 +470,14 @@ object HavenNet : InboundListener {
         runCatching { uniffi.haven_ffi.initLogging(appContext.filesDir.path) }
         scope.launch {
             try {
+                // Fabric before bind: prefs may already know circle DERP from a prior session.
+                // apply_derp_urls is process-wide and only affects this HavenNode if set before start
+                // (iroh RelayMap is construct-time).
+                refreshHavenFabric()
                 // TRANSPORT = per-DEVICE seed → unique per-device relay/node id (never the account id). The
                 // self-connect leak is defended at the haven-net core (Node refuses to dial our own node id).
                 node = HavenNode.start(DeviceKeyStore.deviceAccount().secretSeed(), this@HavenNet)
+                fabricBoundUrls = activeFabricUrls()
                 withContext(Dispatchers.Main) { started.value = true }
                 Log.i(TAG, "node started: ${node?.nodeIdHex()}")
                 // REACHABILITY PROBE: dump this node's ticket (published addrs + DERP relay url) so we can SEE
@@ -525,6 +553,14 @@ object HavenNet : InboundListener {
     private fun startMailboxLoop() {
         if (loopStarted) return
         loopStarted = true
+        // Fast live-call lane (2s) for invite/accept/sdp when iroh dial is down.
+        scope.launch {
+            while (true) {
+                delay(2_000)
+                if (!ready) continue
+                runCatching { pollLiveCallFrames() }
+            }
+        }
         scope.launch {
             while (true) {
                 delay(10_000)
@@ -794,12 +830,122 @@ object HavenNet : InboundListener {
      *  connections). Cross-NAT fallback: a callee whose direct dial back to the caller fails still
      *  lands the ACCEPT within the ring window (the push rings, but the answer path was direct-only). */
     fun sendCallFrame(type: Int, payload: ByteArray, toNodeHex: String) {
+        val frame = Wire.frame(type, payload)
         sendFrame(type, payload, toNodeHex)
         val dests = LinkedHashSet<String>()
+        // Prefer roster device ids for this account; fall back to account hex + invite hints.
         dests.addAll(runCatching { social.deviceNodeIdsFor(toNodeHex) }.getOrDefault(emptyList()))
+        dests.add(toNodeHex.lowercase())
+        if (dests.size <= 1) dests.addAll(deviceHintsFor(toNodeHex))
         if (dests.isEmpty()) dests.add(toNodeHex)
-        dests.addAll(deviceHintsFor(toNodeHex))
-        originateRelayInternet(dests.toList(), Wire.frame(type, payload))
+        originateRelayInternet(dests.toList(), frame)
+        // HTTP live-lane when iroh dial is unreachable (mailbox __live__/<dest>/).
+        // Only fan out to account + roster devices — not every historical hint (floods ICE/answer).
+        val liveDests = LinkedHashSet<String>()
+        liveDests.add(toNodeHex.lowercase())
+        liveDests.addAll(runCatching { social.deviceNodeIdsFor(toNodeHex) }.getOrDefault(emptyList()))
+        if (liveDests.size <= 1) liveDests.addAll(deviceHintsFor(toNodeHex).take(2))
+        scope.launch { uploadLiveCallFrame(liveDests.toList(), frame) }
+    }
+
+    /** PUT sealed call wire frames under haven/mailbox/<circle>/__live__/<dest>/<hash>. */
+    private suspend fun uploadLiveCallFrame(dests: List<String>, frame: ByteArray) {
+        if (!ready || dests.isEmpty() || frame.isEmpty()) return
+        val circles = LinkedHashSet<String>()
+        circles.add(DEFAULT_CIRCLE)
+        runCatching {
+            for (c in social.circles()) {
+                if (c.id.startsWith("dm:")) circles.add(c.id)
+            }
+        }
+        val h = MessageDigest.getInstance("SHA-256").digest(frame)
+            .joinToString("") { "%02x".format(it) }
+        val cleanDests = dests.map { it.lowercase() }.filter { it.length == 64 }.distinct()
+        if (cleanDests.isEmpty()) return
+        for (circleId in circles) {
+            for (dest in cleanDests) {
+                val key = "haven/mailbox/$circleId/__live__/$dest/$h"
+                var landed = false
+                for (nodeHex in relaysFor(circleId)) {
+                    if (nodeHex.startsWith("s3:")) continue
+                    val entry = relayEntries[nodeHex] ?: continue
+                    if (entry.httpToken.isEmpty()) continue
+                    for (base in httpUrlsFor(entry)) {
+                        val r = relayHttpPut(base, entry.httpToken, key, frame)
+                        if (r.isSuccess) {
+                            landed = true
+                            markRelayOk(nodeHex)
+                            Log.i(TAG, "live-call http-put OK type=${frame[0].toInt() and 0xFF} to=${dest.take(8)} relay=${nodeHex.take(8)}")
+                            break
+                        }
+                        if (r.exceptionOrNull() is RelayForbidden) {
+                            noteRefused(nodeHex, "live-call put")
+                            break
+                        }
+                        markHttpUrlBad(base)
+                    }
+                    if (landed) break
+                }
+                // Do NOT markSeen on put — the destination must still be able to list+ingest.
+                // (Content-addressed keys make re-puts idempotent without a local skip.)
+            }
+        }
+    }
+
+    /** Poll __live__/<me>/ call frames and dispatch to callRouter. */
+    private suspend fun pollLiveCallFrames(): Boolean {
+        if (!ready) return false
+        ensureSeenMailboxLoaded()
+        val meDev = runCatching { social.myDeviceNodeHex() }.getOrDefault("").lowercase()
+        val meAcct = nodeIdHex.lowercase()
+        val mine = listOf(meDev, meAcct).filter { it.length == 64 }.distinct()
+        if (mine.isEmpty()) return false
+        val circles = LinkedHashSet<String>()
+        circles.add(DEFAULT_CIRCLE)
+        runCatching { for (c in social.circles()) circles.add(c.id) }
+        var changed = false
+        val callTypes = setOf(
+            CallWire.INVITE, CallWire.ACCEPT, CallWire.HANGUP, CallWire.OFFER,
+            CallWire.ANSWER, CallWire.ICE, CallWire.GROUP_INVITE,
+            CallWire.HANDLED_ELSEWHERE, CallWire.CAMERA,
+        )
+        for (circleId in circles) {
+            val relays = relaysFor(circleId).toMutableList()
+            if (defaultRelayHex.isNotEmpty()) relays.add(defaultRelayHex)
+            for (nodeHex in relays.distinct()) {
+                if (nodeHex.startsWith("s3:")) continue
+                val entry = relayEntries[nodeHex] ?: continue
+                if (entry.httpToken.isEmpty()) continue
+                for (who in mine) {
+                    val prefix = "haven/mailbox/$circleId/__live__/$who/"
+                    for (base in httpUrlsFor(entry)) {
+                        val listed = relayHttpList(base, entry.httpToken, prefix)
+                        if (listed.isFailure) {
+                            if (listed.exceptionOrNull() is RelayForbidden) break
+                            markHttpUrlBad(base)
+                            continue
+                        }
+                        markRelayOk(nodeHex)
+                        for (key in listed.getOrDefault(emptyList())) {
+                            // Claim the key immediately so a concurrent 2s poll cannot double-dispatch.
+                            if (isMailboxSeen(key)) continue
+                            markMailboxSeen(key)
+                            val env = relayHttpGet(base, entry.httpToken, key).getOrNull() ?: continue
+                            if (env.isEmpty()) continue
+                            val type = env[0].toInt() and 0xFF
+                            val body = env.copyOfRange(1, env.size)
+                            if (type in callTypes) {
+                                withContext(Dispatchers.Main) { callRouter?.invoke(type, body) }
+                                Log.i(TAG, "live-call http-ingest type=$type key=${key.substringAfterLast('/').take(12)}")
+                                changed = true
+                            }
+                        }
+                        break
+                    }
+                }
+            }
+        }
+        return changed
     }
 
     // ---- "Tell me when this media is back" (frames 31/32; iOS parity) ---------------------
@@ -1785,6 +1931,8 @@ object HavenNet : InboundListener {
      *  the mailbox/relay, and a freshly-added contact is back-filled directly by acceptContact. */
     private var lastHistoryResendMs: Long = 0
     private var lastMediaBackfillMs: Long = 0
+    /** Last frame-19 re-announce. Must not ride every sync tick (radio + seal cost → heat). */
+    private var lastRelayReannounceMs: Long = 0
     /** Last own-device catch-up sweep. Throttled hard (5 min): it re-seals every envelope it sends,
      *  so it must NOT ride the sync tick. See the sweep in [syncWithContacts] for why it exists. */
     private var lastOwnDeviceCatchupMs: Long = 0
@@ -1890,7 +2038,12 @@ object HavenNet : InboundListener {
                 }
             }
         }
-        reannounceOwnRelay()   // frame 19 was a one-shot at relay start; re-emit so peers reliably learn it
+        // Throttle frame-19 re-announce to ~3 min (parity with iOS heat fix). Fresh peers still get
+        // it on nearby connect / adopt; this is only the periodic safety net.
+        if (nowMs - lastRelayReannounceMs > 180_000) {
+            lastRelayReannounceMs = nowMs
+            reannounceOwnRelay()
+        }
         // Push MY media up to every circle relay periodically (idempotent — skips blobs already present),
         // so a sibling reading the relay finds it. The nearby chunk path is unreliable; the relay is durable.
         if (nowMs - lastMediaBackfillMs > 120_000) {
@@ -2494,9 +2647,17 @@ object HavenNet : InboundListener {
         // Always carry the adoption timestamp so receivers can LWW a stale tombstone. Use the JSON form
         // whenever we have EITHER an HTTP interface or a non-zero adoption stamp; a legacy receiver
         // ignores JSON it can't read as a bare hex (wrong length), so mixed versions stay compatible.
-        val payload = if (hasHttp || addedAt > 0) {
+        val hasDerp = e != null && e.derpUrl.isNotEmpty()
+        val hasTurn = e != null && e.turnUrls.isNotEmpty()
+        val payload = if (hasHttp || addedAt > 0 || hasDerp || hasTurn) {
             org.json.JSONObject().put("node", nodeHex).put("addedAt", addedAt).apply {
                 if (hasHttp) { put("urls", JSONArray(e!!.httpUrls)); put("token", e.httpToken) }
+                if (hasDerp) put("derp", e!!.derpUrl)
+                if (hasTurn) {
+                    put("turn", JSONArray(e!!.turnUrls))
+                    if (e.turnUser.isNotEmpty()) put("turnUser", e.turnUser)
+                    if (e.turnPass.isNotEmpty()) put("turnPass", e.turnPass)
+                }
             }.toString().toByteArray(Charsets.UTF_8)
         } else nodeHex.toByteArray(Charsets.UTF_8)
         return runCatching { social.sealCircleMedia(circleId, payload) }.getOrNull()
@@ -2513,10 +2674,14 @@ object HavenNet : InboundListener {
         val opened = runCatching { social.openCircleMediaSender(circleId, sealed) }.getOrNull() ?: return
         val announcerHex = opened.senderHex.lowercase()   // authenticated envelope sender (account id)
         val text = String(opened.data, Charsets.UTF_8).trim()
-        // Extended announce: JSON {node, urls, token} carries the relay's HTTP media interface.
+        // Extended announce: JSON {node, urls, token, derp, turn, turnUser, turnPass}.
         var announcedUrls: List<String> = emptyList()
         var announcedToken = ""
         var announcedAddedAt = 0L
+        var announcedDerp: String? = null
+        var announcedTurn: List<String> = emptyList()
+        var announcedTurnUser = ""
+        var announcedTurnPass = ""
         val nodeHex: String = if (text.startsWith("{")) {
             val o = runCatching { JSONObject(text) }.getOrNull() ?: return
             announcedUrls = o.optJSONArray("urls")?.let { a ->
@@ -2524,6 +2689,20 @@ object HavenNet : InboundListener {
             } ?: emptyList()
             announcedToken = o.optString("token", "")
             announcedAddedAt = o.optLong("addedAt", 0L)
+            val d = o.optString("derp", "").trim()
+            if (d.startsWith("http")) announcedDerp = d.trimEnd('/')
+            announcedTurn = o.optJSONArray("turn")?.let { a ->
+                (0 until a.length()).mapNotNull { i ->
+                    a.optString(i).takeIf { u -> u.startsWith("turn:") || u.startsWith("turns:") }
+                }
+            } ?: o.optString("turn", "").takeIf { it.startsWith("turn:") || it.startsWith("turns:") }
+                ?.let { listOf(it) } ?: emptyList()
+            announcedTurnUser = o.optString("turnUser", "")
+            announcedTurnPass = o.optString("turnPass", "")
+            if (announcedTurnUser.isEmpty() && announcedTurn.isNotEmpty()) announcedTurnUser = "haven"
+            if (announcedTurnPass.isEmpty() && announcedTurn.isNotEmpty() && announcedToken.isNotEmpty()) {
+                announcedTurnPass = announcedToken
+            }
             o.optString("node", "").trim().lowercase()
         } else text.lowercase()
         if (nodeHex.length != 64) return
@@ -2567,6 +2746,29 @@ object HavenNet : InboundListener {
                 relayEntries[nodeHex] = e.copy(httpUrls = announcedUrls, httpToken = announcedToken)
                 saveRelayNodes()
                 Log.i(TAG, "learned relay http interface for ${nodeHex.take(8)}: ${announcedUrls.size} url(s)")
+            }
+        }
+        // Haven fabric: DERP URL so peers prefer this box over n0 for live NAT.
+        if (announcedDerp != null) {
+            val e = relayEntries[nodeHex]
+            if (e != null && e.derpUrl != announcedDerp) {
+                relayEntries[nodeHex] = e.copy(derpUrl = announcedDerp)
+                saveRelayNodes()
+                refreshHavenFabric()
+                Log.i(TAG, "learned relay DERP fabric for ${nodeHex.take(8)}: $announcedDerp")
+            }
+        }
+        if (announcedTurn.isNotEmpty()) {
+            val e = relayEntries[nodeHex]
+            if (e != null && (e.turnUrls != announcedTurn || e.turnUser != announcedTurnUser || e.turnPass != announcedTurnPass)) {
+                relayEntries[nodeHex] = e.copy(
+                    turnUrls = announcedTurn,
+                    turnUser = announcedTurnUser,
+                    turnPass = announcedTurnPass,
+                )
+                saveRelayNodes()
+                refreshHavenFabric()
+                Log.i(TAG, "learned relay TURN for ${nodeHex.take(8)}: ${announcedTurn.size} url(s)")
             }
         }
         scope.launch(Dispatchers.Main) { bumpRelays() }   // recompose the Relays hub off the inbound thread
@@ -2619,18 +2821,63 @@ object HavenNet : InboundListener {
         uniffi.haven_ffi.makeRelayLink(circleId, members)
     }.getOrNull()
 
+    /**
+     * Adopt a relay. Accepts either a bare 64-hex node id, or the JSON interface blob printed by
+     * `haven-relay` (`{"node","urls","token","derp","turn",…}`) so HTTP media + DERP + TURN are
+     * learned in one paste and re-announced to the circle (frame 19).
+     */
     fun adoptRelay(nodeHex: String, name: String? = null, setDefault: Boolean = false) {
-        val hex = nodeHex.trim().lowercase()
+        val raw = nodeHex.trim()
+        var hex = raw.lowercase()
+        var urls: List<String> = emptyList()
+        var token = ""
+        var derp = ""
+        var turnUrls: List<String> = emptyList()
+        var turnUser = ""
+        var turnPass = ""
+        if (raw.startsWith("{")) {
+            val o = runCatching { JSONObject(raw) }.getOrNull() ?: return
+            hex = o.optString("node", "").trim().lowercase()
+            urls = o.optJSONArray("urls")?.let { a ->
+                (0 until a.length()).mapNotNull { i -> a.optString(i).takeIf { u -> u.startsWith("http") } }
+            } ?: emptyList()
+            token = o.optString("token", "")
+            derp = o.optString("derp", "").trim().trimEnd('/')
+            turnUrls = o.optJSONArray("turn")?.let { a ->
+                (0 until a.length()).mapNotNull { i ->
+                    a.optString(i).takeIf { u -> u.startsWith("turn:") || u.startsWith("turns:") }
+                }
+            } ?: emptyList()
+            turnUser = o.optString("turnUser", "")
+            turnPass = o.optString("turnPass", "")
+            if (turnUser.isEmpty() && turnUrls.isNotEmpty()) turnUser = "haven"
+            if (turnPass.isEmpty() && turnUrls.isNotEmpty() && token.isNotEmpty()) turnPass = token
+        }
         if (hex.length != 64) return
         unforgetRelay(hex)   // explicit adoption overrides a prior Forget + records a re-add CLEAR for self-sync
         ensureRelayEntry(hex, name = name, isS3 = false, activate = true)   // adoptedAtMs=0 → stamp now()
+        if (urls.isNotEmpty() && token.isNotEmpty()) {
+            val e = relayEntries[hex]
+            if (e != null) relayEntries[hex] = e.copy(httpUrls = urls, httpToken = token)
+        }
+        if (derp.isNotEmpty()) {
+            val e = relayEntries[hex]
+            if (e != null) relayEntries[hex] = e.copy(derpUrl = derp)
+        }
+        if (turnUrls.isNotEmpty()) {
+            val e = relayEntries[hex]
+            if (e != null) relayEntries[hex] = e.copy(turnUrls = turnUrls, turnUser = turnUser, turnPass = turnPass)
+        }
+        if (derp.isNotEmpty() || turnUrls.isNotEmpty()) {
+            refreshHavenFabric()
+        }
         if (setDefault) defaultRelayHex = hex
         scope.launch {
             for (c in social.circles()) {
                 val cid = c.id
                 val list = relayNodes.getOrPut(cid) { mutableListOf() }
                 if (!list.contains(hex)) list.add(hex)
-                // Tell members (sealed) so they use the same mailbox.
+                // Tell members (sealed) so they use the same mailbox + fabric.
                 val sealed = relayAnnounceBlob(cid, hex)
                 if (sealed != null) {
                     val frame = Wire.eventPayload(cid, sealed)  // [LP cid][sealed] — same layout as frame 19
@@ -3314,6 +3561,11 @@ object HavenNet : InboundListener {
                 }
             }
         }
+        // HTTP live-lane call frames when iroh dial is down.
+        if (pollLiveCallFrames()) {
+            changed = true
+            bumpActivity()
+        }
         // Mesh: if we host a relay, pull from each adopted sibling so the mailbox self-replicates.
         meshSync()
         // Multi-device self-sync: converge this user's OWN devices (profile/settings/contacts/
@@ -3977,6 +4229,28 @@ object HavenNet : InboundListener {
                 404 -> null
                 401, 403 -> throw RelayForbidden()
                 else -> throw java.io.IOException("http ${c.responseCode}")
+            }
+        } finally { c.disconnect() }
+    }
+
+    /** LIST keys under a prefix via the relay's plain-HTTP interface (`GET /l/<prefix>`). */
+    private fun relayHttpList(base: String, token: String, prefix: String): Result<List<String>> = runCatching {
+        val auth = httpAuth(token, "GET", prefix, ByteArray(0))
+            ?: throw java.io.IOException("cannot sign relay LIST")
+        val root = base.trimEnd('/')
+        val url = "$root/l/${java.net.URLEncoder.encode(prefix, "UTF-8").replace("+", "%20")}"
+        val c = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
+            connectTimeout = 4000; readTimeout = 30000
+            setRequestProperty("Authorization", auth)
+        }
+        try {
+            when (c.responseCode) {
+                in 200..299 -> {
+                    val text = c.inputStream.bufferedReader().use { it.readText() }
+                    text.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
+                }
+                401, 403 -> throw RelayForbidden()
+                else -> throw java.io.IOException("http list ${c.responseCode}")
             }
         } finally { c.disconnect() }
     }
@@ -4938,12 +5212,134 @@ object HavenNet : InboundListener {
                         } ?: emptyList(),
                         httpToken = o.optString("httpToken", ""),
                         addedAtMs = o.optLong("addedAtMs", 0L),
+                        derpUrl = o.optString("derpUrl", "").trim().trimEnd('/'),
+                        turnUrls = o.optJSONArray("turnUrls")?.let { a ->
+                            (0 until a.length()).mapNotNull { i ->
+                                a.optString(i).takeIf { u -> u.startsWith("turn:") || u.startsWith("turns:") }
+                            }
+                        } ?: emptyList(),
+                        turnUser = o.optString("turnUser", ""),
+                        turnPass = o.optString("turnPass", ""),
                     )
                 }
             }
         }
         // Migrate any relay that only exists in relayNodes/the default into a RelayEntry.
         migrateRelayEntries()
+        refreshHavenFabric()
+    }
+
+    /**
+     * Push live DERP URLs into SharedPreferences for [CallManager] ICE **and** into the Rust
+     * process policy via [uniffi.haven_ffi.applyDerpUrls]. Also persists circle TURN for WebRTC.
+     * When a messaging node is already live on a different map, schedules a debounced soft rebind.
+     */
+    private fun refreshHavenFabric() {
+        if (!this::appContext.isInitialized) return
+        val urls = activeFabricUrls()
+        val turnUrls = linkedSetOf<String>()
+        var turnUser = ""
+        var turnPass = ""
+        for (e in relayEntries.values) {
+            if (!e.active || e.turnUrls.isEmpty()) continue
+            turnUrls.addAll(e.turnUrls)
+            if (turnUser.isEmpty() && e.turnUser.isNotEmpty() && e.turnPass.isNotEmpty()) {
+                turnUser = e.turnUser
+                turnPass = e.turnPass
+            }
+        }
+        appContext.getSharedPreferences("haven.fabric", android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putStringSet("derpUrls", urls.toSet())
+            .putStringSet("turnUrls", turnUrls)
+            .putString("turnUser", turnUser)
+            .putString("turnPass", turnPass)
+            .apply()
+        // Sorted list for stable policy; empty → n0 only.
+        runCatching { uniffi.haven_ffi.applyDerpUrls(urls) }
+        scheduleFabricRebindIfNeeded(urls)
+    }
+
+    private fun activeFabricUrls(): List<String> =
+        relayEntries.values
+            .filter { it.active && it.derpUrl.isNotEmpty() }
+            .map { it.derpUrl }
+            .toSortedSet()
+            .toList()
+
+    private fun scheduleFabricRebindIfNeeded(urls: List<String>) {
+        if (node == null || urls.isEmpty() || urls == fabricBoundUrls || fabricRebindInFlight) return
+        val gen = synchronized(this) { fabricRebindGen += 1; fabricRebindGen }
+        Log.i(TAG, "fabric rebind scheduled (urls=${urls.size})")
+        scope.launch {
+            delay(2_000)
+            if (gen != fabricRebindGen) return@launch
+            rebindTransportForFabric()
+        }
+    }
+
+    /**
+     * Stop the messaging node fully, re-apply fabric, start again, re-attach relay host if needed.
+     * Must not dual-bind the same device seed (iroh same-key scar).
+     */
+    private suspend fun rebindTransportForFabric() {
+        if (fabricRebindInFlight) return
+        val target = activeFabricUrls()
+        if (target.isEmpty() || target == fabricBoundUrls) return
+        fabricRebindInFlight = true
+        try {
+            Log.i(TAG, "fabric rebind starting…")
+            val wasHosting = relayHost != null
+            if (wasHosting) {
+                runCatching { relayHost?.disable() }
+                relayHost = null
+                withContext(Dispatchers.Main) { hosting.value = false }
+            }
+            val old = node
+            node = null
+            withContext(Dispatchers.Main) { started.value = false; internetActive.value = false }
+            if (old != null) {
+                runCatching { old.shutdown() }
+                delay(250)
+            }
+            runCatching { uniffi.haven_ffi.applyDerpUrls(activeFabricUrls()) }
+            node = HavenNode.start(DeviceKeyStore.deviceAccount().secretSeed(), this@HavenNet)
+            fabricBoundUrls = activeFabricUrls()
+            withContext(Dispatchers.Main) { started.value = true; internetActive.value = true }
+            Log.i(TAG, "fabric rebind ok urls=${fabricBoundUrls.size}")
+            if (wasHosting) {
+                // Light re-attach (same as startHosting but without re-adopt storm).
+                val n = node
+                if (n != null) {
+                    val dir = File(appContext.filesDir, "relay").apply { mkdirs() }.absolutePath
+                    val h = runCatching {
+                        uniffi.haven_ffi.RelayServerHandle.attachWithLimits(
+                            n, dir,
+                            relayMediaMaxAgeDays.toUInt(),
+                            relayMediaMaxBytes.toULong(),
+                        )
+                    }.getOrNull()
+                    if (h != null) {
+                        relayHost = h
+                        withContext(Dispatchers.Main) { hosting.value = true }
+                        authorizeMembership()
+                        val token = relayHttpToken()
+                        runCatching { h.serveHttp("0.0.0.0:$RELAY_HTTP_PORT", token) }
+                            .recoverCatching { h.serveHttp("0.0.0.0:0", token) }
+                        reannounceOwnRelay()
+                    }
+                }
+            } else {
+                reannounceOwnRelay()
+            }
+            syncWithContacts()
+            // Catch learns that arrived during rebind.
+            scheduleFabricRebindIfNeeded(activeFabricUrls())
+        } catch (e: Throwable) {
+            Log.e(TAG, "fabric rebind failed", e)
+        } finally {
+            fabricRebindInFlight = false
+        }
     }
 
     private fun saveRelayNodes() {
@@ -4957,6 +5353,10 @@ object HavenNet : InboundListener {
                 if (e.httpUrls.isNotEmpty()) put("httpUrls", JSONArray(e.httpUrls))
                 if (e.httpToken.isNotEmpty()) put("httpToken", e.httpToken)
                 if (e.addedAtMs > 0) put("addedAtMs", e.addedAtMs)
+                if (e.derpUrl.isNotEmpty()) put("derpUrl", e.derpUrl)
+                if (e.turnUrls.isNotEmpty()) put("turnUrls", JSONArray(e.turnUrls))
+                if (e.turnUser.isNotEmpty()) put("turnUser", e.turnUser)
+                if (e.turnPass.isNotEmpty()) put("turnPass", e.turnPass)
             })
         }
         val forgotAtJson = JSONObject().apply { forgotAtRelays.forEach { (k, v) -> put(k, v) } }

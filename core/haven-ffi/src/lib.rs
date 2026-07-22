@@ -119,6 +119,33 @@ pub fn init_logging(dir: String) {
     });
 }
 
+/// Install known circle DERP HTTPS URLs as the process-wide iroh fabric policy.
+///
+/// Empty → stock n0 only. Non-empty → Haven-only (n0 off). Call **before** [`HavenNode::start`]
+/// when prefs already know a fabric, and again whenever frame 19 / adopt learns a `derp` URL.
+///
+/// **Limit:** iroh binds `RelayMap` at endpoint construct time. This updates the process policy
+/// for the *next* bind. Live messaging nodes must be stopped and re-started (see
+/// [`HavenNode::shutdown`]) to pick up a new map — desktop does this via soft rebind when fabric
+/// is first learned mid-session. WebRTC ICE still follows app-side fabric prefs
+/// (Apple `HavenFabric` / Android `haven.fabric`).
+#[uniffi::export]
+pub fn apply_derp_urls(urls: Vec<String>) {
+    haven_net::apply_derp_urls(urls);
+}
+
+/// True when ≥1 Haven DERP URL is installed in the process policy (n0 is not sole fabric).
+#[uniffi::export]
+pub fn haven_fabric_active() -> bool {
+    haven_net::haven_fabric_active()
+}
+
+/// Active custom DERP URLs from the process policy (empty when n0-only).
+#[uniffi::export]
+pub fn active_derp_urls() -> Vec<String> {
+    haven_net::active_derp_urls()
+}
+
 /// Multi-device (D16): device-credential + account-state self-sync FFI surface.
 /// `pub` so the desktop backend (which links this crate directly) can call the shared
 /// circle encoder + S3 helpers without going through UniFFI.
@@ -726,6 +753,118 @@ impl RelayServerHandle {
     }
 }
 
+/// Embedded circle-hosted iroh-relay (DERP) — Haven fabric NAT fallback.
+///
+/// Separate listen socket from the messaging node (same-key second-endpoint scar). Hold this
+/// object while hosting; drop stops the server. Desktop / macOS hosts call this; iOS usually does not.
+#[derive(uniffi::Object)]
+pub struct DerpServerHandle {
+    public_url: String,
+    local_addr: String,
+    local_port: u16,
+    _server: haven_net::DerpServer,
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl DerpServerHandle {
+    /// Start DERP on `bind` (e.g. `127.0.0.1:3340`). `public_url` may be empty until a tunnel is up.
+    #[uniffi::constructor]
+    pub async fn spawn(bind: String, public_url: String) -> Result<Arc<Self>, HavenError> {
+        let cfg = haven_net::DerpConfig {
+            enabled: true,
+            bind,
+            public_url: public_url.trim().trim_end_matches('/').to_string(),
+        };
+        let server = haven_net::DerpServer::spawn(&cfg)
+            .await
+            .map_err(|e| HavenError::Invalid {
+                msg: format!("derp spawn: {e}"),
+            })?
+            .ok_or_else(|| HavenError::Invalid {
+                msg: "derp disabled".into(),
+            })?;
+        let local_addr = server.local_addr.to_string();
+        let local_port = server.local_port();
+        let public_url = server.public_url.clone();
+        Ok(Arc::new(Self {
+            public_url,
+            local_addr,
+            local_port,
+            _server: server,
+        }))
+    }
+
+    /// Public HTTPS base for RelayMap / frame-19 `derp` (may be empty until tunnel assigns one).
+    pub fn public_url(&self) -> String {
+        self.public_url.clone()
+    }
+
+    /// Local bind address actually used.
+    pub fn local_addr(&self) -> String {
+        self.local_addr.clone()
+    }
+
+    /// Local TCP port for a second cloudflared quick tunnel.
+    pub fn local_port(&self) -> u16 {
+        self.local_port
+    }
+}
+
+/// Local path-based reverse proxy: one public origin → media mailbox + iroh DERP by path.
+///
+/// `/relay`, `/derp`, `/ping` → DERP backend; everything else → media. Used so free trycloudflare
+/// and single-hostname named tunnels front both roles without a second cloudflared process.
+#[derive(uniffi::Object)]
+pub struct PathRouterHandle {
+    local_addr: String,
+    local_port: u16,
+    _router: haven_net::PathRouter,
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl PathRouterHandle {
+    /// Bind `bind` (e.g. `127.0.0.1:8675`) and proxy to media/derp host:port backends.
+    /// Also serves `/webrtc/hairpin` WebSocket call-media hairpin (free Cloudflare OK).
+    /// `http_token` optional: if join JSON includes `token`, it must match.
+    #[uniffi::constructor]
+    pub async fn spawn(
+        bind: String,
+        media_backend: String,
+        derp_backend: String,
+        http_token: String,
+    ) -> Result<Arc<Self>, HavenError> {
+        let cfg = haven_net::PathRouterConfig {
+            bind,
+            media_backend,
+            derp_backend,
+            http_token,
+        };
+        let router = haven_net::PathRouter::spawn(&cfg)
+            .await
+            .map_err(|e| HavenError::Invalid {
+                msg: format!("path router spawn: {e}"),
+            })?
+            .ok_or_else(|| HavenError::Invalid {
+                msg: "path router disabled".into(),
+            })?;
+        let local_addr = router.local_addr.to_string();
+        let local_port = router.local_port();
+        Ok(Arc::new(Self {
+            local_addr,
+            local_port,
+            _router: router,
+        }))
+    }
+
+    pub fn local_addr(&self) -> String {
+        self.local_addr.clone()
+    }
+
+    pub fn local_port(&self) -> u16 {
+        self.local_port
+    }
+}
+
 // ===== Live social demo =====
 //
 // A local, on-device demonstration of the social engine: every post / comment /
@@ -1055,6 +1194,13 @@ impl HavenNode {
             .await
             .map_err(|e| HavenError::Invalid { msg: e.to_string() })?;
         Ok(Arc::new(Self { node }))
+    }
+
+    /// Close the underlying iroh endpoint so a same-seed restart is safe (no dual endpoint
+    /// under one key). Await this, drop all app references, then call [`HavenNode::start`] again
+    /// after [`apply_derp_urls`] when fabric is learned mid-session.
+    pub async fn shutdown(&self) {
+        self.node.shutdown().await;
     }
 
     /// This node's id (== the account's Haven id), as hex.
@@ -3397,9 +3543,12 @@ fn receive_key_commit(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool
         } else {
             // A contact's epoch key, stored under their ACCOUNT (whether they committed under their account
             // key or an authorized device) — the same slot the read path looks up by the event's author.
+            // ALWAYS adopt a successfully-opened commit (do not first-wins `or_insert`): a peer who
+            // re-sealed the same epoch after membership change produces a NEW key material for that
+            // epoch, and keeping the stale key permanently bricks reverse-path open of later posts.
             let key = (committer_account_hex.clone(), opened.epoch);
-            is_new = !c.peer_epoch_keys.contains_key(&key);
-            c.peer_epoch_keys.entry(key).or_insert(opened.epoch_key);
+            let prev = c.peer_epoch_keys.insert(key, opened.epoch_key);
+            is_new = prev != Some(opened.epoch_key);
             // Store the committer's stable circle secret so I can derive their opaque storage prefix.
             if opened.circle_secret != [0u8; 32] {
                 c.peer_circle_secrets.insert(committer_account_hex.clone(), opened.circle_secret);

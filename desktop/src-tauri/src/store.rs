@@ -1137,7 +1137,9 @@ pub fn load_seed() -> Result<Option<[u8; 32]>> {
 }
 
 /// Decode a 32-byte seed from matrix-QA env vars (never used in production packaging).
-fn qa_seed_override() -> Result<Option<[u8; 32]>> {
+/// Public so startup can force this identity even when a multi-identity roster already exists
+/// (linked-device matrix was ignoring HAVEN_QA_SEED_FILE and booting the prior active account).
+pub fn qa_seed_override() -> Result<Option<[u8; 32]>> {
     let mut s = std::env::var("HAVEN_QA_SEED_B64").ok().unwrap_or_default();
     if s.is_empty() {
         if let Ok(path) = std::env::var("HAVEN_QA_SEED_FILE") {

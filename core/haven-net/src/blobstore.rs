@@ -427,10 +427,13 @@ pub struct RelayAuth {
 
 impl RelayAuth {
     /// Authorize a circle's mailbox to exactly `members` + the circle's sibling `relays`. Idempotent.
+    /// Member / relay hexes are lowercased so HTTP-signed peers (always lowercase) match file-driven
+    /// QA authorize lists and mixed-case account dumps (matrix: device id present but still REFUSED).
     pub fn authorize(&mut self, circle_id: &str, members: Vec<String>, relays: Vec<String>) {
-        self.members.insert(circle_id.to_string(), members.into_iter().collect());
+        let members: HashSet<String> = members.into_iter().map(|m| m.to_lowercase()).collect();
+        self.members.insert(circle_id.to_string(), members);
         for r in relays {
-            self.relays.insert(r);
+            self.relays.insert(r.to_lowercase());
         }
     }
     /// Expand every circle this account is a member of to ALSO include its DEVICE ids — called after a
@@ -440,10 +443,11 @@ impl RelayAuth {
     /// device ids come from an account-SIGNED DeviceList (see `verify_devroster`), so a stranger can't
     /// inject ids for someone else's account. Idempotent (HashSet insert).
     pub(crate) fn authorize_devices(&mut self, account_hex: &str, device_hexes: &[String]) {
+        let acct = account_hex.to_lowercase();
         for members in self.members.values_mut() {
-            if members.contains(account_hex) {
+            if members.contains(&acct) {
                 for d in device_hexes {
-                    members.insert(d.clone());
+                    members.insert(d.to_lowercase());
                 }
             }
         }
@@ -466,12 +470,14 @@ impl RelayAuth {
     }
 
     pub(crate) fn is_known(&self, peer: &str) -> bool {
-        self.members.values().any(|m| m.contains(peer))
+        let p = peer.to_lowercase();
+        self.members.values().any(|m| m.contains(&p))
     }
 
     /// True if `peer` is a member of THIS specific circle.
     pub(crate) fn is_member_of(&self, circle_id: &str, peer: &str) -> bool {
-        self.members.get(circle_id).map(|m| m.contains(peer)).unwrap_or(false)
+        let p = peer.to_lowercase();
+        self.members.get(circle_id).map(|m| m.contains(&p)).unwrap_or(false)
     }
 
     pub(crate) fn knows_circle(&self, circle_id: &str) -> bool {
@@ -1304,7 +1310,8 @@ pub(crate) fn blob_forbidden(auth: &Arc<Mutex<RelayAuth>>, peer: &str, verb: u8,
         if circle.starts_with("dm:") {
             return false;
         }
-        return !a.members.get(circle).map(|m| m.contains(peer)).unwrap_or(false);
+        let p = peer.to_lowercase();
+        return !a.members.get(circle).map(|m| m.contains(&p)).unwrap_or(false);
     }
     // Media refs and device rosters are not per-circle addressable (a ref is an opaque handle that
     // names no circle), so members-of-this-relay is the tightest boundary available here. It is

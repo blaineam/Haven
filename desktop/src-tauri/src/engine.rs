@@ -476,6 +476,19 @@ impl Engine {
             crate::roster::DeviceRoster::device_name(),
             now_ms() / 1000,
         );
+        // Matrix QA: dump account + device hex so the linked-device harness can authorize THIS
+        // desktop on HavenStub (HTTP signs as the device id; without it Tauri gets REFUSED forever).
+        {
+            let acct = social.my_node_hex();
+            let dev = social.my_device_node_hex();
+            let _ = std::fs::write(paths.root.join("qa-account-hex.txt"), &acct);
+            let _ = std::fs::write(paths.root.join("qa-device-hex.txt"), &dev);
+            eprintln!(
+                "qa-identity account={} device={}",
+                &acct[..acct.len().min(12)],
+                &dev[..dev.len().min(12)]
+            );
+        }
         // Matrix QA: optional peer public bundle at `qa-peer-bundle.bin` (parity with Android
         // `ingestQaPeerBundleIfPresent`). Lets circle crypto form when HELLO cannot dial and the
         // Mac is a second device of the iOS account that needs the Android friend in members.
@@ -6030,6 +6043,11 @@ impl Engine {
         // (the old shape) fired for key commits and epoch-rotation re-seals of old history
         // too, so the same "new message" banner repeated forever on a churning circle.
         let mut changed_circles: std::collections::BTreeSet<String> = Default::default();
+        // NEW envelopes this pass — fan out to my other linked devices after ingest. Mailbox was
+        // the hole in receive-time fan-out: a friend's post landed on whichever of my devices
+        // polled first and never reached the rest when their mailbox auth/relay set differed.
+        // (`handle_event` already live-delivers for direct/iroh paths.)
+        let mut newly_ingested: Vec<(String, Vec<u8>)> = Vec::new();
         // (circle_id, relay_node_hex) for every circle × every configured relay — reading from
         // all of them means a message present on any reachable relay still arrives.
         let relay_targets: Vec<(String, String)> = {
@@ -6041,10 +6059,39 @@ impl Engine {
                 .collect()
         };
         for (circle_id, node_hex) in relay_targets {
-            let Some(client) = self.relay_client_for(&node_hex).await else { continue };
             let prefix = format!("haven/mailbox/{circle_id}/");
-            let keys = client.list(prefix).await;
-            self.mark_relay_ok(&node_hex);
+            // Prefer plain-HTTP mailbox when the relay advertised URLs (matrix stub / free CF /
+            // LAN NAS). iroh-only dial fails against an HTTP-mailbox-only host, which is exactly
+            // the linked-device RED: iOS put via HTTP, Tauri polled via iroh, nothing landed.
+            let mut keys: Vec<String> = Vec::new();
+            let mut got_via_http = false;
+            if let Some((bases, token)) = self.relay_http_reachable(&node_hex) {
+                for base in &bases {
+                    if self.http_url_bad(base) {
+                        continue;
+                    }
+                    match self.http_list(base, &token, &prefix).await {
+                        Ok(list) => {
+                            keys = list;
+                            got_via_http = true;
+                            self.mark_relay_ok(&node_hex);
+                            break;
+                        }
+                        Err(RelayErr::Forbidden) => {
+                            self.note_refused(&node_hex, "mailbox list");
+                            let _ = self.heal_forbidden_relays().await;
+                        }
+                        Err(RelayErr::Unreachable) => {
+                            self.mark_http_url_bad(base);
+                        }
+                    }
+                }
+            }
+            if !got_via_http {
+                let Some(client) = self.relay_client_for(&node_hex).await else { continue };
+                keys = client.list(prefix.clone()).await;
+                self.mark_relay_ok(&node_hex);
+            }
             if !keys.is_empty() {
                 self.dyn_state.lock().unwrap().relay_active = true;
             }
@@ -6054,11 +6101,51 @@ impl Engine {
                 if self.dyn_state.lock().unwrap().seen_mailbox.contains(&key) {
                     continue;
                 }
-                let Some(env) = client.get(key.clone()).await else { continue };
-                self.mark_mailbox_seen(key);
-                if self.social.receive(circle_id.clone(), env).unwrap_or(false) {
+                // Prefer HTTP GET when we listed over HTTP (same URL set).
+                let env = if got_via_http {
+                    if let Some((bases, token)) = self.relay_http_reachable(&node_hex) {
+                        let mut got = None;
+                        for base in &bases {
+                            if self.http_url_bad(base) {
+                                continue;
+                            }
+                            match self.http_get(base, &token, &key).await {
+                                Ok(Some(bytes)) => {
+                                    got = Some(bytes);
+                                    break;
+                                }
+                                Ok(None) => {}
+                                Err(RelayErr::Forbidden) => {
+                                    self.note_refused(&node_hex, "mailbox get");
+                                }
+                                Err(RelayErr::Unreachable) => {
+                                    self.mark_http_url_bad(base);
+                                }
+                            }
+                        }
+                        got
+                    } else {
+                        None
+                    }
+                } else if let Some(client) = self.relay_client_for(&node_hex).await {
+                    client.get(key.clone()).await
+                } else {
+                    None
+                };
+                let Some(env) = env else { continue };
+                // Only mark seen after a successful open (iOS parity). Marking first left
+                // epoch-buffered envelopes permanently unretried — the linked-matrix
+                // "story green / photo+video RED" shape when commit landed after the first poll.
+                let env_len = env.len();
+                if self.social.receive(circle_id.clone(), env.clone()).unwrap_or(false) {
+                    self.mark_mailbox_seen(key);
                     changed = true;
                     changed_circles.insert(circle_id.clone());
+                    newly_ingested.push((circle_id.clone(), env));
+                    log::info!(
+                        "mailbox ingest circle={} via_http={got_via_http} bytes={env_len}",
+                        &circle_id.chars().take(12).collect::<String>(),
+                    );
                 }
             }
         }
@@ -6077,10 +6164,11 @@ impl Engine {
                         Ok(Some(e)) => e,
                         _ => continue,
                     };
-                    self.mark_mailbox_seen(key);
-                    if self.social.receive(c.id.clone(), env).unwrap_or(false) {
+                    if self.social.receive(c.id.clone(), env.clone()).unwrap_or(false) {
+                        self.mark_mailbox_seen(key);
                         changed = true;
                         changed_circles.insert(c.id.clone());
+                        newly_ingested.push((c.id.clone(), env));
                     }
                 }
             }
@@ -6090,6 +6178,13 @@ impl Engine {
         }
         self.flush_seen_mailbox();
         if changed {
+            if !newly_ingested.is_empty() {
+                let payloads: Vec<Vec<u8>> = newly_ingested
+                    .iter()
+                    .map(|(cid, env)| wire::event_payload(cid, env))
+                    .collect();
+                self.live_deliver_many_to_my_devices(wire::EVENT, payloads);
+            }
             self.bump_activity(); // a message arrived → keep sync tight while the conversation is live
             self.persist();
             self.emit_changed();
@@ -6386,6 +6481,18 @@ impl Engine {
     fn http_key_url(base: &str, key: &str) -> String {
         format!("{}/k/{}", base.trim_end_matches('/'), key)
     }
+    /// LIST URL: `GET /l/<prefix>` — signed over the raw store prefix (not the `/l/` route).
+    /// Parity with iOS SharedStore / Android relayHttpList. Prefixes are ASCII store paths
+    /// (`haven/mailbox/…`); only `/` and a few reserved chars need encoding.
+    fn http_list_url(base: &str, prefix: &str) -> String {
+        let enc = prefix
+            .replace('%', "%25")
+            .replace('/', "%2F")
+            .replace(' ', "%20")
+            .replace('?', "%3F")
+            .replace('#', "%23");
+        format!("{}/l/{}", base.trim_end_matches('/'), enc)
+    }
     /// Sign ONE request to a relay's plain-HTTP media interface.
     ///
     /// The relay no longer accepts a shared bearer token: it verifies a signature over this
@@ -6418,6 +6525,32 @@ impl Engine {
         match resp.status().as_u16() {
             200..=299 => Ok(Some(resp.bytes().await.map_err(|_| RelayErr::Unreachable)?.to_vec())),
             404 => Ok(None),
+            401 | 403 => Err(RelayErr::Forbidden),
+            _ => Err(RelayErr::Unreachable),
+        }
+    }
+
+    /// LIST keys under a store prefix over the plain-HTTP interface (matrix / free CF path where
+    /// iroh dial to the stub never lands). Signed over `prefix` like Android/iOS.
+    async fn http_list(&self, base: &str, token: &str, prefix: &str) -> Result<Vec<String>, RelayErr> {
+        let auth = self.http_auth(token, "GET", prefix, b"").ok_or(RelayErr::Unreachable)?;
+        let resp = self
+            .http
+            .get(Self::http_list_url(base, prefix))
+            .header("authorization", auth)
+            .send()
+            .await
+            .map_err(|_| RelayErr::Unreachable)?;
+        match resp.status().as_u16() {
+            200..=299 => {
+                let text = resp.text().await.map_err(|_| RelayErr::Unreachable)?;
+                Ok(text
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect())
+            }
             401 | 403 => Err(RelayErr::Forbidden),
             _ => Err(RelayErr::Unreachable),
         }
@@ -7739,16 +7872,27 @@ impl Engine {
     }
 
     /// My OWN other devices' node ids (excluding this one and my account id, which under per-device
-    /// transport seeds resolves to no endpoint).
+    /// transport seeds resolves to no endpoint). Invite/device hints for MY account are included
+    /// too: until self-sync merges the signed own-roster, a freshly-linked sibling is otherwise
+    /// invisible to fan-out and never gets contact events that only this device received.
     fn my_other_device_hexes(&self) -> Vec<String> {
         let account = self.social.my_node_hex().to_lowercase();
         let mine = self.social.my_device_node_hex().to_lowercase();
-        self.social
-            .device_node_ids_for(account.clone())
-            .into_iter()
-            .map(|d| d.to_lowercase())
-            .filter(|d| *d != mine && *d != account)
-            .collect()
+        let mut out: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut add = |h: String| {
+            let l = h.to_lowercase();
+            if l.len() == 64 && l != mine && l != account && seen.insert(l.clone()) {
+                out.push(l);
+            }
+        };
+        for d in self.social.device_node_ids_for(account.clone()) {
+            add(d);
+        }
+        for h in self.device_hints_for(&account) {
+            add(h);
+        }
+        out
     }
 
     /// Frame 22 — tell the other participants my camera just went on or off. Without it, disabling

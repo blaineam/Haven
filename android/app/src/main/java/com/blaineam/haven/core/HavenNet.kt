@@ -1442,28 +1442,31 @@ object HavenNet : InboundListener {
      *  relay-unwrapped frames), used to tell a CONTACT's delivery apart from one of my own devices'. */
     private fun handleEvent(payload: ByteArray, senderDevice: String? = null, viaNearby: Boolean = false) {
         val ev = Wire.parseEvent(payload) ?: return
-        // Did this come from one of MY devices? Those already have it, and re-sharing it back is how
-        // a fan-out becomes a loop. Nearby frames are broadcast to every device in range already.
-        val fromOwnDevice = viaNearby || senderDevice?.let { s ->
+        // Did this come from one of MY devices? Those already have it. Do NOT treat viaNearby as
+        // own-device: Multipeer also carries CONTACT content when a friend is in the room, and
+        // suppressing fan-out there left my other linked devices (off-mesh) without the event.
+        // Loop safety is `receive` returning true only for NEW events.
+        val mineAcct = runCatching { social.myNodeHex() }.getOrNull()?.lowercase()
+        val mineDev = runCatching { social.myDeviceNodeHex() }.getOrNull()?.lowercase()
+        val fromOwnDevice = senderDevice?.let { s ->
             val l = s.lowercase()
-            l == runCatching { social.myNodeHex() }.getOrNull()?.lowercase() ||
-                myOtherDeviceTargets().any { it == l }
+            l == mineAcct || l == mineDev || myOtherDeviceTargets().any { it == l }
         } ?: false
         val changed = runCatching { social.receive(ev.circleId, ev.envelope) }.getOrDefault(false)
         if (changed) {
             // FAN OUT to my other devices. A sender dials the device ids ITS copy of my roster
             // resolves — often just one — so a DM delivered straight to my tablet never reached my
-            // phone, which was left waiting on a mailbox poll (and got nothing at all if the relay
-            // refused it). The send path has always done this for my OWN posts (afterAuthor →
-            // liveDeliverToMyDevices); the receive path did not, so anything a CONTACT sent stopped
-            // at whichever device they happened to reach.
-            //
-            // Cannot loop: `receive` returns true only for a genuinely NEW event, so a sibling that
-            // already holds it stops here — and a frame that came FROM one of my devices, or over
-            // nearby (which every device in range already saw), is never re-shared at all. Volume is
-            // bounded by real new-event traffic. Deliberately NO push amplification: a push per
-            // inbound event would storm during a sync burst.
-            if (!fromOwnDevice) liveDeliverToMyDevices(Wire.EVENT, payload)
+            // phone. The send path has always done this for my OWN posts; the receive path must for
+            // CONTACT posts too. Volume is bounded by real new-event traffic.
+            if (!fromOwnDevice) {
+                liveDeliverToMyDevices(Wire.EVENT, payload)
+                // Internet/relay only: Multipeer already flooded the local mesh. Sealed — only
+                // circle members + my own devices open it; helps a Multipeer sibling that has no
+                // good internet path to the same mailbox.
+                if (!viaNearby && NearbyTransport.active) {
+                    NearbyTransport.broadcast(Wire.frame(Wire.EVENT, payload))
+                }
+            }
             bumpActivity()   // a live event arrived → keep sync tight while the conversation is active
             persist()
             scope.launch(Dispatchers.Main) { feedVersion.value++ }
@@ -1888,9 +1891,17 @@ object HavenNet : InboundListener {
     private fun myOtherDeviceTargets(): List<String> {
         val mineAcct = runCatching { social.myNodeHex() }.getOrNull()?.lowercase() ?: return emptyList()
         val mineDev = runCatching { social.myDeviceNodeHex() }.getOrNull()?.lowercase()
-        return runCatching { social.deviceNodeIdsFor(mineAcct) }.getOrDefault(emptyList())
-            .map { it.lowercase() }
-            .filter { it != mineAcct && it != mineDev }
+        val out = LinkedHashSet<String>()
+        for (d in runCatching { social.deviceNodeIdsFor(mineAcct) }.getOrDefault(emptyList())) {
+            val l = d.lowercase()
+            if (l.length == 64 && l != mineAcct && l != mineDev) out.add(l)
+        }
+        // Invite/device hints for MY account until self-sync merges the signed own-roster.
+        for (h in deviceHintsFor(mineAcct)) {
+            val l = h.lowercase()
+            if (l.length == 64 && l != mineAcct && l != mineDev) out.add(l)
+        }
+        return out.toList()
     }
 
     /** Push a frame straight to my own other devices while they're online (see `haven_net::livedelivery`).
@@ -3544,15 +3555,23 @@ object HavenNet : InboundListener {
         if (!ready) return
         ensureSeenMailboxLoaded()
         var changed = false
+        // NEW envelopes this pass — fan out to my other linked devices after ingest. Mailbox was
+        // the hole in receive-time fan-out: a friend's post landed on whichever of my devices
+        // polled first and never reached the rest when their mailbox auth/relay set differed.
+        val newlyIngested = ArrayList<Pair<String, ByteArray>>()
+        fun ingestMailboxEnv(circleId: String, env: ByteArray): Boolean {
+            if (!runCatching { social.receive(circleId, env) }.getOrDefault(false)) return false
+            newlyIngested.add(circleId to env)
+            notifyInbound(circleId)
+            return true
+        }
         // S3 pre-signed pools (the BYO-bucket path).
         for (circleId in Presign.circles()) {
             val items = runCatching { Presign.poll(circleId, seenMailbox) }.getOrDefault(emptyList())
             if (items.isNotEmpty()) withContext(Dispatchers.Main) { relayActive.value = true }
             for ((key, env) in items) {
                 markMailboxSeen(key)
-                if (runCatching { social.receive(circleId, env) }.getOrDefault(false)) {
-                    changed = true; notifyInbound(circleId)
-                }
+                if (ingestMailboxEnv(circleId, env)) changed = true
             }
         }
         // (circleId, relayNodeHex) for every circle × every configured relay — reading from all of
@@ -3582,9 +3601,7 @@ object HavenNet : InboundListener {
                     if (seenMailbox.contains(s3key)) continue
                     val env = runCatching { uniffi.haven_ffi.s3Get(cfg, s3key) }.getOrNull() ?: continue
                     markMailboxSeen(s3key)
-                    if (runCatching { social.receive(circleId, env) }.getOrDefault(false)) {
-                        changed = true; notifyInbound(circleId)
-                    }
+                    if (ingestMailboxEnv(circleId, env)) changed = true
                 }
                 continue
             }
@@ -3598,10 +3615,7 @@ object HavenNet : InboundListener {
                 if (seenMailbox.contains(key)) continue
                 val env = runCatching { client.get(key) }.getOrNull() ?: continue
                 markMailboxSeen(key)
-                if (runCatching { social.receive(circleId, env) }.getOrDefault(false)) {
-                    changed = true
-                    notifyInbound(circleId)
-                }
+                if (ingestMailboxEnv(circleId, env)) changed = true
             }
         }
         // HTTP live-lane call frames when iroh dial is down.
@@ -3616,6 +3630,18 @@ object HavenNet : InboundListener {
         // refresh trigger (selfSyncDidApply) when a peer device's state arrives.
         runCatching { SelfSyncCoordinator.sync(social) }
         if (changed) {
+            // Fan out friend content that only this device pulled from the mailbox.
+            if (newlyIngested.isNotEmpty()) {
+                liveDeliverManyToMyDevices(
+                    Wire.EVENT,
+                    newlyIngested.map { (cid, env) -> Wire.eventPayload(cid, env) },
+                )
+                if (NearbyTransport.active) {
+                    for ((cid, env) in newlyIngested) {
+                        NearbyTransport.broadcast(Wire.frame(Wire.EVENT, Wire.eventPayload(cid, env)))
+                    }
+                }
+            }
             bumpActivity()   // a message arrived → keep sync tight while the conversation is live
             persist()
             withContext(Dispatchers.Main) { feedVersion.value++ }

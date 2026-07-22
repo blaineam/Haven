@@ -6,6 +6,7 @@ import AppKit
 #endif
 #if os(macOS) || targetEnvironment(macCatalyst)
 import ServiceManagement
+import Darwin
 #endif
 
 /// Runs this device as the circle's **relay / mailbox** in-process (the `haven-relay` core via
@@ -475,32 +476,55 @@ final class RelayHost: ObservableObject {
 
     /// Hexes (account and/or device) the matrix driver wants this host relay to serve.
     /// File: Application Support/`qa-authorize-members.txt` — one 64-hex id per line.
-    /// Also checks common sandboxed subdirs (HavenStub / bundle id) used by macOS containers.
+    /// Also checks common sandboxed subdirs (HavenStub / bundle id) used by macOS containers,
+    /// the absolute container path, and `/tmp/haven-mac-stub-home/…` when the stub is launched
+    /// with an isolated HOME (matrix driver).
     private static func qaAuthorizeMembers() -> [String] {
         #if DEBUG
-        guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            return []
+        var candidates: [URL] = []
+        if let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            candidates.append(base.appendingPathComponent("qa-authorize-members.txt"))
+            for sub in ["HavenStub", "com.blaineam.kith.qa.stub", Bundle.main.bundleIdentifier ?? ""] where !sub.isEmpty {
+                candidates.append(base.appendingPathComponent(sub).appendingPathComponent("qa-authorize-members.txt"))
+            }
         }
-        var candidates = [base.appendingPathComponent("qa-authorize-members.txt")]
-        for sub in ["HavenStub", "com.blaineam.kith.qa.stub", Bundle.main.bundleIdentifier ?? ""] where !sub.isEmpty {
-            candidates.append(base.appendingPathComponent(sub).appendingPathComponent("qa-authorize-members.txt"))
-        }
-        // Absolute container path fallback for driver writes that miss the sandboxed AS root.
+        #if os(macOS)
+        // Matrix paths only make sense on Mac (the QA stub host). iOS never hosts the matrix relay.
         let home = FileManager.default.homeDirectoryForCurrentUser
         candidates.append(home.appendingPathComponent(
             "Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support/qa-authorize-members.txt"))
+        candidates.append(home.appendingPathComponent(
+            "Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support/HavenStub/qa-authorize-members.txt"))
+        // Isolated matrix HOME (driver often launches with HOME=/tmp/haven-mac-stub-home).
+        candidates.append(URL(fileURLWithPath: "/tmp/haven-mac-stub-home/Library/Application Support/qa-authorize-members.txt"))
+        candidates.append(URL(fileURLWithPath: "/tmp/haven-mac-stub-home/Library/Application Support/HavenStub/qa-authorize-members.txt"))
+        // Real user container even when process HOME is isolated.
+        if let pw = getpwuid(getuid()) {
+            let realHome = String(cString: pw.pointee.pw_dir)
+            candidates.append(URL(fileURLWithPath: realHome)
+                .appendingPathComponent("Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support/qa-authorize-members.txt"))
+            candidates.append(URL(fileURLWithPath: realHome)
+                .appendingPathComponent("Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support/HavenStub/qa-authorize-members.txt"))
+        }
+        #endif
+        var seen = Set<String>()
+        var all: [String] = []
         for url in candidates {
             guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
             let hexes = text.split(whereSeparator: \.isNewline)
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
                 .filter { $0.count == 64 && $0.allSatisfy(\.isHexDigit) }
+            for h in hexes where seen.insert(h).inserted { all.append(h) }
             if !hexes.isEmpty {
-                HavenLog.relay("qa-authorize-members loaded \(hexes.count) from \(url.path)")
-                return hexes
+                HavenLog.relay("qa-authorize-members +\(hexes.count) from \(url.path)")
             }
         }
-        HavenLog.relay("qa-authorize-members empty (looked under \(base.path))")
-        return []
+        if all.isEmpty {
+            HavenLog.relay("qa-authorize-members empty (checked \(candidates.count) paths)")
+        } else {
+            HavenLog.relay("qa-authorize-members union=\(all.count)")
+        }
+        return all
         #else
         return []
         #endif

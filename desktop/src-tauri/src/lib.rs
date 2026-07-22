@@ -54,9 +54,48 @@ fn ensure_seed() -> Result<[u8; 32]> {
     Ok(seed)
 }
 
+/// When matrix QA injects a seed, force THAT account (not the prior active roster entry).
+/// Uses a dedicated `qa-matrix` data dir so we never clobber the user's daily-driver identity state.
+fn force_qa_seed_identity() -> Result<Option<([u8; 32], Paths)>> {
+    let Some(seed) = store::qa_seed_override()? else {
+        return Ok(None);
+    };
+    let hex = Account::from_seed(seed.to_vec())
+        .map_err(|e| anyhow!("QA seed derive node id: {e}"))?
+        .node_id_hex();
+    store::save_seed(&seed)?;
+    store::save_identity_seed(&hex, &seed)?;
+    let base = Paths::resolve()?;
+    let mut ids = store::Identities::load(&base);
+    // Keep the QA identity in the roster under a fixed dir so re-runs stay isolated from
+    // the user's daily-driver identity at the legacy root.
+    if ids.find(&hex).is_none() {
+        ids.items.push(store::IdentityEntry {
+            node_hex: hex.clone(),
+            label: "QA linked".into(),
+            dir: "qa-matrix".into(),
+        });
+    } else if let Some(e) = ids.items.iter_mut().find(|i| i.node_hex.eq_ignore_ascii_case(&hex)) {
+        // Ensure prior runs still land in qa-matrix (not the personal root).
+        e.dir = "qa-matrix".into();
+        e.label = "QA linked".into();
+    }
+    ids.active = hex.clone();
+    ids.save(&base)?;
+    let paths = Paths::resolve_for("qa-matrix")?;
+    eprintln!(
+        "qa-seed override active account={} dir=qa-matrix",
+        &hex[..hex.len().min(12)]
+    );
+    Ok(Some((seed, paths)))
+}
+
 /// Resolve the active identity's seed + data dir, migrating a legacy single-identity install
 /// into the roster on first run (the legacy identity keeps the existing flat data dir).
 fn ensure_active_identity() -> Result<([u8; 32], Paths)> {
+    if let Some(forced) = force_qa_seed_identity()? {
+        return Ok(forced);
+    }
     let base = Paths::resolve()?;
     let mut ids = store::Identities::load(&base);
 
@@ -109,6 +148,11 @@ pub enum Startup {
 /// into the normal startup path). A legacy single-seed install is still migrated and counts as
 /// existing. A seedless identity (no keyring seed, but a `seedless.json` marker) boots seedless.
 fn active_identity_if_exists() -> Result<Option<Startup>> {
+    // Matrix QA seed must win over any existing multi-identity roster — otherwise linked Tauri
+    // boots the previous personal account and never opens iOS-sealed events (account hex mismatch).
+    if let Some((seed, paths)) = force_qa_seed_identity()? {
+        return Ok(Some(Startup::Seeded { seed, paths }));
+    }
     let base = Paths::resolve()?;
     let ids = store::Identities::load(&base);
 

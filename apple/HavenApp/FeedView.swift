@@ -1304,26 +1304,35 @@ final class FeedStore: ObservableObject {
     private func bringOnline() {
         // Nearby Bluetooth / Wi-Fi mesh — works even with no internet at all.
         if let social {
-            // Display name must be UNIQUE PER DEVICE, not per account: two of my own devices share the
-            // account node hex, so an account-hex name made the "smaller name invites" tie-breaker a
-            // no-op between them (displayName == displayName) — they NEVER connected over the mesh, which
-            // is why local self-sync silently did nothing. Mix in the per-device key hex. (Identity is
-            // still proven by the Hello bundle, so this only affects who-invites-whom.)
-            let nearbyName = String(social.myNodeHex().prefix(28)) + "-" + String(DeviceKeyStore.deviceNodeHex().prefix(28))
-            let nt = NearbyTransport(
-                displayName: nearbyName,
-                onInbound: { [weak self] data in Task { @MainActor in self?.handleInbound(data, viaNearby: true) } },
-                onPeerConnected: { [weak self] in Task { @MainActor in self?.nearbyPeerConnected() } }
-            )
-            // iOS + Mac: start Multipeer for a bounded discovery window, then park advertise/browse
-            // if nobody connects. Live sessions keep working; send path is rate-limited so neither
-            // side can flood (Mac→iPhone history dump was the field heat source).
-            #if os(iOS)
-            nt.start(parkAfter: 60)
-            #else
-            nt.start(parkAfter: 120)
-            #endif
-            nearby = nt
+            // Matrix QA stub is a pure relay host. Multipeer Bonjour discovery on the stub was
+            // crashing CFNetwork (`_BrowserCancel` / `_CFAssertMismatchedTypeID`) under matrix
+            // bounce load and is not needed for HTTP mailbox QA.
+            let isQaStub = Bundle.main.bundleIdentifier?.contains("qa.stub") == true
+            if !isQaStub {
+                // Display name must be UNIQUE PER DEVICE, not per account: two of my own devices share the
+                // account node hex, so an account-hex name made the "smaller name invites" tie-breaker a
+                // no-op between them (displayName == displayName) — they NEVER connected over the mesh, which
+                // is why local self-sync silently did nothing. Mix in the per-device key hex. (Identity is
+                // still proven by the Hello bundle, so this only affects who-invites-whom.)
+                let nearbyName = String(social.myNodeHex().prefix(28)) + "-" + String(DeviceKeyStore.deviceNodeHex().prefix(28))
+                let nt = NearbyTransport(
+                    displayName: nearbyName,
+                    onInbound: { [weak self] data in Task { @MainActor in self?.handleInbound(data, viaNearby: true) } },
+                    onPeerConnected: { [weak self] in Task { @MainActor in self?.nearbyPeerConnected() } }
+                )
+                // iOS + Mac: start Multipeer for a bounded discovery window, then park advertise/browse
+                // if nobody connects. Live sessions keep working; send path is rate-limited so neither
+                // side can flood (Mac→iPhone history dump was the field heat source).
+                #if os(iOS)
+                nt.start(parkAfter: 60)
+                #else
+                nt.start(parkAfter: 120)
+                #endif
+                nearby = nt
+            } else {
+                nearby = nil
+                HavenLog.net("qa.stub: Multipeer discovery disabled (relay-only host)")
+            }
             online = true
         }
         // Internet path (iroh + n0 discovery/relays).
@@ -2658,13 +2667,16 @@ final class FeedStore: ObservableObject {
         let content = sorted.filter { !$0.1.contains("/__hello__/") }
         // receive() does real crypto per envelope; a backlog drain used to run the whole loop on
         // the main actor and freeze the UI for the duration. Ingest the batch off-main, then hop
-        // back once with the circles that changed.
-        let ingested: [String] = await Task.detached(priority: .utility) {
-            var changed: [String] = []
+        // back once with the circles that changed. Keep the NEW envelopes so we can fan them out
+        // to my other linked devices (handleEvent already does this for live/iroh delivery — mailbox
+        // was the hole: a friend's post landed on whichever of my devices polled first and never
+        // reached the rest when their mailbox auth/relay set differed).
+        let ingested: [(circleId: String, envelope: Data)] = await Task.detached(priority: .utility) {
+            var changed: [(String, Data)] = []
             for (cid, key, env) in content {
                 if (try? social.receive(circleId: cid, envelope: env)) == true {
                     SharedStore.markSeenPublic(key)
-                    changed.append(cid)
+                    changed.append((cid, env))
                 }
             }
             return changed
@@ -2680,7 +2692,15 @@ final class FeedStore: ObservableObject {
         bumpActivity()   // a message arrived → keep sync tight while the conversation is live
         var dmIngested = false
         var dmCircles = Set<String>()
-        for cid in ingested {
+        // Batch fan-out: one Task for many envelopes (same shape as own-device catch-up).
+        liveDeliverManyToMyDevices(1, ingested.map { eventPayload($0.circleId, $0.envelope) })
+        // Multipeer siblings that share no good internet path still need a hop — sealed, so only
+        // members (and my other devices with the seed) open it.
+        for item in ingested {
+            nearbyBroadcast(1, eventPayload(item.circleId, item.envelope), class: .bulk)
+        }
+        for item in ingested {
+            let cid = item.circleId
             notifyNewest(in: cid)
             if cid.hasPrefix("dm:") { dmIngested = true; dmCircles.insert(cid) } else { bumpUnseen(cid) }
         }
@@ -2828,13 +2848,23 @@ final class FeedStore: ObservableObject {
     /// Excludes this device (dialing our own id loops iroh's path discovery unboundedly — the
     /// self-connect leak) and the account id (a contact handle that resolves to NO endpoint under
     /// per-device transport seeds, so dialing it is a guaranteed ~30s timeout, not a sibling).
+    /// Invite/device hints for MY account are included too: until self-sync merges the signed
+    /// own-roster, a freshly-linked sibling is otherwise invisible to fan-out and never gets
+    /// contact events that only this device received.
     private func myOtherDeviceTargets() -> [String] {
         guard let social else { return [] }
         let mineAcct = social.myNodeHex().lowercased()
         let mineDev = social.myDeviceNodeHex().lowercased()
-        return social.deviceNodeIdsFor(accountHex: social.myNodeHex())
-            .map { $0.lowercased() }
-            .filter { $0 != mineAcct && $0 != mineDev }
+        var out = [String]()
+        var seen = Set<String>()
+        func add(_ h: String) {
+            let l = h.lowercased()
+            guard l.count == 64, l != mineAcct, l != mineDev, seen.insert(l).inserted else { return }
+            out.append(l)
+        }
+        for d in social.deviceNodeIdsFor(accountHex: social.myNodeHex()) { add(d) }
+        for h in deviceHints(for: mineAcct) { add(h) }
+        return out
     }
 
     /// Push a frame straight to my own other devices while they're online (see `haven_net::livedelivery`).
@@ -4709,11 +4739,15 @@ final class FeedStore: ObservableObject {
         let circleId = String(data: circleIdData, encoding: .utf8) ?? ""
         let envelope = payload.subdata(in: (payload.startIndex + off)..<payload.endIndex)
         guard !circleId.isEmpty, !envelope.isEmpty else { return }
-        // Did this come from one of MY devices? Those already have it, and re-sharing it back is how
-        // a fan-out becomes a loop. Nearby frames are broadcast to every device in range already.
+        // Did this come from one of MY devices? Those already have it; re-sharing would only waste
+        // radio. Do NOT treat `viaNearby` as own-device: Multipeer also carries CONTACT content when
+        // a friend is in the room, and suppressing fan-out there left my other linked devices
+        // (off-mesh / different network) without the event until a slow catch-up — or never, if
+        // their mailbox path was unauthorized. Loop safety is `receive` returning true only for NEW
+        // events (siblings that already hold it stop here).
         let mine = Set(social.deviceNodeIdsFor(accountHex: social.myNodeHex()).map { $0.lowercased() })
-            .union([social.myNodeHex().lowercased()])
-        let fromOwnDevice = viaNearby || (senderDevice.map { mine.contains($0.lowercased()) } ?? false)
+            .union([social.myNodeHex().lowercased(), social.myDeviceNodeHex().lowercased()])
+        let fromOwnDevice = senderDevice.map { mine.contains($0.lowercased()) } ?? false
         // receive() verifies + decrypts — real CPU per frame, and event frames arrive in BURSTS
         // during a sync. Do the crypto off-main; hop back only for the (already-coalesced) applies.
         Task.detached(priority: .utility) { [weak self] in
@@ -4724,13 +4758,15 @@ final class FeedStore: ObservableObject {
                 // resolves — often just one — so a DM delivered straight to my Mac never reached my
                 // iPhone, which was left waiting on a mailbox poll (and got nothing at all if the
                 // relay refused it). The send path has always done this for my OWN posts via
-                // liveDeliverToMyDevices; the receive path did not, so anything a CONTACT sent
-                // stopped at whichever device they happened to reach.
-                //
-                // Cannot loop: `receive` returns true only for a genuinely NEW event, so a sibling
-                // that already holds it stops here — and a frame that came FROM one of my devices is
-                // never re-shared at all.
-                if !fromOwnDevice { self.liveDeliverToMyDevices(1, payload) }
+                // liveDeliverToMyDevices; the receive path must for CONTACT posts too.
+                if !fromOwnDevice {
+                    self.liveDeliverToMyDevices(1, payload)
+                    // Internet/relay path only: Multipeer already flooded the local mesh, so
+                    // re-broadcasting nearby would amplify. Off-mesh siblings still need iroh above.
+                    if !viaNearby {
+                        self.nearbyBroadcast(1, payload, class: .bulk)
+                    }
+                }
                 // Hearing a message is proof of life — refresh "last seen" for a DM's partner.
                 if circleId.hasPrefix("dm:"), let partner = self.dmPartnerHex(circleId) { self.recordHeard(partner) }
                 self.schedulePersist()             // coalesced — a sync burst writes once, not per event

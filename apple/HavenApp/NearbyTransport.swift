@@ -16,12 +16,24 @@ import MultipeerConnectivity
 /// 2. **Send rate limit** — token bucket on outbound frames (moderate sustained rate). Control
 ///    frames (hello, roster, small signals) get priority; media/history bulk shares the bucket
 ///    and is paced so neither side can flood the link.
+///
+/// ## Bonjour cancel crash
+///
+/// Field (Haven + HavenStub): `EXC_BREAKPOINT` in `_CFAssertMismatchedTypeID` →
+/// `CFRunLoopSourceInvalidate` → `_BrowserCancel(__CFNetServiceBrowser*)` when Multipeer
+/// discovery is stop/start thrash'd. CFNetwork's browser cancel is async on the main run
+/// loop; double-stop, stop-while-start, or reusing a half-cancelled browser traps. We:
+/// - track explicit start flags (never double-stop),
+/// - settle ≥1s between stop and start,
+/// - nil delegates + **retire** the old browser/advertiser (keep alive until cancel finishes)
+///   and build fresh ones for the next start.
 final class NearbyTransport: NSObject {
     private let serviceType = "haven-circle"   // 1–15 chars, lowercase + hyphens
     private let peerID: MCPeerID
     private let session: MCSession
-    private let advertiser: MCNearbyServiceAdvertiser
-    private let browser: MCNearbyServiceBrowser
+    /// Rebuilt after every stop — never reuse a Multipeer discovery object mid-cancel.
+    private var advertiser: MCNearbyServiceAdvertiser
+    private var browser: MCNearbyServiceBrowser
 
     private let onInbound: (Data) -> Void
     private let onPeerConnected: () -> Void
@@ -49,6 +61,19 @@ final class NearbyTransport: NSObject {
     /// True while advertise and/or browse are running.
     private(set) var isDiscovering = false
     private var parkWorkItem: DispatchWorkItem?
+    /// Pending delayed start — Multipeer/Bonjour must not restart mid-cancel.
+    private var restartWorkItem: DispatchWorkItem?
+    /// Explicit flags: double `stopBrowsingForPeers` races CFNetwork `_BrowserCancel`.
+    private var isAdvertising = false
+    private var isBrowsing = false
+    /// Wall-clock of last browse/advertise stop — restarts wait so `_BrowserCancel` can finish.
+    private var lastDiscoveryStopAt: Date = .distantPast
+    /// Minimum gap after stop before start again (Bonjour cancel is async on the run loop).
+    /// 0.75s was still too short under macOS 27 + Multipeer advertiser concurrent publish.
+    private static let discoveryRestartSettle: TimeInterval = 1.5
+    /// Keep stopped browser/advertiser objects alive until CFNetwork finishes cancel.
+    private var retiringDiscovery: [AnyObject] = []
+    private var retirePurgeWork: DispatchWorkItem?
 
     /// `displayName` should be our node id hex (truncated to Multipeer's 63-byte limit).
     init(displayName: String, onInbound: @escaping (Data) -> Void, onPeerConnected: @escaping () -> Void) {
@@ -65,6 +90,16 @@ final class NearbyTransport: NSObject {
         browser.delegate = self
     }
 
+    deinit {
+        // Best-effort: tear down without hopping threads (deinit is non-isolated).
+        advertiser.delegate = nil
+        browser.delegate = nil
+        session.delegate = nil
+        if isAdvertising { advertiser.stopAdvertisingPeer() }
+        if isBrowsing { browser.stopBrowsingForPeers() }
+        session.disconnect()
+    }
+
     private let peersLock = NSLock()
     private var peersSnapshot: [MCPeerID] = []
     private var cachedPeers: [MCPeerID] {
@@ -76,28 +111,91 @@ final class NearbyTransport: NSObject {
 
     /// Start discovery (advertise + browse). Parks after `parkAfter` if still alone.
     func start(parkAfter: TimeInterval = 60) {
-        startDiscovery(parkAfter: parkAfter)
+        // Multipeer advertiser/browser expect main-thread lifecycle; hop if called off-main.
+        if Thread.isMainThread {
+            startDiscovery(parkAfter: parkAfter)
+        } else {
+            DispatchQueue.main.async { [weak self] in self?.startDiscovery(parkAfter: parkAfter) }
+        }
     }
 
     /// Re-open discovery briefly (force-sync, Storage, multi-device UI).
     func nudgeDiscovery(parkAfter: TimeInterval = 45) {
-        startDiscovery(parkAfter: parkAfter)
+        if Thread.isMainThread {
+            startDiscovery(parkAfter: parkAfter)
+        } else {
+            DispatchQueue.main.async { [weak self] in self?.startDiscovery(parkAfter: parkAfter) }
+        }
     }
 
     private func startDiscovery(parkAfter: TimeInterval) {
+        dispatchPrecondition(condition: .onQueue(.main))
         parkWorkItem?.cancel()
-        advertiser.startAdvertisingPeer()
-        if cachedPeers.isEmpty {
-            browser.startBrowsingForPeers()
-        }
-        isDiscovering = true
-        // While connected we only need the session — stop discovery once a peer is up.
+        restartWorkItem?.cancel()
+        restartWorkItem = nil
+
+        // Already have a live peer — discovery not needed; park without thrashing stop/start.
         if !cachedPeers.isEmpty {
-            browser.stopBrowsingForPeers()
-            advertiser.stopAdvertisingPeer()
+            stopDiscoveryIfNeeded()
             isDiscovering = false
             return
         }
+
+        // Already advertising+browsing: only refresh the park timer (no re-start of Bonjour).
+        if isAdvertising && isBrowsing {
+            isDiscovering = true
+            schedulePark(after: parkAfter)
+            return
+        }
+
+        // After a recent stop, wait for CFNetwork's async `_BrowserCancel` to finish.
+        let sinceStop = Date().timeIntervalSince(lastDiscoveryStopAt)
+        let settle = Self.discoveryRestartSettle
+        if sinceStop < settle, lastDiscoveryStopAt != .distantPast {
+            let delay = settle - sinceStop
+            let work = DispatchWorkItem { [weak self] in
+                self?.startDiscovery(parkAfter: parkAfter)
+            }
+            restartWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+            return
+        }
+
+        beginDiscoveryNow(parkAfter: parkAfter)
+    }
+
+    private func beginDiscoveryNow(parkAfter: TimeInterval) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard cachedPeers.isEmpty else {
+            stopDiscoveryIfNeeded()
+            isDiscovering = false
+            return
+        }
+        // Partial state (e.g. only advertising): stop cleanly and wait a settle, never start
+        // browse while advertiser is mid-flight or vice versa — that races CFNetService.
+        if isAdvertising != isBrowsing {
+            stopDiscoveryIfNeeded()
+            let work = DispatchWorkItem { [weak self] in
+                self?.startDiscovery(parkAfter: parkAfter)
+            }
+            restartWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.discoveryRestartSettle, execute: work)
+            return
+        }
+        if !isAdvertising {
+            advertiser.startAdvertisingPeer()
+            isAdvertising = true
+        }
+        if !isBrowsing {
+            browser.startBrowsingForPeers()
+            isBrowsing = true
+        }
+        isDiscovering = true
+        schedulePark(after: parkAfter)
+    }
+
+    private func schedulePark(after parkAfter: TimeInterval) {
+        parkWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             if self.cachedPeers.isEmpty {
@@ -110,15 +208,83 @@ final class NearbyTransport: NSObject {
 
     /// Stop advertise/browse but keep any live session (no disconnect).
     func parkDiscovery() {
+        if Thread.isMainThread {
+            parkDiscoveryOnMain()
+        } else {
+            DispatchQueue.main.async { [weak self] in self?.parkDiscoveryOnMain() }
+        }
+    }
+
+    private func parkDiscoveryOnMain() {
+        dispatchPrecondition(condition: .onQueue(.main))
         parkWorkItem?.cancel()
         parkWorkItem = nil
-        advertiser.stopAdvertisingPeer()
-        browser.stopBrowsingForPeers()
+        restartWorkItem?.cancel()
+        restartWorkItem = nil
+        stopDiscoveryIfNeeded()
         isDiscovering = false
     }
 
+    /// Call only on main. Idempotent — never double-stop Multipeer discovery.
+    private func stopDiscoveryIfNeeded() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        var didStop = false
+        if isAdvertising {
+            // Detach before stop so late Bonjour callbacks don't re-enter us mid-cancel.
+            advertiser.delegate = nil
+            advertiser.stopAdvertisingPeer()
+            retiringDiscovery.append(advertiser)
+            isAdvertising = false
+            didStop = true
+        }
+        if isBrowsing {
+            browser.delegate = nil
+            browser.stopBrowsingForPeers()
+            retiringDiscovery.append(browser)
+            isBrowsing = false
+            didStop = true
+        }
+        if didStop {
+            lastDiscoveryStopAt = Date()
+            // Fresh objects for the next start — never call startBrowsing on a browser that
+            // still has a `_BrowserCancel` source pending (the EXC_BREAKPOINT path).
+            rebuildDiscoveryObjects()
+            scheduleRetirePurge()
+        }
+    }
+
+    private func rebuildDiscoveryObjects() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        let adv = MCNearbyServiceAdvertiser(peer: peerID, discoveryInfo: nil, serviceType: serviceType)
+        let br = MCNearbyServiceBrowser(peer: peerID, serviceType: serviceType)
+        adv.delegate = self
+        br.delegate = self
+        advertiser = adv
+        browser = br
+    }
+
+    private func scheduleRetirePurge() {
+        retirePurgeWork?.cancel()
+        // Hold retired discovery objects long enough for CFNetwork's async cancel to complete.
+        let work = DispatchWorkItem { [weak self] in
+            self?.retiringDiscovery.removeAll()
+        }
+        retirePurgeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: work)
+    }
+
     func stop() {
-        parkDiscovery()
+        if Thread.isMainThread {
+            stopOnMain()
+        } else {
+            // Never main.sync from an arbitrary queue (deadlock risk if main waits on us).
+            DispatchQueue.main.async { [weak self] in self?.stopOnMain() }
+        }
+    }
+
+    private func stopOnMain() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        parkDiscoveryOnMain()
         session.disconnect()
         peersLock.lock(); peersSnapshot = []; peersLock.unlock()
     }
@@ -152,12 +318,10 @@ final class NearbyTransport: NSObject {
             if sendClass == .bulk {
                 droppedBulk += 1
                 if droppedBulk % 50 == 1 {
-                    // Occasional log without spam
                     NSLog("haven nearby: rate-limit drop bulk size=%d (dropped≈%d)", frame.count, droppedBulk)
                 }
             }
             rateLock.unlock()
-            // Control frames: wait briefly on the send queue instead of hard-dropping.
             if sendClass == .control {
                 enqueuePaced(frame, waitMs: 40)
                 return true
@@ -173,8 +337,6 @@ final class NearbyTransport: NSObject {
     }
 
     /// Send bulk/media frames **waiting** for rate tokens instead of aborting the stream.
-    /// Media serve must not `break` after a single rate-limit miss — that left requesters with
-    /// partial videos forever (photos still worked: they fit the burst).
     @discardableResult
     func broadcastWaiting(_ frame: Data, class sendClass: SendClass = .bulk, maxWaitMs: Int = 8_000) -> Bool {
         let deadline = Date().addingTimeInterval(Double(maxWaitMs) / 1_000.0)
@@ -182,11 +344,9 @@ final class NearbyTransport: NSObject {
         while Date() < deadline {
             if broadcast(frame, class: sendClass) { return true }
             attempt += 1
-            // Sleep long enough to refill roughly this frame (plus a little slack).
             let need = max(Double(frame.count), 1024)
             let sec = min(0.35, max(0.04, need / Self.bytesPerSecond))
             Thread.sleep(forTimeInterval: sec)
-            // Backlog full: wait a bit longer for Multipeer to drain rather than spinning.
             if sendBacklogHigh {
                 Thread.sleep(forTimeInterval: 0.15)
             }
@@ -234,10 +394,10 @@ extension NearbyTransport: MCSessionDelegate {
             onPeerConnected()
             // Discovery not needed while connected — session carries traffic.
             DispatchQueue.main.async { [weak self] in
-                self?.parkDiscovery()
+                self?.parkDiscoveryOnMain()
             }
         } else if peers.isEmpty {
-            // Peer left: short rediscovery window so devices can find each other again.
+            // Peer left / Multipeer flap: debounced rediscovery (settle delay inside startDiscovery).
             DispatchQueue.main.async { [weak self] in
                 self?.startDiscovery(parkAfter: 45)
             }
@@ -255,6 +415,16 @@ extension NearbyTransport: MCNearbyServiceAdvertiserDelegate {
     func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didReceiveInvitationFromPeer peerID: MCPeerID, withContext context: Data?, invitationHandler: @escaping (Bool, MCSession?) -> Void) {
         invitationHandler(true, session)
     }
+    func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) {
+        // Mark inactive so a later start rebuilds rather than double-starting a dead advertiser.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if advertiser === self.advertiser {
+                self.isAdvertising = false
+                self.isDiscovering = self.isBrowsing
+            }
+        }
+    }
 }
 
 extension NearbyTransport: MCNearbyServiceBrowserDelegate {
@@ -264,4 +434,13 @@ extension NearbyTransport: MCNearbyServiceBrowserDelegate {
         }
     }
     func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {}
+    func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if browser === self.browser {
+                self.isBrowsing = false
+                self.isDiscovering = self.isAdvertising
+            }
+        }
+    }
 }

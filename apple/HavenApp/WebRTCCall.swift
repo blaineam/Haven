@@ -152,7 +152,13 @@ final class WebRTCCall: NSObject {
     }
 
     func setRemoteAnswer(_ sdp: RTCSessionDescription) {
-        pc.setRemoteDescription(sdp) { [weak self] _ in self?.onRemoteReady?() }
+        // HTTP live-lane can redeliver the same (or a prior session's) answer; a second
+        // setRemoteDescription while already stable fails and is noise.
+        if pc.remoteDescription != nil { return }
+        pc.setRemoteDescription(sdp) { [weak self] err in
+            if let err { HavenLog.call("answer set fail: \(err.localizedDescription)"); return }
+            self?.onRemoteReady?()
+        }
     }
 
     func addRemoteCandidate(_ candidate: RTCIceCandidate) {

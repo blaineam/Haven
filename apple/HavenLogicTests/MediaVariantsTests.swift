@@ -40,12 +40,14 @@ final class MediaVariantsTests: XCTestCase {
         XCTAssertEqual(refs, ["img_p", "poster:vid_v:img_p", "vid_v"])
     }
 
-    func testDisplayRefsDropsMarkersAndOriginals() {
+    func testDisplayRefsDropsMarkersOriginalsAndVideoPosters() {
         let media = MediaVariants.composeVideoMedia(
             poster: "img_p", optimized: "vid_v", original: "vid_o")
         let display = MediaVariants.displayRefs(media)
-        // Poster image + playable video stay; original and both markers go.
-        XCTAssertEqual(display, ["img_p", "vid_v"])
+        // Playable video stays; poster still rides with the video page (not its own slide).
+        // Original and both markers go.
+        XCTAssertEqual(display, ["vid_v"])
+        XCTAssertFalse(display.contains("img_p"))
         XCTAssertFalse(display.contains("vid_o"))
         XCTAssertFalse(display.contains(where: { $0.hasPrefix("poster:") }))
         XCTAssertFalse(display.contains(where: { $0.hasPrefix("orig:") }))

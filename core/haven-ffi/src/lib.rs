@@ -3543,9 +3543,12 @@ fn receive_key_commit(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool
         } else {
             // A contact's epoch key, stored under their ACCOUNT (whether they committed under their account
             // key or an authorized device) — the same slot the read path looks up by the event's author.
+            // ALWAYS adopt a successfully-opened commit (do not first-wins `or_insert`): a peer who
+            // re-sealed the same epoch after membership change produces a NEW key material for that
+            // epoch, and keeping the stale key permanently bricks reverse-path open of later posts.
             let key = (committer_account_hex.clone(), opened.epoch);
-            is_new = !c.peer_epoch_keys.contains_key(&key);
-            c.peer_epoch_keys.entry(key).or_insert(opened.epoch_key);
+            let prev = c.peer_epoch_keys.insert(key, opened.epoch_key);
+            is_new = prev != Some(opened.epoch_key);
             // Store the committer's stable circle secret so I can derive their opaque storage prefix.
             if opened.circle_secret != [0u8; 32] {
                 c.peer_circle_secrets.insert(committer_account_hex.clone(), opened.circle_secret);

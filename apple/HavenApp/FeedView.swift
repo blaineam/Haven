@@ -262,8 +262,28 @@ final class FeedStore: ObservableObject {
             configure(mode: .seedless(accountBundle: bundle, deviceSeed: DeviceKeyStore.deviceAccount().secretSeed()))
         } else if let seed = AccountStore.storedSeed() {
             configure(seed: seed)
+        } else {
+            // No keychain seed (locked, missing entitlement on unsigned sim builds, or first-run race).
+            // Without a configure(), `online` stays false forever and the feed is a dead Offline shell.
+            // Prefer a *stable* fallback seed in UserDefaults so restarts don't mint a new identity
+            // (which breaks circle crypto / peer contacts under matrix QA). Keychain remains preferred.
+            let udKey = "haven.ephemeralSeed.v1"
+            let seed: Data
+            if let b64 = UserDefaults.standard.string(forKey: udKey),
+               let existing = Data(base64Encoded: b64), existing.count == 32 {
+                HavenLog.net("configureForCurrentIdentity: no keychain seed — reusing UserDefaults ephemeral seed")
+                seed = existing
+            } else {
+                HavenLog.net("configureForCurrentIdentity: no keychain seed — minting UserDefaults ephemeral seed")
+                var bytes = [UInt8](repeating: 0, count: 32)
+                _ = SecRandomCopyBytes(kSecRandomDefault, 32, &bytes)
+                seed = Data(bytes)
+                UserDefaults.standard.set(seed.base64EncodedString(), forKey: udKey)
+            }
+            configure(seed: seed)
         }
     }
+
 
     func configure(mode: BootMode) {
         guard social == nil else { return }
@@ -385,8 +405,10 @@ final class FeedStore: ObservableObject {
         relayReachable = true
     }
 
+    private var liveCallTimer: Timer?
     private func startMailboxPolling() {
         mailboxTimer?.invalidate()
+        liveCallTimer?.invalidate()
         pollMailboxNow()
         // 10s heartbeat, but the actual poll only runs when due (30s base, stretching when idle).
         #if os(iOS)
@@ -404,6 +426,26 @@ final class FeedStore: ObservableObject {
                 self.pollMailboxNow()
                 self.dailyMailboxRefreshIfDue()   // long-lived sessions refresh without a relaunch
             }
+        }
+        // Fast live-call lane (2s): invite/accept/sdp must land inside the ring window when iroh dial is down.
+        liveCallTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.pollLiveCallFramesNow() }
+        }
+    }
+
+    /// Pull HTTP-mailbox live-call frames addressed to this device/account and dispatch as inbound frames.
+    @MainActor
+    func pollLiveCallFramesNow() async {
+        guard social != nil else { return }
+        var mine = [myNodeHex.lowercased()]
+        if let d = social?.myDeviceNodeHex().lowercased(), d.count == 64 { mine.append(d) }
+        let frames = await SharedStore.pollLiveCallFrames(circleIds: circles.map(\.id), myHexes: mine)
+        for (key, data) in frames {
+            guard !data.isEmpty else { continue }
+            // Full wire frame: [type][payload] — same shape as iroh inbound.
+            handleInbound(data, viaNearby: false, senderDevice: nil)
+            SharedStore.markSeenPublic(key)
+            HavenLog.call("live-call http-ingest type=\(data[0]) key=\(key.split(separator: "/").last.map(String.init)?.prefix(12) ?? "?")")
         }
     }
 
@@ -842,6 +884,8 @@ final class FeedStore: ObservableObject {
         persist(); refreshCircles()
         if let hello = helloPayload(circleId: "default", circleName: "Your circle") {
             sendIroh(0, hello, to: req.idHex); nearbyBroadcast(0, hello)
+            let meHex = social.myNodeHex()
+            Task { await SharedStore.putHello(circleId: "default", toHex: req.idHex, fromHex: meHex, hello: hello) }
         }
         if shareHistory {
             // Back-fill your past posts to them (and ensure the shared store has them).
@@ -1310,6 +1354,17 @@ final class FeedStore: ObservableObject {
                 self.internetReady = true
                 self.online = true
                 HavenLog.net("node started id=\(n.nodeIdHex().prefix(10)) account=\(social?.myNodeHex().prefix(10) ?? "?")")
+                // Matrix QA: dump public identity bundle so Scripts/qa-exchange-bundles.sh can seed
+                // the Android peer when HELLO cannot dial (HTTP-mailbox-only stub path).
+                if let b = social?.myBundle(), !b.isEmpty {
+                    let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+                    if let url = dir?.appendingPathComponent("qa-my-bundle.bin") {
+                        try? b.write(to: url, options: .atomic)
+                        let name = ProfileStore.shared.displayName.isEmpty ? "SimPeer" : ProfileStore.shared.displayName
+                        try? Data(name.utf8).write(to: dir!.appendingPathComponent("qa-my-name.txt"), options: .atomic)
+                        HavenLog.net("qa-my-bundle written bytes=\(b.count) name=\(name)")
+                    }
+                }
                 // One delayed ticket snapshot for diagnostics — not a multi-probe heat loop.
                 Task {
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
@@ -1387,6 +1442,24 @@ final class FeedStore: ObservableObject {
         } catch {
             nodeError = error.localizedDescription
             HavenLog.net("fabric rebind failed: \(error.localizedDescription)")
+            // Detach left the host in enabled-but-not-serving ("Starting…") with no node.
+            // Bring the messaging node back (best effort) and re-attach the relay so a failed
+            // fabric rebind can't permanently brick hosting until app restart.
+            if node == nil, let bridge = listener {
+                do {
+                    let deviceSeed = DeviceKeyStore.deviceAccount().secretSeed()
+                    let n = try await HavenNode.start(accountSeed: deviceSeed, listener: bridge)
+                    node = n
+                    internetReady = true
+                    online = true
+                    HavenLog.net("fabric rebind recovery node ok id=\(n.nodeIdHex().prefix(10))")
+                } catch {
+                    HavenLog.net("fabric rebind recovery node failed: \(error.localizedDescription)")
+                }
+            }
+            if wasHosting {
+                RelayHost.shared.reattachAfterFabricRebind()
+            }
         }
     }
 
@@ -1484,7 +1557,109 @@ final class FeedStore: ObservableObject {
                 self.enforceLocalLimits()         // device-local age/size caps (throttled ~10 min; no-op if off)
             }
         }
+        #if DEBUG
+        startMatrixQaPoller()
+        #endif
     }
+
+    #if DEBUG
+    /// Matrix multi-device QA: poll Application Support for `qa-cmd.json` and honor
+    /// `haven://qa?...` deep links (post / story / dm / call) without camera or picker automation.
+    ///
+    /// Drop file shape (deleted after one consume):
+    /// ```json
+    /// {"post":"…","story":"…","dm_to":"<64hex>","dm":"…","call_to":"<64hex>"}
+    /// ```
+    private var matrixQaTimer: Timer?
+    private func startMatrixQaPoller() {
+        matrixQaTimer?.invalidate()
+        matrixQaTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.processMatrixQaDropFile() }
+        }
+        // Also honor one-shot launch env (relaunch-driven automation).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.processMatrixQaEnvironment()
+        }
+    }
+
+    /// Handle `haven://qa?post=&story=&dm_to=&dm=&call_to=` from `onOpenURL`.
+    @discardableResult
+    func handleMatrixQaURL(_ url: URL) -> Bool {
+        guard url.scheme == "haven", url.host == "qa" else { return false }
+        var items: [String: String] = [:]
+        URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?
+            .forEach { if let v = $0.value, !v.isEmpty { items[$0.name] = v } }
+        applyMatrixQa(items)
+        return true
+    }
+
+    private func processMatrixQaDropFile() {
+        guard let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
+        let url = dir.appendingPathComponent("qa-cmd.json")
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return }
+        try? FileManager.default.removeItem(at: url)
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            HavenLog.net("matrix-qa drop: invalid JSON")
+            return
+        }
+        var items: [String: String] = [:]
+        for (k, v) in obj {
+            if let s = v as? String, !s.isEmpty { items[k] = s }
+        }
+        applyMatrixQa(items)
+    }
+
+    private func processMatrixQaEnvironment() {
+        let e = ProcessInfo.processInfo.environment
+        var items: [String: String] = [:]
+        if let v = e["HAVEN_QA_POST"], !v.isEmpty { items["post"] = v }
+        if let v = e["HAVEN_QA_STORY"], !v.isEmpty { items["story"] = v }
+        if let v = e["HAVEN_QA_DM"], !v.isEmpty { items["dm"] = v }
+        if let v = e["HAVEN_QA_DM_TO"], !v.isEmpty { items["dm_to"] = v }
+        if let v = e["HAVEN_QA_CALL_TO"], !v.isEmpty { items["call_to"] = v }
+        guard !items.isEmpty else { return }
+        applyMatrixQa(items)
+    }
+
+    private func applyMatrixQa(_ items: [String: String]) {
+        guard social != nil else {
+            HavenLog.net("matrix-qa deferred — social not ready")
+            return
+        }
+        if let body = items["post"], !body.isEmpty {
+            post(body)
+            HavenLog.net("matrix-qa post body=\(body.prefix(40))")
+        }
+        // Text-only story matches Android DEBUG postStory(body, null) — state story=true.
+        if let body = items["story"], !body.isEmpty {
+            post(body, media: [], music: nil, retentionSecs: 86_400, story: true)
+            HavenLog.net("matrix-qa story body=\(body.prefix(40))")
+        }
+        let dmTo = (items["dm_to"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let dmBody = items["dm"] ?? ""
+        if dmTo.count == 64, !dmBody.isEmpty {
+            let name = ContactsStore.shared.name(forNodePrefix: dmTo) ?? "Friend"
+            let cid = startDM(with: dmTo, name: name)
+            post(dmBody, toCircle: cid)
+            HavenLog.net("matrix-qa dm to=\(dmTo.prefix(8)) circle=\(cid.prefix(24)) body=\(dmBody.prefix(40))")
+        }
+        let callTo = (items["call_to"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if callTo.count == 64 {
+            let name = ContactsStore.shared.name(forNodePrefix: callTo) ?? "Friend"
+            CallManager.shared.startCall(peerHex: callTo, name: name)
+            HavenLog.net("matrix-qa call to=\(callTo.prefix(8))")
+        }
+        if items["call_accept"] == "1" || (items["call_accept"] ?? "").lowercased() == "true" {
+            CallManager.shared.accept()
+            HavenLog.net("matrix-qa call_accept")
+        }
+        if items["call_hangup"] == "1" || (items["call_hangup"] ?? "").lowercased() == "true" {
+            CallManager.shared.endCall()
+            HavenLog.net("matrix-qa call_hangup")
+        }
+    }
+    #endif
 
     private func now() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
     /// Stale-result guard for the off-main feed rebuild: only the newest refresh may publish.
@@ -1846,16 +2021,22 @@ final class FeedStore: ObservableObject {
             if circle.id == "default" {
                 for c in ContactsStore.shared.contacts { targets.insert(c.idHex) }
             }
+            let meHex = social.myNodeHex()
             for nodeHex in targets {
                 if skipWarmKeepalives, recentlyHeard(nodeHex, withinMs: 120_000, nowMs: nowMs) {
                     continue
                 }
                 sendIroh(0, hello, to: nodeHex)
+                // HTTP mailbox HELLO when iroh cannot dial (matrix stub / cross-NAT).
+                Task { await SharedStore.putHello(circleId: circle.id, toHex: nodeHex, fromHex: meHex, hello: hello) }
                 if !rosterWire.isEmpty { sendIroh(27, rosterWire, to: nodeHex) }   // announce my device roster
                 // Per-contact history re-send is the flood — throttle it (offline members get history
                 // from the mailbox; new contacts via the share-history flow).
                 if !envs.isEmpty, ConnectionsStore.shared.sharesHistory(nodeHex) {
-                    for env in envs { sendIroh(1, eventPayload(circle.id, env), to: nodeHex) }
+                    for env in envs {
+                        sendIroh(1, eventPayload(circle.id, env), to: nodeHex)
+                        Task { await SharedStore.uploadEvent(circleId: circle.id, env: env) }
+                    }
                 }
             }
             // Bootstrap the device-id exchange over the RELAY. When a friend flips to the per-device
@@ -2260,13 +2441,37 @@ final class FeedStore: ObservableObject {
         guard let social, ids.contains(where: { SharedStore.hasMailbox($0) }) else { return }
         let msgs = await SharedStore.pollMailbox(circleIds: ids)
         guard !msgs.isEmpty else { return }
+        let me = social.myNodeHex().lowercased()
+        // HELLOs over HTTP mailbox first (membership / keys before content).
+        // LIST order is filesystem walk — flat blobs often precede __hello__/ subdirs.
+        var helloIngested = false
+        let sorted = msgs.sorted { a, b in
+            let ah = a.1.contains("/__hello__/"); let bh = b.1.contains("/__hello__/")
+            if ah != bh { return ah && !bh }
+            return false
+        }
+        for (cid, key, data) in sorted where key.contains("/__hello__/") {
+            let parts = key.split(separator: "/").map(String.init)
+            if let i = parts.firstIndex(of: "__hello__"), parts.count > i + 1 {
+                let to = parts[i + 1].lowercased()
+                guard to == me else { SharedStore.markSeenPublic(key); continue }
+            }
+            handleHello(data, viaNearby: false, senderDevice: nil)
+            SharedStore.markSeenPublic(key)
+            helloIngested = true
+            HavenLog.net("hello http-ingest circle=\(cid.prefix(12))")
+        }
+        let content = sorted.filter { !$0.1.contains("/__hello__/") }
         // receive() does real crypto per envelope; a backlog drain used to run the whole loop on
         // the main actor and freeze the UI for the duration. Ingest the batch off-main, then hop
         // back once with the circles that changed.
         let ingested: [String] = await Task.detached(priority: .utility) {
             var changed: [String] = []
-            for (cid, env) in msgs where (try? social.receive(circleId: cid, envelope: env)) == true {
-                changed.append(cid)
+            for (cid, key, env) in content {
+                if (try? social.receive(circleId: cid, envelope: env)) == true {
+                    SharedStore.markSeenPublic(key)
+                    changed.append(cid)
+                }
             }
             return changed
         }.value
@@ -2276,6 +2481,7 @@ final class FeedStore: ObservableObject {
         // here, a kill before the key arrives loses the buffered event forever (the exact
         // random-non-delivery failure). Cheap: msgs is only non-empty when the mailbox served bytes.
         persist()
+        if helloIngested { refresh(); syncWithContacts() }
         guard !ingested.isEmpty else { return }
         bumpActivity()   // a message arrived → keep sync tight while the conversation is live
         var dmIngested = false
@@ -3469,15 +3675,26 @@ final class FeedStore: ObservableObject {
             HavenLog.call("call frame type=\(type) NOT SENT to \(nodeHex.prefix(8)) — seal failed (recipient unresolvable: \(known) known device id(s), \(sealedOpt == nil ? "threw" : "empty"))")
             return
         }
+        let wire = frame(type, sealed)
         sendIroh(type, sealed, to: nodeHex)
         // Cross-NAT fallback: hop the same SEALED frame LIVE through the circle relays (frame 9 — the
         // relay host unwraps + sends it onward over its own connections). The nearby originateRelay
         // flood never leaves the room, so a callee whose direct dial back to the caller failed had
         // NO way to deliver the ACCEPT — the push rang her, but the answer died in the NAT. The relay
         // only ever handles the sealed blob; it cannot read or alter the signaling.
-        var dests = social?.deviceNodeIdsFor(accountHex: nodeHex) ?? [nodeHex]
-        for h in deviceHints(for: nodeHex) where !dests.contains(where: { $0.lowercased() == h }) { dests.append(h) }
-        originateRelayInternet(dests: dests, inner: frame(type, sealed))
+        var dests = social?.deviceNodeIdsFor(accountHex: nodeHex) ?? []
+        if !dests.contains(where: { $0.lowercased() == nodeHex.lowercased() }) { dests.append(nodeHex) }
+        if dests.count <= 1 {
+            for h in deviceHints(for: nodeHex) where !dests.contains(where: { $0.lowercased() == h }) {
+                dests.append(h)
+                if dests.count >= 3 { break }
+            }
+        }
+        originateRelayInternet(dests: dests, inner: wire)
+        // HTTP live-lane: account + roster devices only (avoid flooding every historical hint).
+        let liveDests = dests
+        let cids = self.circles.map(\.id)
+        Task { await SharedStore.uploadLiveCallFrames(circleIds: cids, dests: liveDests, frame: wire) }
     }
 
     /// Originate a frame-9 live forward of `inner` to `dests` via up to 3 adopted INTERNET relays
@@ -4235,10 +4452,13 @@ final class FeedStore: ObservableObject {
         if let hello = helloPayload(circleId: circleId, circleName: circleName) {
             sendIroh(0, hello, to: idHex)
             if circleId == "default" { nearbyBroadcast(0, hello) }
+            let meHex = social.myNodeHex()
+            Task { await SharedStore.putHello(circleId: circleId, toHex: idHex, fromHex: meHex, hello: hello) }
         }
         for env in social.syncEnvelopes(circleId: circleId) {
             sendIroh(1, eventPayload(circleId, env), to: idHex)
             if !isDM { nearbyBroadcast(1, eventPayload(circleId, env)) }
+            Task { await SharedStore.uploadEvent(circleId: circleId, env: env) }
         }
         refresh()
     }
@@ -5189,6 +5409,9 @@ struct PostCard: View {
     @State private var showReactionDetail = false
     /// A "share this post as a story" composer session (nil = not sharing).
     @State private var storyShare: StoryShareTarget?
+    /// Super data saver: video refs the user explicitly tapped play for. We pull those bytes and
+    /// auto-start once they land (normal data-saver mode never autoplays).
+    @State private var dataSaverPendingPlay: Set<String> = []
 
     private var isActive: Bool { audio.centeredPostId == item.id }
 
@@ -5207,12 +5430,14 @@ struct PostCard: View {
     }
 
     private var primaryVideoPlayer: AVPlayer? {
-        guard item.media.count == 1, let ref = item.media.first, isVideo(ref) else { return nil }
+        let media = realMedia
+        guard media.count == 1, let ref = media.first, isVideo(ref) else { return nil }
         return players[ref]
     }
     /// A post that is exactly one video — the GestureVideoPlayer owns all of its gestures.
     private var isSingleVideoPost: Bool {
-        item.media.count == 1 && (item.media.first.map(isVideo) ?? false)
+        let media = realMedia
+        return media.count == 1 && (media.first.map(isVideo) ?? false)
     }
     /// Kind from the REF (a cheap string parse — refs encode img_/vid_/aud_), never `item(ref)`. `item(_:)`
     /// decodes the bitmap / generates the video poster on the main thread on a cache miss, and this is
@@ -5603,33 +5828,49 @@ struct PostCard: View {
         // play affordance. Tapping play requests the video bytes and only then builds an AVPlayer.
         if dataSaver, MediaKind(ref: ref) == .video, !hasVideo {
             let poster = MediaVariants.poster(for: ref, in: item.media)
+            let waiting = dataSaverPendingPlay.contains(ref)
             ZStack {
                 if let poster, MediaStore.shared.hasLocalFile(poster) {
                     FeedImage(ref: poster, maxDimension: 1200, contentMode: .fit) { mediaLoadingPlaceholder(ref) }
                 } else {
                     mediaLoadingPlaceholder(ref)
                 }
-                Image(systemName: "play.circle.fill").font(.system(size: 56))
-                    .foregroundStyle(.white.opacity(0.92)).shadow(radius: 6)
+                if waiting {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(.white)
+                        .scaleEffect(1.4)
+                        .padding(18)
+                        .background(Circle().fill(Color.black.opacity(0.4)))
+                } else {
+                    Image(systemName: "play.circle.fill").font(.system(size: 56))
+                        .foregroundStyle(.white.opacity(0.92)).shadow(radius: 6)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
             .onTapGesture {
-                // Explicit play → download the video (and only the video).
+                // Explicit play → download the video (and only the video), then start once it lands.
+                dataSaverPendingPlay.insert(ref)
                 feed.requestMedia(ref, circleId: feed.activeCircleId)
             }
             .background { pageBackdrop(poster ?? ref, containerAspect: containerAspect) }
         } else if hasVideo {
             if MediaKind(ref: ref) == .video, let url = MediaStore.shared.storagePath(for: ref) {
-                // Data saver with local video: still don't autoplay — GestureVideoPlayer starts paused
-                // when superDataSaver is on via playVisibleVideo; the user taps to start.
+                // Data saver with local video: don't autoplay until the user asked (pending play
+                // from a poster tap, or a first tap on an already-local clip). Tap then toggles mute.
                 let player = playerFor(ref, url)
                 GestureVideoPlayer(player: player,
-                                   onTap: { togglePostMute() },
+                                   onTap: { dataSaverVideoTap(ref, player) },
                                    onDoubleTap: { heartIt() },
                                    inCarousel: inCarousel,
                                    onScrubbing: onScrubbing)
                     .background { pageBackdrop(ref, containerAspect: containerAspect) }
+                    .onAppear {
+                        if dataSaver, dataSaverPendingPlay.contains(ref) {
+                            startDataSaverPlayback(ref, player)
+                        }
+                    }
             } else if MediaKind(ref: ref) == .file {
                 fileAttachmentPage(ref)
             } else {
@@ -5645,6 +5886,29 @@ struct PostCard: View {
             // Referenced but not here yet — it's still coming from the sender / mailbox.
             mediaLoadingPlaceholder(ref)
         }
+    }
+
+    /// Super data saver (and normal) single-tap on an inline video.
+    /// Under data saver a paused clip's first tap means "play" — mute alone left posters dead after
+    /// download because `playVisibleVideo` never auto-starts in that mode.
+    private func dataSaverVideoTap(_ ref: String, _ player: AVPlayer) {
+        if SettingsStore.shared.superDataSaver, player.rate == 0 {
+            startDataSaverPlayback(ref, player)
+            return
+        }
+        togglePostMute()
+    }
+
+    private func startDataSaverPlayback(_ ref: String, _ player: AVPlayer) {
+        dataSaverPendingPlay.remove(ref)
+        if audio.activePostId != item.id {
+            audio.start(postId: item.id, track: nil, video: player, muteVideo: item.muteVideo, immediateMusic: false)
+        }
+        #if os(iOS)
+        ensureHavenPlaybackSession()
+        #endif
+        player.seek(to: .zero)
+        player.play()
     }
 
     /// A `file_` zip attachment: document chip with share/save affordance.
@@ -5956,15 +6220,26 @@ private struct KillHorizontalScroller: NSViewRepresentable {
 
     private func playVisibleVideo() {
         guard isActive else { return }
-        // Super data saver: never autoplay. The still (poster) is already on screen; the user
-        // taps play when they want the bytes + the decode heat.
+        // Index against display refs (not raw item.media) so carousel page maps to the video slide.
+        let media = realMedia
+        let visibleRef: String? = media.isEmpty
+            ? nil
+            : media[min(max(currentPage, 0), media.count - 1)]
+        // Super data saver: never autoplay *unless* the user explicitly tapped play on this ref
+        // (poster → download → pending). Keep a clip they already started; pause everything else.
         if SettingsStore.shared.superDataSaver {
-            for (_, player) in players { player.pause() }
+            for (ref, player) in players {
+                let isVisible = ref == visibleRef
+                if isVisible, dataSaverPendingPlay.contains(ref) {
+                    startDataSaverPlayback(ref, player)
+                } else if isVisible, player.rate > 0 {
+                    // User-started — leave playing.
+                } else if !isVisible {
+                    player.pause()
+                }
+            }
             return
         }
-        let visibleRef: String? = item.media.isEmpty
-            ? nil
-            : item.media[min(max(currentPage, 0), item.media.count - 1)]
         #if os(iOS)
         // A post's music plays on the system music player; without mixing, that music takes the audio
         // session and INTERRUPTS the video's AVPlayer, so the (muted) video just froze. Mix so the video

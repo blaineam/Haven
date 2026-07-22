@@ -39,6 +39,9 @@ class WebRTCPeer(
         if (t.id() == SCREEN_TRACK_ID) onRemoteScreen(t) else onRemoteVideo(t)
     }
     private val pendingRemote = ArrayList<IceCandidate>()
+    /** Answer that arrived before setLocalDescription(offer) finished — apply once local is set. */
+    private var pendingAnswerSdp: String? = null
+    private var localOfferSet = false
     var remoteSet = false; private set
 
     private val pc: PeerConnection? = factory.createPeerConnection(
@@ -100,8 +103,17 @@ class WebRTCPeer(
         val pc = pc ?: return
         pc.createOffer(object : SimpleSdp() {
             override fun onCreateSuccess(sdp: SessionDescription) {
-                pc.setLocalDescription(SimpleSdp(), sdp)
-                onLocalSdp("offer", sdp.description)
+                pc.setLocalDescription(object : SimpleSdp() {
+                    override fun onSetSuccess() {
+                        localOfferSet = true
+                        onLocalSdp("offer", sdp.description)
+                        // Peer may have answered before our local offer finished applying.
+                        pendingAnswerSdp?.let { ans ->
+                            pendingAnswerSdp = null
+                            applyRemoteAnswer(ans)
+                        }
+                    }
+                }, sdp)
             }
         }, mediaConstraints())
     }
@@ -122,8 +134,27 @@ class WebRTCPeer(
     }
 
     fun onRemoteAnswer(sdp: String) {
+        if (!localOfferSet) {
+            // Answer raced ahead of setLocalDescription(offer) → "Called in wrong state: stable".
+            pendingAnswerSdp = sdp
+            Log.d(TAG, "$peerHex queuing remote answer until local offer is set")
+            return
+        }
+        applyRemoteAnswer(sdp)
+    }
+
+    private fun applyRemoteAnswer(sdp: String) {
+        // HTTP live-lane can redeliver the same answer (or a prior session's) after markSeen races;
+        // applying a second answer while already stable fails with "Called in wrong state: stable".
+        if (remoteSet) {
+            Log.d(TAG, "$peerHex ignoring duplicate remote answer")
+            return
+        }
         pc?.setRemoteDescription(object : SimpleSdp() {
             override fun onSetSuccess() { remoteSet = true; flushCandidates() }
+            override fun onSetFailure(error: String?) {
+                Log.w(TAG, "$peerHex answer set fail: $error")
+            }
         }, SessionDescription(SessionDescription.Type.ANSWER, sdp))
     }
 

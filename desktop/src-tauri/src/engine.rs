@@ -476,6 +476,21 @@ impl Engine {
             crate::roster::DeviceRoster::device_name(),
             now_ms() / 1000,
         );
+        // Matrix QA: optional peer public bundle at `qa-peer-bundle.bin` (parity with Android
+        // `ingestQaPeerBundleIfPresent`). Lets circle crypto form when HELLO cannot dial and the
+        // Mac is a second device of the iOS account that needs the Android friend in members.
+        if let Ok(bundle) = std::fs::read(paths.root.join("qa-peer-bundle.bin")) {
+            if bundle.len() >= 32 {
+                if let Ok(hex) = social.add_contact_bundle("default".into(), bundle) {
+                    let name = std::fs::read_to_string(paths.root.join("qa-peer-name.txt"))
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "QA Peer".into());
+                    eprintln!("qa-peer-bundle ingested contact={} name={name}", &hex[..hex.len().min(8)]);
+                }
+            }
+        }
         // Switch-Flip 1.0.7: turn the new crypto ON (seed-drop retirement + MLS keying). Both are
         // GATED in-core — inert (byte-identical to 1.0.6) until a circle is fully capable — and NOT
         // persisted, so they're set here after `register_device` and re-applied every launch in

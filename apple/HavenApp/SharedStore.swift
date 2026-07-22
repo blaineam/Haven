@@ -998,6 +998,31 @@ enum SharedStore {
         return URL(string: "\(trimmed)/k/\(enc)")
     }
 
+    /// LIST: `GET /l/<prefix>` — signed over the raw store prefix (not the `/l/` route).
+    private static func httpListURL(_ base: String, _ prefix: String) -> URL? {
+        let trimmed = base.hasSuffix("/") ? String(base.dropLast()) : base
+        let enc = prefix.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? prefix
+        return URL(string: "\(trimmed)/l/\(enc)")
+    }
+
+    /// LIST keys under a prefix via the relay's plain-HTTP interface. Three-way like `httpGet`.
+    private static func httpList(_ base: String, _ token: String, _ prefix: String) async -> Result<[String], Error> {
+        guard let url = httpListURL(base, prefix) else { return .failure(URLError(.badURL)) }
+        guard let auth = httpAuth(token, "GET", prefix, Data()) else { return .failure(URLError(.userAuthenticationRequired)) }
+        var req = URLRequest(url: url, timeoutInterval: 60)
+        req.setValue(auth, forHTTPHeaderField: "Authorization")
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            switch (resp as? HTTPURLResponse)?.statusCode ?? 0 {
+            case 200...299:
+                let text = String(data: data, encoding: .utf8) ?? ""
+                return .success(text.split(whereSeparator: \.isNewline).map(String.init).filter { !$0.isEmpty })
+            case 401, 403: return .failure(RelayForbidden())
+            default: return .failure(URLError(.badServerResponse))
+            }
+        } catch { return .failure(error) }
+    }
+
     /// Sign ONE request. Never cache the result: it carries a timestamp, a one-shot nonce and a
     /// digest of THIS body, so a reused header is a replay and the relay refuses it.
     /// `key` is the raw (un-percent-encoded) store key — the relay decodes the path before verifying.
@@ -1217,7 +1242,10 @@ enum SharedStore {
     }
     nonisolated private static func seenContains(_ key: String) -> Bool { withSeen { $0.contains(key) } }
     /// Record a key as seen and schedule a debounced save (one write per burst, off the caller).
-    private static func markSeen(_ key: String) {
+    /// Public so FeedStore can mark HELLO/event keys after successful ingest only.
+    nonisolated static func markSeenPublic(_ key: String) { markSeen(key) }
+
+    nonisolated private static func markSeen(_ key: String) {
         let scheduleSave: Bool = withSeen { set in
             guard set.insert(key).inserted, !seenSavePending else { return false }
             seenSavePending = true
@@ -1259,6 +1287,101 @@ enum SharedStore {
         return "haven/mailbox/\(circleId)/\(h)"
     }
 
+    /// Content-addressed live-call frame key under an existing circle mailbox
+    /// (`blob_forbidden` already allows mailbox/* for known members — no new allow-list).
+    private static func liveCallKey(circleId: String, destHex: String, frame: Data) -> String {
+        let h = SHA256.hash(data: frame).map { String(format: "%02x", $0) }.joined()
+        return "haven/mailbox/\(circleId)/__live__/\(destHex.lowercased())/\(h)"
+    }
+
+    /// PUT sealed call wire frames (`[type][payload]`) for each destination under circle mailboxes.
+    /// HTTP-mailbox-only topology fallback when iroh dial is unreachable (matrix stub / free CF).
+    static func uploadLiveCallFrames(circleIds: [String], dests: [String], frame: Data) async {
+        let clean = dests.map { $0.lowercased() }.filter { $0.count == 64 }
+        guard !clean.isEmpty, !frame.isEmpty else { return }
+        let cids = circleIds.isEmpty ? ["default"] : circleIds
+        for circleId in cids {
+            for dest in clean {
+                let key = liveCallKey(circleId: circleId, destHex: dest, frame: frame)
+                // Do NOT markSeen on put — the destination must still list+ingest this key.
+                var landed = false
+                for node in relayNodes(circleId) {
+                    if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
+                        _ = RelayHost.shared.localPut(key, frame)
+                        landed = true
+                        continue
+                    }
+                    guard let http = RelayMailboxStore.shared.httpInterface(node) else { continue }
+                    for base in http.urls where !httpUrlBad(base) {
+                        switch await httpPut(base, http.token, key, frame) {
+                        case .success:
+                            RelayMailboxStore.shared.markSeen(node)
+                            HavenLog.relay("live-call http-put OK to=\(dest.prefix(8)) relay=\(node.prefix(8))")
+                            landed = true
+                        case .failure(is RelayForbidden):
+                            noteRefused(node, "live-call put")
+                        case .failure:
+                            markHttpUrlBad(base)
+                        }
+                        if landed { break }
+                    }
+                    if landed { break }
+                }
+            }
+        }
+    }
+
+    /// LIST+GET live-call frames addressed to any of `myHexes` (device + account).
+    /// Claims each key (markSeen) before return so concurrent 2s polls cannot double-dispatch.
+    static func pollLiveCallFrames(circleIds: [String], myHexes: [String]) async -> [(key: String, frame: Data)] {
+        let mine = myHexes.map { $0.lowercased() }.filter { $0.count == 64 }
+        guard !mine.isEmpty else { return [] }
+        let cids = circleIds.isEmpty ? ["default"] : circleIds
+        var out: [(String, Data)] = []
+        for circleId in cids {
+            for node in relayNodes(circleId) {
+                guard let http = RelayMailboxStore.shared.httpInterface(node) else {
+                    if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
+                        for who in mine {
+                            let prefix = "haven/mailbox/\(circleId)/__live__/\(who)/"
+                            for key in RelayHost.shared.localList(prefix) where !seenContains(key) {
+                                markSeen(key)
+                                if let d = RelayHost.shared.localGet(key), !d.isEmpty {
+                                    out.append((key, d))
+                                }
+                            }
+                        }
+                    }
+                    continue
+                }
+                for who in mine {
+                    let prefix = "haven/mailbox/\(circleId)/__live__/\(who)/"
+                    for base in http.urls where !httpUrlBad(base) {
+                        switch await httpList(base, http.token, prefix) {
+                        case .success(let keys):
+                            RelayMailboxStore.shared.markSeen(node)
+                            for key in keys where !seenContains(key) {
+                                markSeen(key)   // claim before GET so concurrent pollers skip
+                                switch await httpGet(base, http.token, key) {
+                                case .success(let data?):
+                                    if !data.isEmpty { out.append((key, data)) }
+                                case .success(nil), .failure:
+                                    break
+                                }
+                            }
+                        case .failure(is RelayForbidden):
+                            noteRefused(node, "live-call list")
+                        case .failure:
+                            markHttpUrlBad(base)
+                        }
+                        break
+                    }
+                }
+            }
+        }
+        return out
+    }
+
     /// Drop a sealed event envelope into the circle's mailbox (idempotent). Returns whether it
     /// is now safely in the mailbox (already present or just uploaded) — the background uploader
     /// uses this to know when to stop retrying. We only mark a key "seen" on success, so a
@@ -1279,6 +1402,26 @@ enum SharedStore {
                 if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
                     _ = RelayHost.shared.localPut(key, env)
                     landed = true; continue
+                }
+                // Plain-HTTP first (same cross-NAT path as media/devroster). Event envelopes used to
+                // be iroh-only, so a relay whose node id had no addressing (in-app stub / CF / cold
+                // DERP) could hold media and rosters over HTTP while every post never left the phone.
+                if let http = RelayMailboxStore.shared.httpInterface(node) {
+                    var done = false
+                    for base in http.urls where !httpUrlBad(base) {
+                        switch await httpPut(base, http.token, key, env) {
+                        case .success:
+                            RelayMailboxStore.shared.markSeen(node)
+                            HavenLog.relay("mailbox http-put OK relay=\(node.prefix(8))")
+                            landed = true; done = true
+                        case .failure(is RelayForbidden):
+                            noteRefused(node, "mailbox put")
+                        case .failure:
+                            markHttpUrlBad(base)
+                        }
+                        if done { break }
+                    }
+                    if done { continue }
                 }
                 guard let c = await RelayClients.client(node) else { continue }
                 if await c.has(key: key) { RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node); landed = true; continue }
@@ -1372,9 +1515,42 @@ enum SharedStore {
         }
     }
 
-    /// Poll the mailbox for envelopes we haven't seen. Returns (circleId, envelope) pairs.
-    static func pollMailbox(circleIds: [String]) async -> [(String, Data)] {
-        var out: [(String, Data)] = []
+    /// HTTP HELLO key under a circle mailbox (membership-gated like events).
+    /// `haven/mailbox/<circle>/__hello__/<toAcct>/<fromAcct>/<sha256>`
+    static func helloMailboxKey(circleId: String, toHex: String, fromHex: String, body: Data) -> String {
+        let digest = SHA256.hash(data: body).map { String(format: "%02x", $0) }.joined()
+        return "haven/mailbox/\(circleId)/__hello__/\(toHex.lowercased())/\(fromHex.lowercased())/\(digest)"
+    }
+
+    /// Store-and-forward a HELLO when iroh cannot dial the peer (matrix / cross-NAT).
+    static func putHello(circleId: String, toHex: String, fromHex: String, hello: Data) async {
+        let key = helloMailboxKey(circleId: circleId, toHex: toHex, fromHex: fromHex, body: hello)
+        for node in relayNodes(circleId) where !node.hasPrefix("s3:") {
+            if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
+                _ = RelayHost.shared.localPut(key, hello)
+                HavenLog.relay("hello local-put OK to=\(toHex.prefix(8))")
+                continue
+            }
+            guard let http = RelayMailboxStore.shared.httpInterface(node) else { continue }
+            for base in http.urls where !httpUrlBad(base) {
+                switch await httpPut(base, http.token, key, hello) {
+                case .success:
+                    RelayMailboxStore.shared.markSeen(node)
+                    HavenLog.relay("hello http-put OK to=\(toHex.prefix(8)) relay=\(node.prefix(8))")
+                    break
+                case .failure(is RelayForbidden):
+                    noteRefused(node, "hello put")
+                case .failure:
+                    markHttpUrlBad(base)
+                }
+            }
+        }
+    }
+
+    /// Poll the mailbox for envelopes we haven't seen. Returns (circleId, key, envelope) triples.
+    /// Keys are needed so HELLO blobs (`/__hello__/`) can be routed to handleHello, not receive().
+    static func pollMailbox(circleIds: [String]) async -> [(String, String, Data)] {
+        var out: [(String, String, Data)] = []
         for cid in circleIds {
             let prefix = "haven/mailbox/\(cid)/"
             let nodes = relayNodes(cid)
@@ -1423,15 +1599,38 @@ enum SharedStore {
                         }.value
                         // Mark seen only once the bytes are in hand, so a failed read is retried on the
                         // next poll instead of being skipped forever.
-                        for (key, data) in read { markSeen(key); out.append((cid, data)) }
+                        for (key, data) in read { out.append((cid, key, data)) }
                         continue
+                    }
+                    // Plain-HTTP LIST+GET first — same reason as uploadEvent: iroh dial may be
+                    // unreachable while the relay's media port answers.
+                    if let http = RelayMailboxStore.shared.httpInterface(node) {
+                        var listedViaHttp = false
+                        for base in http.urls where !httpUrlBad(base) {
+                            switch await httpList(base, http.token, prefix) {
+                            case .success(let keys):
+                                listedViaHttp = true
+                                RelayMailboxStore.shared.markSeen(node)
+                                for key in keys where !seenContains(key) {
+                                    if case .success(let data?) = await httpGet(base, http.token, key) {
+                                        out.append((cid, key, data))
+                                    }
+                                }
+                            case .failure(is RelayForbidden):
+                                noteRefused(node, "mailbox list")
+                            case .failure:
+                                markHttpUrlBad(base)
+                            }
+                            if listedViaHttp { break }
+                        }
+                        if listedViaHttp { continue }
                     }
                     guard let c = await RelayClients.client(node) else { continue }
                     let keys = await c.list(prefix: prefix)
                     RelayHealth.shared.recordSuccess(node)
                     RelayMailboxStore.shared.markSeen(node)
                     for key in keys where !seenContains(key) {
-                        if let data = await c.get(key: key) { markSeen(key); out.append((cid, data)) }
+                        if let data = await c.get(key: key) { out.append((cid, key, data)) }
                     }
                 }
             } else if PresignStore.shared.hasPool(cid) && !isOwner(cid) {
@@ -1439,14 +1638,13 @@ enum SharedStore {
                 if let listURL = await PresignStore.shared.listURL(cid), let xml = await S3Client.getURL(listURL) {
                     for key in S3Client.parseListKeys(xml) where !seenContains(key) {
                         if let g = await PresignStore.shared.getURL(circleId: cid, key: key), let data = await S3Client.getURL(g) {
-                            markSeen(key)
-                            out.append((cid, data))
+                            out.append((cid, key, data))
                         }
                     }
                 }
             } else if let s3 = isOwner(cid) ? ownerS3() : mailboxClient(), let s3keys = try? await s3.listKeys(prefix: prefix) {
                 for key in s3keys where !seenContains(key) {
-                    if let data = try? await s3.getObject(key: key) { markSeen(key); out.append((cid, data)) }
+                    if let data = try? await s3.getObject(key: key) { out.append((cid, key, data)) }
                 }
             }
         }

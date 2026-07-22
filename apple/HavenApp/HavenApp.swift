@@ -324,6 +324,10 @@ struct RootView: View {
                 return
             }
             #endif
+            #if DEBUG
+            // Matrix multi-device QA: haven://qa?story=&post=&dm_to=&dm=&call_to=
+            if FeedStore.shared.handleMatrixQaURL(url) { return }
+            #endif
             // Profile/post deep links (haven://u/… , haven://p/…) route in-app.
             if DeepLinkRouter.shared.handle(url, tab: &tab) { return }
             // Otherwise it's an invite link — "<id>.<verify>" in the URL fragment

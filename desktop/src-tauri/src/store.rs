@@ -1111,7 +1111,15 @@ impl Prefs {
 /// Load the 32-byte master seed from the secure store, or `None` if there isn't one yet.
 /// Distinguishes "no entry" (new device → caller generates) from a locked/error read, so
 /// we never clobber an existing identity by treating a transient failure as "new".
+///
+/// Matrix QA: if `HAVEN_QA_SEED_B64` is set (standard base64 of 32 bytes), or
+/// `HAVEN_QA_SEED_FILE` points at a file whose first line is `haven-seed:<b64>` / raw b64,
+/// that seed wins — skips the macOS keychain prompt so automation can link Tauri to the
+/// iOS Simulator identity without a human clicking Always Allow.
 pub fn load_seed() -> Result<Option<[u8; 32]>> {
+    if let Some(seed) = qa_seed_override()? {
+        return Ok(Some(seed));
+    }
     let entry = keyring::Entry::new(SERVICE, SEED_ACCOUNT).context("open keyring entry")?;
     match entry.get_password() {
         Ok(b64) => {
@@ -1126,6 +1134,30 @@ pub fn load_seed() -> Result<Option<[u8; 32]>> {
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(anyhow!("keyring read failed: {e}")),
     }
+}
+
+/// Decode a 32-byte seed from matrix-QA env vars (never used in production packaging).
+fn qa_seed_override() -> Result<Option<[u8; 32]>> {
+    let mut s = std::env::var("HAVEN_QA_SEED_B64").ok().unwrap_or_default();
+    if s.is_empty() {
+        if let Ok(path) = std::env::var("HAVEN_QA_SEED_FILE") {
+            s = fs::read_to_string(path).unwrap_or_default();
+        }
+    }
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    let s = s.strip_prefix("haven-seed:").unwrap_or(s).trim();
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(s)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(s))
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(s))
+        .context("HAVEN_QA_SEED_* base64")?;
+    let seed: [u8; 32] = raw
+        .try_into()
+        .map_err(|_| anyhow!("HAVEN_QA_SEED is not 32 bytes"))?;
+    Ok(Some(seed))
 }
 
 /// Persist the master seed to the secure store.

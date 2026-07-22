@@ -189,13 +189,23 @@ object HavenNet : InboundListener {
     /** Record a mailbox key as seen and schedule one debounced save for the burst. */
     private fun markMailboxSeen(key: String) {
         ensureSeenMailboxLoaded()
-        if (!seenMailbox.add(key) || seenMailboxSavePending) return
+        // Always insert into the in-memory set first so concurrent 2s live-call pollers cannot
+        // re-process the same key while a disk save is pending.
+        val inserted = synchronized(seenMailbox) { seenMailbox.add(key) }
+        if (!inserted) return
+        if (seenMailboxSavePending) return
         seenMailboxSavePending = true
         scope.launch {
             kotlinx.coroutines.delay(2_000)
             seenMailboxSavePending = false
-            runCatching { seenMailboxFile.writeText(seenMailbox.joinToString("\n")) }
+            val snap = synchronized(seenMailbox) { seenMailbox.joinToString("\n") }
+            runCatching { seenMailboxFile.writeText(snap) }
         }
+    }
+
+    private fun isMailboxSeen(key: String): Boolean {
+        ensureSeenMailboxLoaded()
+        return synchronized(seenMailbox) { seenMailbox.contains(key) }
     }
 
     /**
@@ -543,6 +553,14 @@ object HavenNet : InboundListener {
     private fun startMailboxLoop() {
         if (loopStarted) return
         loopStarted = true
+        // Fast live-call lane (2s) for invite/accept/sdp when iroh dial is down.
+        scope.launch {
+            while (true) {
+                delay(2_000)
+                if (!ready) continue
+                runCatching { pollLiveCallFrames() }
+            }
+        }
         scope.launch {
             while (true) {
                 delay(10_000)
@@ -812,12 +830,122 @@ object HavenNet : InboundListener {
      *  connections). Cross-NAT fallback: a callee whose direct dial back to the caller fails still
      *  lands the ACCEPT within the ring window (the push rings, but the answer path was direct-only). */
     fun sendCallFrame(type: Int, payload: ByteArray, toNodeHex: String) {
+        val frame = Wire.frame(type, payload)
         sendFrame(type, payload, toNodeHex)
         val dests = LinkedHashSet<String>()
+        // Prefer roster device ids for this account; fall back to account hex + invite hints.
         dests.addAll(runCatching { social.deviceNodeIdsFor(toNodeHex) }.getOrDefault(emptyList()))
+        dests.add(toNodeHex.lowercase())
+        if (dests.size <= 1) dests.addAll(deviceHintsFor(toNodeHex))
         if (dests.isEmpty()) dests.add(toNodeHex)
-        dests.addAll(deviceHintsFor(toNodeHex))
-        originateRelayInternet(dests.toList(), Wire.frame(type, payload))
+        originateRelayInternet(dests.toList(), frame)
+        // HTTP live-lane when iroh dial is unreachable (mailbox __live__/<dest>/).
+        // Only fan out to account + roster devices — not every historical hint (floods ICE/answer).
+        val liveDests = LinkedHashSet<String>()
+        liveDests.add(toNodeHex.lowercase())
+        liveDests.addAll(runCatching { social.deviceNodeIdsFor(toNodeHex) }.getOrDefault(emptyList()))
+        if (liveDests.size <= 1) liveDests.addAll(deviceHintsFor(toNodeHex).take(2))
+        scope.launch { uploadLiveCallFrame(liveDests.toList(), frame) }
+    }
+
+    /** PUT sealed call wire frames under haven/mailbox/<circle>/__live__/<dest>/<hash>. */
+    private suspend fun uploadLiveCallFrame(dests: List<String>, frame: ByteArray) {
+        if (!ready || dests.isEmpty() || frame.isEmpty()) return
+        val circles = LinkedHashSet<String>()
+        circles.add(DEFAULT_CIRCLE)
+        runCatching {
+            for (c in social.circles()) {
+                if (c.id.startsWith("dm:")) circles.add(c.id)
+            }
+        }
+        val h = MessageDigest.getInstance("SHA-256").digest(frame)
+            .joinToString("") { "%02x".format(it) }
+        val cleanDests = dests.map { it.lowercase() }.filter { it.length == 64 }.distinct()
+        if (cleanDests.isEmpty()) return
+        for (circleId in circles) {
+            for (dest in cleanDests) {
+                val key = "haven/mailbox/$circleId/__live__/$dest/$h"
+                var landed = false
+                for (nodeHex in relaysFor(circleId)) {
+                    if (nodeHex.startsWith("s3:")) continue
+                    val entry = relayEntries[nodeHex] ?: continue
+                    if (entry.httpToken.isEmpty()) continue
+                    for (base in httpUrlsFor(entry)) {
+                        val r = relayHttpPut(base, entry.httpToken, key, frame)
+                        if (r.isSuccess) {
+                            landed = true
+                            markRelayOk(nodeHex)
+                            Log.i(TAG, "live-call http-put OK type=${frame[0].toInt() and 0xFF} to=${dest.take(8)} relay=${nodeHex.take(8)}")
+                            break
+                        }
+                        if (r.exceptionOrNull() is RelayForbidden) {
+                            noteRefused(nodeHex, "live-call put")
+                            break
+                        }
+                        markHttpUrlBad(base)
+                    }
+                    if (landed) break
+                }
+                // Do NOT markSeen on put — the destination must still be able to list+ingest.
+                // (Content-addressed keys make re-puts idempotent without a local skip.)
+            }
+        }
+    }
+
+    /** Poll __live__/<me>/ call frames and dispatch to callRouter. */
+    private suspend fun pollLiveCallFrames(): Boolean {
+        if (!ready) return false
+        ensureSeenMailboxLoaded()
+        val meDev = runCatching { social.myDeviceNodeHex() }.getOrDefault("").lowercase()
+        val meAcct = nodeIdHex.lowercase()
+        val mine = listOf(meDev, meAcct).filter { it.length == 64 }.distinct()
+        if (mine.isEmpty()) return false
+        val circles = LinkedHashSet<String>()
+        circles.add(DEFAULT_CIRCLE)
+        runCatching { for (c in social.circles()) circles.add(c.id) }
+        var changed = false
+        val callTypes = setOf(
+            CallWire.INVITE, CallWire.ACCEPT, CallWire.HANGUP, CallWire.OFFER,
+            CallWire.ANSWER, CallWire.ICE, CallWire.GROUP_INVITE,
+            CallWire.HANDLED_ELSEWHERE, CallWire.CAMERA,
+        )
+        for (circleId in circles) {
+            val relays = relaysFor(circleId).toMutableList()
+            if (defaultRelayHex.isNotEmpty()) relays.add(defaultRelayHex)
+            for (nodeHex in relays.distinct()) {
+                if (nodeHex.startsWith("s3:")) continue
+                val entry = relayEntries[nodeHex] ?: continue
+                if (entry.httpToken.isEmpty()) continue
+                for (who in mine) {
+                    val prefix = "haven/mailbox/$circleId/__live__/$who/"
+                    for (base in httpUrlsFor(entry)) {
+                        val listed = relayHttpList(base, entry.httpToken, prefix)
+                        if (listed.isFailure) {
+                            if (listed.exceptionOrNull() is RelayForbidden) break
+                            markHttpUrlBad(base)
+                            continue
+                        }
+                        markRelayOk(nodeHex)
+                        for (key in listed.getOrDefault(emptyList())) {
+                            // Claim the key immediately so a concurrent 2s poll cannot double-dispatch.
+                            if (isMailboxSeen(key)) continue
+                            markMailboxSeen(key)
+                            val env = relayHttpGet(base, entry.httpToken, key).getOrNull() ?: continue
+                            if (env.isEmpty()) continue
+                            val type = env[0].toInt() and 0xFF
+                            val body = env.copyOfRange(1, env.size)
+                            if (type in callTypes) {
+                                withContext(Dispatchers.Main) { callRouter?.invoke(type, body) }
+                                Log.i(TAG, "live-call http-ingest type=$type key=${key.substringAfterLast('/').take(12)}")
+                                changed = true
+                            }
+                        }
+                        break
+                    }
+                }
+            }
+        }
+        return changed
     }
 
     // ---- "Tell me when this media is back" (frames 31/32; iOS parity) ---------------------
@@ -3433,6 +3561,11 @@ object HavenNet : InboundListener {
                 }
             }
         }
+        // HTTP live-lane call frames when iroh dial is down.
+        if (pollLiveCallFrames()) {
+            changed = true
+            bumpActivity()
+        }
         // Mesh: if we host a relay, pull from each adopted sibling so the mailbox self-replicates.
         meshSync()
         // Multi-device self-sync: converge this user's OWN devices (profile/settings/contacts/
@@ -4096,6 +4229,28 @@ object HavenNet : InboundListener {
                 404 -> null
                 401, 403 -> throw RelayForbidden()
                 else -> throw java.io.IOException("http ${c.responseCode}")
+            }
+        } finally { c.disconnect() }
+    }
+
+    /** LIST keys under a prefix via the relay's plain-HTTP interface (`GET /l/<prefix>`). */
+    private fun relayHttpList(base: String, token: String, prefix: String): Result<List<String>> = runCatching {
+        val auth = httpAuth(token, "GET", prefix, ByteArray(0))
+            ?: throw java.io.IOException("cannot sign relay LIST")
+        val root = base.trimEnd('/')
+        val url = "$root/l/${java.net.URLEncoder.encode(prefix, "UTF-8").replace("+", "%20")}"
+        val c = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
+            connectTimeout = 4000; readTimeout = 30000
+            setRequestProperty("Authorization", auth)
+        }
+        try {
+            when (c.responseCode) {
+                in 200..299 -> {
+                    val text = c.inputStream.bufferedReader().use { it.readText() }
+                    text.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
+                }
+                401, 403 -> throw RelayForbidden()
+                else -> throw java.io.IOException("http list ${c.responseCode}")
             }
         } finally { c.disconnect() }
     }

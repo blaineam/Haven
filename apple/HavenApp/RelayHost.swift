@@ -97,10 +97,25 @@ final class RelayHost: ObservableObject {
         return dir.path
     }
 
+    /// Retries while waiting for `FeedStore.transportNode` (shows as "Starting…" in the Relays UI).
+    private var startWaitAttempts = 0
+
     func setEnabled(_ on: Bool) {
-        enabled = on
-        d.set(on, forKey: enabledKey)
-        if on { start() } else { stop() }
+        if on {
+            // Stuck "Starting…" (toggle on, never serving) — force a clean restart rather than
+            // no-op'ing into the same failed half-state (fabric rebind detaches then fails reattach).
+            if enabled && !serving {
+                HavenLog.relay("host toggle on while stuck Starting — force stop+start")
+                stop()
+            }
+            enabled = true
+            d.set(true, forKey: enabledKey)
+            start()
+        } else {
+            enabled = false
+            d.set(false, forKey: enabledKey)
+            stop()
+        }
     }
 
     /// Restart the relay at launch if the user had it on.
@@ -113,17 +128,30 @@ final class RelayHost: ObservableObject {
         setHandle(nil)
         serving = false
         // Keep nodeId so reannounce still has a stable id; reattach refreshes it.
+        HavenLog.relay("host detached for fabric rebind (will reattach when node is back)")
     }
 
     /// Re-attach after `FeedStore` restarted the messaging node onto Haven RelayMap.
     func reattachAfterFabricRebind() {
         guard enabled, handle == nil else { return }
         guard let node = FeedStore.shared.transportNode else {
+            startWaitAttempts += 1
+            if startWaitAttempts <= 30 || startWaitAttempts % 10 == 0 {
+                HavenLog.relay("reattach waiting for messaging node (attempt \(startWaitAttempts))")
+            }
+            // Cap silent wait — after ~15s fall through to full start() which has the same wait,
+            // but keeps UI honest and recovers if rebind left us stranded.
+            if startWaitAttempts > 30 {
+                HavenLog.relay("reattach gave up waiting — full start()")
+                start()
+                return
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 self?.reattachAfterFabricRebind()
             }
             return
         }
+        startWaitAttempts = 0
         #if os(macOS)
         PlatformIdle.disabled = true
         #endif
@@ -152,14 +180,20 @@ final class RelayHost: ObservableObject {
     }
 
     private func start() {
+        guard enabled else { return }
         guard handle == nil else { return }
         // The relay now ATTACHES to the messaging node's endpoint (one iroh node, two ALPNs) — running a
         // second in-process iroh node is what made iroh churn paths unboundedly (the tens-of-GB leak).
         guard let node = FeedStore.shared.transportNode else {
             // Node not up yet — retry shortly; the relay can't exist without the node to attach to.
+            startWaitAttempts += 1
+            if startWaitAttempts == 1 || startWaitAttempts % 5 == 0 {
+                HavenLog.relay("host waiting for messaging node (attempt \(startWaitAttempts))")
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in self?.start() }
             return
         }
+        startWaitAttempts = 0
         // Mac: prevent system sleep so a laptop left closed as a relay keeps serving.
         // iPhone/iPad: NEVER pin the idle timer — keeping the screen awake for hosting was a
         // major battery/heat source (user field: multi-% drain in minutes while "just open").

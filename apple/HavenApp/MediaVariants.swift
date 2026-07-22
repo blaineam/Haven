@@ -88,16 +88,19 @@ enum MediaVariants {
 
     /// Refs the feed/DM bubble should actually render as slides.
     ///
-    /// Drops synthetic markers and original companions (those only appear via "Show original").
-    /// Keeps posters as images so super-data-saver can show them without the video bytes.
-    /// When a video has a declared poster, the poster is kept *and* the video — the player
-    /// uses the poster as its still; data-saver mode can hide the video until play.
+    /// Drops synthetic markers, original companions (those only appear via "Show original"),
+    /// and **poster stills that belong to a video**. The poster rides with the video page as its
+    /// still (super data saver shows that still + play until the user taps to download/play) —
+    /// keeping it as its own carousel slide made the first page a dead image: tapping zoomed the
+    /// still and never pulled the video.
     static func displayRefs(_ media: [String]) -> [String] {
         let originals = Set(allOriginals(in: media))
+        let posterImages = Set(allPosters(in: media))
         return media.filter { ref in
             if parsePoster(ref) != nil { return false }
             if parseOriginal(ref) != nil { return false }
             if originals.contains(ref) { return false }
+            if posterImages.contains(ref) { return false }
             return true
         }
     }

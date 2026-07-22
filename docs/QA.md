@@ -64,7 +64,28 @@ npm link`), it's just `soren run Haven`.
 
 ### Multi-device fabric (Mac + iOS Simulator + Android Emulator)
 
-Automated **server-side** fabric gates (no device farm required):
+#### What Soren **does** prove (release gate)
+
+| Suite | Actually exercises |
+|---|---|
+| `core` / `fabric` / `desktop` | Rust unit + path-proxy/hairpin **integration** (no UI) |
+| `android` | JVM unit + **instrumented** tests on AVD (installs *test* APK; may not leave Haven as your launcher app) |
+| `ios` | XCUITest on simulator (launches Haven for those tests only) |
+| `macos` | **xcodebuild build only** — does **not** launch the Mac app |
+
+**Soren green is not “three devices held a mesh call through a Haven relay.”** Treating it as that is a false positive.
+
+#### Live multi-device smoke (required before claiming device QA)
+
+```sh
+# Installs + launches real Haven on emu + sim + Mac, starts path proxy, screenshots:
+Scripts/live-multi-device-smoke.sh
+# Artifacts under build/live-smoke-*/
+```
+
+This script **fails** if Haven is not running on a surface. It still **skips** full mesh call automation (`CALL_E2E` not wired).
+
+Also:
 
 ```sh
 cargo test -p haven-net --test path_proxy_hairpin
@@ -72,22 +93,15 @@ Scripts/fabric-multi-device-qa.sh
 node ../_shared/soren/soren.mjs run Haven fabric
 ```
 
-Platform unit tests lock ICE policy (no Google STUN when fabric is on):
-
-- Android: `FabricIcePolicyTest` (runs under `soren run Haven android` unit leg)
-- Apple: `HavenFabricTests` (under `HavenLogicTests` / iOS sim)
-
-**Pointing clients at the Mac host’s path proxy** (when hosting a relay on the Mac):
+**Pointing clients at the Mac host’s path proxy:**
 
 | Client | Path-proxy base |
 |---|---|
-| iOS Simulator | `http://127.0.0.1:8675` (same machine) |
-| Android Emulator | `http://10.0.2.2:8675` (host loopback from AVD) |
+| iOS Simulator | `http://127.0.0.1:8675` |
+| Android Emulator | `http://10.0.2.2:8675` |
 | Physical device | `http://<Mac-LAN-IP>:8675` |
 
 Probe: `curl -s http://127.0.0.1:8675/_haven`. Hairpin: `wss://…/webrtc/hairpin`.
-
-End-to-end “two apps call through fabric” still needs each app build installed on sim/emu/Mac with the circle relay hosted; the automated gate proves the **fabric plane** (policy + path proxy + hairpin) every CI run.
 
 `soren migrate Haven` runs `migrate` + `core` (both carry the migration harness).
 Locally verified: `soren run Haven core` → **182 passed, 0 failed**.

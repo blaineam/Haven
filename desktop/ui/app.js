@@ -1291,14 +1291,21 @@ function isSyntheticMedia(ref) {
 }
 function displayMediaRefs(media) {
   const originals = new Set();
+  const posterImages = new Set();
   for (const r of media || []) {
     if (r.startsWith("orig:")) {
       const rest = r.slice(5);
       const c = rest.lastIndexOf(":");
       if (c > 0) originals.add(rest.slice(c + 1));
     }
+    if (r.startsWith("poster:")) {
+      const rest = r.slice(7);
+      const c = rest.lastIndexOf(":");
+      if (c > 0) posterImages.add(rest.slice(c + 1));
+    }
   }
-  return (media || []).filter((r) => !isSyntheticMedia(r) && !originals.has(r));
+  // Poster stills ride with the video page (data-saver still + play) — not as their own slide.
+  return (media || []).filter((r) => !isSyntheticMedia(r) && !originals.has(r) && !posterImages.has(r));
 }
 
 function mediaNode(ref, imgStyle) {

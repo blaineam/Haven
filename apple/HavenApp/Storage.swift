@@ -72,7 +72,11 @@ struct StorageSettingsView: View {
                         Label("Relaying for your circles · \(String(relay.nodeId.prefix(8)))…", systemImage: "checkmark.circle.fill")
                             .font(.caption).foregroundStyle(.green)
                     } else if relay.enabled {
-                        Label("Starting…", systemImage: "clock").font(.caption).foregroundStyle(.secondary)
+                        Label(FeedStore.shared.transportNode == nil
+                              ? "Waiting for network…"
+                              : "Starting…",
+                              systemImage: "clock")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                     // Mac-only: keep the relay always-on by relaunching Haven at login. Catalyst
                     // can't run a true headless/menu-bar agent, so the best achievable is to
@@ -348,7 +352,11 @@ struct CircleMailboxSection: View {
                 Label("This device is relaying · \(String(relay.nodeId.prefix(8)))…", systemImage: "checkmark.circle.fill")
                     .font(.caption).foregroundStyle(.green)
             } else if relay.enabled {
-                Label("Starting…", systemImage: "clock").font(.caption).foregroundStyle(.secondary)
+                Label(FeedStore.shared.transportNode == nil
+                      ? "Waiting for network…"
+                      : "Starting…",
+                      systemImage: "clock")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             #if os(macOS)
             if relay.enabled {
@@ -621,7 +629,13 @@ struct RelaysView: View {
                         Label("Relaying · \(String(relay.nodeId.prefix(8)))…", systemImage: "checkmark.circle.fill")
                             .font(.caption).foregroundStyle(.green)
                     } else if relay.enabled {
-                        Label("Starting…", systemImage: "clock").font(.caption).foregroundStyle(.secondary)
+                        // Distinct copy so a stuck wait for the messaging node is diagnosable
+                        // (was just "Starting…" forever after a failed fabric rebind).
+                        Label(FeedStore.shared.transportNode == nil
+                              ? "Waiting for network…"
+                              : "Starting…",
+                              systemImage: "clock")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                     RelayRetentionControls()
                     // Mac hosts need front-door controls here too — this is the path Circle settings

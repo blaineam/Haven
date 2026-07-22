@@ -49,6 +49,12 @@ free_matrix_ports() {
       fi
     done
   done
+  # Orphan cloudflared helpers from prior HavenStub bounces — each restart left tunnels
+  # running forever (6+ observed mid-matrix). Kill only the stub helper path.
+  for pid in $(pgrep -f 'matrix-haven-mac-stub.*cloudflared' 2>/dev/null || true); do
+    log "killing orphan stub cloudflared pid=$pid"
+    kill "$pid" 2>/dev/null || true
+  done
   sleep 1
 }
 free_matrix_ports

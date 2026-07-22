@@ -6095,10 +6095,24 @@ impl Engine {
             if !keys.is_empty() {
                 self.dyn_state.lock().unwrap().relay_active = true;
             }
+            // Cap unopened keys processed per pass. A fat mailbox (matrix stub ~1k entries,
+            // mostly `__live__` / history) used to GET+crypto every unseen key every poll →
+            // multi-minute 90%+ CPU. 48 opens/pass drains backlog without melting the laptop.
+            const MAX_FRESH_PER_PASS: usize = 48;
+            let mut fresh = 0usize;
             for key in keys {
+                if fresh >= MAX_FRESH_PER_PASS {
+                    break;
+                }
                 // seen_mailbox is keyed by the content-addressed key, so the same envelope
                 // mirrored on several relays is ingested exactly once.
                 if self.dyn_state.lock().unwrap().seen_mailbox.contains(&key) {
+                    continue;
+                }
+                // Live-call frames + HTTP HELLO blobs are not circle events — mark & skip so they
+                // never burn crypto budget on the poll path (iOS handles hellos separately).
+                if key.contains("/__live__/") || key.contains("/__hello__/") {
+                    self.mark_mailbox_seen(key);
                     continue;
                 }
                 // Prefer HTTP GET when we listed over HTTP (same URL set).
@@ -6137,6 +6151,7 @@ impl Engine {
                 // epoch-buffered envelopes permanently unretried — the linked-matrix
                 // "story green / photo+video RED" shape when commit landed after the first poll.
                 let env_len = env.len();
+                fresh += 1; // count attempts (open or buffer) toward the pass budget
                 if self.social.receive(circle_id.clone(), env.clone()).unwrap_or(false) {
                     self.mark_mailbox_seen(key);
                     changed = true;

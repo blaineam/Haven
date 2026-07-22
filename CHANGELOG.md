@@ -32,6 +32,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Call shows Connected but no audio (iOS + Android).** ICE can complete while WebRTC playout stays
+  off: iOS used CallKit `useManualAudio` with `isAudioEnabled=false` until `didActivate`, and if that
+  never arrived (or arrived after media) the UI said Connected with silence both ways. Now enable
+  and re-assert the playAndRecord/speaker session on mesh start, ICE connected, CallKit activate,
+  and a 1.5s fail-open; mid-call CallKit deactivate recovers instead of muting forever. Android
+  re-asserts `MODE_IN_COMMUNICATION` + speakerphone after start.
 - **Mac host relay beachballs / multi‑GB RAM (field sample 4.6 GB).** Mesh anti-entropy ran every
   ~20s against every sibling (including dead NAS), listing the full store and pulling ≤256 MB blobs
   into memory; media backfill enqueued whole libraries and sealed them in one drain. Host mesh is

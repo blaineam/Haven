@@ -838,6 +838,10 @@ final class CallManager: NSObject, ObservableObject {
                 if state == .connected || state == .completed {
                     self.connecting = false; self.inCall = true
                     CallTones.shared.stop()   // first peer connected → stop the dialing loop
+                    // ICE/media path is up — audio session must be live or UI says Connected with silence.
+                    #if os(iOS)
+                    self.ensureWebRTCAudioLive(reason: "ice-connected", forceEnable: true)
+                    #endif
                     #if !os(macOS)
                     if self.isCaller, let provider = self.provider, let uuid = self.callUUID {
                         provider.reportOutgoingCall(with: uuid, connectedAt: nil)
@@ -891,18 +895,50 @@ final class CallManager: NSObject, ObservableObject {
         // `RTCAudioSession` / `AVAudioSession` routing is iOS/Catalyst-only; native macOS manages the
         // audio device itself and WebRTC drives it without a session.
         #if os(iOS)
-        let session = RTCAudioSession.sharedInstance()
-        session.lockForConfiguration()
-        try? session.setCategory(.playAndRecord, with: [.allowBluetoothHFP, .defaultToSpeaker])
-        try? session.setMode(.voiceChat)
-        #if targetEnvironment(macCatalyst)
-        try? session.setActive(true)
-        #endif
-        session.unlockForConfiguration()
-        #if targetEnvironment(macCatalyst)
-        session.isAudioEnabled = true
-        #endif
         installAudioSessionObservers()
+        // Configure category/mode now. WebRTC playout is gated by `isAudioEnabled` under
+        // `useManualAudio` (CallKit owns activation). Without CallKit, or if CallKit never
+        // delivers didActivate, we still must enable — field: "Connected" UI but silence both ways.
+        ensureWebRTCAudioLive(reason: "startMesh", forceEnable: !useCallKit)
+        // CallKit path: fail-open if didActivate is late/missing once media is running.
+        if useCallKit {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self, self.mediaStarted || self.inCall else { return }
+                let rtc = RTCAudioSession.sharedInstance()
+                if !rtc.isAudioEnabled {
+                    HavenLog.call("CallKit audio still disabled 1.5s after mesh — fail-open enable")
+                    self.ensureWebRTCAudioLive(reason: "callkit-timeout", forceEnable: true)
+                }
+            }
+        }
+        #endif
+    }
+
+    /// Make WebRTC capture + playout live. Safe to call repeatedly mid-call (ICE connect, recovery).
+    private func ensureWebRTCAudioLive(reason: String, forceEnable: Bool = true) {
+        #if os(iOS)
+        let rtc = RTCAudioSession.sharedInstance()
+        rtc.lockForConfiguration()
+        try? rtc.setCategory(.playAndRecord, with: [.allowBluetoothHFP, .defaultToSpeaker])
+        try? rtc.setMode(.voiceChat)
+        try? rtc.setActive(true)
+        // Default to speaker for in-app video-style calls so "connected but silent" isn't just
+        // earpiece at zero volume against the cheek — user can still toggle.
+        if !speakerOn {
+            speakerOn = true
+        }
+        try? rtc.overrideOutputAudioPort(.speaker)
+        rtc.unlockForConfiguration()
+        guard forceEnable else { return }
+        if !rtc.isAudioEnabled {
+            HavenLog.call("WebRTC audio enable (\(reason))")
+            rtc.isAudioEnabled = true
+        } else if reason.contains("recover") || reason.contains("Deactivate") || reason.contains("reset") {
+            // Bounce only on recovery paths — not every ICE "connected" tick.
+            rtc.isAudioEnabled = false
+            rtc.isAudioEnabled = true
+            HavenLog.call("WebRTC audio bounce (\(reason))")
+        }
         #endif
     }
 
@@ -1319,11 +1355,24 @@ extension CallManager: CXProviderDelegate {
         let rtc = RTCAudioSession.sharedInstance()
         rtc.audioSessionDidActivate(audioSession)
         rtc.isAudioEnabled = true
+        // Re-assert call category after CallKit hands us the session (otherwise we can stay in
+        // a silent/playback-only route and "Connected" with no hearable audio).
+        Task { @MainActor in
+            self.ensureWebRTCAudioLive(reason: "callkit-didActivate", forceEnable: true)
+        }
     }
     nonisolated func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
         let rtc = RTCAudioSession.sharedInstance()
         rtc.audioSessionDidDeactivate(audioSession)
-        rtc.isAudioEnabled = false
+        // Only mute WebRTC if the call is over — mid-call deactivation (route blip) must recover.
+        Task { @MainActor in
+            if self.active {
+                HavenLog.call("CallKit didDeactivate while active — recovering audio")
+                self.recoverCallAudio(reason: "callkit-didDeactivate")
+            } else {
+                rtc.isAudioEnabled = false
+            }
+        }
     }
 }
 #endif

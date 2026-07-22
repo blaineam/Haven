@@ -461,11 +461,24 @@ object CallManager {
         val f = ensureFactory()
         // Audio. Put the audio system into in-communication mode and route to the loudspeaker by
         // default (so a video call is hands-free); the speaker toggle flips it to the earpiece.
+        // Without MODE_IN_COMMUNICATION + speaker, ICE can show Connected while playout is silent
+        // or stuck on the earpiece at near-zero volume (iOS parity "connected but no audio").
         runCatching {
-            audioManager().mode = android.media.AudioManager.MODE_IN_COMMUNICATION
-            applySpeaker()
+            val am = audioManager()
+            am.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
+            @Suppress("DEPRECATION")
+            am.isSpeakerphoneOn = speakerOn.value
+            // Re-assert after a beat — some devices ignore the first speakerphone flip at start.
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                if (mediaStarted) applySpeaker()
+            }, 400)
         }
-        val audioSource = f.createAudioSource(MediaConstraints())
+        val audioSource = f.createAudioSource(MediaConstraints().apply {
+            // Prefer hardware AEC/NS when available (same intent as iOS googEchoCancellation*).
+            optional.add(MediaConstraints.KeyValuePair("googEchoCancellation", "true"))
+            optional.add(MediaConstraints.KeyValuePair("googAutoGainControl", "true"))
+            optional.add(MediaConstraints.KeyValuePair("googNoiseSuppression", "true"))
+        })
         audioTrack = f.createAudioTrack("haven-audio", audioSource).apply { setEnabled(micOn.value) }
         // Video (front camera).
         startCamera(f)

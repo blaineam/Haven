@@ -31,6 +31,24 @@ enum DeepLink {
 
     static func profileURL(_ nodeHex: String) -> URL? { URL(string: "haven://u/\(nodeHex)") }
 
+    /// Tap-target for a notification: DMs open the Messages thread; circle posts open the post.
+    /// Percent-encode path components so `dm:hex-hex` survives URL parsing.
+    static func interactionLink(circleId: String, postId: String? = nil) -> String {
+        let encCid = circleId.addingPercentEncoding(withAllowedCharacters: fragmentToken) ?? circleId
+        if circleId.hasPrefix("dm:") {
+            if let postId, !postId.isEmpty,
+               let encPid = postId.addingPercentEncoding(withAllowedCharacters: fragmentToken) {
+                return "haven://m/\(encCid)/\(encPid)"
+            }
+            return "haven://m/\(encCid)"
+        }
+        if let postId, !postId.isEmpty,
+           let encPid = postId.addingPercentEncoding(withAllowedCharacters: fragmentToken) {
+            return "haven://p/\(encCid)/\(encPid)"
+        }
+        return "haven://c/\(encCid)"
+    }
+
     /// The link shown in the post's share sheet — web-routed so it crosses the iOS/Android
     /// boundary and survives being pasted anywhere.
     static func postURL(circleId: String, postId: String) -> URL? {
@@ -43,10 +61,14 @@ enum DeepLink {
 enum DeepLinkRoute: Identifiable {
     case profile(nodeHex: String)
     case post(circleId: String, postId: String)
+    case dm(circleId: String, messageId: String?)
+    case circle(circleId: String)
     var id: String {
         switch self {
         case .profile(let h): return "u:\(h)"
         case .post(let c, let p): return "p:\(c):\(p)"
+        case .dm(let c, let m): return "m:\(c):\(m ?? "")"
+        case .circle(let c): return "c:\(c)"
         }
     }
 }
@@ -73,7 +95,9 @@ final class DeepLinkRouter: ObservableObject {
             return true
         }
         guard url.scheme == "haven" else { return false }
-        let parts = url.pathComponents.filter { $0 != "/" }
+        let parts = url.pathComponents.filter { $0 != "/" }.map {
+            $0.removingPercentEncoding ?? $0
+        }
         switch url.host {
         case "u":
             guard let id = parts.first, id.count >= 6 else { return true }
@@ -83,9 +107,41 @@ final class DeepLinkRouter: ObservableObject {
             guard parts.count >= 2 else { return true }
             openPost(circleId: parts[0], postId: parts[1], tab: &tab)
             return true
+        case "m":
+            // DM thread (optional message id for future scroll-to).
+            guard let cid = parts.first, cid.hasPrefix("dm:") else { return true }
+            openDM(circleId: cid, messageId: parts.count >= 2 ? parts[1] : nil, tab: &tab)
+            return true
+        case "c":
+            guard let cid = parts.first, !cid.isEmpty else { return true }
+            openCircle(circleId: cid, tab: &tab)
+            return true
         default:
             return false
         }
+    }
+
+    /// Open a DM conversation (Messages tab). Used by notification taps.
+    private func openDM(circleId: String, messageId: String?, tab: inout String) {
+        tab = "messages"
+        requestedTab = "messages"
+        DMDraftStore.shared.openThread = circleId
+        // Optional: surface a single message sheet if we have an id (parity with post links).
+        if let messageId, !messageId.isEmpty {
+            route = .dm(circleId: circleId, messageId: messageId)
+        }
+    }
+
+    /// Open a feed circle (Circle tab). Used when a notification only carries the circle id.
+    private func openCircle(circleId: String, tab: inout String) {
+        FeedStore.shared.setActiveCircle(circleId)
+        tab = "circle"
+        requestedTab = "circle"
+        if CircleSettingsStore.shared.biometricRequired(circleId),
+           !BiometricGate.shared.unlocked.contains(circleId) {
+            BiometricGate.shared.unlock(circleId)
+        }
+        route = .circle(circleId: circleId)
     }
 
     /// Pull `p/<circle>.<post>` out of an https link's fragment. Anything else (an invite's

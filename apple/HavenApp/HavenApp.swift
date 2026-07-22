@@ -136,7 +136,14 @@ final class HavenAppDelegate: NSObject, NSApplicationDelegate {
             let title = locked ? "Haven" : ((obj["t"] as? String) ?? "Haven")
             let fallbackBody = isCall ? "📞 Incoming call — open Haven to answer" : "New message"
             let body = locked ? "New activity in a locked circle" : ((obj["b"] as? String) ?? fallbackBody)
-            Task { @MainActor in NotificationManager.shared.notify(title: title, body: body, dedupeKey: e) }
+            let deep: String? = {
+                guard let c = obj["c"] as? String, !c.isEmpty else { return nil }
+                let p = obj["p"] as? String
+                return DeepLink.interactionLink(circleId: c, postId: p)
+            }()
+            Task { @MainActor in
+                NotificationManager.shared.notify(title: title, body: body, dedupeKey: e, deepLink: deep)
+            }
         } else if isCall {
             // Call doorbell we couldn't decrypt (it's sealed+signed for the PushKit opener) —
             // still surface SOMETHING rather than staying silent.
@@ -361,6 +368,15 @@ struct RootView: View {
                 }
             case .post(let circleId, let postId):
                 PostLinkView(circleId: circleId, postId: postId)
+            case .dm(let circleId, let messageId):
+                // Notification tap into a DM — open the thread (and optionally the specific message).
+                if let messageId, !messageId.isEmpty {
+                    PostLinkView(circleId: circleId, postId: messageId)
+                } else {
+                    EmptyView()   // Messages tab already opened the thread via DMDraftStore
+                }
+            case .circle:
+                EmptyView()   // Circle tab already switched via setActiveCircle
             }
         }
     }

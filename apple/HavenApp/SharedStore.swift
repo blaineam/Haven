@@ -1487,6 +1487,55 @@ enum SharedStore {
         return out
     }
 
+    /// Publish a sealed frame-19 relay announce into the circle mailbox so friends who miss live
+    /// iroh still learn the relay over HTTP LIST/GET. Content-addressed (payload hash) so a rotated
+    /// free-CF URL is a new key rather than stuck behind a seen cursor.
+    static func putRelayAnnounce(circleId: String, nodeHex: String, payload: Data) async {
+        guard !circleId.isEmpty, nodeHex.count == 64, !payload.isEmpty else { return }
+        let h = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
+        let key = "haven/mailbox/\(circleId)/__relay__/\(nodeHex.lowercased())/\(h)"
+        if seenContains(key) { return }   // this exact announce already landed
+        var landed = false
+        for node in relayNodes(circleId) {
+            if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
+                _ = RelayHost.shared.localPut(key, payload)
+                landed = true
+                continue
+            }
+            if let http = RelayMailboxStore.shared.httpInterface(node) {
+                for base in http.urls where !httpUrlBad(base) {
+                    switch await httpPut(base, http.token, key, payload) {
+                    case .success:
+                        RelayHealth.shared.recordSuccess(node)
+                        RelayMailboxStore.shared.markSeen(node)
+                        landed = true
+                    case .failure(is RelayForbidden):
+                        noteRefused(node, "relay announce put")
+                        RelayHealth.shared.recordSuccess(node)
+                    case .failure:
+                        markHttpUrlBad(base)
+                    }
+                    if landed { break }
+                }
+            }
+            if landed { break }
+            guard let c = await RelayClients.client(node) else { continue }
+            do {
+                try await c.put(key: key, data: payload)
+                RelayHealth.shared.recordSuccess(node)
+                RelayMailboxStore.shared.markSeen(node)
+                landed = true
+            } catch {
+                RelayHealth.shared.recordFailure(node)
+            }
+            if landed { break }
+        }
+        if landed {
+            markSeen(key)
+            HavenLog.relay("relay announce mailbox put circle=\(circleId.prefix(12)) node=\(nodeHex.prefix(8))")
+        }
+    }
+
     /// Drop a sealed event envelope into the circle's mailbox (idempotent). Returns whether it
     /// is now safely in the mailbox (already present or just uploaded) — the background uploader
     /// uses this to know when to stop retrying. We only mark a key "seen" on success, so a

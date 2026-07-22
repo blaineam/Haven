@@ -60,6 +60,12 @@ final class NotificationService: UNNotificationServiceExtension {
             if let thread = decoded.threadId, !thread.isEmpty {
                 best.threadIdentifier = thread
             }
+            // Tap → open the conversation / post (app routes via NotificationTapRouter).
+            if let link = decoded.deepLink, !link.isEmpty {
+                var info = best.userInfo
+                info["havenDeepLink"] = link
+                best.userInfo = info
+            }
             // iOS 15+ ignores summaryArgument / summaryArgumentCount — threadIdentifier above
             // is what groups the stack. Kind labels stay available via SharedNotificationPrivacy.
             _ = decoded.kind
@@ -141,7 +147,9 @@ final class NotificationService: UNNotificationServiceExtension {
         }
         return Decoded(title: "Haven", fullBody: "New activity in a locked circle",
                        privateBody: "New activity in a locked circle",
-                       kind: "locked", emoji: nil, threadId: circleId, redactedForLock: true)
+                       kind: "locked", emoji: nil, threadId: circleId,
+                       deepLink: deepLink(circleId: circleId, postId: nil),
+                       redactedForLock: true)
     }
 
     override func serviceExtensionTimeWillExpire() {
@@ -158,13 +166,36 @@ final class NotificationService: UNNotificationServiceExtension {
         let kind: String?
         let emoji: String?
         let threadId: String?
+        /// `haven://…` route for notification tap (Messages thread / post).
+        let deepLink: String?
         var redactedForLock: Bool = false
         /// Convenience when already fully redacted (locked circle / call).
         var body: String { fullBody }
     }
 
+    /// Build a tap route from banner fields. Mirror of `DeepLink.interactionLink` (NSE can't
+    /// import the app target) — keep encodings in sync.
+    private static func deepLink(circleId: String?, postId: String?) -> String? {
+        guard let circleId, !circleId.isEmpty else { return nil }
+        let allowed = CharacterSet(charactersIn:
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_~")
+        let encCid = circleId.addingPercentEncoding(withAllowedCharacters: allowed) ?? circleId
+        if circleId.hasPrefix("dm:") {
+            if let postId, !postId.isEmpty,
+               let encPid = postId.addingPercentEncoding(withAllowedCharacters: allowed) {
+                return "haven://m/\(encCid)/\(encPid)"
+            }
+            return "haven://m/\(encCid)"
+        }
+        if let postId, !postId.isEmpty,
+           let encPid = postId.addingPercentEncoding(withAllowedCharacters: allowed) {
+            return "haven://p/\(encCid)/\(encPid)"
+        }
+        return "haven://c/\(encCid)"
+    }
+
     /// The sealed payload is a tiny JSON object:
-    /// - Message/post: `{ "t", "b", "bp"?, "c", "k"?, "e"? }` — built by `PushBanner`.
+    /// - Message/post: `{ "t", "b", "bp"?, "c", "k"?, "e"?, "p"? }` — built by `PushBanner`.
     /// - Call fallback: `{ "t": <caller name>, "h": <caller hex> }` — no `b`.
     private static func decode(_ data: Data) -> Decoded? {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
@@ -173,12 +204,13 @@ final class NotificationService: UNNotificationServiceExtension {
         let kind = obj["k"] as? String
         let emoji = obj["e"] as? String
         let circleId = obj["c"] as? String
+        let postId = obj["p"] as? String
         let privateBody = obj["bp"] as? String
         // Call payload: no body, has peer hex.
         if obj["b"] == nil, obj["h"] is String {
             return Decoded(title: title, fullBody: "📞 Incoming call — open Haven to answer",
                            privateBody: "Incoming call",
-                           kind: "call", emoji: nil, threadId: obj["h"] as? String)
+                           kind: "call", emoji: nil, threadId: obj["h"] as? String, deepLink: nil)
         }
         var full = (obj["b"] as? String) ?? "New message"
         if full.isEmpty, let kind {
@@ -186,7 +218,8 @@ final class NotificationService: UNNotificationServiceExtension {
         }
         let thread = circleId ?? kind
         return Decoded(title: title, fullBody: full, privateBody: privateBody,
-                       kind: kind, emoji: emoji, threadId: thread)
+                       kind: kind, emoji: emoji, threadId: thread,
+                       deepLink: deepLink(circleId: circleId, postId: postId))
     }
 
     private static func fallbackBody(kind: String, emoji: String?) -> String {

@@ -2347,14 +2347,20 @@ final class FeedStore: ObservableObject {
         // BOUNDED, deliberately: only when I actually have other devices, at most 50 events per
         // circle, and no more than every 5 minutes — this re-seals per envelope, so it is real CPU
         // and must not ride the 20s tick. Siblings dedupe, so a repeat sweep is harmless.
-        if nowMs - lastOwnDeviceCatchupMs > 300_000, !myOtherDeviceTargets().isEmpty {
+        // Linked-device catch-up: 90s while hosting (Mac relay is often the device that has the
+        // message the phone is missing); 3 min otherwise. Was 5 min — two newest Mac DMs could sit
+        // on the host until the next slow sweep while the phone only saw older history.
+        let catchupEvery: UInt64 = RelayHost.shared.serving ? 90_000 : 180_000
+        if nowMs - lastOwnDeviceCatchupMs > catchupEvery, !myOtherDeviceTargets().isEmpty {
             lastOwnDeviceCatchupMs = nowMs
             let cidsForDevices = circles.map(\.id)
             Task.detached(priority: .utility) { [weak self, social] in
                 var work: [(String, [Data])] = []
                 for cid in cidsForDevices {
                     // ALL authors — the point is my friends' messages that reached one device only.
-                    let envs = social.exportRecentEnvelopes(circleId: cid, limit: 50)
+                    // Prefer the newest slice: 50 was fine for history; 24 keeps the push budget
+                    // small when we also silent-syncSelf the freshest ones below.
+                    let envs = social.exportRecentEnvelopes(circleId: cid, limit: 24)
                     if !envs.isEmpty { work.append((cid, envs)) }
                 }
                 let workFinal = work
@@ -2362,6 +2368,11 @@ final class FeedStore: ObservableObject {
                     guard let self else { return }
                     for (cid, envs) in workFinal {
                         self.liveDeliverManyToMyDevices(1, envs.map { self.eventPayload(cid, $0) })
+                        // iroh live only reaches an awake sibling. Sleeping/cellular iPhone needs
+                        // silent APNs self-sync for the newest few (same hole as mailbox ingest).
+                        for env in envs.suffix(6) where env.count < 3_500 {
+                            PushManager.shared.syncSelf(event: env.base64EncodedString())
+                        }
                     }
                 }
             }
@@ -2413,13 +2424,15 @@ final class FeedStore: ObservableObject {
             // Active relays for the circle (adopted external + all-circles default) plus the relay
             // THIS device hosts. Skip s3: pseudo-relays — those share via the S3-config frame, and
             // handleRelayNode expects a 64-hex node id.
-            // ONLY announce relays WE have proof of life for (a successful op within 5 min) or the
-            // one we host. Re-announcing everything we'd ever LEARNED turned dead relay ids into a
-            // permanent echo: every member kept re-broadcasting them, receivers reactivated them
-            // (announce = "the owner says it's back"), and media paths burned timeouts on ghosts.
-            // A live relay is re-proven constantly by the 20s mailbox poll, so this gates nothing real.
-            var hexes = RelayMailboxStore.shared.relays(forCircle: ci.id).filter {
-                !$0.hasPrefix("s3:") && RelayHealth.shared.provenAlive($0, withinMs: 300_000)
+            // Prefer proven-alive relays, BUT also re-announce any with a public HTTPS media URL.
+            // Free trycloudflare flaps made provenAlive false on the phone while the Mac host was
+            // fine — then nobody re-announced, and friends (iroh-unreachable) never learned the
+            // relay at all ("I'm not connected to any relays" while the owner sees them all on).
+            var hexes = RelayMailboxStore.shared.relays(forCircle: ci.id).filter { hex in
+                guard !hex.hasPrefix("s3:") else { return false }
+                if RelayHealth.shared.provenAlive(hex, withinMs: 300_000) { return true }
+                let urls = RelayMailboxStore.shared.httpInterface(hex)?.urls ?? []
+                return urls.contains { $0.hasPrefix("https://") && RelayMailboxStore.urlReachableByOthers($0) }
             }
             if RelayHost.shared.serving, RelayHost.shared.nodeId.count == 64,
                !hexes.contains(RelayHost.shared.nodeId) {
@@ -2434,6 +2447,10 @@ final class FeedStore: ObservableObject {
                 nearbyBroadcast(19, p)
                 for m in members { sendIroh(19, p, to: m) }
                 originateRelay(dests: members, inner: frame(19, p))
+                // Durable path: friends who miss live iroh still LIST the mailbox over HTTP and
+                // learn the relay (same shape as __hello__). Content-addressed key so a rotated
+                // free-CF URL publishes a NEW key rather than leaving friends stuck on a seen cursor.
+                Task { await SharedStore.putRelayAnnounce(circleId: ci.id, nodeHex: hex, payload: p) }
             }
         }
     }
@@ -2664,17 +2681,17 @@ final class FeedStore: ObservableObject {
         let msgs = await SharedStore.pollMailbox(circleIds: ids)
         guard !msgs.isEmpty else { return }
         let me = social.myNodeHex().lowercased()
-        // Control plane first: HELLOs (membership), then key commits / device rosters (0x03/0x04),
-        // then content events. LIST order is a filesystem walk — flat event blobs often precede
-        // the commits that open them; without this sort a linked host buffers hundreds of events
-        // and only learns the epoch key on a later poll (or never, if the commit was marked seen
-        // while unopenable — see forgetSeenPrefix recovery below).
+        // Control plane first: HELLOs, durable relay announces (__relay__), key commits / rosters,
+        // then content. LIST order is a filesystem walk — without this sort a linked host buffers
+        // hundreds of events before the commit that opens them.
         var helloIngested = false
+        var relayIngested = false
         func controlRank(_ key: String, _ data: Data) -> Int {
             if key.contains("/__hello__/") { return 0 }
+            if key.contains("/__relay__/") { return 1 }
             switch data.first {
-            case 0x03, 0x04: return 1   // key commit / device roster
-            default: return 2
+            case 0x03, 0x04: return 2   // key commit / device roster
+            default: return 3
             }
         }
         let sorted = msgs.sorted { a, b in
@@ -2691,7 +2708,14 @@ final class FeedStore: ObservableObject {
             helloIngested = true
             HavenLog.net("hello http-ingest circle=\(cid.prefix(12))")
         }
-        let content = sorted.filter { !$0.1.contains("/__hello__/") }
+        // Durable frame-19: friends who can't iroh-dial the host still learn the relay + public
+        // media URL from the mailbox ("no available relays" while the owner sees them all on).
+        for (_, key, data) in sorted where key.contains("/__relay__/") {
+            handleRelayNode(data)
+            SharedStore.markSeenPublic(key)
+            relayIngested = true
+        }
+        let content = sorted.filter { !$0.1.contains("/__hello__/") && !$0.1.contains("/__relay__/") }
         // receive() does real crypto per envelope; a backlog drain used to run the whole loop on
         // the main actor and freeze the UI for the duration. Ingest the batch off-main, then hop
         // back once with the circles that changed. Keep the NEW envelopes so we can fan them out
@@ -2737,6 +2761,7 @@ final class FeedStore: ObservableObject {
         // random-non-delivery failure). Cheap: msgs is only non-empty when the mailbox served bytes.
         persist()
         if helloIngested { refresh(); syncWithContacts() }
+        if relayIngested { objectWillChange.send() }   // Storage / circle relay chips re-read the store
         guard !ingested.isEmpty else {
             // Key-commit-only pass: still refresh so a recovering linked host paints newly unlocked
             // history as the next poll drains re-queued events.
@@ -4931,12 +4956,14 @@ final class FeedStore: ObservableObject {
         // A biometric-locked circle must not spill its content (or even who/where) onto the lock
         // screen — mirror the NSE's redaction for this in-process notification path too.
         if CircleSettingsStore.shared.biometricRequired(circleId) {
-            NotificationManager.shared.notify(title: "Haven", body: "New activity", dedupeKey: newest.id)
+            NotificationManager.shared.notify(title: "Haven", body: "New activity", dedupeKey: newest.id,
+                                              deepLink: DeepLink.interactionLink(circleId: circleId, postId: newest.id))
             return
         }
         let body = newest.story ? "shared a story" : (newest.body.isEmpty ? "sent you media" : newest.body)
         let title = circleId.hasPrefix("dm:") ? name : "\(name) in your circle"
-        NotificationManager.shared.notify(title: title, body: body, dedupeKey: newest.id)
+        NotificationManager.shared.notify(title: title, body: body, dedupeKey: newest.id,
+                                          deepLink: DeepLink.interactionLink(circleId: circleId, postId: newest.id))
     }
 }
 

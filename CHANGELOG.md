@@ -225,6 +225,20 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Linked iPhone missing newest Mac messages.** Own-device catch-up was iroh-only every 5 min.
+  Host Mac now re-pushes the newest envelopes over silent APNs self-sync as well, on a 90s
+  cadence while hosting (3 min otherwise).
+
+- **Friends saw no available relays while the host showed them all enabled.** Frame-19 re-announce
+  required proof-of-life within 5 min, so free-CF DNS flaps on the phone stopped re-advertising
+  a live Mac host. Relays with a public HTTPS URL are announced even without a recent local proof,
+  and announces are also written to the mailbox under `__relay__/` so friends learn them over HTTP
+  LIST when iroh dial fails.
+
+- **Notification taps only raised the app.** Local + remote notifications now carry a deep link
+  (`haven://m/…` for DMs, `haven://p/…` for posts, `haven://c/…` for circles) so a tap opens the
+  interaction directly.
+
 - **Mac TestFlight builds silently had no push entitlement.** Native Mac App Store profiles grant
   APNs under `com.apple.developer.aps-environment`; the Mac entitlements file used the iOS short
   key `aps-environment`. codesign intersects by name and dropped push entirely (profile had

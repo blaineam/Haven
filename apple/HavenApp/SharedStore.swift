@@ -1305,13 +1305,53 @@ enum SharedStore {
     /// Public so FeedStore can mark HELLO/event keys after successful ingest only.
     nonisolated static func markSeenPublic(_ key: String) { markSeen(key) }
 
-    nonisolated private static func markSeen(_ key: String) {
-        let scheduleSave: Bool = withSeen { set in
-            guard set.insert(key).inserted, !seenSavePending else { return false }
+    /// Drop seen-cursor entries under a mailbox circle prefix so a later poll re-GETs them.
+    /// Used when a newly-opened key commit must re-drain epoch events that were marked seen while
+    /// unopenable (linked-host recovery: Mac had the blobs on disk but never the peer epoch key).
+    nonisolated static func forgetSeenPrefix(_ prefix: String) {
+        let removed: Int = withSeen { set in
+            let before = set.count
+            set = set.filter { !$0.hasPrefix(prefix) || $0.contains("/__live__/") }
+            return before - set.count
+        }
+        if removed > 0 {
+            HavenLog.relay("mailbox seen: forgot \(removed) keys under \(prefix.prefix(48))")
+            scheduleSeenSave()
+        }
+    }
+
+    /// One-shot recovery for linked Mac hosts: DM mailbox keys that were marked seen while the
+    /// device still lacked peer epoch keys (or under older mark-at-fetch races) stay forever
+    /// skipped — iPhone (primary / push path) shows mom's activity; Mac store holds the blobs
+    /// but the feed never re-opens them. Forget DM content seen-cursors once so control plane
+    /// (key commits) and events re-drain under the durable pending buffer. Idempotent via defaults.
+    @MainActor static func repairLinkedHostMailboxSeenOnce() {
+        let flag = "haven.repair.linkedHostMailbox.v1"
+        guard !UserDefaults.standard.bool(forKey: flag) else { return }
+        UserDefaults.standard.set(true, forKey: flag)
+        let removed: Int = withSeen { set in
+            let before = set.count
+            set = set.filter { key in
+                // Keep non-DM and live-call frames; drop DM content + hellos so commits re-apply.
+                if !key.contains("/dm:") && !key.contains("/dm%3A") { return true }
+                if key.contains("/__live__/") { return true }
+                return false
+            }
+            return before - set.count
+        }
+        if removed > 0 {
+            HavenLog.relay("mailbox seen: linked-host repair forgot \(removed) DM keys")
+            scheduleSeenSave()
+        }
+    }
+
+    nonisolated private static func scheduleSeenSave() {
+        let schedule: Bool = withSeen { _ in
+            guard !seenSavePending else { return false }
             seenSavePending = true
             return true
         }
-        guard scheduleSave else { return }
+        guard schedule else { return }
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
             let snapshot: String = withSeen { set in
                 seenSavePending = false
@@ -1319,6 +1359,11 @@ enum SharedStore {
             }
             try? snapshot.write(to: seenURL, atomically: true, encoding: .utf8)
         }
+    }
+
+    nonisolated private static func markSeen(_ key: String) {
+        let inserted: Bool = withSeen { set in set.insert(key).inserted }
+        if inserted { scheduleSeenSave() }
     }
 
     /// Wipe the persisted seen-set — identity reset/adoption must not inherit the old identity's
@@ -1633,11 +1678,34 @@ enum SharedStore {
                         // the UI, per circle. Fast enough to hide on an M4; not on an M1 with a real
                         // store behind it. The seen-set is NSLock-guarded and always was — it just
                         // wasn't declared callable from off the main actor.
-                        let scan: (all: Int, fresh: [String]) = await Task.detached(priority: .utility) {
-                            let all = host.localList(prefix)
-                            return (all.count, all.filter { !seenContains($0) })
+                        //
+                        // LINKED-HOST RECOVERY: also re-offer a bounded set of already-seen *control*
+                        // envelopes (key commits 0x03, device rosters 0x04). A Mac hosting the relay
+                        // can mark those seen before it can open them (roster lag / dual-open race /
+                        // older mark-at-fetch), leave peer_epoch_keys empty, and then never retry —
+                        // while the iPhone (linked, push-capable) decrypts the same traffic fine.
+                        // Cap keeps the retry cheap; once keys land, receive returns false for
+                        // duplicates and we stop thrashing.
+                        let scan: (all: Int, want: [String]) = await Task.detached(priority: .utility) {
+                            let all = host.localList(prefix).filter { !$0.contains("/__live__/") }
+                            var want = all.filter { !seenContains($0) }
+                            // Re-probe seen control-plane keys (bounded). Prefer unread first.
+                            // Cap both hits and files inspected so a fat circle (thousands of
+                            // already-seen event blobs) does not re-read the whole store every poll.
+                            var controlBudget = 48
+                            var seenScanned = 0
+                            for key in all where seenContains(key) && controlBudget > 0 && seenScanned < 300 {
+                                seenScanned += 1
+                                guard let data = host.localGet(key), let tag = data.first else { continue }
+                                // 0x03 = key commit, 0x04 = device roster — must land before events.
+                                if tag == 0x03 || tag == 0x04 {
+                                    want.append(key)
+                                    controlBudget -= 1
+                                }
+                            }
+                            return (all.count, want)
                         }.value
-                        var fresh = scan.fresh
+                        var fresh = scan.want
                         let localKeys = scan.all
                         // BOUND the pass. On a freshly-enabled relay nothing is in the seen-set, so
                         // "fresh" is the WHOLE store — thousands of envelopes — and this loop used to

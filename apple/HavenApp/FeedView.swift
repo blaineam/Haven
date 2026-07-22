@@ -416,6 +416,11 @@ final class FeedStore: ObservableObject {
     private func startMailboxPolling() {
         mailboxTimer?.invalidate()
         liveCallTimer?.invalidate()
+        // Linked Mac host recovery: re-queue DM mailbox keys that were stuck "seen" with no peer keys.
+        // Also force a self-sync pass so device rosters / circle state from the primary land before
+        // we re-open the re-queued commits (linked seedless Mac often needs the primary's roster).
+        SharedStore.repairLinkedHostMailboxSeenOnce()
+        forceSelfSyncNextPoll()
         pollMailboxNow()
         // 10s heartbeat, but the actual poll only runs when due (30s base, stretching when idle).
         #if os(iOS)
@@ -2659,13 +2664,21 @@ final class FeedStore: ObservableObject {
         let msgs = await SharedStore.pollMailbox(circleIds: ids)
         guard !msgs.isEmpty else { return }
         let me = social.myNodeHex().lowercased()
-        // HELLOs over HTTP mailbox first (membership / keys before content).
-        // LIST order is filesystem walk — flat blobs often precede __hello__/ subdirs.
+        // Control plane first: HELLOs (membership), then key commits / device rosters (0x03/0x04),
+        // then content events. LIST order is a filesystem walk — flat event blobs often precede
+        // the commits that open them; without this sort a linked host buffers hundreds of events
+        // and only learns the epoch key on a later poll (or never, if the commit was marked seen
+        // while unopenable — see forgetSeenPrefix recovery below).
         var helloIngested = false
+        func controlRank(_ key: String, _ data: Data) -> Int {
+            if key.contains("/__hello__/") { return 0 }
+            switch data.first {
+            case 0x03, 0x04: return 1   // key commit / device roster
+            default: return 2
+            }
+        }
         let sorted = msgs.sorted { a, b in
-            let ah = a.1.contains("/__hello__/"); let bh = b.1.contains("/__hello__/")
-            if ah != bh { return ah && !bh }
-            return false
+            controlRank(a.1, a.2) < controlRank(b.1, b.2)
         }
         for (cid, key, data) in sorted where key.contains("/__hello__/") {
             let parts = key.split(separator: "/").map(String.init)
@@ -2685,16 +2698,38 @@ final class FeedStore: ObservableObject {
         // to my other linked devices (handleEvent already does this for live/iroh delivery — mailbox
         // was the hole: a friend's post landed on whichever of my devices polled first and never
         // reached the rest when their mailbox auth/relay set differed).
-        let ingested: [(circleId: String, envelope: Data)] = await Task.detached(priority: .utility) {
+        let batch: (ingested: [(circleId: String, envelope: Data)],
+                    controlKeys: [String: [String]],
+                    unlockedCircles: Set<String>) = await Task.detached(priority: .utility) {
             var changed: [(String, Data)] = []
+            var controlKeys: [String: [String]] = [:]
+            var unlocked = Set<String>()
             for (cid, key, env) in content {
                 if (try? social.receive(circleId: cid, envelope: env)) == true {
                     SharedStore.markSeenPublic(key)
                     changed.append((cid, env))
+                    // Key commit (0x03) or roster (0x04) that actually changed state — peer keys
+                    // may now open events that were previously marked seen while unopenable.
+                    if let tag = env.first, tag == 0x03 || tag == 0x04 {
+                        controlKeys[cid, default: []].append(key)
+                        if tag == 0x03 { unlocked.insert(cid) }
+                    }
                 }
             }
-            return changed
+            return (changed, controlKeys, unlocked)
         }.value
+        let ingested = batch.ingested
+        // After a NEW key commit lands, re-queue that circle's mailbox content (except the control
+        // keys we just applied). Older builds / mark-at-fetch races left epoch events "seen" with
+        // no peer_epoch_keys — classic linked-Mac-host symptom: iPhone has mom's DMs, Mac store
+        // holds hundreds of sealed blobs, feed stays empty.
+        if !batch.unlockedCircles.isEmpty {
+            for cid in batch.unlockedCircles {
+                SharedStore.forgetSeenPrefix("haven/mailbox/\(cid)/")
+                for k in batch.controlKeys[cid] ?? [] { SharedStore.markSeenPublic(k) }
+            }
+            HavenLog.relay("mailbox: re-open \(batch.unlockedCircles.count) circle(s) after key commit")
+        }
         // Persist whenever we ran ANY receive: an envelope that only BUFFERED (event arrived before
         // its key commit / the sender's roster) mutated the now-durable pending_epoch buffer, and the
         // mailbox already marked its key seen at fetch time — so if we don't save the engine state
@@ -2702,7 +2737,12 @@ final class FeedStore: ObservableObject {
         // random-non-delivery failure). Cheap: msgs is only non-empty when the mailbox served bytes.
         persist()
         if helloIngested { refresh(); syncWithContacts() }
-        guard !ingested.isEmpty else { return }
+        guard !ingested.isEmpty else {
+            // Key-commit-only pass: still refresh so a recovering linked host paints newly unlocked
+            // history as the next poll drains re-queued events.
+            if !batch.unlockedCircles.isEmpty { refresh() }
+            return
+        }
         bumpActivity()   // a message arrived → keep sync tight while the conversation is live
         var dmIngested = false
         var dmCircles = Set<String>()
@@ -4794,6 +4834,12 @@ final class FeedStore: ObservableObject {
                     if !viaNearby {
                         self.nearbyBroadcast(1, payload, class: .bulk)
                     }
+                    // Linked-device push path: iroh live-deliver reaches an awake Mac, but a Mac that
+                    // is only hosting in the background (or whose APNs silent path is flaky) still
+                    // needs the sealed event inline on a content-available push. Mailbox poll already
+                    // does this; live contact delivery was the remaining hole for
+                    // "iPhone got mom's notification, linked Mac stayed empty".
+                    PushManager.shared.syncSelf(event: envelope.base64EncodedString())
                 }
                 // Hearing a message is proof of life — refresh "last seen" for a DM's partner.
                 if circleId.hasPrefix("dm:"), let partner = self.dmPartnerHex(circleId) { self.recordHeard(partner) }
@@ -4801,7 +4847,12 @@ final class FeedStore: ObservableObject {
                 self.scheduleRefresh()             // coalesced feed rebuild
                 self.scheduleRequestMissingMedia() // coalesced media pull (scans the whole feed)
                 self.notifyNewest(in: circleId)
-                self.bumpUnseen(circleId)
+                if circleId.hasPrefix("dm:") {
+                    self.recomputeUnreadDMs()
+                    self.requestMissingDMMedia(circleId)
+                } else {
+                    self.bumpUnseen(circleId)
+                }
             }
         }
     }

@@ -225,6 +225,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Linked Mac host showed none of mom's activity while the iPhone got every notification.** The
+  Mac was serving the relay and held hundreds of sealed DM blobs on disk, but peer epoch keys never
+  stuck (or key commits were marked "seen" while still unopenable), so the feed never re-opened them.
+  Host mailbox poll now re-tries key commits / device rosters even when already seen, prefers control
+  plane before content, and after a newly opened key commit forgets that circle's seen cursor so
+  events re-drain. One-shot linked-host repair clears stuck DM seen-cursors. Live contact delivery
+  also `syncSelf`s to other linked devices (not only mailbox ingest / own sends), and DM live receive
+  updates the Messages badge.
+
 - **Friend DMs reached the host Mac but not a linked iPhone.** Mailbox poll on the host already
   live-delivered over iroh, but a sleeping or cellular phone often missed that path and only learned
   events via HTTP poll (flaky free Cloudflare DNS) or a silent APNs self-sync that only ran for

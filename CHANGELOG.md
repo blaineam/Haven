@@ -32,6 +32,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Matrix QA now attaches real photo/video media** (DEBUG). iOS `qa-cmd` / Android intents accept
+  `media=photo|video` plus optional fixture paths; synthetic JPEG and 1s H.264 fixtures live under
+  `Scripts/fixtures/`. Bidirectional `qa-peer-bundle` ingest seeds contacts without HELLO dial.
+  Author-side post/story/DM with `img_`/`vid_`/`poster:` refs proven green on sim+emu; cross-device
+  restore still needs a membership-authorized relay (stub REFUSED until roster lands).
+
 - **Call shows Connected but no audio (iOS + Android).** ICE can complete while WebRTC playout stays
   off: iOS used CallKit `useManualAudio` with `isAudioEnabled=false` until `didActivate`, and if that
   never arrived (or arrived after media) the UI said Connected with silence both ways. Now enable

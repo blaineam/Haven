@@ -1,8 +1,15 @@
 import SwiftUI
 import AVKit
 import AVFoundation
+import CoreVideo
 import UniformTypeIdentifiers
 import CryptoKit
+#if canImport(UIKit)
+import UIKit
+#endif
+#if canImport(AppKit)
+import AppKit
+#endif
 
 /// Short relative time ("now", "5m", "3h", "2d") from a unix-millis SENT timestamp —
 /// so people see when something was sent, not when it reached them.
@@ -1365,6 +1372,8 @@ final class FeedStore: ObservableObject {
                         HavenLog.net("qa-my-bundle written bytes=\(b.count) name=\(name)")
                     }
                 }
+                // Ingest staged Android peer bundle (driver copies qa-peer-bundle.bin into App Support).
+                self.ingestQaPeerBundle()
                 // One delayed ticket snapshot for diagnostics — not a multi-probe heat loop.
                 Task {
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
@@ -1636,23 +1645,57 @@ final class FeedStore: ObservableObject {
             HavenLog.net("matrix-qa deferred — social not ready")
             return
         }
-        if let body = items["post"], !body.isEmpty {
-            post(body)
-            HavenLog.net("matrix-qa post body=\(body.prefix(40))")
+        // Media attach: `media=photo|video` and/or `photo_path` / `video_path` (absolute file).
+        // Text-only when media is absent. Video prepare is async so those paths hop a Task.
+        let mediaKind = (items["media"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let photoPath = (items["photo_path"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let videoPath = (items["video_path"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let wantsMedia = mediaKind == "photo" || mediaKind == "video"
+            || !photoPath.isEmpty || !videoPath.isEmpty
+
+        let publish: ([String]) -> Void = { [weak self] refs in
+            guard let self else { return }
+            if let body = items["post"], !body.isEmpty {
+                self.post(body, media: refs)
+                HavenLog.net("matrix-qa post body=\(body.prefix(40)) media=\(refs.map { $0.prefix(12) }.joined(separator: ","))")
+            }
+            if let body = items["story"], !body.isEmpty {
+                if refs.isEmpty {
+                    self.post(body, media: [], music: nil, retentionSecs: 86_400, story: true)
+                } else {
+                    self.postStory(media: refs, caption: body)
+                }
+                HavenLog.net("matrix-qa story body=\(body.prefix(40)) media=\(refs.map { $0.prefix(12) }.joined(separator: ","))")
+            }
+            let dmTo = (items["dm_to"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let dmBody = items["dm"] ?? ""
+            if dmTo.count == 64, !dmBody.isEmpty {
+                let name = ContactsStore.shared.name(forNodePrefix: dmTo) ?? "Friend"
+                let cid = self.startDM(with: dmTo, name: name)
+                // Author into the DM circle only (not the active feed circle).
+                if let social = self.social,
+                   let env = try? social.post(circleId: cid, body: dmBody, media: refs, music: nil,
+                                              retentionSecs: nil, story: false, muteVideo: false, createdAt: self.now()) {
+                    self.broadcastEvent(cid, env)
+                    for r in refs { MediaBackupQueue.shared.enqueue(r, circleId: cid, social: social) }
+                    self.persist(); self.refresh()
+                }
+                HavenLog.net("matrix-qa dm to=\(dmTo.prefix(8)) circle=\(cid.prefix(24)) body=\(dmBody.prefix(40)) media=\(refs.count)")
+            }
         }
-        // Text-only story matches Android DEBUG postStory(body, null) — state story=true.
-        if let body = items["story"], !body.isEmpty {
-            post(body, media: [], music: nil, retentionSecs: 86_400, story: true)
-            HavenLog.net("matrix-qa story body=\(body.prefix(40))")
+
+        if wantsMedia {
+            Task { @MainActor in
+                let refs = await Self.qaBuildMediaRefs(photoPath: photoPath, videoPath: videoPath, kind: mediaKind)
+                if refs.isEmpty {
+                    HavenLog.net("matrix-qa media FAILED — no refs from kind=\(mediaKind) photo=\(photoPath.prefix(40)) video=\(videoPath.prefix(40))")
+                }
+                publish(refs)
+            }
+        } else {
+            publish([])
         }
-        let dmTo = (items["dm_to"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let dmBody = items["dm"] ?? ""
-        if dmTo.count == 64, !dmBody.isEmpty {
-            let name = ContactsStore.shared.name(forNodePrefix: dmTo) ?? "Friend"
-            let cid = startDM(with: dmTo, name: name)
-            post(dmBody, toCircle: cid)
-            HavenLog.net("matrix-qa dm to=\(dmTo.prefix(8)) circle=\(cid.prefix(24)) body=\(dmBody.prefix(40))")
-        }
+
         let callTo = (items["call_to"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if callTo.count == 64 {
             let name = ContactsStore.shared.name(forNodePrefix: callTo) ?? "Friend"
@@ -1668,9 +1711,131 @@ final class FeedStore: ObservableObject {
             HavenLog.net("matrix-qa call_hangup")
         }
     }
+
+    /// Build media refs for matrix QA from paths and/or synthetic fixtures (no camera/picker).
+    private static func qaBuildMediaRefs(photoPath: String, videoPath: String, kind: String) async -> [String] {
+        var refs: [String] = []
+        if !photoPath.isEmpty, let img = PlatformImage(contentsOfFile: photoPath) {
+            refs.append(MediaStore.shared.addImage(img))
+            HavenLog.net("matrix-qa photo_path → \(refs.last?.prefix(16) ?? "?")")
+        } else if kind == "photo" {
+            #if os(iOS)
+            let renderer = UIGraphicsImageRenderer(size: CGSize(width: 640, height: 480))
+            let img = renderer.image { ctx in
+                UIColor(red: 0.12, green: 0.56, blue: 1.0, alpha: 1).setFill()
+                ctx.fill(CGRect(x: 0, y: 0, width: 640, height: 480))
+                let s = "HavenQA" as NSString
+                s.draw(at: CGPoint(x: 200, y: 220), withAttributes: [
+                    .font: UIFont.boldSystemFont(ofSize: 48),
+                    .foregroundColor: UIColor.white,
+                ])
+            }
+            refs.append(MediaStore.shared.addImage(img))
+            #else
+            let img = NSImage(size: NSSize(width: 640, height: 480))
+            img.lockFocus()
+            NSColor(calibratedRed: 0.12, green: 0.56, blue: 1.0, alpha: 1).setFill()
+            NSBezierPath(rect: NSRect(x: 0, y: 0, width: 640, height: 480)).fill()
+            img.unlockFocus()
+            refs.append(MediaStore.shared.addImage(img))
+            #endif
+            HavenLog.net("matrix-qa synthetic photo → \(refs.last?.prefix(16) ?? "?")")
+        }
+        if !videoPath.isEmpty {
+            let url = URL(fileURLWithPath: videoPath)
+            if FileManager.default.fileExists(atPath: url.path) {
+                let bundle = await MediaStore.shared.prepareVideo(url: url)
+                if !bundle.isEmpty {
+                    refs.append(contentsOf: bundle.mediaRefs)
+                    HavenLog.net("matrix-qa video_path → \(bundle.videoRef.prefix(16)) media=\(bundle.mediaRefs.count)")
+                } else {
+                    HavenLog.net("matrix-qa video_path prepare FAILED \(videoPath.prefix(60))")
+                }
+            } else {
+                HavenLog.net("matrix-qa video_path missing \(videoPath.prefix(60))")
+            }
+        } else if kind == "video" {
+            // Tiny solid-color MP4 written to temp via AVAssetWriter if no fixture path.
+            if let url = await Self.qaSyntheticVideoURL() {
+                let bundle = await MediaStore.shared.prepareVideo(url: url)
+                if !bundle.isEmpty {
+                    refs.append(contentsOf: bundle.mediaRefs)
+                    HavenLog.net("matrix-qa synthetic video → \(bundle.videoRef.prefix(16))")
+                }
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+        return refs
+    }
+
+    /// 1s solid-color H.264 clip for matrix video attach when no fixture is staged.
+    private static func qaSyntheticVideoURL() async -> URL? {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("haven-qa-\(UUID().uuidString).mp4")
+        let size = CGSize(width: 320, height: 240)
+        guard let writer = try? AVAssetWriter(outputURL: url, fileType: .mp4) else { return nil }
+        let settings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: size.width,
+            AVVideoHeightKey: size.height,
+        ]
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
+        input.expectsMediaDataInRealTime = false
+        let attrs: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32ARGB,
+            kCVPixelBufferWidthKey as String: size.width,
+            kCVPixelBufferHeightKey as String: size.height,
+        ]
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: attrs)
+        guard writer.canAdd(input) else { return nil }
+        writer.add(input)
+        guard writer.startWriting() else { return nil }
+        writer.startSession(atSourceTime: .zero)
+        let fps: Int32 = 10
+        let frames = 12
+        for i in 0..<frames {
+            while !input.isReadyForMoreMediaData { try? await Task.sleep(nanoseconds: 5_000_000) }
+            var pb: CVPixelBuffer?
+            CVPixelBufferCreate(kCFAllocatorDefault, Int(size.width), Int(size.height),
+                                kCVPixelFormatType_32ARGB, attrs as CFDictionary, &pb)
+            guard let buf = pb else { continue }
+            CVPixelBufferLockBaseAddress(buf, [])
+            if let base = CVPixelBufferGetBaseAddress(buf) {
+                let shade = Int32(0x40 + min(i * 8, 0x80))
+                memset(base, shade, CVPixelBufferGetDataSize(buf))
+            }
+            CVPixelBufferUnlockBaseAddress(buf, [])
+            let t = CMTime(value: CMTimeValue(i), timescale: fps)
+            adaptor.append(buf, withPresentationTime: t)
+        }
+        input.markAsFinished()
+        await writer.finishWriting()
+        return writer.status == .completed ? url : nil
+    }
     #endif
 
     private func now() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
+    /// Matrix QA: ingest `qa-peer-bundle.bin` from Application Support (Android peer staged by driver).
+    private func ingestQaPeerBundle() {
+        #if DEBUG
+        guard let social else { return }
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        guard let url = dir?.appendingPathComponent("qa-peer-bundle.bin"),
+              let bundle = try? Data(contentsOf: url), !bundle.isEmpty else { return }
+        let name = (try? String(contentsOf: dir!.appendingPathComponent("qa-peer-name.txt"), encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "EmuPeer"
+        do {
+            let hex = try social.addContactBundle(circleId: "default", bundle: bundle)
+            HavenLog.net("qa-peer-bundle ingested hex=\(hex.prefix(12)) name=\(name)")
+            try? FileManager.default.removeItem(at: url)
+            Task { await SharedStore.publishDeviceRoster(social: social) }
+            scheduleRefresh()
+        } catch {
+            HavenLog.net("qa-peer-bundle ingest FAILED \(error.localizedDescription)")
+        }
+        #endif
+    }
+
     /// Stale-result guard for the off-main feed rebuild: only the newest refresh may publish.
     private var refreshGeneration: UInt64 = 0
     func refresh() {

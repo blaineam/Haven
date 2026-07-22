@@ -3,6 +3,7 @@ package com.blaineam.haven.core
 import android.content.Context
 import android.util.Base64
 import android.util.Log
+import com.blaineam.haven.BuildConfig
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -480,6 +481,19 @@ object HavenNet : InboundListener {
                 fabricBoundUrls = activeFabricUrls()
                 withContext(Dispatchers.Main) { started.value = true }
                 Log.i(TAG, "node started: ${node?.nodeIdHex()}")
+                // Matrix QA: dump our public identity so Scripts/qa-exchange-bundles.sh can seed iOS,
+                // and ingest qa-peer-bundle.bin if the driver staged a sim peer (HTTP-mailbox stub path
+                // where HELLO cannot dial). Without mutual addContactBundle reverse media never opens.
+                runCatching {
+                    val b = social.myBundle()
+                    if (b.isNotEmpty()) {
+                        java.io.File(appContext.filesDir, "qa-my-bundle.bin").writeBytes(b)
+                        val name = ProfileStore.get(appContext).displayName.ifBlank { "EmuPeer" }
+                        java.io.File(appContext.filesDir, "qa-my-name.txt").writeText(name)
+                        Log.i("HavenQA", "qa-my-bundle written bytes=${b.size} name=$name account=${social.myNodeHex().take(12)}")
+                    }
+                }
+                runCatching { ingestQaPeerBundle() }
                 // REACHABILITY PROBE: dump this node's ticket (published addrs + DERP relay url) so we can SEE
                 // whether the Android node has an internet-reachable path — the same probe as the Mac. If the
                 // Nokia has a DERP url and the Mac has a DERP url, they SHOULD reach each other; a timeout then
@@ -497,6 +511,7 @@ object HavenNet : InboundListener {
                 pollMailbox()
                 requestMissingMedia()   // back-fill media for posts already in the feed
                 drainPersistedBackups() // finish any of MY media uploads killed mid-flight last session
+                runCatching { publishDeviceRoster() } // authorize this device on HTTP mailbox relays
             } catch (e: Throwable) {
                 Log.e(TAG, "node start failed", e)
             }
@@ -1241,6 +1256,34 @@ object HavenNet : InboundListener {
         persist()
         sendHello(id, contact.idHex)
         return id
+    }
+
+    /**
+     * Matrix QA: if the driver staged `files/qa-peer-bundle.bin` (+ optional name), add that peer
+     * as a contact so reverse posts/stories/DMs/media can open without a live HELLO dial.
+     */
+    private fun ingestQaPeerBundle() {
+        if (!BuildConfig.DEBUG) return
+        val f = java.io.File(appContext.filesDir, "qa-peer-bundle.bin")
+        if (!f.isFile || f.length() == 0L) return
+        val bundle = f.readBytes()
+        val name = java.io.File(appContext.filesDir, "qa-peer-name.txt")
+            .takeIf { it.isFile }?.readText()?.trim().orEmpty().ifBlank { "SimPeer" }
+        val hex = runCatching { social.addContactBundle(DEFAULT_CIRCLE, bundle) }.getOrNull()
+        if (hex.isNullOrEmpty()) {
+            Log.w("HavenQA", "qa-peer-bundle addContactBundle failed")
+            return
+        }
+        // Surface in the contacts list with a friendly name when possible.
+        runCatching {
+            val c = contacts.firstOrNull { it.idHex.equals(hex, ignoreCase = true) }
+            if (c != null && name.isNotEmpty()) {
+                // Profile name often arrives via signed card later; log for the matrix driver.
+            }
+        }
+        Log.i("HavenQA", "qa-peer-bundle ingested hex=${hex.take(12)} name=$name")
+        // One-shot: avoid re-adding every launch if the peer re-seals.
+        f.delete()
     }
 
     /** Deterministic GROUP-DM circle id — sorted full node ids of every member (me + others), so the

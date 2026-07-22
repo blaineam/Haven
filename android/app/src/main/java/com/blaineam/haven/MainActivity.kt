@@ -70,19 +70,37 @@ class MainActivity : FragmentActivity() {
      * Matrix / multi-device QA hooks (DEBUG only). Launch with e.g.:
      *   adb shell am start -n com.blaineam.haven/.MainActivity \
      *     --es haven_qa_story 'StoryMtx_120000' \
-     *     --es haven_qa_dm_to 7cef8803… --es haven_qa_dm 'DmMtx_120000'
-     * Avoids fragile camera automation for stories and contact-picker automation for DMs.
+     *     --es haven_qa_dm_to 7cef8803… --es haven_qa_dm 'DmMtx_120000' \
+     *     --es haven_qa_media photo|video \
+     *     --es haven_qa_photo_path /sdcard/…/qa-photo.jpg \
+     *     --es haven_qa_video_path /sdcard/…/qa-clip.mp4
+     * Media attach avoids camera/picker automation; paths optional when media=photo (synthetic).
      */
     private fun handleQaExtras(intent: Intent?) {
         if (!BuildConfig.DEBUG || intent == null) return
         android.util.Log.i("HavenQA", "handleQaExtras ready=${HavenNet.isReady}")
+        val mediaKind = intent.getStringExtra("haven_qa_media")?.trim()?.lowercase().orEmpty()
+        val photoPath = intent.getStringExtra("haven_qa_photo_path")?.trim().orEmpty()
+        val videoPath = intent.getStringExtra("haven_qa_video_path")?.trim().orEmpty()
+        val mediaRefs = runCatching { qaBuildMediaRefs(mediaKind, photoPath, videoPath) }
+            .onFailure { android.util.Log.w("HavenQA", "media build failed: ${it.message}") }
+            .getOrDefault(emptyList())
+        if (mediaRefs.isNotEmpty()) {
+            android.util.Log.i("HavenQA", "media refs=${mediaRefs.joinToString { it.take(16) }}")
+        }
+
         intent.getStringExtra("haven_qa_story")?.trim()?.takeIf { it.isNotEmpty() }?.let { body ->
-            runCatching { HavenNet.postStory(body, null) }
-            android.util.Log.i("HavenQA", "postStory body=${body.take(40)}")
+            runCatching {
+                if (mediaRefs.isEmpty()) HavenNet.postStory(body, null)
+                else HavenNet.postStory(body, mediaRefs.first())
+            }
+            android.util.Log.i("HavenQA", "postStory body=${body.take(40)} media=${mediaRefs.size}")
         }
         intent.getStringExtra("haven_qa_post")?.trim()?.takeIf { it.isNotEmpty() }?.let { body ->
-            runCatching { HavenNet.post(HavenNet.activeCircle.value, body) }
-            android.util.Log.i("HavenQA", "post body=${body.take(40)}")
+            runCatching {
+                HavenNet.post(HavenNet.activeCircle.value, body, media = mediaRefs)
+            }
+            android.util.Log.i("HavenQA", "post body=${body.take(40)} media=${mediaRefs.size}")
         }
         val dmTo = intent.getStringExtra("haven_qa_dm_to")?.trim()?.lowercase().orEmpty()
         val dmBody = intent.getStringExtra("haven_qa_dm")?.trim().orEmpty()
@@ -94,8 +112,8 @@ class MainActivity : FragmentActivity() {
                         return@runCatching
                     }
                 val cid = HavenNet.startDm(contact)
-                HavenNet.post(cid, dmBody)
-                android.util.Log.i("HavenQA", "dm to=${dmTo.take(8)} circle=${cid.take(24)} body=${dmBody.take(40)}")
+                HavenNet.post(cid, dmBody, media = mediaRefs)
+                android.util.Log.i("HavenQA", "dm to=${dmTo.take(8)} circle=${cid.take(24)} body=${dmBody.take(40)} media=${mediaRefs.size}")
             }.onFailure { android.util.Log.w("HavenQA", "dm failed: ${it.message}") }
         }
         intent.getStringExtra("haven_qa_call_to")?.trim()?.lowercase()?.takeIf { it.length == 64 }?.let { peer ->
@@ -110,6 +128,54 @@ class MainActivity : FragmentActivity() {
                 android.util.Log.i("HavenQA", "call_to=${peer.take(8)} name=$name")
             }.onFailure { android.util.Log.w("HavenQA", "call failed: ${it.message}") }
         }
+    }
+
+    /** Build content-addressed media refs for matrix QA (DEBUG). */
+    private fun qaBuildMediaRefs(kind: String, photoPath: String, videoPath: String): List<String> {
+        val cid = HavenNet.activeCircle.value.ifBlank { "default" }
+        val out = ArrayList<String>()
+        val photoFile = photoPath.takeIf { it.isNotEmpty() }?.let { java.io.File(it) }
+        if (photoFile != null && photoFile.isFile) {
+            val bytes = photoFile.readBytes()
+            out += com.blaineam.haven.core.LocalMedia.store(cid, bytes, isVideo = false)
+            android.util.Log.i("HavenQA", "photo_path → ${out.last().take(16)}")
+        } else if (kind == "photo") {
+            val bmp = android.graphics.Bitmap.createBitmap(640, 480, android.graphics.Bitmap.Config.ARGB_8888)
+            bmp.eraseColor(android.graphics.Color.rgb(30, 144, 255))
+            val baos = java.io.ByteArrayOutputStream()
+            bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, baos)
+            bmp.recycle()
+            out += com.blaineam.haven.core.LocalMedia.store(cid, baos.toByteArray(), isVideo = false)
+            android.util.Log.i("HavenQA", "synthetic photo → ${out.last().take(16)}")
+        }
+        val videoFile = videoPath.takeIf { it.isNotEmpty() }?.let { java.io.File(it) }
+        if (videoFile != null && videoFile.isFile) {
+            val prepared = com.blaineam.haven.core.LocalMedia.prepareVideo(
+                this, android.net.Uri.fromFile(videoFile), cid,
+            )
+            if (prepared.videoRef.isNotEmpty()) {
+                out += prepared.mediaRefs
+                android.util.Log.i("HavenQA", "video_path → ${prepared.videoRef.take(16)} n=${prepared.mediaRefs.size}")
+            } else {
+                val bytes = videoFile.readBytes()
+                out += com.blaineam.haven.core.LocalMedia.store(cid, bytes, isVideo = true)
+                android.util.Log.i("HavenQA", "video_path raw store → ${out.last().take(16)}")
+            }
+        } else if (kind == "video") {
+            val staged = java.io.File(filesDir, "qa-clip.mp4")
+            if (staged.isFile) {
+                val prepared = com.blaineam.haven.core.LocalMedia.prepareVideo(
+                    this, android.net.Uri.fromFile(staged), cid,
+                )
+                if (prepared.videoRef.isNotEmpty()) {
+                    out += prepared.mediaRefs
+                    android.util.Log.i("HavenQA", "staged video → ${prepared.videoRef.take(16)}")
+                }
+            } else {
+                android.util.Log.w("HavenQA", "video requested but no path/fixture — skip")
+            }
+        }
+        return out
     }
 
     /** Ask for the nearby-mesh perms once (per install) when nearby is wanted but not yet granted,

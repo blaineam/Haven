@@ -190,6 +190,9 @@ struct HavenApp: App {
                 // arrived by push while backgrounded stayed invisible until the app was cold-started,
                 // even though its banner had already been shown. Cheap: no-ops when the queue is empty.
                 FeedStore.shared.ingestPushInbox()
+                // Banner-only pushes (body too big for inline `ev`) never fill the inbox — still pull
+                // the mailbox so posts/stories/DMs/reactions appear when you open the app.
+                FeedStore.shared.syncBecauseOfPush()
                 #if os(iOS)
                 // Re-read the ring/silent switch: it may well have been flipped while we were away.
                 SilentSwitch.startMonitoring()

@@ -2546,10 +2546,19 @@ final class FeedStore: ObservableObject {
                     ingested.append((cid, env)); break
                 }
             }
-            guard !ingested.isEmpty else { return }
             let ingestedFinal = ingested
+            let failedOpen = ingestedFinal.isEmpty && !envs.isEmpty
             await MainActor.run { [weak self] in
                 guard let self else { return }
+                if failedOpen {
+                    // Banner fired but every inline envelope failed to open (wrong circle state,
+                    // missing epoch, seedless lag). Do NOT drop the only recovery path — always
+                    // pull the mailbox so posts/stories/DMs still land.
+                    HavenLog.sync("push inbox: \(envs.count) env(s) failed to open — polling mailbox")
+                    self.syncBecauseOfPush()
+                    return
+                }
+                guard !ingestedFinal.isEmpty else { return }
                 var dmCircles = Set<String>()
                 for (cid, env) in ingestedFinal {
                     self.notifyNewest(in: cid)
@@ -3951,7 +3960,7 @@ final class FeedStore: ObservableObject {
         if let url = MediaStore.shared.storagePath(for: ref), FileManager.default.fileExists(atPath: url.path) {
             if servingNow.contains("\(ref)|\(requesterHex)") {
                 HavenLog.net("media REQ ref=\(ref.prefix(12)) — already streaming to \(requesterHex.prefix(8)), ignoring")
-            } else if shouldServeNearby(ref) {
+            } else if shouldServeNearby(ref, requester: requesterHex) {
                 sendMediaChunks(ref: ref, fileURL: url, to: requesterHex)
             }
             return
@@ -3997,7 +4006,7 @@ final class FeedStore: ObservableObject {
         HavenLog.net("media RESUME ref=\(ref.prefix(12)) from=\(requesterHex.prefix(8)): \(missing.count)/\(total) chunks still needed")
         if servingNow.contains("\(ref)|\(requesterHex)") {
             HavenLog.net("media RESUME ref=\(ref.prefix(12)) — already streaming to \(requesterHex.prefix(8)), ignoring")
-        } else if shouldServeNearby(ref) {
+        } else if shouldServeNearby(ref, requester: requesterHex, isResume: true) {
             sendMediaChunks(ref: ref, fileURL: url, to: requesterHex, missing: missing)
         }
     }
@@ -4072,12 +4081,17 @@ final class FeedStore: ObservableObject {
     private var servedAt: [String: UInt64] = [:]
     /// Rate-limit serving a media ref over nearby: the Mac re-requests every cycle while it waits, so
     /// without this the iPhone re-served the same blobs hundreds of times (↑323 for ~18 items), flooding
-    /// MultipeerConnectivity's serial send queue so NOTHING actually drained to the peer. One serve per ref
-    /// per 25s lets the queue clear and the chunks really deliver.
-    private func shouldServeNearby(_ ref: String) -> Bool {
+    /// MultipeerConnectivity's serial send queue so NOTHING actually drained to the peer. One serve per
+    /// ref+requester per 25s lets the queue clear and the chunks really deliver.
+    ///
+    /// **Resume is exempt** (short 3s floor only): a rate-limit abort used to stamp `servedAt` and then
+    /// reject frame-33 resumes for 25s, so partial videos never refilled holes.
+    private func shouldServeNearby(_ ref: String, requester: String? = nil, isResume: Bool = false) -> Bool {
         let nowMs = now()
-        if let last = servedAt[ref], nowMs - last < 25_000 { return false }
-        servedAt[ref] = nowMs
+        let key = requester.map { "\(ref)|\($0.prefix(16))" } ?? ref
+        let window: UInt64 = isResume ? 3_000 : 25_000
+        if let last = servedAt[key], nowMs - last < window { return false }
+        servedAt[key] = nowMs
         if servedAt.count > 4000 { servedAt.removeAll() }
         return true
     }
@@ -4101,7 +4115,7 @@ final class FeedStore: ObservableObject {
             if pushedNearby.contains(ref) || SharedLocation.parse(ref) != nil { continue }
             guard let url = MediaStore.shared.storagePath(for: ref), FileManager.default.fileExists(atPath: url.path) else { continue }
             pushedNearby.insert(ref)
-            guard shouldServeNearby(ref) else { continue }
+            guard shouldServeNearby(ref, requester: me) else { continue }
             sendMediaChunks(ref: ref, fileURL: url, to: me)
             budget -= 1
         }

@@ -35,7 +35,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - **Nearby videos abort mid-transfer (Apple).** Multipeer rate-limit (~64 KB/s + one 50 ms retry then
   `break`) finished photos (fit the burst) but **stopped multi‑MB videos after a few chunks**. Media
   serve now waits for tokens (`broadcastWaiting`), raises the bulk ceiling to ~256 KB/s, and soft-
-  paces backlog instead of hard-aborting. Resume still fills any remaining holes.
+  paces backlog instead of hard-aborting. Resume still fills any remaining holes; resume requests
+  are no longer blocked for 25s by the serve throttle after a partial abort.
+- **Push banner with empty feed (Apple).** Opening the app after a notification only drained the
+  inline push inbox; if those envelopes failed to open (or the body never rode the push), the
+  mailbox was never pulled. Foreground now always `syncBecauseOfPush`, and failed inbox opens still
+  poll the mailbox.
 - **Internet media stuck behind a dead NAS while Mac CF is live (Apple).** Media/mailbox dest order
   preferred pool order, so a long-dead NAS was probed (60s timeout) before the live Mac Cloudflare
   front door. Destinations are now sorted (own host → public HTTP → proven-alive → others), HTTP

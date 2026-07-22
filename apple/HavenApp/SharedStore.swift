@@ -100,18 +100,30 @@ final class MediaBackupQueue {
             let bgId = UIApplication.shared.beginBackgroundTask(withName: "haven.media-backup")
             defer { if bgId != .invalid { UIApplication.shared.endBackgroundTask(bgId) } }
             #endif
-            // ONE pass (like BackgroundUploader): failures stay queued for the next enqueue / launch /
-            // 120s backfill, so a wholly-unreachable relay can't pin us in a tight retry-spin.
-            let work = pending
-            var stillPending: [Job] = []
+            // BUDGETED pass. A Mac hosting a circle relay with a large library used to seal+upload
+            // every pending ref in one go (videos × 2 in RAM) → multi‑GB footprint and beachball.
+            // Failures + leftovers stay queued; we re-arm after a short rest so the UI can breathe.
+            let budget = 5
+            let work = Array(pending.prefix(budget))
+            var stillPending: [Job] = Array(pending.dropFirst(work.count))
             for job in work {
+                // Own hosted store: if the blob is already local under the media key, ledger it and
+                // skip the expensive seal path for that dest (backup still mirrors to remote peers).
                 let ok = await SharedStore.backup(ref: job.ref, circleId: job.cid, social: social)
                 if !ok { stillPending.append(job) }
+                // Yield between large jobs so SwiftUI / Multipeer can run.
+                try? await Task.sleep(nanoseconds: 50_000_000)
             }
-            let newly = pending.count > work.count ? Array(pending.suffix(pending.count - work.count)) : []
-            pending = stillPending + newly
+            pending = stillPending
             save()
             draining = false
+            if !pending.isEmpty {
+                // Continue later without stacking concurrent drains.
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    MediaBackupQueue.shared.drainPersisted(social: social)
+                }
+            }
         }
     }
 }

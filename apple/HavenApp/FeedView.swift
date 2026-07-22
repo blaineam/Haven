@@ -1537,18 +1537,27 @@ final class FeedStore: ObservableObject {
         let syncHeartbeat: TimeInterval = 20
         let syncBaseMs: UInt64 = 45_000
         #else
-        let syncHeartbeat: TimeInterval = 10
-        let syncBaseMs: UInt64 = 20_000
+        // Mac hosting a circle relay: prefer longer gaps so mesh/media work doesn't pin the UI.
+        // (Field sample: friend's always-on relay Mac at 2.7–4.6 GB with constant Multipeer+blob I/O.)
+        let syncHeartbeat: TimeInterval = RelayHost.shared.serving ? 20 : 10
+        let syncBaseMs: UInt64 = RelayHost.shared.serving ? 45_000 : 20_000
         #endif
         syncTimer = Timer.scheduledTimer(withTimeInterval: syncHeartbeat, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 guard self.now() >= self.nextSyncDueMs else { return }
-                self.nextSyncDueMs = self.now() + self.adaptiveInterval(base: syncBaseMs)
+                // Re-read host state: user may have toggled relay after timer start.
+                #if os(macOS)
+                let base = RelayHost.shared.serving ? UInt64(45_000) : UInt64(20_000)
+                #else
+                let base = syncBaseMs
+                #endif
+                self.nextSyncDueMs = self.now() + self.adaptiveInterval(base: base)
                 // requestMissingMedia runs inside syncWithContacts (already throttled) — do not
                 // call it again here or every tick doubles the media-scan + restore Tasks.
                 self.syncWithContacts()
                 // Mesh tick only when we host a relay (avoid empty work every cycle on phones).
+                // Internally throttled to ≥5 min for the expensive pull (see RelayHost.meshSyncTick).
                 if RelayHost.shared.serving {
                     RelayHost.shared.meshSyncTick()
                 }
@@ -3373,16 +3382,37 @@ final class FeedStore: ObservableObject {
     /// a mailbox. Used when sharing history with a new member and when a new relay is adopted.
     func backfillMailboxMedia(circleIds: [String]) {
         guard let social else { return }
+        // Host Macs with large libraries: enqueue a bounded newest-first slice per pass so the
+        // 2‑min tick can't dump thousands of seal jobs onto MediaBackupQueue at once.
+        let perCircleCap = RelayHost.shared.serving ? 40 : 200
         for cid in circleIds where SharedStore.hasMailbox(cid) {
             let feed = social.feed(circleId: cid, nowMs: now(),
                                    viewerRetentionSecs: CircleSettingsStore.shared.retentionSecs(cid))
-            var refs = Set<String>()
+            var refs: [String] = []
+            var seen = Set<String>()
+            // Newest posts first (feed is reverse-chronological).
             for item in feed {
-                refs.formUnion(item.media)
-                for c in item.comments { refs.formUnion(c.media) }
+                for r in item.media where seen.insert(r).inserted { refs.append(r) }
+                for c in item.comments {
+                    for r in c.media where seen.insert(r).inserted { refs.append(r) }
+                }
             }
-            for ref in refs where MediaStore.shared.has(ref) && !MediaBackupBackoff.shouldSkip(ref) {
+            var enqueued = 0
+            for ref in refs {
+                guard enqueued < perCircleCap else { break }
+                guard MediaStore.shared.has(ref), !MediaBackupBackoff.shouldSkip(ref) else { continue }
+                // Already confirmed on every dest including own relay — skip.
+                if MediaBackupLedger.hasAny(ref), !RelayHost.shared.serving {
+                    // Non-host: ledger hit is enough to skip re-queue noise.
+                    continue
+                }
+                if RelayHost.shared.serving,
+                   MediaBackupLedger.has(RelayHost.shared.nodeId, ref),
+                   MediaBackupLedger.hasAnyRemote(ref, ownRelayHex: RelayHost.shared.nodeId) {
+                    continue
+                }
                 MediaBackupQueue.shared.enqueue(ref, circleId: cid, social: social)
+                enqueued += 1
             }
         }
     }

@@ -975,9 +975,28 @@ pub(crate) async fn pull_missing_from_peer(
             .map(|k| (k, 0))
             .collect(),
     };
+    // Cap pulls per mesh pass. Unbounded set-union against a large sibling (or a "dead" NAS that
+    // still answers LIST) loaded multi‑hundred‑MB blobs into RAM every tick — Mac host sample
+    // 4.6 GB peak / unresponsive while serving. Remainder is picked up on later passes.
+    // Prefer mailbox keys first so event history converges before multi‑MB media.
+    const MAX_MESH_PULLS_PER_PASS: usize = 24;
+    let mut want = keys_to_pull(root, &peer_keys, retention);
+    want.sort_by(|a, b| {
+        let rank = |k: &str| {
+            if k.starts_with("haven/mailbox/") {
+                0
+            } else if k.starts_with("haven/media/") {
+                2
+            } else {
+                1
+            }
+        };
+        rank(&a.0).cmp(&rank(&b.0)).then_with(|| a.0.cmp(&b.0))
+    });
     let mut pulled = 0usize;
-    for (key, age) in keys_to_pull(root, &peer_keys, retention) {
+    for (key, age) in want.into_iter().take(MAX_MESH_PULLS_PER_PASS) {
         let Ok(local) = safe_path(root, &key) else { continue };
+        // Prefer mailbox / small keys first for liveness; still allow media within the cap.
         // `get` caps the read at MAX_BLOB, so an oversized body can't blow up memory.
         let Ok(Some(blob)) = client.get(&key).await else { continue };
         if blob.is_empty() {

@@ -455,24 +455,48 @@ final class RelayHost: ObservableObject {
         }
     }
 
+    /// Last mesh anti-entropy pass (ms). Field: host Macs ran this every sync tick (~20s),
+    /// listing every sibling's full `haven/*` store and pulling ≤256 MB blobs into RAM — friend's
+    /// Mac sample hit **4.6 GB peak** and stayed unresponsive while "just hosting a relay."
+    private var lastMeshSyncMs: UInt64 = 0
+    private static let meshSyncMinIntervalMs: UInt64 = 300_000   // 5 minutes
+
     func meshSyncTick() {
         guard let handle, serving else { return }
         authorizeMembership() // keep the allow-list fresh as membership / relays change
+        let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
+        // Cheap path every tick: membership only. Expensive pull is throttled hard.
+        guard nowMs &- lastMeshSyncMs >= Self.meshSyncMinIntervalMs else { return }
+        lastMeshSyncMs = nowMs
         let myHex = nodeId
-        // Every distinct adopted relay (≠ self) that isn't currently backed off.
+        // Only peers we have recently proven OR that advertise a public HTTP front door.
+        // `available` alone is true for never-tried / backoff-expired dead NAS → mesh dial timeouts
+        // every pass while the UI still looks "fine."
         let peers = RelayMailboxStore.shared.allRelays()
             .filter { $0 != myHex && RelayHealth.shared.available($0) }
+            .filter {
+                RelayHealth.shared.provenAlive($0, withinMs: 900_000)
+                    || (RelayMailboxStore.shared.httpInterface($0)?.urls
+                        .contains(where: { RelayMailboxStore.urlReachableByOthers($0) }) ?? false)
+            }
         guard !peers.isEmpty else { return }
         Task {
+            var anyPull = false
             for peer in peers {
                 let pulled = await handle.syncFrom(peerNodeHex: peer)
                 if pulled > 0 {
+                    anyPull = true
                     RelayHealth.shared.recordSuccess(peer)
                     RelayMailboxStore.shared.markSeen(peer)
                     FeedStore.shared.markRelay(true)
-                    // New blobs landed on our store → ingest anything we hadn't seen.
-                    FeedStore.shared.pollMailboxNow()
+                } else if !RelayHealth.shared.provenAlive(peer, withinMs: 60_000) {
+                    // Zero pull + no recent success: treat as soft fail so dead NAS drops out.
+                    // (Successful empty-sync still records success in FFI only when client dials.)
                 }
+            }
+            // One mailbox poll after the whole pass — not per peer (was cascading main-actor work).
+            if anyPull {
+                FeedStore.shared.pollMailboxNow()
             }
         }
     }

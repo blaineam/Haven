@@ -32,6 +32,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Mac host relay beachballs / multi‑GB RAM (field sample 4.6 GB).** Mesh anti-entropy ran every
+  ~20s against every sibling (including dead NAS), listing the full store and pulling ≤256 MB blobs
+  into memory; media backfill enqueued whole libraries and sealed them in one drain. Host mesh is
+  now ≥5 min, only proven/public peers, ≤24 pulls/pass (mailbox first); media backup drains 5 jobs
+  at a time with yields; host backfill caps enqueues; Mac sync interval stretches while serving.
 - **Nearby videos abort mid-transfer (Apple).** Multipeer rate-limit (~64 KB/s + one 50 ms retry then
   `break`) finished photos (fit the burst) but **stopped multi‑MB videos after a few chunks**. Media
   serve now waits for tokens (`broadcastWaiting`), raises the bulk ceiling to ~256 KB/s, and soft-

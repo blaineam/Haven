@@ -32,6 +32,16 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Mac beachballs / main-thread engine lock (Apple, field sample build 343).** Sample of a
+  linked Mac host: main + ~14 cooperative utility threads all stuck in `__psynch_mutexwait` on
+  the single `HavenSocial` mutex (2.1–2.6 GB RSS). Root causes: (1) `messages(in:)` re-ran full
+  `feed()` decrypt on every SwiftUI chat body paint and per-envelope after mailbox ingest;
+  (2) concurrent `Task.detached` workers (receive / exportRecent / exportState / purge) thrashed
+  the same mutex while main waited; (3) `reannounceOwnRelay` sealed on main; (4) `syncEnvelopes`
+  history resend on main. Fix: `EngineGate` serializes heavy FFI, 2s messages cache + coalesced
+  off-main notify/badge side effects, seal/export/receive/persist behind the gate, Mac host
+  adaptive stretch + slower catch-up/reannounce while serving.
+
 - **Linked-device matrix harness (iOS sim + Tauri over HavenStub).** `Scripts/qa-linked-device-matrix.sh`
   links desktop to the sim account seed, injects stub HTTP mailbox prefs, and checks that
   photo/video/story posts land on both fleet devices. Stub host can load

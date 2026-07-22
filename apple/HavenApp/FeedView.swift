@@ -954,6 +954,12 @@ final class FeedStore: ObservableObject {
         postTick += 1
         let circle = circleId
         for ref in media { MediaBackupQueue.shared.enqueue(ref, circleId: circle, social: social) }
+        // Heal 403-before-roster: publish device ids, then reannounce relay so the peer learns
+        // public media URL immediately (cross-device / friend video DMs).
+        if !media.isEmpty {
+            Task { await SharedStore.publishDeviceRoster(social: social) }
+            if RelayHost.shared.serving { reannounceOwnRelay() }
+        }
     }
 
     /// Edit one of your own messages in a specific (DM) circle.
@@ -2076,6 +2082,10 @@ final class FeedStore: ObservableObject {
         broadcastEvent(cid, env, banner: .forPost(circleId: cid, circleName: name, body: body, media: media, story: story))
         postTick += 1; refresh()
         for ref in media { MediaBackupQueue.shared.enqueue(ref, circleId: cid, social: social) }
+        if !media.isEmpty {
+            Task { await SharedStore.publishDeviceRoster(social: social) }
+            if RelayHost.shared.serving { reannounceOwnRelay() }
+        }
     }
 
     /// Post to a SPECIFIC circle (used by the scheduler when a queued post fires — the target
@@ -2351,9 +2361,10 @@ final class FeedStore: ObservableObject {
         }
         // Frame-19 re-announce: throttle hard. Every sync tick used to seal + fan-out relay ids to
         // every member (iroh + nearby + mesh), which kept the radio warm even when nothing changed.
-        // 3 min is enough for peers who missed the host-start one-shot; fresh peers still get it
-        // on nearby connect / adopt.
-        if nowMs &- lastRelayReannounceMs > 180_000 {
+        // Hosting: 45s so friends who just opened Haven learn the relay (and its public media URL)
+        // quickly. Non-host: 3 min is enough for peers who missed the host-start one-shot.
+        let reannounceEvery: UInt64 = RelayHost.shared.serving ? 45_000 : 180_000
+        if nowMs &- lastRelayReannounceMs > reannounceEvery {
             lastRelayReannounceMs = nowMs
             reannounceOwnRelay()
         }
@@ -2361,7 +2372,8 @@ final class FeedStore: ObservableObject {
         // unreliable (0 chunks served), so instead each device durably mirrors its own media to the relays
         // it knows — including a sibling's hosted relay — and the other side reads it locally via poll OWN.
         // backup() is idempotent (skips blobs already on a relay), so this just fills gaps. Throttled.
-        if nowMs - lastMediaBackfillMs > 120_000 {
+        // 60s (was 120): cross-device "why isn't my photo on the other phone yet" felt broken at 2 min.
+        if nowMs - lastMediaBackfillMs > 60_000 {
             lastMediaBackfillMs = nowMs
             backfillMailboxMedia(circleIds: circles.map { $0.id })
             // Re-publish our account-signed device roster to every known relay, so a HEADLESS relay
@@ -3613,17 +3625,14 @@ final class FeedStore: ObservableObject {
                 }
             }
             var enqueued = 0
+            let ownRelay = RelayHost.shared.serving ? RelayHost.shared.nodeId : ""
             for ref in refs {
                 guard enqueued < perCircleCap else { break }
                 guard MediaStore.shared.has(ref), !MediaBackupBackoff.shouldSkip(ref) else { continue }
-                // Already confirmed on every dest including own relay — skip.
-                if MediaBackupLedger.hasAny(ref), !RelayHost.shared.serving {
-                    // Non-host: ledger hit is enough to skip re-queue noise.
-                    continue
-                }
-                if RelayHost.shared.serving,
-                   MediaBackupLedger.has(RelayHost.shared.nodeId, ref),
-                   MediaBackupLedger.hasAnyRemote(ref, ownRelayHex: RelayHost.shared.nodeId) {
+                // Only skip when confirmed on a relay SOMEONE ELSE can read. hasAny alone counted
+                // our own in-process relay (local file copy) and permanently skipped remote
+                // mirrors — "previously shared content never reaches an available relay".
+                if MediaBackupLedger.hasAnyRemote(ref, ownRelayHex: ownRelay) {
                     continue
                 }
                 MediaBackupQueue.shared.enqueue(ref, circleId: cid, social: social)
@@ -3702,9 +3711,14 @@ final class FeedStore: ObservableObject {
         // the circle without any echo fabricating a new timestamp.
         RelayMailboxStore.shared.add(circleId: circleId, nodeHex: nodeHex, adoptedAtMs: announcedAddedAt)
         // Record the relay's announced HTTP media interface (the reliable cross-NAT path).
+        let hadPublicHttp: Bool = {
+            let prev = RelayMailboxStore.shared.httpInterface(lower)?.urls ?? []
+            return prev.contains { $0.hasPrefix("https://") }
+        }()
         if !announcedUrls.isEmpty, !announcedToken.isEmpty {
             RelayMailboxStore.shared.setHttpInterface(lower, urls: announcedUrls, token: announcedToken)
         }
+        let nowPublicHttp = announcedUrls.contains { $0.hasPrefix("https://") }
         // Haven fabric: DERP URL so peers prefer this box over n0 for live NAT.
         if let announcedDerp {
             RelayMailboxStore.shared.setDerpUrl(lower, url: announcedDerp)
@@ -3723,9 +3737,11 @@ final class FeedStore: ObservableObject {
         for a in staleAccounts where a != lower && a.count == 64 {
             RelayMailboxStore.shared.remove(circleId: circleId, nodeHex: a)
         }
-        if wasNew {
-            backfillMailbox(circleIds: [circleId])        // mirror my past posts to the new relay…
-            backfillMailboxMedia(circleIds: [circleId])   // …and their media, so it's a complete fallback
+        // New relay OR first time we learn a public HTTPS media URL (LAN-only → trycloudflare
+        // after host fix): push past posts+media so "previously shared content" finally lands.
+        if wasNew || (!hadPublicHttp && nowPublicHttp) {
+            backfillMailbox(circleIds: [circleId])
+            backfillMailboxMedia(circleIds: [circleId])
         }
         Task { await BackgroundUploader.shared.flush() }   // deliver posts we couldn't send before
         pollMailboxNow()
@@ -6568,35 +6584,43 @@ private struct KillHorizontalScroller: NSViewRepresentable {
                     .foregroundStyle(HavenTheme.pink)
                     .accessibilityLabel("Kept on this device")
             }
-            // Upload state for your OWN media posts, shown whenever the circle has a relay to back up to
-            // (any relay — not just an S3 mailbox this device volunteers, which the old gate required and
-            // so hid this for everyone on the default relay-HTTP path). Driven PER-MEDIA off the backup
-            // ledger: ✓ once every blob in the post is confirmed on at least one relay, ↑ while it's still
-            // uploading. This is the "did my story actually reach a relay?" signal — so the author knows to
-            // keep Haven open a moment until it lands, instead of assuming it's broken and bailing.
-            if item.isMe && !item.unsent, !item.media.isEmpty,
-               !(RelayMailboxStore.shared.relays(forCircle: feed.activeCircleId).isEmpty) {
+            // Upload state for YOUR OWN media posts — ALWAYS shown when there is media, even if this
+            // device knows zero relays. Gating on "has a relay" hid the indicator entirely when a
+            // friend never learned frame-19 (or only had LAN media URLs), so "not syncing" looked
+            // identical to "nothing to show" and previously shared content appeared fine while no
+            // relay ever got a copy. Driven PER-MEDIA off the backup ledger + queue.
+            if item.isMe && !item.unsent, !item.media.isEmpty {
                 // The whole cluster is one tap target: every state below is a partial answer to
                 // "where is this?", and the sheet is the full one — including which relays hold
                 // nothing, which no icon can express.
                 TimelineView(.periodic(from: .now, by: 1.0)) { _ in
                     let blobs = item.media.filter { !MediaStore.isSynthetic($0) }
+                    let circleId = feed.activeCircleId
+                    let hasRelay = !RelayMailboxStore.shared.relays(forCircle: circleId).isEmpty
+                        || SharedStore.hasMailbox(circleId)
                     // "Backed up" must mean a relay SOMEONE ELSE can read. Writing to our own
                     // in-process relay is a local file copy that cannot fail, so counting it showed a
-                    // confident tick on every post while friends could fetch none of them — the single
-                    // biggest reason tonight's delivery failure stayed invisible for hours.
+                    // confident tick on every post while friends could fetch none of them.
                     let ownRelay = RelayHost.shared.serving ? RelayHost.shared.nodeId : ""
                     let backed = !blobs.isEmpty && blobs.allSatisfy {
                         MediaBackupLedger.hasAnyRemote($0, ownRelayHex: ownRelay)
                     }
                     // Reached OUR relay and nowhere else: not an error, not safe either. Says so.
                     let localOnly = !backed && !blobs.isEmpty && blobs.allSatisfy { MediaBackupLedger.hasAny($0) }
+                    let pending = blobs.contains { MediaBackupQueue.shared.hasPending($0) }
                     let progress = MediaUploadProgress.shared.fraction(for: blobs)
                     let stuck = MediaUploadProgress.shared.looksStuck(blobs)
+                        || (!backed && !hasRelay)
+                        || (!backed && !pending && !localOnly && !blobs.isEmpty)
                     if backed {
                         Image(systemName: "checkmark.icloud.fill")
                             .font(.caption2).foregroundStyle(HavenTheme.pink)
                             .help("Backed up to a relay others can read")
+                    } else if !hasRelay {
+                        // The invisible case: no known mailbox → never showed an icon before.
+                        Image(systemName: "exclamationmark.icloud")
+                            .font(.caption2).foregroundStyle(.orange)
+                            .help("No relay known for this circle — media stays on this device only. Open Relays or wait for a member who hosts one.")
                     } else if localOnly {
                         Image(systemName: "externaldrive.badge.exclamationmark")
                             .font(.caption2).foregroundStyle(.orange)
@@ -6622,8 +6646,11 @@ private struct KillHorizontalScroller: NSViewRepresentable {
                         Image(systemName: stuck ? "exclamationmark.icloud" : "arrow.up.circle")
                             .font(.caption2)
                             .foregroundStyle(stuck ? AnyShapeStyle(Color.orange) : AnyShapeStyle(Color.secondary))
-                            .help(stuck ? "Still trying to upload — it has restarted several times"
-                                        : "Waiting to upload to a relay…")
+                            .help(stuck
+                                  ? (hasRelay
+                                     ? "Upload not reaching a relay yet — tap for detail; keep Haven open"
+                                     : "No relay available — media only on this device")
+                                  : "Waiting to upload to a relay…")
                     }
                 }
                 .contentShape(Rectangle())

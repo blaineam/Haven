@@ -225,28 +225,29 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
-- **Nothing reached anyone who wasn't online at the same time as you.** Messages and photos moved
-  fine between two people both using Haven at that moment, and then simply stopped: a relay is
-  supposed to hold what you send and pass it on later, and that part had quietly stopped working
-  between different networks. So a post, a reply or a picture would reach whoever happened to be
-  awake and never reach anybody else — and on your own devices, whichever one was acting as the relay
-  appeared to be the only one receiving anything.
+- **Relay media URL vs DERP split (free Cloudflare).** After a fabric rebind, media was re-announced
+  as LAN-only (`http://10.x:8674`) while iroh/DERP kept the public trycloudflare URL — so messaging
+  and live fabric worked and media never reached remote peers. Media announce now always prefers the
+  live tunnel / path-proxy public URL; reattach and health watch heal LAN-only wipes.
 
-  Two causes, both the same mistake: the connection to a relay was being thrown away and rebuilt —
-  once on a timer, and once every time an attempt failed. Rebuilding it meant starting over on a slow
-  fallback route, which then failed, which threw it away again. It was never left alone long enough to
-  find the direct route between the two devices. It now survives, so it settles onto the direct route
-  and stays there. No port-forwarding, no public address, no configuration — as it always should have
-  been.
+- **Cloud sync icon missing when a device knows no relay.** Own posts/stories/DM attachments hid the
+  backup indicator unless a relay was already configured, so "not syncing" looked like "nothing to
+  report." Always show the indicator; orange ⚠️ when no relay is known or upload is stuck.
 
-- **Media shared in a conversation didn't arrive.** A photo or video sent in a DM was only ever
-  fetched if it happened to be pushed while both people were online. Nothing asked for it otherwise,
-  so it could sit complete on a relay while the recipient's app never requested it — including on
-  your own other devices.
+- **Previous media never re-uploaded to a newly available relay.** Backfill skipped any blob already
+  marked on *any* destination, including this device's own in-process relay (a local file copy).
+  Backfill now requires confirmation on a relay others can read. Learning a public HTTPS media URL
+  for a known relay also re-triggers event+media backfill.
 
-- **Hosting a relay made the app crawl.** Two more paths where the relay's file reads happened on the
-  thread drawing the screen: listing the mailbox and filtering it. Worst on machines with a real
-  history behind them.
+- **Cloudflared diagnostics.** Free-tunnel logs and DNS checks write to
+  `Application Support/Haven/logs/` (`cloudflared-main.log`, `cloudflared-dns.log`); Settings has
+  "Open cloudflared logs". Tunnel hard-stop no longer crashes the app; free-tunnel DNS NXDOMAIN is
+  diagnosed (system vs DoH) without thrashing restarts.
+
+- **Faster cross-device catch-up while hosting.** Frame-19 reannounce every 45s when hosting (was 3 min);
+  media backfill every 60s (was 2 min); post/DM with media publishes device roster and reannounces
+  the host relay immediately.
+
 
 ## [1.1.3]
 

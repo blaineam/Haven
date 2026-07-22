@@ -216,14 +216,25 @@ struct StoryViewer: View {
                     // Same relay-backup signal as a feed post: while viewing your OWN story, show whether
                     // its photo/video has reached a relay yet (↑ uploading, ✓ backed up) — so "did my story
                     // actually sync?" has a visible answer instead of a guess.
-                    if !s.media.isEmpty,
-                       !RelayMailboxStore.shared.relays(forCircle: FeedStore.shared.activeCircleId).isEmpty {
+                    // Always show backup state for own stories — hide-when-no-relay made "not
+                    // syncing" look like "no indicator" (same bug as feed posts).
+                    if !s.media.isEmpty {
                         TimelineView(.periodic(from: .now, by: 2.0)) { _ in
                             let blobs = s.media.filter { !MediaStore.isSynthetic($0) }
-                            let backed = !blobs.isEmpty && blobs.allSatisfy { MediaBackupLedger.hasAny($0) }
-                            Image(systemName: backed ? "checkmark.icloud.fill" : "arrow.up.circle")
-                                .font(.caption2).foregroundStyle(.white.opacity(backed ? 0.9 : 0.7))
-                                .help(backed ? "Backed up to a relay" : "Uploading to a relay…")
+                            let cid = FeedStore.shared.activeCircleId
+                            let hasRelay = !RelayMailboxStore.shared.relays(forCircle: cid).isEmpty
+                                || SharedStore.hasMailbox(cid)
+                            let own = RelayHost.shared.serving ? RelayHost.shared.nodeId : ""
+                            let backed = !blobs.isEmpty && blobs.allSatisfy {
+                                MediaBackupLedger.hasAnyRemote($0, ownRelayHex: own)
+                            }
+                            let icon = backed ? "checkmark.icloud.fill"
+                                : (!hasRelay ? "exclamationmark.icloud" : "arrow.up.circle")
+                            Image(systemName: icon)
+                                .font(.caption2).foregroundStyle(.white.opacity(backed ? 0.9 : 0.75))
+                                .help(backed ? "Backed up to a relay others can read"
+                                      : (!hasRelay ? "No relay known — story only on this device"
+                                         : "Uploading to a relay…"))
                         }
                     }
                 } else {

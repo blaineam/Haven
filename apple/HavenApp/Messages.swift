@@ -700,14 +700,26 @@ struct DMThreadView: View {
                         let blobs = m.media.filter { !MediaStore.isSynthetic($0) }
                         if !blobs.isEmpty {
                             let own = RelayHost.shared.serving ? RelayHost.shared.nodeId : ""
+                            let hasRelay = !RelayMailboxStore.shared.relays(forCircle: circleId).isEmpty
+                                || SharedStore.hasMailbox(circleId)
                             let backed = blobs.allSatisfy { MediaBackupLedger.hasAnyRemote($0, ownRelayHex: own) }
                             let localOnly = !backed && blobs.allSatisfy { MediaBackupLedger.hasAny($0) }
-                            Image(systemName: backed ? "checkmark.icloud.fill"
-                                      : (localOnly ? "externaldrive.badge.exclamationmark" : "arrow.up.circle"))
+                            let pending = blobs.contains { MediaBackupQueue.shared.hasPending($0) }
+                            let stuck = MediaUploadProgress.shared.looksStuck(blobs)
+                                || (!backed && !hasRelay)
+                                || (!backed && !pending && !localOnly)
+                            let icon = backed ? "checkmark.icloud.fill"
+                                : (!hasRelay || stuck ? "exclamationmark.icloud"
+                                   : (localOnly ? "externaldrive.badge.exclamationmark" : "arrow.up.circle"))
+                            let color: AnyShapeStyle = backed ? AnyShapeStyle(HavenTheme.pink)
+                                : ((!hasRelay || stuck || localOnly) ? AnyShapeStyle(Color.orange)
+                                   : AnyShapeStyle(Color.secondary))
+                            Image(systemName: icon)
                                 .font(.system(size: 9))
-                                .foregroundStyle(backed ? AnyShapeStyle(HavenTheme.pink)
-                                                        : (localOnly ? AnyShapeStyle(Color.orange)
-                                                                     : AnyShapeStyle(Color.secondary)))
+                                .foregroundStyle(color)
+                                .help(!hasRelay
+                                      ? "No relay known — attachment only on this device"
+                                      : (backed ? "Backed up to a relay" : "Uploading to a relay…"))
                                 .contentShape(Rectangle())
                                 .onTapGesture { backupDetailRefs = BackupRefs(refs: blobs) }
                                 .accessibilityAddTraits(.isButton)

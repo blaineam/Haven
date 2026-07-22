@@ -268,7 +268,7 @@ struct RelayFrontDoorControls: View {
         case "bundled":
             return "Custom domain: paste media domain + Zero Trust install token. CF origin → http://127.0.0.1:8675 (path router fronts media + DERP). Optional sibling DERP URL if you dual-route without the path router."
         default:
-            return "Auto: free ephemeral trycloudflare.com for media + a second free tunnel for DERP fabric. Hostnames change on restart — use Custom domain or Manual for stable always-on."
+            return "Auto: one free trycloudflare tunnel to the path proxy (:8675) so media + DERP + calls share one public origin. A second free tunnel for DERP is only started if the path proxy cannot start — both URLs are shown below. Hostnames change on restart; use Custom domain or Manual for stable always-on."
         }
     }
 
@@ -323,16 +323,127 @@ struct RelayFrontDoorControls: View {
                 set: { tunnel.tunnelToken = $0 }
             ))
         }
-        if let live = tunnel.publicURL, !live.isEmpty, tunnel.frontDoorMode == "auto" {
-            Label("Live: \(live)", systemImage: "link")
+        // Live connector URLs — always show every free tunnel we actually started.
+        if relay.serving || tunnel.publicURL != nil || tunnel.derpPublicURL != nil {
+            liveTunnelStatus
+        }
+        if tunnel.freeTunnelDNSBroken, let note = tunnel.freeTunnelDNSNote {
+            VStack(alignment: .leading, spacing: 6) {
+                Label("Free Cloudflare DNS broken on this network", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
+                Text(note)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Recommended: switch to “Custom domain” or “Manual / external tunnel” — free trycloudflare will keep minting hostnames that NXDOMAIN here.")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(8)
+            .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+        }
+        #if os(macOS)
+        if tunnel.mainLogPath != nil || tunnel.dnsLogPath != nil || relay.serving {
+            VStack(alignment: .leading, spacing: 4) {
+                Button {
+                    tunnel.revealLogsInFinder()
+                } label: {
+                    Label("Open cloudflared logs", systemImage: "doc.text.magnifyingglass")
+                }
+                .buttonStyle(.plain)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .textSelection(.enabled)
+                if let p = tunnel.mainLogPath {
+                    Text(p)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
+                        .textSelection(.enabled)
+                        .lineLimit(2)
+                }
+                Text("Writes cloudflared-main.log (+ derp/dns) under Application Support/Haven/logs — useful when free hostnames NXDOMAIN.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+        #endif
         Text(help)
             .font(.caption)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder
+    private var liveTunnelStatus: some View {
+        let media = tunnel.publicURL
+        let derp = tunnel.derpPublicURL
+        let local = tunnel.localFrontDoor ?? "http://127.0.0.1:8675"
+
+        if tunnel.usesPathProxy, let media, !media.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Label("One cloudflared → path proxy (\(local))", systemImage: "arrow.triangle.merge")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(media)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                if tunnel.freeTunnelDNSBroken {
+                    Text("Hostname shown above is live in cloudflared but NXDOMAIN in system DNS — browsers on this LAN cannot open it.")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("Media + DERP fabric + call hairpin share this origin.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        } else if let media, !media.isEmpty, let derp, !derp.isEmpty, media != derp {
+            // Dual free tunnels — both hostnames must be visible (never invisible).
+            VStack(alignment: .leading, spacing: 6) {
+                Label("Two free cloudflared tunnels (path proxy off)", systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                Label("Media: \(media)", systemImage: "link")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                Label("DERP fabric: \(derp)", systemImage: "link")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                if let note = tunnel.dualTunnelNote, !note.isEmpty {
+                    Text(note)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        } else if let media, !media.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Label("Live front door → \(local)", systemImage: "link")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(media)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                if let derp, !derp.isEmpty, derp != media {
+                    Text("DERP: \(derp)")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
+        } else if let note = tunnel.dualTunnelNote, !note.isEmpty {
+            Text(note)
+                .font(.caption2)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 

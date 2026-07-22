@@ -31,6 +31,15 @@ final class RelayHost: ObservableObject {
     private var derpHandle: DerpServerHandle?
     /// Single-origin path router (media + DERP by path) — tunnel targets this port when set.
     private var pathRouterHandle: PathRouterHandle?
+    /// Bumps on every stop/start so in-flight `startHttpInterface` Tasks cannot resurrect
+    /// dual free tunnels or a dead path-proxy after the user toggled hosting.
+    private var startGeneration: UInt64 = 0
+    /// Media HTTP bind port (usually 8674) — watchdog verifies it stays up.
+    private var mediaHttpPort: UInt16?
+    /// Front-door local port (path router 8675 when unified, else media).
+    private var frontDoorPort: UInt16?
+    /// Cancels the tunnel/local health loop on stop.
+    private var healthWatchTask: Task<Void, Never>?
     /// The same handle, reachable OFF the main actor.
     ///
     /// RelayHost is @MainActor, so every local-store accessor below used to force its caller onto the
@@ -164,6 +173,10 @@ final class RelayHost: ObservableObject {
         serving = true
         authorizeMembership()
         // HTTP only — tunnels/DERP already running from the original start.
+        // CRITICAL: re-publish the *live tunnel* media URL. reachableHttpUrls() without the
+        // free/named front door is LAN-only — fabric rebind used to wipe https://…trycloudflare
+        // media URLs and leave only 10.x:8674, so iroh (DERP public URL) still worked while
+        // remote media never did.
         Task { [weak self] in
             guard let self else { return }
             let token = self.httpToken()
@@ -171,12 +184,21 @@ final class RelayHost: ObservableObject {
             do { port = try await h.serveHttp(bind: "0.0.0.0:8674", token: token) }
             catch { port = try? await h.serveHttp(bind: "0.0.0.0:0", token: token) }
             guard let port else { HavenLog.relay("reattach http FAILED"); return }
-            let urls = Self.reachableHttpUrls(port: port)
+            self.mediaHttpPort = port
+            let urls = Self.announceHttpUrls(mediaPort: port)
             if !urls.isEmpty, !self.nodeId.isEmpty {
                 RelayMailboxStore.shared.setHttpInterface(self.nodeId, urls: urls, token: token)
+                // Keep DERP on the same public origin when path-proxy single-tunnel is live.
+                #if os(macOS)
+                if CloudflaredTunnel.shared.usesPathProxy, let first = urls.first {
+                    RelayMailboxStore.shared.setDerpUrl(self.nodeId, url: first)
+                }
+                #endif
             }
             FeedStore.shared.reannounceOwnRelay()
-            HavenLog.relay("reattach after fabric rebind relay=\(self.nodeId.prefix(10)) :\(port)")
+            HavenLog.relay(
+                "reattach after fabric rebind relay=\(self.nodeId.prefix(10)) :\(port) urls=\(urls.joined(separator: " "))"
+            )
         }
     }
 
@@ -195,6 +217,8 @@ final class RelayHost: ObservableObject {
             return
         }
         startWaitAttempts = 0
+        startGeneration &+= 1
+        let gen = startGeneration
         // Mac: prevent system sleep so a laptop left closed as a relay keeps serving.
         // iPhone/iPad: NEVER pin the idle timer — keeping the screen awake for hosting was a
         // major battery/heat source (user field: multi-% drain in minutes while "just open").
@@ -202,6 +226,10 @@ final class RelayHost: ObservableObject {
         // for a phone. Desktop-class is the always-on path.
         #if os(macOS)
         PlatformIdle.disabled = true
+        // Clear any orphan free tunnels before we bind so port/origin chaos cannot stick.
+        DispatchQueue.global(qos: .userInitiated).async {
+            CloudflaredTunnel.killOrphanCloudflareds(except: [])
+        }
         #endif
         let h = RelayServerHandle.attachWithLimits(node: node, dir: storeDir,
                                                    mediaMaxAgeDays: UInt32(max(0, mediaMaxAgeDays)),
@@ -214,8 +242,8 @@ final class RelayHost: ObservableObject {
         authorizeMembership()
         // Tell my circles to use this device (its account node id) as their mailbox.
         FeedStore.shared.broadcastRelayNode(nodeId)
-        HavenLog.relay("hosting relay=\(nodeId.prefix(10)) serving=\(serving)")
-        startHttpInterface(h)
+        HavenLog.relay("hosting relay=\(nodeId.prefix(10)) serving=\(serving) gen=\(gen)")
+        startHttpInterface(h, generation: gen)
     }
 
     /// Serve the relay's store over plain HTTP — the DEFAULT cross-NAT media transport (the iroh
@@ -226,18 +254,22 @@ final class RelayHost: ObservableObject {
     /// sent, so it is a pre-filter and never the authorization. Reachable URLs =
     /// the optional user-configured public URL (UserDefaults `haven.relay.publicURL` — set it when
     /// this host is port-forwarded / reverse-proxied / tunneled) first, then every LAN IPv4.
-    private func startHttpInterface(_ h: RelayServerHandle) {
+    private func startHttpInterface(_ h: RelayServerHandle, generation: UInt64) {
         let token = httpToken()
         Task { [weak self] in
             var port: UInt16?
             do { port = try await h.serveHttp(bind: "0.0.0.0:8674", token: token) }
             catch { port = try? await h.serveHttp(bind: "0.0.0.0:0", token: token) }   // port taken → ephemeral
             guard let self, let port else { HavenLog.relay("relay http serve FAILED"); return }
+            guard self.startGeneration == generation, self.enabled, self.handle != nil else {
+                HavenLog.relay("relay http start aborted (stale gen=\(generation))")
+                return
+            }
+            self.mediaHttpPort = port
 
             // Tunnel targets this port (path router when fabric is unified, else media).
             var frontPort = port
             var pathRouted = false
-
             #if os(macOS)
             // Start DERP before the front door so a single-origin path router can front both.
             let configuredDerp = (UserDefaults.standard.string(forKey: "haven.relay.derpURL") ?? "")
@@ -251,36 +283,78 @@ final class RelayHost: ObservableObject {
             var derpLocalPort: UInt16?
             do {
                 let derp = try await DerpServerHandle.spawn(bind: "127.0.0.1:3340", publicUrl: "")
+                guard self.startGeneration == generation else { return }
                 self.derpHandle = derp
                 derpLocalPort = derp.localPort()
                 HavenLog.relay("relay DERP fabric local=\(derp.localAddr())")
             } catch {
                 HavenLog.relay("relay DERP failed: \(error.localizedDescription)")
             }
-            if let dport = derpLocalPort, !siblingDerp {
-                do {
-                    let router = try await PathRouterHandle.spawn(
-                        bind: "127.0.0.1:8675",
-                        mediaBackend: "127.0.0.1:\(port)",
-                        derpBackend: "127.0.0.1:\(dport)",
-                        httpToken: token
-                    )
-                    self.pathRouterHandle = router
-                    frontPort = router.localPort()
-                    pathRouted = true
-                    HavenLog.relay(
-                        "path router on \(router.localAddr()) — single origin media+DERP"
-                    )
-                } catch {
-                    HavenLog.relay("path router failed: \(error.localizedDescription)")
+            var pathFailReason: String?
+            if siblingDerp {
+                // Operator chose a dedicated DERP hostname — skip path proxy, no free dual tunnel.
+                pathFailReason = "sibling DERP URL configured (path proxy skipped)"
+                HavenLog.relay("path router skipped — \(pathFailReason!)")
+            } else if let dport = derpLocalPort {
+                // Prefer single free tunnel via path proxy on the well-known port only.
+                // Never fall back to an ephemeral bind — dual proxies (:8675 + random) confuse
+                // cloudflared origin selection and leave dead listeners behind.
+                for attempt in 1...3 {
+                    do {
+                        let router = try await PathRouterHandle.spawn(
+                            bind: "127.0.0.1:8675",
+                            mediaBackend: "127.0.0.1:\(port)",
+                            derpBackend: "127.0.0.1:\(dport)",
+                            httpToken: token
+                        )
+                        guard self.startGeneration == generation else { return }
+                        self.pathRouterHandle = router
+                        frontPort = router.localPort()
+                        pathRouted = true
+                        HavenLog.relay(
+                            "path router on \(router.localAddr()) — single origin media+DERP "
+                                + "(one cloudflared)"
+                        )
+                        break
+                    } catch {
+                        pathFailReason = error.localizedDescription
+                        HavenLog.relay(
+                            "path router attempt \(attempt) failed: \(error.localizedDescription)"
+                        )
+                        if attempt < 3 {
+                            try? await Task.sleep(nanoseconds: 350_000_000)
+                        }
+                    }
                 }
+            } else {
+                pathFailReason = "DERP fabric did not start"
+                HavenLog.relay("path router skipped — \(pathFailReason!)")
             }
-            #endif
+            self.frontDoorPort = frontPort
 
-            var urls = Self.reachableHttpUrls(port: port)
-            // Desktop-class hosts: free / named / manual front door — see CloudflaredTunnel.
-            #if os(macOS)
+            // Tell the tunnel layer + UI the layout *before* apply so Settings can show
+            // "one tunnel via path proxy" vs "dual free tunnels" without a flash of wrong copy.
+            if pathRouted {
+                CloudflaredTunnel.shared.setFrontDoorLayout(
+                    pathProxy: true, localPort: frontPort, dualNote: nil
+                )
+            } else {
+                CloudflaredTunnel.shared.setFrontDoorLayout(
+                    pathProxy: false,
+                    localPort: frontPort,
+                    dualNote: "Path proxy off (\(pathFailReason ?? "unknown")) — "
+                        + "media and DERP use separate free tunnels when auto is on"
+                )
+            }
+
             let fd = await CloudflaredTunnel.shared.apply(port: frontPort)
+            guard self.startGeneration == generation, self.enabled else {
+                HavenLog.relay("relay front door aborted (stale gen=\(generation))")
+                CloudflaredTunnel.shared.stop()
+                return
+            }
+            // After apply, publicURL is set — announceHttpUrls prefers it over LAN.
+            var urls = Self.announceHttpUrls(mediaPort: port)
             if let u = fd.announceURL {
                 urls = [u] + urls.filter { $0 != u }
                 HavenLog.relay(
@@ -290,14 +364,12 @@ final class RelayHost: ObservableObject {
                         + " \(u)"
                 )
             }
-            #endif
             HavenLog.relay(
                 "relay http on :\(port) front=:\(frontPort) pathRouted=\(pathRouted) urls=\(urls.joined(separator: " "))"
             )
             guard !urls.isEmpty, !self.nodeId.isEmpty else { return }
             RelayMailboxStore.shared.setHttpInterface(self.nodeId, urls: urls, token: token)
 
-            #if os(macOS)
             // Public DERP: single-origin shares media URL (call signaling hairpins over /relay);
             // sibling hostname uses configured URL; dual free tunnel only when path router is off.
             await self.finalizeDerpPublic(
@@ -306,10 +378,258 @@ final class RelayHost: ObservableObject {
                 configuredDerp: configuredDerp,
                 siblingDerp: siblingDerp
             )
+            guard self.startGeneration == generation else { return }
+            self.startHealthWatch(generation: generation, pathRouted: pathRouted, token: token)
+            // Free trycloudflare rotates on every restart — burst reannounce so peers drop the
+            // dead hostname and learn the new one (frame 19).
+            self.reannounceBurst()
+            #else
+            var urls = Self.reachableHttpUrls(port: port)
+            HavenLog.relay(
+                "relay http on :\(port) front=:\(frontPort) pathRouted=\(pathRouted) urls=\(urls.joined(separator: " "))"
+            )
+            guard !urls.isEmpty, !self.nodeId.isEmpty else { return }
+            RelayMailboxStore.shared.setHttpInterface(self.nodeId, urls: urls, token: token)
+            self.reannounceBurst()
             #endif
-            FeedStore.shared.reannounceOwnRelay()   // re-announce WITH the http interface attached
         }
     }
+
+    /// Frame-19 burst after URL rotate / host start — peers that missed the first announce recover.
+    private func reannounceBurst() {
+        FeedStore.shared.reannounceOwnRelay()
+        let delays: [Double] = [2, 5, 12, 25]
+        for d in delays {
+            DispatchQueue.main.asyncAfter(deadline: .now() + d) { [weak self] in
+                guard let self, self.serving, self.enabled else { return }
+                FeedStore.shared.reannounceOwnRelay()
+            }
+        }
+    }
+
+    #if os(macOS)
+    /// Keep free/named tunnels + local backends alive. On death: kill orphans, re-apply front
+    /// door to the path proxy, update HTTP interface, reannounce the (possibly new) public URL.
+    private func startHealthWatch(generation: UInt64, pathRouted: Bool, token: String) {
+        healthWatchTask?.cancel()
+        healthWatchTask = Task { [weak self] in
+            // First check after connectors have a chance to settle (trycloudflare + edge).
+            try? await Task.sleep(nanoseconds: 20_000_000_000)
+            var consecutiveHardFails = 0
+            var consecutivePublicFails = 0
+            while !Task.isCancelled {
+                guard let self else { return }
+                let stillMine = await MainActor.run {
+                    self.startGeneration == generation && self.enabled && self.serving
+                }
+                guard stillMine else { return }
+
+                let localOk = await self.probeLocalFrontDoor()
+                let connectorOk = await MainActor.run { () -> Bool in
+                    let cf = CloudflaredTunnel.shared
+                    let mode = cf.frontDoorMode
+                    if mode == "manual" { return true }
+                    // Auto free tunnel expected but never came up (or died without Process ref).
+                    if mode == "auto", cf.autoEnabled, cf.configuredPublicURL.isEmpty {
+                        if cf.publicURL == nil || !cf.isMainConnectorAlive {
+                            return false
+                        }
+                        return true
+                    }
+                    // Bundled / named: require live connector while token+domain are set.
+                    if cf.expectsLiveConnector {
+                        return cf.isMainConnectorAlive
+                    }
+                    return true
+                }
+                // When free-tunnel DNS is NXDOMAIN on this network, public GET always fails —
+                // do NOT restart cloudflared (new free hostnames will also be unresolvable).
+                let dnsBroken = await MainActor.run { CloudflaredTunnel.shared.freeTunnelDNSBroken }
+                let publicOk: Bool
+                if dnsBroken {
+                    publicOk = true // treat as N/A — local+connector are the only signals
+                } else if localOk && connectorOk {
+                    publicOk = await self.probePublicFrontDoor()
+                } else {
+                    publicOk = false
+                }
+
+                if !localOk || !connectorOk {
+                    consecutiveHardFails += 1
+                    consecutivePublicFails = 0
+                    HavenLog.relay(
+                        "relay health HARD fail #\(consecutiveHardFails) local=\(localOk) connector=\(connectorOk) public=\(publicOk) dnsBroken=\(dnsBroken)"
+                    )
+                } else if !publicOk {
+                    consecutiveHardFails = 0
+                    consecutivePublicFails += 1
+                    HavenLog.relay(
+                        "relay health public soft fail #\(consecutivePublicFails) (connector still up)"
+                    )
+                } else {
+                    consecutiveHardFails = 0
+                    consecutivePublicFails = 0
+                    // Re-check DNS periodically while hosting free tunnels.
+                    let shouldRecheckDNS = await MainActor.run { () -> Bool in
+                        CloudflaredTunnel.shared.frontDoorMode == "auto"
+                            && (CloudflaredTunnel.shared.publicURL?.contains("trycloudflare") == true)
+                    }
+                    if shouldRecheckDNS {
+                        let u = await MainActor.run { () -> String? in
+                            CloudflaredTunnel.shared.publicURL
+                        }
+                        if let u {
+                            await CloudflaredTunnel.shared.assessFreeTunnelDNS(publicURL: u)
+                        }
+                    }
+                    // Heal LAN-only media announce while DERP public URL still works.
+                    await MainActor.run {
+                        self.ensurePublicMediaUrlsAnnounced(token: token)
+                    }
+                }
+
+                // Hard: 2 ticks. Soft public-only: 4 ticks. Never recover solely for DNS NXDOMAIN.
+                let shouldRecover = consecutiveHardFails >= 2
+                    || (!dnsBroken && consecutivePublicFails >= 4)
+                if shouldRecover {
+                    consecutiveHardFails = 0
+                    consecutivePublicFails = 0
+                    await self.recoverFrontDoor(generation: generation, pathRouted: pathRouted, token: token)
+                }
+
+                try? await Task.sleep(nanoseconds: 20_000_000_000)
+            }
+        }
+    }
+
+    private func probeLocalFrontDoor() async -> Bool {
+        let port = await MainActor.run { self.frontDoorPort ?? self.mediaHttpPort }
+        guard let port, port > 0 else { return false }
+        return await Self.httpReachable(url: "http://127.0.0.1:\(port)/", timeout: 3)
+    }
+
+    private func probePublicFrontDoor() async -> Bool {
+        let url = await MainActor.run { CloudflaredTunnel.shared.publicURL }
+        guard let url, url.hasPrefix("https://") else {
+            // Manual/LAN may have no cloudflared public URL — local probe is enough.
+            return true
+        }
+        // trycloudflare dead hostnames often 530/502/timeout; a live path-proxy returns JSON.
+        return await Self.httpReachable(url: url.hasSuffix("/") ? url : url + "/", timeout: 8)
+    }
+
+    /// GET that succeeds on any HTTP response (including 4xx) — connection refused / timeout = dead.
+    private static func httpReachable(url: String, timeout: TimeInterval) async -> Bool {
+        guard let u = URL(string: url) else { return false }
+        var req = URLRequest(url: u)
+        req.httpMethod = "GET"
+        req.timeoutInterval = timeout
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        // Ephemeral session — avoids shared-session cookie / cache quirks on trycloudflare.
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = timeout
+        cfg.waitsForConnectivity = false
+        let session = URLSession(configuration: cfg)
+        defer { session.invalidateAndCancel() }
+        do {
+            let (data, resp) = try await session.data(for: req)
+            guard let http = resp as? HTTPURLResponse else { return false }
+            // Cloudflare edge: 530 = origin/tunnel down for trycloudflare.
+            if http.statusCode == 530 || http.statusCode == 502 || http.statusCode == 503 {
+                return false
+            }
+            // Path-proxy root returns JSON with haven-path-proxy; bare DERP-only is wrong for
+            // the unified front door but still "reachable". Prefer path-proxy marker when present.
+            if let body = String(data: data, encoding: .utf8),
+               body.contains("Iroh Relay"),
+               !body.contains("haven-path-proxy"),
+               !body.contains("haven") {
+                // Likely pointed at raw :3340 instead of path proxy — treat as unhealthy for
+                // single-origin mode so we recover onto :8675.
+                return false
+            }
+            return http.statusCode > 0
+        } catch {
+            return false
+        }
+    }
+
+    private func recoverFrontDoor(generation: UInt64, pathRouted: Bool, token: String) async {
+        let ok = await MainActor.run {
+            self.startGeneration == generation && self.enabled && self.serving
+        }
+        guard ok else { return }
+        let frontPort = await MainActor.run { self.frontDoorPort ?? self.mediaHttpPort ?? 8675 }
+        HavenLog.relay("relay front door recovering → :\(frontPort) (pathRouted=\(pathRouted))")
+
+        // Local media/path-proxy dead → full host restart (not just tunnel).
+        let localOk = await probeLocalFrontDoor()
+        if !localOk {
+            HavenLog.relay("relay local front door dead — full host restart")
+            await MainActor.run {
+                guard self.startGeneration == generation else { return }
+                self.stop()
+                if self.enabled { self.start() }
+            }
+            return
+        }
+
+        // Re-assert layout so Settings stays honest about one vs two tunnels.
+        await MainActor.run {
+            if pathRouted {
+                CloudflaredTunnel.shared.setFrontDoorLayout(
+                    pathProxy: true, localPort: frontPort, dualNote: nil
+                )
+            } else {
+                CloudflaredTunnel.shared.setFrontDoorLayout(
+                    pathProxy: false,
+                    localPort: frontPort,
+                    dualNote: "Path proxy off — dual free tunnels (media + DERP)"
+                )
+            }
+        }
+        let fd = await CloudflaredTunnel.shared.apply(port: frontPort)
+        var urls: [String] = []
+        await MainActor.run {
+            guard self.startGeneration == generation, self.enabled, !self.nodeId.isEmpty else {
+                CloudflaredTunnel.shared.stop()
+                return
+            }
+            urls = Self.announceHttpUrls(mediaPort: self.mediaHttpPort ?? frontPort)
+            if let u = fd.announceURL {
+                urls = [u] + urls.filter { $0 != u }
+                HavenLog.relay("relay front door recovered \(u)")
+            } else {
+                HavenLog.relay("relay front door recover produced no public URL")
+            }
+            if !urls.isEmpty {
+                RelayMailboxStore.shared.setHttpInterface(self.nodeId, urls: urls, token: token)
+            }
+        }
+        // Dual free-tunnel mode: re-spawn the DERP trycloudflare too (apply only restarts media).
+        if !pathRouted {
+            let derpPort = await MainActor.run { self.derpHandle?.localPort() }
+            if let dport = derpPort {
+                let derpURL = await CloudflaredTunnel.shared.startQuickDerp(port: dport)
+                await MainActor.run {
+                    if let d = derpURL, !d.isEmpty, !self.nodeId.isEmpty {
+                        RelayMailboxStore.shared.setDerpUrl(self.nodeId, url: d)
+                    }
+                }
+            }
+        } else if let first = urls.first {
+            await MainActor.run {
+                if !self.nodeId.isEmpty {
+                    RelayMailboxStore.shared.setDerpUrl(self.nodeId, url: first)
+                }
+            }
+        }
+        await MainActor.run {
+            guard self.startGeneration == generation, self.enabled else { return }
+            self.reannounceBurst()
+        }
+    }
+    #endif
 
     #if os(macOS)
     /// Record public DERP URL on our RelayEntry after the front door is known.
@@ -333,14 +653,18 @@ final class RelayHost: ObservableObject {
         }) {
             derpPublic = u
         } else if let port = derpHandle?.localPort() {
-            // Dual free tunnel fallback when path router failed.
+            // Dual free tunnel fallback when path router failed — second trycloudflare is
+            // intentional here; CloudflaredTunnel publishes both live URLs for the Settings UI.
+            HavenLog.relay(
+                "path proxy not active — starting second free cloudflared for DERP :\(port)"
+            )
             derpPublic = await CloudflaredTunnel.shared.startQuickDerp(port: port)
         }
         if let d = derpPublic, !d.isEmpty {
             RelayMailboxStore.shared.setDerpUrl(self.nodeId, url: d)
             HavenLog.relay(
                 "relay DERP fabric public=\(d)"
-                    + (pathRouted ? " (single-tunnel hairpin)" : "")
+                    + (pathRouted ? " (single-tunnel hairpin via path proxy)" : " (dual free tunnel)")
             )
         } else {
             HavenLog.relay("relay DERP listening — no public URL yet")
@@ -358,27 +682,64 @@ final class RelayHost: ObservableObject {
         return tok
     }
 
-    /// URLs peers can reach our HTTP interface at: the configured public URL first, then LAN IPv4s.
-    /// What we tell the circle they can reach this relay's HTTP interface at.
+    /// URLs peers can reach our HTTP **media** interface at.
     ///
-    /// A configured public URL wins OUTRIGHT — LAN addresses are not appended to it. The operator has
-    /// said how members reach this box; adding `192.168.x` behind that only gives every remote member
-    /// something to try and time out on, which is precisely the failure the CLI relay never had: it
-    /// announces nothing unless told, so callers go straight to the path that works.
+    /// Order of preference:
+    /// 1. **Live free/named cloudflared URL** (`CloudflaredTunnel.publicURL`) — path-proxy or media
+    /// 2. Configured public URL (manual / bundled domain)
+    /// 3. LAN IPv4s only when no public origin is known
     ///
-    /// With no public URL we still announce LAN addresses, because a member on the SAME network should
-    /// use them — that is the fast local path and it genuinely works. Remote members discard them on
-    /// receipt (`httpInterface` keeps a private address only when we are on that /24), so the useless
-    /// case is filtered by the side that can actually tell.
+    /// Public HTTPS wins OUTRIGHT — LAN is not appended. Appending `192.168.x` behind a public URL
+    /// makes remote members burn timeouts. That bug + fabric-rebind reattach used to leave
+    /// **LAN-only media URLs while DERP kept trycloudflare** → iroh works, media never does.
     static func reachableHttpUrls(port: UInt16) -> [String] {
-        // Prefer normalized public URL (manual / bundled domain). Bare hostnames get https://.
+        announceHttpUrls(mediaPort: port)
+    }
+
+    /// Build the media announce list (shared by host start, reattach, health recover).
+    static func announceHttpUrls(mediaPort: UInt16) -> [String] {
+        #if os(macOS)
+        // Live tunnel (free trycloudflare or named) — most important for remote peers.
+        if let live = CloudflaredTunnel.shared.publicURL?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !live.isEmpty {
+            var t = live
+            while t.hasSuffix("/") { t.removeLast() }
+            if let n = CloudflaredTunnel.normalizePublicURL(t) { return [n] }
+            if t.hasPrefix("https://") || t.hasPrefix("http://") { return [t] }
+        }
+        #endif
+        // Manual / bundled configured domain.
         if let pub = CloudflaredTunnel.normalizePublicURL(
             UserDefaults.standard.string(forKey: "haven.relay.publicURL") ?? ""
         ) {
             return [pub]
         }
-        return lanIPv4s().map { "http://\($0):\(port)" }
+        // LAN-only fallback (same network only).
+        return lanIPv4s().map { "http://\($0):\(mediaPort)" }
     }
+
+    /// If our entry lost the public media URL (LAN-only wipe), restore from the live tunnel.
+    #if os(macOS)
+    func ensurePublicMediaUrlsAnnounced(token: String) {
+        guard serving, !nodeId.isEmpty else { return }
+        guard let live = CloudflaredTunnel.shared.publicURL?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !live.isEmpty else { return }
+        let current = RelayMailboxStore.shared.httpInterface(nodeId)?.urls ?? []
+        let hasPublicHttps = current.contains { $0.hasPrefix("https://") }
+        if hasPublicHttps, current.contains(where: { $0.contains(live) || live.contains($0) }) {
+            return
+        }
+        var t = live
+        while t.hasSuffix("/") { t.removeLast() }
+        let urls = [CloudflaredTunnel.normalizePublicURL(t) ?? t]
+        RelayMailboxStore.shared.setHttpInterface(nodeId, urls: urls, token: token)
+        if CloudflaredTunnel.shared.usesPathProxy {
+            RelayMailboxStore.shared.setDerpUrl(nodeId, url: urls[0])
+        }
+        HavenLog.relay("media announce restored public URL \(urls[0]) (was LAN-only=\(current))")
+        reannounceBurst()
+    }
+    #endif
 
     /// Every up, non-loopback, non-link-local IPv4 on this device (getifaddrs).
     static func lanIPv4s() -> [String] {
@@ -426,8 +787,14 @@ final class RelayHost: ObservableObject {
     }
 
     private func stop() {
+        // Invalidate any in-flight startHttpInterface / health watch immediately.
+        startGeneration &+= 1
+        healthWatchTask?.cancel()
+        healthWatchTask = nil
+        mediaHttpPort = nil
+        frontDoorPort = nil
         #if os(macOS)
-        CloudflaredTunnel.shared.stop()
+        CloudflaredTunnel.shared.stop() // also sweeps orphans off-main
         pathRouterHandle = nil  // drops unified media+DERP front door
         derpHandle = nil   // drops embedded iroh-relay
         #endif

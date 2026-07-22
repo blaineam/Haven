@@ -101,6 +101,13 @@ pub struct RelayStatusDto {
     pub internet_active: bool,
     pub started: bool,
     pub relay_link: Option<String>,
+    /// Live free/named media (or path-proxy) public URL while hosting.
+    pub live_media_url: Option<String>,
+    /// Live free DERP trycloudflare when dual-tunnel fallback is active (else null — fabric
+    /// shares `live_media_url` via the path proxy).
+    pub live_derp_url: Option<String>,
+    /// True when one cloudflared targets the path proxy (:8675) for media+DERP.
+    pub path_routed: bool,
 }
 
 #[derive(Serialize)]
@@ -982,7 +989,18 @@ pub fn unblock(engine: Eng, id_hex: String) {
 #[tauri::command]
 pub fn relay_status(engine: Eng) -> RelayStatusDto {
     let (hosting, has_relay, relay_active, internet_active, started) = engine.relay_status();
-    RelayStatusDto { hosting, has_relay, relay_active, internet_active, started, relay_link: engine.relay_link() }
+    let (live_media_url, live_derp_url, path_routed) = engine.live_front_door();
+    RelayStatusDto {
+        hosting,
+        has_relay,
+        relay_active,
+        internet_active,
+        started,
+        relay_link: engine.relay_link(),
+        live_media_url,
+        live_derp_url,
+        path_routed,
+    }
 }
 
 #[tauri::command]

@@ -3600,9 +3600,9 @@ async function relaySheet() {
   });
   const modeBox = el("div", { class: "col", style: "gap:4px" });
   const modes = [
-    ["auto", "Free trycloudflare", "Ephemeral *.trycloudflare.com when no custom domain — may change every restart. Media + DERP each get their own free tunnel."],
-    ["bundled", "Custom domain (Haven runs cloudflared)", "Paste media domain + Cloudflare install token. Origin in CF dashboard: :8674 for media; path-route or sibling host → :3340 for DERP fabric."],
-    ["manual", "Manual / external tunnel", "You run cloudflared, Caddy, nginx, Tailscale Funnel, etc. Haven only announces the HTTPS URL(s) — works even if free tunnels are blocked."],
+    ["auto", "Free trycloudflare", "One ephemeral *.trycloudflare.com to the path proxy (:8675) so media + DERP share one origin. Hostname changes on restart. A second free tunnel is only used if the path proxy fails (both URLs shown)."],
+    ["bundled", "Custom domain (Haven runs cloudflared)", "Paste media domain + Cloudflare install token. Origin in CF dashboard: http://127.0.0.1:8675 (path proxy). Optional sibling host → :3340 if you dual-route without the path proxy."],
+    ["manual", "Manual / external tunnel", "You run cloudflared, Caddy, nginx, Tailscale Funnel, etc. Point at :8675 for unified media+DERP. Haven only announces the HTTPS URL(s)."],
   ];
   const derpLabel = el("label", { class: "muted small", style: "margin-top:6px" }, "DERP fabric URL (optional, distinct from media)");
   const syncModeUi = () => {
@@ -3611,7 +3611,7 @@ async function relaySheet() {
     urlInput.placeholder = frontDoor === "auto"
       ? "optional stable media URL (switches to manual when set alone)"
       : "https://relay.example.com";
-    // Dedicated DERP URL is most useful for named/manual dual-role; free auto uses a second tunnel.
+    // Dedicated DERP URL for named/manual dual-role; free auto prefers path proxy (one origin).
     const hideDerp = frontDoor === "auto";
     derpInput.style.display = hideDerp ? "none" : "";
     derpLabel.style.display = hideDerp ? "none" : "";
@@ -3659,8 +3659,44 @@ async function relaySheet() {
     tokenInput,
     el("button", { class: "btn small primary", style: "align-self:flex-start;margin-top:8px", onclick: savePublic }, "Save front door"),
     el("div", { class: "muted small" },
-      "Named/Manual dual role: point media at :8674 and either path-route DERP on the same host or set a sibling hostname for :3340 in the DERP field. Empty DERP field reuses the media URL (path-route required). Free auto uses two trycloudflare origins."),
+      "Auto free: one trycloudflare to the path proxy (:8675) for media+DERP. Dual free tunnels only if the path proxy cannot start — both live URLs are shown while hosting. Named/Manual: point media at :8675 (path proxy) or set a sibling DERP hostname for :3340."),
   );
+  const liveTunnelCard = (() => {
+    if (!s.hosting) return null;
+    const media = s.live_media_url || "";
+    const derp = s.live_derp_url || "";
+    if (!media && !derp) return null;
+    if (s.path_routed && media) {
+      return el("div", { class: "card col" },
+        el("h3", {}, "Live Cloudflare tunnel"),
+        el("div", { class: "ok-text" }, "One cloudflared → path proxy :8675 (media + DERP)"),
+        el("div", { class: "mono", style: "word-break:break-all" }, media),
+        el("button", { class: "btn small", style: "align-self:flex-start", onclick: () => { navigator.clipboard.writeText(media); toast("URL copied"); } }, "Copy"),
+      );
+    }
+    if (media && derp && media !== derp) {
+      return el("div", { class: "card col" },
+        el("h3", {}, "Live Cloudflare tunnels (dual)"),
+        el("div", { class: "muted small" }, "Path proxy off — two free trycloudflare origins (both visible):"),
+        el("div", { class: "muted small" }, "Media"),
+        el("div", { class: "mono", style: "word-break:break-all" }, media),
+        el("div", { class: "muted small", style: "margin-top:6px" }, "DERP fabric"),
+        el("div", { class: "mono", style: "word-break:break-all" }, derp),
+      );
+    }
+    if (media) {
+      return el("div", { class: "card col" },
+        el("h3", {}, "Live Cloudflare tunnel"),
+        el("div", { class: "mono", style: "word-break:break-all" }, media),
+        derp && derp !== media
+          ? el("div", { class: "col" },
+              el("div", { class: "muted small" }, "DERP"),
+              el("div", { class: "mono", style: "word-break:break-all" }, derp))
+          : null,
+      );
+    }
+    return null;
+  })();
   const hostCard = el("div", { class: "card col" },
     el("h3", {}, "Host the relay on this PC"),
     el("div", { class: "muted small" }, "Your circle's relay runs here so posts and media reach friends even when you're both offline. The relay never sees your content — everything is end-to-end sealed."),
@@ -3770,7 +3806,7 @@ async function relaySheet() {
       s3.configured ? el("button", { class: "btn danger small", onclick: async () => { await invoke("erase_relay", { nodeHex: "s3:" + s3.bucket }); await invoke("s3_clear"); toast("S3 relay removed"); renderRelay(); } }, "Remove") : null,
     ),
   );
-  sheet("Relays", el("div", { class: "col", style: "gap:16px" }, hostCard, publicCard, alwaysOn, adoptCard, s3card, headless));
+  sheet("Relays", el("div", { class: "col", style: "gap:16px" }, hostCard, liveTunnelCard, publicCard, alwaysOn, adoptCard, s3card, headless));
 }
 
 // ---- You / Settings --------------------------------------------------------------------

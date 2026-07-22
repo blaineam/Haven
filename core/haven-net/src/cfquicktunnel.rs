@@ -87,24 +87,55 @@ impl QuickTunnel {
         }
     }
 
-    /// Start a free quick tunnel to `local_http` (typically `http://127.0.0.1:8674`).
+    /// Start a free quick tunnel to `local_http` (typically `http://127.0.0.1:8675` path proxy).
     ///
     /// `cloudflared` must already exist at `bin`. Use [`ensure_cloudflared`] first.
+    /// Sweeps orphan Haven tunnels first so a prior toggle cannot leave dual free origins.
+    ///
+    /// Logs: if `HAVEN_CLOUDFLARED_LOG` is set, or `~/.local/share/haven/logs` /
+    /// `%APPDATA%/Haven/logs` is writable, writes `cloudflared-main.log` via `--logfile`
+    /// (and still scrapes stdout/stderr for the trycloudflare URL).
     pub fn start(cloudflared: &Path, local_http: &str) -> Result<Self> {
         if !cloudflared.is_file() {
             bail!("cloudflared not found at {}", cloudflared.display());
         }
+        kill_orphan_cloudflareds(&[]);
+        let log_path = cloudflared_log_path("cloudflared-main.log");
+        let mut args: Vec<String> = Vec::new();
+        if let Some(ref p) = log_path {
+            args.extend([
+                "--logfile".into(),
+                p.display().to_string(),
+                "--loglevel".into(),
+                "info".into(),
+            ]);
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+                .and_then(|mut f| {
+                    use std::io::Write;
+                    writeln!(
+                        f,
+                        "── haven spawn quick {} → {} ──",
+                        chrono_like_now(),
+                        local_http
+                    )
+                });
+            log_info(&format!("cloudflared log → {}", p.display()));
+        }
+        args.extend([
+            "tunnel".into(),
+            "--url".into(),
+            local_http.into(),
+            "--no-autoupdate".into(),
+            // HTTP/2 is friendlier through broken UDP paths; QUIC is still tried first by default
+            // in recent builds, but http2 is a reliable fallback flag for some networks.
+            "--protocol".into(),
+            "http2".into(),
+        ]);
         let mut child = Command::new(cloudflared)
-            .args([
-                "tunnel",
-                "--url",
-                local_http,
-                "--no-autoupdate",
-                // HTTP/2 is friendlier through broken UDP paths; QUIC is still tried first by default
-                // in recent builds, but http2 is a reliable fallback flag for some networks.
-                "--protocol",
-                "http2",
-            ])
+            .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -117,6 +148,15 @@ impl QuickTunnel {
             |line| extract_trycloudflare_url(line),
             "cloudflared did not print a trycloudflare.com URL within 45s",
         )?;
+
+        if let Some(ref p) = log_path {
+            let _ = std::fs::OpenOptions::new().create(true).append(true).open(p).and_then(
+                |mut f| {
+                    use std::io::Write;
+                    writeln!(f, "── ready public_url={public_url} ──")
+                },
+            );
+        }
 
         Ok(Self {
             child,
@@ -138,16 +178,40 @@ impl QuickTunnel {
             bail!("cloudflare tunnel token is empty");
         }
         let public_url = normalize_public_url(public_url)?;
+        kill_orphan_cloudflareds(&[]);
+        let log_path = cloudflared_log_path("cloudflared-main.log");
+        let mut args: Vec<String> = Vec::new();
+        if let Some(ref p) = log_path {
+            args.extend([
+                "--logfile".into(),
+                p.display().to_string(),
+                "--loglevel".into(),
+                "info".into(),
+            ]);
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+                .and_then(|mut f| {
+                    use std::io::Write;
+                    writeln!(
+                        f,
+                        "── haven spawn named {} domain={public_url} ──",
+                        chrono_like_now()
+                    )
+                });
+        }
+        args.extend([
+            "tunnel".into(),
+            "--no-autoupdate".into(),
+            "--protocol".into(),
+            "http2".into(),
+            "run".into(),
+            "--token".into(),
+            token.to_string(),
+        ]);
         let mut child = Command::new(cloudflared)
-            .args([
-                "tunnel",
-                "--no-autoupdate",
-                "--protocol",
-                "http2",
-                "run",
-                "--token",
-                token,
-            ])
+            .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -409,6 +473,121 @@ where
                 bail!("cloudflared output closed before ready");
             }
         }
+    }
+}
+
+/// Preferred directory for cloudflared logs (env override, then platform data dir).
+pub fn cloudflared_logs_dir() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("HAVEN_CLOUDFLARED_LOG_DIR") {
+        let pb = PathBuf::from(p);
+        let _ = std::fs::create_dir_all(&pb);
+        return Some(pb);
+    }
+    // Desktop / CLI: ~/.local/share/haven/logs or %APPDATA%/Haven/logs
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let pb = PathBuf::from(home)
+                .join("Library/Application Support/Haven/logs");
+            let _ = std::fs::create_dir_all(&pb);
+            return Some(pb);
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let pb = PathBuf::from(appdata).join("Haven").join("logs");
+            let _ = std::fs::create_dir_all(&pb);
+            return Some(pb);
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let pb = PathBuf::from(home).join(".local/share/haven/logs");
+            let _ = std::fs::create_dir_all(&pb);
+            return Some(pb);
+        }
+    }
+    None
+}
+
+fn cloudflared_log_path(name: &str) -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("HAVEN_CLOUDFLARED_LOG") {
+        return Some(PathBuf::from(p));
+    }
+    cloudflared_logs_dir().map(|d| d.join(name))
+}
+
+fn chrono_like_now() -> String {
+    // Avoid chrono dep — local timestamp via SystemTime is enough for log markers.
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("unix:{secs}")
+}
+
+fn log_info(msg: &str) {
+    // haven-net has no log crate dependency; eprintln is fine for desktop/CLI.
+    eprintln!("[haven cloudflared] {msg}");
+}
+
+/// Kill leftover Haven `cloudflared` processes (toggle off/on, crashed host, dual free tunnels).
+///
+/// Matches processes whose command line points at Haven's bundled helper **or** tunnels to the
+/// well-known local origins (`:8675` path proxy, `:8674` media, `:3340` DERP). Skips PIDs in
+/// `except` (currently live children). Best-effort — never errors.
+pub fn kill_orphan_cloudflareds(except: &[u32]) {
+    #[cfg(unix)]
+    {
+        use std::collections::HashSet;
+        let except: HashSet<u32> = except.iter().copied().collect();
+        let Ok(out) = Command::new("ps")
+            .args(["-ax", "-o", "pid=", "-o", "command="])
+            .output()
+        else {
+            return;
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut targets: Vec<String> = Vec::new();
+        for line in text.lines() {
+            let line = line.trim();
+            let mut parts = line.splitn(2, char::is_whitespace);
+            let Some(pid_s) = parts.next() else { continue };
+            let Some(cmd) = parts.next() else { continue };
+            let Ok(pid) = pid_s.trim().parse::<u32>() else { continue };
+            if pid <= 1 || except.contains(&pid) {
+                continue;
+            }
+            let is_haven_helper = cmd.contains("/Contents/Helpers/cloudflared")
+                || (cmd.contains("matrix-haven-mac-stub") && cmd.contains("cloudflared"))
+                || (cmd.contains("HavenStub") && cmd.contains("cloudflared"))
+                || cmd.contains("haven-cloudflared");
+            let is_haven_origin = cmd.contains("cloudflared")
+                && (cmd.contains("127.0.0.1:8675")
+                    || cmd.contains("127.0.0.1:8674")
+                    || cmd.contains("127.0.0.1:3340"));
+            if is_haven_helper || is_haven_origin {
+                targets.push(pid.to_string());
+            }
+        }
+        for pid in &targets {
+            let _ = Command::new("kill").args(["-TERM", pid]).status();
+        }
+        if !targets.is_empty() {
+            thread::sleep(Duration::from_millis(350));
+            for pid in &targets {
+                let _ = Command::new("kill").args(["-KILL", pid]).status();
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = except;
+        // Windows: drop of QuickTunnel kills the tracked child. Orphan scan would need WMI /
+        // CreateToolhelp32Snapshot — left as tracked-Process only for now.
     }
 }
 

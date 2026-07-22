@@ -261,6 +261,8 @@ pub struct Engine {
     derp_server: StdMutex<Option<haven_net::DerpServer>>,
     /// Local path router: one origin → media + DERP by path (`/relay` → fabric).
     path_router: StdMutex<Option<haven_net::PathRouter>>,
+    /// True while hosting with path proxy active (one public origin / one free cloudflared).
+    path_routed: StdMutex<bool>,
     /// Embedded circle TURN for WebRTC ICE — own UDP socket (not a second Endpoint).
     turn_server: StdMutex<Option<haven_net::TurnServer>>,
     prefs: StdMutex<Prefs>,
@@ -550,6 +552,7 @@ impl Engine {
             derp_tunnel: StdMutex::new(None),
             derp_server: StdMutex::new(None),
             path_router: StdMutex::new(None),
+            path_routed: StdMutex::new(false),
             turn_server: StdMutex::new(None),
             prefs: StdMutex::new(prefs),
             dyn_state: StdMutex::new(dyn_state),
@@ -656,6 +659,7 @@ impl Engine {
             derp_tunnel: StdMutex::new(None),
             derp_server: StdMutex::new(None),
             path_router: StdMutex::new(None),
+            path_routed: StdMutex::new(false),
             turn_server: StdMutex::new(None),
             prefs: StdMutex::new(prefs),
             dyn_state: StdMutex::new(dyn_state),
@@ -4268,21 +4272,44 @@ impl Engine {
                     derp_backend: format!("127.0.0.1:{dport}"),
                     http_token: token.clone(),
                 };
-                match haven_net::PathRouter::spawn(&rcfg).await {
-                    Ok(Some(router)) => {
-                        front_port = router.local_port();
-                        path_routed = true;
-                        log::info!(
-                            "path router on {} — single origin media+DERP",
-                            router.local_addr
-                        );
-                        *self.path_router.lock().unwrap() = Some(router);
+                // Prefer path proxy (one free cloudflared). Retry once on ephemeral bind if :8675 busy.
+                for attempt in 1u8..=2 {
+                    let bind = if attempt == 1 {
+                        haven_net::DEFAULT_PATH_ROUTER_BIND.to_string()
+                    } else {
+                        "127.0.0.1:0".into()
+                    };
+                    let mut try_cfg = rcfg.clone();
+                    try_cfg.bind = bind;
+                    match haven_net::PathRouter::spawn(&try_cfg).await {
+                        Ok(Some(router)) => {
+                            front_port = router.local_port();
+                            path_routed = true;
+                            log::info!(
+                                "path router on {} — single origin media+DERP (one cloudflared)",
+                                router.local_addr
+                            );
+                            *self.path_router.lock().unwrap() = Some(router);
+                            break;
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            log::warn!("path router attempt {attempt} failed: {e:#}");
+                            if attempt == 1 {
+                                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                            }
+                        }
                     }
-                    Ok(None) => {}
-                    Err(e) => log::warn!("path router failed: {e:#}"),
+                }
+                if !path_routed {
+                    log::warn!(
+                        "path proxy unavailable — free auto will use dual trycloudflare \
+                         (media + DERP); both URLs are exposed to the UI"
+                    );
                 }
             }
         }
+        *self.path_routed.lock().unwrap() = path_routed;
 
         let mut urls = Vec::new();
         // Manual = announce-only. Bundled/Auto may spawn cloudflared → path router when unified.
@@ -4375,6 +4402,19 @@ impl Engine {
             derp_url.as_deref(),
             turn_info.as_ref(),
         );
+        // Free trycloudflare rotates hostname on every restart — burst frame-19 so peers
+        // drop the dead URL and learn the new one (parity with Apple RelayHost.reannounceBurst).
+        self.reannounce_own_relay();
+        let me = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            for secs in [2u64, 5, 12, 25] {
+                tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+                if !me.dyn_state.lock().unwrap().hosting {
+                    return;
+                }
+                me.reannounce_own_relay();
+            }
+        });
     }
 
     /// Paste-ready interface blob (CLI parity) so headless / operators can copy media + DERP + TURN.
@@ -4459,9 +4499,13 @@ impl Engine {
             drop(guard);
             match Self::start_desktop_derp_quick_tunnel(port) {
                 Ok(t) => {
-                    log::info!("relay quick tunnel (DERP dual-origin): {}", t.public_url);
+                    log::info!(
+                        "relay dual free tunnels — DERP trycloudflare: {} (media uses separate origin; both shown in UI)",
+                        t.public_url
+                    );
                     let url = t.public_url.clone();
                     *self.derp_tunnel.lock().unwrap() = Some(t);
+                    *self.path_routed.lock().unwrap() = false;
                     if let Some(srv) = self.derp_server.lock().unwrap().as_mut() {
                         srv.public_url = url.clone();
                     }
@@ -4935,16 +4979,57 @@ impl Engine {
             max_age_days,
             max_bytes,
         );
+        let node_hex = handle.node_id_hex();
         let token = self.prefs.lock().unwrap().relay_http_token.clone();
         if !token.is_empty() {
             // Prefer the well-known port so existing cloudflared front doors keep working.
             if let Err(e) = handle.serve_http("0.0.0.0:8674".into(), token.clone()).await {
                 log::warn!("reattach http :8674 failed ({e}); trying ephemeral");
                 let _ = handle
-                    .serve_http("0.0.0.0:0".into(), token)
+                    .serve_http("0.0.0.0:0".into(), token.clone())
                     .await
                     .map_err(|e| anyhow::anyhow!("reattach http: {e}"))?;
             }
+        }
+        // Re-publish media URLs from the *live* tunnel. Without this, fabric rebind left
+        // LAN-only media URLs while DERP still had trycloudflare → iroh works, media never does.
+        let mut urls: Vec<String> = Vec::new();
+        if let Some(t) = self.quick_tunnel.lock().unwrap().as_ref() {
+            let u = t.public_url.trim().trim_end_matches('/').to_string();
+            if !u.is_empty() {
+                urls.push(u);
+            }
+        }
+        if urls.is_empty() {
+            let pub_url = self.prefs.lock().unwrap().relay_public_url.clone();
+            let t = pub_url.trim().trim_end_matches('/');
+            if !t.is_empty() {
+                if let Ok(n) = haven_net::cfquicktunnel::normalize_public_url(t) {
+                    urls.push(n);
+                } else {
+                    urls.push(t.to_string());
+                }
+            }
+        }
+        if urls.is_empty() {
+            if let Some(ip) = Self::primary_lan_ip() {
+                urls.push(format!("http://{ip}:8674"));
+            }
+        }
+        if !urls.is_empty() && !token.is_empty() {
+            let path_routed = *self.path_routed.lock().unwrap();
+            let mut p = self.prefs.lock().unwrap();
+            let mut changed = p.set_relay_http(&node_hex, urls.clone(), token);
+            // Path-proxy single origin: keep DERP on the same public URL.
+            if path_routed {
+                if let Some(u) = urls.first() {
+                    changed |= p.set_relay_derp(&node_hex, u);
+                }
+            }
+            if changed {
+                let _ = p.save(&self.paths);
+            }
+            log::info!("reattach media announce urls={urls:?}");
         }
         *self.relay_host.lock().unwrap() = Some(handle);
         self.dyn_state.lock().unwrap().hosting = true;
@@ -4999,9 +5084,32 @@ impl Engine {
         *self.derp_tunnel.lock().unwrap() = None;
         *self.derp_server.lock().unwrap() = None;
         *self.path_router.lock().unwrap() = None;
+        *self.path_routed.lock().unwrap() = false;
         *self.turn_server.lock().unwrap() = None;
+        // Also sweep orphans — lost Process/Child refs leave dual free tunnels that make the
+        // public URL look like "Iroh Relay only" or 401 after toggle off/on.
+        haven_net::cfquicktunnel::kill_orphan_cloudflareds(&[]);
         self.dyn_state.lock().unwrap().hosting = false;
         self.emit_changed();
+    }
+
+    /// Live free/named front-door URLs for the Settings UI (media + optional dual DERP).
+    /// `(live_media, live_derp, path_routed)`.
+    pub fn live_front_door(&self) -> (Option<String>, Option<String>, bool) {
+        let media = self
+            .quick_tunnel
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|t| t.public_url.clone());
+        let derp = self
+            .derp_tunnel
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|t| t.public_url.clone());
+        let path_routed = *self.path_routed.lock().unwrap();
+        (media, derp, path_routed)
     }
 
     /// Re-emit THIS host's own relay id (frame 19) to every circle's contacts, WITHOUT adopt_relay's heavy

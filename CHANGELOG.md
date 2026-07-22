@@ -225,6 +225,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Opening the free Cloudflare URL in Safari often downloaded a 0 KB file.** Browsers hitting
+  the media mailbox root (or a mis-hopped path) got `401 application/octet-stream` with an empty
+  body — Safari saves that as a download. Path-proxy `/` now serves a small HTML status page for
+  browsers; media non-API paths return HTML/text 404 instead of empty 401; proxy hops force
+  `Connection: close` and rewrite `Host` so keep-alive cannot strand the next request.
+
 - **Relay media URL vs DERP split (free Cloudflare).** After a fabric rebind, media was re-announced
   as LAN-only (`http://10.x:8674`) while iroh/DERP kept the public trycloudflare URL — so messaging
   and live fabric worked and media never reached remote peers. Media announce now always prefers the

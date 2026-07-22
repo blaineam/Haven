@@ -228,6 +228,25 @@ async fn handle_client(mut client: TcpStream, state: &ProxyState) -> Result<()> 
 
     let path = parse_request_path(&head).unwrap_or("/");
     let kind = classify_path(path);
+    // Optional request log for diagnosing trycloudflare / browser oddities.
+    // Enable with HAVEN_PATH_PROXY_LOG=/path/to/file (append).
+    if let Ok(log_path) = std::env::var("HAVEN_PATH_PROXY_LOG") {
+        let line = format!(
+            "{:?} kind={} path={} head_first={:?}\n",
+            std::time::SystemTime::now(),
+            kind.as_str(),
+            path,
+            std::str::from_utf8(&head[..head.len().min(160)]).unwrap_or("?")
+        );
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .and_then(|mut f| {
+                use std::io::Write;
+                f.write_all(line.as_bytes())
+            });
+    }
 
     match kind {
         RouteKind::Status => {
@@ -287,27 +306,40 @@ async fn serve_status(client: &mut TcpStream, head: &[u8], state: &ProxyState) -
         write_simple(client, 405, "method not allowed", b"GET or HEAD only\n").await?;
         return Ok(());
     }
-    let body = if path_only == "/_haven/routes" || path_only == "/_haven" || path_only == "/" {
-        state.status_json()
-    } else {
-        // /_haven/… unknown → still JSON 404-ish
-        format!(r#"{{"error":"not found","path":"{path_only}"}}"#)
-    };
-    let status = if path_only == "/_haven/routes"
-        || path_only == "/_haven"
-        || path_only == "/"
-    {
-        200
-    } else {
-        404
-    };
-    let reason = if status == 200 { "ok" } else { "not found" };
+    // Browsers (Safari especially) treat unknown Content-Types + empty bodies as a *download*.
+    // Prefer HTML for human visits (Accept: text/html); JSON for machines (/_haven, curl *).
+    let accept = header_value(head, "accept").unwrap_or("");
+    let wants_html = accept.contains("text/html");
+    let is_routes = path_only == "/_haven/routes" || path_only == "/_haven";
+    let is_root = path_only == "/";
+    let (status, reason, content_type, body): (u16, &str, &str, String) =
+        if is_root || is_routes {
+            let json = state.status_json();
+            if is_root && wants_html {
+                (
+                    200,
+                    "ok",
+                    "text/html; charset=utf-8",
+                    status_html(&json, &state.local_addr.to_string()),
+                )
+            } else {
+                (200, "ok", "application/json; charset=utf-8", json)
+            }
+        } else {
+            (
+                404,
+                "not found",
+                "application/json; charset=utf-8",
+                format!(r#"{{"error":"not found","path":"{path_only}"}}"#),
+            )
+        };
     let body_bytes = body.as_bytes();
     let resp = format!(
         "HTTP/1.1 {status} {reason}\r\n\
-         Content-Type: application/json; charset=utf-8\r\n\
+         Content-Type: {content_type}\r\n\
          Content-Length: {}\r\n\
          Cache-Control: no-store\r\n\
+         X-Haven-Path-Proxy: 1\r\n\
          Connection: close\r\n\
          \r\n",
         body_bytes.len()
@@ -320,11 +352,56 @@ async fn serve_status(client: &mut TcpStream, head: &[u8], state: &ProxyState) -
     Ok(())
 }
 
+fn status_html(json: &str, bind: &str) -> String {
+    // Escape for HTML text node (json is our own ASCII).
+    let escaped = json.replace('&', "&amp;").replace('<', "&lt;");
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Haven relay</title>
+<style>
+ body{{font-family:system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem;line-height:1.45;color:#111}}
+ code,pre{{font-size:.85rem;background:#f4f4f5;padding:.15rem .35rem;border-radius:4px}}
+ pre{{padding:1rem;overflow:auto}}
+ .ok{{color:#15803d;font-weight:600}}
+</style></head><body>
+<h1>Haven path proxy</h1>
+<p class="ok">Front door is up.</p>
+<p>This URL is the <strong>public HTTPS origin</strong> for a circle relay (media + iroh fabric + call hairpin).
+It is not a website — Haven clients use signed API paths. Opening it in a browser only checks that the tunnel reaches this host.</p>
+<p>Local bind: <code>{bind}</code></p>
+<ul>
+ <li><code>/k/*</code> <code>/l/*</code> <code>/t/*</code> — sealed media mailbox</li>
+ <li><code>/relay</code> <code>/derp</code> <code>/ping</code> — iroh DERP fabric</li>
+ <li><code>/webrtc/hairpin</code> — call media over free Cloudflare</li>
+</ul>
+<pre>{escaped}</pre>
+</body></html>"#
+    )
+}
+
+fn header_value<'a>(head: &'a [u8], name: &str) -> Option<&'a str> {
+    let text = std::str::from_utf8(head).ok()?;
+    let want = name.to_ascii_lowercase();
+    for line in text.lines().skip(1) {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim().eq_ignore_ascii_case(&want) {
+                return Some(v.trim());
+            }
+        }
+    }
+    None
+}
+
 async fn write_simple(client: &mut TcpStream, status: u16, reason: &str, body: &[u8]) -> Result<()> {
     let resp = format!(
         "HTTP/1.1 {status} {reason}\r\n\
          Content-Type: text/plain; charset=utf-8\r\n\
          Content-Length: {}\r\n\
+         X-Haven-Path-Proxy: 1\r\n\
          Connection: close\r\n\
          \r\n",
         body.len()
@@ -340,8 +417,11 @@ async fn proxy_to(client: &mut TcpStream, head: &[u8], backend: &str) -> Result<
         .await
         .with_context(|| format!("connect backend {backend}"))?;
 
-    // Forward the already-read head, then bidirectional copy (covers body + WebSocket upgrade).
-    upstream.write_all(head).await?;
+    // Rewrite Host to the backend and force Connection: close so keep-alive reuse cannot
+    // leave cloudflared mid-stream on a previous media/DERP hop (Safari 0-byte downloads
+    // were often media 401 application/octet-stream from a confused origin path).
+    let rewritten = rewrite_proxy_head(head, backend);
+    upstream.write_all(&rewritten).await?;
 
     let (mut cr, mut cw) = client.split();
     let (mut ur, mut uw) = upstream.split();
@@ -369,11 +449,66 @@ async fn proxy_to(client: &mut TcpStream, head: &[u8], backend: &str) -> Result<
         }
         Ok::<(), std::io::Error>(())
     };
-    tokio::select! {
-        r = c2u => { r?; }
-        r = u2c => { r?; }
-    }
+    // Finish both directions; Connection: close on the rewritten head limits keep-alive reuse.
+    let _ = tokio::join!(c2u, u2c);
     Ok(())
+}
+
+/// Adjust request head for a single-origin reverse proxy hop.
+fn rewrite_proxy_head(head: &[u8], backend: &str) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(head) else {
+        return head.to_vec();
+    };
+    let Some(split) = text.find("\r\n\r\n") else {
+        return head.to_vec();
+    };
+    let header_block = &text[..split];
+    let rest = &text[split + 4..]; // may include already-read body bytes
+    let lines: Vec<&str> = header_block.split("\r\n").collect();
+    if lines.is_empty() {
+        return head.to_vec();
+    }
+    // request line stays; rewrite Host + Connection.
+    let mut out = String::with_capacity(head.len() + 32);
+    out.push_str(lines[0]);
+    out.push_str("\r\n");
+    let mut saw_host = false;
+    let mut saw_conn = false;
+    for line in lines.iter().skip(1) {
+        if line.is_empty() {
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("host:") {
+            out.push_str("Host: ");
+            out.push_str(backend);
+            out.push_str("\r\n");
+            saw_host = true;
+            continue;
+        }
+        if lower.starts_with("connection:") {
+            out.push_str("Connection: close\r\n");
+            saw_conn = true;
+            continue;
+        }
+        // Drop hop-by-hop headers that confuse keep-alive pooling through free CF.
+        if lower.starts_with("keep-alive:") || lower.starts_with("proxy-connection:") {
+            continue;
+        }
+        out.push_str(line);
+        out.push_str("\r\n");
+    }
+    if !saw_host {
+        out.push_str("Host: ");
+        out.push_str(backend);
+        out.push_str("\r\n");
+    }
+    if !saw_conn {
+        out.push_str("Connection: close\r\n");
+    }
+    out.push_str("\r\n");
+    out.push_str(rest);
+    out.into_bytes()
 }
 
 /// Extract the request-target path from a raw HTTP request head.

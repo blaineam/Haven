@@ -267,6 +267,35 @@ async fn handle_conn(
             .unwrap_or(true);
 
         let route = route(&method, &path);
+        // Browser/probes hitting the media port root (or free-CF mis-routed to :8674) used to get
+        // `401 application/octet-stream` with an empty body — Safari downloads that as a 0 KB file.
+        // Non-API paths get a short HTML/text answer instead.
+        if matches!(route, Route::Bad) {
+            discard(&mut r, clen).await?;
+            let accept = header(&headers, "accept").unwrap_or("");
+            if accept.contains("text/html") || method == "GET" && (path == "/" || path.is_empty()) {
+                let body = b"<!DOCTYPE html><html><body><h1>Haven media mailbox</h1>\
+<p>This port serves sealed media over signed <code>/k/</code> <code>/l/</code> <code>/t/</code> paths. \
+Open the path-proxy origin (usually public trycloudflare to :8675) for a status page.</p></body></html>\n";
+                let head = format!(
+                    "HTTP/1.1 404 not a website\r\nContent-Type: text/html; charset=utf-8\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                w.write_all(head.as_bytes()).await?;
+                w.write_all(body).await?;
+            } else {
+                respond(
+                    &mut w,
+                    404,
+                    "not found",
+                    false,
+                    b"use /k/ /l/ /t/ with Authorization: Haven ...\n",
+                )
+                .await?;
+            }
+            return Ok(());
+        }
         let cap = match route {
             Route::Put(_) => MAX_BLOB,
             _ => MAX_TOUCH_BODY,
@@ -285,9 +314,10 @@ async fn handle_conn(
             .and_then(|v| verify_header(v, token, &method, route_key(&route), nonces));
         let Some((peer, digest)) = signed else {
             discard(&mut r, clen).await?;
-            respond(&mut w, 401, "unauthorized", keep_alive, b"").await?;
-            if !keep_alive { return Ok(()); }
-            continue;
+            // Prefer close so reverse proxies (path proxy / cloudflared) never reuse a half-spent
+            // connection and hand the next browser GET / a 401 octet-stream empty body.
+            respond(&mut w, 401, "unauthorized", false, b"").await?;
+            return Ok(());
         };
 
         // MAY they? Same circle-membership gate as the iroh path, against the identity the

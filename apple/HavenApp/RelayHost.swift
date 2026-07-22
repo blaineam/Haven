@@ -369,6 +369,8 @@ final class RelayHost: ObservableObject {
             )
             guard !urls.isEmpty, !self.nodeId.isEmpty else { return }
             RelayMailboxStore.shared.setHttpInterface(self.nodeId, urls: urls, token: token)
+            // New public origin — drop cool-downs so phones don't sit on stale trycloudflare skips.
+            SharedStore.clearAllHttpUrlBad()
 
             // Public DERP: single-origin shares media URL (call signaling hairpins over /relay);
             // sibling hostname uses configured URL; dual free tunnel only when path router is off.
@@ -390,6 +392,7 @@ final class RelayHost: ObservableObject {
             )
             guard !urls.isEmpty, !self.nodeId.isEmpty else { return }
             RelayMailboxStore.shared.setHttpInterface(self.nodeId, urls: urls, token: token)
+            SharedStore.clearAllHttpUrlBad()
             self.reannounceBurst()
             #endif
         }
@@ -1630,16 +1633,21 @@ final class RelayHealth: ObservableObject {
         byNode[nodeHex] = Health(fails: 0, nextRetryMs: 0, lastSuccessMs: nowMs())
         objectWillChange.send()
     }
-    /// A failure grows the backoff exponentially (5s, 10s, 20s … capped at 5m) AND invalidates
-    /// proof-of-life: a relay that just failed is no longer "reachable", even if it succeeded within
-    /// the last 15 min. Without this a relay stayed green for the full window while failing every op.
+    /// A failure grows the backoff exponentially (5s, 10s, 20s … capped at 5m).
+    ///
+    /// Proof-of-life is cleared only after **two** consecutive failures: a single free-CF DNS miss
+    /// or one cold dial used to zero `lastSuccessMs` and paint the relay orange, then the next
+    /// HTTP poll greened it again — the iPhone "cycling unreachable / reachable" UI. One blip
+    /// still backs off retries; two in a row drop proven-alive.
     func recordFailure(_ nodeHex: String) {
         var h = byNode[nodeHex] ?? Health()
         h.fails = h.fails == UInt32.max ? h.fails : h.fails + 1
         let shift = UInt64(min(h.fails - 1, 6))   // cap the exponent so the shift never overflows
         let backoff = min(Self.baseBackoffMs * (1 << shift), Self.maxBackoffMs)
         h.nextRetryMs = nowMs() + backoff
-        h.lastSuccessMs = 0   // no longer proven alive — the last thing we know is that it FAILED
+        if h.fails >= 2 {
+            h.lastSuccessMs = 0   // no longer proven alive after repeated failure
+        }
         byNode[nodeHex] = h
         objectWillChange.send()
     }

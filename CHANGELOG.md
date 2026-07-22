@@ -225,6 +225,18 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Friend DMs reached the host Mac but not a linked iPhone.** Mailbox poll on the host already
+  live-delivered over iroh, but a sleeping or cellular phone often missed that path and only learned
+  events via HTTP poll (flaky free Cloudflare DNS) or a silent APNs self-sync that only ran for
+  *own* sends. Ingested mailbox events now call `syncSelf` so linked devices get the same silent
+  push path as self-authored posts.
+
+- **iPhone relay status cycling unreachable ↔ reachable.** HTTP mailbox success never stamped
+  relay health (only iroh dial did), and a single dial/DNS blip zeroed proof-of-life. Free
+  trycloudflare URL cool-down was also 120s. HTTP LIST/PUT success (and 403 roster refusal)
+  now count as reachability; proof-of-life clears only after two consecutive failures; trycloudflare
+  cool-down is ~25s and clears when a new public URL is announced. iOS mailbox poll base ~20s.
+
 - **Opening the free Cloudflare URL in Safari often downloaded a 0 KB file.** Browsers hitting
   the media mailbox root (or a mis-hopped path) got `401 application/octet-stream` with an empty
   body — Safari saves that as a download. Path-proxy `/` now serves a small HTML status page for

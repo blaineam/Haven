@@ -419,8 +419,10 @@ final class FeedStore: ObservableObject {
         pollMailboxNow()
         // 10s heartbeat, but the actual poll only runs when due (30s base, stretching when idle).
         #if os(iOS)
-        let pollHeartbeat: TimeInterval = 20
-        let pollBaseMs: UInt64 = 60_000
+        // 30s base was too slow when free-CF DNS skips a poll or two — DMs sat on Mac (host)
+        // for a minute+ before iPhone tried HTTP again. 20s still idle-stretches via adaptiveInterval.
+        let pollHeartbeat: TimeInterval = 15
+        let pollBaseMs: UInt64 = 20_000
         #else
         let pollHeartbeat: TimeInterval = 10
         let pollBaseMs: UInt64 = 30_000
@@ -2711,6 +2713,14 @@ final class FeedStore: ObservableObject {
         for item in ingested {
             nearbyBroadcast(1, eventPayload(item.circleId, item.envelope), class: .bulk)
         }
+        // APNs silent self-sync for LINKED devices. Own-authored events already call syncSelf in
+        // broadcastEvent; mailbox ingest was the hole: host Mac polled the friend's DM first and
+        // liveDelivered over iroh, but a sleeping/cellular iPhone that missed iroh never got a
+        // push with the inline event — so Mac showed the DM and iPhone stayed empty until a
+        // successful HTTP mailbox poll (often blocked by free-CF DNS flaps).
+        for item in ingested {
+            PushManager.shared.syncSelf(event: item.envelope.base64EncodedString())
+        }
         for item in ingested {
             let cid = item.circleId
             notifyNewest(in: cid)
@@ -3717,6 +3727,8 @@ final class FeedStore: ObservableObject {
         }()
         if !announcedUrls.isEmpty, !announcedToken.isEmpty {
             RelayMailboxStore.shared.setHttpInterface(lower, urls: announcedUrls, token: announcedToken)
+            // New/rotated free CF hostname — stop skipping the old cool-down window.
+            for u in announcedUrls { SharedStore.clearHttpUrlBad(u) }
         }
         let nowPublicHttp = announcedUrls.contains { $0.hasPrefix("https://") }
         // Haven fabric: DERP URL so peers prefer this box over n0 for live NAT.

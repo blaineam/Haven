@@ -998,7 +998,16 @@ enum SharedStore {
 
     private static var httpUrlBadUntil: [String: Date] = [:]
     private static func httpUrlBad(_ base: String) -> Bool { (httpUrlBadUntil[base] ?? .distantPast) > Date() }
-    private static func markHttpUrlBad(_ base: String) { httpUrlBadUntil[base] = Date().addingTimeInterval(120) }
+    /// Skip a base URL briefly after transport failure. Free trycloudflare DNS flaps hard on some
+    /// networks (system NXDOMAIN while DoH works) — a 120s skip made the iPhone UI thrash
+    /// unreachable→reachable every couple of minutes and blocked mailbox poll for linked devices.
+    private static func markHttpUrlBad(_ base: String) {
+        let cool: TimeInterval = base.contains("trycloudflare.com") ? 25 : 60
+        httpUrlBadUntil[base] = Date().addingTimeInterval(cool)
+    }
+    /// Clear a URL's skip so a recovered free tunnel is tried again immediately (e.g. after host reannounce).
+    static func clearHttpUrlBad(_ base: String) { httpUrlBadUntil.removeValue(forKey: base) }
+    static func clearAllHttpUrlBad() { httpUrlBadUntil.removeAll() }
 
     /// Relays that have refused us since our roster last reached them. A refusal is not a dead
     /// endpoint — it means the relay has never been told this DEVICE id belongs to our account, so
@@ -1462,11 +1471,13 @@ enum SharedStore {
                     for base in http.urls where !httpUrlBad(base) {
                         switch await httpPut(base, http.token, key, env) {
                         case .success:
+                            RelayHealth.shared.recordSuccess(node)
                             RelayMailboxStore.shared.markSeen(node)
                             HavenLog.relay("mailbox http-put OK relay=\(node.prefix(8))")
                             landed = true; done = true
                         case .failure(is RelayForbidden):
                             noteRefused(node, "mailbox put")
+                            RelayHealth.shared.recordSuccess(node)
                         case .failure:
                             markHttpUrlBad(base)
                         }
@@ -1661,6 +1672,10 @@ enum SharedStore {
                             switch await httpList(base, http.token, prefix) {
                             case .success(let keys):
                                 listedViaHttp = true
+                                // HTTP LIST is a real reachability proof — without this the UI only
+                                // greened on iroh dial success, so free-CF (HTTP-only) relays flapped
+                                // orange whenever a dial timed out while HTTP was fine.
+                                RelayHealth.shared.recordSuccess(node)
                                 RelayMailboxStore.shared.markSeen(node)
                                 for key in keys where !seenContains(key) {
                                     if case .success(let data?) = await httpGet(base, http.token, key) {
@@ -1669,6 +1684,8 @@ enum SharedStore {
                                 }
                             case .failure(is RelayForbidden):
                                 noteRefused(node, "mailbox list")
+                                // Reachable enough to refuse — not a dead endpoint.
+                                RelayHealth.shared.recordSuccess(node)
                             case .failure:
                                 markHttpUrlBad(base)
                             }

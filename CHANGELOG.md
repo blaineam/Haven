@@ -225,6 +225,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Mac TestFlight builds silently had no push entitlement.** Native Mac App Store profiles grant
+  APNs under `com.apple.developer.aps-environment`; the Mac entitlements file used the iOS short
+  key `aps-environment`. codesign intersects by name and dropped push entirely (profile had
+  production push; the signed app had none). Mac entitlements now use the Mac-form key so silent
+  content-available pushes can register again.
+
 - **Linked Mac host showed none of mom's activity while the iPhone got every notification.** The
   Mac was serving the relay and held hundreds of sealed DM blobs on disk, but peer epoch keys never
   stuck (or key commits were marked "seen" while still unopenable), so the feed never re-opened them.

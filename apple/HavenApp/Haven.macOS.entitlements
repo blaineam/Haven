@@ -19,7 +19,15 @@
 	<true/>
 	<key>com.apple.security.personal-information.photos-library</key>
 	<true/>
-	<key>aps-environment</key>
+	<!--
+	  Push (APNs). iOS profiles grant this under the short key `aps-environment`.
+	  Native macOS App Store / Team Store profiles grant it under the long key
+	  `com.apple.developer.aps-environment`. codesign intersects the entitlements
+	  file with the profile and DROPS keys that don't match by name — so shipping
+	  the short iOS key on Mac silently stripped push from every TestFlight Mac
+	  build (profile had production push; signed app had none). Use the Mac form.
+	-->
+	<key>com.apple.developer.aps-environment</key>
 	<string>production</string>
 	<!-- Universal Links: invite + post links at wemiller.com/apps/haven/#… open the Mac app.
 	     See web/.well-known/apple-app-site-association. -->

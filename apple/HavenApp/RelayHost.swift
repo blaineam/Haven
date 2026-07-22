@@ -449,10 +449,61 @@ final class RelayHost: ObservableObject {
     /// relay set changes. The relay stays permissive until the first circle is authorized here.
     func authorizeMembership() {
         guard let handle, serving else { return }
+        // Matrix QA stub (`com.blaineam.kith.qa.stub`) hosts a pure relay with no social graph.
+        // Calling authorizeCircle with only the host locks the door (RelayAuth fails CLOSED when
+        // members are just the host) so every client gets HTTP REFUSED forever — posts/media never
+        // land for multi-device or cross-user. Union extra hexes from Application Support so the
+        // driver can authorize iOS/Android/Tauri accounts (and their device ids) for the mailbox.
+        let qaExtra = Self.qaAuthorizeMembers()
         for (cid, members) in FeedStore.shared.circleMemberships() {
+            var m = members
+            for h in qaExtra where !m.contains(h) { m.append(h) }
             let relays = RelayMailboxStore.shared.relays(forCircle: cid)
-            handle.authorizeCircle(circleId: cid, members: members, relays: relays)
+            handle.authorizeCircle(circleId: cid, members: m, relays: relays)
         }
+        // Stub may have zero circles in its social engine — still authorize "default" for QA.
+        if Bundle.main.bundleIdentifier?.contains("qa.stub") == true {
+            var m = qaExtra
+            let me = AccountStore.currentNodeHex()
+            if !me.isEmpty, !m.contains(me) { m.append(me) }
+            if !m.isEmpty {
+                handle.authorizeCircle(circleId: "default", members: m, relays: [nodeId].filter { !$0.isEmpty })
+                HavenLog.relay("stub authorize default members=\(m.count)")
+            }
+        }
+    }
+
+    /// Hexes (account and/or device) the matrix driver wants this host relay to serve.
+    /// File: Application Support/`qa-authorize-members.txt` — one 64-hex id per line.
+    /// Also checks common sandboxed subdirs (HavenStub / bundle id) used by macOS containers.
+    private static func qaAuthorizeMembers() -> [String] {
+        #if DEBUG
+        guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return []
+        }
+        var candidates = [base.appendingPathComponent("qa-authorize-members.txt")]
+        for sub in ["HavenStub", "com.blaineam.kith.qa.stub", Bundle.main.bundleIdentifier ?? ""] where !sub.isEmpty {
+            candidates.append(base.appendingPathComponent(sub).appendingPathComponent("qa-authorize-members.txt"))
+        }
+        // Absolute container path fallback for driver writes that miss the sandboxed AS root.
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        candidates.append(home.appendingPathComponent(
+            "Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support/qa-authorize-members.txt"))
+        for url in candidates {
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            let hexes = text.split(whereSeparator: \.isNewline)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                .filter { $0.count == 64 && $0.allSatisfy(\.isHexDigit) }
+            if !hexes.isEmpty {
+                HavenLog.relay("qa-authorize-members loaded \(hexes.count) from \(url.path)")
+                return hexes
+            }
+        }
+        HavenLog.relay("qa-authorize-members empty (looked under \(base.path))")
+        return []
+        #else
+        return []
+        #endif
     }
 
     /// Last mesh anti-entropy pass (ms). Field: host Macs ran this every sync tick (~20s),

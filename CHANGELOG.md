@@ -32,6 +32,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Linked-device matrix harness (iOS sim + Tauri over HavenStub).** `Scripts/qa-linked-device-matrix.sh`
+  links desktop to the sim account seed, injects stub HTTP mailbox prefs, and checks that
+  photo/video/story posts land on both fleet devices. Stub host can load
+  `qa-authorize-members.txt` (account + transport device hexes) so the mailbox is not only the
+  host account. Cross-device mailbox still RED when membership auth fails (HTTP REFUSED) — calls
+  over internet deferred while QA auth is fixed.
+
 - **Matrix QA now attaches real photo/video media** (DEBUG). iOS `qa-cmd` / Android intents accept
   `media=photo|video` plus optional fixture paths; synthetic JPEG and 1s H.264 fixtures live under
   `Scripts/fixtures/`. Bidirectional `qa-peer-bundle` ingest seeds contacts without HELLO dial.

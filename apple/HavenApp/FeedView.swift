@@ -1372,6 +1372,26 @@ final class FeedStore: ObservableObject {
                         HavenLog.net("qa-my-bundle written bytes=\(b.count) name=\(name)")
                     }
                 }
+                // Dump account seed for linked-device Tauri (haven-seed:…). Keychain-only stores were
+                // unreadable to Scripts/qa-link-tauri-to-ios.sh under the sim.
+                #if DEBUG
+                if let seed = AccountStore.storedSeed(), seed.count == 32,
+                   let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+                    let line = "haven-seed:" + seed.base64EncodedString()
+                    try? line.write(to: dir.appendingPathComponent("qa-account-seed.txt"), atomically: true, encoding: .utf8)
+                    try? (social?.myNodeHex() ?? "").write(
+                        to: dir.appendingPathComponent("qa-account-hex.txt"), atomically: true, encoding: .utf8)
+                    // HTTP mailbox auth is the DEVICE transport id — stub must authorize this too.
+                    try? n.nodeIdHex().write(
+                        to: dir.appendingPathComponent("qa-device-hex.txt"), atomically: true, encoding: .utf8)
+                    let ss = UserDefaults.standard.string(forKey: "haven.selfsync.deviceId") ?? ""
+                    if !ss.isEmpty {
+                        try? ss.write(to: dir.appendingPathComponent("qa-selfsync-device-hex.txt"),
+                                      atomically: true, encoding: .utf8)
+                    }
+                    HavenLog.net("qa-account-seed written account=\(social?.myNodeHex().prefix(12) ?? "?") device=\(n.nodeIdHex().prefix(12))")
+                }
+                #endif
                 // Ingest staged Android peer bundle (driver copies qa-peer-bundle.bin into App Support).
                 self.ingestQaPeerBundle()
                 // One delayed ticket snapshot for diagnostics — not a multi-probe heat loop.

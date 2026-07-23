@@ -80,6 +80,20 @@ jobs:
   build:
     needs: changes
     if: github.ref_type == 'tag' || needs.changes.outputs.android == 'true'
+    # ── One Play publish at a time ──────────────────────────────────────────────────────────────
+    # Google Play allows ONE open Edit per package. Two publish-capable runs racing (a `v*` tag
+    # push → internal, plus a workflow_dispatch play_track=beta on the same ref) each open their
+    # own Edit; the slower one commits into "This edit has expired, please create a new Edit" and
+    # the AAB never lands (observed on v1.1.4-rc.23 beta, run 30019665798 — and because the publish
+    # step is continue-on-error, only the "Flag a Play publish that did not land" warning shows).
+    # So: serialize publish-capable runs (tag pushes + all workflow_dispatch) in one static group —
+    # the second run QUEUES instead of racing. Plain main pushes never publish, so each gets a
+    # unique throwaway group (run_id) and keeps running fully parallel.
+    # Caveat: GitHub keeps only the NEWEST pending run per group; if a third publish run piles on,
+    # the middle one is cancelled — visibly (red "cancelled"), never a silent green no-op.
+    concurrency:
+      group: ${{ (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && 'android-play-publish' || format('android-build-{0}', github.run_id) }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

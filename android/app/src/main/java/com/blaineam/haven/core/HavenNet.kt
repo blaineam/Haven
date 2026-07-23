@@ -3299,6 +3299,8 @@ object HavenNet : InboundListener {
                 saveRelayNodes()
                 Log.i(TAG, "learned relay http interface for ${nodeHex.take(8)}: ${announcedUrls.size} url(s)")
             }
+            // New/rotated free CF hostname — stop skipping the old cool-down window (iOS parity).
+            for (u in announcedUrls) httpUrlBad.remove(u)
         }
         // Haven fabric: DERP URL so peers prefer this box over n0 for live NAT.
         if (announcedDerp != null) {
@@ -3340,6 +3342,93 @@ object HavenNet : InboundListener {
         Log.i(TAG, "learned relay for $circleId: ${nodeHex.take(8)}")
         scope.launch {
             backfillMailbox(circleId)   // upload everything I've already posted here
+            pollMailbox()
+        }
+    }
+
+    // ---- Relay interface self-heal (rotated/never-learned HTTP front doors) ----------------------
+
+    /** Last self-heal fetch attempt per relay (unix ms), so a media-miss storm can't hammer the
+     *  same relay. Mirrors iOS `relayInterfaceRefreshMs`. */
+    private val relayInterfaceRefreshMs = HashMap<String, Long>()
+
+    /**
+     * Fetch a relay's SELF-PUBLISHED interface (`haven/relay/__interface__` — its current public
+     * HTTP URLs + token + DERP/TURN, written by the relay process at startup) over the iroh
+     * channel that still works, and adopt it exactly like a frame-19 announce. This is the
+     * self-heal for the failure that stranded media while posts flowed: a CLI relay restart
+     * rotates its free-tunnel URL, every client keeps polling the mailbox over iroh (fine) and
+     * fetching media over a front door that no longer exists (dead) — and the paste-wire flow
+     * only ever ran once at adopt time. After adopting we re-announce, so members with no iroh
+     * reach — including builds older than this one — learn the URL from the mailbox. iOS
+     * `refreshRelayInterfaceIfNeeded` parity.
+     */
+    private fun refreshRelayInterfaceIfNeeded(nodeHex: String) {
+        val lower = nodeHex.trim().lowercase()
+        if (lower.length != 64) return   // s3: pseudo-relays have no iroh side to ask
+        // Only when we hold no HTTP interface, or every URL we hold is unusable from here
+        // (bad window / LAN-implausible — httpUrlsFor is the one "usable" judge).
+        val held = relayEntries[lower]
+        if (held != null && httpUrlsFor(held).isNotEmpty()) return
+        val nowMs = System.currentTimeMillis()
+        synchronized(relayInterfaceRefreshMs) {
+            if (nowMs - (relayInterfaceRefreshMs[lower] ?: 0L) < 300_000) return
+            relayInterfaceRefreshMs[lower] = nowMs
+        }
+        scope.launch {
+            val client = relayClientFor(lower) ?: return@launch
+            val data = runCatching { client.get("haven/relay/__interface__") }.getOrNull() ?: return@launch
+            val o = runCatching { JSONObject(String(data, Charsets.UTF_8)) }.getOrNull() ?: return@launch
+            // A relay may only describe ITSELF — the key is served from its own store, but
+            // never adopt a doc whose node field disagrees with who we asked.
+            if (o.optString("node", "").trim().lowercase() != lower) return@launch
+            val urls = o.optJSONArray("urls")?.let { a ->
+                (0 until a.length()).mapNotNull { i -> a.optString(i).takeIf { u -> u.startsWith("http") } }
+            } ?: emptyList()
+            val token = o.optString("token", "")
+            if (urls.isEmpty() || token.isEmpty()) return@launch
+            Log.i(TAG, "relay interface ${lower.take(10)}: learned ${urls.size} url(s) over iroh — adopting + re-announcing")
+            ensureRelayEntry(lower, isS3 = false, activate = true)
+            relayEntries[lower]?.let { relayEntries[lower] = it.copy(httpUrls = urls, httpToken = token) }
+            // Rotated hostname — stop skipping the old cool-down window.
+            for (u in urls) httpUrlBad.remove(u)
+            val derp = o.optString("derp", "").trim()
+            if (derp.startsWith("http")) {
+                relayEntries[lower]?.let { relayEntries[lower] = it.copy(derpUrl = derp.trimEnd('/')) }
+            }
+            val turn = o.optJSONArray("turn")?.let { a ->
+                (0 until a.length()).mapNotNull { i ->
+                    a.optString(i).takeIf { u -> u.startsWith("turn:") || u.startsWith("turns:") }
+                }
+            } ?: emptyList()
+            if (turn.isNotEmpty()) {
+                // Same credential defaults as the frame-19/paste parsers of this JSON shape.
+                val turnUser = o.optString("turnUser", "").ifEmpty { "haven" }
+                val turnPass = o.optString("turnPass", "").ifEmpty { token }
+                relayEntries[lower]?.let {
+                    relayEntries[lower] = it.copy(turnUrls = turn, turnUser = turnUser, turnPass = turnPass)
+                }
+            }
+            saveRelayNodes()
+            if (derp.startsWith("http") || turn.isNotEmpty()) refreshHavenFabric()
+            withContext(Dispatchers.Main) { bumpRelays() }
+            // React like a frame-19 that taught us a public URL: pull what we were missing and
+            // push what the circle was missing, then re-announce so everyone else learns it too.
+            val circles = relayNodes.toMap().filterValues { it.contains(lower) }.keys
+            for (cid in circles) {
+                // Sealed frame-19 with the freshly-learned interface — members with no iroh reach
+                // to this relay learn the rotated URL from us (nearby + direct; the sync tick's
+                // proven-alive re-announce keeps propagating it from here on).
+                val sealed = relayAnnounceBlob(cid, lower)
+                if (sealed != null) {
+                    val frame = Wire.eventPayload(cid, sealed)  // [LP cid][sealed] — same layout as frame 19
+                    if (NearbyTransport.active) NearbyTransport.broadcast(Wire.frame(Wire.RELAY_NODE, frame))
+                    for (idHex in dialTargets(cid)) sendFrame(Wire.RELAY_NODE, frame, idHex)
+                }
+                backfillMailbox(cid)
+                backfillHistoryToRelay(cid)
+            }
+            reannounceOwnRelay()
             pollMailbox()
         }
     }
@@ -4265,7 +4354,15 @@ object HavenNet : InboundListener {
             if (client != null) {
                 keys = runCatching { client.list(prefix) }.getOrNull()
                 if (keys == null) relayFailed(nodeHex)
-                else markRelayOk(nodeHex)
+                else {
+                    markRelayOk(nodeHex)
+                    // We reached this relay over iroh but may hold no usable HTTP interface for
+                    // it — exactly the state a restarted CLI relay (rotated free-tunnel URL)
+                    // leaves every client in, where mailbox flows and MEDIA silently dies (the
+                    // blob dial drops cross-NAT). Fetch its self-published interface and adopt +
+                    // re-announce (guarded + throttled inside; no-op while HTTP works).
+                    refreshRelayInterfaceIfNeeded(nodeHex)
+                }
             }
             // iroh unreachable (dial backoff / no addressing — emulator NAT, CGNAT both ends) →
             // the relay's signed-HTTP interface, the reliable cross-NAT path. Without this rung
@@ -5691,6 +5788,12 @@ object HavenNet : InboundListener {
             // the SENDER to put it (back) up, which is a different thing from "downloading" or
             // "gone forever" (Apple noteMediaMissingOnRelays parity).
             noteMediaMissingOnRelays(ref)
+            // A full miss is ALSO the signature of a relay whose HTTP front door we can't use
+            // (rotated tunnel / never learned): the blob may sit on a relay we only failed to
+            // ASK properly. Try to fetch each dest relay's self-published interface over iroh —
+            // if one lands, the retry path finds the blob and the URL gets re-announced.
+            // (s3: pseudo-relays and our own hosted node are skipped inside.)
+            for (hex in relays) refreshRelayInterfaceIfNeeded(hex)
         } else {
             android.util.Log.i("MediaSync", "fetch ref=$ref REFUSED by ${synchronized(rosterNeeded) { rosterNeeded.size }} relay(s) — not missing; re-publishing our roster so the retry is allowed")
         }

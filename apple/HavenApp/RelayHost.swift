@@ -188,6 +188,7 @@ final class RelayHost: ObservableObject {
             let urls = Self.announceHttpUrls(mediaPort: port)
             if !urls.isEmpty, !self.nodeId.isEmpty {
                 RelayMailboxStore.shared.setHttpInterface(self.nodeId, urls: urls, token: token)
+                self.publishOwnInterface(urls: urls, token: token)
                 // Keep DERP on the same public origin when path-proxy single-tunnel is live.
                 #if os(macOS)
                 if CloudflaredTunnel.shared.usesPathProxy, let first = urls.first {
@@ -369,6 +370,7 @@ final class RelayHost: ObservableObject {
             )
             guard !urls.isEmpty, !self.nodeId.isEmpty else { return }
             RelayMailboxStore.shared.setHttpInterface(self.nodeId, urls: urls, token: token)
+            self.publishOwnInterface(urls: urls, token: token)
             // New public origin — drop cool-downs so phones don't sit on stale trycloudflare skips.
             SharedStore.clearAllHttpUrlBad()
 
@@ -392,9 +394,31 @@ final class RelayHost: ObservableObject {
             )
             guard !urls.isEmpty, !self.nodeId.isEmpty else { return }
             RelayMailboxStore.shared.setHttpInterface(self.nodeId, urls: urls, token: token)
+            self.publishOwnInterface(urls: urls, token: token)
             SharedStore.clearAllHttpUrlBad()
             self.reannounceBurst()
             #endif
+        }
+    }
+
+    /// Write our CURRENT interface doc into the hosted relay's own store under the reserved key
+    /// (`haven/relay/__interface__`), generation-stamped — parity with the CLI relay's startup
+    /// publication. Any member/fleet device that can still dial us over iroh can then learn a
+    /// rotated front door even when it missed every frame-19 burst (asleep, backgrounded, offline).
+    private func publishOwnInterface(urls: [String], token: String) {
+        guard !nodeId.isEmpty, !urls.isEmpty else { return }
+        var doc: [String: Any] = [
+            "v": 1,
+            "gen": UInt64(Date().timeIntervalSince1970 * 1000),
+            "node": nodeId,
+            "urls": urls,
+            "token": token,
+        ]
+        if let derp = RelayMailboxStore.shared.entries[nodeId]?.derpUrl, !derp.isEmpty {
+            doc["derp"] = derp
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: doc) {
+            _ = localPut("haven/relay/__interface__", data)
         }
     }
 
@@ -607,6 +631,7 @@ final class RelayHost: ObservableObject {
             }
             if !urls.isEmpty {
                 RelayMailboxStore.shared.setHttpInterface(self.nodeId, urls: urls, token: token)
+                self.publishOwnInterface(urls: urls, token: token)
             }
         }
         // Dual free-tunnel mode: re-spawn the DERP trycloudflare too (apply only restarts media).
@@ -736,6 +761,7 @@ final class RelayHost: ObservableObject {
         while t.hasSuffix("/") { t.removeLast() }
         let urls = [CloudflaredTunnel.normalizePublicURL(t) ?? t]
         RelayMailboxStore.shared.setHttpInterface(nodeId, urls: urls, token: token)
+        publishOwnInterface(urls: urls, token: token)
         if CloudflaredTunnel.shared.usesPathProxy {
             RelayMailboxStore.shared.setDerpUrl(nodeId, url: urls[0])
         }

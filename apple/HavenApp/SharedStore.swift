@@ -1119,7 +1119,7 @@ enum SharedStore {
     // per-device seed), or the relay sees a node id that is in no roster and answers 403.
 
     private static var httpUrlBadUntil: [String: Date] = [:]
-    private static func httpUrlBad(_ base: String) -> Bool { (httpUrlBadUntil[base] ?? .distantPast) > Date() }
+    static func httpUrlBad(_ base: String) -> Bool { (httpUrlBadUntil[base] ?? .distantPast) > Date() }
     /// Skip a base URL briefly after transport failure. Free trycloudflare DNS flaps hard on some
     /// networks (system NXDOMAIN while DoH works) — a 120s skip made the iPhone UI thrash
     /// unreachable→reachable every couple of minutes and blocked mailbox poll for linked devices.
@@ -1435,6 +1435,15 @@ enum SharedStore {
                 // waiting on the SENDER to put it (back) up, which is a different thing from
                 // "downloading" or "gone forever".
                 FeedStore.shared.noteMediaMissingOnRelays(ref)
+                // A full miss is ALSO the signature of a relay whose HTTP front door we can't use
+                // (rotated tunnel / never learned): the blob may sit on a relay we only failed to
+                // ASK properly. Try to fetch each dest relay's self-published interface over iroh —
+                // if one lands, the retry path finds the blob and the URL gets re-announced.
+                for cid in circleIds {
+                    for node in mediaDests(cid) where !(RelayHost.shared.serving && node == RelayHost.shared.nodeId) {
+                        FeedStore.shared.refreshRelayInterfaceIfNeeded(node)
+                    }
+                }
             } else {
                 HavenLog.relay("media restore \(ref.prefix(12)): REFUSED by \(rosterNeeded.count) relay(s) — not missing; re-publishing our roster so the retry is allowed")
             }
@@ -2256,6 +2265,11 @@ enum SharedStore {
                     guard let keys = try? await c.list(prefix: prefix) else { continue }
                     RelayHealth.shared.recordSuccess(node)
                     RelayMailboxStore.shared.markSeen(node)
+                    // We reached this relay over iroh but hold no usable HTTP interface for it —
+                    // exactly the state a restarted CLI relay (rotated free-tunnel URL) leaves every
+                    // client in, where mailbox flows and MEDIA silently dies (the blob dial drops
+                    // cross-NAT). Fetch its self-published interface and adopt + re-announce.
+                    FeedStore.shared.refreshRelayInterfaceIfNeeded(node)
                     // Same shape as the HTTP path: skip unclaimed live-call frames + other ids'
                     // hello slots, control first, cap.
                     var fresh = keys.filter {

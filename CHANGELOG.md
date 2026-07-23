@@ -71,6 +71,22 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Media stuck on "Waiting for sender…" while the blob sat on the relay (core + relay +
+  all clients).** A CLI relay's HTTP front door only ever reached clients as a pasted wire
+  string — so a relay that gained (or rotated) its free-tunnel URL after adoption left
+  every client fetching media from a front door they never learned: the mailbox kept
+  flowing over iroh, media silently died cross-NAT (the blob dial drops datagrams), and
+  the post metadata arrived without its picture. Relays now publish their CURRENT
+  interface (public URLs + token + DERP/TURN, generation-stamped) into their own store
+  under `haven/relay/__interface__`, served read-only to the members/fleet they already
+  serve — the same audience the sealed frame-19 announces reach. Clients that reach a
+  relay over iroh but hold no usable HTTP interface fetch it, adopt it, and re-announce
+  frame-19 so members with no iroh reach (including older builds) learn the URL from the
+  mailbox. Hooks: mailbox poll's iroh fallback, and the media-restore full miss. The Mac's
+  in-process relay publishes the same doc on every front-door change.
+- **Activity bell badge clipped by the toolbar capsule (iOS).** The unread count was
+  offset outside the button's bounds and the Liquid-Glass toolbar clipped it; the badge
+  now sits inside padded headroom within the clip shape.
 - **Runaway re-ingest storm on relay-hosting Macs — 16.8 GB of RAM in five minutes, UI
   frozen, and a push-notification firehose at your own phone (core + Apple).** Since
   device-signed key commits, a contact's devices each mint a random key for the same

@@ -388,6 +388,9 @@ pub struct Engine {
     /// HTTP relay URLs that recently failed to answer → retry-after epoch ms (2-min backoff), so a
     /// dead LAN address doesn't cost a connect-timeout per chunk.
     http_url_bad: StdMutex<HashMap<String, u64>>,
+    /// Last `haven/relay/__interface__` fetch attempt per relay (epoch ms), so a media-miss storm
+    /// can't hammer the same relay — one attempt per relay per 5 min (iOS relayInterfaceRefreshMs).
+    relay_interface_refresh_ms: StdMutex<HashMap<String, u64>>,
     /// App-layer activity rows (deep-linked notifications raised on this device) — the bell's
     /// non-core half, persisted to `activity-app.json` and bounded on append.
     app_activity: StdMutex<Vec<ActivityRow>>,
@@ -675,6 +678,7 @@ impl Engine {
                 .build()
                 .unwrap_or_default(),
             http_url_bad: StdMutex::new(HashMap::new()),
+            relay_interface_refresh_ms: StdMutex::new(HashMap::new()),
             app_activity: StdMutex::new(app_activity),
             seen_relay: StdMutex::new(std::collections::HashSet::new()),
             media_purged: StdMutex::new(std::collections::HashSet::new()),
@@ -783,6 +787,7 @@ impl Engine {
                 .build()
                 .unwrap_or_default(),
             http_url_bad: StdMutex::new(HashMap::new()),
+            relay_interface_refresh_ms: StdMutex::new(HashMap::new()),
             app_activity: StdMutex::new(app_activity),
             seen_relay: StdMutex::new(std::collections::HashSet::new()),
             media_purged: StdMutex::new(std::collections::HashSet::new()),
@@ -4718,6 +4723,110 @@ impl Engine {
         Some(circle_id)
     }
 
+    /// Fetch a relay's SELF-PUBLISHED interface (`haven/relay/__interface__` — its current public
+    /// HTTP URLs + token + DERP/TURN, written by the relay process at startup) over the iroh
+    /// channel that still works, and adopt it exactly like a frame-19 announce. This is the
+    /// self-heal for the failure that stranded media while posts flowed: a CLI relay restart
+    /// rotates its free-tunnel URL, every client keeps polling the mailbox over iroh (fine) and
+    /// fetching media over a front door that no longer exists (dead) — and the paste-wire flow
+    /// only ever ran once at adopt time. After adopting we re-announce, so members with no iroh
+    /// reach — including builds older than this one — learn the URL from the mailbox.
+    /// iOS `FeedStore.refreshRelayInterfaceIfNeeded` parity.
+    fn refresh_relay_interface_if_needed(self: &Arc<Self>, node_hex: &str) {
+        let lower = node_hex.to_lowercase();
+        // Only when we hold no usable HTTP interface, or every URL we hold is in its bad window.
+        if let Some((urls, _)) = self.relay_http_reachable(&lower) {
+            if urls.iter().any(|u| !self.http_url_bad(u)) {
+                return;
+            }
+        }
+        let now = now_ms();
+        {
+            let mut m = self.relay_interface_refresh_ms.lock().unwrap();
+            if let Some(&last) = m.get(&lower) {
+                if now.saturating_sub(last) < 300_000 {
+                    return;
+                }
+            }
+            m.insert(lower.clone(), now);
+        }
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move {
+            // relay_client_for self-guards (own node) and honors the backoff window.
+            let Some(client) = me.relay_client_for(&lower).await else { return };
+            let Some(data) = client.get(haven_net::blobstore::RELAY_INTERFACE_KEY.to_string()).await
+            else {
+                return;
+            };
+            let Ok(v) = serde_json::from_slice::<serde_json::Value>(&data) else { return };
+            // A relay may only describe ITSELF — the key is served from its own store, but never
+            // adopt a doc whose node field disagrees with who we asked.
+            if v["node"].as_str().unwrap_or_default().trim().to_lowercase() != lower {
+                return;
+            }
+            let urls: Vec<String> = v["urls"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|u| u.as_str())
+                        .filter(|u| u.starts_with("http"))
+                        .map(|u| u.to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let token = v["token"].as_str().unwrap_or_default().to_string();
+            if urls.is_empty() || token.is_empty() {
+                return;
+            }
+            let mut derp: Option<String> = None;
+            if let Some(d) = v["derp"].as_str() {
+                let d = d.trim().trim_end_matches('/');
+                if d.starts_with("http") {
+                    derp = Some(d.to_string());
+                }
+            }
+            let turn = haven_net::parse_turn_urls(&v["turn"]);
+            let turn_user = v["turnUser"].as_str().unwrap_or_default().to_string();
+            let turn_pass = v["turnPass"].as_str().unwrap_or_default().to_string();
+            log::info!(
+                "relay interface {}: learned {} url(s) over iroh — adopting + re-announcing",
+                &lower.chars().take(10).collect::<String>(),
+                urls.len()
+            );
+            let circles: Vec<String> = {
+                let mut p = me.prefs.lock().unwrap();
+                p.set_relay_http(&lower, urls.clone(), token);
+                if let Some(d) = &derp {
+                    p.set_relay_derp(&lower, d);
+                }
+                if !turn.is_empty() {
+                    p.set_relay_turn(&lower, turn, &turn_user, &turn_pass);
+                }
+                let _ = p.save(&me.paths);
+                p.relays
+                    .iter()
+                    .filter(|(_, list)| list.iter().any(|h| h == &lower))
+                    .map(|(cid, _)| cid.clone())
+                    .collect()
+            };
+            for u in &urls {
+                me.clear_http_url_bad(u);
+            }
+            me.refresh_haven_fabric();
+            // React like a frame-19 that taught us a public URL: pull what we were missing and
+            // push what the circle was missing, then re-announce so everyone else learns it too.
+            if !circles.is_empty() {
+                for cid in &circles {
+                    me.backfill_mailbox(cid).await;
+                }
+                me.backfill_media_to_relays().await;
+                me.dyn_state.lock().unwrap().last_media_backfill_ms = now_ms();
+            }
+            me.poll_mailbox().await;
+            me.reannounce_own_relay();
+        });
+    }
+
     pub fn relay_status(&self) -> (bool, bool, bool, bool, bool) {
         let st = self.dyn_state.lock().unwrap();
         let prefs = self.prefs.lock().unwrap();
@@ -6963,6 +7072,11 @@ impl Engine {
                     Ok(k) => { keys = k; self.mark_relay_ok(&node_hex); }
                     Err(_) => continue,
                 }
+                // We reached this relay over iroh but hold no usable HTTP interface for it —
+                // exactly the state a restarted CLI relay (rotated free-tunnel URL) leaves every
+                // client in, where mailbox flows and MEDIA silently dies (the blob dial drops
+                // cross-NAT). Fetch its self-published interface and adopt + re-announce.
+                self.refresh_relay_interface_if_needed(&node_hex);
             }
             if !keys.is_empty() {
                 self.dyn_state.lock().unwrap().relay_active = true;
@@ -7631,6 +7745,10 @@ impl Engine {
     fn mark_http_url_bad(&self, base: &str) {
         self.http_url_bad.lock().unwrap().insert(base.to_string(), now_ms() + 120_000);
     }
+    /// Forget a URL's bad window — a just-adopted relay interface must be tried immediately.
+    fn clear_http_url_bad(&self, base: &str) {
+        self.http_url_bad.lock().unwrap().remove(base);
+    }
     fn http_key_url(base: &str, key: &str) -> String {
         format!("{}/k/{}", base.trim_end_matches('/'), key)
     }
@@ -8278,6 +8396,14 @@ impl Engine {
         let short = reference.chars().take(12).collect::<String>();
         if refused == 0 {
             log::info!("media restore {short}: NOT FOUND on any relay/S3");
+            // A full miss is ALSO the signature of a relay whose HTTP front door we can't use
+            // (rotated tunnel / never learned): the blob may sit on a relay we only failed to
+            // ASK properly. Try to fetch each dest relay's self-published interface over iroh —
+            // if one lands, the retry path finds the blob and the URL gets re-announced. (Our own
+            // hosted relay is skipped by relay_client_for's self-guard; media_dests excludes s3.)
+            for node_hex in self.media_dests(circle_id) {
+                self.refresh_relay_interface_if_needed(&node_hex);
+            }
         } else {
             log::info!("media restore {short}: REFUSED by {refused} relay(s) — not missing; re-publishing our roster so the retry is allowed");
         }

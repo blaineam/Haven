@@ -4812,6 +4812,61 @@ final class FeedStore: ObservableObject {
         pollMailboxNow()
     }
 
+    // MARK: - Relay interface self-heal (rotated/never-learned HTTP front doors)
+
+    /// Last fetch attempt per relay, so a media-miss storm can't hammer the same relay.
+    private var relayInterfaceRefreshMs: [String: UInt64] = [:]
+
+    /// Fetch a relay's SELF-PUBLISHED interface (`haven/relay/__interface__` — its current public
+    /// HTTP URLs + token + DERP/TURN, written by the relay process at startup) over the iroh
+    /// channel that still works, and adopt it exactly like a frame-19 announce. This is the
+    /// self-heal for the failure that stranded media while posts flowed: a CLI relay restart
+    /// rotates its free-tunnel URL, every client keeps polling the mailbox over iroh (fine) and
+    /// fetching media over a front door that no longer exists (dead) — and the paste-wire flow
+    /// only ever ran once at adopt time. After adopting we re-announce, so members with no iroh
+    /// reach — including builds older than this one — learn the URL from the mailbox.
+    func refreshRelayInterfaceIfNeeded(_ nodeHex: String) {
+        let lower = nodeHex.lowercased()
+        // Only when we hold no HTTP interface, or every URL we hold is in its bad window.
+        if let http = RelayMailboxStore.shared.httpInterface(lower),
+           http.urls.contains(where: { !SharedStore.httpUrlBad($0) }) { return }
+        let nowMs = now()
+        if let last = relayInterfaceRefreshMs[lower], nowMs &- last < 300_000 { return }
+        relayInterfaceRefreshMs[lower] = nowMs
+        Task { @MainActor in
+            guard let c = await RelayClients.client(lower) else { return }
+            guard let data = await c.get(key: "haven/relay/__interface__"),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  // A relay may only describe ITSELF — the key is served from its own store, but
+                  // never adopt a doc whose node field disagrees with who we asked.
+                  (obj["node"] as? String)?.lowercased() == lower,
+                  let urls = obj["urls"] as? [String], !urls.isEmpty,
+                  let token = obj["token"] as? String, !token.isEmpty
+            else { return }
+            HavenLog.relay("relay interface \(lower.prefix(10)): learned \(urls.count) url(s) over iroh — adopting + re-announcing")
+            RelayMailboxStore.shared.setHttpInterface(lower, urls: urls, token: token)
+            for u in urls { SharedStore.clearHttpUrlBad(u) }
+            if let derp = obj["derp"] as? String, !derp.isEmpty {
+                RelayMailboxStore.shared.setDerpUrl(lower, url: derp)
+            }
+            if let turn = obj["turn"] as? [String], !turn.isEmpty {
+                RelayMailboxStore.shared.setTurn(lower, urls: turn,
+                                                 user: obj["turnUser"] as? String ?? "",
+                                                 pass: obj["turnPass"] as? String ?? "")
+            }
+            // React like a frame-19 that taught us a public URL: pull what we were missing and
+            // push what the circle was missing, then re-announce so everyone else learns it too.
+            let circles = RelayMailboxStore.shared.relaysByCircle
+                .filter { $0.value.contains(lower) }.map(\.key)
+            if !circles.isEmpty {
+                backfillMailbox(circleIds: circles)
+                backfillMailboxMedia(circleIds: circles)
+            }
+            pollMailboxNow()
+            reannounceOwnRelay()
+        }
+    }
+
     // MARK: - Pre-signed S3 pool (advanced mailbox without sharing credentials)
 
     func memberHexes(circleId: String) -> [String] { social?.contactNodeIds(circleId: circleId) ?? [] }
@@ -6496,7 +6551,12 @@ struct FeedView: View {
                 // badge cleared fleet-wide on open (seenAt syncs via SelfSync). Both platforms.
                 ToolbarItem(placement: .havenTrailing) {
                     Button { showActivity = true } label: {
+                        // Headroom for the badge comes from PADDING (inside the toolbar capsule's
+                        // clip shape), not from offsetting the badge outside the button bounds —
+                        // the glass capsule clips anything past its edge, which cut the count off.
                         Image(systemName: "bell.fill")
+                            .padding(.top, 5)
+                            .padding(.trailing, 8)
                             .overlay(alignment: .topTrailing) {
                                 if activity.unread > 0 {
                                     Text(activity.unread > 99 ? "99+" : "\(activity.unread)")
@@ -6504,7 +6564,6 @@ struct FeedView: View {
                                         .foregroundStyle(.white)
                                         .padding(.horizontal, 3).padding(.vertical, 1)
                                         .background(Capsule().fill(Color.red))
-                                        .offset(x: 9, y: -7)
                                 }
                             }
                     }

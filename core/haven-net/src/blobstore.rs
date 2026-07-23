@@ -1572,8 +1572,25 @@ pub(crate) fn blob_forbidden(auth: &Arc<Mutex<RelayAuth>>, peer: &str, verb: u8,
     if key.starts_with("haven/media/") || key.starts_with(DEVROSTER_PREFIX) {
         return false;
     }
+    // The relay's own interface document (its public HTTP URLs + bearer token + DERP/TURN),
+    // written LOCALLY by the relay process at startup — READ-ONLY to anyone we serve. This is how
+    // a client that can still dial the relay over iroh learns the CURRENT front door after a
+    // restart rotated the free-tunnel URL: without it, a CLI relay's HTTP interface only ever
+    // reached clients as a pasted wire string, so every tunnel rotation stranded all media
+    // ("Waiting for sender…" while the blob sat on the relay). Members already receive exactly
+    // these fields via sealed frame-19 announces, so serving them behind the same members-only
+    // floor widens nothing. Remote writes stay denied (fallthrough): only `relay_local_put`
+    // from inside the relay process can publish it.
+    if key == RELAY_INTERFACE_KEY && matches!(verb, VERB_GET | VERB_HAS) {
+        return false;
+    }
     true // unrecognized key under haven/ → deny
 }
+
+/// Reserved key under which a relay publishes its OWN current interface (JSON:
+/// `{v, gen, node, urls, token, derp, turn, turnUser, turnPass}`). Written locally by the relay
+/// process at startup / front-door change; served read-only to any peer the relay serves.
+pub const RELAY_INTERFACE_KEY: &str = "haven/relay/__interface__";
 
 /// Serve one request stream against the on-disk store. Pure ciphertext I/O — the body is
 /// stored and returned verbatim, never inspected.

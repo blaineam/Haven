@@ -499,6 +499,25 @@ pub async fn run(cfg: Config) -> Result<()> {
                     println!("  {line}");
                     println!("  (also written to {})", path.display());
                 }
+                // ALSO publish the interface into the relay's own blob store under the reserved
+                // key, generation-stamped. A client that can still dial us over iroh fetches this
+                // to learn the CURRENT front door (free quick-tunnel URLs rotate on every restart,
+                // and the paste-string flow only ever ran once at adopt time) and then re-announces
+                // frame 19 to the circle — self-healing instead of "media waits forever while the
+                // blob sits right here". Served read-only behind the members-only gate
+                // (`blob_forbidden`), the same audience the sealed announces already reach.
+                interface["v"] = serde_json::json!(1);
+                interface["gen"] = serde_json::json!(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0)
+                );
+                if let Ok(bytes) = serde_json::to_vec(&interface) {
+                    if node.relay_local_put(haven_net::blobstore::RELAY_INTERFACE_KEY, &bytes) {
+                        println!("  interface  : published to fleet/members over the relay channel");
+                    }
+                }
             }
         }
         StoreBackend::S3 | StoreBackend::Rclone { .. } => {

@@ -1209,7 +1209,12 @@ final class RelayMailboxStore: ObservableObject {
         // Do NOT call refreshHavenFabric() here. That path reads `RelayMailboxStore.shared`,
         // which is still inside this dispatch_once init → recursive lock → SIGTRAP on launch
         // (libdispatch: "trying to lock recursively"). Push fabric after init returns.
-        DispatchQueue.main.async { Self.refreshHavenFabric() }
+        // The NSE relay mirror refreshes here too so the first launch of this build seeds it
+        // even before any relay bookkeeping changes.
+        DispatchQueue.main.async { [weak self] in
+            Self.refreshHavenFabric()
+            self?.mirrorRelayDirectory()
+        }
     }
 
     /// Ensure every relay referenced by relaysByCircle / the default has a RelayEntry record.
@@ -1233,6 +1238,27 @@ final class RelayMailboxStore: ObservableObject {
 
     private func persistEntries() {
         if let data = try? JSONEncoder().encode(entries) { UserDefaults.standard.set(data, forKey: entriesKey) }
+        mirrorRelayDirectory()
+    }
+
+    /// Mirror every circle's relay HTTP interface into the App Group (`SharedRelayDirectory`) so
+    /// the NSE can fetch a pushed envelope BEFORE the app opens (push-before-content). Rides
+    /// `persistEntries` — the chokepoint every entry mutation (adopt, announce, http-interface,
+    /// forget) already funnels through; the write itself dedupes by content, so this is cheap.
+    private func mirrorRelayDirectory() {
+        var circles: [String: [SharedRelayDirectory.RelayInterface]] = [:]
+        for cid in relaysByCircle.keys {
+            let ifaces = relays(forCircle: cid).compactMap { hex -> SharedRelayDirectory.RelayInterface? in
+                guard let http = httpInterface(hex) else { return nil }
+                return .init(u: http.urls, t: http.token)
+            }
+            if !ifaces.isEmpty { circles[cid] = ifaces }
+        }
+        var any: [SharedRelayDirectory.RelayInterface] = []
+        if let def = defaultNodeHex, !def.isEmpty, isActive(def), let http = httpInterface(def) {
+            any.append(.init(u: http.urls, t: http.token))
+        }
+        SharedRelayDirectory.write(circles: circles, any: any)
     }
 
     /// True when this relay has a config record and is currently active. Unknown hexes (never recorded,

@@ -356,7 +356,8 @@ pub fn post(engine: Eng, circle_id: String, body: String, media: Vec<String>, mu
 
 #[tauri::command]
 pub fn post_story(engine: Eng, body: String, media: Option<String>, music: Option<TrackInput>) {
-    engine.post_story(body, media, music.map(|m| m.into_ffi()));
+    // UI stories always live in the personal circle; only the qa driver targets another.
+    engine.post_story(DEFAULT_CIRCLE.to_string(), body, media, music.map(|m| m.into_ffi()));
 }
 
 #[tauri::command]
@@ -460,6 +461,45 @@ pub fn dm_threads(engine: Eng) -> Vec<DmThreadDto> {
 #[tauri::command]
 pub fn mark_dm_read(engine: Eng, circle_id: String) {
     engine.mark_dm_read(circle_id);
+}
+
+/// Pinned DM ids in pin order (synced across the user's devices via self-sync).
+#[tauri::command]
+pub fn pinned_dms(engine: Eng) -> Vec<String> {
+    engine.pinned_dms()
+}
+
+#[tauri::command]
+pub fn set_pinned_dms(engine: Eng, ids: Vec<String>) {
+    engine.set_pinned_dms(ids);
+}
+
+// ---- Activity (the bell) -----------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct ActivityDto {
+    pub rows: Vec<crate::engine::ActivityRow>,
+    /// "Seen up to" watermark (unix ms) — rows newer than this are unread.
+    pub seen_at: u64,
+}
+
+/// The activity feed + its read watermark, newest-first (core rows across every circle plus the
+/// app-layer notification rows).
+#[tauri::command]
+pub fn activity(engine: Eng) -> ActivityDto {
+    ActivityDto { rows: engine.activity(), seen_at: engine.activity_seen_at() }
+}
+
+/// The bare watermark, for callers that don't need the rows.
+#[tauri::command]
+pub fn activity_seen(engine: Eng) -> u64 {
+    engine.activity_seen_at()
+}
+
+/// Opening the bell marks everything current as seen (monotonic; synced to the user's devices).
+#[tauri::command]
+pub fn mark_activity_seen(engine: Eng) {
+    engine.mark_activity_seen();
 }
 
 /// Delete a whole DM conversation locally (records a "cleared before" watermark so re-syncing this

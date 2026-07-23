@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 // Multi-device live sync (roadmap D16, Phase 3 — client wiring).
 //
@@ -147,6 +148,13 @@ final class SelfSyncCoordinator {
         // no device can un-read another, and a fresh device's empty map changes nothing).
         let reads = DMReadStore.shared.lastRead
         if !reads.isEmpty, let data = try? JSONEncoder().encode(reads) { m["setting:dmLastRead"] = data }
+        // Activity-seen watermark (the bell) — opening the activity list on one device clears the
+        // badge on the others. 8-byte LE ms, merged MAX on apply — dmLastRead's exact contract,
+        // for a single scalar. A fresh device's 0 is simply not broadcast, so it changes nothing.
+        let activitySeen = ActivityStore.shared.seenAtMs
+        if activitySeen > 0 {
+            m["setting:activitySeenAt"] = withUnsafeBytes(of: activitySeen.littleEndian) { Data($0) }
+        }
         // Stories I kept to my profile. Carries its own per-entry timestamps and tombstones, so it
         // merges rather than last-writer-wins: keeping one story on my phone and another on my Mac
         // must end with BOTH kept, and un-keeping must not be undone by a sibling's stale copy.
@@ -293,6 +301,10 @@ final class SelfSyncCoordinator {
         if let v = h.get(key: "setting:dmLastRead"), let m = try? JSONDecoder().decode([String: UInt64].self, from: v) {
             DMReadStore.shared.applySynced(m)   // per-key MAX merge
             FeedStore.shared.recomputeUnreadDMs()
+        }
+        if let v = h.get(key: "setting:activitySeenAt"), v.count == 8 {
+            let ms = v.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self).littleEndian }
+            ActivityStore.shared.applySyncedSeenAt(ms)   // MAX merge — reading anywhere clears everywhere
         }
         if let v = h.get(key: "setting:keptStories") {
             KeptStoriesStore.shared.applySynced(v)   // per-entry LWW + tombstones
@@ -484,16 +496,45 @@ final class SelfSyncCoordinator {
 
     // MARK: sync
 
+    /// Skip-upload bookkeeping (step 5): the digest of the converged state we last published, and
+    /// when. Publishing is per-pass radio work against EVERY transport, yet the state is identical
+    /// pass after pass on an idle device — the 6h floor keeps the slot's mailbox-GC liveness fresh
+    /// without re-uploading the same bytes every ~2 minutes.
+    private let lastPublishedHashKey = "haven.selfsync.lastPublishedHash"
+    private let lastPublishedAtKey = "haven.selfsync.lastPublishedAt"
+    private let republishFloor: TimeInterval = 6 * 3600
+
+    /// Step-3 caches. Peer slot keys are FIXED per device (`self/<acct>/state/<dev>`), so the LIST
+    /// only ever changes when a device is added/removed — re-LISTing every transport every pass was
+    /// pure radio. Cached per transport for a bounded window (forced passes refresh). And per
+    /// (transport,key): the digest of the last-fetched slot blob, so an unchanged slot skips the
+    /// open+merge crypto (the transports expose no etag, so the GET itself can't be skipped).
+    private var peerKeysCache: [String: (at: Date, keys: [String])] = [:]
+    private var peerSlotDigest: [String: String] = [:]
+    private let peerKeysTTL: TimeInterval = 600
+
+    private func transportId(_ t: Transport) -> String {
+        switch t {
+        case .relay(let node): return "relay:\(node)"
+        case .s3: return "s3"
+        }
+    }
+
     /// One full sync pass: fold local changes into the base with fresh stamps, merge every peer
     /// slot, apply the converged result locally, persist, and re-publish our own slot. Safe to
     /// call on a timer; coalesces if already running. No-op without an account or any sync
     /// target (a relay or the user's S3 bucket — either works, no relay required).
+    /// `force` (explicit user actions: device link, force-sync, foreground pull) bypasses the
+    /// thermal gate and the step-3 caches so a deliberate sync is never silently a no-op.
     /// Returns `true` if the merge brought in changes from another device (so the caller can
     /// persist the engine state + refresh the UI — relevant when circles arrive).
     @discardableResult
-    func sync(social: HavenSocial?) async -> Bool {
+    func sync(social: HavenSocial?, force: Bool = false) async -> Bool {
         guard !inFlight else { return false }
         guard canSelfSync() else { return false }
+        // A warm device defers the whole pass — this is multi-transport LIST+FETCH+crypto and the
+        // state it converges changes rarely. Explicit user actions force through.
+        if !force, ThermalPolicy.skipSelfSync { return false }
         let accountHex = AccountStore.currentNodeHex()
         guard !accountHex.isEmpty else { return false }
         let transports = gatherTransports()
@@ -539,15 +580,29 @@ final class SelfSyncCoordinator {
         // Snapshot post-fold so we can tell whether the merge below actually brought anything new.
         let preMerge = base.toBytes()
 
-        // 3. Pull + merge every peer slot from every relay/bucket.
+        // 3. Pull + merge every peer slot from every relay/bucket. The key LIST is cached per
+        // transport (slot keys only change when a device joins/leaves); an unchanged slot blob
+        // (same digest as last fetch) skips the open+merge crypto.
         let prefix = "haven/" + selfSyncSlotPrefix(accountNodeHex: accountHex)
         let ownKey = "haven/" + selfSyncSlotKey(accountNodeHex: accountHex, deviceNodeHex: SelfSyncDevice.hex)
         for t in transports {
-            let keys = await tList(t, prefix)
+            let tid = transportId(t)
+            let keys: [String]
+            if !force, let hit = peerKeysCache[tid], Date().timeIntervalSince(hit.at) < peerKeysTTL {
+                keys = hit.keys
+            } else {
+                keys = await tList(t, prefix)
+                // Only cache a NON-EMPTY answer — an unreachable transport must retry next pass.
+                if !keys.isEmpty { peerKeysCache[tid] = (Date(), keys) }
+            }
             for key in keys where key != ownKey {
                 guard let blob = await tFetch(t, key) else { continue }
+                let digest = SHA256.hash(data: blob).map { String(format: "%02x", $0) }.joined()
+                if !force, peerSlotDigest["\(tid)|\(key)"] == digest { continue }   // byte-identical since last merge
                 if let peer = openState(blob) {
                     base.merge(other: peer)
+                    peerSlotDigest["\(tid)|\(key)"] = digest
+                    if peerSlotDigest.count > 200 { peerSlotDigest.removeAll() }   // bound (tiny anyway)
                 }
             }
         }
@@ -556,11 +611,30 @@ final class SelfSyncCoordinator {
 
         // 4. Apply the converged state locally + persist the new base.
         applyLocal(base, social: social)
-        try? base.toBytes().write(to: baseURL, options: .atomic)
+        let converged = base.toBytes()
+        try? converged.write(to: baseURL, options: .atomic)
 
-        // 5. Re-publish our own slot (sealed) to every relay/bucket for redundancy.
+        // 5. Re-publish our own slot (sealed) to every relay/bucket for redundancy — SKIPPED when
+        // the converged state is byte-identical to what we last published (the seal itself is
+        // nonce-fresh every time, so the STATE bytes are the stable identity), with a 6h floor so
+        // relay-side mailbox GC still sees the slot as live.
+        // The epoch rides the identity: adopting a rotated key must re-publish (v1 seal) even
+        // though the state bytes themselves didn't move.
+        let stateHash = SHA256.hash(data: converged).map { String(format: "%02x", $0) }.joined()
+            + "|e\(SelfSyncEpochStore.epoch)"
+        let d = UserDefaults.standard
+        let lastAt = d.double(forKey: lastPublishedAtKey)
+        if !force, d.string(forKey: lastPublishedHashKey) == stateHash,
+           Date().timeIntervalSince1970 - lastAt < republishFloor {
+            return changed
+        }
         guard let sealed = sealState(base) else { return changed }
-        for t in transports { _ = await tUpload(t, ownKey, sealed) }
+        var uploaded = false
+        for t in transports { if await tUpload(t, ownKey, sealed) { uploaded = true } }
+        if uploaded {
+            d.set(stateHash, forKey: lastPublishedHashKey)
+            d.set(Date().timeIntervalSince1970, forKey: lastPublishedAtKey)
+        }
         return changed
     }
 
@@ -609,6 +683,12 @@ final class SelfSyncCoordinator {
     func reset() {
         try? FileManager.default.removeItem(at: baseURL)
         SelfSyncEpochStore.clear()
+        // The step-3/5 caches describe the OLD base/identity — a fresh base must re-fetch and
+        // re-publish everything.
+        peerKeysCache.removeAll()
+        peerSlotDigest.removeAll()
+        UserDefaults.standard.removeObject(forKey: lastPublishedHashKey)
+        UserDefaults.standard.removeObject(forKey: lastPublishedAtKey)
     }
 
     /// This device's sealed self-sync slot, folding in local changes first — the payload to hand a
@@ -699,17 +779,37 @@ final class SelfSyncCoordinator {
 
     /// Every place this device can read/write its self-sync slots: all configured relays plus
     /// the user's OWN S3 bucket (so sync works with no relay at all — BYO storage is enough).
+    /// ALSO includes active relays wired only through an HTTP interface (`setHttpInterface`
+    /// creates the entry but no circle ever lists it, so `allRelays()` never returns it) — two
+    /// linked devices whose only common ground is a FRIEND's relay had NO self-sync transport at
+    /// all, which is precisely the "my devices each show different things" field complaint.
     private func gatherTransports() -> [Transport] {
-        var ts: [Transport] = RelayMailboxStore.shared.allRelays().map { .relay($0) }
+        let store = RelayMailboxStore.shared
+        var nodes = store.allRelays()
+        for e in store.allEntries() where e.active && !e.isS3 && !nodes.contains(e.hex) {
+            if store.httpInterface(e.hex) != nil { nodes.append(e.hex) }
+        }
+        var ts: [Transport] = nodes.map { .relay($0) }
         if let s3 = SharedStore.ownerS3() { ts.append(.s3(s3)) }
         return ts
     }
 
+    // The relay ops climb the same ladder as SharedStore.uploadEvent: our OWN hosted relay reads/
+    // writes its local store (no iroh self-connection), then the relay's signed plain-HTTP
+    // interface (the transport that actually works cross-NAT — iroh-only self-sync was a dead
+    // lane wherever the dial couldn't land while HTTP could), then iroh as the last rung.
+
     private func tList(_ t: Transport, _ prefix: String) async -> [String] {
         switch t {
         case .relay(let node):
+            if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
+                return RelayHost.shared.localList(prefix)
+            }
+            if let keys = await SharedStore.selfSyncHttpList(node, prefix: prefix) { return keys }
             guard let c = await RelayClients.client(node) else { return [] }
-            return await c.list(prefix: prefix)
+            // list() now throws to distinguish a dead dial from an empty mailbox; here an
+            // error just means this transport has nothing for us — fall through to [].
+            return (try? await c.list(prefix: prefix)) ?? []
         case .s3(let c):
             return (try? await c.listKeys(prefix: prefix)) ?? []
         }
@@ -718,6 +818,14 @@ final class SelfSyncCoordinator {
     private func tFetch(_ t: Transport, _ key: String) async -> Data? {
         switch t {
         case .relay(let node):
+            if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
+                return RelayHost.shared.localGet(key)
+            }
+            switch await SharedStore.selfSyncHttpGet(node, key: key) {
+            case .hit(let d): return d
+            case .miss: return nil          // reached — same store as iroh, don't redial
+            case .unavailable: break        // no HTTP rung → iroh
+            }
             guard let c = await RelayClients.client(node) else { return nil }
             return await c.get(key: key)
         case .s3(let c):
@@ -728,6 +836,10 @@ final class SelfSyncCoordinator {
     private func tUpload(_ t: Transport, _ key: String, _ data: Data) async -> Bool {
         switch t {
         case .relay(let node):
+            if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
+                return RelayHost.shared.localPut(key, data)
+            }
+            if await SharedStore.selfSyncHttpPut(node, key: key, data: data) { return true }
             guard let c = await RelayClients.client(node) else { return false }
             do { try await c.put(key: key, data: data); RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node); return true }
             catch { RelayHealth.shared.recordFailure(node); return false }

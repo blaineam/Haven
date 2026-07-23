@@ -99,7 +99,7 @@ struct OnboardingView: View {
                     action: { showLink = true })
                 onboardingChoice(
                     title: "Move my account to this device",
-                    subtitle: "Bring my identity over from another device using a transfer code. Use this when replacing a device, not when adding one.",
+                    subtitle: "Move your identity from a device you're replacing — adding a device? Use the option above.",
                     icon: "arrow.right.circle",
                     action: { showRestore = true })
             }

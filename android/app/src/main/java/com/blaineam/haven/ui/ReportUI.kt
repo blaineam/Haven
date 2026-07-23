@@ -100,7 +100,7 @@ fun ReportSheet(item: FeedItemFfi, circleId: String, authorName: String, onDismi
             }
             Spacer(Modifier.height(6.dp))
             Text(
-                "The post disappears from your feed right away, and everyone in the circle sees your report so they can act too. Only who reported whom and the category are logged — never the content.",
+                "Hides the post for you now; your circle sees the report. Nothing is ever logged.",
                 color = HavenTheme.textSecondary, fontSize = 12.sp,
             )
             Spacer(Modifier.height(14.dp))

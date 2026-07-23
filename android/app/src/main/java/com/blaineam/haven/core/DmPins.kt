@@ -35,16 +35,25 @@ object DmPins {
 
     /** Pin (if room) or unpin a conversation. */
     fun toggle(id: String) {
-        if (pinned.remove(id)) persist()
-        else if (pinned.size < MAX_PINS) { pinned.add(id); persist() }
+        if (pinned.remove(id)) { persist(); HavenNet.selfSyncNudge() }
+        else if (pinned.size < MAX_PINS) { pinned.add(id); persist(); HavenNet.selfSyncNudge() }
     }
 
-    fun unpin(id: String) { if (pinned.remove(id)) persist() }
+    fun unpin(id: String) { if (pinned.remove(id)) { persist(); HavenNet.selfSyncNudge() } }
 
     /** Commit a user-chosen order (from a rearrange mode). Keeps only ids that are still pinned. */
     fun setOrder(ids: List<String>) {
         val kept = ids.filter { pinned.contains(it) }
         val rest = pinned.filter { !kept.contains(it) }
         pinned.clear(); pinned.addAll(kept + rest); persist()
+        HavenNet.selfSyncNudge()   // local pin reorder — push to my other devices now (LWW)
+    }
+
+    /** Adopt the self-synced pin order (plain LWW — the CRDT already resolved which device wrote
+     *  last). Applied only when it differs so the stores' observers never ping-pong. */
+    fun applySynced(ids: List<String>) {
+        val next = ids.filter { it.isNotEmpty() }.distinct().take(MAX_PINS)
+        if (next == pinned.toList()) return
+        pinned.clear(); pinned.addAll(next); persist()
     }
 }

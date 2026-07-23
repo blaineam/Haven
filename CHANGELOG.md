@@ -11,6 +11,45 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **In-app Activity list (all platforms).** A bell with an unread badge opens a
+  time-ordered list of everything that happened to you — reactions and comments on
+  your posts, new posts and stories, DMs, votes, connections, circle adds, linked
+  devices — each row tapping straight through to the exact post, story, or thread.
+  Derived entirely from already-synced circle data (a new `activity()` reduction in
+  core, one FFI for all four platforms); read-state syncs across your devices
+  (`setting:activitySeenAt`), so reading on the phone clears the bell on the Mac.
+  No server, nothing new stored remotely.
+- **Notification taps open the exact content everywhere.** Sealed push banners now
+  carry the post id (including for freshly-authored posts, via a new
+  `last_authored_event_id` FFI) plus targeted fetch coordinates; Android and desktop
+  notifications finally attach deep links at all (they used to just open the app), and
+  a new story route opens the story viewer directly. Circle taps no longer open a
+  blank sheet on iOS/macOS.
+- **Push→content gap closed.** The Notification Service Extension now *fetches* the
+  announced envelope (single targeted GET via a relay directory mirrored into the app
+  group) and prefetches thumbnails before the banner is even shown; iOS alert pushes
+  carry `content-available` so a backgrounded app wakes and syncs before you open it;
+  app-open consumes push hints first — hinted circles and refs jump the queue ahead
+  of the general sweep. macOS does the same in-process; Android/desktop prefetch media
+  before firing their local notifications.
+- **Media rides with its post.** Photos mint a tiny thumbnail that uploads first and
+  renders (blurred, correctly sized) the moment the post arrives; fresh posts' blobs
+  upload in a priority lane ahead of backfill; authors announce "media landed" to the
+  circle so receivers fetch immediately instead of polling; fresh refs retry on a tight
+  bounded backoff; chunked (>256 MB) relay downloads resume from the last chunk instead
+  of restarting; and placeholders are honest — downloading with progress, "waiting for
+  sender", or a terminal state with Retry / Ask-for-it-back.
+- **Relay delta-LIST.** Mailbox polls send a content digest; an unchanged mailbox
+  answers `204 No Content` instead of re-shipping the full key list every 30–45 s —
+  the single biggest recurring radio cost while idle. Old clients/relays are untouched
+  (graceful fallback both ways).
+- **Full cross-device E2E suite with perf gates** (`soren run Haven e2e`): iOS sim +
+  Android emulator + isolated mac stub + Tauri desktop on one fleet, exercising posts,
+  stories + captions, DMs, reactions, comments, files, music cards, profile edits, and
+  circle membership — asserting convergence on every device, gating on propagation-
+  latency budgets, and failing on >2× run-over-run regressions. The mac leg is always
+  the isolated QA stub; personal accounts can never be touched.
+
 - **Bundled Cloudflare Quick Tunnel for desktop + haven-relay.** Serious always-on relays can expose
   the HTTP media interface over a free `*.trycloudflare.com` HTTPS URL without port-forwarding or a
   user-installed `cloudflared` CLI. Desktop (Windows/macOS/Linux) ships the official Apache-2.0
@@ -32,6 +71,71 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Self-sync over relays was dead on every platform (core + Apple).** Three stacked
+  causes, live-fleet diagnosed: the relay authorized only the legacy bare `self/…`
+  namespace while every client keys `haven/self/…` (which fell to the catch-all deny);
+  the owner gate required `peer == account` while device-id-everywhere makes clients
+  connect under device ids; and Apple's self-sync transports were iroh-only, so a relay
+  reachable only over HTTP (in-app stub / free-CF / cold DERP) — or wired only via its
+  HTTP interface, or hosted in-process — was never used at all. The relay now serves
+  `haven/self/<acct>/**` (both transports, one policy) to the account's OWN fleet: the
+  account id or any device in its stored account-signed devroster; LIST stays scoped
+  per account (F3 — no cross-account enumeration, and the roster gate discloses nothing
+  the relay doesn't already store). Apple's `tList`/`tFetch`/`tUpload` climb the same
+  ladder as event uploads (own hosted relay's local store → signed HTTP → iroh), and
+  HTTP-interface-only relay entries now count as self-sync transports. This is the root
+  of "my linked devices each show different things".
+- **Circle invites lost in dead hello slots (Apple).** Store-and-forward hellos were
+  addressed per DIAL TARGET, so a stale/rotated device id became a mailbox slot nobody
+  ever claims — and the invite riding it vanished; hellos are now addressed by the
+  member's ACCOUNT hex only (device ids remain iroh dial targets). The receiver used to
+  claim-and-mark-seen EVERY hello slot it saw (other members', sibling devices', stale
+  ids'), consuming invites on whichever device polled first; it now claims only slots
+  addressed to its account or current transport device id, leaves the rest for their
+  owners/TTL, skips even fetching them, and runs a one-shot seen repair so previously
+  swallowed hellos become claimable. Sender-side dedupe is per (relay, key) instead of
+  global, so a relay adopted later still receives standing hellos.
+- **Rebuilt QA stubs stop spamming macOS keychain-approval dialogs.** Every re-signed
+  `HavenStub` triggered login-keychain prompts because the Secure-Enclave key item (and
+  legacy fallback read probes) landed in the file keychain, whose per-binary ACLs never
+  match a rebuilt binary. The stub now confines every keychain touch to the
+  data-protection keychain (entitlement-governed via its `…qa.stub` access group —
+  same storage strength, zero dialogs) and never probes the legacy keychain at all.
+  Production keychain behavior is unchanged (migration fallbacks kept).
+- **Idle heat, round two (Apple).** The remaining steady-state burners: self-sync no
+  longer re-seals + re-uploads an unchanged account state every 2 minutes (content
+  hash + 6 h liveness floor; epoch rides the hash so rotations still republish);
+  hellos stop re-uploading the same avatar-bearing card to every relay each tick
+  (seen-set gate); the 3-minute full-history re-seal now stretches with the idle
+  multiplier and reuses cached deterministic bundles; missing-media retries back off
+  exponentially (90 s → 6 h, persisted) and park at thermal pressure; background app
+  refresh does a slim mailbox pull instead of spinning Multipeer + full fan-out; the
+  3-second live-call timer only exists during calls; speaker-stats polling dropped to
+  1 s and is skipped for 1:1 calls. A shared ThermalPolicy applies the same gates
+  everywhere.
+- **Linked devices finally converge (Android + desktop parity wave).** Android marked
+  mailbox keys seen *at fetch* — an envelope buffered waiting for its epoch key was
+  burned forever (that's "one device gets some things, another gets others"); it now
+  marks seen only after successful ingest, persists buffers across process death, and
+  runs a one-shot seen-set repair. Android + desktop now route `__hello__` /
+  `__relay__` / `__live__` mailbox keys like iOS instead of feeding them to the event
+  decoder (desktop was re-fetching + re-crypting every `__relay__` announce on every
+  poll, and dropping store-and-forward hellos entirely). Avatar + pinned-DM self-sync
+  ported to both; desktop's retention setting used a different CRDT key than the
+  phones (seconds vs days) and never converged — it now speaks both. Circle re-adds
+  lift the engine tombstone on all platforms. Own-device internet catch-up covers ALL
+  circles via round-robin (it silently skipped everything past the first two).
+  Android + desktop gained the push-wake leg (authored/ingested events now wake
+  recipients' and your own other devices' phones — previously Apple-only).
+- **Bonjour teardown crash hardened.** Discovery objects now retire through a static
+  main-confined pool that outlives their owner (the `_CFAssertMismatchedTypeID` /
+  `CFRunLoopSourceInvalidate` trap fired when a browser freed in the same runloop
+  turn as its async cancel), and every transport handoff stops discovery first.
+- **In-app copy de-densified everywhere.** Settings/relay/device/onboarding explainers
+  across iOS, macOS, Android, and desktop are one plain line each (safety warnings
+  keep two), with "Learn more" links into the docs site for real detail — and the
+  desktop text claiming linked devices "hold a copy of your master key" is corrected
+  (they never do; they get their own revocable key).
 - **iPhone scorch + Mac 10 GB / freeze (Apple, field sample build 344).** Live profile: Mac host
   at **237% CPU / 10.6 GB RSS**, path-proxy log **~98% `__live__` LIST** (6–17/sec) while idle;
   main thread still mutex-waiting; Circle Settings sheet re-rendered on every `FeedStore`

@@ -13,6 +13,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Forum
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -91,6 +92,7 @@ private fun MainScaffold() {
     val context = LocalContext.current
     var tab by remember { mutableStateOf(demoTab() ?: Tab.Circle) }
     var showConnect by remember { mutableStateOf(false) }
+    var showActivity by remember { mutableStateOf(false) }
     var openPost by remember { mutableStateOf<com.blaineam.haven.core.DeepLink.Post?>(null) }
 
     // Deep-linked invite (haven:// or the invite web page) → surface the Connect screen, which
@@ -108,6 +110,16 @@ private fun MainScaffold() {
                 HavenNet.setActiveCircle(p.circleId)
                 tab = Tab.Circle
             } else openPost = p
+        }
+    }
+
+    // Deep-linked circle (haven://c/<circleId> — a notification that only names the circle) →
+    // switch to that circle's feed. Same lock rule as the post path: a locked circle switches to
+    // its lock screen (CircleScreen gates itself on CircleLock), never past it.
+    LaunchedEffect(com.blaineam.haven.core.CircleLinkInbox.pending) {
+        com.blaineam.haven.core.CircleLinkInbox.consume()?.let { c ->
+            HavenNet.setActiveCircle(c.circleId)
+            tab = Tab.Circle
         }
     }
 
@@ -208,6 +220,25 @@ private fun MainScaffold() {
                         colors = navColors,
                     )
                 }
+                // Activity bell: reactions/comments on MY posts, new posts/stories/DMs, connections
+                // — badge = rows newer than the (self-synced) read watermark.
+                com.blaineam.haven.core.ActivityStore.version.intValue
+                val unseen = com.blaineam.haven.core.ActivityStore.unseenCount()
+                NavigationBarItem(
+                    selected = false,
+                    onClick = { showActivity = true },
+                    icon = {
+                        if (unseen > 0) {
+                            androidx.compose.material3.BadgedBox(
+                                badge = { androidx.compose.material3.Badge(containerColor = HavenTheme.pink) { Text("$unseen") } },
+                            ) { Icon(Icons.Filled.Notifications, contentDescription = "Activity") }
+                        } else {
+                            Icon(Icons.Filled.Notifications, contentDescription = "Activity")
+                        }
+                    },
+                    label = { Text("Activity") },
+                    colors = navColors,
+                )
                 // A minimized call shows as a "Call" tab to the right of You (iOS parity), not a banner.
                 if (inCall && callMinimized) {
                     NavigationBarItem(
@@ -237,6 +268,20 @@ private fun MainScaffold() {
         exit = slideOutVertically { it },
     ) {
         ConnectScreen(onDone = { showConnect = false })
+    }
+
+    // Activity sheet (same slide-up). Rows jump via the EXISTING routes: PostLinkInbox /
+    // CircleLinkInbox (their LaunchedEffects above), DmDrafts.openThread (the Messages switch),
+    // and showConnect — no routing of its own.
+    AnimatedVisibility(
+        visible = showActivity,
+        enter = slideInVertically { it },
+        exit = slideOutVertically { it },
+    ) {
+        ActivityScreen(
+            onDone = { showActivity = false },
+            onConnect = { showActivity = false; showConnect = true },
+        )
     }
 
     // Deep-linked post sheet (same slide-up as Connect).

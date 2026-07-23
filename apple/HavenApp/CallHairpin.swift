@@ -22,8 +22,9 @@ final class CallHairpin {
         return URLSession(configuration: c)
     }()
 
-    /// Public fabric/media HTTPS base → `wss://…/webrtc/hairpin`.
-    static func hairpinURL(fromPublicBase base: String) -> URL? {
+    /// Public fabric/media HTTPS base → `wss://…/webrtc/hairpin`. Pure string→URL math, so it is
+    /// nonisolated — callable from the host-less logic tests without the MainActor.
+    nonisolated static func hairpinURL(fromPublicBase base: String) -> URL? {
         let t = base.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard !t.isEmpty, let u = URL(string: t), let host = u.host else { return nil }

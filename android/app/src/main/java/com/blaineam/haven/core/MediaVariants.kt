@@ -8,6 +8,43 @@ object MediaVariants {
     fun posterMarker(video: String, poster: String) = "poster:$video:$poster"
     fun originalMarker(optimized: String, original: String) = "orig:$optimized:$original"
 
+    /** `thumb:<contentRef>:<thumbRef>` — a tiny (~256px, ≤32KB) preview companion for a photo.
+     *  Joins the SIGNED media list at post time (same pattern as `poster:`), so old clients simply
+     *  ignore it. The bare thumb ref is deliberately NOT listed — receivers learn it from the
+     *  marker, so a legacy carousel never shows a duplicate tiny slide. Apple parity. */
+    fun thumbMarker(content: String, thumb: String) = "thumb:$content:$thumb"
+
+    fun parseThumb(ref: String): Pair<String, String>? {
+        if (!ref.startsWith("thumb:")) return null
+        val rest = ref.removePrefix("thumb:")
+        val i = rest.lastIndexOf(':')
+        if (i <= 0 || i >= rest.length - 1) return null
+        return rest.substring(0, i) to rest.substring(i + 1)
+    }
+
+    /** Thumb companion for a content ref, if the post/DM declared one. */
+    fun thumbFor(content: String, media: List<String>): String? =
+        media.mapNotNull { parseThumb(it) }.firstOrNull { it.first == content }?.second
+
+    /** Every thumb image ref declared in the list (prefetched everywhere — tiny by contract). */
+    fun allThumbs(media: List<String>): List<String> =
+        media.mapNotNull { parseThumb(it)?.second }
+
+    /** The relay-upload order for a media list's fetchable refs: thumbs first (tiny, unblock the
+     *  placeholder), then posters, then everything else in list order. Markers dropped. */
+    fun uploadOrder(media: List<String>): List<String> {
+        val thumbs = allThumbs(media).toSet()
+        val posters = media.mapNotNull { parsePoster(it)?.second }.toSet()
+        fun rank(r: String) = when {
+            r in thumbs -> 0
+            r in posters -> 1
+            else -> 2
+        }
+        // Keep list order within a rank (stable sort) and skip markers — a ':' at index > 1 is a
+        // synthetic scheme (mirror of LocalMedia.isSynthetic, inlined so this file stays test-only).
+        return media.filter { r -> r.indexOf(':') <= 1 }.sortedBy { rank(it) }
+    }
+
     fun parsePoster(ref: String): Pair<String, String>? {
         if (!ref.startsWith("poster:")) return null
         val rest = ref.removePrefix("poster:")
@@ -39,8 +76,10 @@ object MediaVariants {
     fun displayRefs(media: List<String>): List<String> {
         val originals = allOriginals(media).toSet()
         val posterImages = media.mapNotNull { parsePoster(it)?.second }.toSet()
+        val thumbImages = allThumbs(media).toSet()
         return media.filter {
-            parsePoster(it) == null && parseOriginal(it) == null && it !in originals && it !in posterImages
+            parsePoster(it) == null && parseOriginal(it) == null && parseThumb(it) == null &&
+                it !in originals && it !in posterImages && it !in thumbImages
         }
     }
 
@@ -58,6 +97,8 @@ object MediaVariants {
             }
         }
         for (p in posters) if (p !in out) out.add(p)
+        // Thumbs are ≤32KB by contract — always worth fetching, data saver included.
+        for (t in allThumbs(media)) if (t !in out) out.add(t)
         return out
     }
 

@@ -66,9 +66,14 @@ pub fn current_local(prefs: &Prefs, social: &HavenSocial) -> BTreeMap<String, Ve
     if !prefs.profile.link.is_empty() {
         m.insert("profile:link".into(), prefs.profile.link.clone().into_bytes());
     }
+    // Profile photo (small base64 image) — so a freshly-linked device gets the avatar too, not just
+    // the name/bio. Mirrors iOS SelfSync `profile:avatar`.
+    if !prefs.profile.avatar.is_empty() {
+        m.insert("profile:avatar".into(), prefs.profile.avatar.clone().into_bytes());
+    }
     // LWW timestamps per profile field — so two of my devices resolve a profile edit by WHO EDITED LAST,
     // not who synced last (the endless profile ping-pong). See store::Prefs::profile_field_ts.
-    for field in ["name", "emoji", "bio", "link"] {
+    for field in ["name", "emoji", "bio", "link", "avatar"] {
         let ts = prefs.profile_field_stamp(field);
         if ts > 0 {
             m.insert(format!("profile-at:{field}"), ts.to_le_bytes().to_vec());
@@ -78,6 +83,12 @@ pub fn current_local(prefs: &Prefs, social: &HavenSocial) -> BTreeMap<String, Ve
     // Global settings. retention as u64 LE (None = 0 = keep all); host-on-launch as a 1-byte flag.
     let retention = prefs.retention_secs.unwrap_or(0);
     m.insert("setting:retention".into(), retention.to_le_bytes().to_vec());
+    // …and the CROSS-PLATFORM shape iOS/Android publish: `setting:retentionDays` as Int32 LE DAYS.
+    // The legacy `setting:retention` (u64 LE seconds) was a desktop-only key the phones never read,
+    // so a retention change made here silently never reached them (and theirs never landed here) —
+    // the key mismatch. Both are emitted; `retentionDays` is preferred on apply.
+    let retention_days = (retention / 86_400) as i32;
+    m.insert("setting:retentionDays".into(), retention_days.to_le_bytes().to_vec());
     m.insert("setting:host_on_launch".into(), vec![if prefs.host_on_launch { 1 } else { 0 }]);
     // LWW timestamps for the synced settings — so two devices resolve a settings change by WHO CHANGED it
     // last, not who synced last (the same ping-pong that hit profiles). See store::Prefs::setting_ts.
@@ -86,6 +97,24 @@ pub fn current_local(prefs: &Prefs, social: &HavenSocial) -> BTreeMap<String, Ve
         if ts > 0 {
             m.insert(format!("setting-at:{key}"), ts.to_le_bytes().to_vec());
         }
+    }
+    // The retention stamp under the key iOS/Android read it from (their `tsKeyRet` is the literal
+    // UserDefaults key), so a change made here wins/loses LWW correctly on the phones too.
+    let ret_ts = prefs.setting_stamp("retention");
+    if ret_ts > 0 {
+        m.insert("setting-at:haven.retentionDays".into(), ret_ts.to_le_bytes().to_vec());
+    }
+
+    // Pinned DM conversations (ordered) sync across my devices, last-writer-wins. Only broadcast
+    // when non-empty so a fresh device can't blank a sibling's pins (absence ≠ authoritative).
+    if !prefs.pinned_dms.is_empty() {
+        m.insert("setting:pinnedDMs".into(), prefs.pinned_dms.join("\n").into_bytes());
+    }
+
+    // Activity-list read watermark — per-key MAX on apply (monotonic, same rule as dmLastRead), so
+    // opening the bell on one device clears the badge on the others. 8-byte LE ms.
+    if prefs.activity_seen_at > 0 {
+        m.insert("setting:activitySeenAt".into(), prefs.activity_seen_at.to_le_bytes().to_vec());
     }
 
     // DM read watermarks — reading a thread on one device clears its badge on the others. JSON map
@@ -185,10 +214,10 @@ pub fn current_local(prefs: &Prefs, social: &HavenSocial) -> BTreeMap<String, Ve
         }
     };
     for ci in social.circles() {
-        // Skip DM pseudo-circles — they reconstruct from the contact pair, not from sync.
-        if ci.id.starts_with("dm:") {
-            continue;
-        }
+        // DM pseudo-circles are INCLUDED (iOS/Android parity): a DM's structure does reconstruct
+        // from the contact pair, but only once THIS device knows the partner — a freshly-linked
+        // device doesn't, so skipping them here left its Messages tab empty until every partner
+        // happened to re-handshake. The `circle:` record carries the pair's bundles either way.
         // Don't re-broadcast a circle the user DELETED (LWW): its `circle-deleted:` record carries the
         // deletion, and re-emitting the `circle:` row would fight it every sync.
         if prefs.is_circle_deleted(&ci.id) {
@@ -296,6 +325,22 @@ pub fn apply_local(
             changed = true;
         }
     }
+    // Avatar rides the same per-field LWW as the text fields (base64 payload, so it's handled
+    // outside the loop above rather than growing a String clone of a photo per pass).
+    if let Some(v) = get("profile:avatar") {
+        if let Ok(s) = std::str::from_utf8(v) {
+            let local_ts = prefs.profile_field_stamp("avatar");
+            let mut ts = ts_of("profile-at:avatar");
+            if ts == 0 && local_ts == 0 && prefs.profile.avatar.is_empty() && !s.is_empty() {
+                ts = 1; // seed an avatar-less local from a legacy (untimestamped) sibling
+            }
+            if ts > local_ts && s != prefs.profile.avatar {
+                prefs.profile.avatar = s.to_string();
+                prefs.profile_field_ts.insert("avatar".into(), ts);
+                changed = true;
+            }
+        }
+    }
 
     // Settings are LWW by per-key timestamp — same fix as profiles. A remote value only wins if it was
     // changed more recently than ours; an untimestamped legacy record (old peer) maps to ts=1 so it seeds
@@ -308,13 +353,31 @@ pub fn apply_local(
             t
         }
     };
-    if let Some(v) = get("setting:retention") {
-        if v.len() == 8 {
-            let mut a = [0u8; 8];
-            a.copy_from_slice(v);
-            let n = u64::from_le_bytes(a);
-            let want = if n == 0 { None } else { Some(n) };
-            let ts = setting_ts_of("retention");
+    // Retention: PREFER the cross-platform `setting:retentionDays` (Int32 LE days — what iOS and
+    // Android publish) and only fall back to the legacy desktop-only `setting:retention` (u64 LE
+    // seconds) when a fleet has no modern writer yet. Reading only the legacy key was the mismatch
+    // that kept a phone's retention change from ever landing here. The stamp is the max of the
+    // desktop key and the phones' `setting-at:haven.retentionDays`.
+    {
+        let want: Option<Option<u64>> = if let Some(v) = get("setting:retentionDays") {
+            (v.len() == 4).then(|| {
+                let mut a = [0u8; 4];
+                a.copy_from_slice(v);
+                let days = i32::from_le_bytes(a);
+                if days <= 0 { None } else { Some(days as u64 * 86_400) }
+            })
+        } else if let Some(v) = get("setting:retention") {
+            (v.len() == 8).then(|| {
+                let mut a = [0u8; 8];
+                a.copy_from_slice(v);
+                let n = u64::from_le_bytes(a);
+                if n == 0 { None } else { Some(n) }
+            })
+        } else {
+            None
+        };
+        if let Some(want) = want {
+            let ts = setting_ts_of("retention").max(ts_of("setting-at:haven.retentionDays"));
             if ts > prefs.setting_stamp("retention") && want != prefs.retention_secs {
                 prefs.retention_secs = want;
                 prefs.setting_ts.insert("retention".into(), ts);
@@ -332,6 +395,19 @@ pub fn apply_local(
             }
         }
     }
+    // Pinned DMs from my other devices — last-writer-wins wholesale (the value is one small ordered
+    // list, so per-entry merging would just interleave two orders nobody chose). Mirrors iOS
+    // `DMPinStore.applySynced`.
+    if let Some(v) = get("setting:pinnedDMs") {
+        if let Ok(s) = std::str::from_utf8(v) {
+            let ids: Vec<String> =
+                s.split('\n').filter(|l| !l.is_empty()).take(6).map(str::to_string).collect();
+            if !ids.is_empty() && ids != prefs.pinned_dms {
+                prefs.pinned_dms = ids;
+                changed = true;
+            }
+        }
+    }
     // DM read watermarks from my other devices: per-key MAX merge (monotonic — always safe).
     if let Some(v) = get("setting:dmLastRead") {
         if let Ok(m) = serde_json::from_slice::<BTreeMap<String, u64>>(v) {
@@ -341,6 +417,15 @@ pub fn apply_local(
                     changed = true;
                 }
             }
+        }
+    }
+    // Activity-list read watermark: per-key MAX (monotonic — a device can only mark MORE read, and
+    // a fresh device's 0 changes nothing), same rule as dmLastRead.
+    {
+        let ts = ts_of("setting:activitySeenAt");
+        if ts > prefs.activity_seen_at {
+            prefs.activity_seen_at = ts;
+            changed = true;
         }
     }
 
@@ -515,11 +600,16 @@ pub fn apply_local(
                     }
                 }
             } else if readd > 0 {
-                // Newest verdict is RE-ADDED. Merge the re-add ts. Only the CLIENT guard is lifted here —
-                // NOT the engine tombstone (a deliberate LOCAL re-add clears that). The member's bundle
-                // comes back via the additive `circle:` record.
+                // Newest verdict is RE-ADDED. Merge the re-add ts AND lift the ENGINE tombstone —
+                // the tombstone otherwise keeps rejecting the member's events on this device even
+                // though the client guard is clear, so a re-add made on the phone looked applied
+                // here while their posts silently never ingested. The member's bundle comes back
+                // via the additive `circle:` record. Parity with SelfSync.swift (clearCircleRemoval
+                // on the re-add verdict).
                 let was = prefs.is_circle_member_removed(&entry);
-                prefs.merge_circle_readded_at(&entry, readd);
+                if !prefs.merge_circle_readded_at(&entry, readd) {
+                    social.clear_circle_removal(cid, hex); // newest is a re-add → lift tombstone
+                }
                 if was && !prefs.is_circle_member_removed(&entry) {
                     changed = true;
                 }

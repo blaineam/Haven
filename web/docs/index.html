@@ -209,6 +209,30 @@
         </details>
       </div>
 
+      <!-- 4b · The relay's public front door (linked from in-app relay settings) -->
+      <div class="card reveal" id="front-door" style="padding:30px 26px">
+        <span class="eyebrow">The relay's front door</span>
+        <h2 style="font-size:clamp(22px,4vw,30px)">One public address that answers for everything.</h2>
+        <p class="muted" style="margin-top:12px;max-width:74ch">
+          A relay you host can publish one HTTPS address — its <b>front door</b> — that answers for
+          everything it does: media pickup, the connection fabric (<b>DERP</b>) that helps devices find
+          each other, and call forwarding. In the app, set just the media address and leave the DERP
+          field empty — Haven routes both through the same tunnel. A separate DERP address is only for
+          deliberately hosting it on its own hostname.
+        </p>
+        <details class="tech">
+          <summary><span class="tag-tech">The technical bit</span><span class="chev">›</span></summary>
+          <div class="tbody">
+            <p>The in-app Mac relay runs a <b>path router</b> on <code>127.0.0.1:8675</code> that fronts
+              the media store (<code>:8674</code>) and the DERP fabric (<code>:3340</code>) behind one
+              origin, so a single tunnel — free trycloudflare, a custom Cloudflare domain, or any proxy
+              you run — serves them all. A dedicated DERP URL is only for dual-hostname setups without
+              the path router, e.g. <code>https://derp.example.com → http://127.0.0.1:3340</code>.</p>
+            <p>Full detail: <a class="inline" href="https://github.com/blaineam/haven/blob/main/docs/CLOUDFLARE-TUNNEL.md" rel="noopener">CLOUDFLARE-TUNNEL.md ↗</a></p>
+          </div>
+        </details>
+      </div>
+
       <!-- 5 · Media -->
       <div class="card reveal" id="media" style="padding:30px 26px">
         <span class="eyebrow">Your photos keep their mouth shut</span>

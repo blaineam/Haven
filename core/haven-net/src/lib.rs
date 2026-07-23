@@ -29,6 +29,7 @@ pub mod livedelivery;
 pub mod path_router;
 pub mod relay;
 pub mod s3tunnel;
+pub mod statuspage;
 pub mod turn;
 pub mod ws_hairpin;
 
@@ -329,8 +330,12 @@ impl Node {
             // Replay the circles paired members taught this relay BEFORE any link grant is applied,
             // so a relay whose link grants nothing (or whose operator never re-pastes) still serves
             // everything it learned last run. `relay_authorize` re-merges after each link grant.
+            // Device rosters likewise: the self-sync owner gate (`haven/self/…`) never required a
+            // circle, so a relay that is never `relay_authorize`d must still re-authorize every
+            // account's verified device fleet from disk — not answer 403 until each device heals.
             if let Some(cfg) = g.as_ref() {
                 blobstore::rehydrate_learned_grants(&root, &cfg.auth);
+                blobstore::rehydrate_device_rosters(&root, &cfg.auth);
             }
             // Stamp the GC-enabled marker(s) now so the 48h first-enable grace clock starts.
             let _ = blobstore::gc_sweep_with(&root, &retention, blobstore::GC_GRACE);

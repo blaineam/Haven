@@ -154,6 +154,7 @@ const ICONS = {
   "plus.circle": { d: "M12 21a9 9 0 100-18 9 9 0 000 18zM12 8.2v7.6M8.2 12h7.6" },
   "arrow.uturn.backward": { d: "M9 14l-5-5 5-5M4 9h9a6 6 0 010 12H8" },
   "lock.shield.fill": { fill: true, d: "M12 2L4 5v6.5c0 5 3.4 9.6 8 10.5 4.6-.9 8-5.5 8-10.5V5l-8-3zm0 6.2a2.3 2.3 0 012.3 2.3v1h.4a.8.8 0 01.8.8v3.4a.8.8 0 01-.8.8H9.3a.8.8 0 01-.8-.8v-3.4a.8.8 0 01.8-.8h.4v-1A2.3 2.3 0 0112 8.2zm0 1.4a.9.9 0 00-.9.9v1h1.8v-1a.9.9 0 00-.9-.9z" },
+  "bell": { d: "M12 4a5.4 5.4 0 00-5.4 5.4v3.1L5 15.6a.8.8 0 00.7 1.2h12.6a.8.8 0 00.7-1.2l-1.6-3.1V9.4A5.4 5.4 0 0012 4zM10 19.2a2.1 2.1 0 004 0" },
 };
 /** One glyph as an <svg>. `cls` lands on the element so callers can size it. */
 function icon(name, cls) {
@@ -235,8 +236,54 @@ async function loadMedia(node, circleId, ref) {
     const post = card ? { circleId, postId: card.dataset.post, authorShort: card.dataset.author, isMe: !!card.dataset.mine } : null;
     const bytes = await invoke("media_evicted_size", { reference: ref }).catch(() => null);
     if (bytes != null) node.replaceWith(evictedPlaceholder(circleId, ref, bytes, isVideo, post));
-    else node.replaceWith(el("div", { class: "tag" }, "media syncing…"));
+    else node.replaceWith(syncingPlaceholder(circleId, ref, isVideo));
   } catch (_) {}
+}
+
+// Honest still-syncing placeholder (iOS MissingMediaPlaceholder parity): the post's blurred
+// `thumb:` companion behind the spinner when one is held (real shape and color instead of a grey
+// box), "Still loading…" while the engine's sweeps fetch, and a terminal "Not available yet" +
+// Retry once polling gives up — never a spinner that lies forever.
+function syncingPlaceholder(circleId, ref, isVideo) {
+  const box = el("div", { class: "media-evicted", style: "position:relative;overflow:hidden" });
+  const t = ThumbIndex.thumbFor(ref);
+  if (t) {
+    invoke("media_data_url", { circleId, reference: t }).then((u) => {
+      if (!u || !box.isConnected) return;
+      box.prepend(el("img", {
+        src: u,
+        style: "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;filter:blur(12px);opacity:.75;z-index:0",
+      }));
+    }).catch(() => {});
+  }
+  const front = el("div", { class: "col", style: "position:relative;z-index:1;align-items:center;gap:6px" });
+  box.append(front);
+  const waiting = () => front.replaceChildren(
+    el("div", { class: "spinner" }),
+    el("div", { class: "muted small" }, isVideo ? "Video still loading…" : "Still loading…"));
+  const gone = () => front.replaceChildren(
+    el("div", { class: "muted small" }, "Not available yet"),
+    el("button", { class: "btn small", onclick: () => {
+      invoke("media_download", { reference: ref }).catch(() => {});
+      start();
+    } }, "Retry"));
+  let timer = null;
+  const start = () => {
+    waiting();
+    let waited = 0;
+    clearTimeout(timer);
+    const tick = async () => {
+      if (!box.isConnected) return;   // card re-rendered underneath us — stop polling
+      const url = await invoke("media_data_url", { circleId, reference: ref }).catch(() => null);
+      if (url) { const n = mediaNode(ref); box.replaceWith(n); loadMedia(n, circleId, ref); return; }
+      waited += 2000;
+      if (waited >= 45000) { gone(); return; }
+      timer = setTimeout(tick, 2000);
+    };
+    timer = setTimeout(tick, 2000);
+  };
+  start();
+  return box;
 }
 
 // The #3 placeholder for a deliberately-evicted blob: a tap re-fetches it (media_download clears the
@@ -408,6 +455,54 @@ async function refreshBadges() {
     b.textContent = unread;
     b.classList.toggle("show", unread > 0);
   } catch (_) {}
+  try {
+    // Bell badge = activity rows newer than the seen watermark (cleared by opening the panel —
+    // on ANY of the user's devices, via the synced watermark).
+    const a = await invoke("activity");
+    const n = (a.rows || []).filter((r) => r.created_at > (a.seen_at || 0)).length;
+    const b = $("#badge-bell");
+    if (b) { b.textContent = n > 99 ? "99+" : n; b.classList.toggle("show", n > 0); }
+  } catch (_) {}
+}
+
+// ---- Activity (the bell) -----------------------------------------------------------------
+// The in-app notification list: who reacted / commented / voted / posted / messaged, newest-first,
+// plus app-raised rows ("media is back"). Rows are styled like the Messages list; tapping one jumps
+// through the same deep-link route table a pasted link uses. Opening marks everything seen
+// (monotonic watermark, synced to your other devices via `setting:activitySeenAt`).
+async function activityPanel() {
+  const a = await invoke("activity").catch(() => ({ rows: [], seen_at: 0 }));
+  const rows = a.rows || [], seenAt = a.seen_at || 0;
+  invoke("mark_activity_seen").catch(() => {});
+  const verb = (r) => {
+    switch (r.kind) {
+      case "react": return `Reacted ${r.emoji || "👍"}`;
+      case "comment": return "Commented";
+      case "vote": return "Voted";
+      case "story": return "Shared a story";
+      case "dm": return "Sent you a message";
+      default: return "Posted";
+    }
+  };
+  const list = el("div", { class: "thread-list" });
+  if (!rows.length) {
+    list.append(el("div", { class: "empty" },
+      el("div", { class: "h" }, "Nothing yet"),
+      el("div", {}, "Reactions, comments, new posts and messages land here.")));
+  }
+  for (const r of rows) {
+    const unread = r.created_at > seenAt;
+    const title = r.kind === "app" ? (r.actor_name || "Haven") : `${r.actor_name || "Someone"} · ${verb(r)}`;
+    list.append(el("div", { class: "thread-item", onclick: async () => { closeModal(); if (r.link) await routeDeepLink(r.link); } },
+      el("div", { class: "avatar" }, r.kind === "app" ? "🔔" : initials(r.actor_name || "?")),
+      el("div", { style: "flex:1;min-width:0" },
+        el("div", { class: "name" + (unread ? " unread" : "") }, title),
+        el("div", { class: "preview" + (unread ? " unread" : ""), style: "white-space:nowrap;overflow:hidden;text-overflow:ellipsis" }, r.snippet || "")),
+      el("div", { class: "muted small" }, relTime(r.created_at)),
+    ));
+  }
+  sheet("Activity", list);
+  refreshBadges();   // opening marked everything seen — clear the badge now, not on the next sync
 }
 
 /** Connection state for the feed's banner (macOS `banner` + `connectionText`) — a green dot and a
@@ -497,6 +592,29 @@ const DeepLink = {
       return circleId && postId ? { circleId, postId } : null;
     } catch (_) { return null; }   // malformed %-escape
   },
+  /** haven://m/<circle>[/<message>] — a notification's tap-target for a DM: open that Messages
+   *  thread. Mirrors Apple DeepLink.interactionLink. */
+  message(raw) {
+    const parts = this._havenParts(raw, "m");
+    if (!parts) return null;
+    try {
+      return { circleId: decodeURIComponent(parts[0]), messageId: parts[1] ? decodeURIComponent(parts[1]) : null };
+    } catch (_) { return null; }
+  },
+  /** haven://c/<circle> — switch to that circle's feed. */
+  circle(raw) {
+    const parts = this._havenParts(raw, "c");
+    if (!parts) return null;
+    try { return { circleId: decodeURIComponent(parts[0]) }; } catch (_) { return null; }
+  },
+  /** Path segments of a `haven://<host>/…` link, or null when it isn't one. */
+  _havenParts(raw, host) {
+    let u;
+    try { u = new URL((raw || "").trim()); } catch (_) { return null; }
+    if (u.protocol !== "haven:" || u.hostname !== host) return null;
+    const parts = u.pathname.split("/").filter(Boolean);
+    return parts.length ? parts : null;
+  },
 };
 
 /** Route a link from the OS or the Connect paste box. Post links are discriminated FIRST, so one can
@@ -504,8 +622,29 @@ const DeepLink = {
 async function routeDeepLink(raw) {
   const p = DeepLink.post(raw);
   if (p) { await openPostLink(p.circleId, p.postId); return "post"; }
+  const m = DeepLink.message(raw);
+  if (m) { await openDmThread(m.circleId); return "dm"; }
+  const c = DeepLink.circle(raw);
+  if (c) {
+    const circles = await invoke("circles").catch(() => []);
+    if (!circles.some((x) => x.id === c.circleId)) { toast("That link points at a circle you're not in."); return "circle"; }
+    state.activeCircle = c.circleId;
+    state.activeDm = null;
+    switchView("circle");
+    return "circle";
+  }
   try { return (await invoke("connect_by_link", { uri: (raw || "").trim() })) ? "invite" : null; }
   catch (_) { return null; }
+}
+
+// Open a DM thread from a deep link (haven://m/…): resolve its display name from the thread list
+// and land in Messages with the thread open — the same plumbing a row tap uses.
+async function openDmThread(circleId) {
+  const threads = await invoke("dm_threads").catch(() => []);
+  const t = threads.find((x) => x.circle_id === circleId);
+  if (!t) { toast("That conversation isn't on this device yet."); state.activeDm = null; switchView("messages"); return; }
+  state.activeDm = { id: t.circle_id, name: t.name };
+  switchView("messages");
 }
 
 // Open the post a link points at: switch to its circle, then surface that post in the feed. Desktop has
@@ -559,7 +698,24 @@ const Pins = {
     const i = this.ids.indexOf(id);
     if (i >= 0) { this.ids.splice(i, 1); this._save(); }
   },
-  _save() { localStorage.setItem("haven-dm-pinned", JSON.stringify(this.ids)); },
+  /** Adopt the engine's synced copy (`setting:pinnedDMs` — pinning on the phone pins here too).
+   *  A device that pinned before this shipped seeds the engine once from its localStorage. */
+  async load() {
+    try {
+      const synced = await invoke("pinned_dms");
+      if (!Array.isArray(synced)) return;
+      if (!synced.length && this.ids.length) {
+        await invoke("set_pinned_dms", { ids: this.ids }).catch(() => {});
+      } else {
+        this.ids = synced;
+        localStorage.setItem("haven-dm-pinned", JSON.stringify(this.ids));
+      }
+    } catch (_) {}   // engine not ready — the localStorage copy still renders
+  },
+  _save() {
+    localStorage.setItem("haven-dm-pinned", JSON.stringify(this.ids));
+    invoke("set_pinned_dms", { ids: this.ids }).catch(() => {});
+  },
 };
 
 // ---- Relay nudge -----------------------------------------------------------------------
@@ -638,19 +794,20 @@ function relayWalkthrough(circleId) {
     el("h2", {}, "Set up a relay"),
     el("div", { class: "col", style: "max-height:64vh;overflow:auto;gap:8px" },
       point("📥", "Nobody has to be online at once",
-        "Your posts and media go up sealed. Anyone in the circle picks them up whenever they next open Haven — even if you closed it hours ago."),
+        "Posts upload sealed; friends pick them up next time they open Haven."),
       point("🖼️", "Photos and videos actually arrive",
-        "Media is fetched from the relay instead of waiting on the person who posted it, so it still lands when two devices' networks can't reach each other directly."),
+        "Media comes from the relay, not the poster's device, so it lands even when they're offline."),
       point("🔀", "It routes around home routers",
-        "When a member can't be dialed directly, the relay forwards their sealed messages onward. No port forwarding, no domain, no ports to open."),
+        "When devices can't reach each other directly, the relay forwards sealed messages — no port forwarding."),
       point("🔒", "The relay can't read a thing",
-        "It only ever holds sealed blobs and a small routing header — destination node ids, a hop budget, and an id used to drop duplicates. No content key ever goes near it, so hosting one can never turn it into a reader."),
+        ["It only ever holds sealed blobs and a routing header — no content key ever goes near it. ",
+         el("a", { href: "https://wemiller.com/apps/haven/docs/#relay-idea", target: "_blank", style: "color:var(--pink);text-decoration:underline" }, "Learn more")]),
 
       heading("How to set one up"),
       point("🖥️", "The easy way — this PC",
-        "One click below and this PC holds the circle's sealed mailbox. Unlike a phone it can keep doing it: under Relay, switch on “Start Haven when I log in” and “Host the relay automatically on launch”, and it survives a reboot."),
+        "One click: this PC holds the circle's sealed mailbox — turn on the two Relay toggles to survive reboots."),
       point("⌨️", "Or with no window at all",
-        "haven-desktop --headless runs just the relay and your scheduled messages — a small always-on server on any machine you own."),
+        "Prefer no window? Run haven-desktop --headless for relay-only."),
       point("📦", "Or a spare machine",
         "On a Mac, Linux box, or Raspberry Pi:\ncurl -fsSL https://wemiller.com/apps/haven/relay/install.sh | sh\n\nOn Windows, in PowerShell:\nirm https://wemiller.com/apps/haven/relay/install.ps1 | iex\n\nIt sets itself to start on every reboot; paste its node id under Relay to adopt it."),
 
@@ -658,7 +815,8 @@ function relayWalkthrough(circleId) {
       point("🔑", "Only the people you added can read it",
         "Everything you post is sealed on this PC to your circle's members. Remove someone and the circle's key rotates, so they can't read anything posted afterwards."),
       point("⚛️", "Encrypted for the long haul",
-        "Haven pairs today's proven encryption with post-quantum encryption — X25519 with ML-KEM-768, signed with Ed25519 and ML-DSA-65. An attacker has to break both halves, so ciphertext captured today isn't a bet on a future quantum computer. No promises beyond that: your keys live on your devices, and Haven never holds them."),
+        ["Double-locked: today's proven encryption plus post-quantum. Keys never leave your devices. ",
+         el("a", { href: "https://wemiller.com/apps/haven/docs/#encryption", target: "_blank", style: "color:var(--pink);text-decoration:underline" }, "Learn more")]),
     ),
     // wrap: three buttons don't fit the sheet on a narrow window, and a clipped "Not now" is a trap.
     el("div", { class: "row wrap", style: "margin-top:14px" },
@@ -803,12 +961,12 @@ async function renderFeed() {
   for (const it of items) list.append(postCard(it, state.activeCircle, reportsByTarget[it.id] || []));
 
   const composer = buildComposer(
-    (body, music, muteVideo) => invoke("post", { circleId: state.activeCircle, body, media: state.attachments.map((a) => a.ref), music, muteVideo }),
+    (body, music, muteVideo) => invoke("post", { circleId: state.activeCircle, body, media: withThumbMarkers(state.attachments), music, muteVideo }),
     "Share something…",
     {
       circleId: state.activeCircle,
       floating: true,
-      onSchedule: (body, music, muteVideo, sendAtMs) => invoke("schedule_message", { kind: "post", circleId: state.activeCircle, body, media: state.attachments.map((a) => a.ref), music, muteVideo, sendAtMs }),
+      onSchedule: (body, music, muteVideo, sendAtMs) => invoke("schedule_message", { kind: "post", circleId: state.activeCircle, body, media: withThumbMarkers(state.attachments), music, muteVideo, sendAtMs }),
     },
   );
 
@@ -987,9 +1145,9 @@ function buildComposer(onPost, placeholder = "Share something…", opts = {}) {
     muteBtn.style.display = hasVideo ? "" : "none";
     if (!hasVideo) { muteVideo = false; muteBtn.textContent = "🔊 Mute video"; muteBtn.classList.remove("primary"); }
   };
-  const addAttachment = async (ref, isVideo, isAudio) => {
+  const addAttachment = async (ref, isVideo, isAudio, thumbRef = null) => {
     const url = isAudio ? null : await invoke("media_data_url", { circleId, reference: ref }).catch(() => null);
-    state.attachments.push({ ref, url, isVideo, isAudio });
+    state.attachments.push({ ref, url, isVideo, isAudio, thumbRef });
     drawPreviews();
   };
   // Expose the active composer's attach fn so dropped files (handled globally) land here.
@@ -1290,8 +1448,10 @@ function isSyntheticMedia(ref) {
   return i > 1; // multi-char scheme: poster:, orig:, geo:, music:, …
 }
 function displayMediaRefs(media) {
+  ThumbIndex.learn(media);
   const originals = new Set();
   const posterImages = new Set();
+  const thumbImages = new Set();
   for (const r of media || []) {
     if (r.startsWith("orig:")) {
       const rest = r.slice(5);
@@ -1303,10 +1463,31 @@ function displayMediaRefs(media) {
       const c = rest.lastIndexOf(":");
       if (c > 0) posterImages.add(rest.slice(c + 1));
     }
+    if (r.startsWith("thumb:")) {
+      const rest = r.slice(6);
+      const c = rest.lastIndexOf(":");
+      if (c > 0) thumbImages.add(rest.slice(c + 1));
+    }
   }
   // Poster stills ride with the video page (data-saver still + play) — not as their own slide.
-  return (media || []).filter((r) => !isSyntheticMedia(r) && !originals.has(r) && !posterImages.has(r));
+  // Thumbs never render as slides at all: they back the loading placeholder, blurred.
+  return (media || []).filter((r) => !isSyntheticMedia(r) && !originals.has(r) && !posterImages.has(r) && !thumbImages.has(r));
 }
+
+// ---- `thumb:` companions (MediaVariants parity) ------------------------------------------
+// contentRef -> tiny thumbRef, learned from every media list that passes through displayMediaRefs,
+// so a still-loading tile can paint its own blurred preview instead of a grey box.
+const ThumbIndex = {
+  map: new Map(),
+  learn(media) {
+    for (const r of media || []) {
+      if (!r.startsWith("thumb:")) continue;
+      const rest = r.slice(6), c = rest.lastIndexOf(":");
+      if (c > 0) this.map.set(rest.slice(0, c), rest.slice(c + 1));
+    }
+  },
+  thumbFor(ref) { return this.map.get(ref) || null; },
+};
 
 function mediaNode(ref, imgStyle) {
   // Videos start muted unless the global "play video sound" toggle is on (iOS parity); native controls
@@ -1749,10 +1930,42 @@ async function handleFiles(files, after) {
     try {
       const ref = await invoke("add_media", { circleId: state.activeCircle, dataBase64: b64, isVideo });
       const url = await invoke("media_data_url", { circleId: state.activeCircle, reference: ref });
-      state.attachments.push({ ref, url, isVideo });
+      const thumbRef = isVideo ? null : await mintThumb(b64, state.activeCircle);
+      state.attachments.push({ ref, url, isVideo, thumbRef });
       after();
     } catch (e) { toast("Couldn't attach: " + e); }
   }
+}
+
+// Mint the tiny (~256px, ≤32KB) `thumb:` companion for a photo at compose time: recipients render
+// it blurred behind the loading placeholder long before the full bytes land. Returns the thumb's
+// ref, or null when the encode can't get small enough (a "thumb" that isn't tiny is just waste) —
+// the photo simply posts without one. Mirrors iOS MediaStore.mintThumbCompanion.
+async function mintThumb(b64, circleId) {
+  try {
+    if (b64.length * 0.75 < 64 * 1024) return null;   // already small — a thumb saves nothing
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/jpeg;base64," + b64; });
+    if (!img.width || !img.height) return null;
+    const scale = Math.min(1, 256 / Math.max(img.width, img.height));
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(img.width * scale));
+    c.height = Math.max(1, Math.round(img.height * scale));
+    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+    let q = 0.6, data = c.toDataURL("image/jpeg", q);
+    while (data.length * 0.75 > 32 * 1024 && q > 0.25) { q -= 0.15; data = c.toDataURL("image/jpeg", q); }
+    if (data.length * 0.75 > 48 * 1024) return null;
+    return await invoke("add_media", { circleId, dataBase64: data.split(",")[1], isVideo: false });
+  } catch (_) { return null; }
+}
+
+/** The composed media array for a post/DM: attachment refs in order, then a `thumb:<ref>:<thumbRef>`
+ *  pairing marker per photo that minted one (synthetic scheme — old clients simply ignore it). */
+function withThumbMarkers(atts) {
+  return [
+    ...atts.map((a) => a.ref),
+    ...atts.filter((a) => a.thumbRef).map((a) => `thumb:${a.ref}:${a.thumbRef}`),
+  ];
 }
 
 // Re-encode a picked video to a metadata-free ≤1080p clip and return its base64. This is the desktop
@@ -2089,8 +2302,8 @@ const Reoptimize = {
     // the circle a clip Apple can't play.
     if (this.hasScanned && this.videos > 0) {
       kids.push(el("div", { class: "muted small" },
-        `${this.videos} video${this.videos === 1 ? "" : "s"} and voice note${this.videos === 1 ? "" : "s"} of yours (${fmtBytes(this.videoBytes)}) can't be re-optimized on desktop — `
-        + "this app can only re-encode video to a format iPhone can't play, so it leaves them alone. Use Haven on your phone for those."));
+        `${this.videos} video${this.videos === 1 ? "" : "s"} and voice note${this.videos === 1 ? "" : "s"} of yours (${fmtBytes(this.videoBytes)}) skipped — `
+        + "video re-encoding isn't available here; use Haven on your phone for those."));
     }
     host.replaceChildren(...kids);
   },
@@ -2301,7 +2514,7 @@ function reportDialog(it, circleId) {
     note,
     el("label", { class: "row", style: "margin-top:8px;gap:8px;cursor:pointer" }, blockBox, `✋ Also block ${it.author_name}`),
     el("div", { class: "muted small", style: "margin-top:10px" },
-      "The post disappears from your feed right away, and everyone in the circle sees your report so they can act too. Only who reported whom and the category are logged — never the content."),
+      "Hides the post for you now; your circle sees the report. Nothing is ever logged."),
     el("div", { class: "row", style: "margin-top:12px;justify-content:flex-end" }, submit),
   ));
 }
@@ -2562,7 +2775,7 @@ async function manageCircleDialog(circle) {
       } }, "Save")),
     el("div", { class: "muted small" }, "Only you see this. It never reaches anyone else in the circle, and it doesn't change the circle's name for them. Leave it empty to use the circle's own name."),
     el("label", { class: "muted small", style: "margin-top:6px" }, "Relays for this circle"),
-    el("div", { class: "muted small" }, "Choose which configured relays this circle uses, overriding the default. The default relay (if set) always applies — change it under Settings ▸ Relays."),
+    el("div", { class: "muted small" }, "Pick which of your relays carry this circle — the default relay always applies."),
     relaySection,
     el("label", { class: "muted small", style: "margin-top:6px" }, "Members"),
     memberList,
@@ -3248,15 +3461,14 @@ async function renderThread(root, dm) {
   const chat = el("div", { class: "chat" });
   for (const m of msgs) {
     // A `geo:` ref renders as a map chip, not media (otherwise a broken tile in the bubble).
+    // displayMediaRefs is the ONE displayRefs-parity filter: markers, original companions,
+    // poster stills AND `thumb:` companions all hidden (a thumb used to render as a second
+    // tiny copy of the photo in the bubble).
+    const dmVisible = new Set(displayMediaRefs(m.media || []));
     const mediaEls = (m.media || []).flatMap((r) => {
       const g = parseGeo(r);
       if (g) return [geoChip(g)];
-      // Hide poster:/orig: markers and original companions (displayRefs parity).
-      if (isSyntheticMedia(r)) return [];
-      const originals = new Set((m.media || []).filter((x) => x.startsWith("orig:")).map((x) => {
-        const rest = x.slice(5); const c = rest.lastIndexOf(":"); return c > 0 ? rest.slice(c + 1) : "";
-      }).filter(Boolean));
-      if (originals.has(r)) return [];
+      if (!dmVisible.has(r)) return [];
       // Same reservation as the feed grid: a bubble that grows when its photo lands drags the whole
       // thread down under the reader mid-scroll.
       return [guardSensitive(reserveAspect(mediaNode(r, "max-width:240px;border-radius:12px;display:block"), r, "intrinsic"), r)];
@@ -3600,9 +3812,9 @@ async function relaySheet() {
   });
   const modeBox = el("div", { class: "col", style: "gap:4px" });
   const modes = [
-    ["auto", "Free trycloudflare", "One ephemeral *.trycloudflare.com to the path proxy (:8675) so media + DERP share one origin. Hostname changes on restart. A second free tunnel is only used if the path proxy fails (both URLs shown)."],
-    ["bundled", "Custom domain (Haven runs cloudflared)", "Paste media domain + Cloudflare install token. Origin in CF dashboard: http://127.0.0.1:8675 (path proxy). Optional sibling host → :3340 if you dual-route without the path proxy."],
-    ["manual", "Manual / external tunnel", "You run cloudflared, Caddy, nginx, Tailscale Funnel, etc. Point at :8675 for unified media+DERP. Haven only announces the HTTPS URL(s)."],
+    ["auto", "Free trycloudflare", "A free temporary Cloudflare address — zero setup, but it changes every restart."],
+    ["bundled", "Custom domain (Haven runs cloudflared)", "Your own domain: paste it plus a Cloudflare tunnel token, and Haven runs the tunnel for you."],
+    ["manual", "Manual / external tunnel", "You run the tunnel or reverse proxy; Haven just announces its HTTPS address."],
   ];
   const derpLabel = el("label", { class: "muted small", style: "margin-top:6px" }, "DERP fabric URL (optional, distinct from media)");
   const syncModeUi = () => {
@@ -3659,7 +3871,8 @@ async function relaySheet() {
     tokenInput,
     el("button", { class: "btn small primary", style: "align-self:flex-start;margin-top:8px", onclick: savePublic }, "Save front door"),
     el("div", { class: "muted small" },
-      "Auto free: one trycloudflare to the path proxy (:8675) for media+DERP. Dual free tunnels only if the path proxy cannot start — both live URLs are shown while hosting. Named/Manual: point media at :8675 (path proxy) or set a sibling DERP hostname for :3340."),
+      "Whichever mode you pick, the front door only ever carries sealed data. ",
+      el("a", { href: "https://wemiller.com/apps/haven/docs/#front-door", target: "_blank", style: "color:var(--pink);text-decoration:underline" }, "Learn more")),
   );
   const liveTunnelCard = (() => {
     if (!s.hosting) return null;
@@ -3776,7 +3989,7 @@ async function relaySheet() {
   );
   const headless = el("div", { class: "card col" },
     el("h3", {}, "Run headless"),
-    el("div", { class: "muted small html", html: "Prefer no window at all? Launch <span class='mono'>haven-desktop --headless</span> to run only the relay (and your scheduled-message dispatcher) as a small always-on server. Any official Haven app — iPhone, Mac, Windows, Linux — can also act as your relay in a pinch." }),
+    el("div", { class: "muted small html", html: "Prefer no window? Run <span class='mono'>haven-desktop --headless</span> for relay-only." }),
   );
   const s3 = await invoke("s3_status");
   const f = {
@@ -4021,7 +4234,7 @@ async function settingsSheet() {
     foot("Keep more than one identity on this PC and switch between them. Each has its own profile, circles and contacts."),
 
     group(row("Devices", "laptop", () => devicesSheet())),
-    foot("Link this account to your other devices — each holds a copy of your master key and its own key on top, and syncs your profile + posts. See which devices are authorized, re-sync, or revoke one."),
+    foot("Link your other devices — each gets its own revocable key, never your master key."),
 
     group(row("Scheduled messages", "clock", () => scheduledSheet())),
     foot("Posts and DMs waiting to send. Compose one with the + menu's “Send later…”."),
@@ -5262,6 +5475,12 @@ async function boot() {
   // the Rust side can't reach.
   if (await invoke("demo_mode").catch(() => false)) RelayNudge.dismiss("default");
   $$(".tab").forEach((b) => b.addEventListener("click", () => switchView(b.dataset.view)));
+  // The activity bell: glyph + click target (the badge <i> already sits inside the button).
+  const bell = $("#bell-btn");
+  if (bell) {
+    bell.prepend(icon("bell"));
+    bell.addEventListener("click", () => activityPanel());
+  }
   try {
     const b = await invoke("bootstrap");
     state.node = b.node_id_hex;
@@ -5271,6 +5490,7 @@ async function boot() {
   } catch (e) {
     toast("Backend not ready: " + e);
   }
+  await Pins.load();   // adopt pins synced from the user's other devices before Messages renders
   await refreshStatus();
   await refreshBadges();
   await render();
@@ -5286,6 +5506,7 @@ async function boot() {
   } catch (_) { state.superDataSaver = false; }
   listen("haven:changed", async () => {
     await refreshStatus(); await refreshBadges();
+    await Pins.load();   // a pin made on the phone lands via self-sync — reflect it live
     try { state.contacts = await invoke("contacts"); } catch (_) {}
     // Don't yank the profile editor out from under the user mid-type on a background sync — re-rendering
     // the "you" view rebuilds its inputs and discards what they're typing.
@@ -5371,7 +5592,8 @@ async function boot() {
         if (b64 === null) continue;                      // refused — no ref, no attachment entry
         const circleId = state.composerCircle || state.activeCircle;
         const ref = await invoke("add_media", { circleId, dataBase64: b64, isVideo });
-        await state.composerAdd(ref, isVideo, false);
+        const thumbRef = isVideo ? null : await mintThumb(b64, circleId);
+        await state.composerAdd(ref, isVideo, false, thumbRef);
       } catch (err) {
         console.error("drop ingest failed", p, err);
         // The Rust side enforces the same size cap before it reads, so name that reason explicitly

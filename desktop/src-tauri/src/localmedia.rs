@@ -260,9 +260,16 @@ impl LocalMedia {
     // chunks (see engine::upload_media / fetch_media_from_relay). On download we APPEND each chunk to a
     // temp file on disk — the full sealed blob is NEVER held in RAM at once — then adopt it.
 
+    /// The (deterministic) reassembly file for an incoming chunked (sealed) transfer of
+    /// `reference` — WITHOUT touching whatever partial is already there. The resumable relay
+    /// restore appends to it across attempts; `new_sealed_part` is the start-fresh variant.
+    pub fn sealed_part_path(&self, reference: &str) -> PathBuf {
+        self.dir.join(format!("incoming_{}.part", bare_id(reference)))
+    }
+
     /// A fresh empty temp file to reassemble an incoming chunked (sealed) transfer for `reference`.
     pub fn new_sealed_part(&self, reference: &str) -> PathBuf {
-        let p = self.dir.join(format!("incoming_{}.part", bare_id(reference)));
+        let p = self.sealed_part_path(reference);
         let _ = fs::remove_file(&p);
         let _ = fs::File::create(&p);
         p
@@ -671,6 +678,11 @@ mod tests {
     fn synthetic_excludes_geo_but_keeps_media() {
         // geo: location pins carry no bytes and were never relay-storable → skip in sweeps.
         assert!(LocalMedia::is_synthetic("geo:36.213,-118.687,Place Name"));
+        // Compose-time pairing markers (MediaVariants parity) — never fetchable, and the qa-dump's
+        // real-refs reduction relies on this predicate covering every marker scheme.
+        assert!(LocalMedia::is_synthetic("poster:vid_a:img_b"));
+        assert!(LocalMedia::is_synthetic("orig:vid_a:vid_b"));
+        assert!(LocalMedia::is_synthetic("thumb:img_a:img_b"));
         // Real media refs stay fetchable — img_/vid_/aud_, bare hashes, and legacy v:/i:/a:.
         assert!(!LocalMedia::is_synthetic("img_deadbeef"));
         assert!(!LocalMedia::is_synthetic("vid_deadbeef"));

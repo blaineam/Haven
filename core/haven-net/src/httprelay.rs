@@ -22,6 +22,11 @@
 //! the caller's live keys under `<prefix>` (one circle's mailbox), the relay bumps their
 //! mtimes, and the reply names the keys it does NOT hold so the caller re-PUTs them.
 //!
+//! LIST answers carry an [`LIST_DIGEST_HEADER`] response header — a digest of the sorted key
+//! set. A client that echoes it on its next LIST of the same prefix gets `204 No Content`
+//! (header only, no body) when nothing changed, so idle mailbox polls stop re-downloading an
+//! unchanged list over the radio. A client that never sends the header gets today's `200`.
+//!
 //! `<key>`/`<prefix>` are percent-encoded store keys and pass through the same
 //! [`super::blobstore::safe_path`] validation as the iroh path (no traversal, no NUL).
 //!
@@ -60,9 +65,12 @@
 //! for an on-path attacker to lift (audit F9). It is a coarse pre-filter. Membership is the
 //! authorization, and only the signature can establish it.
 //!
-//! `self/…` keys (account self-sync slots) stay refused outright here — self-sync has no reason
-//! to leave the iroh path. An empty token still means "no shared secret", NOT "no auth": the
-//! signature and the membership check are unconditional.
+//! Self-sync slots ride this transport under their canonical `haven/self/<acct>/…` keys, gated by
+//! `blob_forbidden`'s owner-or-roster-device rule exactly like the iroh path (two linked devices
+//! that share only an HTTP-reachable relay MUST still converge — iroh-only self-sync was a dead
+//! lane cross-NAT). Only the legacy bare `self/…` namespace stays refused here (`checked` confines
+//! HTTP to `haven/`). An empty token still means "no shared secret", NOT "no auth": the signature
+//! and the membership check are unconditional.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -75,8 +83,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::blobstore::{
-    blob_forbidden, local_get, local_list, local_put, local_touch, safe_path, verify_devroster_put,
-    RelayAuth, DEVROSTER_PREFIX, VERB_GET, VERB_HAS, VERB_LIST, VERB_PUT, VERB_TOUCH,
+    blob_forbidden, local_get, local_list, local_put, local_touch, record_devroster, safe_path,
+    verify_devroster_put, DevrosterPut, RelayAuth, DEVROSTER_PREFIX, VERB_GET, VERB_HAS, VERB_LIST,
+    VERB_PUT, VERB_TOUCH,
 };
 
 /// Hard cap on a single blob — matches the iroh blob path (256 MiB).
@@ -89,6 +98,9 @@ const MAX_TOUCH_BODY: u64 = 256 * 1024;
 /// Domain tag on the request signature, so a node-key signature minted for Haven's HTTP relay can
 /// never be lifted from (or replayed into) any other context that signs with the same key.
 pub const REQUEST_DOMAIN: &str = "haven-httprelay-v1";
+/// LIST delta header (request AND response): a hex digest of a prefix's sorted key set. Echoing
+/// the last-seen value turns an unchanged LIST into a bodiless `204` (the radio saver).
+pub const LIST_DIGEST_HEADER: &str = "X-Haven-List-Digest";
 /// Accepted clock skew, and therefore how long a nonce must be remembered to make a signed
 /// request one-shot. Wide enough for a phone with a lazy clock, short enough to bound the cache.
 const SKEW: u64 = 300;
@@ -116,6 +128,14 @@ fn transcript(token: &str, method: &str, key: &str, ts: u64, nonce: &str, body_h
 
 fn body_digest(body: &[u8]) -> String {
     hex(blake3::hash(body).as_bytes())
+}
+
+/// The digest a LIST answer advertises in [`LIST_DIGEST_HEADER`]: blake3 over the newline-joined
+/// SORTED key set — i.e. exactly the bytes of the 200 body. Public so the client half can verify
+/// or precompute; the server computes it per request (the keys are already in memory from the
+/// listing, so this is a hash over a few KB, not extra I/O).
+pub fn list_digest(sorted_keys_joined: &str) -> String {
+    hex(blake3::hash(sorted_keys_joined.as_bytes()).as_bytes())
 }
 
 /// Build the `Authorization` value for one request, signing with this node's Ed25519 node secret
@@ -274,16 +294,14 @@ async fn handle_conn(
             discard(&mut r, clen).await?;
             let accept = header(&headers, "accept").unwrap_or("");
             if accept.contains("text/html") || method == "GET" && (path == "/" || path.is_empty()) {
-                let body = b"<!DOCTYPE html><html><body><h1>Haven media mailbox</h1>\
-<p>This port serves sealed media over signed <code>/k/</code> <code>/l/</code> <code>/t/</code> paths. \
-Open the path-proxy origin (usually public trycloudflare to :8675) for a status page.</p></body></html>\n";
+                let body = crate::statuspage::media_root_page();
                 let head = format!(
                     "HTTP/1.1 404 not a website\r\nContent-Type: text/html; charset=utf-8\r\n\
                      Content-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 w.write_all(head.as_bytes()).await?;
-                w.write_all(body).await?;
+                w.write_all(body.as_bytes()).await?;
             } else {
                 respond(
                     &mut w,
@@ -375,15 +393,36 @@ Open the path-proxy origin (usually public trycloudflare to :8675) for a status 
                     }
                 } else if let Some(acct) = key.strip_prefix(DEVROSTER_PREFIX) {
                     match verify_devroster_put(root, acct, &body) {
-                        Some((account, devices)) => match local_put(root, &key, &body) {
-                            Ok(()) => {
-                                auth.lock().unwrap().authorize_devices(&account, &devices);
-                                respond(&mut w, 200, "OK", keep_alive, b"OK").await?;
+                        DevrosterPut::Store { account, devices, revoked } => {
+                            match local_put(root, &key, &body) {
+                                Ok(()) => {
+                                    record_devroster(root, auth, &account, &devices, &revoked);
+                                    respond(&mut w, 200, "OK", keep_alive, b"OK").await?;
+                                }
+                                Err(_) => {
+                                    respond(&mut w, 500, "write failed", keep_alive, b"").await?
+                                }
                             }
-                            Err(_) => respond(&mut w, 500, "write failed", keep_alive, b"").await?,
-                        },
-                        // Unsigned/forged/wrong-account/stale roster → refuse, same as the read gate.
-                        None => respond(&mut w, 403, "forbidden", keep_alive, b"").await?,
+                        }
+                        DevrosterPut::AuthOnly { account, devices } => {
+                            // Older signed roster: keep the newer stored blob (never downgrade it),
+                            // but still authorize its signed device ids so a late-joining linked
+                            // device escapes the chicken-and-egg lockout. Additive only; ids the
+                            // newer roster revokes were already filtered out. 200 OK — the PUT was
+                            // legitimate; the relay just had a newer blob to keep.
+                            if !devices.is_empty() {
+                                eprintln!(
+                                    "[haven relay] devroster PUT lost version race but {} signed device ids added to auth union",
+                                    devices.len()
+                                );
+                                record_devroster(root, auth, &account, &devices, &[]);
+                            }
+                            respond(&mut w, 200, "OK", keep_alive, b"OK").await?;
+                        }
+                        // Unsigned/forged/wrong-account roster → refuse, same as the read gate.
+                        DevrosterPut::Refused => {
+                            respond(&mut w, 403, "forbidden", keep_alive, b"").await?
+                        }
                     }
                 } else {
                     match local_put(root, &key, &body) {
@@ -395,7 +434,17 @@ Open the path-proxy origin (usually public trycloudflare to :8675) for a status 
             Route::List(_) => {
                 let mut keys = local_list(root, &key);
                 keys.sort();
-                respond(&mut w, 200, "OK", keep_alive, keys.join("\n").as_bytes()).await?;
+                let body = keys.join("\n");
+                let digest = list_digest(&body);
+                // Radio saver: a client that already holds this exact key set (it echoed the
+                // digest we last sent) gets a bodiless 204 instead of the same list again.
+                let unchanged = header(&headers, "x-haven-list-digest")
+                    .is_some_and(|v| v.trim().eq_ignore_ascii_case(&digest));
+                if unchanged {
+                    digest_respond(&mut w, 204, "no content", keep_alive, &digest, b"").await?;
+                } else {
+                    digest_respond(&mut w, 200, "OK", keep_alive, &digest, body.as_bytes()).await?;
+                }
             }
             Route::Touch(_) => {
                 // Mailbox-GC liveness refresh: body = newline-joined keys; reply = the keys we do
@@ -454,7 +503,9 @@ fn route(method: &str, path: &str) -> Route {
 }
 
 /// Validate a key for HTTP exposure: must be safe (no traversal) AND inside the `haven/`
-/// namespace — `self/…` slots and anything else are refused (identity-gated, iroh-only).
+/// namespace. The canonical self-sync slots (`haven/self/…`) pass and are then owner-gated by
+/// `blob_forbidden`; only legacy bare `self/…` keys (and everything else outside `haven/`) are
+/// refused outright.
 fn checked(root: &PathBuf, key: &str) -> Option<String> {
     if !(key == "haven" || key.starts_with("haven/")) {
         return None;
@@ -521,6 +572,26 @@ async fn respond<W: tokio::io::AsyncWrite + Unpin>(w: &mut W, code: u16, reason:
     let conn = if keep_alive { "keep-alive" } else { "close" };
     let head = format!(
         "HTTP/1.1 {code} {reason}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: {conn}\r\n\r\n",
+        body.len()
+    );
+    w.write_all(head.as_bytes()).await?;
+    w.write_all(body).await?;
+    w.flush().await?;
+    Ok(())
+}
+
+/// [`respond`] plus the [`LIST_DIGEST_HEADER`] — the LIST answers (200 list / 204 unchanged).
+async fn digest_respond<W: tokio::io::AsyncWrite + Unpin>(
+    w: &mut W,
+    code: u16,
+    reason: &str,
+    keep_alive: bool,
+    digest: &str,
+    body: &[u8],
+) -> Result<()> {
+    let conn = if keep_alive { "keep-alive" } else { "close" };
+    let head = format!(
+        "HTTP/1.1 {code} {reason}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n{LIST_DIGEST_HEADER}: {digest}\r\nConnection: {conn}\r\n\r\n",
         body.len()
     );
     w.write_all(head.as_bytes()).await?;
@@ -667,8 +738,150 @@ mod tests {
             assert!(req("GET", "/k/haven/media/x", &h, b"").starts_with("HTTP/1.1 401"), "nonce is one-shot");
             // Even a member may not enumerate across circles.
             assert!(req("GET", "/l/haven", &signed(m, "GET", "/l/haven", b""), b"").starts_with("HTTP/1.1 403"));
-            // self/ refused outright — self-sync stays on the iroh path.
+            // Legacy bare self/ refused outright — only the canonical haven/self/… namespace is
+            // served over HTTP (owner-gated; see self_sync_owner_fleet_over_http).
             assert!(req("GET", "/k/self/a/state/b", &signed(m, "GET", "/k/self/a/state/b", b""), b"").starts_with("HTTP/1.1 403"));
+        });
+        blocking.await.unwrap();
+        srv.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Self-sync slots over HTTP: `haven/self/<acct>/**` serves the account's own fleet — the
+    /// account id, or a device its stored devroster names (authorize_devices) — and 403s everyone
+    /// else, scoped LIST included. This is the transport half of the dead-self-sync-lane fix: two
+    /// linked devices sharing only an HTTP-reachable relay must be able to converge here.
+    #[tokio::test]
+    async fn self_sync_owner_fleet_over_http() {
+        use ed25519_dalek::SigningKey;
+
+        let dir = std::env::temp_dir().join(format!("httprelay-self-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let acct_sk = [5u8; 32];
+        let dev_sk = [6u8; 32];
+        let stranger_sk = [9u8; 32];
+        let acct_hex = hex(SigningKey::from_bytes(&acct_sk).verifying_key().as_bytes());
+        let dev_hex = hex(SigningKey::from_bytes(&dev_sk).verifying_key().as_bytes());
+
+        let auth = Arc::new(Mutex::new(RelayAuth::default()));
+        // The verified devroster's effect (both transports call this after verify_devroster_put).
+        auth.lock().unwrap().authorize_devices(&acct_hex, &[dev_hex.clone()]);
+
+        let srv = serve(dir.clone(), "127.0.0.1:0", "tok".into(), auth).await.unwrap();
+        let base = format!("127.0.0.1:{}", srv.port());
+
+        let req = move |verb: &str, path: &str, hdr: &str, body: &[u8]| {
+            use std::io::{Read, Write};
+            let mut s = std::net::TcpStream::connect(&base).unwrap();
+            let head = format!(
+                "{verb} {path} HTTP/1.1\r\nHost: x\r\n{hdr}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            s.write_all(head.as_bytes()).unwrap();
+            s.write_all(body).unwrap();
+            let mut resp = Vec::new();
+            s.read_to_end(&mut resp).unwrap();
+            String::from_utf8_lossy(&resp).into_owned()
+        };
+        let signed = |sk: &[u8; 32], verb: &str, path: &str, body: &[u8]| {
+            let key = path.splitn(3, '/').nth(2).unwrap_or("");
+            format!("Authorization: {}\r\n", auth_header(sk, "tok", verb, key, body))
+        };
+
+        let slot = format!("/k/haven/self/{acct_hex}/state/{dev_hex}");
+        let prefix = format!("/l/haven/self/{acct_hex}/state/");
+        let blocking = tokio::task::spawn_blocking(move || {
+            // The DEVICE (the id that actually connects under device-id-everywhere) round-trips.
+            assert!(req("PUT", &slot, &signed(&dev_sk, "PUT", &slot, b"sealed"), b"sealed").starts_with("HTTP/1.1 200"));
+            let got = req("GET", &slot, &signed(&dev_sk, "GET", &slot, b""), b"");
+            assert!(got.starts_with("HTTP/1.1 200") && got.ends_with("sealed"), "roster device reads its slot: {got}");
+            let l = req("GET", &prefix, &signed(&dev_sk, "GET", &prefix, b""), b"");
+            assert!(l.contains("/state/"), "roster device lists the fleet's slots: {l}");
+            // The ACCOUNT id itself is always its own fleet.
+            assert!(req("GET", &slot, &signed(&acct_sk, "GET", &slot, b""), b"").starts_with("HTTP/1.1 200"));
+            // A validly-signed stranger: authenticated, not the owner → 403, read AND enumerate.
+            assert!(req("GET", &slot, &signed(&stranger_sk, "GET", &slot, b""), b"").starts_with("HTTP/1.1 403"));
+            assert!(req("GET", &prefix, &signed(&stranger_sk, "GET", &prefix, b""), b"").starts_with("HTTP/1.1 403"));
+        });
+        blocking.await.unwrap();
+        srv.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The LIST delta short-circuit (radio saver): an unchanged prefix collapses to a bodiless
+    /// 204 once the client echoes the advertised digest, and any change falls back to a full 200
+    /// with a NEW digest. A client that never sends the header keeps today's 200 path.
+    #[tokio::test]
+    async fn list_digest_round_trip() {
+        use ed25519_dalek::SigningKey;
+
+        let dir = std::env::temp_dir().join(format!("httprelay-digest-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let member_sk = [7u8; 32];
+        let member_hex = hex(SigningKey::from_bytes(&member_sk).verifying_key().as_bytes());
+        let auth = Arc::new(Mutex::new(RelayAuth::default()));
+        auth.lock().unwrap().authorize("fam", vec![member_hex], vec![]);
+
+        let srv = serve(dir.clone(), "127.0.0.1:0", "tok".into(), auth).await.unwrap();
+        let base = format!("127.0.0.1:{}", srv.port());
+
+        let req = move |verb: &str, path: &str, hdr: &str, body: &[u8]| {
+            use std::io::{Read, Write};
+            let mut s = std::net::TcpStream::connect(&base).unwrap();
+            let head = format!(
+                "{verb} {path} HTTP/1.1\r\nHost: x\r\n{hdr}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            s.write_all(head.as_bytes()).unwrap();
+            s.write_all(body).unwrap();
+            let mut resp = Vec::new();
+            s.read_to_end(&mut resp).unwrap();
+            String::from_utf8_lossy(&resp).into_owned()
+        };
+        let signed = |sk: &[u8; 32], verb: &str, path: &str, body: &[u8]| {
+            let key = path.splitn(3, '/').nth(2).unwrap_or("");
+            format!("Authorization: {}\r\n", auth_header(sk, "tok", verb, key, body))
+        };
+        let digest_of = |resp: &str| {
+            resp.lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("x-haven-list-digest:"))
+                .and_then(|l| l.split_once(':').map(|(_, v)| v.trim().to_string()))
+        };
+
+        let blocking = tokio::task::spawn_blocking(move || {
+            let m = &member_sk;
+
+            assert!(req("PUT", "/k/haven/mailbox/fam/aa", &signed(m, "PUT", "/k/haven/mailbox/fam/aa", b"one"), b"one").starts_with("HTTP/1.1 200"));
+
+            // First LIST (no cached digest): the full 200 plus the digest to cache.
+            let l1 = req("GET", "/l/haven/mailbox/fam/", &signed(m, "GET", "/l/haven/mailbox/fam/", b""), b"");
+            assert!(l1.starts_with("HTTP/1.1 200"), "{l1}");
+            assert!(l1.contains("haven/mailbox/fam/aa"));
+            let d1 = digest_of(&l1).expect("200 LIST carries a digest");
+
+            // Echoing it while nothing changed: bodiless 204, digest still advertised.
+            let hdr = format!("{}X-Haven-List-Digest: {d1}\r\n", signed(m, "GET", "/l/haven/mailbox/fam/", b""));
+            let l2 = req("GET", "/l/haven/mailbox/fam/", &hdr, b"");
+            assert!(l2.starts_with("HTTP/1.1 204"), "unchanged list short-circuits: {l2}");
+            assert_eq!(digest_of(&l2).as_deref(), Some(d1.as_str()));
+            assert!(!l2.contains("haven/mailbox/fam/aa"), "204 carries no body");
+
+            // A new key invalidates the digest: back to a full 200 with a NEW digest …
+            assert!(req("PUT", "/k/haven/mailbox/fam/bb", &signed(m, "PUT", "/k/haven/mailbox/fam/bb", b"two"), b"two").starts_with("HTTP/1.1 200"));
+            let hdr = format!("{}X-Haven-List-Digest: {d1}\r\n", signed(m, "GET", "/l/haven/mailbox/fam/", b""));
+            let l3 = req("GET", "/l/haven/mailbox/fam/", &hdr, b"");
+            assert!(l3.starts_with("HTTP/1.1 200"), "stale digest gets the full list: {l3}");
+            assert!(l3.contains("haven/mailbox/fam/aa") && l3.contains("haven/mailbox/fam/bb"));
+            let d2 = digest_of(&l3).expect("200 LIST carries a digest");
+            assert_ne!(d1, d2, "the digest must track the key set");
+
+            // … which then short-circuits again.
+            let hdr = format!("{}X-Haven-List-Digest: {d2}\r\n", signed(m, "GET", "/l/haven/mailbox/fam/", b""));
+            assert!(req("GET", "/l/haven/mailbox/fam/", &hdr, b"").starts_with("HTTP/1.1 204"));
         });
         blocking.await.unwrap();
         srv.stop();

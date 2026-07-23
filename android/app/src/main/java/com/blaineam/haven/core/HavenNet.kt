@@ -10,6 +10,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -46,7 +47,12 @@ const val DEFAULT_CIRCLE = "default"
 data class Contact(val idHex: String, val name: String, val verifyHex: String)
 
 /** Someone who said hello but we haven't approved yet. */
-data class PendingRequest(val idHex: String, val name: String, val verifyHex: String, val bundle: ByteArray)
+data class PendingRequest(
+    val idHex: String, val name: String, val verifyHex: String, val bundle: ByteArray,
+    /** The circle grant the held hello carried — approval applies THIS circle, not just default
+     *  (an invite into a named circle used to land its approved member in default only). */
+    val circleId: String = DEFAULT_CIRCLE, val circleName: String = "",
+)
 
 /**
  * Live media-sync counters, kept OUT of [HavenNet.feedVersion] so incrementing them never
@@ -209,6 +215,88 @@ object HavenNet : InboundListener {
         return synchronized(seenMailbox) { seenMailbox.contains(key) }
     }
 
+    /** Force the (debounced-elsewhere) seen-set to disk now. */
+    private fun saveSeenMailboxNow() {
+        val snap = synchronized(seenMailbox) { seenMailbox.joinToString("\n") }
+        runCatching { seenMailboxFile.writeText(snap) }
+    }
+
+    /**
+     * ONE-SHOT repair for keys the old poll loop wrongly marked seen. It used to
+     * `markMailboxSeen` BEFORE `receive()` ran, so an envelope that arrived before its key commit
+     * (or its sender's roster) was buffered — or dropped — and its key was still burned as seen,
+     * never to be retried: the classic "banner arrived, message didn't" shape. Forget DM content
+     * keys (where the symptom bites — a DM has exactly two members, so a commit-before-content
+     * race is common) so the next poll re-GETs them and the mark-after-ingest contract takes over;
+     * keep `__live__` (claimed call frames must not re-dispatch). Deliberately NOT every circle's
+     * content: a key whose envelope DID ingest re-downloads as a duplicate (receive() == false)
+     * and is never re-marked, so a full forget would turn every poll into a full mailbox
+     * re-download. Mirrors iOS `SharedStore.repairLinkedHostMailboxSeenOnce`.
+     */
+    private fun repairMailboxSeenOnce() {
+        val flag = "haven.repair.mailboxSeen.v1"
+        if (!prefs.getBoolean(flag, false)) {
+            prefs.edit().putBoolean(flag, true).apply()
+            ensureSeenMailboxLoaded()
+            val removed = synchronized(seenMailbox) {
+                val before = seenMailbox.size
+                seenMailbox.retainAll { key ->
+                    // Keep non-DM and live-call frames; drop DM content + hellos so commits re-apply.
+                    if (!key.contains("/dm:") && !key.contains("/dm%3A")) return@retainAll true
+                    key.contains("/__live__/")
+                }
+                before - seenMailbox.size
+            }
+            if (removed > 0) {
+                Log.i(TAG, "mailbox seen: one-shot repair forgot $removed DM keys (mark-after-ingest)")
+                saveSeenMailboxNow()
+            }
+        }
+        // ONE-SHOT #2: forget every seen `__hello__` key (the DM repair above only covered `dm:`
+        // circles). Senders used to park hellos on transport/device-id slots; the poll filed those
+        // as "someone else's — just mark" and burned the key, so the account-slot re-address never
+        // got a second look at hellos already fetched — and a hello whose [handleHello] bailed
+        // early (a removal tombstone since lifted, a bundle race) was burned the same way. That is
+        // a circle INVITE lost to the seen-set. Hellos are idempotent to re-handle (acceptContact
+        // upserts, the pending list dedupes, the reply path no-ops for known contacts), so the
+        // price is one re-GET per hello blob, once.
+        val helloFlag = "haven.repair.helloSeen.v1"
+        if (!prefs.getBoolean(helloFlag, false)) {
+            prefs.edit().putBoolean(helloFlag, true).apply()
+            ensureSeenMailboxLoaded()
+            val removed = synchronized(seenMailbox) {
+                val before = seenMailbox.size
+                seenMailbox.removeAll { it.contains("/__hello__/") }
+                before - seenMailbox.size
+            }
+            if (removed > 0) {
+                Log.i(TAG, "mailbox seen: one-shot repair forgot $removed hello keys (account-slot re-claim)")
+                saveSeenMailboxNow()
+            }
+        }
+        // ONE-SHOT #3 (v2): earlier builds also marked hellos seen at CLAIM time even when
+        // [handleHello] HELD them (connection-approval gate, transient engine failure) — the
+        // circle grant riding the hello was consumed without ever applying (the E2E-stub
+        // "invite never lands" symptom). Now that routeMailboxEntry marks only CONSUMED hellos,
+        // sweep the polluted marks once more so grants still sitting in a mailbox (own store or
+        // a friend's relay) get re-offered and re-judged. Re-handling is idempotent for the same
+        // reasons as #2. Mirrors iOS SharedStore.repairHelloSeenOnce v2.
+        val helloFlagV2 = "haven.repair.helloSeen.v2"
+        if (!prefs.getBoolean(helloFlagV2, false)) {
+            prefs.edit().putBoolean(helloFlagV2, true).apply()
+            ensureSeenMailboxLoaded()
+            val removed = synchronized(seenMailbox) {
+                val before = seenMailbox.size
+                seenMailbox.removeAll { it.contains("/__hello__/") }
+                before - seenMailbox.size
+            }
+            if (removed > 0) {
+                Log.i(TAG, "mailbox seen: hello repair v2 forgot $removed keys (mark-on-consume)")
+                saveSeenMailboxNow()
+            }
+        }
+    }
+
     /**
      * Per-relay exponential-backoff health (5s → 5m), keyed by node hex — drives graceful
      * fallback. A relay that fails to connect/put/list/get is parked in a backoff window so we
@@ -290,6 +378,7 @@ object HavenNet : InboundListener {
         KeptStoriesStore.init(appContext)   // stories held on my profile past the 24h window
         EvictedMediaStore.init(appContext)  // deliberately-removed refs (no auto-refetch)
         MediaWantedStore.init(appContext)   // refs whose author we asked to put back (frames 31/32)
+        ActivityStore.init(appContext)      // in-app activity list (engine rows + connection/circle rows)
         MediaLimits.init(appContext)        // local age/size caps
         // Persisted don't-retry set ONLY. Deliberately starts nothing: the re-optimize pass has no
         // timer, no launch hook and no WorkManager job — a button is its only caller (see the
@@ -562,6 +651,30 @@ object HavenNet : InboundListener {
         nextSyncDueMs = 0
         nextPollDueMs = 0
     }
+    /** Mark "a user is actively LOOKING" without forcing any work: the idle stretch resets, and
+     *  an already-stretched due time is clamped down to the tight base — so the next pass runs at
+     *  real active cadence, but nothing runs early. QA `dump` uses this (docs/QA.md "qa-cmd v2"):
+     *  a reader's convergence is measured at the poll an active user would actually get, so
+     *  forcing one here would fake the measured latency. */
+    fun markUserActive() {
+        lastActivityMs = System.currentTimeMillis()
+        val now = lastActivityMs
+        nextSyncDueMs = minOf(nextSyncDueMs, now + adaptiveInterval(20_000))
+        nextPollDueMs = minOf(nextPollDueMs, now + adaptiveInterval(30_000))
+    }
+    /** Author-side nudge: run a mailbox poll NOW instead of at the next due heartbeat, so a
+     *  just-authored burst uploads/fans out (mesh + multi-device self-sync ride pollMailbox)
+     *  immediately. Coalesces — an in-flight nudge absorbs the burst — and the pass counts as
+     *  the due poll so the heartbeat doesn't immediately repeat it. */
+    @Volatile private var pollNowJob: Job? = null
+    fun pollMailboxNow() {
+        if (!ready) return
+        if (pollNowJob?.isActive == true) return
+        pollNowJob = scope.launch {
+            nextPollDueMs = System.currentTimeMillis() + adaptiveInterval(30_000)
+            runCatching { pollMailbox() }
+        }
+    }
 
     /** Adaptive-cadence loop: 10s heartbeat, expensive work only when due so an idle phone stays cool. */
     private var loopStarted = false
@@ -674,6 +787,7 @@ object HavenNet : InboundListener {
         CircleDeletion.markRecreated(id)   // a freshly-created circle is not deleted (LWW)
         persist(); bumpCircles()
         setActiveCircle(id)
+        selfSyncNudge()   // a new circle should appear on my other devices in seconds, not minutes
         return id
     }
 
@@ -706,6 +820,7 @@ object HavenNet : InboundListener {
         reconcileSupersededCircles()              // collapse the now-superseded legacy circle to one row
         persist(); bumpCircles()
         setActiveCircle(id)
+        selfSyncNudge()   // the successor + supersession tombstone travel to my other devices now
         return id
     }
 
@@ -719,6 +834,7 @@ object HavenNet : InboundListener {
         reconcileSupersededCircles()                // collapse the now-superseded legacy circle to one row
         persist(); bumpCircles()
         setActiveCircle(newCircleId)
+        selfSyncNudge()   // the followed successor + supersession tombstone travel now
         return true
     }
 
@@ -736,6 +852,7 @@ object HavenNet : InboundListener {
 
     fun renameCircle(id: String, name: String) {
         runCatching { social.renameCircle(id, name) }; persist(); bumpCircles()
+        selfSyncNudge()   // the new name rides the circle: record to my other devices now
     }
 
     fun leaveCircle(id: String) {
@@ -744,6 +861,7 @@ object HavenNet : InboundListener {
         runCatching { social.leaveCircle(id) }
         if (activeCircle.value == id) activeCircle.value = DEFAULT_CIRCLE
         persist(); bumpCircles()
+        selfSyncNudge()   // the deletion tombstone travels now, before a sibling can re-broadcast the row
     }
 
     /** Add an existing contact to a circle + greet them there so it forms on their side. */
@@ -753,6 +871,7 @@ object HavenNet : InboundListener {
         runCatching { social.addExistingToCircle(circleId, contactIdHex) }
         persist(); bumpCircles()
         sendHello(circleId, contactIdHex)
+        selfSyncNudge()   // membership change (add / re-add) — push to my other devices now
     }
 
     fun setActiveCircle(id: String) {
@@ -933,15 +1052,22 @@ object HavenNet : InboundListener {
                 if (entry.httpToken.isEmpty()) continue
                 for (who in mine) {
                     val prefix = "haven/mailbox/$circleId/__live__/$who/"
+                    // Delta-LIST: echo the last digest for this (relay, prefix) so the idle 2s/12s
+                    // sweeps of every DM×device lane collapse to bodiless 204s — this LIST was ~98%
+                    // of the path-proxy log (the __live__ storm).
+                    val digestKey = "$nodeHex|$prefix"
                     for (base in httpUrlsFor(entry)) {
-                        val listed = relayHttpList(base, entry.httpToken, prefix)
+                        val cached = synchronized(mailboxListDigests) { mailboxListDigests[digestKey] }
+                        val listed = relayHttpListDelta(base, entry.httpToken, prefix, cached)
                         if (listed.isFailure) {
                             if (listed.exceptionOrNull() is RelayForbidden) break
                             markHttpUrlBad(base)
                             continue
                         }
                         markRelayOk(nodeHex)
-                        for (key in listed.getOrDefault(emptyList())) {
+                        val (keys, respDigest) = listed.getOrDefault(null to null)
+                        if (keys == null) break   // 204: unchanged key set — nothing to GET
+                        for (key in keys) {
                             // Claim the key immediately so a concurrent 2s poll cannot double-dispatch.
                             if (isMailboxSeen(key)) continue
                             markMailboxSeen(key)
@@ -954,6 +1080,12 @@ object HavenNet : InboundListener {
                                 Log.i(TAG, "live-call http-ingest type=$type key=${key.substringAfterLast('/').take(12)}")
                                 changed = true
                             }
+                        }
+                        // Every listed key was claimed above, so the digest may be committed — a 204
+                        // next poll skips nothing we still owe a GET.
+                        if (!respDigest.isNullOrEmpty()) synchronized(mailboxListDigests) {
+                            mailboxListDigests[digestKey] = respDigest
+                            if (mailboxListDigests.size > 500) mailboxListDigests.clear()
                         }
                         break
                     }
@@ -1075,15 +1207,66 @@ object HavenNet : InboundListener {
         Log.i(TAG, "media-wanted ${f.ref.take(10)}: back on a relay, told ${f.from.take(8)}")
     }
 
+    /**
+     * Author-side push-ahead: a FRESH post's blob just reached a relay (priority backup lane) —
+     * proactively tell the whole circle with the SAME frame-32 shape as the ask-back reply, plus a
+     * silent push so a backgrounded member wakes and prefetches. This is what makes media drop in
+     * WITH the post instead of on the recipient's next missing-media sweep. postId is best-effort
+     * (a deep-link nicety); the receiver keys on the ref. Apple FeedStore.announceMediaLanded.
+     */
+    private fun announceMediaLanded(ref: String, circleId: String) {
+        val postId = runCatching {
+            social.feed(circleId, nowMs(), null).firstOrNull { item ->
+                item.isMe && (item.media.contains(ref) ||
+                    MediaVariants.allThumbs(item.media).contains(ref) ||
+                    item.media.mapNotNull { MediaVariants.parsePoster(it)?.second }.contains(ref))
+            }?.id
+        }.getOrNull() ?: ""
+        val body = mediaFrameBody(ref, circleId, postId)
+        for (member in runCatching { social.contactNodeIds(circleId) }.getOrDefault(emptyList())) {
+            CallManager.sealedSend(Wire.MEDIA_AVAILABLE, body, member)
+            pushWake(member, ciphertextB64 = null, eventB64 = null, silent = true)
+        }
+        Log.i(TAG, "media-landed ${ref.take(10)} announced to circle ${circleId.take(12)}")
+    }
+
+    /** Per-ref throttle for acting on unsolicited frame-32 announces (the author push-ahead). */
+    private val announcedMediaAt = HashMap<String, Long>()
+
     /** Requester side: media I asked about is back. Notify with a deep link straight to the post. */
     private fun handleMediaAvailable(sealedBody: ByteArray) {
         val body = CallManager.openSealed(Wire.MEDIA_AVAILABLE, sealedBody) ?: return
         val f = parseMediaFrame(body) ?: return
         if (!isContact(f.from)) return
-        // Only act on something I actually asked for — an unsolicited "it's back" is just noise.
-        if (!MediaWantedStore.isWanted(f.ref)) return
+        if (!MediaWantedStore.isWanted(f.ref)) {
+            // Not something we asked for → an author's push-ahead announce (their fresh post's
+            // media just landed on a relay). Prefetch it anyway — bounded, deduped, and data-saver
+            // aware (videos stay tap-to-play under super data saver). No notification: the POST's
+            // banner is the news; this is just its media arriving on time. Apple parity.
+            if (LocalMedia.isSynthetic(f.ref) || LocalMedia.has(f.ref) ||
+                EvictedMediaStore.contains(f.ref)) return
+            val saver = runCatching { ProfileStore.get(appContext).superDataSaver }.getOrDefault(false)
+            if (saver && !(f.ref.startsWith("img_") || f.ref.startsWith("i:") ||
+                    f.ref.startsWith("aud_") || f.ref.startsWith("a:") || f.ref.startsWith("file_"))) return
+            val now = System.currentTimeMillis()
+            synchronized(announcedMediaAt) {
+                val last = announcedMediaAt[f.ref]
+                if (last != null && now - last < 60_000) return
+                announcedMediaAt[f.ref] = now
+                if (announcedMediaAt.size > 500) announcedMediaAt.clear()
+            }
+            synchronized(fastReq) { fastReq.remove(f.ref) }   // it's on a relay NOW — restart the lane
+            waitingForSenderMedia.remove(f.ref)
+            val cid = if (runCatching { social.circles() }.getOrDefault(emptyList())
+                    .any { it.id == f.circleId }) f.circleId else activeCircle.value
+            enqueueRestore(cid, f.ref)
+            Log.i(TAG, "media-available ${f.ref.take(10)}: announced by ${f.from.take(8)} — prefetching")
+            return
+        }
         MediaWantedStore.clear(f.ref)
         unavailableMedia.remove(f.ref)
+        waitingForSenderMedia.remove(f.ref)
+        synchronized(fastReq) { fastReq.remove(f.ref) }
         EvictedMediaStore.clear(f.ref)
         downloadEvicted(f.ref)   // pull it now, while we know it's there
         val who = displayName(f.from.take(8))
@@ -1160,32 +1343,47 @@ object HavenNet : InboundListener {
         }
     }
 
-    private fun handleHello(payload: ByteArray, viaNearby: Boolean = false, senderDevice: String? = null) {
-        val hello = Wire.parseHello(payload) ?: return
+    /** Outcome of ingesting one HELLO. [consumed] = true when the hello was APPLIED or
+     *  deliberately dropped — safe for a mailbox caller to mark its slot seen. False means NOT
+     *  applied (held for connection approval, transient engine failure): the mailbox slot must
+     *  stay UNCLAIMED so a later poll retries — once the gate clears (user approves, contacts
+     *  converge) the SAME slot re-processes and the circle grant riding it finally applies.
+     *  Marking held hellos seen is exactly how the E2E stub's circle invite evaporated: claimed
+     *  at fetch, quarantined at the approval gate, seen forever. [why] feeds the one-line claim
+     *  log in pollMailbox (iOS pullMailbox parity). */
+    private data class HelloOutcome(val consumed: Boolean, val why: String)
+
+    private fun handleHello(payload: ByteArray, viaNearby: Boolean = false, senderDevice: String? = null): HelloOutcome {
+        val hello = Wire.parseHello(payload) ?: return HelloOutcome(true, "malformed")
         val idHex = nodeHex(hello.bundle)
-        if (blocked.contains(idHex)) return   // a blocked node can't handshake back in
+        if (blocked.contains(idHex)) return HelloOutcome(true, "blocked")   // a blocked node can't handshake back in
         // A hello delivered DIRECTLY teaches us the sender's dialable device id for this account —
         // the reply-path bootstrap (their signed roster supersedes; a wrong hint only misroutes
         // sealed frames, same trust model as invite-link hints).
         if (senderDevice != null && senderDevice.length == 64 && !senderDevice.equals(idHex, ignoreCase = true)) {
             recordDeviceHints(idHex, listOf(senderDevice))
         }
-        val actualVerify = runCatching { social.bundleVerificationHex(hello.bundle) }.getOrNull() ?: return
+        val actualVerify = runCatching { social.bundleVerificationHex(hello.bundle) }.getOrNull()
+            ?: return HelloOutcome(true, "malformed")
         val name = runCatching { social.verifyProfile(hello.bundle, hello.signedProfile) }.getOrNull() ?: "Someone"
         // Capture the full profile card (avatar + emoji) so the feed/people/story-tray show real photos.
         runCatching { social.verifyProfileCard(hello.bundle, hello.signedProfile) }.getOrNull()
             ?.let { AvatarStore.put(idHex, it.avatar, it.emoji) }
 
         // DM circles encode both full node ids — only those two may ever join (MITM/contamination guard).
-        if (hello.circleId.startsWith("dm:") && !dmAllows(hello.circleId, idHex)) return
+        if (hello.circleId.startsWith("dm:") && !dmAllows(hello.circleId, idHex)) return HelloOutcome(true, "dm-third-party")
         // A member you explicitly removed from THIS circle must NOT auto-rejoin on their handshake
         // (parity with iOS). A removed person keeps broadcasting Hellos — they don't know they're gone —
         // and without this guard the "already a contact" branch below silently re-added them to the very
         // circle you removed them from, so the removal never stuck. A deliberate re-add clears the
         // tombstone (addToCircle), so this only blocks the unsolicited rejoin.
-        if (isRemovedFromCircle(hello.circleId, idHex)) return
+        if (isRemovedFromCircle(hello.circleId, idHex)) return HelloOutcome(true, "removed-from-circle")
         // A verified Hello forms the circle on our side if we don't have it yet (matches iOS).
+        val isNewCircle = hello.circleId != DEFAULT_CIRCLE && !hello.circleId.startsWith("dm:") &&
+            runCatching { social.circles() }.getOrDefault(emptyList()).none { it.id == hello.circleId }
         runCatching { social.createCircle(hello.circleId, hello.circleName) }
+        // App-layer activity row: being added to a circle has no engine event to reduce.
+        if (isNewCircle) ActivityStore.noteCircleAdd(hello.circleId, hello.circleName)
         // §5 — a dm: circle formed inbound is a live lane too (re-applied on launch by applyCryptoSwitches).
         if (hello.circleId.startsWith("dm:")) runCatching { social.setCircleLiveLane(hello.circleId, true) }
 
@@ -1194,16 +1392,20 @@ object HavenNet : InboundListener {
             // We scanned them first — auto-accept iff the bundle hash matches what the QR promised.
             if (expected.isNotEmpty() && expected != actualVerify) {
                 Log.w(TAG, "verify mismatch for $idHex — dropping (possible MITM)")
-                return
+                return HelloOutcome(true, "verify-mismatch")   // deliberate drop — the QR promise is firm
             }
             acceptContact(hello.circleId, hello.bundle, idHex, name, actualVerify, helloBack = true)
             initiated.remove(idHex)
-            return
+            return HelloOutcome(true, "applied")
         }
         if (contacts.any { it.idHex == idHex }) {
             // Already a contact (e.g. their Hello-back) — make sure their bundle is in the circle.
-            runCatching { social.addContactBundle(hello.circleId, hello.bundle) }
-            return
+            // This is also where a formerly-HELD hello lands after approval: the retained mailbox
+            // slot re-processes and the ORIGINAL circle grant it carries applies right here.
+            if (runCatching { social.addContactBundle(hello.circleId, hello.bundle) }.isFailure) {
+                return HelloOutcome(false, "engine-add-failed")   // transient — leave the slot for the next poll
+            }
+            return HelloOutcome(true, "applied")
         }
         // A hello carrying a DEVICE bundle of an account we ALREADY know is not a new person. A linked
         // (seedless) device signs with its own key and carries its OWN bundle, so without this it lands
@@ -1218,18 +1420,41 @@ object HavenNet : InboundListener {
         if (ownerAccount != null && !ownerAccount.equals(idHex, ignoreCase = true)) {
             recordDeviceHints(ownerAccount, listOf(idHex))
             Log.i(TAG, "hello from ${idHex.take(8)} is a DEVICE of known account ${ownerAccount.take(8)} — recorded as their device, not a new contact")
-            return
+            return HelloOutcome(true, "known-device")
+        }
+        // ENGINE-KNOWN MEMBER: the ENGINE already lists this account in one of my circles — an
+        // established relationship (I invited or approved them, possibly on a linked device before
+        // the contacts list converged, or the list lagged a restore). They are not "someone new":
+        // re-gating them as a stranger strands every hello they send — the circle grant riding the
+        // hello was quarantined as a pending request nobody acted on, and the circle never formed.
+        // Same principle as the device-of-known-account rule above, at account level. Adopt the
+        // contact record and continue the normal handshake. A contact the user explicitly REMOVED
+        // (LWW tombstone) still takes the approval path. (iOS handleHello parity.)
+        val engineKnows = !ContactRemovals.isRemoved(idHex) &&
+            runCatching { social.circles() }.getOrDefault(emptyList()).any { c ->
+                runCatching { social.contactNodeIds(c.id) }.getOrDefault(emptyList())
+                    .any { it.equals(idHex, ignoreCase = true) }
+            }
+        if (engineKnows) {
+            Log.i(TAG, "hello from ${idHex.take(8)} is an engine-known circle member — adopted as contact, handshake continues")
+            acceptContact(hello.circleId, hello.bundle, idHex, name, actualVerify, helloBack = true)
+            return HelloOutcome(true, "applied")
         }
         // Unknown sender on a non-DM circle → a request to approve — UNLESS it merely arrived over the
         // proximity mesh (nearby ≠ intent to connect; that flooded the user with spurious requests).
-        if (viaNearby) return
+        if (viaNearby) return HelloOutcome(true, "nearby-stranger")
         if (!hello.circleId.startsWith("dm:")) {
             scope.launch(Dispatchers.Main) {
                 if (pending.none { it.idHex == idHex }) {
-                    pending.add(PendingRequest(idHex, name, actualVerify, hello.bundle))
+                    pending.add(PendingRequest(idHex, name, actualVerify, hello.bundle, hello.circleId, hello.circleName))
                 }
             }
         }
+        // NOT consumed: the circle grant this hello carries must survive until the user decides.
+        // Approval re-processes the retained mailbox slot on the next poll (the already-a-contact
+        // branch above) and applies the ORIGINAL grant; a dm: stranger holds the same way until
+        // they become a contact. Marking held hellos seen is how invites used to evaporate.
+        return HelloOutcome(false, "held-for-approval")
     }
 
     // ---- DMs (a DM is a private 2-person circle, id encodes both node ids) ----------------
@@ -1255,6 +1480,7 @@ object HavenNet : InboundListener {
         runCatching { social.setCircleLiveLane(id, true) }   // §5 — dm: circle → per-message forward secrecy
         persist()
         sendHello(id, contact.idHex)
+        selfSyncNudge()   // the new DM (+ any lifted deletion) appears on my other devices in seconds
         return id
     }
 
@@ -1325,6 +1551,7 @@ object HavenNet : InboundListener {
         for (c in contacts) runCatching { social.addExistingToCircle(id, c.idHex) }
         persist()
         for (c in contacts) sendHello(id, c.idHex)
+        selfSyncNudge()   // the new group DM appears on my other devices in seconds
         return id
     }
 
@@ -1388,18 +1615,26 @@ object HavenNet : InboundListener {
         runCatching { social.leaveCircle(circleId) }
         if (activeCircle.value == circleId) activeCircle.value = DEFAULT_CIRCLE
         persist(); bumpCircles(); scope.launch(Dispatchers.Main) { feedVersion.value++ }
+        selfSyncNudge()   // the deletion tombstone travels now, before a sibling can re-broadcast the DM
     }
 
     /** Send a text DM into a circle and deliver it to the partner. */
     fun sendDm(circleId: String, body: String, media: List<String> = emptyList(),
                music: uniffi.haven_ffi.TrackRefFfi? = null, retentionSecs: ULong? = null) {
         if (body.isBlank() && media.isEmpty() && music == null) return
+        val withThumbs = withThumbMarkers(media)
+        val ts = nowMs()
         // retentionSecs != null → a disappearing message (auto-expires in the feed reducer, iOS parity).
         val env = runCatching {
-            social.post(circleId, body, media, music, retentionSecs, false, false, nowMs())
+            social.post(circleId, body, withThumbs, music, retentionSecs, false, false, ts)
         }.getOrNull() ?: return
-        afterAuthor(circleId, env)
-        media.forEach { enqueueBackup(circleId, it) }   // serialized: one blob in RAM at a time
+        // The engine derives event ids internally (BLAKE3 at author time) — read back the id of the
+        // message just created so the sealed banner's `p` deep-link opens THIS thread entry (Apple
+        // FeedStore.sendMessage parity). Best-effort: null keeps the legacy circle route.
+        val postId = runCatching { social.lastAuthoredEventId(circleId, ts) }.getOrNull()
+        afterAuthor(circleId, env,
+            PushBanner.forPost(circleId, circleName(circleId), body, withThumbs, story = false, postId = postId))
+        enqueueAuthoredMedia(circleId, withThumbs)   // priority lane, thumbs first
     }
 
     /**
@@ -1460,6 +1695,9 @@ object HavenNet : InboundListener {
             // CONTACT posts too. Volume is bounded by real new-event traffic.
             if (!fromOwnDevice) {
                 liveDeliverToMyDevices(Wire.EVENT, payload)
+                // …and a silent push with the inline envelope for my POCKETED devices — live
+                // delivery only reaches siblings that are online right now (iOS parity).
+                pushSyncSelf(ev.envelope)
                 // Internet/relay only: Multipeer already flooded the local mesh. Sealed — only
                 // circle members + my own devices open it; helps a Multipeer sibling that has no
                 // good internet path to the same mailbox.
@@ -1472,6 +1710,7 @@ object HavenNet : InboundListener {
             scope.launch(Dispatchers.Main) { feedVersion.value++ }
             requestMissingMedia()   // fetch any photos/videos the new post references
             notifyInbound(ev.circleId)
+            ActivityStore.poke(social)   // fresh rows for the bell (debounced engine reduce)
         }
     }
 
@@ -1488,6 +1727,22 @@ object HavenNet : InboundListener {
         val newest = feed.filter { !it.isMe }.maxByOrNull { it.createdAt } ?: return
         if (nowMs() - newest.createdAt > 600_000uL) return   // 10 min (ULong math; skew-safe enough)
         if (!markNotified("$circleId:${newest.id}")) return
+        // PREFETCH-BEFORE-NOTIFY: kick the message's media fetches (poster/thumb first, data-saver
+        // rules) so the bytes are downloading — often landed — by the time the user taps the
+        // banner. Concurrent with the notify below (the restore queue drains off this thread);
+        // covers both the FGS ingest path (handleEvent → here) and the SyncWorker poll.
+        run {
+            val saver = runCatching { ProfileStore.get(appContext).superDataSaver }.getOrDefault(false)
+            val wanted = if (saver) MediaVariants.dataSaverPrefetchRefs(newest.media) else newest.media
+            val ordered = MediaVariants.allThumbs(newest.media) +
+                newest.media.mapNotNull { MediaVariants.parsePoster(it)?.second } + wanted
+            for (ref in ordered.distinct()) {
+                if (!LocalMedia.isSynthetic(ref) && !LocalMedia.has(ref) &&
+                    !EvictedMediaStore.contains(ref) && !unopenableMedia.contains(ref)) {
+                    enqueueRestore(circleId, ref)
+                }
+            }
+        }
         // Kind-aware copy (parity with Apple PushBanner / desktop notify_circle). A reaction or
         // story must never say "Someone posted in your circle".
         val circleName = runCatching { social.circles() }.getOrDefault(emptyList())
@@ -1509,6 +1764,10 @@ object HavenNet : InboundListener {
             appContext,
             title = if (useName) authorName else "Haven",
             body = body,
+            // Tap-target: a DM opens its Messages THREAD; a circle post/story opens the exact post
+            // (Apple DeepLink.interactionLink parity). Routed through MainActivity.handleShare, so
+            // one route table — and the circle-lock rules — govern links from every source.
+            deepLink = DeepLink.interactionLink(circleId, newest.id),
         )
     }
 
@@ -1581,6 +1840,20 @@ object HavenNet : InboundListener {
         CircleRemovals.remove(DEFAULT_CIRCLE, req.idHex)
         runCatching { social.clearCircleRemoval(DEFAULT_CIRCLE, req.idHex) }   // lift the engine tombstone too
         acceptContact(DEFAULT_CIRCLE, req.bundle, req.idHex, req.name, req.verifyHex, helloBack = true)
+        // Apply the ORIGINAL circle grant the held hello carried — approval used to collapse every
+        // request to the default circle, so an invite into a named circle never formed it on our
+        // side. The retained mailbox slot re-applies the same grant on the next poll (hello claim
+        // discipline); doing it here makes approval immediate and covers direct/iroh hellos that
+        // have no mailbox slot to retry.
+        if (req.circleId != DEFAULT_CIRCLE && !req.circleId.startsWith("dm:")) {
+            CircleRemovals.remove(req.circleId, req.idHex)
+            runCatching { social.clearCircleRemoval(req.circleId, req.idHex) }
+            runCatching { social.createCircle(req.circleId, req.circleName.ifBlank { "Circle" }) }
+            if (runCatching { social.addContactBundle(req.circleId, req.bundle) }.isSuccess) {
+                sendHello(req.circleId, req.idHex)   // mutual: they learn we accepted the grant
+            }
+            feedVersion.value++; circlesVersion.value++; persist()
+        }
         pending.removeAll { it.idHex == req.idHex }
     }
 
@@ -1614,6 +1887,7 @@ object HavenNet : InboundListener {
         // can't be clawed back — a fundamental P2P limit — but the epoch key rotates so they can't
         // read anything new.)
         authorizeMembership()
+        selfSyncNudge()   // the severance record travels to my other devices now
     }
 
     /** True if [hex] was explicitly removed from [circleId] (severance) — don't dial / show them there. */
@@ -1937,6 +2211,8 @@ object HavenNet : InboundListener {
     ) {
         runCatching { social.addContactBundle(circleId, bundle) }
         ContactRemovals.markReadded(idHex)   // a deliberate (re-)add lifts any contact tombstone (LWW)
+        // App-layer activity row: a new connection has no engine event to reduce.
+        if (contacts.none { it.idHex == idHex }) ActivityStore.noteConnection(idHex, name)
         scope.launch(Dispatchers.Main) {
             // Upsert: refresh the name/verify on re-add (a removed-then-readded contact must stop
             // resolving to "Someone" — iOS does the same via syncUpsert).
@@ -1959,6 +2235,13 @@ object HavenNet : InboundListener {
     private fun sendHello(circleId: String, toNodeHex: String, resendHistory: Boolean = true) {
         val hello = helloPayload(circleId) ?: return
         sendFrame(Wire.HELLO, hello, toNodeHex)
+        // Store-and-forward the same hello through the circle mailbox (iOS putHello parity): the
+        // direct frame reaches nobody when iroh can't dial the peer — cross-NAT is exactly where a
+        // circle invite used to die. Addressed to the member's ACCOUNT hex, the one slot every one
+        // of their devices claims at the mailbox; a transport/device id goes stale with a re-minted
+        // bundle and parks the invite on a slot nobody polls.
+        val acct = runCatching { social.accountForDevice(toNodeHex) }.getOrNull() ?: toNodeHex
+        scope.launch { runCatching { putHelloMailbox(circleId, acct, hello) } }
         if (resendHistory) {
             val envs = runCatching { social.syncEnvelopes(circleId) }.getOrDefault(emptyList())
             for (env in envs) sendFrame(Wire.EVENT, Wire.eventPayload(circleId, env), toNodeHex)
@@ -2159,6 +2442,7 @@ object HavenNet : InboundListener {
             val entry = relayEntries[nodeHex]
             if (entry != null && entry.httpToken.isNotEmpty()) {
                 var done = false
+                var refused = false
                 for (base in httpUrlsFor(entry)) {
                     val r = relayHttpPut(base, entry.httpToken, key, wire)
                     if (r.isSuccess) {
@@ -2170,9 +2454,18 @@ object HavenNet : InboundListener {
                     // this very publish. Still never back the URL off: this is the one write that
                     // authorizes all the others, and sealing it for two minutes is how a device stays
                     // unauthorized (and unable to upload) far longer than it needs to.
-                    if (r.exceptionOrNull() !is RelayForbidden) markHttpUrlBad(base)
+                    if (r.exceptionOrNull() is RelayForbidden) refused = true else markHttpUrlBad(base)
                 }
                 if (done) continue
+                if (refused) {
+                    // The relay REJECTED our signed roster on the reliable rung. On HTTP-only
+                    // reachability (emulator NAT, CGNAT both ends) the iroh fallback below dies in
+                    // discovery ("dial in cooldown") and never surfaces the refusal — so the R6
+                    // rollback remedy must hook HERE too, or a device that fell behind the fleet
+                    // roster can never re-authorize (its selfsync + uploads stay 403 forever).
+                    adoptNewerOwnRosterAndRetry(nodeHex, key, wire, RelayForbidden())
+                    continue
+                }
             }
             val client = relayClientFor(nodeHex) ?: continue
             runCatching { client.put(key, wire) }
@@ -2208,7 +2501,8 @@ object HavenNet : InboundListener {
      * SharedStore.adoptNewerOwnRosterAndRetry parity.
      */
     private suspend fun adoptNewerOwnRosterAndRetry(nodeHex: String, key: String, sent: ByteArray, error: Throwable) {
-        if (error.message?.lowercase()?.contains("forbidden") != true) return
+        // RelayForbidden is the HTTP rung's refusal (its message says "refused", not "forbidden").
+        if (error !is RelayForbidden && error.message?.lowercase()?.contains("forbidden") != true) return
         val acct = runCatching { social.exportOwnRoster() }.getOrDefault(emptyList()).firstOrNull()?.accountHex ?: return
         Log.i(TAG, "devroster refused by ${nodeHex.take(8)} — pulling the newer roster it holds and re-publishing")
         if (!fetchContactRoster(acct)) {
@@ -2219,6 +2513,20 @@ object HavenNet : InboundListener {
         if (fresh.wire.contentEquals(sent)) {
             Log.i(TAG, "devroster: adopted roster is identical to the one refused — refusal is NOT a version rollback on ${nodeHex.take(8)}")
             return
+        }
+        // Re-publish at the adopted version — HTTP rung first (the reliable cross-NAT path, and the
+        // only one on an HTTP-only reachability), then the iroh dial (original behavior).
+        val entry = relayEntries[nodeHex]
+        if (entry != null && entry.httpToken.isNotEmpty()) {
+            for (base in httpUrlsFor(entry)) {
+                val r = relayHttpPut(base, entry.httpToken, key, fresh.wire)
+                if (r.isSuccess) {
+                    markRelaySeen(nodeHex); rosterPublished[nodeHex] = fresh.wire.contentHashCode() to System.currentTimeMillis()
+                    Log.i(TAG, "devroster http-put OK relay=${nodeHex.take(8)} after adopting its newer roster — this device is authorized again")
+                    return
+                }
+                if (r.exceptionOrNull() !is RelayForbidden) markHttpUrlBad(base)
+            }
         }
         val client = relayClientFor(nodeHex) ?: return
         runCatching { client.put(key, fresh.wire) }
@@ -2317,16 +2625,121 @@ object HavenNet : InboundListener {
         return Wire.helloPayload(circleId, circleName, bundle, signed)
     }
 
+    /** Mailbox hello key — `haven/mailbox/<circle>/__hello__/<toAcct>/<fromAcct>/<sha256>`, the
+     *  layout [pollMailbox] claims on the receiving side (iOS helloMailboxKey parity). Content-
+     *  addressed over the hello body: the profile signature is deterministic, so the digest is
+     *  stable across sync ticks and re-offers dedupe instead of minting a fresh key per pass. */
+    private fun helloMailboxKey(circleId: String, toHex: String, fromHex: String, body: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(body).joinToString("") { "%02x".format(it) }
+        return "haven/mailbox/$circleId/__hello__/${toHex.lowercase()}/${fromHex.lowercase()}/$digest"
+    }
+
+    /** `<relayHex>|<key>` pairs that LANDED. The re-offer skip is per-RELAY, deliberately NOT the
+     *  global seen-set: a relay adopted AFTER a hello landed elsewhere must still be offered it,
+     *  or the invite sits where the invitee never polls (the late-relay hole). In-memory only —
+     *  a re-offer after relaunch is one idempotent content-addressed PUT per relay. */
+    private val helloOffered = HashSet<String>()
+
+    /**
+     * Store-and-forward a HELLO through every relay serving the circle, for the peer iroh cannot
+     * dial (cross-NAT — the lane a circle invite rides when the two networks never touch directly).
+     * [toAccountHex] MUST be the member's ACCOUNT hex: every one of their devices claims the
+     * account slot at the mailbox ([pollMailbox]'s meAcct check), while a transport/device id can
+     * go stale with a re-minted bundle and strand the invite. iOS SharedStore.putHello parity,
+     * plus the iroh-dial rung so a NAS relay that announces no HTTP interface still carries it.
+     */
+    private suspend fun putHelloMailbox(circleId: String, toAccountHex: String, hello: ByteArray) {
+        val to = toAccountHex.trim().lowercase()
+        if (to.length != 64) return
+        if (to == nodeIdHex.lowercase()) return   // never hello ourselves
+        val key = helloMailboxKey(circleId, to, nodeIdHex, hello)
+        val hostedHex = runCatching { relayHost?.nodeIdHex() }.getOrNull()
+        for (nodeHex in relaysFor(circleId)) {
+            if (nodeHex.startsWith("s3:")) continue   // presign pools carry events; hellos ride relay mailboxes
+            val offered = "$nodeHex|$key"
+            if (synchronized(helloOffered) { offered in helloOffered }) continue
+            var landed = false
+            if (hostedHex != null && nodeHex == hostedHex) {
+                // Our OWN hosted relay: straight into the local store (no self-dial).
+                landed = runCatching { relayHost?.localPut(key, hello) == true }.getOrDefault(false)
+            } else {
+                // Relay HTTP interface first (the reliable cross-NAT path), else the iroh dial.
+                var forbidden = false
+                val entry = relayEntries[nodeHex]
+                if (entry != null) {
+                    for (base in httpUrlsFor(entry)) {
+                        val r = relayHttpPut(base, entry.httpToken, key, hello)
+                        if (r.isSuccess) { markRelaySeen(nodeHex); landed = true; break }
+                        // Refused = the relay doesn't know this device yet. The iroh path runs the
+                        // same membership gate, so don't burn a dial on it — publish the roster
+                        // (noteRefused → heal) and let the next tick's re-offer land.
+                        if (r.exceptionOrNull() is RelayForbidden) { noteRefused(nodeHex, "hello put"); forbidden = true; break }
+                        markHttpUrlBad(base)
+                    }
+                }
+                if (!landed && !forbidden) {
+                    val client = relayClientFor(nodeHex) ?: continue
+                    runCatching { client.put(key, hello) }
+                        .onSuccess { markRelayOk(nodeHex); landed = true }
+                        .onFailure { Log.d(TAG, "hello mailbox put failed ($nodeHex): ${it.message}"); relayFailed(nodeHex) }
+                }
+            }
+            if (landed) {
+                synchronized(helloOffered) {
+                    if (helloOffered.size > 4000) helloOffered.clear()   // bound (tiny in practice)
+                    helloOffered.add(offered)
+                }
+                markMailboxSeen(key)   // our own poll must not re-download our own hello
+                Log.i(TAG, "hello mailbox-put to=${to.take(8)} circle=${circleId.take(12)} relay=${nodeHex.take(8)}")
+            }
+        }
+    }
+
+    /**
+     * Expand a compose-time media list with `thumb:` pairing markers for photos whose tiny
+     * companion was minted at attach time (LocalMedia.store). The marker joins the SIGNED list —
+     * same pattern as `poster:` — so old clients simply ignore it. The bare thumb ref is
+     * deliberately NOT listed: receivers learn it from the marker, so a legacy carousel never
+     * shows a duplicate tiny slide. Apple FeedStore.withThumbMarkers parity.
+     */
+    private fun withThumbMarkers(media: List<String>): List<String> {
+        if (media.isEmpty()) return media
+        val out = ArrayList(media)
+        for (ref in media) {
+            if (!ref.startsWith("img_")) continue
+            if (MediaVariants.thumbFor(ref, media) != null) continue
+            val t = LocalMedia.thumbCompanion(ref) ?: continue
+            if (LocalMedia.has(t)) out.add(MediaVariants.thumbMarker(ref, t))
+        }
+        return out
+    }
+
+    /** Queue a just-authored event's media for relay backup: PRIORITY lane (ahead of any backfill
+     *  backlog), thumbs first, then posters, then content — so the placeholder-feeding bytes land
+     *  before the big blobs start. Apple FeedStore.enqueueAuthoredMedia parity. */
+    private fun enqueueAuthoredMedia(circleId: String, media: List<String>) {
+        for (ref in MediaVariants.allThumbs(media) + MediaVariants.uploadOrder(media)) {
+            enqueueBackup(circleId, ref, priority = true)
+        }
+    }
+
     /** Author a post in a circle and broadcast the sealed event to its members. */
     fun post(circleId: String, body: String, media: List<String> = emptyList(),
              music: uniffi.haven_ffi.TrackRefFfi? = null, retentionSecs: ULong? = null) {
         if (body.isBlank() && media.isEmpty() && music == null) return
+        val withThumbs = withThumbMarkers(media)
+        val ts = nowMs()
         val env = runCatching {
             // retentionSecs != null → a disappearing post (auto-expires in the feed reducer, iOS parity).
-            social.post(circleId, body, media, music, retentionSecs, false, false, nowMs())
+            social.post(circleId, body, withThumbs, music, retentionSecs, false, false, ts)
         }.getOrNull() ?: return
-        afterAuthor(circleId, env)
-        media.forEach { enqueueBackup(circleId, it) }   // serialized: push photos/videos to the relay, one blob in RAM at a time
+        // Read back the engine-derived id of the post just authored so the sealed banner carries `p`
+        // (exact tap route on the recipient — Apple FeedStore.post parity). Best-effort: null keeps
+        // the legacy circle route.
+        val postId = runCatching { social.lastAuthoredEventId(circleId, ts) }.getOrNull()
+        afterAuthor(circleId, env,
+            PushBanner.forPost(circleId, circleName(circleId), body, withThumbs, story = false, postId = postId))
+        enqueueAuthoredMedia(circleId, withThumbs)   // serialized priority lane: thumbs → posters → blobs
         // "Save my posts to Photos" (per-circle override, falling back to the app-wide default).
         if (media.isNotEmpty() && CircleSettings.saveOwn(circleId))
             scope.launch { media.forEach { MediaSaver.autoSave(appContext, it) } }
@@ -2339,33 +2752,39 @@ object HavenNet : InboundListener {
             artist = artist, artworkUrl = "", durationMs = 0UL,
         )
 
-    /** Post a story (a post with the story flag + 24h retention; auto-expires). */
-    fun postStory(body: String, mediaId: String?, music: uniffi.haven_ffi.TrackRefFfi? = null) {
+    /** Post a story (a post with the story flag + 24h retention; auto-expires). [circleId] lets a
+     *  caller aim it at a specific circle (qa-cmd `circle_id`); the UI's story path stays default. */
+    fun postStory(body: String, mediaId: String?, music: uniffi.haven_ffi.TrackRefFfi? = null,
+                  circleId: String = DEFAULT_CIRCLE) {
         if (body.isBlank() && mediaId == null && music == null) return
+        val media = withThumbMarkers(listOfNotNull(mediaId))
+        val ts = nowMs()
         val env = runCatching {
-            social.post(DEFAULT_CIRCLE, body, listOfNotNull(mediaId), music, 86_400UL, true, false, nowMs())
+            social.post(circleId, body, media, music, 86_400UL, true, false, ts)
         }.getOrNull() ?: return
-        afterAuthor(DEFAULT_CIRCLE, env)
-        mediaId?.let { enqueueBackup(DEFAULT_CIRCLE, it) }   // serialized: one blob in RAM at a time
+        val postId = runCatching { social.lastAuthoredEventId(circleId, ts) }.getOrNull()   // best-effort `p` tag (see `post`)
+        afterAuthor(circleId, env,
+            PushBanner.forPost(circleId, circleName(circleId), body, media, story = true, postId = postId))
+        enqueueAuthoredMedia(circleId, media)   // priority lane: the story's blob beats any backfill
     }
 
     /** React / unreact / comment on a post — author + broadcast, same as a post. */
     fun react(circleId: String, postId: String, emoji: String) {
         val env = runCatching { social.react(circleId, postId, emoji, nowMs()) }.getOrNull() ?: return
-        afterAuthor(circleId, env)
+        afterAuthor(circleId, env, PushBanner.forReaction(emoji, circleId, postId))
     }
 
     fun unreact(circleId: String, postId: String, emoji: String) {
         val env = runCatching { social.unreact(circleId, postId, emoji, nowMs()) }.getOrNull() ?: return
-        afterAuthor(circleId, env)
+        afterAuthor(circleId, env)   // retracting carries no news — silent wake only
     }
 
     fun comment(circleId: String, postId: String, body: String, media: List<String> = emptyList()) {
         // A media-only reply (a photo or a voice note with no text) is valid — iOS allows it too.
         if (body.isBlank() && media.isEmpty()) return
         val env = runCatching { social.comment(circleId, postId, body, media, nowMs()) }.getOrNull() ?: return
-        afterAuthor(circleId, env)
-        media.forEach { enqueueBackup(circleId, it) }   // same relay push a post's media gets
+        afterAuthor(circleId, env, PushBanner.forComment(body, circleId, circleName(circleId), postId))
+        media.forEach { enqueueBackup(circleId, it, priority = true) }   // a fresh reply's media beats backfill
     }
 
     /**
@@ -2506,8 +2925,10 @@ object HavenNet : InboundListener {
     fun reports(circleId: String): Map<String, List<uniffi.haven_ffi.ReportFfi>> =
         runCatching { social.reports(circleId) }.getOrDefault(emptyList()).groupBy { it.target }
 
-    /** Persist, bump the feed, and broadcast a freshly-authored sealed envelope to members. */
-    private fun afterAuthor(circleId: String, env: ByteArray) {
+    /** Persist, bump the feed, and broadcast a freshly-authored sealed envelope to members.
+     *  [banner] = the kind-aware push copy for members' lock screens (null → a silent
+     *  content-available wake only, e.g. an edit/unsend that carries no news). */
+    private fun afterAuthor(circleId: String, env: ByteArray, banner: PushBanner.Copy? = null) {
         bumpActivity()   // I just posted/messaged → keep sync tight
         persist()
         scope.launch(Dispatchers.Main) { feedVersion.value++ }
@@ -2529,9 +2950,86 @@ object HavenNet : InboundListener {
             }
             uploadEvent(circleId, env)
         }
+        // Push leg (Apple PushManager.wake/syncSelf parity): the blind worker forwards a banner
+        // SEALED + SIGNED to each recipient (their NSE decrypts and verifies it really came from
+        // us) plus the base64 sealed event inline, so an offline iPhone/Mac member gets a real
+        // banner AND ingests the event with no mailbox round-trip. And a silent syncSelf so my own
+        // pocketed devices catch up immediately. Android recipients keep polling (no FCM by
+        // design) — this leg is for the members who DO hold push tokens.
+        scope.launch {
+            pushSyncSelf(env)
+            val eventB64 = Base64.encodeToString(env, Base64.NO_WRAP)
+            val notifJson = banner?.let { bannerJson(it, circleId) }
+            for (member in runCatching { social.contactNodeIds(circleId) }.getOrDefault(emptyList())) {
+                val sealed = notifJson?.let {
+                    runCatching { social.sealSignedNotification(member, it) }.getOrNull()
+                }
+                pushWake(
+                    member,
+                    ciphertextB64 = sealed?.let { Base64.encodeToString(it, Base64.NO_WRAP) },
+                    eventB64 = eventB64,
+                    silent = sealed == null,
+                )
+            }
+        }
         // Nearby mesh (never DMs — they stay point-to-point, matching iOS).
         if (NearbyTransport.active && !circleId.startsWith("dm:")) {
             NearbyTransport.broadcast(Wire.frame(Wire.EVENT, payload))
+        }
+    }
+
+    // ---- Push relay leg (blind Cloudflare Worker; Apple PushManager parity) ---------------------
+
+    /** The Apple `PushBanner.jsonObject` shape (`{t,b,bp,c,k,e?,p?}`) — sealed per recipient below
+     *  so the worker never sees it and the recipient's NSE verifies the signer. `p` = the authored/
+     *  PARENT post id, so the recipient's tap opens the exact post (Apple parity). */
+    private fun bannerJson(copy: PushBanner.Copy, circleId: String): ByteArray? = runCatching {
+        val o = JSONObject()
+            .put("t", profile.displayName.ifBlank { "Someone" })
+            .put("b", copy.body)
+            .put("bp", copy.privateBody)
+            .put("c", circleId)
+            .put("k", copy.kind)
+        copy.emoji?.let { o.put("e", it) }
+        copy.postId?.takeIf { it.isNotEmpty() }?.let { o.put("p", it) }
+        o.toString().toByteArray(Charsets.UTF_8)
+    }.getOrNull()
+
+    /** Ask the push relay to wake a (possibly offline) peer. [ciphertextB64] = the banner sealed to
+     *  THAT peer (worker forwards it blind); null + [silent] = a bannerless content-available wake. */
+    private fun pushWake(nodeId: String, ciphertextB64: String?, eventB64: String?, silent: Boolean) {
+        if (nodeId.isEmpty()) return
+        val body = JSONObject().put("nodeId", nodeId).put("ciphertext", ciphertextB64 ?: "_")
+        if (eventB64 != null) body.put("event", eventB64)
+        if (silent) body.put("silent", true)
+        pushPost("/notify", body)
+    }
+
+    /** Multi-device: deliver an envelope to my OWN other devices' push tokens — a silent
+     *  content-available push (no self-notify), inline event, no mailbox round-trip. */
+    private fun pushSyncSelf(env: ByteArray) {
+        pushPost("/notify", JSONObject()
+            .put("nodeId", accountNodeHex)
+            .put("event", Base64.encodeToString(env, Base64.NO_WRAP))
+            .put("silent", true))
+    }
+
+    /** Fire-and-forget POST to the push worker ([PUSH_RELAY]) — failures only log (polling is the
+     *  fallback lane, exactly as on Apple when push is unconfigured). */
+    private fun pushPost(path: String, body: JSONObject) {
+        val payload = body.toString().toByteArray(Charsets.UTF_8)
+        scope.launch {
+            runCatching {
+                val c = (java.net.URL(PUSH_RELAY + path).openConnection() as java.net.HttpURLConnection).apply {
+                    requestMethod = "POST"; doOutput = true; connectTimeout = 8000; readTimeout = 8000
+                    setRequestProperty("Content-Type", "application/json")
+                }
+                try {
+                    c.outputStream.use { it.write(payload) }
+                    val code = c.responseCode
+                    if (code != 200) Log.d(TAG, "push $path HTTP $code")
+                } finally { c.disconnect() }
+            }.onFailure { Log.d(TAG, "push $path failed: ${it.message}") }
         }
     }
 
@@ -2991,6 +3489,7 @@ object HavenNet : InboundListener {
                 runCatching { relayClients.remove(hex)?.close() }
                 relayHealth.remove(hex)
             }
+            invalidateListDigests(hex)   // its cached LIST digests describe a relay we no longer read
             withContext(Dispatchers.Main) { bumpRelays() }
         }
     }
@@ -3158,6 +3657,20 @@ object HavenNet : InboundListener {
         if (defaultRelayHex.isNotEmpty() && isRelayActive(defaultRelayHex) && !out.contains(defaultRelayHex))
             out.add(defaultRelayHex)
         return out
+    }
+
+    /** Every distinct ACTIVE relay this device knows — every active relay ENTRY (INCLUDING those
+     *  learned from a sealed announce but not yet wired to any circle), plus every relay referenced
+     *  by a circle, plus the all-circles default; deduped, inactive/forgotten excluded. Unlike
+     *  [allRelays] (per-circle associations + default only) this also folds in announce-learned
+     *  entries, so a selfsync-learned circle with no relay association can still fall back to the
+     *  relay it demonstrably reaches. Mirrors desktop `all_active_relay_hexes` / iOS `allRelays()`. */
+    private fun allActiveRelayHexes(): List<String> {
+        val out = LinkedHashSet<String>()
+        for (e in relayEntries.values) if (e.active) out.add(e.hex)
+        for (hex in relayNodes.values.flatten()) if (isRelayActive(hex)) out.add(hex)
+        if (defaultRelayHex.isNotEmpty() && isRelayActive(defaultRelayHex)) out.add(defaultRelayHex)
+        return out.toList()
     }
 
     private fun relayAvailable(nodeHex: String): Boolean =
@@ -3450,8 +3963,21 @@ object HavenNet : InboundListener {
         }
         // Mirror to EVERY configured Haven relay (redundancy). Content-addressed keys make
         // re-puts idempotent, and a relay in backoff is skipped — graceful fallback.
+        // SYMMETRIC with pollMailbox's ephemeral fallback: a selfsync-learned circle whose winning
+        // record carried an EMPTY relay list has NO key in relayNodes, so relaysFor() is empty and
+        // an authored event (post OR reaction/comment — all funnel through afterAuthor) would upload
+        // to ZERO relays; relay-only members (cross-NAT peers, the matrix stub) would never receive
+        // it. Fall back to every ACTIVE relay this device knows (s3 handled by the Presign leg
+        // above). Ephemeral by design: never writes relayNodes.
+        val relayHexes = relaysFor(circleId).ifEmpty {
+            if (relayNodes.containsKey(circleId)) emptyList()
+            else allActiveRelayHexes().filter { !it.startsWith("s3:") }
+        }
+        // One info line per authored upload so a future empty-relay-set drop (relays=0 → nothing
+        // reaches relay-only members) is visible in logcat instead of silently vanishing.
+        Log.i(TAG, "uploadEvent circle=${circleId.take(16)} relays=${relayHexes.size}")
         val hostedHex = runCatching { relayHost?.nodeIdHex() }.getOrNull()
-        for (nodeHex in relaysFor(circleId)) {
+        for (nodeHex in relayHexes) {
             // S3-bucket relay (store-and-forward): PUT the sealed blob straight into the bucket via the
             // direct S3 FFI using the device-local creds (StorageStore). Content-addressed key.
             if (nodeHex.startsWith("s3:")) {
@@ -3467,14 +3993,39 @@ object HavenNet : InboundListener {
                 withContext(Dispatchers.Main) { relayActive.value = true }
                 continue
             }
-            val client = relayClientFor(nodeHex) ?: continue
-            runCatching { client.put(key, env) }
-                .onSuccess {
-                    landed = true
-                    markRelayOk(nodeHex)
-                    withContext(Dispatchers.Main) { relayActive.value = true }
+            // Relay HTTP interface FIRST (the reliable cross-NAT path — a cloudflared / free-CF /
+            // LAN-NAS relay never iroh-dials), else the iroh dial. Same ladder as hello-put + the
+            // mailbox poll. uploadEvent was the one mailbox-WRITE path still iroh-only, so an
+            // authored envelope (post OR reaction/comment) could only ride the iroh blob ALPN —
+            // which drops on pure-relay cross-NAT paths — and never reached an HTTP-only relay:
+            // relay-only members (cross-NAT peers, the matrix stub) lost this device's events. The
+            // send half of the poll side's "put via HTTP, polled via iroh, nothing landed" fix.
+            var putOk = false
+            val entry = relayEntries[nodeHex]
+            if (entry != null) {
+                for (base in httpUrlsFor(entry)) {
+                    val r = relayHttpPut(base, entry.httpToken, key, env)
+                    if (r.isSuccess) {
+                        markRelayOk(nodeHex); landed = true; putOk = true
+                        withContext(Dispatchers.Main) { relayActive.value = true }
+                        break
+                    }
+                    // Same store behind every URL — a membership refusal stands; don't fall through
+                    // to iroh (it runs the same gate) and let the roster republish + next tick land.
+                    if (r.exceptionOrNull() is RelayForbidden) { noteRefused(nodeHex, "mailbox put"); putOk = true; break }
+                    markHttpUrlBad(base)
                 }
-                .onFailure { Log.d(TAG, "mailbox put failed ($nodeHex): ${it.message}"); relayFailed(nodeHex) }
+            }
+            if (!putOk) {
+                val client = relayClientFor(nodeHex) ?: continue
+                runCatching { client.put(key, env) }
+                    .onSuccess {
+                        landed = true
+                        markRelayOk(nodeHex)
+                        withContext(Dispatchers.Main) { relayActive.value = true }
+                    }
+                    .onFailure { Log.d(TAG, "mailbox put failed ($nodeHex): ${it.message}"); relayFailed(nodeHex) }
+            }
         }
         if (landed) markMailboxSeen(key)
     }
@@ -3484,7 +4035,12 @@ object HavenNet : InboundListener {
      *  media — used by the 2-minute sync tick, which needs media freshness but not a daily-enough
      *  event sweep. */
     private suspend fun backfillMailbox(circleId: String, eventsToo: Boolean = true) {
-        if (relaysFor(circleId).isEmpty() && !Presign.hasBootstrap(circleId)) return
+        // Mirror uploadEvent's fallback: a selfsync-learned circle with no relayNodes association
+        // still has somewhere to land if this device knows any active relay, so the catch-up sweep
+        // must not short-circuit it the way a truly relay-less, S3-less circle is skipped.
+        val hasRelay = relaysFor(circleId).isNotEmpty() ||
+            (!relayNodes.containsKey(circleId) && allActiveRelayHexes().any { !it.startsWith("s3:") })
+        if (!hasRelay && !Presign.hasBootstrap(circleId)) return
         if (eventsToo) {
             val envs = runCatching { social.exportMyEnvelopes(circleId) }.getOrDefault(emptyList())
             for (env in envs) uploadEvent(circleId, env)
@@ -3550,28 +4106,102 @@ object HavenNet : InboundListener {
         for (ref in refs) if (LocalMedia.has(ref)) enqueueBackup(circleId, ref)
     }
 
+    /** Control-plane keys rank first — they unlock everything else (iOS pullMailbox parity). */
+    private fun mailboxKeyRank(key: String): Int = when {
+        key.contains("/__hello__/") -> 0
+        key.contains("/__relay__/") -> 1
+        else -> 2
+    }
+
     /** Poll every circle's mailbox; ingest envelopes we haven't seen. */
     suspend fun pollMailbox() {
         if (!ready) return
         ensureSeenMailboxLoaded()
+        repairMailboxSeenOnce()
         var changed = false
+        // Whether ANY receive() ran this pass. receive() can change engine state without reporting
+        // a new event — an envelope that arrives before its key commit is BUFFERED in
+        // pending_epoch and returns false — so persisting only `if (changed)` dropped those
+        // buffers on process death and the eventual commit had nothing left to unlock (delivery
+        // gap; mirror of desktop engine.rs pollMailbox).
+        var receiveRan = false
         // NEW envelopes this pass — fan out to my other linked devices after ingest. Mailbox was
         // the hole in receive-time fan-out: a friend's post landed on whichever of my devices
         // polled first and never reached the rest when their mailbox auth/relay set differed.
         val newlyIngested = ArrayList<Pair<String, ByteArray>>()
         fun ingestMailboxEnv(circleId: String, env: ByteArray): Boolean {
+            receiveRan = true
             if (!runCatching { social.receive(circleId, env) }.getOrDefault(false)) return false
             newlyIngested.add(circleId to env)
             notifyInbound(circleId)
             return true
         }
+        val meAcct = nodeIdHex.lowercase()
+        val meDev = runCatching { social.myDeviceNodeHex() }.getOrDefault("").lowercase()
+        /**
+         * Claim ONLY hellos addressed to one of MY ids: my account hex (the canonical slot) or my
+         * transport device id (transition senders addressed per dial target). A hello addressed
+         * to any OTHER id — another member, a sibling device, a STALE id of mine — is not ours to
+         * touch. The old "someone else's — just mark" burned those slots forever on whichever
+         * device polled first, which is exactly how circle invites vanished; leave them for their
+         * owners (or the relay TTL). Non-hello keys always pass (iOS shouldFetchHello parity).
+         */
+        fun helloSlotIsMine(key: String): Boolean {
+            val marker = "/__hello__/"
+            val i = key.indexOf(marker)
+            if (i < 0) return true
+            val to = key.substring(i + marker.length).substringBefore('/').lowercase()
+            return to == meAcct || to == meDev
+        }
+        /**
+         * Route ONE fetched mailbox blob and answer whether its key may be marked seen.
+         *  • `__hello__` addressed to me → [handleHello]; marked seen ONLY when CONSUMED (applied
+         *    or deliberately dropped) — a HELD hello (approval gate, engine hiccup) keeps its
+         *    mailbox slot so the next poll retries; marking it here is how a circle grant riding
+         *    a hello from a not-yet-approved contact evaporated forever (E2E stub / hosting-Mac
+         *    symptom, iOS pullMailbox parity). Addressed to someone else → untouched, never marked.
+         *  • `__relay__` → the durable frame-19 relay announce ([handleRelayNode]) — friends who
+         *    can't iroh-dial the host still learn the relay + public media URL from the mailbox.
+         *  • content → `receive()`; marked ONLY on a successful ingest, so an envelope buffered
+         *    ahead of its key commit is retried instead of burned (desktop engine.rs parity —
+         *    the old mark-at-fetch is what left DMs delivered-but-invisible).
+         */
+        suspend fun routeMailboxEntry(circleId: String, key: String, env: ByteArray): Boolean {
+            when {
+                key.contains("/__hello__/") -> {
+                    val parts = key.split("/")
+                    val i = parts.indexOf("__hello__")
+                    val toShort = if (i >= 0 && parts.size > i + 1) parts[i + 1].take(8) else "?"
+                    val fromShort = if (i >= 0 && parts.size > i + 2) parts[i + 2].take(8) else "?"
+                    if (!helloSlotIsMine(key)) {
+                        // Belt-and-suspenders for envelopes that reached here through an older
+                        // fetch path — the poll loops below skip these before the GET.
+                        Log.i(TAG, "hello claim SKIPPED (addressed to $toShort, not me) from=$fromShort circle=${circleId.take(12)}")
+                        return false
+                    }
+                    val outcome = handleHello(env, viaNearby = false, senderDevice = null)
+                    // The claim decision, visible: consumed slots are marked seen, held ones retry.
+                    Log.i(TAG, "hello claim ${if (outcome.consumed) "CONSUMED" else "HELD"} (${outcome.why}) from=$fromShort to=$toShort circle=${circleId.take(12)}")
+                    return outcome.consumed
+                }
+                key.contains("/__relay__/") -> {
+                    handleRelayNode(env)
+                    return true
+                }
+                else -> {
+                    if (ingestMailboxEnv(circleId, env)) { changed = true; return true }
+                    return false
+                }
+            }
+        }
         // S3 pre-signed pools (the BYO-bucket path).
         for (circleId in Presign.circles()) {
             val items = runCatching { Presign.poll(circleId, seenMailbox) }.getOrDefault(emptyList())
             if (items.isNotEmpty()) withContext(Dispatchers.Main) { relayActive.value = true }
-            for ((key, env) in items) {
-                markMailboxSeen(key)
-                if (ingestMailboxEnv(circleId, env)) changed = true
+            for ((key, env) in items.sortedBy { mailboxKeyRank(it.first) }) {
+                if (key.contains("/__live__/")) continue   // call frames — the in-call poll's lane
+                if (!helloSlotIsMine(key)) continue         // another id's hello slot — not ours to claim (or burn)
+                if (routeMailboxEntry(circleId, key, env)) markMailboxSeen(key)
             }
         }
         // (circleId, relayNodeHex) for every circle × every configured relay — reading from all of
@@ -3589,6 +4219,24 @@ object HavenNet : InboundListener {
                     base + extra
                 } else base
             }
+            .let { base ->
+                // Circles the ENGINE holds but no relay announce / synced circle record has wired
+                // yet — a fresh selfsync-learned circle whose winning record carried an EMPTY relay
+                // list. Un-polled they stay content-less forever (the linked-device receive gap that
+                // matches the upload gap above), so read them from every ACTIVE relay this device
+                // knows. Ephemeral by design: relayNodes only ever learns real associations from
+                // announces/sync, never these fallback guesses. Symmetric with uploadEvent + desktop
+                // engine.rs poll_mailbox.
+                val actives = allActiveRelayHexes().filter { !it.startsWith("s3:") }
+                if (actives.isEmpty()) base
+                else {
+                    val engineCircles = runCatching { social.circles().map { it.id } }.getOrDefault(emptyList())
+                    val extra = engineCircles
+                        .filter { cid -> !relayNodes.containsKey(cid) }
+                        .flatMap { cid -> actives.map { cid to it } }
+                    base + extra
+                }
+            }
         for ((circleId, nodeHex) in relayTargets) {
             // S3-bucket relay: LIST + GET via the direct S3 FFI (store-and-forward poll).
             if (nodeHex.startsWith("s3:")) {
@@ -3597,25 +4245,60 @@ object HavenNet : InboundListener {
                 val keys = runCatching { uniffi.haven_ffi.s3List(cfg, prefix) }.getOrNull() ?: continue
                 markRelaySeen(nodeHex)
                 if (keys.isNotEmpty()) withContext(Dispatchers.Main) { relayActive.value = true }
-                for (s3key in keys) {
+                // Control-plane first (hello → relay → content) — LIST order is a store walk, and
+                // without the sort a cold device buffers content ahead of the commit that opens it.
+                // `__live__` keys are unclaimed call frames — never content; fed to receive() they
+                // fail every poll forever, so they stay out of the batch entirely (iOS parity).
+                for (s3key in keys.sortedBy { mailboxKeyRank(it) }) {
+                    if (s3key.contains("/__live__/")) continue
+                    if (!helloSlotIsMine(s3key)) continue   // another id's hello slot — skip before the GET
                     if (seenMailbox.contains(s3key)) continue
                     val env = runCatching { uniffi.haven_ffi.s3Get(cfg, s3key) }.getOrNull() ?: continue
-                    markMailboxSeen(s3key)
-                    if (ingestMailboxEnv(circleId, env)) changed = true
+                    if (routeMailboxEntry(circleId, s3key, env)) markMailboxSeen(s3key)
                 }
                 continue
             }
-            val client = relayClientFor(nodeHex) ?: continue
             val prefix = "haven/mailbox/$circleId/"
-            val keys = runCatching { client.list(prefix) }.getOrNull()
-            if (keys == null) { relayFailed(nodeHex); continue }
-            markRelayOk(nodeHex)
+            val client = relayClientFor(nodeHex)
+            var keys: List<String>? = null
+            var httpBase: String? = null
+            if (client != null) {
+                keys = runCatching { client.list(prefix) }.getOrNull()
+                if (keys == null) relayFailed(nodeHex)
+                else markRelayOk(nodeHex)
+            }
+            // iroh unreachable (dial backoff / no addressing — emulator NAT, CGNAT both ends) →
+            // the relay's signed-HTTP interface, the reliable cross-NAT path. Without this rung
+            // store-and-forward CONTENT only ever rode the dial, so an HTTP-only device polled
+            // "successfully" forever while its mailbox sat full on the relay (iOS pullMailbox
+            // parity — same ladder as devroster/media/`__live__`).
+            val entry = relayEntries[nodeHex]
+            if (keys == null && entry != null && entry.httpToken.isNotEmpty()) {
+                for (base in httpUrlsFor(entry)) {
+                    val r = relayHttpListDelta(base, entry.httpToken, prefix, digest = null)
+                    if (r.isSuccess) {
+                        keys = r.getOrNull()?.first ?: emptyList()
+                        httpBase = base
+                        markRelaySeen(nodeHex)
+                        Log.d(TAG, "mailbox http-list ${keys.size} keys circle=${circleId.take(12)} via $base")
+                        break
+                    }
+                    if (r.exceptionOrNull() is RelayForbidden) { noteRefused(nodeHex, "mailbox list"); break }
+                    Log.d(TAG, "mailbox http-list failed via $base: ${r.exceptionOrNull()?.message}")
+                    markHttpUrlBad(base)
+                }
+            }
+            if (keys == null) continue
             if (keys.isNotEmpty()) withContext(Dispatchers.Main) { relayActive.value = true }
-            for (key in keys) {
+            // Same shape as the S3 branch: skip unclaimed live-call frames, control-plane first,
+            // and mark a content key seen ONLY once its envelope actually ingested.
+            for (key in keys.sortedBy { mailboxKeyRank(it) }) {
+                if (key.contains("/__live__/")) continue
+                if (!helloSlotIsMine(key)) continue   // another id's hello slot — skip before the GET
                 if (seenMailbox.contains(key)) continue
-                val env = runCatching { client.get(key) }.getOrNull() ?: continue
-                markMailboxSeen(key)
-                if (ingestMailboxEnv(circleId, env)) changed = true
+                val env = (if (httpBase != null) relayHttpGet(httpBase, entry!!.httpToken, key).getOrNull()
+                           else runCatching { client!!.get(key) }.getOrNull()) ?: continue
+                if (routeMailboxEntry(circleId, key, env)) markMailboxSeen(key)
             }
         }
         // HTTP live-lane call frames when iroh dial is down.
@@ -3629,6 +4312,9 @@ object HavenNet : InboundListener {
         // blocked/circles) over the same relays. Has its own transport + in-flight guard, and a
         // refresh trigger (selfSyncDidApply) when a peer device's state arrives.
         runCatching { SelfSyncCoordinator.sync(social) }
+        // Persist whenever ANY receive ran — even a "nothing changed" pass may have buffered
+        // envelopes into pending_epoch, and those buffers must survive process death.
+        if (receiveRan && !changed) persist()
         if (changed) {
             // Fan out friend content that only this device pulled from the mailbox.
             if (newlyIngested.isNotEmpty()) {
@@ -3641,11 +4327,16 @@ object HavenNet : InboundListener {
                         NearbyTransport.broadcast(Wire.frame(Wire.EVENT, Wire.eventPayload(cid, env)))
                     }
                 }
+                // Multi-device: a silent content-available push carries each envelope to my OWN
+                // other devices' tokens, so a pocketed sibling ingests without waiting out its
+                // next mailbox poll (Apple PushManager.syncSelf parity).
+                for ((_, env) in newlyIngested.take(20)) pushSyncSelf(env)
             }
             bumpActivity()   // a message arrived → keep sync tight while the conversation is live
             persist()
             withContext(Dispatchers.Main) { feedVersion.value++ }
             requestMissingMedia()
+            ActivityStore.poke(social)   // fresh rows for the bell without a per-envelope reduce
         }
     }
 
@@ -3719,11 +4410,18 @@ object HavenNet : InboundListener {
     // single serial consumer so peak memory is ~one blob, not the whole library. Mirrors iOS
     // SharedStore.MediaBackupQueue (enqueue(ref, circleId); one drain loop runs them one at a time).
     private sealed class MediaJob(val ref: String, val circleId: String) {
-        class Backup(ref: String, circleId: String, val force: Boolean = false) : MediaJob(ref, circleId)
+        /** [priority] = a just-authored event's media (drained ahead of any backfill backlog);
+         *  [atMs] = when it was enqueued, so a landed PRIORITY blob that is still fresh announces
+         *  itself to the circle (frame 32) instead of waiting out everyone's missing-media sweep. */
+        class Backup(ref: String, circleId: String, val force: Boolean = false,
+                     val priority: Boolean = false, val atMs: Long = 0L) : MediaJob(ref, circleId)
         class Restore(ref: String, circleId: String) : MediaJob(ref, circleId)
     }
     // Unlimited buffer + a single consumer = strictly serial; the dedup set + cap below bound it.
+    // The priority channel is drained FIRST: without it a fresh story's blob queued behind a long
+    // historical backfill and friends saw the post minutes before its media could possibly land.
     private val mediaQueue = Channel<MediaJob>(Channel.UNLIMITED)
+    private val mediaPriorityQueue = Channel<MediaJob>(Channel.UNLIMITED)
     private val mediaQueueKeys = LinkedHashSet<String>()   // in-flight/pending de-dup ("B|ref|cid" / "R|ref|cid")
     private val mediaQueueLock = Any()
     @Volatile private var mediaQueueStarted = false
@@ -3736,7 +4434,13 @@ object HavenNet : InboundListener {
             mediaQueueStarted = true
         }
         scope.launch {
-            for (job in mediaQueue) {
+            while (true) {
+                // Strict priority: exhaust the just-authored lane before touching the backlog.
+                val job = mediaPriorityQueue.tryReceive().getOrNull()
+                    ?: kotlinx.coroutines.selects.select {
+                        mediaPriorityQueue.onReceive { it }
+                        mediaQueue.onReceive { it }
+                    }
                 val key = jobKey(job)
                 // Process ONE blob at a time — peak memory ≈ a single media file, not the library.
                 runCatching {
@@ -3747,7 +4451,16 @@ object HavenNet : InboundListener {
                             // start / background sync / 2-min backfill retries it — the media reaches a
                             // relay even if the app was killed the instant after the post was made.
                             val landed = uploadMedia(job.circleId, job.ref, job.force)
-                            if (landed && !job.force) clearPendingBackup(job.ref, job.circleId)
+                            if (landed && !job.force) {
+                                clearPendingBackup(job.ref, job.circleId)
+                                // A FRESH post's blob just landed on a relay — tell the circle so their
+                                // devices prefetch NOW instead of on their next missing-media sweep
+                                // (frame 32; Apple MediaBackupQueue drain parity).
+                                if (job.priority && job.atMs > 0 &&
+                                    System.currentTimeMillis() - job.atMs < 600_000) {
+                                    announceMediaLanded(job.ref, job.circleId)
+                                }
+                            }
                         }
                         is MediaJob.Restore -> {
                             // A relay REFUSED us rather than lacking the blob: publish our device roster
@@ -3759,6 +4472,7 @@ object HavenNet : InboundListener {
                                 (healForbiddenRelays() && fetchMediaFromRelay(job.circleId, job.ref))) &&
                                 acceptFetchedBlob(job.ref)
                             if (got) {
+                                mediaArrived(job.ref)
                                 withContext(Dispatchers.Main) { feedVersion.value++ }
                             }
                         }
@@ -3773,8 +4487,10 @@ object HavenNet : InboundListener {
         (if (job is MediaJob.Backup) (if (job.force) "BF|" else "B|") else "R|") + job.ref + "|" + job.circleId
 
     /** Enqueue a media blob to mirror to the circle's relays — serialized (one in RAM at a time).
-     *  [force] = the 1.0.8 recovery overwrite (bypass the "already held?" probe + ledger). */
-    private fun enqueueBackup(circleId: String, ref: String, force: Boolean = false) {
+     *  [force] = the 1.0.8 recovery overwrite (bypass the "already held?" probe + ledger).
+     *  [priority] = just-authored media — rides the fast lane ahead of any backfill backlog and
+     *  announces itself to the circle the moment it lands (frame 32). */
+    private fun enqueueBackup(circleId: String, ref: String, force: Boolean = false, priority: Boolean = false) {
         if (LocalMedia.isSynthetic(ref)) return   // geo: pins et al. carry no bytes — never relay-storable
         // Record the job DURABLY before the in-memory Channel enqueue, so a story's blob still reaches a
         // relay even if the app is killed the instant after posting. The Channel (mediaQueue) is
@@ -3784,10 +4500,11 @@ object HavenNet : InboundListener {
         // recovery-overwrite path (force) isn't persisted here: it has its own sticky latch
         // (mediaResealRefs) and must not resurrect across launches once done.
         if (!force) addPendingBackup(ref, circleId)
-        val job = MediaJob.Backup(ref, circleId, force)
+        val job = MediaJob.Backup(ref, circleId, force, priority,
+            atMs = if (priority) System.currentTimeMillis() else 0L)
         if (!offerMediaJob(jobKey(job))) return
         ensureMediaQueueDraining()
-        mediaQueue.trySend(job)
+        (if (priority) mediaPriorityQueue else mediaQueue).trySend(job)
     }
 
     /** Enqueue a missing media blob to fetch from the circle's relays — serialized (one at a time). */
@@ -4110,12 +4827,65 @@ object HavenNet : InboundListener {
     val downloadingMedia = mutableStateListOf<String>()
     val unavailableMedia = mutableStateListOf<String>()
 
+    /** Relays were reachable and NONE holds the blob — we're waiting on the SENDER's device to
+     *  upload it. Drives the placeholder's honest "Waiting for sender…" state (Apple parity). */
+    val waitingForSenderMedia = mutableStateListOf<String>()
+
+    /** Chunk progress for large chunked relay restores (ref → done/total) — the placeholder's i/n. */
+    val mediaRestoreProgress = androidx.compose.runtime.mutableStateMapOf<String, Pair<Int, Int>>()
+
+    /** thumb companion learned from `thumb:` markers while scanning feeds (content ref → thumb ref)
+     *  — how a placeholder six composables deep finds its blurred backdrop without the media list. */
+    private val thumbOfContent = java.util.Collections.synchronizedMap(HashMap<String, String>())
+    fun thumbRefFor(ref: String): String? = thumbOfContent[ref]
+
+    /** The bytes for [ref] just landed — clear every transient placeholder state it held. */
+    private fun mediaArrived(ref: String) {
+        scope.launch(Dispatchers.Main) {
+            downloadingMedia.remove(ref)
+            waitingForSenderMedia.remove(ref)
+            unavailableMedia.remove(ref)
+            mediaRestoreProgress.remove(ref)
+        }
+        synchronized(fastReq) { fastReq.remove(ref) }
+    }
+
+    /** Relays answered and none holds it — an honest different truth from "downloading" (we
+     *  aren't) and from "gone forever" (it never arrived anywhere). */
+    private fun noteMediaMissingOnRelays(ref: String) {
+        if (LocalMedia.has(ref)) return
+        scope.launch(Dispatchers.Main) {
+            if (!waitingForSenderMedia.contains(ref)) waitingForSenderMedia.add(ref)
+        }
+    }
+
+    /** Honest progress for the placeholder: i/n while a chunked blob reassembles. */
+    private fun noteRestoreProgress(ref: String, done: Int, total: Int) {
+        scope.launch(Dispatchers.Main) {
+            mediaRestoreProgress[ref] = done to total
+            if (!downloadingMedia.contains(ref)) downloadingMedia.add(ref)   // a chunked pull IS a download
+        }
+    }
+
+    private fun clearRestoreProgress(ref: String) {
+        scope.launch(Dispatchers.Main) {
+            mediaRestoreProgress.remove(ref)
+            downloadingMedia.remove(ref)
+        }
+    }
+
     /** User tapped "Download" on a placeholder for a blob we deliberately evicted: clear the eviction
      *  (so the normal missing-media path may fetch it), request it now (relay restore + a direct peer
      *  ask), and surface a spinner. If it hasn't arrived in ~45s, mark it unavailable. */
     fun downloadEvicted(ref: String) {
         EvictedMediaStore.clear(ref)
         unavailableMedia.remove(ref)
+        // A tap retry restarts every lane from the top: the fresh-lane schedule, the session
+        // unopenable mark (the author may have re-sealed the stored copy since), and the waiting
+        // state (Apple parity).
+        waitingForSenderMedia.remove(ref)
+        unopenableMedia.remove(ref)
+        synchronized(fastReq) { fastReq.remove(ref) }
         if (LocalMedia.has(ref)) return
         if (!downloadingMedia.contains(ref)) downloadingMedia.add(ref)
         // Find the circle that references this ref (for the relay restore key + a scoped direct ask).
@@ -4137,14 +4907,41 @@ object HavenNet : InboundListener {
         }
     }
 
+    // ---- Missing-media fetch lanes (fresh vs old; Apple FeedStore parity) -----------------------
+    //
+    // FRESH lane: refs referenced by events created < 5 min ago retry on a fast bounded backoff
+    // (5s → 10s → 20s → 45s → 90s, then park) with their OWN 5s re-sweep — so a post's media drops
+    // in seconds after the author's upload lands, instead of waiting out the flat 5-min throttle.
+    // The fresh state is in-memory: freshness itself expires in minutes.
+    private val FRESH_EVENT_MS = 5 * 60_000L
+    private val FAST_STEPS = longArrayOf(5_000, 10_000, 20_000, 45_000, 90_000)
+    private val fastReq = HashMap<String, Pair<Int, Long>>()   // ref -> (attempts, dueMs)
+    @Volatile private var fastSweepArmed = false
+
+    /** Keep a 5s re-sweep alive exactly while fresh refs are still retrying. */
+    private fun armFastMediaSweep() {
+        if (fastSweepArmed) return
+        fastSweepArmed = true
+        scope.launch {
+            delay(5_000)
+            fastSweepArmed = false
+            requestMissingMedia()
+        }
+    }
+
     /** Fetch missing feed media: try the circle relay (haven/media/<ref>) first, then ask contacts. */
     fun requestMissingMedia() {
         if (!ready) return
         val myHex = nodeIdHex
-        val missing = LinkedHashMap<String, String>()   // ref -> circleId
+        val nowMs = System.currentTimeMillis()
+        val now = nowMs()
+        val missing = LinkedHashMap<String, Pair<String, Boolean>>()   // ref -> (circleId, fresh)
+        val thumbs = LinkedHashMap<String, String>()   // thumb ref -> circleId (prefetched unconditionally)
         for (c in social.circles()) {
-            val feed = runCatching { social.feed(c.id, nowMs(), null) }.getOrDefault(emptyList())
+            val feed = runCatching { social.feed(c.id, now, null) }.getOrDefault(emptyList())
             for (item in feed) {
+                // FRESH = the referencing event is < 5 min old — its media rides the fast lane.
+                val fresh = now >= item.createdAt && (now - item.createdAt) < FRESH_EVENT_MS.toULong()
                 // Skip synthetic refs (geo: location pins): they carry no fetchable bytes, so counting
                 // them keeps the pending metric pinned above 0 forever and fires a doomed fetch each sweep.
                 // Skip refs the user DELIBERATELY evicted ("Manage media" / local-limit sweep): auto-
@@ -4154,8 +4951,22 @@ object HavenNet : InboundListener {
                 // Skip refs whose relay copy was found and could not be opened (acceptFetchedBlob):
                 // re-fetching them just re-downloads the same unopenable bytes; only the author's
                 // re-seal fixes them, and the set is dropped on restart so a repair is picked up.
-                item.media.forEach { if (!LocalMedia.isSynthetic(it) && !LocalMedia.has(it) && !EvictedMediaStore.contains(it) && !unopenableMedia.contains(it)) missing.putIfAbsent(it, c.id) }
-                item.comments.forEach { cm -> cm.media.forEach { if (!LocalMedia.isSynthetic(it) && !LocalMedia.has(it) && !EvictedMediaStore.contains(it) && !unopenableMedia.contains(it)) missing.putIfAbsent(it, c.id) } }
+                fun consider(ref: String) {
+                    if (LocalMedia.isSynthetic(ref) || LocalMedia.has(ref) ||
+                        EvictedMediaStore.contains(ref) || unopenableMedia.contains(ref)) return
+                    val prior = missing[ref]
+                    if (prior == null || (fresh && !prior.second)) missing[ref] = c.id to fresh
+                }
+                item.media.forEach { consider(it) }
+                // Thumb companions: remember the pairing (feeds the blurred placeholder) and
+                // prefetch for EVERY post regardless of lane/data saver — ≤32KB by contract.
+                for (m in item.media) {
+                    MediaVariants.parseThumb(m)?.let { (content, thumb) ->
+                        thumbOfContent[content] = thumb
+                        if (!LocalMedia.has(thumb) && !unopenableMedia.contains(thumb)) thumbs[thumb] = c.id
+                    }
+                }
+                item.comments.forEach { cm -> cm.media.forEach { consider(it) } }
             }
         }
         SyncMetrics.setPending(missing.size)   // media refs still missing locally (iOS nbMediaPending)
@@ -4164,10 +4975,27 @@ object HavenNet : InboundListener {
         // backlog of missing media flooded the network with hundreds of thousands of frames per cycle
         // (drowning real delivery — the iOS flood bug). Direct-request each ref at most once per 5 min and
         // only a handful per cycle; the content-addressed relay/mailbox restore below is the real path and
-        // is idempotent, so it carries the bulk without flooding.
-        val nowMs = System.currentTimeMillis()
+        // is idempotent, so it carries the bulk without flooding. FRESH refs bypass the 5-min throttle on
+        // their own bounded schedule (FAST_STEPS) — that is what makes media drop in WITH the post.
         var directBudget = 8
-        for ((ref, circleId) in missing) {
+        var fastActive = false
+        for ((ref, info) in missing) {
+            val (circleId, fresh) = info
+            if (fresh) {
+                val st = synchronized(fastReq) { fastReq[ref] } ?: (0 to 0L)
+                if (st.first >= FAST_STEPS.size) continue   // fast rounds spent — parked (ages into old lane)
+                fastActive = true
+                if (nowMs < st.second) continue             // not due yet
+                synchronized(fastReq) {
+                    fastReq[ref] = (st.first + 1) to (nowMs + FAST_STEPS[st.first])
+                    if (fastReq.size > 500) fastReq.keys.retainAll(missing.keys)
+                }
+                enqueueRestore(circleId, ref)
+                requestedRefs.add(ref)
+                val payload = myHex.toByteArray(Charsets.UTF_8) + ref.toByteArray(Charsets.UTF_8)
+                askForMedia(ref, payload, contacts.map { it.idHex })
+                continue
+            }
             // SERIALIZED RESTORE: the relay fetch loads a FULL blob into RAM, so it goes through the
             // single media-transfer queue (one blob at a time) instead of one concurrent coroutine per
             // missing ref — which used to pull the whole library into memory at once and OOM-crash.
@@ -4182,6 +5010,10 @@ object HavenNet : InboundListener {
             val payload = myHex.toByteArray(Charsets.UTF_8) + ref.toByteArray(Charsets.UTF_8)
             askForMedia(ref, payload, contacts.map { it.idHex })   // resumes from a partial when we hold one
         }
+        if (fastActive) armFastMediaSweep()
+        // Thumbs: no lanes, no data-saver gate — they are what makes the loading placeholder look
+        // like the photo. The restore queue's own dedup bounds the re-asks.
+        for ((t, cid) in thumbs) enqueueRestore(cid, t)
         if (mediaReqAt.size > 4000) mediaReqAt.clear()   // bound the throttle map
     }
 
@@ -4303,7 +5135,31 @@ object HavenNet : InboundListener {
     }
 
     /** LIST keys under a prefix via the relay's plain-HTTP interface (`GET /l/<prefix>`). */
-    private fun relayHttpList(base: String, token: String, prefix: String): Result<List<String>> = runCatching {
+    private fun relayHttpList(base: String, token: String, prefix: String): Result<List<String>> =
+        relayHttpListDelta(base, token, prefix, digest = null).map { it.first ?: emptyList() }
+
+    /** Last-seen LIST digest per `(relay node, prefix)`. Only committed once a listing's keys were
+     *  fully processed — otherwise a 204 on the next poll would hide keys we still owe a GET. */
+    private val mailboxListDigests = HashMap<String, String>()
+
+    /** Drop cached LIST digests whose keys start with [nodeHex] (relay forgotten/erased) or every
+     *  digest when the seen-set is reset — the next poll must re-list in full. */
+    private fun invalidateListDigests(nodeHex: String? = null) {
+        synchronized(mailboxListDigests) {
+            if (nodeHex == null) mailboxListDigests.clear()
+            else mailboxListDigests.keys.removeAll { it.startsWith("$nodeHex|") }
+        }
+    }
+
+    /**
+     * Delta-LIST (the radio saver, core httprelay.rs `X-Haven-List-Digest`): echo the last-seen
+     * digest for this prefix and an UNCHANGED key set comes back as a bodiless 204 (`first ==
+     * null`) instead of the same list again. A 200 carries the fresh keys plus the digest to echo
+     * next time. A relay that doesn't speak the header simply never answers 204 and never hands us
+     * a digest — today's behavior. Apple SharedStore.httpListDelta parity.
+     */
+    private fun relayHttpListDelta(base: String, token: String, prefix: String,
+                                   digest: String?): Result<Pair<List<String>?, String?>> = runCatching {
         val auth = httpAuth(token, "GET", prefix, ByteArray(0))
             ?: throw java.io.IOException("cannot sign relay LIST")
         val root = base.trimEnd('/')
@@ -4311,12 +5167,15 @@ object HavenNet : InboundListener {
         val c = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
             connectTimeout = 4000; readTimeout = 30000
             setRequestProperty("Authorization", auth)
+            if (!digest.isNullOrEmpty()) setRequestProperty("X-Haven-List-Digest", digest)
         }
         try {
+            val respDigest = c.getHeaderField("X-Haven-List-Digest")?.trim()?.takeIf { it.isNotEmpty() }
             when (c.responseCode) {
+                204 -> null to respDigest   // nothing new — skip the GETs
                 in 200..299 -> {
                     val text = c.inputStream.bufferedReader().use { it.readText() }
-                    text.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
+                    text.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList() to respDigest
                 }
                 401, 403 -> throw RelayForbidden()
                 else -> throw java.io.IOException("http list ${c.responseCode}")
@@ -4828,32 +5687,97 @@ object HavenNet : InboundListener {
         // allowed to ask for it.
         if (synchronized(rosterNeeded) { rosterNeeded.isEmpty() }) {
             android.util.Log.i("MediaSync", "fetch ref=$ref NOT FOUND — no relay served it")
+            // Honest placeholder state: the relays answered and none holds it — we are waiting on
+            // the SENDER to put it (back) up, which is a different thing from "downloading" or
+            // "gone forever" (Apple noteMediaMissingOnRelays parity).
+            noteMediaMissingOnRelays(ref)
         } else {
             android.util.Log.i("MediaSync", "fetch ref=$ref REFUSED by ${synchronized(rosterNeeded) { rosterNeeded.size }} relay(s) — not missing; re-publishing our roster so the retry is allowed")
         }
         return false
     }
 
+    // ---- Resumable chunked relay restore (.part bookkeeping; Apple SharedStore parity) ----------
+    //
+    // A chunked relay download used to be all-or-nothing: any chunk miss threw the temp file away,
+    // so a 600 MB video over a flaky tunnel restarted from chunk 0 every retry — the mirror image
+    // of the upload-resume problem (frame-33 peer resume already fixed the peer path). Chunks are
+    // fetched IN ORDER and appended, so resume state is just "how many leading chunks are in the
+    // .part file", persisted in a sidecar next to it. The manifest's chunk count keys validity: a
+    // count mismatch (a different seal uploaded meanwhile) discards the partial.
+
+    private fun restorePartsDir(): File =
+        File(appContext.filesDir, "relay-parts").apply { mkdirs() }
+    private fun restorePartFile(ref: String): File {
+        val safe = MessageDigest.getInstance("SHA-256").digest(ref.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }.take(32)
+        return File(restorePartsDir(), "$safe.part")
+    }
+    private fun restoreMetaFile(ref: String): File = File(restorePartFile(ref).path + ".meta")
+    /** Leading chunks already in the .part file (0 = no valid partial for this chunk count). */
+    private fun loadRestorePart(ref: String, chunks: Int): Int = runCatching {
+        val meta = restoreMetaFile(ref).takeIf { it.exists() }?.readText()?.trim() ?: return 0
+        val (c, got) = meta.split(':').let { it.getOrNull(0)?.toIntOrNull() to it.getOrNull(1)?.toIntOrNull() }
+        if (c != chunks || got == null || got <= 0 || got > chunks) return 0
+        if (!restorePartFile(ref).exists()) return 0
+        got
+    }.getOrDefault(0)
+    private fun saveRestorePart(ref: String, chunks: Int, got: Int) {
+        runCatching { restoreMetaFile(ref).writeText("$chunks:$got") }
+    }
+    private fun clearRestorePart(ref: String) {
+        runCatching { restorePartFile(ref).delete() }
+        runCatching { restoreMetaFile(ref).delete() }
+    }
+    /** Reclaim abandoned partials (untouched > 7 days) — cheap, once per process. */
+    @Volatile private var sweptRestoreParts = false
+    private fun sweepRestorePartsOnce() {
+        if (sweptRestoreParts) return
+        sweptRestoreParts = true
+        scope.launch {
+            runCatching {
+                val cutoff = System.currentTimeMillis() - 7L * 86_400_000
+                restorePartsDir().listFiles()?.forEach { if (it.lastModified() < cutoff) it.delete() }
+            }
+        }
+    }
+
     /**
      * Persist a fetched media [head] for [ref]. If [head] is a chunk manifest, fetch each chunk via
-     * [getChunk] and APPEND it to a temp file on disk (streaming — the full sealed blob is never held in
-     * RAM), then adopt it. Otherwise [head] IS the sealed blob (legacy/small). Returns false on any
-     * missing chunk so the caller can try the next relay.
+     * [getChunk] and APPEND it to a PERSISTENT .part file on disk (streaming — the full sealed blob
+     * is never held in RAM), then adopt it. Otherwise [head] IS the sealed blob (legacy/small).
+     * RESUMABLE: the sidecar records how many leading chunks landed, so a retry after a mid-download
+     * failure fetches only the missing chunks instead of restarting a multi-hundred-MB pull.
+     * Returns false on any missing chunk so the caller can try the next relay (the partial is KEPT).
      */
     private suspend fun reassembleInto(ref: String, head: ByteArray, getChunk: suspend (Int) -> ByteArray?): Boolean {
         val count = parseManifest(head)
         if (count == null) { LocalMedia.writeRawSealed(ref, head); return true }
-        val part = LocalMedia.newSealedPart(ref)
-        for (i in 0 until count) {
+        sweepRestorePartsOnce()
+        val part = restorePartFile(ref)
+        var have = loadRestorePart(ref, count)
+        if (have == 0) {
+            // No (valid) partial — start fresh.
+            runCatching { part.delete() }
+            runCatching { part.createNewFile() }
+        } else {
+            android.util.Log.i("MediaSync", "reassemble ref=$ref resuming at chunk $have/$count")
+        }
+        for (i in have until count) {
             val chunk = getChunk(i)
             if (chunk == null || !LocalMedia.appendSealedPart(part, chunk)) {
-                runCatching { part.delete() }
-                android.util.Log.i("MediaSync", "reassemble ref=$ref FAILED at chunk $i/$count")
+                // KEEP the partial + sidecar — the next attempt resumes from `have`.
+                clearRestoreProgress(ref)
+                android.util.Log.i("MediaSync", "reassemble ref=$ref STALLED at chunk $i/$count — partial kept for resume")
                 return false
             }
+            have = i + 1
+            saveRestorePart(ref, count, have)
+            noteRestoreProgress(ref, have, count)   // honest i/n for the placeholder
         }
+        clearRestoreProgress(ref)
         val ok = LocalMedia.adoptSealedPart(ref, part)
-        if (!ok) runCatching { part.delete() }
+        clearRestorePart(ref)
         android.util.Log.i("MediaSync", "reassemble ref=$ref chunks=$count adopted=$ok")
         return ok
     }
@@ -5411,6 +6335,28 @@ object HavenNet : InboundListener {
         }
     }
 
+    /** QA driver only (DEBUG): wire a relay entry + make it the all-circles default — the same
+     *  state a sealed announce builds, minus the announce. Prefs-file surgery from the harness
+     *  raced the app's own rewrites (the classic silent no-relay leg); going through this API
+     *  is authoritative and persists like any UI-adopted relay. [derp] mirrors the announce's
+     *  `derp` field: without it the emulator has no addressing route to the stub's node id (no
+     *  n0 record) and every iroh dial dies in discovery — refreshHavenFabric would also rewrite
+     *  `haven.fabric` from the entries and wipe any hand-patched DERP set. */
+    fun qaWireRelay(hex: String, urls: List<String>, token: String, derp: String = "") {
+        val now = System.currentTimeMillis()
+        relayEntries[hex] = RelayEntry(
+            hex = hex, name = "QA wired", active = true, lastSeenMs = now, isS3 = false,
+            httpUrls = urls, httpToken = token, addedAtMs = now,
+            derpUrl = derp.trim().trimEnd('/'),
+        )
+        val list = relayNodes.getOrPut("default") { mutableListOf() }
+        if (!list.contains(hex)) list.add(hex)
+        defaultRelayHex = hex
+        saveRelayNodes()
+        if (derp.isNotBlank()) refreshHavenFabric()
+        pollMailboxNow()
+    }
+
     private fun saveRelayNodes() {
         val o = JSONObject()
         relayNodes.forEach { (k, v) -> o.put(k, JSONArray().apply { v.forEach { put(it) } }) }
@@ -5448,6 +6394,7 @@ object HavenNet : InboundListener {
         contacts.clear(); pending.clear(); blocked.clear(); initiated.clear()
         relayNodes.clear(); relayClients.clear(); relayHealth.clear(); seenMailbox.clear()
         runCatching { seenMailboxFile.delete() }   // a new identity must not inherit the seen-set
+        invalidateListDigests()   // a fresh seen-set must re-list everything (no 204 short-circuit)
         relayEntries.clear(); suppressedRelays.clear(); forgotAtRelays.clear(); clearedRelayForgets.clear(); defaultRelayHex = ""
         Presign.reset()
         CircleLock.reset()
@@ -5557,10 +6504,75 @@ object HavenNet : InboundListener {
         scope.launch(Dispatchers.Main) { bumpRelays() }
     }
 
+    /** Roster-publish heal for self-sync refusals (desktop `poll_self_sync` parity): re-publish our
+     *  device roster to every relay that 403'd this pass, so the NEXT pass converges instead of
+     *  refusing forever. Rate-limited inside [healForbiddenRelays]; no-op when nothing refused.
+     *  Without this the selfsync ladder's [noteRefused] calls were write-only on Android — only the
+     *  MEDIA paths ever healed, so a device the relay had never seen 403'd self-sync indefinitely. */
+    suspend fun selfSyncHealRefusals(): Boolean = healForbiddenRelays()
+
     /** Connect (cached) to a relay, honoring backoff. Public wrapper so the coordinator can list/get/put. */
     suspend fun selfSyncRelayClient(nodeHex: String): RelayClient? = relayClientFor(nodeHex)
     suspend fun selfSyncRelayFailed(nodeHex: String) = relayFailed(nodeHex)
     fun selfSyncRelayOk(nodeHex: String) = markRelayOk(nodeHex)
+
+    // ---- Self-sync transport ladder (parity with the mailbox paths) --------------------------
+    //
+    // The coordinator's RelayTransport used relayClientFor ONLY, so a relay this device cannot
+    // iroh-dial — an HTTP-only announce, a dial in backoff, our own hosted relay (self-dial
+    // guard) — silently carried NO self-sync slots: two linked devices sharing only a friend's
+    // relay never converged ("my devices each receive different things"). These rungs mirror the
+    // devroster/mailbox ladder: own local store, then the signed-HTTP interface (httpAuthHeader —
+    // per-request node-key signature, token folded in and never sent), with the iroh dial staying
+    // the coordinator's first remote choice. A 403 routes through noteRefused → roster publish →
+    // retry, never a URL backoff (the refusal IS the thing a roster publish fixes).
+
+    /** Our own hosted relay's store for self-sync slots (no self-dial). Null unless we host [nodeHex]. */
+    fun selfSyncLocalStore(nodeHex: String): uniffi.haven_ffi.RelayServerHandle? =
+        relayHost?.takeIf { runCatching { it.nodeIdHex() }.getOrNull() == nodeHex }
+
+    /** LIST self-sync slot keys over the relay's signed-HTTP interface. Null = no usable interface. */
+    fun selfSyncHttpList(nodeHex: String, prefix: String): List<String>? {
+        val entry = relayEntries[nodeHex] ?: return null
+        val bases = httpUrlsFor(entry)
+        if (bases.isEmpty()) { Log.d(TAG, "selfsync http-list: no usable base for ${nodeHex.take(8)}") }
+        for (base in bases) {
+            val r = relayHttpList(base, entry.httpToken, prefix)
+            if (r.isSuccess) {
+                markRelaySeen(nodeHex)
+                Log.d(TAG, "selfsync http-list ${r.getOrNull()?.size ?: -1} keys via $base")
+                return r.getOrNull()
+            }
+            if (r.exceptionOrNull() is RelayForbidden) { noteRefused(nodeHex, "selfsync list"); return null }
+            Log.d(TAG, "selfsync http-list failed via $base: ${r.exceptionOrNull()?.message}")
+            markHttpUrlBad(base)
+        }
+        return null
+    }
+
+    /** GET one self-sync slot over the relay's signed-HTTP interface (null = miss or unreachable). */
+    fun selfSyncHttpGet(nodeHex: String, key: String): ByteArray? {
+        val entry = relayEntries[nodeHex] ?: return null
+        for (base in httpUrlsFor(entry)) {
+            val r = relayHttpGet(base, entry.httpToken, key)
+            if (r.isSuccess) { markRelaySeen(nodeHex); return r.getOrNull() }
+            if (r.exceptionOrNull() is RelayForbidden) { noteRefused(nodeHex, "selfsync slot get"); return null }
+            markHttpUrlBad(base)
+        }
+        return null
+    }
+
+    /** PUT one self-sync slot over the relay's signed-HTTP interface. */
+    fun selfSyncHttpPut(nodeHex: String, key: String, data: ByteArray): Boolean {
+        val entry = relayEntries[nodeHex] ?: return false
+        for (base in httpUrlsFor(entry)) {
+            val r = relayHttpPut(base, entry.httpToken, key, data)
+            if (r.isSuccess) { markRelaySeen(nodeHex); return true }
+            if (r.exceptionOrNull() is RelayForbidden) { noteRefused(nodeHex, "selfsync slot put"); return false }
+            markHttpUrlBad(base)
+        }
+        return false
+    }
 
     // ---- Local store mutation for self-sync apply() --------------------------------------
 
@@ -5599,6 +6611,48 @@ object HavenNet : InboundListener {
         reconcileSupersededCircles()   // an upgrade synced from another device may have superseded a circle
         persist()
         scope.launch(Dispatchers.Main) { feedVersion.value++; circlesVersion.value++ }
+    }
+
+    // ---- Self-sync nudge (debounced local-mutation push) ---------------------------------
+
+    /** Debounce window for [selfSyncNudge] — long enough to coalesce a burst of edits (typing out a
+     *  profile, pinning a few DMs) into ONE forced pass, short enough that the user's other devices
+     *  see the change in seconds. */
+    private const val SELF_SYNC_NUDGE_MS = 4_000L
+
+    @Volatile private var selfSyncNudgeJob: Job? = null
+
+    /**
+     * A LOCAL mutation of self-sync-carried state just happened (profile/settings edit, circle
+     * create/membership change, DM pin/read, retention change) — schedule ONE forced self-sync pass
+     * in [SELF_SYNC_NUDGE_MS] so the edit reaches the user's other devices in seconds instead of
+     * waiting out the periodic pollMailbox cadence (30s base, STRETCHED to minutes when idle).
+     *
+     * Coalescing: further mutations inside the window ride the already-scheduled shot (the timer is
+     * NOT restarted, so a burst can't starve the push past the window). Fires ONLY on real local
+     * mutations — sync-applied values go through applyingRemote/applySynced paths that never land
+     * here — so an idle device schedules nothing and the adaptive-cadence heat work stands. The
+     * forced pass pushes through MODERATE thermal (the user asked for this edit) but yields at
+     * SEVERE+ — there the change rides the next periodic pass instead. The periodic cadence itself
+     * is untouched.
+     */
+    fun selfSyncNudge() {
+        if (!ready) return   // pre-start edits (onboarding) publish on the launch pollMailbox pass
+        if (selfSyncNudgeJob?.isActive == true) return   // one shot already pending — this burst rides it
+        selfSyncNudgeJob = scope.launch {
+            delay(SELF_SYNC_NUDGE_MS)
+            if (android.os.Build.VERSION.SDK_INT >= 29) {
+                val pm = appContext.getSystemService(android.content.Context.POWER_SERVICE) as? android.os.PowerManager
+                when (pm?.currentThermalStatus) {
+                    android.os.PowerManager.THERMAL_STATUS_SEVERE,
+                    android.os.PowerManager.THERMAL_STATUS_CRITICAL,
+                    android.os.PowerManager.THERMAL_STATUS_EMERGENCY,
+                    android.os.PowerManager.THERMAL_STATUS_SHUTDOWN -> return@launch
+                    else -> {}
+                }
+            }
+            runCatching { SelfSyncCoordinator.sync(social, force = true) }
+        }
     }
 
     // ---- Demo seeding support (DEBUG-only; see DemoSeed.kt) ------------------------------

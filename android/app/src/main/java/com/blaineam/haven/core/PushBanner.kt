@@ -11,6 +11,9 @@ object PushBanner {
         val body: String,
         val privateBody: String,
         val emoji: String? = null,
+        /** The authored/PARENT post id (wire field `p`) — the recipient's tap opens the exact
+         *  post/thread entry instead of the legacy circle route. Best-effort; null keeps legacy. */
+        val postId: String? = null,
     )
 
     fun clip(text: String?, limit: Int = 80): String? {
@@ -29,7 +32,21 @@ object PushBanner {
 
     private fun isAudio(ref: String) = ref.startsWith("aud_") || ref.startsWith("a:")
 
+    // Each factory takes the authored/PARENT post id when the caller has it (a reaction/comment
+    // always does — it's their target; a post reads its own id back via lastAuthoredEventId), so
+    // the recipient's tap opens the exact post. A nil id keeps the old circle/thread route.
+    // Parity with Apple PushBanner's `tagged` wrapper.
+
     fun forPost(
+        circleId: String,
+        circleName: String,
+        body: String,
+        media: List<String>,
+        story: Boolean,
+        postId: String? = null,
+    ): Copy = tag(innerForPost(circleId, circleName, body, media, story), postId)
+
+    private fun innerForPost(
         circleId: String,
         circleName: String,
         body: String,
@@ -67,32 +84,44 @@ object PushBanner {
         }
     }
 
-    fun forReaction(emoji: String, circleId: String): Copy {
+    fun forReaction(emoji: String, circleId: String, postId: String? = null): Copy {
         val isDm = circleId.startsWith("dm:")
         val e = emoji.ifEmpty { "👍" }
-        return Copy(
-            "react",
-            if (isDm) "Reacted $e to your message" else "Reacted $e to your post",
-            if (isDm) "Reacted to your message" else "Reacted to your post",
-            e,
+        return tag(
+            Copy(
+                "react",
+                if (isDm) "Reacted $e to your message" else "Reacted $e to your post",
+                if (isDm) "Reacted to your message" else "Reacted to your post",
+                e,
+            ),
+            postId,
         )
     }
 
-    fun forComment(body: String, circleId: String, circleName: String): Copy {
+    fun forComment(body: String, circleId: String, circleName: String, postId: String? = null): Copy {
         val isDm = circleId.startsWith("dm:")
         clip(body)?.let {
-            return Copy(
-                "comment",
-                if (isDm) "Replied: $it" else "Commented in $circleName: $it",
-                if (isDm) "Replied to your message" else "Left a comment",
+            return tag(
+                Copy(
+                    "comment",
+                    if (isDm) "Replied: $it" else "Commented in $circleName: $it",
+                    if (isDm) "Replied to your message" else "Left a comment",
+                ),
+                postId,
             )
         }
-        return Copy(
-            "comment",
-            if (isDm) "Replied to your message" else "Commented in $circleName",
-            if (isDm) "Replied to your message" else "Left a comment",
+        return tag(
+            Copy(
+                "comment",
+                if (isDm) "Replied to your message" else "Commented in $circleName",
+                if (isDm) "Replied to your message" else "Left a comment",
+            ),
+            postId,
         )
     }
+
+    private fun tag(copy: Copy, postId: String?): Copy =
+        if (postId.isNullOrEmpty()) copy else copy.copy(postId = postId)
 
     /** `detail`: full | private | minimal */
     fun displayBody(full: String, privateBody: String?, kind: String?, detail: String): Pair<Boolean, String> {

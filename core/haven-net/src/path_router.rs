@@ -320,7 +320,7 @@ async fn serve_status(client: &mut TcpStream, head: &[u8], state: &ProxyState) -
                     200,
                     "ok",
                     "text/html; charset=utf-8",
-                    status_html(&json, &state.local_addr.to_string()),
+                    crate::statuspage::front_door_page(&json, &state.local_addr.to_string()),
                 )
             } else {
                 (200, "ok", "application/json; charset=utf-8", json)
@@ -350,34 +350,6 @@ async fn serve_status(client: &mut TcpStream, head: &[u8], state: &ProxyState) -
     }
     let _ = client.shutdown().await;
     Ok(())
-}
-
-fn status_html(json: &str, bind: &str) -> String {
-    // Escape for HTML text node (json is our own ASCII).
-    let escaped = json.replace('&', "&amp;").replace('<', "&lt;");
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Haven relay</title>
-<style>
- body{{font-family:system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem;line-height:1.45;color:#111}}
- code,pre{{font-size:.85rem;background:#f4f4f5;padding:.15rem .35rem;border-radius:4px}}
- pre{{padding:1rem;overflow:auto}}
- .ok{{color:#15803d;font-weight:600}}
-</style></head><body>
-<h1>Haven path proxy</h1>
-<p class="ok">Front door is up.</p>
-<p>This URL is the <strong>public HTTPS origin</strong> for a circle relay (media + iroh fabric + call hairpin).
-It is not a website — Haven clients use signed API paths. Opening it in a browser only checks that the tunnel reaches this host.</p>
-<p>Local bind: <code>{bind}</code></p>
-<ul>
- <li><code>/k/*</code> <code>/l/*</code> <code>/t/*</code> — sealed media mailbox</li>
- <li><code>/relay</code> <code>/derp</code> <code>/ping</code> — iroh DERP fabric</li>
- <li><code>/webrtc/hairpin</code> — call media over free Cloudflare</li>
-</ul>
-<pre>{escaped}</pre>
-</body></html>"#
-    )
 }
 
 fn header_value<'a>(head: &'a [u8], name: &str) -> Option<&'a str> {

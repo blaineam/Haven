@@ -94,6 +94,55 @@ struct PostCenterKey: PreferenceKey {
     }
 }
 
+/// Old-lane retry schedule for missing media, PERSISTED across launches (mirror of
+/// MediaBackupBackoff's shape, but for the FETCH side): 90s → 5m → 30m → 6h, then parked. The
+/// in-memory version reset on every launch, so each app open re-requested the entire backlog of
+/// permanently-missing media at the tight cadence — steady open-the-app heat for bytes that were
+/// never going to arrive. A landed blob, a tap retry, or a fresh ingest of the ref clears it.
+@MainActor
+enum MediaFetchBackoff {
+    private static let steps: [UInt64] = [90_000, 300_000, 1_800_000, 21_600_000]
+    private static let defaultsKey = "haven.media.reqBackoff.v1"
+    private struct Entry: Codable { var n: Int; var due: UInt64 }
+    private static var map: [String: Entry] = {
+        guard let d = UserDefaults.standard.data(forKey: defaultsKey),
+              let m = try? JSONDecoder().decode([String: Entry].self, from: d) else { return [:] }
+        return m
+    }()
+    private static var savePending = false
+    private static func save() {
+        guard !savePending else { return }
+        savePending = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            savePending = false
+            if let d = try? JSONEncoder().encode(map) { UserDefaults.standard.set(d, forKey: defaultsKey) }
+        }
+    }
+    private static func nowMs() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
+
+    /// Whether `ref`'s next attempt is due (an unknown ref is always due).
+    static func due(_ ref: String) -> Bool {
+        guard let e = map[ref] else { return true }
+        return nowMs() >= e.due
+    }
+    /// True once every round has been spent — the caller moves the ref to `unavailableMedia`.
+    static func exhausted(_ ref: String) -> Bool { (map[ref]?.n ?? 0) > steps.count }
+    /// Record an attempt (grows the gap by one step).
+    static func recordAttempt(_ ref: String) {
+        let n = (map[ref]?.n ?? 0) + 1
+        let gap = steps[min(n - 1, steps.count - 1)]
+        map[ref] = Entry(n: n, due: nowMs() + gap)
+        if map.count > 4000 { map.removeAll() }   // bound (matches the old throttle map's cap)
+        save()
+    }
+    /// The blob arrived, or the user asked to try again — restart from the top.
+    static func clear(_ ref: String) {
+        guard map.removeValue(forKey: ref) != nil else { return }
+        save()
+    }
+}
+
 /// Drives the live social demo: every action goes through the real hybrid-PQ social
 /// engine (seal → open → feed) in `haven-p2p`. Posts can carry media + a song.
 @MainActor
@@ -201,11 +250,7 @@ final class FeedStore: ObservableObject {
         if RelayHost.shared.serving { mult = max(mult, mult * 2) }
         #endif
         #if os(iOS)
-        switch ProcessInfo.processInfo.thermalState {
-        case .serious, .critical: mult *= 4
-        case .fair: mult *= 2
-        default: break
-        }
+        mult *= ThermalPolicy.intervalMultiplier   // .fair ×2 / .serious+ ×4 — centralized policy
         #endif
         if SettingsStore.shared.superDataSaver { mult = mult * 2 }
         return base * max(1, mult)
@@ -235,6 +280,10 @@ final class FeedStore: ObservableObject {
     /// Tears down the old engine, networking, and on-disk state, then configures fresh.
     func reconfigure(seed: Data) {
         node = nil
+        // Stop Multipeer cleanly BEFORE dropping the reference — deinit-time teardown cancels the
+        // browser in the same runloop turn it's freed (the Bonjour cancel crash); stop() parks
+        // discovery properly and the static retire pool holds the cancelled objects.
+        nearby?.stop()
         nearby = nil
         social = nil
         items.removeAll()
@@ -423,10 +472,14 @@ final class FeedStore: ObservableObject {
     private func startMailboxPolling() {
         mailboxTimer?.invalidate()
         liveCallTimer?.invalidate()
+        liveCallTimer = nil   // callActivityChanged below re-arms it only while a call exists
         // Linked Mac host recovery: re-queue DM mailbox keys that were stuck "seen" with no peer keys.
         // Also force a self-sync pass so device rosters / circle state from the primary land before
         // we re-open the re-queued commits (linked seedless Mac often needs the primary's roster).
         SharedStore.repairLinkedHostMailboxSeenOnce()
+        // Hello-lane recovery: forget hello seen-cursors claimed under the old claim-everything
+        // filter, so invites swallowed by the wrong device become claimable again.
+        SharedStore.repairHelloSeenOnce()
         forceSelfSyncNextPoll()
         pollMailboxNow()
         // 10s heartbeat, but the actual poll only runs when due (30s base, stretching when idle).
@@ -462,12 +515,27 @@ final class FeedStore: ObservableObject {
         // path-proxy log was ~98% `__live__` LIST — 6–17/sec continuous from idle 12s sweeps of
         // every DM×device hex (and overlapping polls piling up). Invites still land via iroh +
         // APNs/VoIP; HTTP is the fallback lane *during* a call when iroh can't carry SDP/ICE.
-        liveCallTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                guard CallManager.shared.callInProgress else { return }
-                await self.pollLiveCallFramesNow()
+        // Armed ONLY while a call exists — CallManager's `active` didSet flips it through
+        // callActivityChanged, so the 3s timer no longer wakes the main actor forever just to hit
+        // its callInProgress guard. If a call is already up (timer restart mid-call), arm now.
+        callActivityChanged(CallManager.shared.callInProgress)
+    }
+
+    /// CallManager's call lifecycle hook: arm the live-call HTTP poll on call start, kill it on end.
+    func callActivityChanged(_ inProgress: Bool) {
+        if inProgress {
+            guard liveCallTimer == nil else { return }
+            liveCallTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    guard CallManager.shared.callInProgress else { return }
+                    await self.pollLiveCallFramesNow()
+                }
             }
+            Task { @MainActor in await self.pollLiveCallFramesNow() }   // first poll right away
+        } else {
+            liveCallTimer?.invalidate()
+            liveCallTimer = nil
         }
     }
 
@@ -634,11 +702,15 @@ final class FeedStore: ObservableObject {
         CircleDeletionStore.markRecreated(id)   // a freshly-created circle is not deleted (LWW)
         // Switch-Flip §2: record it so the pin is re-applied on every launch.
         CircleCreatorStore.markCreated(id)
-        for m in memberIds { try? social.addExistingToCircle(circleId: id, nodeHex: m) }
+        for m in memberIds {
+            try? social.addExistingToCircle(circleId: id, nodeHex: m)
+            forceHelloNextSync(m, circleId: id)   // the grant rides the hello — never warm-skip it
+        }
         persist(); refreshCircles()
         activeCircleId = id
         refresh()
         if !memberIds.isEmpty { syncWithContacts() }   // greet + back-fill to the new members
+        nudgeSelfSyncSoon()   // the new circle reaches my other devices in seconds, not minutes
     }
 
     /// Lift a member's removal both client-side (the guard set) and in the engine (the authoritative
@@ -647,6 +719,7 @@ final class FeedStore: ObservableObject {
     func clearCircleRemovalEverywhere(idHex: String, circleId: String) {
         ConnectionsStore.shared.clearCircleRemoval(idHex, circleId: circleId)
         social?.clearCircleRemoval(circleId: circleId, nodeHex: idHex)
+        nudgeSelfSyncSoon()   // the re-add tombstone-lift must beat a sibling's stale removal
     }
 
     /// Add a known contact to the active circle, then sync so the circle forms on theirs.
@@ -655,8 +728,10 @@ final class FeedStore: ObservableObject {
         ConnectionsStore.shared.clearCircleRemoval(idHex, circleId: activeCircleId)  // deliberate re-add un-bans them
         social.clearCircleRemoval(circleId: activeCircleId, nodeHex: idHex)          // …and lift the engine tombstone
         try? social.addExistingToCircle(circleId: activeCircleId, nodeHex: idHex)
+        forceHelloNextSync(idHex, circleId: activeCircleId)   // the invite rides the hello — never warm-skip it
         persist(); refreshCircles()
         syncWithContacts()
+        nudgeSelfSyncSoon()   // membership change → my other devices
     }
 
     /// Remove a member from the active (custom) circle only — not a global block. This is durable: the
@@ -672,6 +747,7 @@ final class FeedStore: ObservableObject {
         social.removeFromCircle(circleId: circleId, nodeHex: idHex)  // purges their events + rotates epoch
         ConnectionsStore.shared.removeFromCircle(idHex, circleId: circleId)  // authoritative tombstone: block re-add
         persist(); refreshCircles(); refresh()
+        nudgeSelfSyncSoon()   // the removal tombstone reaches my other devices in seconds
     }
 
     /// Rip a member out of EVERY group circle at once — each removal is LWW-tombstoned so they can't
@@ -690,6 +766,7 @@ final class FeedStore: ObservableObject {
             }
         }
         persist(); refreshCircles(); refresh()
+        if count > 0 { nudgeSelfSyncSoon() }   // fan the tombstones out to my other devices now
         return count
     }
 
@@ -724,6 +801,7 @@ final class FeedStore: ObservableObject {
         social.renameCircle(id: circleId, name: trimmed)
         persist(); refreshCircles()
         syncWithContacts()
+        nudgeSelfSyncSoon()   // the new name reaches my other devices in seconds
     }
 
     /// Node ids that are members of a circle but NOT in your own contacts — people you can
@@ -804,10 +882,12 @@ final class FeedStore: ObservableObject {
     func addMemberToMyCircle(_ idHex: String) {
         guard let social else { return }
         try? social.addExistingToCircle(circleId: "default", nodeHex: idHex)
+        forceHelloNextSync(idHex, circleId: "default")
         if !ContactsStore.shared.contacts.contains(where: { $0.idHex == idHex }) {
             ContactsStore.shared.add(name: String(idHex.prefix(6)), idHex: idHex)
         }
         persist(); refreshCircles(); syncWithContacts()
+        nudgeSelfSyncSoon()   // membership + contact change → my other devices
     }
 
     /// Switch to a circle that isn't biometric-locked (used when an unlock is cancelled/fails,
@@ -829,6 +909,7 @@ final class FeedStore: ObservableObject {
         persist(); refreshCircles()
         activeCircleId = "default"
         refresh()
+        nudgeSelfSyncSoon()   // the deletion tombstone reaches my other devices in seconds
     }
 
     // MARK: - Direct messages (a DM is a private 2-person circle)
@@ -866,7 +947,9 @@ final class FeedStore: ObservableObject {
         social.createCircle(id: id, name: name)
         social.setCircleLiveLane(circleId: id, on: true)   // Switch-Flip §5: DM per-message forward secrecy
         try? social.addExistingToCircle(circleId: id, nodeHex: idHex)
+        forceHelloNextSync(idHex, circleId: id)
         persist(); refreshCircles(); syncWithContacts()
+        nudgeSelfSyncSoon()   // the (re-)opened DM reaches my other devices in seconds
         return id
     }
 
@@ -888,6 +971,7 @@ final class FeedStore: ObservableObject {
         social.setCircleLiveLane(circleId: id, on: true)   // Switch-Flip §5: DM per-message forward secrecy
         for hex in members where hex != myNodeHex { try? social.addExistingToCircle(circleId: id, nodeHex: hex) }
         persist(); refreshCircles(); syncWithContacts()
+        nudgeSelfSyncSoon()   // the (re-)opened group DM reaches my other devices in seconds
         return id
     }
 
@@ -937,7 +1021,7 @@ final class FeedStore: ObservableObject {
         if let hello = helloPayload(circleId: "default", circleName: "Your circle") {
             sendIroh(0, hello, to: req.idHex); nearbyBroadcast(0, hello)
             let meHex = social.myNodeHex()
-            Task { await SharedStore.putHello(circleId: "default", toHex: req.idHex, fromHex: meHex, hello: hello) }
+            Task { await SharedStore.putHello(circleId: "default", toHex: req.idHex, fromHex: meHex, hello: hello, force: true) }
         }
         if shareHistory {
             // Back-fill your past posts to them (and ensure the shared store has them).
@@ -1018,13 +1102,18 @@ final class FeedStore: ObservableObject {
 
     /// Send a DM with optional media (photos/videos/audio), a song, and optional
     /// disappearing retention (seconds; the message auto-deletes after that).
-    func sendMessage(to circleId: String, _ body: String, media: [String], music: TrackRefFfi?, retentionSecs: UInt64? = nil) {
-        guard let social, let env = try? social.post(circleId: circleId, body: body, media: media, music: music, retentionSecs: retentionSecs, story: false, muteVideo: false, createdAt: now()) else { return }
+    func sendMessage(to circleId: String, _ body: String, media rawMedia: [String], music: TrackRefFfi?, retentionSecs: UInt64? = nil) {
+        let media = withThumbMarkers(rawMedia)
+        let ts = now()
+        guard let social, let env = try? social.post(circleId: circleId, body: body, media: media, music: music, retentionSecs: retentionSecs, story: false, muteVideo: false, createdAt: ts) else { return }
         let name = circles.first(where: { $0.id == circleId })?.name ?? "your circle"
-        broadcastEvent(circleId, env, banner: .forPost(circleId: circleId, circleName: name, body: body, media: media, story: false))
+        // The engine derives event ids internally (BLAKE3 at author time) — read back the id of the
+        // message just created so the sealed banner's `p` deep-link opens THIS thread entry. Best-effort:
+        // nil keeps the legacy circle route.
+        let postId = social.lastAuthoredEventId(circleId: circleId, createdAt: ts)
+        broadcastEvent(circleId, env, banner: .forPost(circleId: circleId, circleName: name, body: body, media: media, story: false, postId: postId))
         postTick += 1
-        let circle = circleId
-        for ref in media { MediaBackupQueue.shared.enqueue(ref, circleId: circle, social: social) }
+        enqueueAuthoredMedia(media, circleId: circleId, social: social)
         // Heal 403-before-roster: publish device ids, then reannounce relay so the peer learns
         // public media URL immediately (cross-device / friend video DMs).
         if !media.isEmpty {
@@ -1043,13 +1132,13 @@ final class FeedStore: ObservableObject {
                      media: [String] = [], music: TrackRefFfi? = nil) {
         guard let social, let env = try? social.edit(circleId: circleId, target: id, body: body, media: media, music: music, muteVideo: false, createdAt: now()) else { return }
         let name = circles.first(where: { $0.id == circleId })?.name ?? "your circle"
-        broadcastEvent(circleId, env, banner: .forEdit(circleId: circleId, circleName: name)); postTick += 1; refresh()
+        broadcastEvent(circleId, env, banner: .forEdit(circleId: circleId, circleName: name, postId: id)); postTick += 1; refresh()
     }
 
     /// Delete (retract) one of your own messages in a specific (DM) circle.
     func deleteMessage(in circleId: String, _ id: String) {
         guard let social, let env = try? social.unsend(circleId: circleId, target: id, createdAt: now()) else { return }
-        broadcastEvent(circleId, env, banner: .forUnsend(circleId: circleId)); postTick += 1; refresh()
+        broadcastEvent(circleId, env, banner: .forUnsend(circleId: circleId, postId: id)); postTick += 1; refresh()
     }
 
     /// Delete a whole DM conversation locally (also clears any old contaminated thread).
@@ -1059,6 +1148,7 @@ final class FeedStore: ObservableObject {
         CircleDeletionStore.markDeleted(circleId)   // LWW tombstone so self-sync can't re-create it from a sibling
         social.leaveCircle(id: circleId)
         persist(); refreshCircles(); refresh()
+        nudgeSelfSyncSoon()   // the deletion tombstone reaches my other devices in seconds
         HavenLog.sync("DELETE-DM \(circleId.prefix(24))")
     }
 
@@ -1341,6 +1431,37 @@ final class FeedStore: ObservableObject {
     /// placeholder's spinner / "no longer available" states.
     @Published var downloadingMedia: Set<String> = []
     @Published var unavailableMedia: Set<String> = []
+    /// Relays were reachable and NONE holds the blob — we're waiting on the SENDER's device to
+    /// upload it. Drives the placeholder's honest "Waiting for sender…" state.
+    @Published var waitingForSenderMedia: Set<String> = []
+    /// Chunk progress for large chunked relay restores (ref → done/total) — the placeholder's i/n.
+    @Published var mediaRestoreProgress: [String: (done: Int, total: Int)] = [:]
+    /// Present-but-undecryptable blobs (bytes fetched, every circle failed to open them). SESSION
+    /// scoped, Android/desktop parity: without it the missing-media sweep re-downloaded the same
+    /// bad blob every cycle forever. A tap-retry (downloadEvicted) or relaunch clears it — by then
+    /// the author's forced re-seal may have replaced the stored copy.
+    var unopenableMedia: Set<String> = []
+
+    func noteMediaMissingOnRelays(_ ref: String) {
+        guard !MediaStore.shared.has(ref) else { return }
+        waitingForSenderMedia.insert(ref)
+    }
+    func noteUnopenableMedia(_ ref: String) { unopenableMedia.insert(ref) }
+    func noteRestoreProgress(_ ref: String, done: Int, total: Int) {
+        mediaRestoreProgress[ref] = (done, total)
+        downloadingMedia.insert(ref)   // a chunked pull IS a download — say so
+    }
+    func clearRestoreProgress(_ ref: String) {
+        mediaRestoreProgress.removeValue(forKey: ref)
+    }
+    /// The bytes for `ref` just landed — clear every transient placeholder state it held.
+    private func mediaArrived(_ ref: String) {
+        downloadingMedia.remove(ref)
+        waitingForSenderMedia.remove(ref)
+        unavailableMedia.remove(ref)
+        unopenableMedia.remove(ref)
+        mediaRestoreProgress.removeValue(forKey: ref)
+    }
 
     /// User tapped "Download" on a placeholder for a blob we deliberately evicted: clear the eviction
     /// (so the normal missing-media path may fetch it), request it now, and surface a spinner. If it
@@ -1348,6 +1469,11 @@ final class FeedStore: ObservableObject {
     func downloadEvicted(_ ref: String) {
         EvictedMediaStore.shared.clear(ref)
         unavailableMedia.remove(ref)
+        // A tap retry restarts every lane from the top: backoff schedule, session-unopenable mark
+        // (the author may have re-sealed the stored copy since), and the waiting state.
+        MediaFetchBackoff.clear(ref)
+        unopenableMedia.remove(ref)
+        waitingForSenderMedia.remove(ref)
         guard !MediaStore.shared.has(ref) else { scheduleRefresh(); return }
         downloadingMedia.insert(ref)
         requestMedia(ref)
@@ -1385,6 +1511,10 @@ final class FeedStore: ObservableObject {
     }
 
     private func bringOnline() {
+        // Re-entry (identity adoption paths call this again): stop the previous transport before
+        // building a fresh one — overwriting `nearby` frees the old browser in the same runloop
+        // turn as its cancel otherwise (the Bonjour cancel crash).
+        nearby?.stop()
         // Nearby Bluetooth / Wi-Fi mesh — works even with no internet at all.
         if let social {
             // Matrix QA stub is a pure relay host. Multipeer Bonjour discovery on the stub was
@@ -1657,6 +1787,14 @@ final class FeedStore: ObservableObject {
         syncWithContacts()
         forceSelfSyncNextPoll()
         pollMailboxNow()
+        pullActivity()
+    }
+
+    /// Refresh the in-app activity list from the engine (bell icon / ActivityView). Off-main via
+    /// EngineGate inside ActivityStore; deduped by event id, so calling liberally is cheap.
+    func pullActivity() {
+        guard let social else { return }
+        ActivityStore.shared.pull(social: social)
     }
 
     private func startSyncTimer() {
@@ -1724,10 +1862,11 @@ final class FeedStore: ObservableObject {
     /// Matrix multi-device QA: poll Application Support for `qa-cmd.json` and honor
     /// `haven://qa?...` deep links (post / story / dm / call) without camera or picker automation.
     ///
-    /// Drop file shape (deleted after one consume):
-    /// ```json
-    /// {"post":"…","story":"…","dm_to":"<64hex>","dm":"…","call_to":"<64hex>"}
-    /// ```
+    /// Drop file shape (deleted after one consume) — two dialects:
+    /// - legacy v1: `{"post":"…","story":"…","dm_to":"<64hex>","dm":"…","call_to":"<64hex>"}`
+    /// - qa-cmd v2 (docs/QA.md): `{"op":"post|story|dm|react|comment|profile|circle_create|
+    ///   circle_invite|file|music_post|mark_read|dump", …}` — every op answers with a fresh
+    ///   `qa-dump.json` next to the drop file.
     private var matrixQaTimer: Timer?
     private func startMatrixQaPoller() {
         matrixQaTimer?.invalidate()
@@ -1741,9 +1880,12 @@ final class FeedStore: ObservableObject {
     }
 
     /// Handle `haven://qa?post=&story=&dm_to=&dm=&call_to=` from `onOpenURL`.
+    /// A bare poke (`haven://qa?x=1`) consumes any waiting drop file immediately, so the
+    /// v2 driver doesn't have to wait out the 1.5s poll tick.
     @discardableResult
     func handleMatrixQaURL(_ url: URL) -> Bool {
         guard url.scheme == "haven", url.host == "qa" else { return false }
+        processMatrixQaDropFile()
         var items: [String: String] = [:]
         URLComponents(url: url, resolvingAgainstBaseURL: false)?
             .queryItems?
@@ -1759,6 +1901,11 @@ final class FeedStore: ObservableObject {
         try? FileManager.default.removeItem(at: url)
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             HavenLog.net("matrix-qa drop: invalid JSON")
+            return
+        }
+        // qa-cmd v2 dialect: an explicit {"op": …} routes through the full driver contract.
+        if obj["op"] is String {
+            applyMatrixQaV2(obj)
             return
         }
         var items: [String: String] = [:]
@@ -1810,18 +1957,9 @@ final class FeedStore: ObservableObject {
             let dmTo = (items["dm_to"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             let dmBody = items["dm"] ?? ""
             if dmTo.count == 64, !dmBody.isEmpty {
-                let name = ContactsStore.shared.name(forNodePrefix: dmTo) ?? "Friend"
-                let cid = self.startDM(with: dmTo, name: name)
-                // Author into the DM circle only (not the active feed circle).
-                if let social = self.social,
-                   let env = try? social.post(circleId: cid, body: dmBody, media: refs, music: nil,
-                                              retentionSecs: nil, story: false, muteVideo: false, createdAt: self.now()) {
-                    self.broadcastEvent(cid, env)
-                    for r in refs { MediaBackupQueue.shared.enqueue(r, circleId: cid, social: social) }
-                    self.persist(); self.refresh()
-                }
-                HavenLog.net("matrix-qa dm to=\(dmTo.prefix(8)) circle=\(cid.prefix(24)) body=\(dmBody.prefix(40)) media=\(refs.count)")
+                self.qaSendDM(to: dmTo, body: dmBody, refs: refs)
             }
+            self.qaWriteDump()   // v2 contract: every qa op refreshes qa-dump.json
         }
 
         if wantsMedia {
@@ -1951,6 +2089,300 @@ final class FeedStore: ObservableObject {
         input.markAsFinished()
         await writer.finishWriting()
         return writer.status == .completed ? url : nil
+    }
+
+    // MARK: qa-cmd v2 (docs/QA.md) — {"op": …} dispatch + qa-dump.json answer
+
+    /// Full v2 driver contract. Each op rides the SAME code path the UI uses (post/react/…),
+    /// then refreshes `qa-dump.json` so the orchestrator can assert on the resulting state.
+    private func applyMatrixQaV2(_ obj: [String: Any]) {
+        guard let social else {
+            HavenLog.net("matrix-qa v2 deferred — social not ready")
+            return
+        }
+        func str(_ k: String) -> String {
+            ((obj[k] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let op = str("op").lowercased()
+        let body = str("body")
+        HavenLog.net("matrix-qa v2 op=\(op)")
+
+        // Content ops honor an explicit "circle_id": switch the active circle through the same
+        // store call the UI's circle picker uses, then author normally. Nothing is restored —
+        // the QA fleet doesn't care which circle stays selected. A missing or unknown id keeps
+        // current behavior (author into whatever circle is active).
+        if ["post", "story", "file", "music_post"].contains(op) {
+            let target = str("circle_id")
+            if !target.isEmpty {
+                if social.circles().contains(where: { $0.id == target }) {
+                    setActiveCircle(target)
+                } else {
+                    HavenLog.net("matrix-qa v2 unknown circle_id=\(target.prefix(24)) — authoring into active")
+                }
+            }
+        }
+
+        switch op {
+        case "post", "story", "dm":
+            // Media-carrying ops share the async ref build (photo sync, video prepare hops a Task).
+            let mediaKind = str("media").lowercased()
+            let photoPath = str("photo_path")
+            let videoPath = str("video_path")
+            let wantsMedia = mediaKind == "photo" || mediaKind == "video"
+                || !photoPath.isEmpty || !videoPath.isEmpty
+            let finish: ([String]) -> Void = { [weak self] refs in
+                guard let self else { return }
+                switch op {
+                case "post":
+                    self.post(body, media: refs)
+                case "story":
+                    let caption = str("caption").isEmpty ? body : str("caption")
+                    if refs.isEmpty {
+                        self.post(caption, media: [], music: nil, retentionSecs: 86_400, story: true)
+                    } else {
+                        self.postStory(media: refs, caption: caption)
+                    }
+                case "dm":
+                    self.qaSendDM(to: str("dm_to").lowercased(), body: body, refs: refs)
+                default: break
+                }
+                self.qaMarkUserActive(mutating: true)
+                self.qaWriteDump()
+            }
+            if wantsMedia {
+                Task { @MainActor in
+                    let refs = await Self.qaBuildMediaRefs(photoPath: photoPath, videoPath: videoPath, kind: mediaKind)
+                    if refs.isEmpty {
+                        HavenLog.net("matrix-qa v2 media FAILED — no refs from kind=\(mediaKind)")
+                    }
+                    finish(refs)
+                }
+            } else {
+                finish([])
+            }
+            return   // dump written by `finish`
+
+        case "react":
+            let target = str("target_id"), emoji = str("emoji")
+            if !target.isEmpty, !emoji.isEmpty, let cid = qaFindCircleId(ofEvent: target) {
+                reactMessage(in: cid, target, emoji)   // the same reaction path the UI uses
+            } else {
+                HavenLog.net("matrix-qa v2 react: target not found id=\(target.prefix(16))")
+            }
+
+        case "comment":
+            let target = str("target_id")
+            if !target.isEmpty, !body.isEmpty, let cid = qaFindCircleId(ofEvent: target) {
+                commentMessage(in: cid, target, body)
+            } else {
+                HavenLog.net("matrix-qa v2 comment: target not found id=\(target.prefix(16))")
+            }
+
+        case "profile":
+            let name = str("name")
+            if !name.isEmpty {
+                // The real settings path: the didSet persists + stamps the LWW timestamp
+                // (self-sync carries it to my other devices), then push my card to contacts.
+                ProfileStore.shared.displayName = name
+                rebroadcastProfile()
+            }
+
+        case "circle_create":
+            let name = str("name")
+            if !name.isEmpty { createCircle(name: name) }   // same engine call the UI uses
+
+        case "circle_invite":
+            let cid = str("circle_id"), hex = str("dm_to").lowercased()
+            if !cid.isEmpty, hex.count == 64 {
+                // Mirror addContactToActiveCircle for a specific circle: deliberate add lifts
+                // any removal tombstone, then greet + back-fill so the circle forms on theirs.
+                ConnectionsStore.shared.clearCircleRemoval(hex, circleId: cid)
+                social.clearCircleRemoval(circleId: cid, nodeHex: hex)
+                try? social.addExistingToCircle(circleId: cid, nodeHex: hex)
+                forceHelloNextSync(hex, circleId: cid)   // invite rides the hello — never warm-skip
+                persist(); refreshCircles()
+                syncWithContacts()
+            } else {
+                HavenLog.net("matrix-qa v2 circle_invite: bad args circle=\(cid.prefix(24)) hex=\(hex.prefix(8))")
+            }
+
+        case "file":
+            let path = str("file_path")
+            if !path.isEmpty, FileManager.default.fileExists(atPath: path) {
+                // Same path the share/file picker takes: zip → `file_` ref → regular post.
+                let ref = MediaStore.shared.addFile(url: URL(fileURLWithPath: path))
+                if ref.isEmpty { HavenLog.net("matrix-qa v2 file: addFile failed \(path.suffix(40))") }
+                else { post(body, media: [ref]) }
+            } else {
+                HavenLog.net("matrix-qa v2 file: missing \(path.suffix(60))")
+            }
+
+        case "music_post":
+            let music = obj["music"] as? [String: Any]
+            let title = (music?["title"] as? String) ?? ""
+            let artist = (music?["artist"] as? String) ?? ""
+            // Song-card post path (composer + song picker) — a synthetic catalog id like DemoSeed's.
+            post(body, media: [], music: TrackRefFfi(catalogId: "qa-\(title)", title: title, artist: artist,
+                                                     artworkUrl: "", durationMs: 0))
+
+        case "mark_read":
+            let cid = str("circle_id")
+            if !cid.isEmpty {
+                DMReadStore.shared.markRead(cid)
+            } else {
+                for c in social.circles() where c.id.hasPrefix("dm:") { DMReadStore.shared.markRead(c.id) }
+            }
+
+        case "dump":
+            break   // the shared dump write below is the whole op
+
+        default:
+            HavenLog.net("matrix-qa v2 unknown op=\(op)")
+            qaWriteDump()
+            return   // not a user action — leave the sync cadence untouched
+        }
+        // Every recognized op models a user actively using the app; `dump` is the one
+        // non-mutating op — it marks activity but must NOT force a poll (see qaMarkUserActive).
+        qaMarkUserActive(mutating: op != "dump")
+        qaWriteDump()
+    }
+
+    /// qa-cmd v2 cadence contract: a qa op represents a user ACTIVELY using the app, so every op
+    /// resets the adaptive idle multiplier exactly like the real user-activity/foreground hook
+    /// (`bumpActivity`). Mutating ops additionally nudge an immediate mailbox poll — the slim
+    /// `pollMailboxNow` path, NOT the full Multipeer `forceSync` — so freshly authored content
+    /// uploads now. `dump` deliberately skips the poll: receivers must converge at their real
+    /// active-cadence poll, keeping measured convergence latency honest.
+    private func qaMarkUserActive(mutating: Bool) {
+        bumpActivity()
+        if mutating { pollMailboxNow() }
+    }
+
+    /// Author a DM (used by both the legacy `dm_to`+`dm` keys and the v2 `dm` op).
+    private func qaSendDM(to dmTo: String, body: String, refs: [String]) {
+        guard dmTo.count == 64, !body.isEmpty else { return }
+        let name = ContactsStore.shared.name(forNodePrefix: dmTo) ?? "Friend"
+        let cid = startDM(with: dmTo, name: name)
+        // Author into the DM circle only (not the active feed circle).
+        if let social,
+           let env = try? social.post(circleId: cid, body: body, media: refs, music: nil,
+                                      retentionSecs: nil, story: false, muteVideo: false, createdAt: now()) {
+            broadcastEvent(cid, env)
+            for r in refs { MediaBackupQueue.shared.enqueue(r, circleId: cid, social: social) }
+            persist(); refresh()
+        }
+        HavenLog.net("matrix-qa dm to=\(dmTo.prefix(8)) circle=\(cid.prefix(24)) body=\(body.prefix(40)) media=\(refs.count)")
+    }
+
+    /// Which circle holds this post (or comment) id? QA-only scan across every circle's feed —
+    /// react/comment targets arrive as bare event ids from another device's dump.
+    private func qaFindCircleId(ofEvent target: String) -> String? {
+        guard let social, !target.isEmpty else { return nil }
+        let nowMs = now()
+        for c in social.circles() {
+            for item in social.feed(circleId: c.id, nowMs: nowMs, viewerRetentionSecs: nil)
+            where item.id == target || item.comments.contains(where: { $0.id == target }) {
+                return c.id
+            }
+        }
+        return nil
+    }
+
+    /// One circle's worth of dump state, snapshotted off-main via the engine gate.
+    private struct QaCircleSnapshot {
+        let circle: CircleInfoFfi
+        let items: [FeedItemFfi]
+        let members: [String]
+    }
+
+    /// Stale-write guard: only the newest dump request may land (ops fire back-to-back).
+    private var qaDumpGeneration: UInt64 = 0
+
+    /// Write `qa-dump.json` next to the drop file — the v2 contract's answer after every op.
+    /// Engine reads (feed() decodes every envelope) happen off-main like `refresh`; the
+    /// MainActor-bound bits (MediaStore.has, ProfileStore) assemble + write on main.
+    private func qaWriteDump() {
+        guard let social else { return }
+        qaDumpGeneration &+= 1
+        let gen = qaDumpGeneration
+        let nowMs = now()
+        Task.detached(priority: .utility) { [weak self] in
+            let snapshot: [QaCircleSnapshot] = await EngineGate.shared.run {
+                social.circles().map { c in
+                    QaCircleSnapshot(circle: c,
+                                     items: social.feed(circleId: c.id, nowMs: nowMs, viewerRetentionSecs: nil),
+                                     members: social.contactNodeIds(circleId: c.id))
+                }
+            }
+            await MainActor.run { [weak self] in
+                guard let self, self.qaDumpGeneration == gen else { return }
+                self.qaWriteDumpFile(snapshot, accountHex: social.myNodeHex(), tsMs: nowMs)
+            }
+        }
+    }
+
+    private func qaWriteDumpFile(_ snapshot: [QaCircleSnapshot], accountHex: String, tsMs: UInt64) {
+        guard let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
+        #if os(iOS)
+        let device = "ios"
+        #else
+        let device = Bundle.main.bundleIdentifier?.contains("qa.stub") == true ? "mac-stub" : "mac"
+        #endif
+        let me = myNodeHex
+        var posts: [(ts: UInt64, row: [String: Any])] = []
+        var dms: [String: [[String: Any]]] = [:]
+        var circles: [[String: Any]] = []
+        for snap in snapshot {
+            circles.append(["id": snap.circle.id, "name": snap.circle.name, "members": snap.members])
+            if snap.circle.id.hasPrefix("dm:") {
+                // DM threads keyed by the peer's full account hex (group DMs fall back to the id body).
+                let peer = snap.members.first(where: { $0 != me }) ?? String(snap.circle.id.dropFirst(3))
+                var rows = dms[peer] ?? []
+                for item in snap.items where !item.unsent {
+                    // Fetchable blobs only — `poster:`/`thumb:` markers aren't bytes and must not
+                    // be able to fail the orchestrator's media-blob gate (Android realRefs /
+                    // desktop media_present already skip them; the stub runs THIS file).
+                    let real = item.media.filter { !MediaStore.isSynthetic($0) }
+                    rows.append(["id": item.id, "body": item.body,
+                                 "media_present": real.map { MediaStore.shared.has($0) }])
+                }
+                dms[peer] = rows
+            } else {
+                for item in snap.items where !item.unsent {
+                    // Same synthetic-marker filter as the DM rows above: a `poster:`/`thumb:`
+                    // marker can never be present, and mapping `has()` over it pinned a video
+                    // post's media_present at [true, false, true] forever — the E2E video-blob
+                    // gate failed even after the blob demonstrably landed on the relay.
+                    let real = item.media.filter { !MediaStore.isSynthetic($0) }
+                    posts.append((item.createdAt, [
+                        "id": item.id,
+                        "body": item.body,
+                        "circle": snap.circle.id,
+                        "story": item.story,
+                        "caption": item.story ? item.body : NSNull(),
+                        "media_refs": real,
+                        "media_present": real.map { MediaStore.shared.has($0) },
+                        "reactions": Dictionary(item.reactions.map { ($0.emoji, Int($0.count)) }, uniquingKeysWith: +),
+                        "comments": item.comments.filter { !$0.unsent }.map { ["id": $0.id, "body": $0.body] },
+                    ]))
+                }
+            }
+        }
+        let dump: [String: Any] = [
+            "device": device,
+            "account_hex": accountHex,
+            "ts_ms": tsMs,
+            "posts": posts.sorted { $0.ts > $1.ts }.prefix(100).map { $0.row },   // newest 100
+            "dms": dms,
+            "profile": ["name": ProfileStore.shared.displayName],
+            "circles": circles,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: dump, options: [.sortedKeys]) else {
+            HavenLog.net("matrix-qa dump: JSON encode failed")
+            return
+        }
+        try? data.write(to: dir.appendingPathComponent("qa-dump.json"), options: .atomic)
+        HavenLog.net("matrix-qa dump written posts=\(min(posts.count, 100)) dms=\(dms.count) circles=\(circles.count)")
     }
     #endif
 
@@ -2186,13 +2618,42 @@ final class FeedStore: ObservableObject {
 
     // MARK: - Authoring (seal locally, then broadcast to contacts)
 
-    func post(_ body: String, media: [String] = [], music: TrackRefFfi? = nil, retentionSecs: UInt64? = nil, story: Bool = false, muteVideo: Bool = false) {
-        guard let social, let env = try? social.post(circleId: activeCircleId, body: body, media: media, music: music, retentionSecs: retentionSecs, story: story, muteVideo: muteVideo, createdAt: now()) else { return }
+    /// Expand a compose-time media list with `thumb:` pairing markers for photos whose tiny
+    /// companion was minted at attach time (MediaStore.addImage). The marker joins the SIGNED
+    /// list — same pattern as `poster:` — so old clients simply ignore it. The bare thumb ref is
+    /// deliberately NOT listed: receivers learn it from the marker, so a legacy carousel never
+    /// shows a duplicate tiny slide.
+    private func withThumbMarkers(_ media: [String]) -> [String] {
+        var out = media
+        for ref in media where ref.hasPrefix("img_") {
+            guard MediaVariants.thumb(for: ref, in: media) == nil,
+                  let t = MediaStore.shared.thumbCompanion(ref), MediaStore.shared.has(t) else { continue }
+            out.append(MediaVariants.thumbMarker(content: ref, thumb: t))
+        }
+        return out
+    }
+
+    /// Queue a just-authored event's media for relay backup: PRIORITY lane (ahead of any backfill
+    /// backlog), thumbs first, then posters, then content — so the placeholder-feeding bytes land
+    /// before the big blobs start.
+    private func enqueueAuthoredMedia(_ media: [String], circleId: String, social: HavenSocial) {
+        for ref in MediaVariants.allThumbs(in: media) + MediaVariants.uploadOrder(media) {
+            MediaBackupQueue.shared.enqueue(ref, circleId: circleId, social: social, priority: true)
+        }
+    }
+
+    func post(_ body: String, media rawMedia: [String] = [], music: TrackRefFfi? = nil, retentionSecs: UInt64? = nil, story: Bool = false, muteVideo: Bool = false) {
+        let media = withThumbMarkers(rawMedia)
+        let ts = now()
+        guard let social, let env = try? social.post(circleId: activeCircleId, body: body, media: media, music: music, retentionSecs: retentionSecs, story: story, muteVideo: muteVideo, createdAt: ts) else { return }
         let cid = activeCircleId
         let name = circles.first(where: { $0.id == cid })?.name ?? "your circle"
-        broadcastEvent(cid, env, banner: .forPost(circleId: cid, circleName: name, body: body, media: media, story: story))
+        // Read back the engine-derived id of the post just authored so the sealed banner carries `p`
+        // (exact tap route on the recipient). Best-effort — nil keeps the legacy circle route.
+        let postId = social.lastAuthoredEventId(circleId: cid, createdAt: ts)
+        broadcastEvent(cid, env, banner: .forPost(circleId: cid, circleName: name, body: body, media: media, story: story, postId: postId))
         postTick += 1; refresh()
-        for ref in media { MediaBackupQueue.shared.enqueue(ref, circleId: cid, social: social) }
+        enqueueAuthoredMedia(media, circleId: cid, social: social)
         if !media.isEmpty {
             Task { await SharedStore.publishDeviceRoster(social: social) }
             if RelayHost.shared.serving { reannounceOwnRelay() }
@@ -2201,20 +2662,25 @@ final class FeedStore: ObservableObject {
 
     /// Post to a SPECIFIC circle (used by the scheduler when a queued post fires — the target
     /// circle may not be the active one). Same seal → broadcast → mailbox-backup path as `post`.
-    func postScheduled(circleId: String, body: String, media: [String]) {
-        guard let social, let env = try? social.post(circleId: circleId, body: body, media: media, music: nil, retentionSecs: nil, story: false, muteVideo: false, createdAt: now()) else { return }
+    func postScheduled(circleId: String, body: String, media rawMedia: [String]) {
+        let media = withThumbMarkers(rawMedia)
+        let ts = now()
+        guard let social, let env = try? social.post(circleId: circleId, body: body, media: media, music: nil, retentionSecs: nil, story: false, muteVideo: false, createdAt: ts) else { return }
         let name = circles.first(where: { $0.id == circleId })?.name ?? "your circle"
-        broadcastEvent(circleId, env, banner: .forPost(circleId: circleId, circleName: name, body: body, media: media, story: false))
+        let postId = social.lastAuthoredEventId(circleId: circleId, createdAt: ts)   // best-effort `p` tag (see `post`)
+        broadcastEvent(circleId, env, banner: .forPost(circleId: circleId, circleName: name, body: body, media: media, story: false, postId: postId))
         postTick += 1
         if circleId == activeCircleId { refresh() }
-        for ref in media { MediaBackupQueue.shared.enqueue(ref, circleId: circleId, social: social) }
+        enqueueAuthoredMedia(media, circleId: circleId, social: social)
     }
 
     /// Post text to a specific circle (used by App Intents with a circle filter).
     func post(_ body: String, toCircle circleId: String) {
-        guard let social, let env = try? social.post(circleId: circleId, body: body, media: [], music: nil, retentionSecs: nil, story: false, muteVideo: false, createdAt: now()) else { return }
+        let ts = now()
+        guard let social, let env = try? social.post(circleId: circleId, body: body, media: [], music: nil, retentionSecs: nil, story: false, muteVideo: false, createdAt: ts) else { return }
         let name = circles.first(where: { $0.id == circleId })?.name ?? "your circle"
-        broadcastEvent(circleId, env, banner: .forPost(circleId: circleId, circleName: name, body: body, media: [], story: false))
+        let postId = social.lastAuthoredEventId(circleId: circleId, createdAt: ts)   // best-effort `p` tag (see `post`)
+        broadcastEvent(circleId, env, banner: .forPost(circleId: circleId, circleName: name, body: body, media: [], story: false, postId: postId))
         postTick += 1; refresh()
     }
 
@@ -2247,11 +2713,11 @@ final class FeedStore: ObservableObject {
         guard let social, let env = try? social.comment(circleId: activeCircleId, target: id, body: body, media: media, createdAt: now()) else { return }
         let cid = activeCircleId
         let name = circles.first(where: { $0.id == cid })?.name ?? "your circle"
-        broadcastEvent(cid, env, banner: .forComment(body: body, circleId: cid, circleName: name)); refresh()
+        broadcastEvent(cid, env, banner: .forComment(body: body, circleId: cid, circleName: name, postId: id)); refresh()
     }
     func react(_ id: String, _ emoji: String) {
         guard let social, let env = try? social.react(circleId: activeCircleId, target: id, emoji: emoji, createdAt: now()) else { return }
-        broadcastEvent(activeCircleId, env, banner: .forReaction(emoji: emoji, circleId: activeCircleId))
+        broadcastEvent(activeCircleId, env, banner: .forReaction(emoji: emoji, circleId: activeCircleId, postId: id))
         reactionTick += 1; refresh()
     }
     /// Remove my own reaction (emoji) from a post/comment in the active circle.
@@ -2263,7 +2729,7 @@ final class FeedStore: ObservableObject {
     /// React to a message in a specific (DM) circle.
     func reactMessage(in circleId: String, _ id: String, _ emoji: String) {
         guard let social, let env = try? social.react(circleId: circleId, target: id, emoji: emoji, createdAt: now()) else { return }
-        broadcastEvent(circleId, env, banner: .forReaction(emoji: emoji, circleId: circleId))
+        broadcastEvent(circleId, env, banner: .forReaction(emoji: emoji, circleId: circleId, postId: id))
         reactionTick += 1; refresh()
     }
     /// Remove my own reaction from a message in a specific (DM) circle. Silent (see `unreact`).
@@ -2275,7 +2741,7 @@ final class FeedStore: ObservableObject {
     func commentMessage(in circleId: String, _ id: String, _ body: String, _ media: [String] = []) {
         guard let social, let env = try? social.comment(circleId: circleId, target: id, body: body, media: media, createdAt: now()) else { return }
         let name = circles.first(where: { $0.id == circleId })?.name ?? "your circle"
-        broadcastEvent(circleId, env, banner: .forComment(body: body, circleId: circleId, circleName: name)); refresh()
+        broadcastEvent(circleId, env, banner: .forComment(body: body, circleId: circleId, circleName: name, postId: id)); refresh()
     }
     /// Auto-save freshly-received media to Photos (Haven ▸ Received) when "Save to Photos" is on.
     func autoSaveReceived(_ ref: String) {
@@ -2287,16 +2753,17 @@ final class FeedStore: ObservableObject {
         guard let hex = dmPartnerHex(circleId) else { return (false, nil) }
         return (isConnected(hex), lastHeard[hex])
     }
-    func edit(_ id: String, _ body: String, media: [String] = [], music: TrackRefFfi? = nil, muteVideo: Bool = false) {
+    func edit(_ id: String, _ body: String, media rawMedia: [String] = [], music: TrackRefFfi? = nil, muteVideo: Bool = false) {
+        let media = withThumbMarkers(rawMedia)
         guard let social, let env = try? social.edit(circleId: activeCircleId, target: id, body: body, media: media, music: music, muteVideo: muteVideo, createdAt: now()) else { return }
         let cid = activeCircleId
         let name = circles.first(where: { $0.id == cid })?.name ?? "your circle"
-        broadcastEvent(cid, env, banner: .forEdit(circleId: cid, circleName: name)); refresh()
-        for ref in media { MediaBackupQueue.shared.enqueue(ref, circleId: cid, social: social) }
+        broadcastEvent(cid, env, banner: .forEdit(circleId: cid, circleName: name, postId: id)); refresh()
+        enqueueAuthoredMedia(media, circleId: cid, social: social)
     }
     func unsend(_ id: String) {
         guard let social, let env = try? social.unsend(circleId: activeCircleId, target: id, createdAt: now()) else { return }
-        broadcastEvent(activeCircleId, env, banner: .forUnsend(circleId: activeCircleId)); refresh()
+        broadcastEvent(activeCircleId, env, banner: .forUnsend(circleId: activeCircleId, postId: id)); refresh()
     }
 
     // MARK: - Wire protocol  [type][payload]: 0 Hello, 1 Event, 3 MediaReq, 5 MediaChunk
@@ -2307,6 +2774,19 @@ final class FeedStore: ObservableObject {
     /// circle's posts, so the circle forms on their side and back-fills.
     private var lastHistoryResendMs: UInt64 = 0
     private var lastMediaBackfillMs: UInt64 = 0
+    /// Sealed full-history bundles per circle. The periodic re-send re-seals EVERY event
+    /// (`syncEnvelopes` — real crypto per envelope), yet between re-sends most circles haven't
+    /// changed at all. Keyed by a per-circle change GENERATION bumped on every authored event,
+    /// ingest, and key commit — the app-visible proxy for (epoch, eventCount, headId) — so an
+    /// unchanged circle re-sends its cached bytes instead of re-sealing its whole history.
+    private var syncBundleCache: [String: (gen: UInt64, envs: [Data])] = [:]
+    private var syncBundleGen: [String: UInt64] = [:]
+    /// Something changed in `circleId` (post/edit/unsend, ingested envelope, epoch commit) — the
+    /// next history re-send must re-seal it.
+    private func invalidateSyncBundle(_ circleId: String) {
+        syncBundleGen[circleId, default: 0] += 1
+        syncBundleCache.removeValue(forKey: circleId)
+    }
     /// Last own-device catch-up sweep. Throttled hard (5 min): it re-seals every envelope it sends,
     /// so it must not ride the 20s sync tick. See the sweep for why it exists.
     private var lastOwnDeviceCatchupMs: UInt64 = 0
@@ -2325,7 +2805,10 @@ final class FeedStore: ObservableObject {
         let rosterWire = social.myDeviceRosterWire()
         // The nearby broadcast is a single LOCAL fan-out (not × contacts) and is the own-device
         // (iPhone↔Mac) sync path, so it stays every cycle.
-        let resendHistory = nowMs - lastHistoryResendMs > 180_000   // ~3 min; gates the WHOLE history re-send
+        // ~3 min at the tight cadence, stretching with the SAME idle/thermal multiplier as the
+        // sync base — an idle phone re-sealing + re-blasting full history every flat 3 min was a
+        // straight heat source with nobody new to catch up.
+        let resendHistory = nowMs - lastHistoryResendMs > adaptiveInterval(base: 180_000)
         // When the app is open but quiet, skip keep-alive hello/roster to peers we heard from
         // recently. Real posts still go out via broadcastEvent; mailbox/poll covers the offline case.
         // Without this, every sync tick redials every warm peer (iroh path discovery / radio heat).
@@ -2339,12 +2822,33 @@ final class FeedStore: ObservableObject {
             let circleSnap = circles.map { ($0.id, $0.name) }
             let shareMap = Dictionary(uniqueKeysWithValues:
                 ContactsStore.shared.contacts.map { ($0.idHex.lowercased(), ConnectionsStore.shared.sharesHistory($0.idHex)) })
+            // Re-seal ONLY circles whose change generation moved since their last seal; the rest
+            // re-send their cached bundle bytes (siblings dedupe, so identical bytes are fine).
+            var cachedBundles: [(String, [Data])] = []
+            var toSeal: [(cid: String, gen: UInt64)] = []
+            for (cid, _) in circleSnap {
+                let gen = syncBundleGen[cid] ?? 0
+                if let hit = syncBundleCache[cid], hit.gen == gen {
+                    cachedBundles.append((cid, hit.envs))
+                } else {
+                    toSeal.append((cid: cid, gen: gen))
+                }
+            }
             Task.detached(priority: .utility) { [weak self, social] in
-                let sealed: [(String, [Data])] = await EngineGate.shared.run {
-                    circleSnap.map { ($0.0, social.syncEnvelopes(circleId: $0.0)) }
+                let freshSealed: [(cid: String, gen: UInt64, envs: [Data])] = await EngineGate.shared.run {
+                    toSeal.map { ($0.cid, $0.gen, social.syncEnvelopes(circleId: $0.cid)) }
                 }
                 await MainActor.run { [weak self] in
                     guard let self else { return }
+                    for s in freshSealed {
+                        // Cache only if the circle didn't change while sealing, and keep it bounded
+                        // (history envelopes are small event JSON, but a huge circle stays uncached).
+                        let bytes = s.envs.reduce(0) { $0 + $1.count }
+                        if (self.syncBundleGen[s.cid] ?? 0) == s.gen, bytes < 8 * 1024 * 1024 {
+                            self.syncBundleCache[s.cid] = (gen: s.gen, envs: s.envs)
+                        }
+                    }
+                    let sealed = freshSealed.map { ($0.cid, $0.envs) } + cachedBundles
                     for (cid, envs) in sealed where !envs.isEmpty {
                         var targets = Set(self.dialTargets(cid))
                         if cid == "default" {
@@ -2377,9 +2881,34 @@ final class FeedStore: ObservableObject {
                     continue
                 }
                 sendIroh(0, hello, to: nodeHex)
-                // HTTP mailbox HELLO when iroh cannot dial (matrix stub / cross-NAT).
-                Task { await SharedStore.putHello(circleId: circle.id, toHex: nodeHex, fromHex: meHex, hello: hello) }
                 if !rosterWire.isEmpty { sendIroh(27, rosterWire, to: nodeHex) }   // announce my device roster
+            }
+            // HTTP mailbox HELLO when iroh cannot dial (matrix stub / cross-NAT) — addressed by the
+            // member's ACCOUNT hex ONLY, never a dial target. A device id in the slot pins the
+            // hello to whatever transport id we happened to hold; a stale/rotated one is a dead
+            // slot nobody ever claims, and the circle invite riding the hello silently vanishes
+            // (the lost-invite bug). Device ids stay exactly what they are: iroh DIAL targets
+            // (the loop above). The account hex is the stable handle every fleet claims.
+            var helloAccounts = Set(social.contactNodeIds(circleId: circle.id).map { $0.lowercased() })
+            if circle.id == "default" {
+                for c in ContactsStore.shared.contacts { helloAccounts.insert(c.idHex.lowercased()) }
+            }
+            helloAccounts.remove(meHex.lowercased())
+            if !helloAccounts.isEmpty {
+                HavenLog.net("hello fan-out circle=\(circle.id.prefix(20)) accounts=\(helloAccounts.count) forced=\(pendingForcedHellos.count)")
+            }
+            for acct in helloAccounts {
+                // A just-invited member must get the hello NOW — it carries the circle grant,
+                // and a member who greeted us seconds ago stays "warm" for as long as they
+                // keep talking, so the warm skip alone can defer an invite indefinitely
+                // (relay-only peers have no other lane).
+                let forcedKey = "\(acct)|\(circle.id)"
+                let forced = pendingForcedHellos.contains(forcedKey)
+                if !forced, skipWarmKeepalives, recentlyHeard(acct, withinMs: 120_000, nowMs: nowMs) {
+                    continue   // warm skip; a cold putHello is cheap anyway (per-relay seen marks)
+                }
+                if forced { pendingForcedHellos.remove(forcedKey) }
+                Task { await SharedStore.putHello(circleId: circle.id, toHex: acct, fromHex: meHex, hello: hello, force: forced) }
             }
             // Bootstrap the device-id exchange over the RELAY. When a friend flips to the per-device
             // transport their ACCOUNT id stops resolving, so a direct send can't reach them to deliver my
@@ -2493,9 +3022,27 @@ final class FeedStore: ObservableObject {
            nowMs - lastOwnDeviceCatchupMs > catchupEvery,
            !myOtherDeviceTargets().isEmpty {
             lastOwnDeviceCatchupMs = nowMs
-            // Prefer DMs + default — full circle export was the heat spike with many circles.
-            let cidsForDevices = circles.map(\.id).filter { $0.hasPrefix("dm:") || $0 == "default" }
-                + circles.map(\.id).filter { !$0.hasPrefix("dm:") && $0 != "default" }.prefix(2)
+            // Cover ALL circles via a persisted round-robin. The old "DMs + default + first 2"
+            // shape meant a custom circle past the first two NEVER reconciled between own devices
+            // (a steady source of the linked-device divergence reports). Budgeted slice per sweep
+            // (the per-sweep cost stays what it was); the persisted index advances so successive
+            // sweeps walk the whole list — and it survives relaunches, so short sessions don't
+            // forever re-sweep the same head. A cold device (no index yet) does one full pass so
+            // a fresh link converges without waiting out the rotation.
+            let rrKey = "haven.selfCatchup.rrIndex"
+            let allCids = circles.map(\.id)
+            let circleBudget = 6
+            let cidsForDevices: [String]
+            if UserDefaults.standard.object(forKey: rrKey) == nil {
+                cidsForDevices = allCids
+                UserDefaults.standard.set(0, forKey: rrKey)
+            } else if allCids.count <= circleBudget {
+                cidsForDevices = allCids
+            } else {
+                let start = UserDefaults.standard.integer(forKey: rrKey) % allCids.count
+                cidsForDevices = (0..<circleBudget).map { allCids[(start + $0) % allCids.count] }
+                UserDefaults.standard.set((start + circleBudget) % allCids.count, forKey: rrKey)
+            }
             Task.detached(priority: .utility) { [weak self, social] in
                 let workFinal: [(String, [Data])] = await EngineGate.shared.run {
                     var work: [(String, [Data])] = []
@@ -2774,6 +3321,7 @@ final class FeedStore: ObservableObject {
                                 banner: PushBanner? = nil) {
         bumpActivity()   // I just posted/messaged → keep sync tight
         invalidateMessagesCache(circleId)   // own send must not sit behind a 2s feed cache
+        invalidateSyncBundle(circleId)      // the cached history bundle no longer has this event
         let payload = eventPayload(circleId, env)
         let members = social?.contactNodeIds(circleId: circleId) ?? []
         // Build the push banner once: title = my name, body keyed to the KIND of event. We seal it
@@ -2784,8 +3332,12 @@ final class FeedStore: ObservableObject {
         let resolved = banner ?? .generic(isDM: isDM, circleName: circleName)
         // `c` lets the recipient's NSE redact the banner if *they've* locked this circle.
         // `k`/`e` let a modern NSE group and format; older NSEs ignore unknown keys.
+        // `mk` (the deterministic mailbox key this envelope uploads under, below) + `p`/`mr` from
+        // the banner ride INSIDE the sealed blob — the recipient's NSE fetches the content the
+        // moment the banner lands, and the relay never learns what was announced.
         let notifJSON = (try? JSONSerialization.data(
-            withJSONObject: resolved.jsonObject(title: myName, circleId: circleId))) ?? Data()
+            withJSONObject: resolved.jsonObject(title: myName, circleId: circleId,
+                                                mailboxKey: SharedStore.mailboxKeyHint(circleId: circleId, env: env)))) ?? Data()
         let eventB64 = env.base64EncodedString()   // the sealed circle event, for push-inline sync
         PushManager.shared.syncSelf(event: eventB64)   // multi-device: deliver to my own other devices
         // Deliver the event to each member's DEVICE node ids (+ account id for old-build peers) — the account
@@ -2824,8 +3376,38 @@ final class FeedStore: ObservableObject {
     /// Poll the shared mailbox and ingest any envelopes uploaded while we (or the sender)
     /// were offline. This is what delivers posts without both ends being online at once.
     private var lastSelfSyncMs: UInt64 = 0
+    /// Set by explicit user actions (device link, force-sync, foreground pull): the next self-sync
+    /// pass runs FORCED — past the thermal gate and the step-3/5 skip caches.
+    private var selfSyncForced = false
     /// Force the next poll to run self-sync even if inside the throttle window (device link, foreground).
-    func forceSelfSyncNextPoll() { lastSelfSyncMs = 0 }
+    func forceSelfSyncNextPoll() { lastSelfSyncMs = 0; selfSyncForced = true }
+
+    /// Debounced "self-sync now" nudge — called by every LOCAL mutation of self-sync-carried state
+    /// (profile fields, synced settings, DM pins, read watermarks, circle create/membership/rename/
+    /// delete). One ~4s timer coalesces a burst of edits (typing a bio, bulk member adds) into a
+    /// SINGLE forced pass, so the user's other devices converge in seconds instead of waiting out
+    /// the 2-minute periodic gate. Fires ONLY on a mutation — an idle app schedules nothing (the
+    /// heat fixes stand, and the periodic cadence is untouched). Thermal: a deliberate user edit
+    /// pushes through .fair (the pass runs `force: true`, past `skipSelfSync`), but .serious+ stays
+    /// respected — only the forced flag is set, and the parked poll runs it once the SoC recovers.
+    private var selfSyncNudgeTask: Task<Void, Never>?
+    func nudgeSelfSyncSoon() {
+        selfSyncNudgeTask?.cancel()
+        selfSyncNudgeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard let self, !Task.isCancelled else { return }
+            self.selfSyncNudgeTask = nil
+            self.forceSelfSyncNextPoll()
+            guard !ThermalPolicy.isSeriousOrWorse else { return }
+            // Live-push my sealed slot to my OWN devices (frame 23, mesh + iroh) so an ONLINE
+            // sibling applies the edit immediately — its own periodic gate/idle stretch would
+            // otherwise hold the published slot for minutes. One seal + two sends, mutation-only.
+            if let slot = SelfSyncCoordinator.shared.sealedLocalSlot(social: self.social) {
+                self.sendToMyDevices(23, slot)
+            }
+            self.pollMailboxNow()
+        }
+    }
 
     private var lastPushPollMs: UInt64 = 0
     /// A push landed — go and FETCH, rather than trusting it to have carried the event.
@@ -2841,10 +3423,138 @@ final class FeedStore: ObservableObject {
     /// burst of notifications can't turn into a burst of LIST+FETCH round-trips — a peer sending twenty
     /// messages must not cost twenty mailbox sweeps.
     func syncBecauseOfPush() {
+        // Hints first, OUTSIDE the throttle: they're targeted single GETs (cheap by construction)
+        // and immediacy is their entire point — the banner already told the user something exists.
+        consumePushHints()
         let nowMs = now()
         guard nowMs - lastPushPollMs > 10_000 else { return }
         lastPushPollMs = nowMs
         pollMailboxNow()
+    }
+
+    /// Drain `SharedPushHints` (written into the app group as pushes arrive) and act on them AHEAD
+    /// of the general sweep: targeted-GET each hinted mailbox key (single GET, no LIST), pull the
+    /// hinted circles first, and request the hinted media refs bypassing the fetch throttles —
+    /// closing the "banner beat the content" gap. Tolerant of the drop not existing yet.
+    private func consumePushHints() {
+        guard social != nil else { return }
+        let hints = SharedPushHints.drain()
+        guard !hints.isEmpty else { return }
+        let known = Set(circles.map(\.id))
+        let hintedCids = Array(Set(hints.map(\.c)).intersection(known))
+        HavenLog.sync("push hints: \(hints.count) hint(s), \(hintedCids.count) known circle(s)")
+        Task { @MainActor in
+            // 1. Targeted single GETs for the exact keys the pushes announced.
+            var fetched: [(cid: String, key: String, env: Data)] = []
+            for h in hints.prefix(32) {
+                guard known.contains(h.c), let mk = h.mk, !mk.isEmpty else { continue }
+                if let data = await SharedStore.fetchMailboxKey(circleId: h.c, key: mk) {
+                    fetched.append((cid: h.c, key: mk, env: data))
+                }
+            }
+            if !fetched.isEmpty { await self.ingestHintedEnvelopes(fetched) }
+            // 2. Hinted circles ahead of the caller's (throttled) general sweep.
+            if !hintedCids.isEmpty { await self.pullMailbox(circleIds: hintedCids) }
+        }
+        // 3. Media the push named: request NOW, bypassing the lane throttles/backoff.
+        for h in hints {
+            for ref in (h.mr ?? []).prefix(8)
+                where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref) {
+                MediaFetchBackoff.clear(ref)
+                fastReq[ref] = nil
+                requestMedia(ref, circleId: known.contains(h.c) ? h.c : nil)
+            }
+        }
+    }
+
+    /// Targeted prefetch for the macOS silent-push handler (full engine in-process — no NSE
+    /// limits): GET the exact mailbox key the push named + kick the named media fetches, BEFORE
+    /// its banner posts, so clicking the notification opens content that is already there.
+    /// Envelope path mirrors `consumePushHints` step 1; the caller bounds how long it waits.
+    func prefetchPush(circleId: String, mailboxKey: String?, mediaRefs: [String]) async {
+        guard social != nil, circles.contains(where: { $0.id == circleId }) else { return }
+        if let mk = mailboxKey, !mk.isEmpty,
+           let data = await SharedStore.fetchMailboxKey(circleId: circleId, key: mk) {
+            await ingestHintedEnvelopes([(cid: circleId, key: mk, env: data)])
+        }
+        for ref in mediaRefs.prefix(8)
+            where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref) {
+            MediaFetchBackoff.clear(ref)
+            fastReq[ref] = nil
+            requestMedia(ref, circleId: circleId)
+        }
+    }
+
+    /// Adopt sealed media the NSE prefetched into the App Group scratch while we were away: open
+    /// each blob against its hinted circle (falling back to every circle) and store it, so the
+    /// post's image is already on screen when the feed renders. One attempt per blob — the normal
+    /// media fetch lanes stay the backstop.
+    private func adoptPushMediaScratch() {
+        guard let social else { return }
+        let items = SharedPushMediaScratch.drain()
+        guard !items.isEmpty else { return }
+        let known = circles.map(\.id)
+        Task { @MainActor in
+            var adopted = false
+            for item in items where !MediaStore.shared.has(item.ref) {
+                var cids = [item.circleId]
+                cids.append(contentsOf: known.filter { $0 != item.circleId })
+                let opened: Data? = await Task.detached(priority: .utility) {
+                    await EngineGate.shared.run {
+                        for cid in cids {
+                            if let d = social.openCircleMedia(circleId: cid, sealed: item.sealed) { return d }
+                        }
+                        return nil
+                    }
+                }.value
+                guard let opened else { continue }
+                MediaStore.shared.store(item.ref, opened)
+                mediaArrived(item.ref)
+                MediaFetchBackoff.clear(item.ref)
+                adopted = true
+            }
+            if adopted { scheduleRefresh() }
+        }
+    }
+
+    /// Ingest envelopes fetched via targeted hint GETs — same receive/mark-seen/side-effect
+    /// contract as pullMailbox's content path, for a tiny batch.
+    private func ingestHintedEnvelopes(_ batch: [(cid: String, key: String, env: Data)]) async {
+        guard let social else { return }
+        let ingested: [(String, Data)] = await Task.detached(priority: .utility) {
+            await EngineGate.shared.run {
+                var out: [(String, Data)] = []
+                for item in batch where (try? social.receive(circleId: item.cid, envelope: item.env)) == true {
+                    SharedStore.markSeenPublic(item.key)
+                    out.append((item.cid, item.env))
+                }
+                return out
+            }
+        }.value
+        guard !ingested.isEmpty else { return }
+        persist()
+        bumpActivity()
+        for (cid, env) in ingested {
+            invalidateMessagesCache(cid)
+            invalidateSyncBundle(cid)
+            liveDeliverToMyDevices(1, eventPayload(cid, env))
+            scheduleCircleSideEffects(cid)
+        }
+        refresh(); requestMissingMedia()
+    }
+
+    /// SLIM background sync for BG-refresh wakes: push-inbox drain + a mailbox-only pull + the
+    /// upload-queue flush. Deliberately NO Multipeer nudge and NO hello/roster fan-out — those
+    /// are foreground work that just cooked the SoC in a 30s pocket wake. Returns whether
+    /// anything new arrived so the caller can end the window early on an empty poll.
+    @discardableResult
+    func slimBackgroundSync() async -> Bool {
+        ingestPushInbox()
+        consumePushHints()
+        guard let social else { return false }
+        let got = await pullMailbox(circleIds: circles.map(\.id))
+        MediaBackupQueue.shared.drainPersisted(social: social)   // upload-queue flush (media half)
+        return got > 0
     }
 
     func pollMailboxNow() {
@@ -2863,8 +3573,10 @@ final class FeedStore: ObservableObject {
     }
 
     private func selfSyncAndPull() {
+        let force = selfSyncForced
+        selfSyncForced = false
         Task { @MainActor in
-            if await SelfSyncCoordinator.shared.sync(social: self.social) {
+            if await SelfSyncCoordinator.shared.sync(social: self.social, force: force) {
                 // refreshCircles() — NOT just refresh() — so a circle synced from another of MY devices
                 // actually enters the polled list; otherwise its mailbox is never pulled and the linked
                 // device shows the circle but none of its posts.
@@ -2880,10 +3592,13 @@ final class FeedStore: ObservableObject {
     }
 
     /// Pull every sealed post/DM waiting in the given circles' relay mailboxes and ingest them.
-    @MainActor func pullMailbox(circleIds ids: [String]) async {
-        guard let social, ids.contains(where: { SharedStore.hasMailbox($0) }) else { return }
+    /// Returns how many envelopes actually ingested (the BG-refresh slim sync ends its window
+    /// early on 0).
+    @discardableResult
+    @MainActor func pullMailbox(circleIds ids: [String]) async -> Int {
+        guard let social, ids.contains(where: { SharedStore.hasMailbox($0) }) else { return 0 }
         let msgs = await SharedStore.pollMailbox(circleIds: ids)
-        guard !msgs.isEmpty else { return }
+        guard !msgs.isEmpty else { return 0 }
         let me = social.myNodeHex().lowercased()
         // Control plane first: HELLOs, durable relay announces (__relay__), key commits / rosters,
         // then content. LIST order is a filesystem walk — without this sort a linked host buffers
@@ -2901,17 +3616,48 @@ final class FeedStore: ObservableObject {
         let sorted = msgs.sorted { a, b in
             controlRank(a.1, a.2) < controlRank(b.1, b.2)
         }
+        // Claim ONLY hellos addressed to one of MY ids: my account hex (the canonical slot) or my
+        // CURRENT transport device id (transition senders addressed per dial target). A hello
+        // addressed to any OTHER id — another member, a sibling device, a STALE id of mine — is
+        // not ours to touch. The old `else { markSeen }` consumed those slots forever on whichever
+        // device polled first, which is exactly how circle invites vanished; leave them for their
+        // owners (or the relay TTL). pollMailbox already skips fetching them — this is the
+        // belt-and-suspenders for envelopes that arrived through an older fetch path.
+        var myIds: Set<String> = [me]
+        let tdev = transportNodeHex.lowercased()
+        if !tdev.isEmpty { myIds.insert(tdev) }
+        let mdev = social.myDeviceNodeHex().lowercased()
+        if !mdev.isEmpty { myIds.insert(mdev) }
+        var heldHelloCircles = Set<String>()
         for (cid, key, data) in sorted where key.contains("/__hello__/") {
             let parts = key.split(separator: "/").map(String.init)
+            var toShort = "?", fromShort = "?"
             if let i = parts.firstIndex(of: "__hello__"), parts.count > i + 1 {
                 let to = parts[i + 1].lowercased()
-                guard to == me else { SharedStore.markSeenPublic(key); continue }
+                toShort = String(to.prefix(8))
+                if parts.count > i + 2 { fromShort = String(parts[i + 2].prefix(8)) }
+                guard myIds.contains(to) else {
+                    // The claim decision, visible: this slot belongs to another id — untouched.
+                    HavenLog.net("hello claim SKIPPED (addressed to \(toShort), not me) from=\(fromShort) circle=\(cid.prefix(12))")
+                    continue
+                }
             }
-            handleHello(data, viaNearby: false, senderDevice: nil)
-            SharedStore.markSeenPublic(key)
-            helloIngested = true
-            HavenLog.net("hello http-ingest circle=\(cid.prefix(12))")
+            let outcome = handleHello(data, viaNearby: false, senderDevice: nil)
+            // Mark seen ONLY when the hello was applied or deliberately dropped. A HELD hello
+            // (approval gate, verification hold, engine hiccup) keeps its mailbox slot so the
+            // next poll retries — marking it here is how a circle grant riding a hello from a
+            // not-yet-approved contact evaporated forever (E2E stub / hosting-Mac symptom).
+            if outcome.consumed {
+                SharedStore.markSeenPublic(key)
+                helloIngested = true
+            } else {
+                heldHelloCircles.insert(cid)
+            }
+            HavenLog.net("hello claim \(outcome.consumed ? "CONSUMED" : "HELD") (\(outcome.why)) from=\(fromShort) to=\(toShort) circle=\(cid.prefix(12))")
         }
+        // A held hello stays unclaimed, but the HTTP delta-LIST digest was already committed at
+        // fetch time — a 204 next poll would hide the slot and stall the retry. Re-list in full.
+        for cid in heldHelloCircles { SharedStore.invalidateMailboxListDigests(circleId: cid) }
         // Durable frame-19: friends who can't iroh-dial the host still learn the relay + public
         // media URL from the mailbox ("no available relays" while the owner sees them all on).
         for (_, key, data) in sorted where key.contains("/__relay__/") {
@@ -2919,7 +3665,12 @@ final class FeedStore: ObservableObject {
             SharedStore.markSeenPublic(key)
             relayIngested = true
         }
-        let content = sorted.filter { !$0.1.contains("/__hello__/") && !$0.1.contains("/__relay__/") }
+        // `/__live__/` keys are call frames claimed by the in-call 2s poll — never content. An
+        // unclaimed one (another device's lane, or a call long over) fed to receive() fails every
+        // single poll forever; keep them out of the batch entirely.
+        let content = sorted.filter {
+            !$0.1.contains("/__hello__/") && !$0.1.contains("/__relay__/") && !$0.1.contains("/__live__/")
+        }
         // receive() does real crypto per envelope; a backlog drain used to run the whole loop on
         // the main actor and freeze the UI for the duration. Ingest the batch off-main, then hop
         // back once with the circles that changed. Keep the NEW envelopes so we can fan them out
@@ -2956,6 +3707,9 @@ final class FeedStore: ObservableObject {
         if !batch.unlockedCircles.isEmpty {
             for cid in batch.unlockedCircles {
                 SharedStore.forgetSeenPrefix("haven/mailbox/\(cid)/")
+                // The relay's key SET didn't change, so its LIST digest didn't either — drop ours
+                // or the next poll 204s and the re-queued keys never re-GET.
+                SharedStore.invalidateMailboxListDigests(circleId: cid)
                 for k in batch.controlKeys[cid] ?? [] { SharedStore.markSeenPublic(k) }
             }
             HavenLog.relay("mailbox: re-open \(batch.unlockedCircles.count) circle(s) after key commit")
@@ -2972,12 +3726,12 @@ final class FeedStore: ObservableObject {
             // Key-commit-only pass: still refresh so a recovering linked host paints newly unlocked
             // history as the next poll drains re-queued events.
             if !batch.unlockedCircles.isEmpty { refresh() }
-            return
+            return 0
         }
         bumpActivity()   // a message arrived → keep sync tight while the conversation is live
         // Drop stale feed reads before badge/notify — a cold messages() per envelope was the
         // beachball: N × feed() on main while utility workers still held the engine mutex.
-        for cid in Set(ingested.map(\.circleId)) { invalidateMessagesCache(cid) }
+        for cid in Set(ingested.map(\.circleId)) { invalidateMessagesCache(cid); invalidateSyncBundle(cid) }
         // Batch fan-out: one Task for many envelopes (same shape as own-device catch-up).
         liveDeliverManyToMyDevices(1, ingested.map { eventPayload($0.circleId, $0.envelope) })
         // Multipeer siblings that share no good internet path still need a hop — sealed, so only
@@ -3000,6 +3754,7 @@ final class FeedStore: ObservableObject {
             scheduleCircleSideEffects(item.circleId)
         }
         refresh(); requestMissingMedia()
+        return ingested.count
     }
 
     /// Fetch media the NEWEST messages in a DM circle reference and we don't hold.
@@ -3034,6 +3789,7 @@ final class FeedStore: ObservableObject {
     /// and an empty thread (and never asked the mailbox for the attached photo).
     func ingestPushInbox() {
         guard let social else { return }
+        adoptPushMediaScratch()   // NSE-prefetched sealed media → open + store before the feed renders
         let envs = SharedInbox.drain()
         guard !envs.isEmpty else { return }
         let ids = circles.map { $0.id }
@@ -3063,6 +3819,7 @@ final class FeedStore: ObservableObject {
                 guard !ingestedFinal.isEmpty else { return }
                 for (cid, env) in ingestedFinal {
                     self.invalidateMessagesCache(cid)
+                    self.invalidateSyncBundle(cid)
                     self.scheduleCircleSideEffects(cid)  // notify + badge + DM media (off-main feed)
                     // Fan out to my other online devices — same contract as handleEvent. The push
                     // worker delivers to every device token, but the *event body* only rides the
@@ -3429,7 +4186,9 @@ final class FeedStore: ObservableObject {
         // iOS/desktop/Android, so a rotated key crosses platforms.
         Task {
             await SelfSyncCoordinator.shared.publishEpochGrants()
-            _ = await SelfSyncCoordinator.shared.sync(social: social)
+            // Forced: a rotation is an explicit user action and MUST publish under the new epoch
+            // now — never deferred by the thermal gate or the unchanged-state publish skip.
+            _ = await SelfSyncCoordinator.shared.sync(social: social, force: true)
         }
         HavenLog.net("switch-flip: rotated self-sync key → epoch \(newEpoch) after revoking \(revokedHex.prefix(10))")
     }
@@ -3601,6 +4360,8 @@ final class FeedStore: ObservableObject {
         NotificationManager.shared.notify(title: "New device linked",
                                           body: "“\(request.name)” is now a secure linked device.",
                                           dedupeKey: "seedless-enroll-\(request.deviceHex)", persist: false)
+        ActivityStore.shared.note(id: "seedless-enroll-\(request.deviceHex)", kind: "device",
+                                  snippet: "“\(request.name)” is now a secure linked device")
     }
 
     /// PRIMARY: the user declined the link. Drop the pending request; the ticket stays live so a genuine
@@ -3638,6 +4399,7 @@ final class FeedStore: ObservableObject {
             try? FileManager.default.removeItem(at: backup)
             try? FileManager.default.moveItem(at: stateURL, to: backup)
         }
+        nearby?.stop()   // clean Multipeer teardown before the reference drops (Bonjour cancel crash)
         node = nil; nearby = nil; social = nil; items.removeAll(); circles.removeAll()
         configure(mode: .seedless(accountBundle: grant.accountBundle, deviceSeed: deviceSeed))
         // 4. Ask the primary to push full state now (profile/circles/posts) → it answers with the
@@ -3646,6 +4408,8 @@ final class FeedStore: ObservableObject {
         NotificationManager.shared.notify(title: "Device linked",
                                           body: "This device is now linked — syncing your circles…",
                                           dedupeKey: "seedless-grant", persist: false)
+        ActivityStore.shared.note(id: "seedless-grant-\(now())", kind: "device",
+                                  snippet: "This device is now linked to your account")
     }
 
     /// Send a frame directly to one 64-hex device transport id (no account→device expansion). Used for
@@ -4166,6 +4930,30 @@ final class FeedStore: ObservableObject {
         sendCallFrame(32, f, to: peer)
     }
 
+    /// Author-side push-ahead: a FRESH post's blob just reached a relay (MediaBackupQueue priority
+    /// lane) — proactively tell the whole circle with the SAME frame-32 shape as the ask-back
+    /// reply (sendCallFrame covers iroh + the frame-9 relay forward + the HTTP live lane), plus a
+    /// silent push so a backgrounded member wakes and prefetches. This is what makes media drop in
+    /// WITH the post instead of on the recipient's next 90s sweep. postId is best-effort (a
+    /// deep-link nicety); the receiver keys on the ref.
+    func announceMediaLanded(ref: String, circleId: String) {
+        guard social != nil else { return }
+        let postId = messages(in: circleId).first(where: { item in
+            item.isMe && (item.media.contains(ref)
+                          || MediaVariants.allThumbs(in: item.media).contains(ref)
+                          || MediaVariants.allPosters(in: item.media).contains(ref))
+        })?.id ?? ""
+        var f = Data(myNodeHex.utf8)
+        lpAppend(&f, Data(ref.utf8))
+        lpAppend(&f, Data(circleId.utf8))
+        lpAppend(&f, Data(postId.utf8))
+        for member in memberHexes(circleId: circleId) {
+            sendCallFrame(32, f, to: member)
+            PushManager.shared.wake(member, ciphertext: nil, event: nil, silent: true)
+        }
+        HavenLog.sync("media-landed \(ref.prefix(10)) announced to circle \(circleId.prefix(12))")
+    }
+
     /// Requester side: media I asked about is back. Notify with a deep link straight to the post.
     private func handleMediaAvailable(_ payload: Data) {
         guard payload.count > 64 else { return }
@@ -4177,10 +4965,30 @@ final class FeedStore: ObservableObject {
         let ref = String(data: refD, encoding: .utf8) ?? ""
         let circleId = String(data: cidD, encoding: .utf8) ?? ""
         let postId = String(data: pidD, encoding: .utf8) ?? ""
-        // Only act on something I actually asked for — an unsolicited "it's back" is just noise.
-        guard MediaWantedStore.shared.isWanted(ref) else { return }
+        guard MediaWantedStore.shared.isWanted(ref) else {
+            // Not something we asked for → an author's push-ahead announce (their fresh post's
+            // media just landed on a relay). Prefetch it anyway — bounded, deduped, and
+            // data-saver aware (videos stay tap-to-play under super data saver). No notification:
+            // the POST's banner is the news; this is just its media arriving on time.
+            guard !MediaStore.isSynthetic(ref), !MediaStore.shared.has(ref),
+                  !EvictedMediaStore.shared.contains(ref) else { return }
+            if SettingsStore.shared.superDataSaver,
+               !(ref.hasPrefix("img_") || ref.hasPrefix("i:") || ref.hasPrefix("aud_")
+                 || ref.hasPrefix("a:") || ref.hasPrefix("file_")) { return }
+            let nowMs = now()
+            if let last = announcedMediaAt[ref], nowMs &- last < 60_000 { return }
+            announcedMediaAt[ref] = nowMs
+            if announcedMediaAt.count > 500 { announcedMediaAt.removeAll() }
+            MediaFetchBackoff.clear(ref)   // it's on a relay NOW — restart any parked schedule
+            waitingForSenderMedia.remove(ref)
+            requestMedia(ref, circleId: circles.contains(where: { $0.id == circleId }) ? circleId : nil)
+            HavenLog.sync("media-available \(ref.prefix(10)): announced by \(from.prefix(8)) — prefetching")
+            return
+        }
         MediaWantedStore.shared.clear(ref)
         unavailableMedia.remove(ref)
+        waitingForSenderMedia.remove(ref)
+        MediaFetchBackoff.clear(ref)
         EvictedMediaStore.shared.clear(ref)
         requestMedia(ref)   // pull it now, while we know it's there
         let who = ContactsStore.shared.name(forNodePrefix: from) ?? "Someone"
@@ -4391,13 +5199,51 @@ final class FeedStore: ObservableObject {
         if !circleIds.contains(circle) { circleIds.append(circle) }
         Task { @MainActor in   // also pull from the circle's shared store if one exists
             if let data = await SharedStore.restore(ref: ref, circleIds: circleIds, social: social) {
-                MediaStore.shared.store(ref, data); autoSaveReceived(ref); scheduleRefresh()
+                MediaStore.shared.store(ref, data); mediaArrived(ref); MediaFetchBackoff.clear(ref)
+                autoSaveReceived(ref); scheduleRefresh()
             }
         }
     }
 
-    private var mediaReqAt: [String: UInt64] = [:]   // ref → last direct-request ms (throttle)
+    // MARK: - Missing-media fetch lanes (fresh vs old)
+    //
+    // FRESH lane: refs referenced by events created < 5 min ago retry on a fast bounded backoff
+    // (5s → 10s → 20s → 45s → 90s, then park) on their OWN 5s timer — so a post's media drops in
+    // seconds after the author's upload lands, instead of waiting out a flat 90s throttle. The
+    // fresh state is in-memory: freshness itself expires in minutes.
+    //
+    // OLD lane: everything else grows 90s → 5m → 30m → 6h (mirror of MediaBackupBackoff), with
+    // the schedule PERSISTED so a relaunch doesn't snap a long-dead ref back to the tight cadence
+    // — that reset was a steady heat source on every open. After the last round the ref moves to
+    // `unavailableMedia` (the placeholder's Retry / Ask-for-it-back state); a tap retry or a fresh
+    // ingest of the same ref restarts the schedule.
+    private static let freshEventMs: UInt64 = 5 * 60_000
+    private static let fastSteps: [UInt64] = [5_000, 10_000, 20_000, 45_000, 90_000]
+    private var fastReq: [String: (n: Int, due: UInt64)] = [:]
+    private var fastMediaTimer: Timer?
+    private var thumbReqAt: [String: UInt64] = [:]   // thumbs: plain 90s throttle, no lanes
     private var lastMediaScanMs: UInt64 = 0
+    /// Rotating pointer over non-active circles — one extra circle scanned per pass (bounded),
+    /// covering them all across successive passes.
+    private var otherCircleScanIdx = 0
+
+    /// Keep the fresh-lane 5s timer armed exactly while fresh refs are still retrying.
+    private func armFastMediaTimer(_ active: Bool) {
+        if active {
+            guard fastMediaTimer == nil else { return }
+            fastMediaTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.lastMediaScanMs = 0   // the fresh lane bypasses the 2s scan gate
+                    self.requestMissingMedia()
+                }
+            }
+        } else {
+            fastMediaTimer?.invalidate()
+            fastMediaTimer = nil
+        }
+    }
+
     private func requestMissingMedia() {
         guard let social, node != nil || nearby != nil else { return }
         // The scan below is O(items × media) with a stat() per ref (MediaStore.has) — cap it to
@@ -4406,61 +5252,76 @@ final class FeedStore: ObservableObject {
         guard nowMs - lastMediaScanMs > 2_000 else { return }
         lastMediaScanMs = nowMs
         let myHex = social.myNodeHex()
-        var missing = Set<String>()
         // Skip synthetic refs (geo: location pins): they carry no fetchable bytes, so counting them
         // keeps nbMediaPending pinned above 0 forever and fires a doomed restore each sweep.
         // Skip refs the user DELIBERATELY evicted (cleanup screen / local-limit sweep). Auto-refetching
         // them would silently undo the space the user just freed — they re-download only on an explicit
         // "Download" tap (downloadEvicted clears the eviction first). Still fetch media never seen yet.
+        // Skip session-unopenable refs: the bytes ARE on a relay and can't be decrypted — re-pulling
+        // the same bad blob every sweep repaired nothing and cost a full download each time.
         let dataSaver = SettingsStore.shared.superDataSaver
-        for item in items {
+        var missing: [String: (circleId: String, fresh: Bool)] = [:]
+        var thumbs: [String: String] = [:]   // thumb image ref → circle (prefetched unconditionally)
+        func scan(_ item: FeedItemFfi, circleId: String) {
+            let fresh = nowMs >= item.createdAt && nowMs &- item.createdAt < Self.freshEventMs
             // Super data saver: only prefetch posters/images/audio/files — never full videos or
             // original companions. Videos download when the user taps play; originals via the menu.
             let candidates: [String] = dataSaver
                 ? MediaVariants.dataSaverPrefetchRefs(item.media)
                 : item.media
-            for ref in candidates where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref) && !EvictedMediaStore.shared.contains(ref) {
-                missing.insert(ref)
+            for ref in candidates where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref)
+                && !EvictedMediaStore.shared.contains(ref) && !unopenableMedia.contains(ref) {
+                if missing[ref] == nil || fresh { missing[ref] = (circleId, fresh) }
+            }
+            // Thumb companions prefetch for EVERY post regardless of lane/data saver — ≤32KB by
+            // contract, and they're what makes the loading placeholder look like the photo.
+            for t in MediaVariants.allThumbs(in: item.media)
+                where !MediaStore.shared.has(t) && !unopenableMedia.contains(t) {
+                thumbs[t] = circleId
             }
             for c in item.comments {
                 let cands: [String] = dataSaver ? MediaVariants.dataSaverPrefetchRefs(c.media) : c.media
-                for ref in cands where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref) && !EvictedMediaStore.shared.contains(ref) {
-                    missing.insert(ref)
+                for ref in cands where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref)
+                    && !EvictedMediaStore.shared.contains(ref) && !unopenableMedia.contains(ref) {
+                    if missing[ref] == nil || fresh { missing[ref] = (circleId, fresh) }
                 }
+            }
+        }
+        for item in items { scan(item, circleId: activeCircleId) }
+        // ALL circles, newest-first, budget-bounded: rotate one NON-active circle per pass so its
+        // posts prefetch too — media used to download only for the circle you were LOOKING at, so
+        // switching circles always meant a wall of placeholders. DMs keep their own dedicated path
+        // (requestMissingDMMedia, driven off ingest).
+        let others = circles.map(\.id).filter { $0 != activeCircleId && !$0.hasPrefix("dm:") }
+        if !others.isEmpty {
+            otherCircleScanIdx = (otherCircleScanIdx + 1) % others.count
+            let cid = others[otherCircleScanIdx]
+            for item in messages(in: cid).sorted(by: { $0.createdAt > $1.createdAt }).prefix(12) {
+                scan(item, circleId: cid)
             }
         }
         let circleIds = circles.map { $0.id }
         SyncMetrics.shared.nbMediaPending = missing.count
-        // THROTTLE: a missing ref was re-requested from every contact on every sync, so a backlog of
-        // missing media flooded the network with hundreds of thousands of frames per cycle (drowning real
-        // delivery). Direct-request each ref at most once per 5 min, and only a handful per cycle — the
-        // mailbox/relay restore below is the real path and it's idempotent.
-        // Rate-limit the WHOLE request per ref (nearby + iroh + mailbox restore) to once per 90s, capped per
-        // cycle. Previously the nearby ask + a restore Task fired for EVERY missing ref EVERY cycle, so media
-        // neither device can reach (e.g. an offline friend's) was re-requested + re-served forever — it never
-        // settled. Available media still arrives quickly (a request lands within a cycle); unreachable media
-        // just retries occasionally instead of churning.
-        var budget = 12
         let hasMailbox = circleIds.contains(where: { SharedStore.hasMailbox($0) })
-        for ref in missing {
-            let stale = (mediaReqAt[ref].map { nowMs - $0 > 90_000 } ?? true)
-            guard stale, budget > 0 else { continue }
-            mediaReqAt[ref] = nowMs
-            mediaReqCircle[ref] = activeCircleId   // these refs come from the active circle's feed
-            budget -= 1
+
+        // One fetch attempt for `ref` — relay-first, then the peer ask (shared tail of both lanes).
+        // RELAY-FIRST: pull the stored copy from the circle's mailbox (own hosted store → relay
+        // HTTP :8674 → S3 → iroh blob, in that order inside restore). Only if there is NO mailbox,
+        // or the stored copy can't be fetched, fall back to asking an online author/peer directly.
+        func fetch(_ ref: String, circleId: String) {
+            mediaReqCircle[ref] = circleId
             var payload = Data(myHex.utf8)          // 64-byte requester id
             payload.append(Data(ref.utf8))
             let directAsk = { self.askForMedia(ref: ref, myHex: myHex, plain: payload) }
-            // RELAY-FIRST: pull the stored copy from the circle's mailbox (own hosted store → relay
-            // HTTP :8674 → S3 → iroh blob, in that order inside restore). Only if there is NO mailbox,
-            // or the stored copy can't be fetched, fall back to asking an online author/peer directly.
-            // Previously the direct ask fired FIRST alongside the restore, so an online sender streamed
-            // the bytes peer-to-peer (heat + bandwidth on both) even though the relay already held them.
             if hasMailbox {
+                downloadingMedia.insert(ref)   // honest placeholder: an AUTO restore IS a download
                 Task { @MainActor in
+                    defer { if !MediaStore.shared.has(ref) { self.downloadingMedia.remove(ref) } }
                     if let data = await SharedStore.restore(ref: ref, circleIds: circleIds, social: social) {
                         HavenLog.relay("MEDIA-FETCH ok ref=\(ref.prefix(10)) bytes=\(data.count) via=relay")
-                        MediaStore.shared.store(ref, data); autoSaveReceived(ref); scheduleRefresh()
+                        MediaStore.shared.store(ref, data); self.mediaArrived(ref)
+                        MediaFetchBackoff.clear(ref); self.fastReq[ref] = nil
+                        self.autoSaveReceived(ref); self.scheduleRefresh()
                     // A relay REFUSED us rather than lacking the blob: publish our device roster to it
                     // and try once more. Without this the fetch degrades to a peer ask that only works
                     // while the author happens to be online — which is exactly how media a few days old
@@ -4468,7 +5329,9 @@ final class FeedStore: ObservableObject {
                     } else if await SharedStore.healForbiddenRelays(social: social),
                               let data = await SharedStore.restore(ref: ref, circleIds: circleIds, social: social) {
                         HavenLog.relay("MEDIA-FETCH ok ref=\(ref.prefix(10)) bytes=\(data.count) via=relay (after roster publish)")
-                        MediaStore.shared.store(ref, data); autoSaveReceived(ref); scheduleRefresh()
+                        MediaStore.shared.store(ref, data); self.mediaArrived(ref)
+                        MediaFetchBackoff.clear(ref); self.fastReq[ref] = nil
+                        self.autoSaveReceived(ref); self.scheduleRefresh()
                     } else {
                         HavenLog.relay("MEDIA-FETCH miss ref=\(ref.prefix(10)) — relay had none, asking peers")
                         directAsk()   // relay didn't have it (or unreachable) → ask a peer
@@ -4479,7 +5342,47 @@ final class FeedStore: ObservableObject {
                 directAsk()           // no mailbox in any circle → peer-to-peer is the only path
             }
         }
-        if mediaReqAt.count > 4000 { mediaReqAt.removeAll() }   // bound the throttle map
+
+        // FRESH lane: 5s/10s/20s/45s/90s, then park (the ref ages into the old lane naturally).
+        var fastActive = false
+        var fastBudget = ThermalPolicy.mediaBudget(8)
+        for (ref, info) in missing where info.fresh {
+            let st = fastReq[ref] ?? (n: 0, due: 0)
+            guard st.n < Self.fastSteps.count else { continue }   // fast rounds spent — parked
+            fastActive = true
+            guard nowMs >= st.due, fastBudget > 0 else { continue }
+            fastBudget -= 1
+            fastReq[ref] = (n: st.n + 1, due: nowMs + Self.fastSteps[st.n])
+            fetch(ref, circleId: info.circleId)
+        }
+        if fastReq.count > 500 { fastReq = fastReq.filter { missing[$0.key] != nil } }
+        armFastMediaTimer(fastActive)
+
+        // OLD lane: parked entirely at .serious+ (thermal), halved budget at .fair.
+        if !ThermalPolicy.parkMediaRetries {
+            var budget = ThermalPolicy.mediaBudget(12)
+            for (ref, info) in missing where !info.fresh {
+                guard budget > 0 else { break }
+                if MediaFetchBackoff.exhausted(ref) {
+                    // Every round spent → the honest end state (placeholder offers Retry and
+                    // Ask-for-it-back; a tap or fresh ingest clears the backoff and starts over).
+                    unavailableMedia.insert(ref)
+                    continue
+                }
+                guard MediaFetchBackoff.due(ref) else { continue }
+                budget -= 1
+                MediaFetchBackoff.recordAttempt(ref)
+                fetch(ref, circleId: info.circleId)
+            }
+        }
+
+        // Thumbs: no lanes, no data-saver gate, no thermal budget — a plain 90s per-ref throttle.
+        for (t, cid) in thumbs {
+            if let at = thumbReqAt[t], nowMs &- at < 90_000 { continue }
+            thumbReqAt[t] = nowMs
+            fetch(t, circleId: cid)
+        }
+        if thumbReqAt.count > 2000 { thumbReqAt.removeAll() }
     }
 
     private func handleMediaRequest(_ payload: Data) {
@@ -4892,16 +5795,25 @@ final class FeedStore: ObservableObject {
         ContactsStore.shared.contacts.contains { $0.idHex == idHex }
     }
 
-    private func handleHello(_ payload: Data, viaNearby: Bool = false, senderDevice: String? = nil) {
-        guard let social else { return }
+    /// Ingest one HELLO. Returns `consumed`: true when the hello was APPLIED or deliberately
+    /// dropped — safe for a mailbox caller to mark its slot seen. False means NOT applied
+    /// (engine not ready, held for connection approval, verification hold, transient engine
+    /// failure): the mailbox slot must stay UNCLAIMED so a later poll retries — once the gate
+    /// clears (user approves, contacts sync converges) the SAME slot re-processes and the
+    /// circle grant riding it finally applies. Marking held hellos seen is exactly how the
+    /// E2E stub's circle invite evaporated: claimed at fetch, quarantined at the approval
+    /// gate, seen forever. `why` feeds the one-line claim diag in pullMailbox.
+    @discardableResult
+    private func handleHello(_ payload: Data, viaNearby: Bool = false, senderDevice: String? = nil) -> (consumed: Bool, why: String) {
+        guard let social else { return (false, "engine-not-ready") }
         // [LP circleId][LP circleName][LP bundle][signed profile]
         var off = 0
         guard let circleIdData = lpRead(payload, &off),
               let circleNameData = lpRead(payload, &off),
-              let bundle = lpRead(payload, &off), bundle.count >= 32 else { return }
+              let bundle = lpRead(payload, &off), bundle.count >= 32 else { return (true, "malformed") }
         let circleId = String(data: circleIdData, encoding: .utf8) ?? ""
         let circleName = String(data: circleNameData, encoding: .utf8) ?? "Circle"
-        guard !circleId.isEmpty else { return }
+        guard !circleId.isEmpty else { return (true, "malformed") }
         let profileBlob = payload.subdata(in: (payload.startIndex + off)..<payload.endIndex)
         let idHex = nodeHex(bundle.prefix(32))
         // A hello delivered DIRECTLY teaches us the sender's dialable device id for this account —
@@ -4919,7 +5831,7 @@ final class FeedStore: ObservableObject {
             // caches the primary's signed card — carried on this self-hello — and rebroadcasts it verbatim.
             if SeedlessState.isEnabled, !profileBlob.isEmpty { social.setCachedProfile(blob: profileBlob) }
             if let slot = SelfSyncCoordinator.shared.sealedLocalSlot(social: social) { nearbyBroadcast(23, slot) }
-            return
+            return (true, "self-device")
         }
         // A hello carrying a DEVICE bundle of an account we ALREADY know is not a new person. A linked
         // (seedless) device signs with its own key and carries its own bundle, so without this it lands
@@ -4934,42 +5846,69 @@ final class FeedStore: ObservableObject {
            account != idHex.lowercased() {
             recordDeviceHints(accountHex: account, deviceIds: [idHex])
             HavenLog.sync("hello from \(idHex.prefix(8)) is a DEVICE of known account \(account.prefix(8)) — recorded as their device, not a new contact")
-            return
+            return (true, "known-device")
         }
         // Blocked people get dropped entirely — no add, no re-add.
-        if ConnectionsStore.shared.isBlocked(idHex) { return }
+        if ConnectionsStore.shared.isBlocked(idHex) { return (true, "blocked") }
         // Someone new reaching us through our invite → hold for approval (don't auto-add).
         // One person scans; the other gets asked, with safety words to verify.
         if !isContact(idHex) {
-            // BUT: a non-contact Hello that arrived over the NEARBY mesh is just proximity — another
-            // Haven user happened to be in Bluetooth/Wi-Fi range. That must NOT pop a connection request
-            // (it did, repeatedly, for everyone nearby). Real new connections come from scanning an
-            // invite, which sends a TARGETED Hello over iroh/relay (viaNearby == false) — those still ask.
-            if viaNearby { return }
-            let name = social.verifyProfile(bundle: bundle, blob: profileBlob) ?? "Someone"
-            let vhex = (try? social.bundleVerificationHex(bundle: bundle)) ?? ""
-            let display = name.isEmpty ? "Someone" : name
-            ConnectionsStore.shared.addPending(ConnectionRequest(
-                idHex: idHex, name: display, bundle: bundle,
-                safetyWords: SafetyWords.words(fromHex: vhex)))
-            NotificationManager.shared.notify(title: "New connection",
-                                              body: "\(display) wants to connect",
-                                              dedupeKey: "req-\(idHex)")
-            return
+            // ENGINE-KNOWN MEMBER: the ENGINE already lists this account in one of my circles —
+            // an established relationship (I invited or approved them, possibly on a linked
+            // device before ContactsStore converged, or ContactsStore lagged a restore). They
+            // are not "someone new": re-gating them as a stranger strands every hello they
+            // send — on a hosting Mac the circle grant riding the hello was quarantined as a
+            // pending request nobody could see, and the circle never formed. Same principle
+            // as the device-of-known-account rule above, at account level. Adopt the contact
+            // record and continue the normal handshake. A contact the user explicitly REMOVED
+            // (LWW tombstone) still takes the approval path.
+            let engineKnows = !ContactsStore.shared.isContactRemoved(idHex) && social.circles().contains { c in
+                social.contactNodeIds(circleId: c.id).contains { $0.lowercased() == idHex.lowercased() }
+            }
+            if engineKnows {
+                let name = social.verifyProfile(bundle: bundle, blob: profileBlob) ?? "Someone"
+                let vhex = try? social.bundleVerificationHex(bundle: bundle)
+                ContactsStore.shared.add(name: name.isEmpty ? "Someone" : name, idHex: idHex, verificationHex: vhex)
+                HavenLog.sync("hello from \(idHex.prefix(8)) is an engine-known circle member — adopted as contact, handshake continues")
+            } else {
+                // BUT: a non-contact Hello that arrived over the NEARBY mesh is just proximity — another
+                // Haven user happened to be in Bluetooth/Wi-Fi range. That must NOT pop a connection request
+                // (it did, repeatedly, for everyone nearby). Real new connections come from scanning an
+                // invite, which sends a TARGETED Hello over iroh/relay (viaNearby == false) — those still ask.
+                if viaNearby { return (true, "nearby-stranger") }
+                let name = social.verifyProfile(bundle: bundle, blob: profileBlob) ?? "Someone"
+                let vhex = (try? social.bundleVerificationHex(bundle: bundle)) ?? ""
+                let display = name.isEmpty ? "Someone" : name
+                ConnectionsStore.shared.addPending(ConnectionRequest(
+                    idHex: idHex, name: display, bundle: bundle,
+                    safetyWords: SafetyWords.words(fromHex: vhex)))
+                NotificationManager.shared.notify(title: "New connection",
+                                                  body: "\(display) wants to connect",
+                                                  dedupeKey: "req-\(idHex)")
+                ActivityStore.shared.note(id: "req-\(idHex)", kind: "connect",
+                                          actorHex: idHex, actorShort: String(idHex.prefix(8)),
+                                          snippet: "\(display) wants to connect")
+                // NOT consumed: the grant this hello carries must survive until the user decides.
+                // Approval re-processes the same mailbox slot on the next poll and applies it.
+                return (false, "held-for-approval")
+            }
         }
         if let expected = ContactsStore.shared.verification(forNodePrefix: idHex),
            let actual = try? social.bundleVerificationHex(bundle: bundle),
            expected != actual {
-            return
+            // NOT consumed: the local expectation may be stale (self-sync lag / re-verify) —
+            // keep the slot until it clears or the mailbox TTL expires. Same body → same key,
+            // so a permanently-wrong hello is bounded by the TTL, not retried forever.
+            return (false, "verification-mismatch")
         }
         // A DM circle is strictly its two encoded parties — never let a third party (e.g. a
         // contact who picked up a broadcast Hello) handshake their way into someone else's DM.
-        if circleId.hasPrefix("dm:") && !dmCircleAllows(circleId, idHex) { return }
+        if circleId.hasPrefix("dm:") && !dmCircleAllows(circleId, idHex) { return (true, "dm-third-party") }
         // A member you explicitly removed from this circle must NOT auto-rejoin on their handshake.
-        if ConnectionsStore.shared.isRemovedFromCircle(idHex, circleId: circleId) { return }
+        if ConnectionsStore.shared.isRemovedFromCircle(idHex, circleId: circleId) { return (true, "removed-from-circle") }
         // A circle/DM the user DELETED must not be re-created by a bare handshake (LWW) — respect the
         // deletion. The user re-opens it explicitly (startDM/createCircle) if they want it back.
-        if circleId != "default", CircleDeletionStore.isDeleted(circleId) { return }
+        if circleId != "default", CircleDeletionStore.isDeleted(circleId) { return (true, "circle-deleted") }
         // Ensure the circle exists on our side, then add the sender to it.
         let isNewCircle = circleId != "default" && !circles.contains { $0.id == circleId }
         social.createCircle(id: circleId, name: circleName)
@@ -4978,8 +5917,13 @@ final class FeedStore: ObservableObject {
             NotificationManager.shared.notify(title: "Added to a circle",
                                               body: "\(who) added you to “\(circleName)”",
                                               dedupeKey: "circle-\(circleId)")
+            ActivityStore.shared.note(id: "circle-\(circleId)", kind: "circle", circleId: circleId,
+                                      actorHex: idHex, actorShort: String(idHex.prefix(8)),
+                                      snippet: "\(who) added you to “\(circleName)”")
         }
-        guard (try? social.addContactBundle(circleId: circleId, bundle: bundle)) != nil else { return }
+        guard (try? social.addContactBundle(circleId: circleId, bundle: bundle)) != nil else {
+            return (false, "engine-add-failed")   // transient — leave the slot for the next poll
+        }
         dialTargetsCache.removeAll()   // a just-handshaked member must be dialable now, not in 10s
         recordHeard(idHex)
         persist(); refreshCircles()
@@ -4996,7 +5940,8 @@ final class FeedStore: ObservableObject {
         let replyKey = "\(idHex)|\(circleId)"
         let now = Date()
         if let last = lastHelloReply[replyKey], now.timeIntervalSince(last) < 20 {
-            refresh(); return   // already handshaked this peer/circle very recently — don't echo back
+            refresh()
+            return (true, "applied")   // already handshaked this peer/circle very recently — don't echo back
         }
         lastHelloReply[replyKey] = now
         let isDM = circleId.hasPrefix("dm:")
@@ -5004,7 +5949,7 @@ final class FeedStore: ObservableObject {
             sendIroh(0, hello, to: idHex)
             if circleId == "default" { nearbyBroadcast(0, hello) }
             let meHex = social.myNodeHex()
-            Task { await SharedStore.putHello(circleId: circleId, toHex: idHex, fromHex: meHex, hello: hello) }
+            Task { await SharedStore.putHello(circleId: circleId, toHex: idHex, fromHex: meHex, hello: hello, force: true) }
         }
         for env in social.syncEnvelopes(circleId: circleId) {
             sendIroh(1, eventPayload(circleId, env), to: idHex)
@@ -5012,9 +5957,17 @@ final class FeedStore: ObservableObject {
             Task { await SharedStore.uploadEvent(circleId: circleId, env: env) }
         }
         refresh()
+        return (true, "applied")
     }
     /// Cooldown to break handshake ping-pong (see handleHello). Keyed by "<peerHex>|<circleId>".
     private var lastHelloReply: [String: Date] = [:]
+
+    /// "<acctHex>|<circleId>" keys whose next fan-out hello must NOT be warm-skipped —
+    /// populated at invite time so the circle grant always ships immediately.
+    private var pendingForcedHellos: Set<String> = []
+    func forceHelloNextSync(_ idHex: String, circleId: String) {
+        pendingForcedHellos.insert("\(idHex.lowercased())|\(circleId)")
+    }
 
     /// `senderDevice` = the authenticated transport id this frame arrived from (nil for nearby /
     /// relay-unwrapped frames), used to tell a CONTACT's delivery apart from one of my own devices'.
@@ -5067,6 +6020,7 @@ final class FeedStore: ObservableObject {
                 // Hearing a message is proof of life — refresh "last seen" for a DM's partner.
                 if circleId.hasPrefix("dm:"), let partner = self.dmPartnerHex(circleId) { self.recordHeard(partner) }
                 self.invalidateMessagesCache(circleId)
+                self.invalidateSyncBundle(circleId)
                 self.schedulePersist()             // coalesced — a sync burst writes once, not per event
                 self.scheduleRefresh()             // coalesced feed rebuild
                 self.scheduleRequestMissingMedia() // coalesced media pull (scans the whole feed)
@@ -5139,6 +6093,9 @@ final class FeedStore: ObservableObject {
             }
         }
         if anyDM { recomputeUnreadDMs() }
+        // Refresh the in-app activity list off this same coalesced pass (its own EngineGate hop,
+        // deduped by event id — an ingest burst pulls once).
+        ActivityStore.shared.pull(social: social)
     }
 
     /// Same rules as `notifyNewest` but with a pre-fetched feed (no engine lock on main).
@@ -5146,6 +6103,9 @@ final class FeedStore: ObservableObject {
         let inbound = items.filter { !$0.isMe && !$0.unsent }
         guard let newest = inbound.max(by: { $0.createdAt < $1.createdAt }) else { return }
         guard now() &- newest.createdAt < 10 * 60 * 1000 else { return }
+        // Mirror into the in-app activity list — the list must be complete even when the banner
+        // is suppressed (foreground, deduped, unauthorized). Same event id as the engine pull.
+        ActivityStore.shared.noteFeedItem(newest, circleId: circleId)
         let name = ContactsStore.shared.name(forNodePrefix: newest.authorShort) ?? "Someone"
         if CircleSettingsStore.shared.biometricRequired(circleId) {
             NotificationManager.shared.notify(title: "Haven", body: "New activity", dedupeKey: newest.id,
@@ -5204,6 +6164,8 @@ final class FeedStore: ObservableObject {
     /// bandwidth at will, and concurrent asks for one ref each start their own upload.
     private var mediaWantedInFlight: Set<String> = []
     private var mediaWantedServedAt: [String: Date] = [:]
+    /// Per-ref throttle for acting on unsolicited frame-32 announces (the author push-ahead).
+    private var announcedMediaAt: [String: UInt64] = [:]
 
     /// The newest inbound item already counted toward each circle's badge.
     ///
@@ -5240,6 +6202,7 @@ final class FeedStore: ObservableObject {
         // a wiped/fresh dedupe store that meant the same old message notified again and again;
         // an old message re-surfacing is never worth a banner.
         guard now() &- newest.createdAt < 10 * 60 * 1000 else { return }
+        ActivityStore.shared.noteFeedItem(newest, circleId: circleId)   // list stays complete (see applyNotifyFromItems)
         let name = ContactsStore.shared.name(forNodePrefix: newest.authorShort) ?? "Someone"
         // A biometric-locked circle must not spill its content (or even who/where) onto the lock
         // screen — mirror the NSE's redaction for this in-process notification path too.
@@ -5367,6 +6330,8 @@ struct FeedView: View {
     @State private var storyIndex = 0
     @State private var trimmingRef: TrimTarget?
     @State private var showRequests = false
+    @State private var showActivity = false
+    @ObservedObject private var activity = ActivityStore.shared
     @ObservedObject private var connections = ConnectionsStore.shared
     @FocusState private var composeFocused: Bool
     @State private var commentingActive = false   // a post's comment field is focused → hide composer
@@ -5497,12 +6462,34 @@ struct FeedView: View {
                 #else
                 ToolbarItem(placement: .principal) { circlePicker }
                 #endif
+                // Activity bell: everything that happened across your circles, with an unread
+                // badge cleared fleet-wide on open (seenAt syncs via SelfSync). Both platforms.
+                ToolbarItem(placement: .havenTrailing) {
+                    Button { showActivity = true } label: {
+                        Image(systemName: "bell.fill")
+                            .overlay(alignment: .topTrailing) {
+                                if activity.unread > 0 {
+                                    Text(activity.unread > 99 ? "99+" : "\(activity.unread)")
+                                        .font(.system(size: 9, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 3).padding(.vertical, 1)
+                                        .background(Capsule().fill(Color.red))
+                                        .offset(x: 9, y: -7)
+                                }
+                            }
+                    }
+                    .buttonStyle(HavenGlassIcon())
+                    .accessibilityLabel("Activity")
+                }
                 // Manage this circle (members, invite, settings) — lives on the circle, not You.
                 ToolbarItem(placement: .havenTrailing) {
                     Button { showCircle = true } label: { Image(systemName: "person.2.fill") }
                         .buttonStyle(HavenGlassIcon())
                         .accessibilityLabel("Manage circle")
                 }
+            }
+            .sheet(isPresented: $showActivity) {
+                ActivityView().macSheetFrame()
             }
             .sheet(isPresented: $showCircle) {
                 #if os(macOS)
@@ -6771,7 +7758,8 @@ private struct KillHorizontalScroller: NSViewRepresentable {
     @ViewBuilder private func mediaLoadingPlaceholder(_ ref: String) -> some View {
         MissingMediaPlaceholder(ref: ref, isVideo: MediaKind(ref: ref) == .video,
                                 postContext: (circleId: feed.activeCircleId, postId: item.id,
-                                              authorShort: item.authorShort))
+                                              authorShort: item.authorShort),
+                                mediaList: item.media)
             .frame(maxWidth: .infinity, minHeight: 160)
     }
 
@@ -6780,6 +7768,13 @@ private struct KillHorizontalScroller: NSViewRepresentable {
         // Read pixel dimensions from the file header (ImageIO) — NOT item()?.image.size, which decoded the
         // whole bitmap on the main thread just to get an aspect ratio (a scroll hitch per single-media post).
         if let sz = MediaStore.shared.pixelSize(ref), sz.width > 0, sz.height > 0 {
+            return sz.width / sz.height
+        }
+        // Full bytes not here yet, but the tiny thumb companion may be — same aspect as the
+        // original, so the placeholder reserves the REAL shape and the layout doesn't jump when
+        // the full-size media lands.
+        if let t = MediaVariants.thumb(for: ref, in: item.media),
+           let sz = MediaStore.shared.pixelSize(t), sz.width > 0, sz.height > 0 {
             return sz.width / sz.height
         }
         return 4.0 / 3.0

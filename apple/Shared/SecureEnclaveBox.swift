@@ -24,6 +24,18 @@ struct SecureEnclaveBox {
         self.accessGroup = accessGroup
     }
 
+    /// True in the QA stub (`com.blaineam.kith.qa.stub`): every keychain touch must stay in the
+    /// DATA-PROTECTION keychain. The stub binary is re-signed on every QA build, and any legacy
+    /// (login-file) keychain access — including the persistent item macOS creates for a
+    /// permanent SE key when no DP flag is given, and every legacy-fallback read probe — hits
+    /// items whose per-binary ACL no longer matches, so macOS throws the "HavenStub wants to use
+    /// your keychain" approval dialog on every rebuilt stub. DP-keychain items are governed by
+    /// the `keychain-access-groups` entitlement (`…qa.stub` in Haven.macOS.stub.entitlements),
+    /// so a team-signed rebuild never re-prompts — same storage strength, zero dialogs.
+    /// Production deliberately keeps its legacy fallbacks (migration of pre-DP items); the flag
+    /// only ever ADDS the DP constraint for the stub.
+    static let dataProtectionKeychainOnly = Bundle.main.bundleIdentifier?.contains("qa.stub") == true
+
     private static let algorithm: SecKeyAlgorithm = .eciesEncryptionStandardX963SHA256AESGCM
 
     /// False where no Secure Enclave exists (Simulator). Callers fall back to plaintext storage.
@@ -49,6 +61,8 @@ struct SecureEnclaveBox {
             kSecReturnRef as String: true,
         ]
         if let accessGroup { q[kSecAttrAccessGroup as String] = accessGroup }
+        // QA stub: search the DP keychain only — a legacy-keychain probe is a prompt (see above).
+        if Self.dataProtectionKeychainOnly { q[kSecUseDataProtectionKeychain as String] = true }
         var ref: CFTypeRef?
         let status = SecItemCopyMatching(q as CFDictionary, &ref)
         guard status == errSecSuccess, let r = ref else { return (nil, status) }
@@ -80,13 +94,17 @@ struct SecureEnclaveBox {
         ]
         // Pin the key to the shared group when requested so a sibling process can open with it.
         if let accessGroup { keyAttrs[kSecAttrAccessGroup as String] = accessGroup }
+        // QA stub: persist the key's item in the DP keychain, never the login file keychain —
+        // a login-keychain key item is exactly the per-binary-ACL item that prompts on rebuild.
+        if Self.dataProtectionKeychainOnly { keyAttrs[kSecUseDataProtectionKeychain as String] = true }
 
-        let attributes: [String: Any] = [
+        var attributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeySizeInBits as String: 256,
             kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
             kSecPrivateKeyAttrs as String: keyAttrs,
         ]
+        if Self.dataProtectionKeychainOnly { attributes[kSecUseDataProtectionKeychain as String] = true }
         var keyError: Unmanaged<CFError>?
         guard let priv = SecKeyCreateRandomKey(attributes as CFDictionary, &keyError) else {
             return nil   // Hardware without a usable Enclave → caller falls back to plaintext.

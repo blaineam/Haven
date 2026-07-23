@@ -204,7 +204,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
                 Text("Stay connected", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                 Spacer(Modifier.height(4.dp))
-                Text("Keep Haven connected in the background for instant posts, messages and calls — no server, no Google. Uses a little battery and shows an ongoing notification.",
+                Text("Stay connected for instant posts, messages, and calls. Uses a little battery.",
                     color = HavenTheme.textSecondary, fontSize = 12.sp)
                 Spacer(Modifier.height(8.dp))
                 var stayOn by remember { mutableStateOf(com.blaineam.haven.core.ConnectionService.isEnabled(context)) }
@@ -290,8 +290,9 @@ fun SettingsScreen(onBack: () -> Unit) {
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
                 }
                 Spacer(Modifier.height(10.dp))
-                Text("Haven uses hybrid post-quantum encryption (X25519 + ML-KEM-768, Ed25519 + ML-DSA). Your keys never leave this device.",
+                Text("Hybrid post-quantum encryption. Your keys never leave this device.",
                     color = HavenTheme.textSecondary, fontSize = 12.sp)
+                LearnMoreLink("encryption")
             }
 
             Spacer(Modifier.height(16.dp))
@@ -445,7 +446,7 @@ private fun MediaCleanupCard(onManageMedia: () -> Unit) {
     Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
         Text("Storage", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
         Spacer(Modifier.height(4.dp))
-        Text("Photos and videos from your circles, cached on this device. Manage media lists everything by size so you can free the biggest items or keep favorites forever.",
+        Text("Photos and videos from your circles, cached on this device.",
             color = HavenTheme.textSecondary, fontSize = 12.sp)
 
         // Manage media (size-sorted cleanup screen) + kept count.
@@ -476,7 +477,7 @@ private fun MediaCleanupCard(onManageMedia: () -> Unit) {
             selected = maxGB,
             onSelect = { com.blaineam.haven.core.MediaLimits.setMaxGB(it) },
         )
-        Text("Automatically removes old / excess cached media (oldest first) — the posts stay and re-download on demand. Kept items are never removed.",
+        Text("Removes oldest cached media to stay under your caps. Kept items are never removed.",
             color = HavenTheme.textSecondary, fontSize = 11.sp)
 
         // On-demand orphan sweep.
@@ -504,11 +505,7 @@ private fun MediaCleanupCard(onManageMedia: () -> Unit) {
 
         Spacer(Modifier.height(8.dp))
         Text(
-            "Clean up unused media removes only media no post, message or scheduled send references " +
-                "anymore — this device only, and it also happens on its own each week. Re-optimize " +
-                "re-encodes photos and videos you shared before Haven learned to compress them properly " +
-                "(or shared with auto-optimize off) and quietly re-shares the smaller copy, so everyone " +
-                "in the circle gets the space back — your captions, comments and timestamps are untouched.",
+            "Clean up removes media nothing references anymore — this device only. Re-optimize re-shares smaller copies of media you already posted, so the whole circle gets the space back.",
             color = HavenTheme.textSecondary, fontSize = 11.sp,
         )
     }
@@ -673,9 +670,10 @@ private fun StorageSyncCard(context: android.content.Context) {
         Text(
             if (saved.isConfigured)
                 "Using your own S3 bucket — your phones, tablets and computers stay in sync with no relay needed."
-            else "Add your own S3-compatible bucket so your devices keep your profile, contacts and circles in sync — even with no relay. Credentials never leave this device.",
+            else "Your own S3 bucket keeps your devices in sync. Credentials never leave this device.",
             color = HavenTheme.textSecondary, fontSize = 12.sp,
         )
+        LearnMoreLink("byo")
         Spacer(Modifier.height(12.dp))
 
         StorageField("Endpoint (e.g. https://s3.us-east-1.amazonaws.com)", endpoint) { endpoint = it }
@@ -733,7 +731,7 @@ private fun RelaysHubCard(context: android.content.Context) {
     Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
         Text("This device", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
         Spacer(Modifier.height(4.dp))
-        Text("Turn this phone into a relay — sealed (unreadable) posts and media live here and re-serve to your circles when someone's been offline. Serves while Haven is open (or in the background if Real-time connection is on).",
+        Text("Sealed posts and media live here and re-serve to your circles while Haven runs.",
             color = HavenTheme.textSecondary, fontSize = 12.sp)
         Spacer(Modifier.height(10.dp))
         val hosting by HavenNet.hosting
@@ -1018,6 +1016,16 @@ private fun StorageField(label: String, value: String, secret: Boolean = false, 
     )
 }
 
+/** One-liner copy keeps the detail out of the card — "Learn more" opens the docs at [anchor]. */
+@Composable
+private fun LearnMoreLink(anchor: String) {
+    val context = LocalContext.current
+    Text("Learn more", color = HavenTheme.pink, fontSize = 12.sp, fontWeight = FontWeight.Medium,
+        modifier = Modifier.clip(RoundedCornerShape(6.dp))
+            .clickable { openInApp(context, "https://wemiller.com/apps/haven/docs/#$anchor") }
+            .padding(vertical = 4.dp))
+}
+
 @Composable
 private fun SettingSwitch(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1045,9 +1053,9 @@ private fun AuthorizedDevicesCard() {
         Text("Authorized devices", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
         Spacer(Modifier.height(4.dp))
         val role = when {
-            seedless -> "This is a seedless linked device" to "It holds its own revocable device key and a granted sync key — never your master seed. Your primary device authorizes it and can cut it off cryptographically."
+            seedless -> "This is a seedless linked device" to "It has its own revocable key — never your master key. Your primary device can revoke it anytime."
             enabled -> "This is your primary device" to "It holds your master key and authorizes or revokes your other devices."
-            authorized -> "This is a linked device" to "It holds a copy of your master key and syncs with your primary device, which can revoke it."
+            authorized -> "This is a linked device" to "It acts under its own key — never your master key — and your primary device can revoke it."
             else -> "This device isn’t linked yet" to "Make it your primary, or link it to the device that already is."
         }
         Text(role.first, color = HavenTheme.pink, fontSize = 14.sp, fontWeight = FontWeight.Medium)
@@ -1126,7 +1134,7 @@ private fun AuthorizedDevicesCard() {
                 Spacer(Modifier.height(12.dp))
                 BrandText("Link a new device", fontSize = 22)
                 Spacer(Modifier.height(8.dp))
-                Text("On your NEW phone: open Haven → “Link without the seed” → scan this. The new device gets its own key — this code never carries your seed. It expires in a few minutes.",
+                Text("On your new device: “Add this as another of my devices”, then scan this code. It gets its own revocable key — never your master key.",
                     color = HavenTheme.textSecondary, fontSize = 13.sp, textAlign = TextAlign.Center)
                 Spacer(Modifier.height(20.dp))
                 qr?.let { Image(it, "Enroll QR",
@@ -1140,7 +1148,7 @@ private fun AuthorizedDevicesCard() {
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { HavenNet.dismissSeedlessEnroll() }, containerColor = HavenTheme.card,
             title = { Text("Link “${p.name}”?", color = HavenTheme.textPrimary) },
-            text = { Text("This device is asking to join your account with its own revocable key. Only continue if you started this on “${p.name}”. It will receive your circles and contacts, and you can revoke it any time.", color = HavenTheme.textSecondary) },
+            text = { Text("Only continue if you started this on “${p.name}”. It gets its own revocable key — never your master key — and you can revoke it anytime.", color = HavenTheme.textSecondary) },
             confirmButton = {
                 Text("Link device", color = HavenTheme.pink,
                     modifier = Modifier.clickable { HavenNet.confirmSeedlessEnroll() }.padding(8.dp))
@@ -1156,7 +1164,7 @@ private fun AuthorizedDevicesCard() {
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { revokeTarget = null }, containerColor = HavenTheme.card,
             title = { Text("Revoke “${t.name}”?", color = HavenTheme.textPrimary) },
-            text = { Text("Revoking stops this device receiving what you post afterward — which cuts off a device that is simply lost or stolen. It can’t help if someone has extracted your master key from it: linked devices hold a copy of that key, and revoking doesn’t take it back. If that happened, the only remedy is to start a new identity.", color = HavenTheme.textSecondary) },
+            text = { Text("Revoking cuts this device off from everything shared afterward — it never received your master key, so it can’t let itself back in. It keeps only what it already downloaded.", color = HavenTheme.textSecondary) },
             confirmButton = {
                 Text("Revoke device", color = Color(0xFFF87171),
                     modifier = Modifier.clickable { HavenNet.revokeDevice(t.nodeHex); revokeTarget = null }.padding(8.dp))

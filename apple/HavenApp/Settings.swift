@@ -45,6 +45,9 @@ final class SettingsStore: ObservableObject {
         guard !applyingRemote else { return }
         settingTs[key] = UInt64(Date().timeIntervalSince1970 * 1000)
         d.set(settingTs.mapValues { NSNumber(value: $0) }, forKey: kSettingTs)
+        // A real LOCAL change to a SYNCED setting (the guard excludes sync-applied writes) reaches
+        // the user's other devices in seconds via a debounced forced self-sync pass.
+        FeedStore.shared.nudgeSelfSyncSoon()
     }
     func settingTimestamp(_ key: String) -> UInt64 { settingTs[key] ?? 0 }
     /// Apply a REMOTE synced setting only if it was changed more recently than our local one (LWW).
@@ -224,7 +227,7 @@ struct SettingsView: View {
                         .tint(HavenTheme.pink)
                 } header: { Text("Save to Photos — default") }
                 footer: {
-                    Text("Media you create lands in a **Haven ▸ Shared** album; media others send you in **Haven ▸ Received**. Photos you pick from your own library aren't re-saved. These are the defaults — any circle can override them in its own settings.")
+                    Text("Your media saves to **Haven ▸ Shared**; media sent to you saves to **Haven ▸ Received**.")
                 }
                 Section {
                     Toggle("Auto-optimize media", isOn: $settings.autoOptimize)
@@ -234,7 +237,7 @@ struct SettingsView: View {
                     Toggle("Super data saver", isOn: $settings.superDataSaver)
                         .tint(HavenTheme.pink)
                 } footer: {
-                    Text("Auto-optimize shares a smaller photo/video by default (always strips location). “Also send original” keeps the camera file beside it so recipients can open the full-size copy from the post menu. Super data saver never autoplays video or music, loads poster stills only, and downloads a video only when you tap play. Per-circle override available for optimize.")
+                    Text("Shares a smaller copy by default and always strips location.")
                 }
                 Section {
                     Picker("Notification previews", selection: $settings.notificationDetail) {
@@ -264,7 +267,7 @@ struct SettingsView: View {
                     }
                 } header: { Text("Auto-delete — default") }
                 footer: {
-                    Text("Auto-delete only affects YOUR view — it hides old posts from your feed to keep things tidy. It never deletes anything for other people, and posts you sent stay on their devices. A sender can set a shorter limit on their own posts (that one does expire everywhere). With “Always keep my own posts” on, your own posts stay in your feed as a personal archive. Per-circle override available.")
+                    Text("Hides old posts from your feed only — never deletes anything for anyone else.")
                 }
                 Section {
                     HStack {
@@ -330,7 +333,12 @@ struct SettingsView: View {
                     ReoptimizeMediaRow(onFinished: { await measureStorage() })
                 } header: { Text("Storage") }
                 footer: {
-                    Text("Photos and videos from your circles, cached on this device. **Manage media** lists everything by size so you can free the biggest items or keep favorites on this device forever. The local limits automatically remove old/excess cached media (oldest first) to stay under your caps — the posts stay and re-download on demand. Kept items are never removed. **Clean up unused media** removes only media no post, message or scheduled send references anymore — this device only, and it also happens on its own each week. **Re-optimize** re-encodes photos and videos you shared before Haven learned to compress them properly (or shared with auto-optimize off) and quietly re-shares the smaller copy, so everyone in the circle gets the space back — your captions, comments and timestamps are untouched.")
+                    Text("""
+                    **Manage media** lists everything by size; kept items are never removed.
+                    Cached media stays under your caps — posts stay and re-download on demand.
+                    **Clean up** removes media nothing references anymore, on this device only.
+                    **Re-optimize** re-shares smaller copies so the whole circle gets space back.
+                    """)
                 }
                 .task { await measureStorage() }
                 Section {
@@ -338,7 +346,7 @@ struct SettingsView: View {
                         Label("Relays", systemImage: "antenna.radiowaves.left.and.right")
                     }
                 } footer: {
-                    Text("Manage where your circles' sealed posts & media live so they reach people who were offline. Add unlimited relays (a Haven node or your own S3 bucket), pick a default for every circle, and activate or deactivate each. Each circle can override the default in its own settings.")
+                    Text("Where your circles' sealed posts & media wait for people who were offline.")
                 }
                 Section {
                     NavigationLink { BlockedPeopleView() } label: {
@@ -352,14 +360,14 @@ struct SettingsView: View {
                         Label("Identity & iCloud backup", systemImage: "icloud.fill")
                     }
                 } footer: {
-                    Text("Back up your identity to iCloud so it follows you to a new Apple device, move it to another device with a QR code, or restore/swap an identity here.")
+                    Text("Back up your identity to iCloud, move it with a QR code, or restore one here.")
                 }
                 Section {
                     NavigationLink { AuthorizedDevicesView(accountStore: accountStore) } label: {
                         Label("Devices", systemImage: "laptopcomputer.and.iphone")
                     }
                 } footer: {
-                    Text("Link this account to your other devices — each gets its own revocable key and syncs your profile + posts. See which devices are authorized, re-sync, or revoke one.")
+                    Text("Link your other devices — each gets its own revocable key, never your master key.")
                 }
                 Section {
                     NavigationLink {

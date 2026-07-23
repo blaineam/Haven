@@ -16,6 +16,11 @@ import java.net.URL
 // The only thing that ever leaves the circle is a content-free ledger entry — identity vs
 // identity, action, offense category. No PII, no content.
 
+/** The blind push relay (a Cloudflare Worker) — one shared constant for BOTH the moderation
+ *  ledger and the notify/wake push leg (parity with Apple `PushManager.defaultRelay`). The
+ *  worker only ever sees node ids + ciphertext sealed to the recipient. */
+const val PUSH_RELAY = "https://haven-push.blaineams3.workers.dev"
+
 /**
  * Fire-and-forget, content-free entries to the developer ledger on the push Worker. Node ids are
  * opaque public keys — the ledger records only that an identity WAS REPORTED and for which
@@ -25,7 +30,7 @@ import java.net.URL
  * private, local decision to stop seeing someone, and it stays on the device.
  */
 object ModerationLedger {
-    const val RELAY = "https://haven-push.blaineams3.workers.dev"
+    const val RELAY = PUSH_RELAY
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /** Signed with the identity key (audit F1): the Terms attach real consequences to a ledger row,

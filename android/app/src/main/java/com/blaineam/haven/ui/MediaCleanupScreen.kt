@@ -108,7 +108,7 @@ fun MediaCleanupScreen() {
                             )
                             Spacer(Modifier.height(4.dp))
                             Text(
-                                "Sorted by size. Removing an item frees only the copy on this device — the post stays and can be re-downloaded. “Keep on this device” exempts an item from every cleanup.",
+                                "Sorted by size. Removing frees only this device's copy — posts stay. Kept items are never removed.",
                                 color = HavenTheme.textSecondary, fontSize = 12.sp,
                             )
                         }

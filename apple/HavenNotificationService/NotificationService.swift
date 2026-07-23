@@ -49,6 +49,14 @@ final class NotificationService: UNNotificationServiceExtension {
             return
         }
 
+        // Foreground fast-path hand-off: record the push's coordinates in the App Group so the
+        // app's next foreground/push drain targets exactly this envelope + media even if our own
+        // prefetch below is killed mid-flight. Reader (`SharedPushHints`) clears; we only append.
+        if let cid = decoded.circleId, !cid.isEmpty, !decoded.redactedForLock {
+            SharedPushHintWriter.append(c: cid, mk: decoded.mailboxKey,
+                                        mr: decoded.mediaRefs, p: decoded.postId)
+        }
+
         // Resolve how much detail THIS device is allowed to show. Async because iOS notification
         // settings are. Cap wait so we never miss the NSE deadline if the system stalls.
         Self.resolveDetail { detail in
@@ -69,7 +77,38 @@ final class NotificationService: UNNotificationServiceExtension {
             // iOS 15+ ignores summaryArgument / summaryArgumentCount — threadIdentifier above
             // is what groups the stack. Kind labels stay available via SharedNotificationPrivacy.
             _ = decoded.kind
-            contentHandler(best)
+            // Push-before-content: the banner already names the sender — now fetch what it
+            // announced (the sealed envelope by its exact mailbox key, plus thumb/poster media)
+            // while we still hold the NSE's execution window, THEN deliver. The banner text is
+            // final either way; `serviceExtensionTimeWillExpire` still delivers it on overrun.
+            let hasInlineEvent = request.content.userInfo["ev"] != nil
+            Self.prefetchThenDeliver(decoded, hasInlineEvent: hasInlineEvent) {
+                contentHandler(best)
+            }
+        }
+    }
+
+    /// Best-effort content prefetch bounded to ~10s of the NSE budget; always calls `deliver`.
+    private static func prefetchThenDeliver(_ decoded: Decoded, hasInlineEvent: Bool,
+                                            deliver: @escaping () -> Void) {
+        let wantEnvelope = !hasInlineEvent && decoded.mailboxKey != nil
+        let mediaRefs = decoded.mediaRefs ?? []
+        guard !decoded.redactedForLock, wantEnvelope || !mediaRefs.isEmpty,
+              let cid = decoded.circleId, !cid.isEmpty else {
+            deliver()
+            return
+        }
+        Task {
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    await SharedPushPrefetch.run(circleId: cid, mailboxKey: decoded.mailboxKey,
+                                                 mediaRefs: mediaRefs, skipEnvelope: hasInlineEvent)
+                }
+                group.addTask { try? await Task.sleep(nanoseconds: 10_000_000_000) }
+                await group.next()      // whichever finishes first — fetch done, or budget spent
+                group.cancelAll()
+            }
+            deliver()
         }
     }
 
@@ -166,16 +205,21 @@ final class NotificationService: UNNotificationServiceExtension {
         let kind: String?
         let emoji: String?
         let threadId: String?
-        /// `haven://…` route for notification tap (Messages thread / post).
+        /// `haven://…` route for notification tap (Messages thread / post / story).
         let deepLink: String?
         var redactedForLock: Bool = false
+        /// Push-before-content coordinates (all from inside the sealed blob).
+        var circleId: String?
+        var postId: String?
+        var mailboxKey: String?
+        var mediaRefs: [String]?
         /// Convenience when already fully redacted (locked circle / call).
         var body: String { fullBody }
     }
 
-    /// Build a tap route from banner fields. Mirror of `DeepLink.interactionLink` (NSE can't
-    /// import the app target) — keep encodings in sync.
-    private static func deepLink(circleId: String?, postId: String?) -> String? {
+    /// Build a tap route from banner fields. Mirror of `DeepLink.interactionLink` /
+    /// `DeepLink.storyLink` (NSE can't import the app target) — keep encodings in sync.
+    private static func deepLink(circleId: String?, postId: String?, kind: String? = nil) -> String? {
         guard let circleId, !circleId.isEmpty else { return nil }
         let allowed = CharacterSet(charactersIn:
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_~")
@@ -189,13 +233,15 @@ final class NotificationService: UNNotificationServiceExtension {
         }
         if let postId, !postId.isEmpty,
            let encPid = postId.addingPercentEncoding(withAllowedCharacters: allowed) {
-            return "haven://p/\(encCid)/\(encPid)"
+            // A story tap lands in the story viewer, not the feed.
+            return kind == "story" ? "haven://s/\(encCid)/\(encPid)" : "haven://p/\(encCid)/\(encPid)"
         }
         return "haven://c/\(encCid)"
     }
 
     /// The sealed payload is a tiny JSON object:
-    /// - Message/post: `{ "t", "b", "bp"?, "c", "k"?, "e"?, "p"? }` — built by `PushBanner`.
+    /// - Message/post: `{ "t", "b", "bp"?, "c", "k"?, "e"?, "p"?, "mk"?, "mr"? }` — built by
+    ///   `PushBanner`. `p`/`mk`/`mr` are the deep-link + prefetch coordinates.
     /// - Call fallback: `{ "t": <caller name>, "h": <caller hex> }` — no `b`.
     private static func decode(_ data: Data) -> Decoded? {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
@@ -219,7 +265,10 @@ final class NotificationService: UNNotificationServiceExtension {
         let thread = circleId ?? kind
         return Decoded(title: title, fullBody: full, privateBody: privateBody,
                        kind: kind, emoji: emoji, threadId: thread,
-                       deepLink: deepLink(circleId: circleId, postId: postId))
+                       deepLink: deepLink(circleId: circleId, postId: postId, kind: kind),
+                       circleId: circleId, postId: postId,
+                       mailboxKey: obj["mk"] as? String,
+                       mediaRefs: obj["mr"] as? [String])
     }
 
     private static func fallbackBody(kind: String, emoji: String?) -> String {

@@ -91,7 +91,7 @@ struct StorageSettingsView: View {
                             Label(err, systemImage: "exclamationmark.triangle.fill")
                                 .font(.caption).foregroundStyle(.orange)
                         }
-                        Text("With this on, Haven relays invisibly in the background: close the window and it keeps serving your circle with no dock icon (launch Haven again to reopen it). At login it starts hidden — launch it a second time to open the window, like the first time.")
+                        Text("Keeps relaying with no window after you close it — launch Haven again to reopen.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     // Mac: front-door controls (bundled cloudflared / custom domain / manual).
@@ -105,8 +105,8 @@ struct StorageSettingsView: View {
                     Text("Circle relay")
                 } footer: {
                     Text(relay.isDesktopClass
-                         ? "Turn this Mac into your circles' always-available mailbox — sealed (unreadable) posts and media are stored here and re-served to your circle whenever someone's been offline. Just leave Haven running."
-                         : "Use this device as your circles' mailbox — sealed posts/media live here and re-serve when someone's offline. On iPhone/iPad it serves while Haven is open and the screen's on (keep it on a charger); a Mac or the desktop app is best for always-on. No setup, no cloud.")
+                         ? "This Mac holds your circles' sealed posts & media for anyone who was offline."
+                         : "Holds your circles' sealed posts for offline members while Haven is open — a Mac is best for always-on.")
                 }
                 // Reuse a mailbox you already set up on another circle — a simple one-tap pick.
                 let others = RelayMailboxStore.shared.circlesWithRelay(excluding: cid)
@@ -149,7 +149,7 @@ struct StorageSettingsView: View {
                             Text("Stop using this relay")
                         }
                     } header: { Text("Active relay") }
-                    footer: { Text("Your circle shares this bucket so posts arrive even when people are offline. Only sealed, unreadable blobs are stored there.") }
+                    footer: { Text("Your circle shares this bucket. Only sealed, unreadable data is stored there.") }
                 }
 
                 // Power-user options live one tap deeper so the common path stays uncluttered:
@@ -161,7 +161,7 @@ struct StorageSettingsView: View {
                         Label("Advanced", systemImage: "slider.horizontal.3")
                     }
                 } footer: {
-                    Text("Connect an external always-on relay (a Mac, Linux box, or spare device running `haven-relay`), or point Haven at your own S3-compatible bucket. Optional — the toggle above is all most people need.")
+                    Text("Point Haven at an external `haven-relay` or your own S3 bucket. Most people can skip this.")
                 }
             }
             .scrollContentBackground(.hidden)
@@ -243,7 +243,7 @@ struct RelayPoolSection: View {
             } header: {
                 Text(relays.count == 1 ? "Relay" : "Relays · \(relays.count)")
             } footer: {
-                Text("Posts and media are mirrored to every relay here and read from any that's reachable, so your circle keeps syncing as long as one is up. A relay that fails is paused and retried automatically. Swipe a relay to forget it everywhere.")
+                Text("Posts mirror to every relay; any one reachable keeps the circle syncing. Swipe to forget one.")
             }
         }
     }
@@ -312,10 +312,12 @@ struct RelayFrontDoorControls: View {
             ))
             .autocorrectionDisabled().havenAutocap(.never)
             .textContentType(.URL)
-            Text("Leave DERP empty to reuse the media URL (path router unifies both on :8675). Sibling hostname example: https://derp.example.com → http://127.0.0.1:3340.")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 6) {
+                Text("Leave empty to reuse the media tunnel.")
+                Link("Learn more", destination: URL(string: "https://wemiller.com/apps/haven/docs/#front-door")!)
+            }
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
         }
         if tunnel.frontDoorMode == "bundled" {
             SecureField("Cloudflare tunnel install token", text: Binding(
@@ -492,8 +494,11 @@ struct CircleMailboxSection: View {
         } header: {
             Text("Relay")
         } footer: {
-            Text("Where this circle's sealed posts & media live so they reach people who were offline. Leave a device on as the relay (easy), or point at an external relay / your own S3 bucket under Advanced. On Mac, set a custom Cloudflare domain + tunnel token so the bundled cloudflared connector serves a stable HTTPS front door (see docs/CLOUDFLARE-TUNNEL.md). Blobs stay E2E-sealed; the tunnel only moves ciphertext.")
-                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Holds this circle's sealed posts for offline members — it only ever sees ciphertext.")
+                Link("Learn more", destination: URL(string: "https://wemiller.com/apps/haven/docs/#relay-idea")!)
+            }
+            .fixedSize(horizontal: false, vertical: true)
         }
         RelayPoolSection(circleId: circleId)
         Section {
@@ -591,7 +596,7 @@ struct AdvancedStorageView: View {
                 Label("Saved on this device", systemImage: "checkmark.seal.fill").foregroundStyle(.green).font(.caption)
             }
         } header: { Text("Your S3-compatible bucket") }
-        footer: { Text("Works with AWS S3, Cloudflare R2, Backblaze B2, rclone serve s3, etc. Keys are stored only in this device's Keychain — never on any server.") }
+        footer: { Text("Works with AWS S3, Cloudflare R2, Backblaze B2, etc. Keys stay in this device's Keychain — never on any server.") }
 
         if store.s3Configured {
             Section {
@@ -607,7 +612,14 @@ struct AdvancedStorageView: View {
                 }
                 .tint(HavenTheme.pink)
             } header: { Text("Volunteer as tribute") }
-            footer: { Text("Your bucket becomes the circle's shared relay: every post is stored sealed and re-served to anyone who's missing it — so messages and memories arrive even when the sender is offline and you're never online at the same time. Tap “Share as my circle's relay” to send these credentials (sealed, only your circle can open them) so everyone uses the same bucket — rent one from any S3 provider, no server to run. Heads up: members you share with can read (still sealed) and write to the bucket, so only share with a circle you trust, and rotate the key if someone leaves.") }
+            footer: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Your own S3 bucket keeps your circle synced. Credentials never leave your circle's devices.")
+                    Text("Heads up: members you share with can read (still sealed) and write to the bucket, so only share with a circle you trust, and rotate the key if someone leaves.")
+                    Link("Learn more", destination: URL(string: "https://wemiller.com/apps/haven/docs/#byo")!)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }
@@ -643,8 +655,13 @@ enum Keychain {
         if dataProtection { q[kSecUseDataProtectionKeychain as String] = true }
         return q
     }
+    /// Stub: DP keychain only — a legacy login-keychain touch prompts on every rebuilt binary
+    /// (see SecureEnclaveBox.dataProtectionKeychainOnly). Production keeps the migration domains.
+    private static var domains: [Bool] {
+        SecureEnclaveBox.dataProtectionKeychainOnly ? [true] : [true, false]
+    }
     static func set(_ value: String, for key: String) {
-        for dp in [true, false] { SecItemDelete(base(key, dataProtection: dp) as CFDictionary) }
+        for dp in domains { SecItemDelete(base(key, dataProtection: dp) as CFDictionary) }
         guard !value.isEmpty else { return }
         var add = base(key)
         add[kSecValueData as String] = Data(value.utf8)
@@ -659,6 +676,7 @@ enum Keychain {
             return SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess ? item as? Data : nil
         }
         if let d = read(dataProtection: true) { return String(data: d, encoding: .utf8) }
+        if SecureEnclaveBox.dataProtectionKeychainOnly { return nil }   // never probe legacy (prompt)
         // Legacy keychain fallback → migrate forward (drop legacy only after the DP write lands).
         guard let d = read(dataProtection: false) else { return nil }
         var add = base(key)
@@ -709,8 +727,8 @@ struct RelayRetentionControls: View {
             } label: { Label("Media storage limit", systemImage: "internaldrive") }
 
             Text(relay.serving
-                 ? "Changes apply next time the relay starts — switch the relay off and on to apply them now."
-                 : "Whichever limit is reached first wins: old media is swept on age, and the oldest goes first if the size cap is hit. Undelivered messages are never swept — only media.")
+                 ? "Changes apply next time the relay starts — flip it off and on to apply now."
+                 : "Whichever limit hits first wins, oldest media first. Undelivered messages are never swept.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
@@ -758,7 +776,7 @@ struct RelaysView: View {
                     }
                     #endif
                 } header: { Text("This device") }
-                footer: { Text("Turn this device into an always-available relay — sealed (unreadable) posts and media live here and re-serve to your circles when someone's been offline. A Mac left running is ideal; on iPhone it serves while Haven is open. On Mac, pick a public front door below when the relay is on (free trycloudflare, custom domain, or your own tunnel).") }
+                footer: { Text("Sealed posts & media live here and re-serve to your circles when someone's been offline.") }
 
                 if entries.isEmpty {
                     Section { Text("No relays configured yet. Add one below, or flip the toggle above to use this device.").font(.caption).foregroundStyle(.secondary) }
@@ -766,7 +784,7 @@ struct RelaysView: View {
                     Section {
                         ForEach(entries) { e in relayRow(e) }
                     } header: { Text("Configured relays · \(entries.count)") }
-                    footer: { Text("The default relay (★) is inherited by every circle that hasn't picked its own. Removing a relay DEACTIVATES it — its name and circle settings survive so you can turn it back on later. An inactive relay unseen for a week is cleaned up automatically.") }
+                    footer: { Text("The default (★) is inherited by circles without their own pick. Removing deactivates — the config survives.") }
                 }
 
                 Section {
@@ -950,7 +968,7 @@ struct AddRelaySheet: View {
                         footer: {
                             HStack(alignment: .top, spacing: 6) {
                                 Image(systemName: "info.circle.fill").foregroundStyle(.orange)
-                                Text("Store-and-forward only: an S3 bucket holds sealed posts & media for offline delivery (mailbox/backup) — it is **not** a live P2P relay (no realtime fan-out). Your secret stays in this device's Keychain, never on any server.")
+                                Text("Store-and-forward only — holds sealed posts for offline delivery, not a live P2P relay. Your secret stays in this device's Keychain, never on any server.")
                             }.font(.caption)
                         }
                     }

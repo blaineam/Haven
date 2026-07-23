@@ -14,16 +14,24 @@ final class DMPinStore: ObservableObject {
         if let i = pinned.firstIndex(of: id) { pinned.remove(at: i) }
         else if pinned.count < Self.maxPins { pinned.append(id) }
         UserDefaults.standard.set(pinned, forKey: key)
+        nudgeSync()
     }
     func remove(_ id: String) {
         guard let i = pinned.firstIndex(of: id) else { return }
         pinned.remove(at: i); UserDefaults.standard.set(pinned, forKey: key)
+        nudgeSync()
     }
     /// Commit a user-chosen order (from the rearrange mode). Keeps only ids that are still pinned.
     func setOrder(_ ids: [String]) {
         let kept = ids.filter { pinned.contains($0) }
         pinned = kept + pinned.filter { !kept.contains($0) }
         UserDefaults.standard.set(pinned, forKey: key)
+        nudgeSync()
+    }
+    /// A LOCAL pin change (never `applySynced`) reaches my other devices in seconds via a
+    /// debounced forced self-sync pass, instead of waiting out the 2-minute periodic gate.
+    private func nudgeSync() {
+        Task { @MainActor in FeedStore.shared.nudgeSelfSyncSoon() }
     }
     /// Adopt a pinned list synced from one of my other devices (via SelfSyncCoordinator, last-writer-wins).
     func applySynced(_ ids: [String]) {
@@ -89,6 +97,12 @@ final class DMDraftStore: ObservableObject {
 
     /// Take the staged draft for a thread (once) — the composer owns the text from then on.
     func takeDraft(_ circleId: String) -> String? { drafts.removeValue(forKey: circleId) }
+
+    /// A message the opening thread should scroll to (a notification tap names the exact
+    /// message). Staged by DeepLinkRouter.openDM, consumed once by the thread's onAppear.
+    private var scrollTargets: [String: String] = [:]
+    func stageScroll(circleId: String, messageId: String) { scrollTargets[circleId] = messageId }
+    func takeScrollTarget(_ circleId: String) -> String? { scrollTargets.removeValue(forKey: circleId) }
 }
 
 struct MessagesView: View {
@@ -481,6 +495,17 @@ struct DMThreadView: View {
                     // half-typed.
                     if let staged = DMDraftStore.shared.takeDraft(circleId) {
                         text = text.isEmpty ? staged : "\(text)\n\(staged)"
+                    }
+                    // A notification tap names the exact message — land on IT, not the bottom
+                    // (twice, non-animated, to catch late lazy layout — same trick as below).
+                    // The bottom is only the right default when nothing specific was asked for.
+                    if let target = DMDraftStore.shared.takeScrollTarget(circleId),
+                       ordered.contains(where: { $0.id == target }) {
+                        proxy.scrollTo(target, anchor: .center)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                            proxy.scrollTo(target, anchor: .center)
+                        }
+                        return
                     }
                     scrollToBottom(proxy, animated: false)
                     DispatchQueue.main.async { scrollToBottom(proxy, animated: false) }

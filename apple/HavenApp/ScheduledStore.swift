@@ -1,4 +1,9 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
 
 /// A post or DM queued to send at a future time. Haven is P2P + serverless, so a scheduled item
 /// fires while the app is awake — at launch, on foreground, on a 30s timer, or on a background
@@ -25,11 +30,34 @@ final class ScheduledStore: ObservableObject {
 
     private init() { load() }
 
-    /// Begin firing due items (call once networking is up).
+    /// Begin firing due items (call once networking is up). One-shot at the EARLIEST fireAt —
+    /// most users have nothing scheduled, and a 30s repeating timer woke the main actor forever
+    /// for an empty queue (idle heat). Re-armed on schedule/cancel/fire and on foreground (a
+    /// timer can't fire while suspended, so the wake catches anything that came due meanwhile).
     func start() {
         fireDue()
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+        observeForegroundOnce()
+    }
+
+    private var foregroundObserver: NSObjectProtocol?
+    private func observeForegroundOnce() {
+        guard foregroundObserver == nil else { return }
+        #if canImport(UIKit)
+        let name = UIApplication.willEnterForegroundNotification
+        #else
+        let name = NSApplication.didBecomeActiveNotification
+        #endif
+        foregroundObserver = NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in
+            Task { @MainActor in ScheduledStore.shared.fireDue() }
+        }
+    }
+
+    /// Point the one-shot timer at the earliest pending item (or clear it when nothing waits).
+    private func rearm() {
+        timer?.invalidate(); timer = nil
+        guard let next = items.map(\.fireAt).min() else { return }
+        let delay = max(1, next - Date().timeIntervalSince1970)
+        timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             Task { @MainActor in self?.fireDue() }
         }
     }
@@ -39,20 +67,21 @@ final class ScheduledStore: ObservableObject {
                                    body: body, media: media, fireAt: date.timeIntervalSince1970))
         items.sort { $0.fireAt < $1.fireAt }
         save()
+        rearm()
     }
 
-    func cancel(_ id: String) { items.removeAll { $0.id == id }; save() }
+    func cancel(_ id: String) { items.removeAll { $0.id == id }; save(); rearm() }
 
     /// Items still waiting for a given circle (for the composer's "N scheduled" badge / list).
     func upcoming(forCircle circleId: String) -> [ScheduledItem] {
         items.filter { $0.circleId == circleId }
     }
 
-    /// Send anything whose time has arrived, then drop it from the queue.
+    /// Send anything whose time has arrived, then drop it from the queue and re-arm the one-shot.
     func fireDue() {
         let now = Date().timeIntervalSince1970
         let due = items.filter { $0.fireAt <= now }
-        guard !due.isEmpty else { return }
+        guard !due.isEmpty else { rearm(); return }
         items.removeAll { $0.fireAt <= now }
         save()
         for item in due {
@@ -62,6 +91,7 @@ final class ScheduledStore: ObservableObject {
                 FeedStore.shared.postScheduled(circleId: item.circleId, body: item.body, media: item.media)
             }
         }
+        rearm()
     }
 
     /// Encrypted-at-rest store for the queued plaintext (was an unprotected UserDefaults plist).
@@ -111,7 +141,7 @@ struct SchedulePicker: View {
                                    displayedComponents: [.date, .hourAndMinute])
                             .tint(HavenTheme.pink)
                     } footer: {
-                        Text("Haven sends this when the time comes and the app is awake (it can't send from a server). Keep Haven open or let it wake in the background near then.")
+                        Text("Sends when the time comes if Haven is awake — no server involved.")
                     }
                     let pending = store.upcoming(forCircle: circleId)
                     if !pending.isEmpty {

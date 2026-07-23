@@ -6,6 +6,50 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest wave (built, batched for next upload)
+- **Self-sync + hello lane resurrection (2026-07-23, core + Apple)** — live-fleet
+  diagnosis found the self-sync-over-relay lane DEAD everywhere (three stacked causes)
+  and circle invites dying in unclaimable hello slots; the root of "my linked devices
+  each show different things". Relay now authorizes `haven/self/<acct>/**` on BOTH
+  transports for the account's own fleet (account id or any device in its stored
+  account-signed devroster; LIST stays per-account — F3 intact, nothing new disclosed);
+  Apple self-sync climbs the uploadEvent ladder (own hosted relay local store → signed
+  HTTP → iroh) and counts HTTP-interface-only relays as transports. Hellos are now
+  addressed by ACCOUNT hex (device ids stay dial targets), claimed only by their real
+  owner (account or current transport device id — never mark-seen'd away by whoever
+  polled first), skipped at fetch when addressed to others, deduped per (relay, key) so
+  late-adopted relays still get them, plus a one-shot seen repair. Also: rebuilt QA
+  stubs no longer spam macOS keychain-approval dialogs (stub keychain work confined to
+  the data-protection keychain under its `…qa.stub` access group; production behavior
+  unchanged). NEEDS: NAS relay redeploy to serve the new self-sync gate; Android +
+  desktop get the same client-side hello/self-sync addressing in their parity pass.
+- **The "everything wave" (2026-07-22 night)** — nine-front fix pass, all platforms:
+  (1) *Heat round two*: unchanged self-sync states stop re-sealing/re-uploading every
+  2 min, hello uploads dedupe, history re-seals stretch with idle + cache, media
+  retries back off to 6h persisted, BG refresh is a slim mailbox pull, live-call
+  timer only exists in calls, relay **delta-LIST** (digest → 204) kills the idle
+  full-key-list radio cost on every platform. (2) *Push→content gap*: NSE fetches the
+  announced envelope + thumbnails before showing the banner (relay directory mirrored
+  into the app group), alert pushes wake the app (`content-available`), app-open
+  consumes push hints first; Android/desktop prefetch before notifying. (3) *Deep
+  links everywhere*: banners carry exact post ids (incl. fresh posts via new
+  `last_authored_event_id` FFI), Android/desktop notification taps finally deep-link,
+  story route added, blank-sheet circle taps fixed. (4) **In-app Activity list** on
+  all four platforms (bell + unread badge, tap-to-jump, read-state synced via
+  `setting:activitySeenAt`), derived from synced data by one new core `activity()`
+  FFI. (5) *Media rides with posts*: priority upload lane + author "media landed"
+  announce + photo micro-thumbs upload-first + resumable chunked restores + honest
+  placeholder states. (6) *Linked-device convergence*: Android mark-seen-at-fetch bug
+  (the divergence root cause) fixed + one-shot repair, `__hello__`/`__relay__`/
+  `__live__` routing parity on Android/desktop, avatar + pinned-DM LWW ported,
+  desktop retention CRDT key mismatch fixed, own-device catch-up round-robins ALL
+  circles, push-wake leg added to Android/desktop. (7) *Crash*: Bonjour retire-pool
+  hardening (static, outlives owner). (8) *Copy*: every dense settings/relay/device
+  explainer rewritten to one line on all platforms + Learn-more docs links; desktop
+  master-key factual error fixed. (9) *QA*: full cross-device E2E suite
+  (`soren run Haven e2e`) with propagation-latency perf gates + regression ledger,
+  qa-cmd v2 driver contract on all four clients. NEEDS: `cd push && wrangler deploy`
+  (content-available + the pending VoIP wave), TestFlight via Xcode Cloud, final
+  v1.1.4 tag for relay/desktop release, NAS relay rebuild.
 - **Background call ringing fixed (iOS→iOS)**: four defects in the PushKit→CallKit path —
   registry created only in `.onAppear` (a background VoIP launch never renders a view → the
   wake push had nowhere to land), ONE voip-token slot per account on the worker (any linked

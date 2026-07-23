@@ -21,8 +21,8 @@ use haven_p2p::treekem;
 use haven_p2p::identity::{Identity, HavenId};
 use haven_p2p::link::HavenLink;
 use haven_p2p::social::{
-    build_feed, is_expired, open_bytes, open_event, seal_bytes, seal_event, Event, EventKind,
-    FeedPoll, Group, SealedEnvelope, TrackRef,
+    build_activity, build_feed, is_expired, open_bytes, open_event, seal_bytes, seal_event, Event,
+    EventKind, FeedPoll, Group, SealedEnvelope, TrackRef,
 };
 use haven_p2p::groupkey::{
     mailbox_prefix, new_circle_secret, new_epoch_key, open_event_in_epoch_authored, open_key_commit,
@@ -615,8 +615,17 @@ impl RelayClient {
     }
 
     /// List keys under a prefix (e.g. `mailbox/<circle>`) to poll the mailbox.
-    pub async fn list(&self, prefix: String) -> Vec<String> {
-        self.inner.list(&prefix).await.unwrap_or_default()
+    ///
+    /// Failures SURFACE as an error — an empty Vec means the relay really holds nothing under
+    /// the prefix. The old `unwrap_or_default()` made every transport failure (dial cooldown,
+    /// unreachable relay) indistinguishable from an empty mailbox, so callers with an HTTP
+    /// fallback rung never took it: an HTTP-only device "polled successfully" forever while
+    /// its mailbox sat full on the relay. Kotlin call sites already `runCatching` this.
+    pub async fn list(&self, prefix: String) -> Result<Vec<String>, HavenError> {
+        self.inner
+            .list(&prefix)
+            .await
+            .map_err(|e| HavenError::Invalid { msg: format!("relay list: {e}") })
     }
 
     /// Refresh the liveness of `keys` (all under `prefix`, one circle's mailbox path) so the
@@ -732,7 +741,9 @@ impl RelayServerHandle {
     /// Requests are authorized by the caller's per-request node-key signature against this relay's
     /// circle membership — the same gate as the iroh path. `token` is the shared relay secret from
     /// the sealed relay announce, folded into each signature (never sent). Clients build their
-    /// header with [`http_auth_header`]. `self/…` keys are never served over HTTP.
+    /// header with [`http_auth_header`]. Canonical self-sync slots (`haven/self/…`) are served
+    /// under the owner-or-roster-device gate (same rule as iroh); legacy bare `self/…` keys stay
+    /// iroh-only.
     pub async fn serve_http(&self, bind: String, token: String) -> Result<u16, HavenError> {
         self.node
             .node
@@ -1144,6 +1155,28 @@ pub struct ReportFfi {
     pub reason: String,
     pub comment: String,
     pub created_at: u64,
+}
+
+/// One activity row for the UI — who did what to my content, and where (see
+/// `HavenSocial::activity`).
+#[derive(uniffi::Record)]
+pub struct ActivityItemFfi {
+    /// The originating event's id.
+    pub id: String,
+    /// `"react" | "comment" | "vote" | "post" | "story" | "dm"`.
+    pub kind: String,
+    /// Which circle it happened in (`dm:`-prefixed for DMs).
+    pub circle_id: String,
+    /// The actor's FULL node hex + 8-char display prefix for contact lookup.
+    pub actor_hex: String,
+    pub actor_short: String,
+    /// The parent post/comment/poll id where applicable (reactions, comments, votes).
+    pub target_id: Option<String>,
+    /// Body prefix (~120 chars) for the preview line.
+    pub snippet: String,
+    pub created_at: u64,
+    /// The reaction emoji (kind == "react").
+    pub emoji: Option<String>,
 }
 
 fn short(node_hex: &str) -> String {
@@ -4803,8 +4836,9 @@ impl HavenSocial {
     /// so self-sync never carried it. This does — self-sync publishes it under `roster:<myAccountHex>`
     /// and the peer ingests it via [`Self::ingest_roster_wire`], whose `acct_id == my_id` branch
     /// union-merges the sibling's device id into this device's own list → the relay then authorizes it.
-    /// The `haven/self/…` self-sync slots are served permissively by any relay (incl. a headless one),
-    /// so this converges over any shared relay both devices can reach — no relay change required.
+    /// The `haven/self/…` self-sync slots are served to the account's own fleet by any relay (incl. a
+    /// headless one — the owner gate needs no circle membership, only the account's devroster), so this
+    /// converges over any shared relay both devices can reach — no relay change required.
     /// Returns 0 or 1 entries (empty until this device has registered itself).
     pub fn export_own_roster(&self) -> Vec<ContactRosterWire> {
         let st = self.state.lock().unwrap();
@@ -4951,6 +4985,24 @@ impl HavenSocial {
     }
     pub fn unsend(&self, circle_id: String, target: String, created_at: u64) -> Result<Vec<u8>, HavenError> {
         self.author(&circle_id, created_at, EventKind::Unsend { target })
+    }
+
+    /// The id of the event *I* authored in `circle_id` at `created_at` — how the author learns the
+    /// engine-derived id of a post it just created (ids are content-addressed inside `Event::new`:
+    /// BLAKE3(author ‖ created_at ‖ kind), so no caller can predict one). Exact because `author()`
+    /// pushes the event into the circle's log before returning its envelope; `created_at` (pass the
+    /// same timestamp you gave `post`) pins the lookup so an own-device event landing via sync in
+    /// the same instant can't be mistaken for it. Newest match wins. `None` for an unknown circle
+    /// or no match — callers treat this as best-effort (e.g. the sealed push banner's `p` deep-link
+    /// tag simply stays absent, keeping the legacy circle route).
+    pub fn last_authored_event_id(&self, circle_id: String, created_at: u64) -> Option<String> {
+        let st = self.state.lock().unwrap();
+        let me = hex(&st.me().node_id_bytes());
+        st.circles
+            .iter()
+            .find(|c| c.id == circle_id)
+            .and_then(|c| c.events.iter().rev().find(|e| e.author == me && e.created_at == created_at))
+            .map(|e| e.id.clone())
     }
 
     /// Re-seal every event *I* authored in a circle into mailbox envelopes. Used to BACKFILL a
@@ -5434,6 +5486,40 @@ impl HavenSocial {
             .map(|c| c.events.clone())
             .unwrap_or_default();
         map_feed(events, &me, now_ms, viewer_retention_secs, keep_own)
+    }
+
+    /// Activity rows across ALL circles, newest-first — who reacted to / commented on / voted on
+    /// MY events, plus others' posts, stories and DMs (see `build_activity`). ONE pass under the
+    /// state lock clones each circle's events out; the reduce runs with the lock released, so a
+    /// large history can't stall every other caller (the mac beachball lesson).
+    pub fn activity(&self, since_ms: u64, now_ms: u64) -> Vec<ActivityItemFfi> {
+        let (me, circles) = {
+            let st = self.state.lock().unwrap();
+            let me = hex(&st.me().node_id_bytes());
+            let circles: Vec<(String, Vec<Event>)> =
+                st.circles.iter().map(|c| (c.id.clone(), c.events.clone())).collect();
+            (me, circles)
+        };
+        let mut out: Vec<ActivityItemFfi> = Vec::new();
+        for (circle_id, events) in circles {
+            for it in build_activity(events, &me, &circle_id, since_ms, now_ms) {
+                let actor_short = short(&it.actor_hex);
+                out.push(ActivityItemFfi {
+                    id: it.id,
+                    kind: it.kind,
+                    circle_id: circle_id.clone(),
+                    actor_hex: it.actor_hex,
+                    actor_short,
+                    target_id: it.target_id,
+                    snippet: it.snippet,
+                    created_at: it.created_at,
+                    emoji: it.emoji,
+                });
+            }
+        }
+        // Each per-circle reduce is newest-first; merge them into one global newest-first list.
+        out.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(a.id.cmp(&b.id)));
+        out
     }
 
     /// Really delete expired content from a circle's event log. `feed` only hides expired items —
@@ -6499,6 +6585,42 @@ mod net_tests {
         assert_eq!(bob.feed("fam".into(), 4_000, None).len(), 1, "fam post lands in fam circle");
         assert_eq!(bob.feed(cid, 4_000, None).len(), 1, "default circle is unchanged");
         assert_eq!(alice.circles().len(), 2, "alice now has two circles");
+    }
+
+    #[test]
+    fn last_authored_event_id_matches_the_feed() {
+        let alice = HavenSocial::new([50u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([51u8; 32].to_vec()).unwrap();
+        let cid = DEFAULT_CIRCLE.to_string();
+        alice.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+        bob.add_contact_bundle(cid.clone(), alice.my_bundle()).unwrap();
+
+        // Author a post → the FFI hands back the engine-derived id (BLAKE3 over
+        // author ‖ created_at ‖ kind, computed inside Event::new — the caller can't
+        // predict it), and it is exactly the id feed() shows for that post.
+        alice.post(cid.clone(), "hello".into(), vec![], None, None, false, false, 1_000).unwrap();
+        let id = alice.last_authored_event_id(cid.clone(), 1_000).expect("id of the post just created");
+        let feed = alice.feed(cid.clone(), 2_000, None);
+        assert_eq!(feed.len(), 1);
+        assert_eq!(feed[0].id, id, "the returned id is what feed() shows for the post");
+
+        // Content-addressed → the RECIPIENT computes the same id, so a sealed banner's
+        // `p` deep-link tag resolves on their device too.
+        sync(&alice, &bob, &cid);
+        assert_eq!(bob.feed(cid.clone(), 2_000, None)[0].id, id, "recipient sees the same id");
+
+        // Each timestamp resolves to its own event; earlier posts stay addressable.
+        alice.post(cid.clone(), "again".into(), vec![], None, None, false, false, 1_500).unwrap();
+        let id2 = alice.last_authored_event_id(cid.clone(), 1_500).expect("second post's id");
+        assert_ne!(id2, id);
+        assert_eq!(alice.last_authored_event_id(cid.clone(), 1_000), Some(id));
+
+        // Only MY authored events answer: Bob holds Alice's post at ts 1000, but he
+        // authored nothing — a received event must never masquerade as his.
+        assert_eq!(bob.last_authored_event_id(cid.clone(), 1_000), None);
+        // Unknown circle / no event at that timestamp → None (best-effort contract).
+        assert_eq!(alice.last_authored_event_id("nope".into(), 1_000), None);
+        assert_eq!(alice.last_authored_event_id(cid, 999), None);
     }
 
     #[test]

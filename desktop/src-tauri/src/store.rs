@@ -31,6 +31,19 @@ impl Paths {
 
     /// Resolve paths for a specific identity data subdir (relative to `base`; `""` = legacy root).
     pub fn resolve_for(dir_rel: &str) -> Result<Self> {
+        // QA/dev override: `HAVEN_DESKTOP_DATA` points the WHOLE data tree (base AND identity
+        // root) at one directory, so a scratch instance is hermetic — it can run alongside a live
+        // fleet without touching `~/Library/Application Support/Haven` at all. The QA scripts
+        // already treat this variable as "the dir that holds prefs.json", so `dir_rel` is
+        // deliberately ignored: the override names the exact directory to use. Unset ⇒ unchanged.
+        if let Ok(dir) = std::env::var("HAVEN_DESKTOP_DATA") {
+            let dir = dir.trim();
+            if !dir.is_empty() {
+                let base = PathBuf::from(dir);
+                fs::create_dir_all(&base).with_context(|| format!("create {}", base.display()))?;
+                return Ok(Self { base: base.clone(), root: base });
+            }
+        }
         let base = dirs::data_dir().ok_or_else(|| anyhow!("no data dir"))?.join("Haven");
         fs::create_dir_all(&base).with_context(|| format!("create {}", base.display()))?;
         let root = if dir_rel.is_empty() { base.clone() } else { base.join(dir_rel) };
@@ -336,6 +349,15 @@ pub struct Prefs {
     /// this feature ships, pre-existing history doesn't light every conversation up as unread.
     #[serde(default)]
     pub dm_read_seeded_at: u64,
+    /// Pinned DM conversation ids, in pin order (the UI caps at 6). Synced across my devices as
+    /// `setting:pinnedDMs` (newline-joined, last-writer-wins) — mirrors iOS `DMPinStore`.
+    #[serde(default)]
+    pub pinned_dms: Vec<String>,
+    /// Activity-list "seen up to" watermark (unix ms): activity rows at/before this are read, newer
+    /// ones badge the bell. MONOTONIC — merged per-key MAX via `setting:activitySeenAt`, the same
+    /// shape as `dm_last_read`, so opening the bell on one device clears the badge on all of them.
+    #[serde(default)]
+    pub activity_seen_at: u64,
     /// DEVICE-LOCAL "keep on this device" set (#2): media refs the user asked to retain here, exempt
     /// from EVERY cleanup path (orphan sweep, the age/size limit sweep, and the cleanup screen marks
     /// them ineligible). NOT synced to other devices. Refs stored verbatim; callers union each ref's

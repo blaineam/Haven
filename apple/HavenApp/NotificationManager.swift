@@ -87,9 +87,17 @@ final class NotificationManager {
         scheduleRefresh()   // chain the next wake
         let work = Task { @MainActor in
             await BackgroundUploader.shared.flush()   // finish any posts that didn't reach the mailbox
-            FeedStore.shared.forceSync()
-            // Give inbound a window to arrive (handleEvent fires notifications itself).
-            try? await Task.sleep(nanoseconds: 12_000_000_000)
+            // SLIM background sync — NOT forceSync. A BG-refresh window is ~30s of battery the
+            // system lends us while the phone is pocketed: bringing up Multipeer discovery and
+            // fanning hello+roster to every contact there was pure heat with nobody to answer.
+            // Push-inbox drain + a mailbox-only pull + the upload-queue flush is the whole point
+            // of the wake; when the poll comes back empty we end the window early instead of
+            // idling out the full grant.
+            let gotSomething = await FeedStore.shared.slimBackgroundSync()
+            if gotSomething {
+                // Give ingest side effects (banner posting, sibling fan-out) a short window.
+                try? await Task.sleep(nanoseconds: 6_000_000_000)
+            }
             task.setTaskCompleted(success: !Task.isCancelled)
         }
         task.expirationHandler = { work.cancel() }

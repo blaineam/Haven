@@ -21,7 +21,7 @@ struct TransferIdentityView: View {
                     Image(systemName: "iphone.gen3.radiowaves.left.and.right")
                         .font(.system(size: 44)).foregroundStyle(HavenTheme.pink).padding(.top, 8)
                     Text("Move to another device").font(.title3.bold())
-                    Text("On your other device, choose **Restore identity** and scan this code. You'll be the same person in your circle — same posts, same contacts.")
+                    Text("Scan this with **Restore identity** on your other device — you'll be the same you there.")
                         .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
 
                     if revealed {
@@ -79,7 +79,7 @@ struct LinkDeviceView: View {
                     Image(systemName: "iphone.and.arrow.forward")
                         .font(.system(size: 44)).foregroundStyle(HavenTheme.pink).padding(.top, 8)
                     Text("Link a new device").font(.title3.bold())
-                    Text("On your other device, choose **“Link this as another of my devices”** on its welcome screen (or Settings → Devices), then scan this code — or tap Copy and paste it there. Both devices then act as **you**, each posting + receiving and syncing directly when near or online together.")
+                    Text("Scan this with **“Link this as another of my devices”** on your other device — both then act as you.")
                         .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
 
                     if revealed {
@@ -146,7 +146,7 @@ struct EnrollDeviceView: View {
                         Text("This is a linked device. Link new devices from your **primary device** (the one that holds your master key).")
                             .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
                     } else {
-                        Text("On your new device, choose **“Link a device”** on its welcome screen, then scan this code. It gets its own key and a copy of your circles — it **never receives your master key**, so you can revoke it anytime.")
+                        Text("Your new device scans this from **“Link a device”** and gets its own revocable key — **never your master key**.")
                             .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
 
                         if let img = QRCode.image(from: code), !code.isEmpty {
@@ -219,7 +219,7 @@ struct EnrollScanView: View {
             ScrollView {
                 VStack(spacing: 18) {
                     Text("Link this device").font(.title3.bold()).padding(.top, 8)
-                    Text("On your primary device, open **Settings → Devices → Link a device** (or its welcome screen) to show a code, then scan it here — or paste it below.")
+                    Text("Show a code with **Settings → Devices → Link a device** on your primary device, then scan or paste it here.")
                         .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
 
                     if scanning && !waiting {
@@ -343,10 +343,10 @@ struct RestoreIdentityView: View {
                         Text("Restore from a backup").font(.subheadline.weight(.semibold))
                         if backups.isEmpty {
                             if iCloudOn {
-                                Text("No backed-up identities found in your iCloud Keychain yet. Backups appear here once an identity has synced from another of your Apple devices.")
+                                Text("No iCloud backups yet — they appear once an identity syncs from another Apple device.")
                                     .font(.caption).foregroundStyle(.secondary)
                             } else {
-                                Text("Turn on iCloud Keychain backup to recover an identity you used on another Apple device — without needing a transfer code.")
+                                Text("Turn on iCloud backup to recover an identity from another Apple device — no code needed.")
                                     .font(.caption).foregroundStyle(.secondary)
                                 Button {
                                     accountStore.setICloudSync(true)

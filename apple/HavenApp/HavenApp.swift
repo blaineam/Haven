@@ -136,12 +136,43 @@ final class HavenAppDelegate: NSObject, NSApplicationDelegate {
             let title = locked ? "Haven" : ((obj["t"] as? String) ?? "Haven")
             let fallbackBody = isCall ? "📞 Incoming call — open Haven to answer" : "New message"
             let body = locked ? "New activity in a locked circle" : ((obj["b"] as? String) ?? fallbackBody)
+            let cid = obj["c"] as? String
+            let postId = obj["p"] as? String
+            let mailboxKey = obj["mk"] as? String
+            let mediaRefs = (obj["mr"] as? [String]) ?? []
             let deep: String? = {
-                guard let c = obj["c"] as? String, !c.isEmpty else { return nil }
-                let p = obj["p"] as? String
-                return DeepLink.interactionLink(circleId: c, postId: p)
+                guard let c = cid, !c.isEmpty else { return nil }
+                // A story tap lands in the story viewer, not the feed.
+                if (obj["k"] as? String) == "story", let p = postId, !p.isEmpty {
+                    return DeepLink.storyLink(circleId: c, postId: p)
+                }
+                return DeepLink.interactionLink(circleId: c, postId: postId)
             }()
+            // Same App-Group hint the NSE writes (item retried by the foreground fast-path if the
+            // in-process prefetch below loses its race with a slow relay).
+            if let cid, !cid.isEmpty, !locked {
+                SharedPushHintWriter.append(c: cid, mk: mailboxKey,
+                                            mr: mediaRefs.isEmpty ? nil : mediaRefs, p: postId)
+            }
             Task { @MainActor in
+                // Push-before-content, full engine in-process (no NSE limits): fetch the exact
+                // envelope + media the push named BEFORE the banner posts, so clicking it opens
+                // content that is already there. Bounded — a dead relay can't hold the banner
+                // hostage; the prefetch itself keeps running past the bound.
+                if let cid, !cid.isEmpty {
+                    let prefetch = Task { @MainActor in
+                        // `ev` already delivered the envelope inline — media only, then.
+                        await FeedStore.shared.prefetchPush(circleId: cid,
+                                                            mailboxKey: userInfo["ev"] == nil ? mailboxKey : nil,
+                                                            mediaRefs: mediaRefs)
+                    }
+                    _ = await withTaskGroup(of: Void.self) { group in
+                        group.addTask { _ = await prefetch.value }
+                        group.addTask { try? await Task.sleep(nanoseconds: 6_000_000_000) }
+                        await group.next()
+                        group.cancelAll()   // cancels the waiters, not the prefetch task itself
+                    }
+                }
                 NotificationManager.shared.notify(title: title, body: body, dedupeKey: e, deepLink: deep)
             }
         } else if isCall {
@@ -200,6 +231,8 @@ struct HavenApp: App {
                 // Banner-only pushes (body too big for inline `ev`) never fill the inbox — still pull
                 // the mailbox so posts/stories/DMs/reactions appear when you open the app.
                 FeedStore.shared.syncBecauseOfPush()
+                // Refresh the activity list (bell badge) — what happened while we were away.
+                FeedStore.shared.pullActivity()
                 #if os(iOS)
                 // Re-read the ring/silent switch: it may well have been flipped while we were away.
                 SilentSwitch.startMonitoring()
@@ -358,7 +391,9 @@ struct RootView: View {
             tab = t
             deepLinks.requestedTab = nil
         }
-        // Profile / specific-post deep links open as a sheet.
+        // Profile / specific-post / story deep links open as a sheet. (DM and circle links don't
+        // route here at all: the tab switch + DMDraftStore/setActiveCircle land IN the content —
+        // the old `.dm`/`.circle` sheets only ever floated redundant or blank cards over it.)
         .sheet(item: $deepLinks.route) { route in
             switch route {
             case .profile(let nodeHex):
@@ -368,15 +403,8 @@ struct RootView: View {
                 }
             case .post(let circleId, let postId):
                 PostLinkView(circleId: circleId, postId: postId)
-            case .dm(let circleId, let messageId):
-                // Notification tap into a DM — open the thread (and optionally the specific message).
-                if let messageId, !messageId.isEmpty {
-                    PostLinkView(circleId: circleId, postId: messageId)
-                } else {
-                    EmptyView()   // Messages tab already opened the thread via DMDraftStore
-                }
-            case .circle:
-                EmptyView()   // Circle tab already switched via setActiveCircle
+            case .story(let circleId, let postId):
+                StoryLinkView(circleId: circleId, postId: postId)
             }
         }
     }

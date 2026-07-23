@@ -117,17 +117,17 @@ private fun RelayWalkthrough(onDone: () -> Unit) {
         Text("Set up a relay", color = HavenTheme.textPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
 
         Point(Icons.Filled.Inbox, "Nobody has to be online at once",
-            "Your posts and media are uploaded sealed. Anyone in the circle picks them up whenever they next open Haven — even if you've long since closed the app.")
+            "Posts upload sealed; friends pick them up next time they open Haven.")
         Point(Icons.Filled.PhotoLibrary, "Photos and videos actually arrive",
-            "Media is fetched from the relay instead of waiting on the person who posted it, so it still lands when two phones' networks can't reach each other directly.")
+            "Media comes from the relay, not the sender — it lands even on tricky networks.")
         Point(Icons.Filled.Hub, "It routes around home routers",
-            "When a member can't be dialed directly, the relay forwards their sealed messages onward. No port forwarding, no domain, no ports to open.")
+            "The relay forwards sealed messages when a member can't be dialed directly.")
         Point(Icons.Filled.Lock, "The relay can't read a thing",
-            "It only ever holds sealed blobs and a tiny routing header — destination node ids, a hop budget, and a de-duplication id. No content key ever goes near it, so hosting one can never turn it into a reader.")
+            "It only holds sealed blobs and routing info — never a key, so it can never read anything.")
 
         Header("How to set one up")
         Point(Icons.Filled.Smartphone, "The easy way — this phone",
-            "One tap below and this phone holds the circle's sealed mailbox. It serves while Haven is open, or in the background if Real-time connection is on — fine on a charger, but a computer or a Raspberry Pi left running is the real fix. Turn it off any time under Settings ▸ Relays.")
+            "One tap: this phone holds the circle's sealed mailbox while Haven runs. Turn off anytime.")
         Point(Icons.Filled.Terminal, "Or a spare machine",
             "On a Mac, Linux box, or Raspberry Pi, one line installs it:\ncurl -fsSL https://wemiller.com/apps/haven/relay/install.sh | sh\n\nOn Windows, in PowerShell:\nirm https://wemiller.com/apps/haven/relay/install.ps1 | iex\n\nIt sets itself to start on every reboot, then prints a node id. Add it under Settings ▸ Relays ▸ Add a relay.")
 
@@ -138,7 +138,8 @@ private fun RelayWalkthrough(onDone: () -> Unit) {
             // imply a new member is fenced off from earlier posts. They aren't.
             "Everything you post is sealed on your device to your circle's members. Remove someone and the circle's key rotates, so they can't read anything posted afterwards.")
         Point(Icons.Filled.Science, "Encrypted for the long haul",
-            "Haven pairs today's proven encryption with post-quantum encryption — X25519 with ML-KEM-768, signed with Ed25519 and ML-DSA-65. An attacker has to break both halves, so ciphertext saved today isn't a bet on a future quantum computer. No promises beyond that: keys live on your devices, and Haven never holds them.")
+            "Double-locked: today's proven encryption plus post-quantum. Keys never leave your devices.",
+            learnMore = "encryption")
 
         Spacer(Modifier.height(4.dp))
         BrandButton(text = "Use this phone as the relay") {
@@ -158,7 +159,7 @@ private fun Header(text: String) {
 }
 
 @Composable
-private fun Point(icon: ImageVector, title: String, body: String) {
+private fun Point(icon: ImageVector, title: String, body: String, learnMore: String? = null) {
     Row(
         Modifier.fillMaxWidth().havenCard().padding(14.dp),
         verticalAlignment = Alignment.Top,
@@ -169,6 +170,12 @@ private fun Point(icon: ImageVector, title: String, body: String) {
             Text(title, color = HavenTheme.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(3.dp))
             Text(body, color = HavenTheme.textSecondary, fontSize = 12.sp)
+            learnMore?.let { anchor ->
+                val context = androidx.compose.ui.platform.LocalContext.current
+                Spacer(Modifier.height(3.dp))
+                Text("Learn more", color = HavenTheme.pink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.clickable { openInApp(context, "https://wemiller.com/apps/haven/docs/#$anchor") })
+            }
         }
     }
 }

@@ -703,7 +703,44 @@ final class MediaStore: ObservableObject {
         let ref = Self.contentRef(.image, data)
         if let url = fileURL(ref) { try? data.write(to: url) }
         cachePut(ref, MediaItem(id: ref, kind: .image, image: img, videoURL: nil))
+        // Mint the tiny thumb companion (~256px, ≤32KB) for photos worth one: recipients render it
+        // blurred behind the loading placeholder long before the full bytes land. The pairing
+        // marker (`thumb:<ref>:<thumbRef>`) joins the SIGNED media list at post time — see
+        // FeedStore.withThumbMarkers — so old clients simply ignore it (synthetic scheme).
+        if data.count > 64 * 1024 { mintThumbCompanion(for: ref, from: img) }
         return ref
+    }
+
+    // MARK: - Thumb companions (compose-time tiny previews — see MediaVariants `thumb:`)
+
+    private static let thumbCompanionKey = "haven.media.thumbCompanions"
+    private var thumbCompanions: [String: String] = {
+        (UserDefaults.standard.dictionary(forKey: MediaStore.thumbCompanionKey) as? [String: String]) ?? [:]
+    }()
+
+    /// The thumb companion ref minted for a photo at compose time, if one exists.
+    func thumbCompanion(_ ref: String) -> String? { thumbCompanions[ref] }
+
+    /// Encode + store a ≤32KB, ~256px JPEG companion for `ref` and remember the pairing. Skipped
+    /// silently when the encode can't get small enough — a "thumb" that isn't tiny is just waste.
+    private func mintThumbCompanion(for ref: String, from image: PlatformImage) {
+        guard thumbCompanions[ref] == nil else { return }
+        let small = Self.downscale(image, maxDimension: 256)
+        var quality: CGFloat = 0.6
+        guard var data = small.jpegData(compressionQuality: quality) else { return }
+        while data.count > 32 * 1024, quality > 0.25 {
+            quality -= 0.15
+            guard let d = small.jpegData(compressionQuality: quality) else { break }
+            data = d
+        }
+        guard data.count <= 48 * 1024 else { return }
+        let thumbRef = Self.contentRef(.image, data)
+        if let url = fileURL(thumbRef) { try? data.write(to: url) }
+        thumbCompanions[ref] = thumbRef
+        if thumbCompanions.count > 2000 {   // bound: old pairings only matter until the post is sealed
+            thumbCompanions = Dictionary(uniqueKeysWithValues: Array(thumbCompanions.suffix(1000)))
+        }
+        UserDefaults.standard.set(thumbCompanions, forKey: Self.thumbCompanionKey)
     }
 
     /// Async because optimizing transcodes the video (AVAssetExportSession). Without
@@ -1889,11 +1926,14 @@ final class EvictedMediaStore: ObservableObject {
 
 // MARK: - Missing-media placeholder (#3)
 
-/// A graceful placeholder for a referenced blob whose bytes aren't on disk. Three states:
+/// A graceful placeholder for a referenced blob whose bytes aren't on disk. Honest states:
 ///  • deliberately evicted (cleanup / limit sweep) → a "Download N MB" affordance (re-fetches on tap);
-///  • actively downloading → a spinner;
-///  • relay/peers no longer have it → "No longer available" (with Retry).
-/// Media that's simply still syncing (never evicted) keeps the plain "still loading" spinner.
+///  • actively downloading → a spinner, with chunk progress (i/n) for large chunked blobs;
+///  • relays reachable but empty → "Waiting for sender…" (their device hasn't uploaded it yet);
+///  • retries exhausted / relay swept it → "No longer available" (Retry + Ask-for-it-back).
+/// Media that's simply still syncing keeps the plain "still loading" spinner — rendered over the
+/// post's blurred `thumb:` companion when one is held, so the card has real shape + color instead
+/// of a grey box (and the layout doesn't jump when the full bytes land).
 struct MissingMediaPlaceholder: View {
     let ref: String
     var isVideo: Bool = false
@@ -1901,22 +1941,51 @@ struct MissingMediaPlaceholder: View {
     /// (and to deep-link the notification when they do). Absent where a placeholder isn't rendered
     /// inside a post — the ask simply isn't offered there rather than guessing at an author.
     var postContext: (circleId: String, postId: String, authorShort: String)?
+    /// The post's full media list — how the placeholder finds this ref's `thumb:` companion.
+    var mediaList: [String] = []
     @ObservedObject private var feed = FeedStore.shared
     @ObservedObject private var evicted = EvictedMediaStore.shared
     @ObservedObject private var wanted = MediaWantedStore.shared
 
+    /// The held thumb companion image, if the post declared one and its tiny bytes have arrived.
+    private var thumbImage: PlatformImage? {
+        guard let t = MediaVariants.thumb(for: ref, in: mediaList) else { return nil }
+        return MediaStore.shared.thumbnail(t, maxDimension: 512)
+    }
+
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(.secondarySystemFill))
+            if let img = thumbImage {
+                Image(platformImage: img).resizable().scaledToFill()
+                    .blur(radius: 12)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.black.opacity(0.25)))
+            } else {
+                RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(.secondarySystemFill))
+            }
             content
         }
     }
 
+    /// White-on-thumb when the blurred preview is behind, secondary on the plain fill.
+    private var overlayStyle: Color { thumbImage != nil ? .white : .secondary }
+
     @ViewBuilder private var content: some View {
         if feed.downloadingMedia.contains(ref) {
             VStack(spacing: 8) {
-                ProgressView()
-                Text("Downloading…").font(.caption).foregroundStyle(.secondary)
+                ProgressView().tint(thumbImage != nil ? .white : nil)
+                if let p = feed.mediaRestoreProgress[ref], p.total > 1 {
+                    Text("Downloading… \(p.done)/\(p.total)").font(.caption).foregroundStyle(overlayStyle)
+                } else {
+                    Text("Downloading…").font(.caption).foregroundStyle(overlayStyle)
+                }
+            }
+        } else if feed.waitingForSenderMedia.contains(ref), !feed.unavailableMedia.contains(ref) {
+            // The relays answered and none holds it — the SENDER hasn't uploaded it yet. A different
+            // truth from "downloading" (we aren't) and from "gone" (it never arrived anywhere).
+            VStack(spacing: 8) {
+                Image(systemName: "clock.arrow.circlepath").font(.title3).foregroundStyle(overlayStyle)
+                Text("Waiting for sender…").font(.caption).foregroundStyle(overlayStyle)
             }
         } else if feed.unavailableMedia.contains(ref) {
             VStack(spacing: 8) {
@@ -1952,9 +2021,9 @@ struct MissingMediaPlaceholder: View {
             .buttonStyle(.plain)
         } else {
             VStack(spacing: 8) {
-                ProgressView()
+                ProgressView().tint(thumbImage != nil ? .white : nil)
                 Text(isVideo ? "Video still loading…" : "Media still loading…")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(overlayStyle)
             }
         }
     }
@@ -2013,7 +2082,7 @@ struct MediaCleanupView: View {
                         Text("\(rows.count) item\(rows.count == 1 ? "" : "s") · \(fmt(totalBytes))"
                              + (pinnedBytes > 0 ? " · \(fmt(pinnedBytes)) kept" : ""))
                     } footer: {
-                        Text("Sorted by size. Removing an item frees only the copy on this device — the post stays and can be re-downloaded from your relay. “Keep on this device” exempts an item from every cleanup.")
+                        Text("Frees space on this device only — posts stay and re-download. Kept items are never removed.")
                     }
                 }
                 #if os(iOS)

@@ -423,6 +423,14 @@ pub struct RelayAuth {
     members: HashMap<String, HashSet<String>>,
     /// Sibling relay node hexes allowed to replicate via broad LIST (mesh anti-entropy).
     relays: HashSet<String>,
+    /// account hex → its VERIFIED device hexes, recorded whenever an account-signed devroster is
+    /// accepted ([`Self::authorize_devices`] — verified PUTs on both transports + startup
+    /// rehydrate). This is what lets a device touch its OWN account's `haven/self/…` slots under
+    /// device-id-everywhere: the verified peer is a DEVICE id, the slot names the ACCOUNT, and
+    /// only the stored account-signed roster can connect the two. Discloses nothing the relay
+    /// doesn't already hold — the roster blob itself is stored (and served) at
+    /// `haven/devroster/<acct>`.
+    account_devices: HashMap<String, HashSet<String>>,
 }
 
 impl RelayAuth {
@@ -444,6 +452,13 @@ impl RelayAuth {
     /// inject ids for someone else's account. Idempotent (HashSet insert).
     pub(crate) fn authorize_devices(&mut self, account_hex: &str, device_hexes: &[String]) {
         let acct = account_hex.to_lowercase();
+        // Record the verified account→devices mapping REGARDLESS of circle membership — it backs
+        // the `haven/self/…` owner gate (see `is_self_sync_owner`), which, like the old bare
+        // `self/` gate, never required the account to be in a circle this relay serves.
+        let set = self.account_devices.entry(acct.clone()).or_default();
+        for d in device_hexes {
+            set.insert(d.to_lowercase());
+        }
         for members in self.members.values_mut() {
             if members.contains(&acct) {
                 for d in device_hexes {
@@ -451,6 +466,57 @@ impl RelayAuth {
                 }
             }
         }
+    }
+
+    /// Drop explicitly-REVOKED device ids from this account's verified union — the in-memory set
+    /// AND every circle expansion [`Self::authorize_devices`] made. Revocation is a positive,
+    /// account-signed fact carried by a verified roster; ABSENCE never prunes (each device
+    /// publishes its own partial roster, and a sibling missing from it must not be evicted — see
+    /// [`save_devroster_devices`], where this distinction keeps the persisted union honest).
+    pub(crate) fn revoke_devices(&mut self, account_hex: &str, revoked_hexes: &[String]) {
+        let acct = account_hex.to_lowercase();
+        for d in revoked_hexes {
+            let d = d.to_lowercase();
+            if d == acct {
+                continue; // the account id comes from the operator's link, never from a roster
+            }
+            if let Some(set) = self.account_devices.get_mut(&acct) {
+                set.remove(&d);
+            }
+            for members in self.members.values_mut() {
+                if members.contains(&acct) {
+                    members.remove(&d);
+                }
+            }
+        }
+    }
+
+    /// Snapshot every account's VERIFIED device union — the persistence input for
+    /// [`save_devroster_devices`]. Sorted (and empty accounts omitted) so the file is
+    /// deterministic. Discloses nothing new: the same ids are served at `haven/devroster/<acct>`.
+    pub(crate) fn device_unions(&self) -> Vec<(String, Vec<String>)> {
+        let mut out: Vec<(String, Vec<String>)> = self
+            .account_devices
+            .iter()
+            .filter(|(_, d)| !d.is_empty())
+            .map(|(a, d)| {
+                let mut ds: Vec<String> = d.iter().cloned().collect();
+                ds.sort();
+                (a.clone(), ds)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// May `peer` touch `account_hex`'s self-sync slots? Yes for the account id itself, and for
+    /// any device named in the account's stored account-signed devroster. Device-id-everywhere is
+    /// why the roster half exists: clients connect under their DEVICE ids (the account id is only
+    /// the contact handle), so "peer == acct" alone silently killed the whole self-sync lane.
+    pub(crate) fn is_self_sync_owner(&self, account_hex: &str, peer: &str) -> bool {
+        let acct = account_hex.to_lowercase();
+        let p = peer.to_lowercase();
+        p == acct || self.account_devices.get(&acct).map(|d| d.contains(&p)).unwrap_or(false)
     }
 
     pub(crate) fn deauthorize(&mut self, circle_id: &str) {
@@ -1043,7 +1109,19 @@ fn is_broad_prefix(key: &str) -> bool {
             | "haven/media/"
             | "haven/devroster"
             | "haven/devroster/"
+            | "haven/self"
+            | "haven/self/"
     )
+}
+
+/// The owning `<acct>` of a self-sync slot key (`haven/self/<acct>/…`) — the namespace the apps
+/// actually write (core `selfsync::slot_key` + the clients' `"haven/" + …` prefix, so the slots
+/// ride relay mesh replication like every other `haven/` key). The namespace roots return None,
+/// keeping them behind the broad-prefix / catch-all deny (F3: no cross-account enumeration).
+fn self_sync_account(key: &str) -> Option<&str> {
+    let rest = key.strip_prefix("haven/self/")?;
+    let acct = rest.split('/').next().unwrap_or("");
+    (!acct.is_empty()).then_some(acct)
 }
 
 /// The `haven/media/…`-style key prefix under which a device publishes its account-signed device
@@ -1067,15 +1145,20 @@ const TAG_DEVICE_ROSTER: u8 = 0x04;
 /// account signature. The relay holds only account NODE ids (from the link), which are insufficient
 /// to verify the hybrid signature, so the blob is self-describing (carries the full bundle); binding
 /// bundle→account via the key + verifying the signature means a stranger can neither impersonate the
-/// account nor inject device ids for it. Revoked device ids are excluded.
-fn verify_devroster(expect_account: &str, body: &[u8]) -> Option<(String, Vec<String>)> {
-    let (account, devices, _version) = verify_devroster_full(expect_account, body)?;
-    Some((account, devices))
+/// account nor inject device ids for it. Returns `(account, live_devices, revoked_devices)` —
+/// revoked ids are excluded from the live list and carried separately, because revocation is a
+/// positive signed fact the union persistence must honor (see [`record_devroster`]).
+fn verify_devroster(expect_account: &str, body: &[u8]) -> Option<(String, Vec<String>, Vec<String>)> {
+    let (account, devices, revoked, _version) = verify_devroster_full(expect_account, body)?;
+    Some((account, devices, revoked))
 }
 
 /// Like [`verify_devroster`] but also returns the DeviceList `version`, so a write gate can enforce
 /// rollback defense (higher-version-wins; a replayed OLD roster must never overwrite a newer one).
-fn verify_devroster_full(expect_account: &str, body: &[u8]) -> Option<(String, Vec<String>, u64)> {
+fn verify_devroster_full(
+    expect_account: &str,
+    body: &[u8],
+) -> Option<(String, Vec<String>, Vec<String>, u64)> {
     use haven_p2p::device::DeviceList;
     use haven_p2p::identity::HavenId;
     let body = match body.split_first() {
@@ -1107,63 +1190,219 @@ fn verify_devroster_full(expect_account: &str, body: &[u8]) -> Option<(String, V
         .filter(|d| !dl.revoked.contains(d))
         .map(|d| hex(d))
         .collect();
-    Some((expect_account.to_string(), devices, dl.version))
+    let revoked = dl.revoked.iter().map(|d| hex(d)).collect();
+    Some((expect_account.to_string(), devices, revoked, dl.version))
+}
+
+/// Outcome of gating a device-roster PUT to `haven/devroster/<account>` (see
+/// [`verify_devroster_put`]). BOTH transports (iroh + HTTP) branch on this so neither can drift.
+pub(crate) enum DevrosterPut {
+    /// Unsigned, malformed, or wrong-account body — refuse the write, authorize nothing.
+    Refused,
+    /// Account-signed AND `version` ≥ the stored blob's: STORE the bytes and record the full
+    /// effect — authorize `devices`, apply the explicit `revoked` set.
+    Store { account: String, devices: Vec<String>, revoked: Vec<String> },
+    /// Account-signed but `version` STRICTLY OLDER than the stored blob's. The newer blob stays on
+    /// disk (never downgraded), but the hybrid signature proves `devices` genuinely belong to
+    /// `account`, so authorizing them discloses nothing and cannot be spoofed by a non-account
+    /// party — add them to the authorization union anyway. This is the chicken-and-egg fix: a
+    /// device that comes online AFTER a sibling published a higher-versioned roster (that omits it)
+    /// can't self-heal by GET+merge+republish (devroster GET is member-gated and it isn't a member
+    /// yet), so its own signed — but version-losing — PUT is the only proof of membership the relay
+    /// will ever see. `devices` is PURELY ADDITIVE: any id the NEWER stored roster EXPLICITLY
+    /// REVOKES has already been filtered out (a stale replay must never resurrect a revoked device),
+    /// and the stale roster's OWN `revoked` set is dropped entirely (an older roster must never prune
+    /// newer state — that would reopen the roster flip-flop). Absence never revokes; only the newest
+    /// stored roster's explicit signed revocation prunes.
+    AuthOnly { account: String, devices: Vec<String> },
 }
 
 /// Gate a device-roster PUT to `haven/devroster/<expect_account>` BEFORE the bytes are stored.
-/// Returns the verified `(account, device_hexes)` to expand membership with when the write MAY
-/// proceed, or `None` to REFUSE it entirely.
+/// Returns a [`DevrosterPut`] telling the caller whether to store the blob and which verified
+/// device ids to feed [`record_devroster`].
 ///
 /// This is the write-side twin of the read gate, and it fails CLOSED exactly the same way: an
-/// unsigned, malformed, or wrong-account body → `None`. The write is deliberately un-gated by
-/// [`blob_forbidden`] (a device the relay has never heard of must be able to publish its first
-/// roster), so this signature check is the ONLY thing standing between a stranger and a victim's
-/// roster on disk. Without it a self-minted key could rename garbage over any account's roster
-/// (audit R6).
+/// unsigned, malformed, or wrong-account body → [`DevrosterPut::Refused`]. The write is deliberately
+/// un-gated by [`blob_forbidden`] (a device the relay has never heard of must be able to publish its
+/// first roster), so this signature check is the ONLY thing standing between a stranger and a
+/// victim's roster on disk. Without it a self-minted key could rename garbage over any account's
+/// roster (audit R6).
 ///
 /// Rollback defense (the roster flip-flop bug — see `DeviceList::adopt_if_newer`): a validly-signed
-/// body whose `version` is strictly OLDER than the roster already on disk is refused, so a replayed
-/// stale roster can only lose. A same-version re-publish is accepted (only the account key could
-/// produce a different signed list at one version, so the bytes are effectively identical) — that
-/// keeps a device's routine re-publish to a freshly-dialed relay working.
+/// body whose `version` is strictly OLDER than the roster already on disk NEVER overwrites the newer
+/// blob, and never contributes its own revocations. A same-version re-publish is accepted (only the
+/// account key could produce a different signed list at one version, so the bytes are effectively
+/// identical) — that keeps a device's routine re-publish to a freshly-dialed relay working.
+///
+/// The older-signed body still yields [`DevrosterPut::AuthOnly`] so its listed device ids expand the
+/// authorization union (the account signature vouches for them), MINUS anything the newer stored
+/// roster explicitly revokes. This is what lets a late-joining linked device escape the chicken-and-
+/// egg lockout without ever letting a stale roster downgrade the stored blob or resurrect a revoked
+/// device.
 pub(crate) fn verify_devroster_put(
     root: &Path,
     expect_account: &str,
     body: &[u8],
-) -> Option<(String, Vec<String>)> {
-    let (account, devices, version) = verify_devroster_full(expect_account, body)?;
-    // Never let an older signed version clobber a newer stored one. Both are account-signed and
-    // versions only grow, so "newer wins" can't be forged and a replay can only be rejected.
+) -> DevrosterPut {
+    let Some((account, devices, revoked, version)) = verify_devroster_full(expect_account, body)
+    else {
+        return DevrosterPut::Refused;
+    };
+    // Compare against the stored blob (if any). Versions only grow and both bodies are
+    // account-signed, so "newer wins" can't be forged and a replay can only lose the DISK — but a
+    // signed replay's device ids are still genuine, so they join the auth union (minus ids the
+    // newer stored roster explicitly revokes) rather than being dropped on the floor.
     if let Ok(path) = safe_path(root, &format!("{DEVROSTER_PREFIX}{expect_account}")) {
         if let Ok(existing) = std::fs::read(&path) {
-            if let Some((_, _, cur)) = verify_devroster_full(expect_account, &existing) {
+            if let Some((_, _, stored_revoked, cur)) = verify_devroster_full(expect_account, &existing)
+            {
                 if version < cur {
-                    return None;
+                    let revoked_by_newer: HashSet<String> =
+                        stored_revoked.iter().map(|d| d.to_lowercase()).collect();
+                    let live: Vec<String> = devices
+                        .into_iter()
+                        .filter(|d| !revoked_by_newer.contains(&d.to_lowercase()))
+                        .collect();
+                    return DevrosterPut::AuthOnly { account, devices: live };
                 }
             }
         }
     }
-    Some((account, devices))
+    DevrosterPut::Store { account, devices, revoked }
 }
 
 /// Re-apply every stored `haven/devroster/<account>` blob to `auth` — so a relay that authorizes
 /// circles fresh on startup/reconfigure (account ids only) re-expands to the accounts' device ids
 /// without waiting for the apps to re-publish. Best-effort; unverifiable blobs are skipped.
+///
+/// The stored blob alone is NOT enough: it is the LAST WRITER'S view (each device publishes its
+/// own account-signed list, and the newest wholesale-replaces the file), while the authorization
+/// this relay actually granted is the UNION of every verified PUT. That union is persisted
+/// separately (see [`DEVROSTER_DEVICES_FILE`]) and merged back here — minus any id the stored
+/// blob REVOKES, so a revocation that arrived by mesh replication (a blob synced from a sibling,
+/// never PUT here) still prunes, and a stale union can never resurrect a revoked device.
 pub(crate) fn rehydrate_device_rosters(root: &Path, auth: &Arc<Mutex<RelayAuth>>) {
-    let Ok(dir) = safe_path(root, DEVROSTER_PREFIX) else {
-        return;
-    };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return;
-    };
-    for e in entries.flatten() {
-        let acct = e.file_name().to_string_lossy().to_string();
-        if let Ok(body) = std::fs::read(e.path()) {
-            if let Some((account, devices)) = verify_devroster(&acct, &body) {
-                auth.lock().unwrap().authorize_devices(&account, &devices);
+    let mut revoked_by_acct: HashMap<String, HashSet<String>> = HashMap::new();
+    if let Ok(dir) = safe_path(root, DEVROSTER_PREFIX) {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for e in entries.flatten() {
+                let acct = e.file_name().to_string_lossy().to_string();
+                if let Ok(body) = std::fs::read(e.path()) {
+                    if let Some((account, devices, revoked)) = verify_devroster(&acct, &body) {
+                        auth.lock().unwrap().authorize_devices(&account, &devices);
+                        revoked_by_acct
+                            .insert(account.to_lowercase(), revoked.into_iter().collect());
+                    }
+                }
             }
         }
     }
+    for (account, devices) in load_devroster_devices(root) {
+        let revoked = revoked_by_acct.get(&account.to_lowercase());
+        let live: Vec<String> = devices
+            .into_iter()
+            .filter(|d| revoked.map_or(true, |r| !r.contains(&d.to_lowercase())))
+            .collect();
+        if !live.is_empty() {
+            auth.lock().unwrap().authorize_devices(&account, &live);
+        }
+    }
+}
+
+// --- devroster union persistence (restart survival for multi-device fleets) -------------------
+
+/// Where a relay remembers the UNION of verified device ids per account. The blob at
+/// `haven/devroster/<acct>` is one device's own account-signed list and is wholesale-replaced by
+/// the last writer — correct for the blob (it must stay byte-for-byte signature-verifiable, and a
+/// relay-synthesized merge could never be), but the AUTHORIZATION built up from every verified PUT
+/// is the union, and it lived only in memory. After a restart, rehydrate replayed the last
+/// writer's partial view alone, so the account's OTHER devices answered `ERR forbidden`/403 until
+/// their own heal re-published — a NAS relay that restarts nightly broke half the fleet every
+/// morning. This file persists the verified device-id SET separately from the blobs (never an
+/// unverifiable synthesized "signed" roster): it is the relay's own record of what it verified,
+/// exactly what `RelayAuth::account_devices` holds, disclosing nothing the served blob doesn't.
+///
+/// Like [`LEARNED_GRANTS_FILE`], it lives at the store ROOT and **not** under `haven/`: no member
+/// can read or overwrite it over the wire, and mesh sync can never replicate one relay's
+/// authorization memory into another's.
+const DEVROSTER_DEVICES_FILE: &str = "devroster-devices.json";
+
+fn devroster_devices_path(root: &Path) -> PathBuf {
+    root.join(DEVROSTER_DEVICES_FILE)
+}
+
+/// Read the persisted device unions: `(account, devices)` pairs. Best-effort — a missing or
+/// corrupt file means "no union remembered", never a startup failure (the stored blobs still
+/// rehydrate the last writer, and each device's heal re-publishes the rest).
+pub(crate) fn load_devroster_devices(root: &Path) -> Vec<(String, Vec<String>)> {
+    let Ok(bytes) = std::fs::read(devroster_devices_path(root)) else { return Vec::new() };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return Vec::new() };
+    let Some(arr) = v.get("accounts").and_then(|a| a.as_array()) else { return Vec::new() };
+    let mut out = Vec::new();
+    for e in arr {
+        let Some(acct) = e.get("a").and_then(|a| a.as_str()) else { continue };
+        let Some(ds) = e.get("d").and_then(|d| d.as_array()) else { continue };
+        // Re-validate on the way IN as well as on the way out, same as the learned grants: a relay
+        // that trusts its own disk blindly would turn a corrupted byte into an authorized node id.
+        if acct.len() != 64 || !acct.bytes().all(|b| b.is_ascii_hexdigit()) {
+            continue;
+        }
+        let devices: Vec<String> = ds
+            .iter()
+            .filter_map(|d| d.as_str())
+            .filter(|d| d.len() == 64 && d.bytes().all(|b| b.is_ascii_hexdigit()))
+            .map(String::from)
+            .collect();
+        if devices.is_empty() {
+            continue;
+        }
+        out.push((acct.to_string(), devices));
+    }
+    out
+}
+
+/// Persist the CURRENT in-memory device unions (every account). A snapshot of memory rather than
+/// a file read-modify-write: memory is the serving truth, so the file can never disagree with it,
+/// and concurrent verified PUTs for different accounts can't lose each other's entry the way two
+/// interleaved file merges could. Atomic temp+rename, same as [`save_learned_grant`].
+pub(crate) fn save_devroster_devices(root: &Path, auth: &Arc<Mutex<RelayAuth>>) {
+    let unions = auth.lock().unwrap().device_unions();
+    let doc = serde_json::json!({
+        "v": 1,
+        "accounts": unions
+            .iter()
+            .map(|(a, d)| serde_json::json!({ "a": a, "d": d }))
+            .collect::<Vec<_>>(),
+    });
+    let Ok(bytes) = serde_json::to_vec(&doc) else { return };
+    let path = devroster_devices_path(root);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("part");
+    if std::fs::write(&tmp, &bytes).and_then(|_| std::fs::rename(&tmp, &path)).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// Apply one VERIFIED devroster's effect — expand the account's device authorization, drop its
+/// explicitly-revoked ids — and persist the resulting union. The single post-PUT chokepoint for
+/// BOTH transports (iroh + HTTP), so neither can drift: same expansion, same prune, same file.
+/// Only ever call this with `verify_devroster_put` output, never with raw wire input — the file
+/// must never contain a device id no account signature vouched for.
+pub(crate) fn record_devroster(
+    root: &Path,
+    auth: &Arc<Mutex<RelayAuth>>,
+    account: &str,
+    devices: &[String],
+    revoked: &[String],
+) {
+    {
+        let mut a = auth.lock().unwrap();
+        a.authorize_devices(account, devices);
+        a.revoke_devices(account, revoked);
+    }
+    save_devroster_devices(root, auth);
 }
 
 // --- learned circle grants (the pairing handshake's persistent half) --------------------------
@@ -1281,6 +1520,20 @@ pub(crate) fn blob_forbidden(auth: &Arc<Mutex<RelayAuth>>, peer: &str, verb: u8,
     if matches!(verb, VERB_PUT | VERB_GET | VERB_HAS) && crate::discovery::discovery_node(key).is_some() {
         return false;
     }
+    // Self-sync slots (`haven/self/<acct>/…`) are private to their owning ACCOUNT: the verified
+    // peer must be the account id itself OR a device in the account's stored account-signed
+    // devroster (audit F3 — nobody else may read, write, or even enumerate them; the scoped LIST
+    // prefix names the account, so it goes through this same gate). No circle membership is
+    // required — same contract as the legacy bare `self/` gate: a fleet syncs itself through any
+    // relay it can reach. These keys used to fall through to the catch-all deny below (clients
+    // key `haven/self/…`, the old gate only knew bare `self/…`), which is why the self-sync lane
+    // was dead over every relay. Storage verbs only — ENROLL keeps its "must name an enroll key"
+    // rule below regardless of who the caller is.
+    if matches!(verb, VERB_PUT | VERB_GET | VERB_HAS | VERB_LIST | VERB_TOUCH | VERB_AGES) {
+        if let Some(acct) = self_sync_account(key) {
+            return !a.is_self_sync_owner(acct, peer);
+        }
+    }
     // Everything below requires the caller to be a member of SOME circle this relay serves. This
     // is the check that was entirely absent on the HTTP transport, and it is what a shared bearer
     // token can never establish: the token says "someone gave me a secret", not "I am Alice".
@@ -1349,13 +1602,17 @@ pub(crate) async fn handle_request(
         }
     };
 
-    // Self-sync slots (`self/<accountHex>/state/<device>`) are private to their owning account — only
-    // the account owner (the verified connecting peer) may read/write/list them (audit F3). Without
-    // this, any node that learns the relay id could enumerate + fetch another account's device slots.
-    // `self/` is owner-gated and `haven/` is membership-gated; a key in neither namespace belongs to
-    // no one and is refused, so a new namespace can't arrive pre-authorized (audit F4).
+    // Self-sync slots are private to their owning account — only the account's OWN fleet (the
+    // account id, or a device in its stored account-signed devroster: device-id-everywhere means
+    // the verified peer is a device id) may read/write/list them (audit F3). Without this, any
+    // node that learns the relay id could enumerate + fetch another account's device slots.
+    // The CANONICAL keys are `haven/self/<acct>/…` and gate inside `blob_forbidden`
+    // (self_sync_account) so both transports share one policy; this branch keeps the legacy bare
+    // `self/…` namespace on the identical owner-or-roster-device rule. A key in neither namespace
+    // belongs to no one and is refused, so a new namespace can't arrive pre-authorized (audit F4).
     let allowed = if let Some(rest) = key.strip_prefix("self/") {
-        rest.split('/').next().unwrap_or("") == peer
+        let acct = rest.split('/').next().unwrap_or("");
+        !acct.is_empty() && auth.lock().unwrap().is_self_sync_owner(acct, &peer)
     } else if key == SYNC_PREFIX || key.starts_with("haven/") {
         // Circle-membership authorization: only a circle's members (or a sibling relay) may touch
         // its keys (audit F2/F4). `peer` here is the QUIC-verified endpoint id.
@@ -1397,8 +1654,30 @@ pub(crate) async fn handle_request(
             // devices forward to expand membership after the write.
             let roster = if let Some(acct) = key.strip_prefix(DEVROSTER_PREFIX) {
                 match verify_devroster_put(&root, acct, &body) {
-                    Some(v) => Some(v),
-                    None => {
+                    DevrosterPut::Store { account, devices, revoked } => {
+                        Some((account, devices, revoked))
+                    }
+                    DevrosterPut::AuthOnly { account, devices } => {
+                        // Lost the version race: the newer stored roster stays on disk (do NOT
+                        // overwrite it), but the body is account-SIGNED, so its device ids genuinely
+                        // belong to `account` — add them to the authorization union so a device that
+                        // came online after a sibling published a higher-versioned roster can still
+                        // be authorized (the chicken-and-egg lockout). Additive only: no revocations
+                        // from the stale roster, and ids the newer roster revokes were already
+                        // filtered out. Report OK — the PUT was legitimate; the relay simply had a
+                        // newer blob to keep.
+                        if !devices.is_empty() {
+                            eprintln!(
+                                "[haven relay] devroster PUT lost version race but {} signed device ids added to auth union",
+                                devices.len()
+                            );
+                            record_devroster(&root, &auth, &account, &devices, &[]);
+                        }
+                        let _ = send.write_all(b"OK").await;
+                        let _ = send.finish();
+                        return Ok(());
+                    }
+                    DevrosterPut::Refused => {
                         let _ = send.write_all(b"ERR forbidden").await;
                         let _ = send.finish();
                         return Ok(());
@@ -1434,10 +1713,11 @@ pub(crate) async fn handle_request(
                     // Device-roster authorization: expand this account's circle membership to include
                     // its (now-verified) device ids — so a HEADLESS relay (which only knows account
                     // ids from the operator's link) stops ERR-forbidding the account's devices' mailbox
-                    // ops. The blob is persisted, so it also mesh-replicates to siblings and survives
-                    // restart (see `rehydrate_device_rosters`).
-                    if let Some((account, devices)) = roster {
-                        auth.lock().unwrap().authorize_devices(&account, &devices);
+                    // ops. The blob mesh-replicates to siblings; the UNION of every verified PUT is
+                    // persisted alongside so a restart re-authorizes the whole fleet, not just this
+                    // (partial) last writer (see `record_devroster` / `rehydrate_device_rosters`).
+                    if let Some((account, devices, revoked)) = roster {
+                        record_devroster(&root, &auth, &account, &devices, &revoked);
                     }
                 }
                 Err(_) => {
@@ -2367,6 +2647,53 @@ mod tests {
         assert!(blob_forbidden(&auth, &member, VERB_ENROLL, "haven/mailbox/fam/x"));
     }
 
+    /// The self-sync lane: `haven/self/<acct>/**` serves the account's OWN fleet — the account id
+    /// itself, or a device its stored account-signed devroster names — and nobody else. This is
+    /// the gate whose absence killed self-sync on every platform: the clients key `haven/self/…`,
+    /// which used to fall to the catch-all deny, and the legacy owner test (`peer == acct`) never
+    /// matched a device-id peer.
+    #[test]
+    fn self_sync_slots_gate_on_account_or_roster_device() {
+        let auth: Arc<Mutex<RelayAuth>> = Arc::new(Mutex::new(RelayAuth::default()));
+        let acct = "aa".repeat(32);
+        let dev = "bb".repeat(32);
+        let stranger = "cc".repeat(32);
+        let key = format!("haven/self/{acct}/state/{dev}");
+        let prefix = format!("haven/self/{acct}/state/");
+
+        // The account itself passes — even on a relay that serves it in no circle (the old bare
+        // `self/` contract), and before any roster has landed.
+        assert!(!blob_forbidden(&auth, &acct, VERB_PUT, &key));
+        assert!(!blob_forbidden(&auth, &acct, VERB_GET, &key));
+        assert!(!blob_forbidden(&auth, &acct, VERB_LIST, &prefix));
+
+        // A device the relay holds NO roster for is denied — device-id-everywhere without the
+        // roster is exactly the dead lane, and the deny is what makes publishing the roster the
+        // remedy (RelayForbidden → heal → retry).
+        assert!(blob_forbidden(&auth, &dev, VERB_GET, &key));
+        assert!(blob_forbidden(&auth, &stranger, VERB_GET, &key));
+
+        // The verified devroster lands (both transports call authorize_devices after
+        // verify_devroster_put; rehydrate replays it on restart) → the listed device passes.
+        auth.lock().unwrap().authorize_devices(&acct, &[dev.clone()]);
+        assert!(!blob_forbidden(&auth, &dev, VERB_PUT, &key));
+        assert!(!blob_forbidden(&auth, &dev, VERB_GET, &key));
+        assert!(!blob_forbidden(&auth, &dev, VERB_LIST, &prefix), "scoped LIST works for the fleet");
+
+        // …but a non-roster peer stays denied, and a roster device may not cross accounts.
+        assert!(blob_forbidden(&auth, &stranger, VERB_GET, &key));
+        assert!(blob_forbidden(&auth, &stranger, VERB_LIST, &prefix), "F3: no cross-account enumerate");
+        let other = format!("haven/self/{}/state/{dev}", "dd".repeat(32));
+        assert!(blob_forbidden(&auth, &dev, VERB_GET, &other));
+
+        // The namespace ROOT is never enumerable by a non-relay — only mesh siblings (F3).
+        assert!(blob_forbidden(&auth, &acct, VERB_LIST, "haven/self"));
+        assert!(blob_forbidden(&auth, &acct, VERB_LIST, "haven/self/"));
+        let sibling = "ee".repeat(32);
+        auth.lock().unwrap().relays.insert(sibling.clone());
+        assert!(!blob_forbidden(&auth, &sibling, VERB_LIST, "haven/self/"), "mesh anti-entropy still replicates");
+    }
+
     // ---- the pairing handshake: learning circles after the link ----------------------------
 
     fn learn_dir(tag: &str) -> PathBuf {
@@ -2504,6 +2831,265 @@ mod tests {
         assert!(auth.learn("mal", &mallory, &[mallory.clone()]).is_none());
         assert!(load_learned_grants(&dir).is_empty(), "a refused enroll persists nothing");
         assert!(!auth.knows_circle("mal"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- devroster union persistence: a restart must keep the WHOLE fleet authorized ---------
+
+    /// The self-sync roster wire exactly as `haven-ffi::encode_roster` builds it (and as
+    /// `tests/http_relay_probe.rs` drives it over HTTP): a `TAG_DEVICE_ROSTER` byte, then
+    /// `lp(account_bundle) ‖ lp(device_list) ‖ u32(n_creds = 0)`.
+    fn signed_roster_wire(
+        account: &haven_p2p::identity::Identity,
+        version: u64,
+        devices: Vec<[u8; 32]>,
+        revoked: Vec<[u8; 32]>,
+    ) -> Vec<u8> {
+        let dl = haven_p2p::device::DeviceList::signed(account, version, 1000, devices, revoked);
+        let lp = |out: &mut Vec<u8>, b: &[u8]| {
+            out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+            out.extend_from_slice(b);
+        };
+        let mut body = vec![TAG_DEVICE_ROSTER];
+        lp(&mut body, &account.public().to_bytes());
+        lp(&mut body, &dl.to_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body
+    }
+
+    /// Drive one devroster PUT exactly as BOTH transports do: verify (with rollback defense),
+    /// store the blob when it wins, record the verified effect. Returns whether the blob was STORED
+    /// (a version-losing but signed roster still expands the auth union, but its bytes never
+    /// overwrite the newer blob, so it returns `false`).
+    fn put_roster(dir: &Path, auth: &Arc<Mutex<RelayAuth>>, acct: &str, body: &[u8]) -> bool {
+        match verify_devroster_put(dir, acct, body) {
+            DevrosterPut::Store { account, devices, revoked } => {
+                local_put(dir, &format!("{DEVROSTER_PREFIX}{acct}"), body).unwrap();
+                record_devroster(dir, auth, &account, &devices, &revoked);
+                true
+            }
+            DevrosterPut::AuthOnly { account, devices } => {
+                // Newer blob stays put; still authorize the (newer-revoked-filtered) signed ids.
+                if !devices.is_empty() {
+                    record_devroster(dir, auth, &account, &devices, &[]);
+                }
+                false
+            }
+            DevrosterPut::Refused => false,
+        }
+    }
+
+    /// Two devices each publish their OWN partial account-signed roster. The last writer's blob
+    /// wholesale-replaces the first on disk — correct for the blob (a relay-merged roster could
+    /// never carry a verifiable signature) — but the relay's AUTHORIZATION is the union, and the
+    /// union must survive a restart. Before it was persisted, rehydrate replayed only the last
+    /// writer's partial view, so the account's other device answered forbidden on every gate
+    /// until its own heal re-published — a nightly-restart NAS relay broke half the fleet every
+    /// morning.
+    #[test]
+    fn devroster_union_survives_restart_for_both_devices() {
+        let dir = learn_dir("roster-union");
+        let account = haven_p2p::identity::Identity::generate();
+        let acct_hex = hex(&account.public().node_id_bytes());
+        let (dev_a, dev_b) = ([0xA5u8; 32], [0xB6u8; 32]);
+        let (a_hex, b_hex) = (hex(&dev_a), hex(&dev_b));
+
+        // --- run 1: each device publishes its own PARTIAL roster (B's is newer → owns the disk).
+        let auth1: Arc<Mutex<RelayAuth>> = Arc::new(Mutex::new(RelayAuth::default()));
+        assert!(put_roster(&dir, &auth1, &acct_hex, &signed_roster_wire(&account, 1, vec![dev_a], vec![])));
+        assert!(put_roster(&dir, &auth1, &acct_hex, &signed_roster_wire(&account, 2, vec![dev_b], vec![])));
+        // The stored blob is the last writer's alone — exactly the bug's setup.
+        let stored =
+            std::fs::read(safe_path(&dir, &format!("{DEVROSTER_PREFIX}{acct_hex}")).unwrap()).unwrap();
+        let (_, stored_devices, _) = verify_devroster(&acct_hex, &stored).unwrap();
+        assert_eq!(stored_devices, vec![b_hex.clone()], "last writer wholesale-replaced the blob");
+        assert!(auth1.lock().unwrap().is_self_sync_owner(&acct_hex, &a_hex));
+        assert!(auth1.lock().unwrap().is_self_sync_owner(&acct_hex, &b_hex));
+
+        // --- run 2 (restart): fresh auth, link re-applied (ACCOUNT ids only), rehydrate.
+        let auth2: Arc<Mutex<RelayAuth>> = Arc::new(Mutex::new(RelayAuth::default()));
+        auth2.lock().unwrap().authorize("fam", vec![acct_hex.clone()], vec![]);
+        rehydrate_device_rosters(&dir, &auth2);
+
+        // BOTH devices pass the self-sync gate AND the mailbox gate — not just the last writer.
+        let self_key = format!("haven/self/{acct_hex}/state/x");
+        for d in [&a_hex, &b_hex] {
+            assert!(
+                auth2.lock().unwrap().is_self_sync_owner(&acct_hex, d),
+                "device {d} lost self-sync across the restart"
+            );
+            assert!(!blob_forbidden(&auth2, d, VERB_GET, &self_key));
+            assert!(!blob_forbidden(&auth2, d, VERB_PUT, &self_key));
+            assert!(
+                !blob_forbidden(&auth2, d, VERB_GET, "haven/mailbox/fam/msg1"),
+                "device {d} lost the mailbox across the restart"
+            );
+        }
+        // A stranger still gets nothing — the union widens the fleet, never the world.
+        assert!(blob_forbidden(&auth2, &"cc".repeat(32), VERB_GET, &self_key));
+
+        // The union file lives OUTSIDE `haven/`, so members can't touch it over the wire and mesh
+        // sync can't replicate one relay's authorization memory into another's.
+        assert!(dir.join(DEVROSTER_DEVICES_FILE).is_file());
+        let mut keys = Vec::new();
+        collect_keys(&dir, &dir.join("haven"), &mut keys);
+        assert!(
+            !keys.iter().any(|k| k.contains(DEVROSTER_DEVICES_FILE)),
+            "the union file must not be enumerable as a store key"
+        );
+
+        // A corrupt union file degrades to "last writer only", never to a startup failure.
+        std::fs::write(dir.join(DEVROSTER_DEVICES_FILE), b"{ not json").unwrap();
+        assert!(load_devroster_devices(&dir).is_empty());
+        let auth3: Arc<Mutex<RelayAuth>> = Arc::new(Mutex::new(RelayAuth::default()));
+        rehydrate_device_rosters(&dir, &auth3);
+        assert!(auth3.lock().unwrap().is_self_sync_owner(&acct_hex, &b_hex));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Explicit revocation must prune the persisted union — an additive-forever file would keep a
+    /// revoked device authorized across restarts, which is exactly the rollback the signed
+    /// `revoked` set exists to prevent. ABSENCE stays non-destructive: a device's partial roster
+    /// never evicts its siblings; only the positive, account-signed revoked entry prunes.
+    #[test]
+    fn devroster_union_prunes_revoked_but_not_absent_devices() {
+        let dir = learn_dir("roster-revoke");
+        let account = haven_p2p::identity::Identity::generate();
+        let acct_hex = hex(&account.public().node_id_bytes());
+        let (dev_a, dev_b, dev_c) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+        let (a_hex, b_hex, c_hex) = (hex(&dev_a), hex(&dev_b), hex(&dev_c));
+        let auth: Arc<Mutex<RelayAuth>> = Arc::new(Mutex::new(RelayAuth::default()));
+        auth.lock().unwrap().authorize("fam", vec![acct_hex.clone()], vec![]);
+
+        // A and B union; A's ABSENCE from B's newer partial roster prunes nothing…
+        assert!(put_roster(&dir, &auth, &acct_hex, &signed_roster_wire(&account, 1, vec![dev_a], vec![])));
+        assert!(put_roster(&dir, &auth, &acct_hex, &signed_roster_wire(&account, 2, vec![dev_b], vec![])));
+        assert!(auth.lock().unwrap().is_self_sync_owner(&acct_hex, &a_hex));
+
+        // …but an explicit account-signed REVOCATION prunes A everywhere: the live gates…
+        assert!(put_roster(&dir, &auth, &acct_hex, &signed_roster_wire(&account, 3, vec![dev_b], vec![dev_a])));
+        assert!(!auth.lock().unwrap().is_self_sync_owner(&acct_hex, &a_hex));
+        assert!(
+            blob_forbidden(&auth, &a_hex, VERB_GET, "haven/mailbox/fam/msg1"),
+            "a revoked device kept its mailbox access"
+        );
+        assert!(auth.lock().unwrap().is_self_sync_owner(&acct_hex, &b_hex));
+
+        // …the persisted union…
+        assert_eq!(load_devroster_devices(&dir), vec![(acct_hex.clone(), vec![b_hex.clone()])]);
+
+        // …and a restart (neither the blob nor the union file may resurrect A).
+        let auth2: Arc<Mutex<RelayAuth>> = Arc::new(Mutex::new(RelayAuth::default()));
+        rehydrate_device_rosters(&dir, &auth2);
+        assert!(!auth2.lock().unwrap().is_self_sync_owner(&acct_hex, &a_hex));
+        assert!(auth2.lock().unwrap().is_self_sync_owner(&acct_hex, &b_hex));
+
+        // A revocation that arrived by MESH SYNC (blob landed on disk, never PUT here, so the
+        // union file was never updated) still prunes on rehydrate — the stale union must not
+        // resurrect a device the newest signed blob revokes.
+        let synced = signed_roster_wire(&account, 4, vec![dev_c], vec![dev_a, dev_b]);
+        std::fs::write(safe_path(&dir, &format!("{DEVROSTER_PREFIX}{acct_hex}")).unwrap(), &synced)
+            .unwrap();
+        let auth3: Arc<Mutex<RelayAuth>> = Arc::new(Mutex::new(RelayAuth::default()));
+        rehydrate_device_rosters(&dir, &auth3);
+        assert!(auth3.lock().unwrap().is_self_sync_owner(&acct_hex, &c_hex));
+        assert!(
+            !auth3.lock().unwrap().is_self_sync_owner(&acct_hex, &b_hex),
+            "a stale union resurrected a mesh-revoked device"
+        );
+        assert!(!auth3.lock().unwrap().is_self_sync_owner(&acct_hex, &a_hex));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Only what `verify_devroster_put` ACCEPTED reaches the union file — a forged or stale
+    /// roster must not leave device ids behind that a restart would then honour. The write-side
+    /// twin of `only_accepted_grants_are_persisted`.
+    #[test]
+    fn refused_roster_puts_persist_no_devices() {
+        let dir = learn_dir("roster-refused");
+        let auth: Arc<Mutex<RelayAuth>> = Arc::new(Mutex::new(RelayAuth::default()));
+        let account = haven_p2p::identity::Identity::generate();
+        let acct_hex = hex(&account.public().node_id_bytes());
+        let (dev_a, dev_b) = ([1u8; 32], [2u8; 32]);
+
+        // Unsigned garbage → refused; nothing stored, nothing persisted.
+        assert!(!put_roster(&dir, &auth, &acct_hex, b"POISONED-NOT-A-SIGNED-ROSTER"));
+        assert!(!dir.join(DEVROSTER_DEVICES_FILE).exists(), "a refused PUT persisted a union");
+
+        // A validly-signed but STALE replay (v1 after v2 revoked its device) never overwrites the
+        // newer blob, and — crucially — its version-losing device id is NOT re-authorized because
+        // the newer stored roster EXPLICITLY revokes it. So the blob isn't stored (`false`) and the
+        // union keeps exactly v2's effect: a stale replay can never resurrect a revoked device.
+        assert!(put_roster(&dir, &auth, &acct_hex, &signed_roster_wire(&account, 2, vec![dev_b], vec![dev_a])));
+        assert!(!put_roster(&dir, &auth, &acct_hex, &signed_roster_wire(&account, 1, vec![dev_a], vec![])));
+        assert_eq!(load_devroster_devices(&dir), vec![(acct_hex.clone(), vec![hex(&dev_b)])]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The linked-device lockout (the live bug): a device that comes ONLINE at a relay AFTER a
+    /// sibling published a higher-versioned account roster there could never get authorized for
+    /// CUSTOM circles. The relay maps device→account only from the account-signed roster; the
+    /// sibling's newer roster (its own device set) wins the version race and OMITS the late device,
+    /// and the late device's own signed PUT LOSES the rollback check — yet it can't self-heal
+    /// (devroster GET is member-gated and it isn't a member yet). Fix: a version-LOSING but
+    /// account-signed PUT still contributes its listed device ids to the auth union (the signature
+    /// proves they belong to the account), while the newer blob stays stored. ABSENCE — not
+    /// revocation — is why the late device was missing, so it must be admitted.
+    #[test]
+    fn version_losing_signed_roster_still_authorizes_its_devices() {
+        let dir = learn_dir("roster-late-join");
+        let account = haven_p2p::identity::Identity::generate();
+        let acct_hex = hex(&account.public().node_id_bytes());
+        let (dev_b, dev_c) = ([0xB1u8; 32], [0xC2u8; 32]);
+        let (b_hex, c_hex) = (hex(&dev_b), hex(&dev_c));
+        let auth: Arc<Mutex<RelayAuth>> = Arc::new(Mutex::new(RelayAuth::default()));
+        auth.lock().unwrap().authorize("fam", vec![acct_hex.clone()], vec![]);
+
+        // Sibling B publishes the HIGHER-versioned roster first (its own device set, omitting C).
+        assert!(put_roster(&dir, &auth, &acct_hex, &signed_roster_wire(&account, 2, vec![dev_b], vec![])));
+
+        // Late device C publishes its OWN account-signed roster, but at a LOWER version → it loses
+        // the rollback race, so the stored blob must stay B's v2 (never downgraded)…
+        assert!(!put_roster(&dir, &auth, &acct_hex, &signed_roster_wire(&account, 1, vec![dev_c], vec![])));
+        let stored =
+            std::fs::read(safe_path(&dir, &format!("{DEVROSTER_PREFIX}{acct_hex}")).unwrap()).unwrap();
+        let (_, stored_devices, _) = verify_devroster(&acct_hex, &stored).unwrap();
+        assert_eq!(stored_devices, vec![b_hex.clone()], "a version-losing PUT must not downgrade the blob");
+
+        // …yet BOTH B and C are now authorized — C escaped the chicken-and-egg lockout via its own
+        // signed (but version-losing) PUT. Self-sync owner gate AND the custom-circle mailbox gate.
+        let self_key = format!("haven/self/{acct_hex}/state/x");
+        for d in [&b_hex, &c_hex] {
+            assert!(auth.lock().unwrap().is_self_sync_owner(&acct_hex, d), "device {d} is not a self-sync owner");
+            assert!(!blob_forbidden(&auth, d, VERB_GET, &self_key), "device {d} blocked from its self slot");
+            assert!(!blob_forbidden(&auth, d, VERB_PUT, &self_key), "device {d} blocked from its self slot");
+            assert!(
+                !blob_forbidden(&auth, d, VERB_GET, "haven/mailbox/fam/msg1"),
+                "device {d} blocked from the custom-circle mailbox"
+            );
+        }
+
+        // The union PERSISTS both, so a restart keeps C authorized without a re-publish.
+        assert_eq!(load_devroster_devices(&dir), vec![(acct_hex.clone(), vec![b_hex.clone(), c_hex.clone()])]);
+
+        // A stranger still gets nothing — the union widens the fleet, never the world.
+        assert!(blob_forbidden(&auth, &"dd".repeat(32), VERB_GET, &self_key));
+
+        // An UNSIGNED older body contributes nothing (Refused, not AuthOnly).
+        assert!(!put_roster(&dir, &auth, &acct_hex, b"POISONED-NOT-A-SIGNED-ROSTER"));
+
+        // A WRONG-ACCOUNT older roster (validly self-signed, but by a DIFFERENT account, PUT under
+        // acct's key) contributes nothing: the signature does not vouch for `acct`'s devices.
+        let intruder = haven_p2p::identity::Identity::generate();
+        let dev_x = [0x99u8; 32];
+        let x_hex = hex(&dev_x);
+        assert!(!put_roster(&dir, &auth, &acct_hex, &signed_roster_wire(&intruder, 1, vec![dev_x], vec![])));
+        assert!(
+            !auth.lock().unwrap().is_self_sync_owner(&acct_hex, &x_hex),
+            "a wrong-account roster authorized a device it does not own"
+        );
+        // Union unchanged — still exactly {B, C}.
+        assert_eq!(load_devroster_devices(&dir), vec![(acct_hex.clone(), vec![b_hex.clone(), c_hex.clone()])]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

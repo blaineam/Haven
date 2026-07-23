@@ -31,6 +31,10 @@ final class ProfileStore: ObservableObject {
         guard !applyingRemote, !DemoEnv.isDemo else { return }
         fieldTs[field] = nowMs()
         defaults.set(fieldTs.mapValues { NSNumber(value: $0) }, forKey: fieldTsKey)
+        // A real LOCAL edit (the guard above already excludes sync-applied values) should reach the
+        // user's other devices in seconds, not on the 2-minute periodic pass. Debounced — typing a
+        // bio restamps per keystroke commit but coalesces into one forced self-sync.
+        FeedStore.shared.nudgeSelfSyncSoon()
     }
     func fieldTimestamp(_ field: String) -> UInt64 { fieldTs[field] ?? 0 }
     private func loadFieldTs() {

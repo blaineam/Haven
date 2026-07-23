@@ -219,7 +219,7 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
             Spacer(Modifier.height(10.dp))
             OnboardingChoice(
                 title = "Move my account to this device",
-                subtitle = "Bring my identity over from another device using a transfer code. Use this when replacing a device, not when adding one.",
+                subtitle = "Bring my identity here with a transfer code — for replacing a device, not adding one.",
             ) { code = ""; linkError = false; showLink = true }
             Spacer(Modifier.height(16.dp))
             Text(
@@ -288,7 +288,7 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
                 text = {
                     Column {
                         Text(
-                            "On the device you already use, open You ▸ Settings ▸ Authorized devices ▸ “Link a new device (no seed)”, then scan its QR or paste the code. Your master seed never leaves that device — this one gets its own revocable key.",
+                            "On your current device: Settings ▸ Identity & devices ▸ Link a new device, then scan the code it shows. This device gets its own revocable key — never your master key.",
                             color = HavenTheme.textSecondary,
                             fontSize = 13.sp,
                         )

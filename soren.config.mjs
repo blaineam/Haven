@@ -109,6 +109,22 @@ export default {
       description: 'desktop web UI syntax check',
     },
 
+    // ── Full cross-device E2E: iOS sim + Android emu + macOS HavenStub (relay
+    //    host + friend account) + Tauri desktop on one fleet account. Exercises
+    //    every in-app action (posts/stories/DMs/reactions/comments/files/music/
+    //    captions/profile/circles), asserts convergence on EVERY device, and
+    //    gates on propagation-latency budgets with a run-over-run regression
+    //    check (build/e2e-history.jsonl). The mac leg is ALWAYS the isolated
+    //    HavenStub — the personal account/container is never touched.
+    //    Needs: DEBUG builds of all four clients (see docs/QA.md "qa-cmd v2").
+    e2e: {
+      type: 'cmd',
+      cmd: 'node',
+      args: ['Scripts/qa-e2e-full.mjs'],
+      description: 'Full cross-device E2E (iOS+Android+macStub+Tauri) with perf gates',
+      tags: ['e2e', 'relay', 'perf'],
+    },
+
     // ── Fabric / path-proxy / WebSocket hairpin (Mac host + sim/emu consumers).
     //    Automated gate for Haven-first policy + free-CF-compatible call hairpin.
     //    Multi-device (iOS sim / Android emu / Mac) points at the Mac host path proxy;

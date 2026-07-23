@@ -11,6 +11,10 @@ mod demo;
 mod engine;
 mod localmedia;
 mod mediaresume;
+// qa-cmd v2 driver (docs/QA.md) — same rule as demo: `cfg`, not a runtime check, so no release
+// binary carries a file-drop remote control. See qa.rs for the contract.
+#[cfg(debug_assertions)]
+mod qa;
 mod relayhealth;
 mod reoptimize;
 mod roster;
@@ -31,6 +35,49 @@ use tauri::{Emitter, Manager};
 
 use crate::engine::Engine;
 use crate::store::Paths;
+
+/// Minimal stderr backend for the `log` facade. The crate logged through `log::info!`/`warn!`
+/// everywhere but never installed a backend, so EVERY log line was silently dropped and
+/// `RUST_LOG=debug` did nothing — which is what made the dead self-sync lane undebuggable
+/// (tauri.log stayed empty no matter what failed). Zero new deps; QA harnesses capture stderr.
+/// Honors `RUST_LOG` as a plain level word (error|warn|info|debug|trace), default `info`.
+struct StderrLogger(log::LevelFilter);
+
+impl log::Log for StderrLogger {
+    fn enabled(&self, m: &log::Metadata) -> bool {
+        m.level() <= self.0
+    }
+    fn log(&self, r: &log::Record) {
+        if !self.enabled(r.metadata()) {
+            return;
+        }
+        // Only OUR crate's records below Warn — dependency debug chatter stays out even at debug.
+        let ours = r.target().starts_with("haven_desktop") || r.target().starts_with("haven_");
+        if r.level() >= log::Level::Info && !ours {
+            return;
+        }
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        eprintln!("[{ms} {:5} {}] {}", r.level(), r.target(), r.args());
+    }
+    fn flush(&self) {}
+}
+
+/// Install the stderr logger (idempotent — the second call's `set_boxed_logger` just errs).
+fn init_logging() {
+    let level = match std::env::var("RUST_LOG").unwrap_or_default().to_lowercase() {
+        s if s.contains("trace") => log::LevelFilter::Trace,
+        s if s.contains("debug") => log::LevelFilter::Debug,
+        s if s.contains("error") => log::LevelFilter::Error,
+        s if s.contains("warn") => log::LevelFilter::Warn,
+        _ => log::LevelFilter::Info,
+    };
+    if log::set_boxed_logger(Box::new(StderrLogger(level))).is_ok() {
+        log::set_max_level(level);
+    }
+}
 
 /// `haven://…` URLs the OS has handed us that the frontend hasn't routed yet.
 ///
@@ -63,8 +110,10 @@ fn force_qa_seed_identity() -> Result<Option<([u8; 32], Paths)>> {
     let hex = Account::from_seed(seed.to_vec())
         .map_err(|e| anyhow!("QA seed derive node id: {e}"))?
         .node_id_hex();
-    store::save_seed(&seed)?;
-    store::save_identity_seed(&hex, &seed)?;
+    // No keyring writes here: the harness's HAVEN_QA_SEED_FILE is the QA identity's
+    // source of truth and is re-read on every launch. Persisting it would (a) wedge
+    // headless QA forever on the macOS keychain-ACL prompt a re-signed dev binary
+    // triggers, and (b) pollute the user's real keychain with throwaway QA seeds.
     let base = Paths::resolve()?;
     let mut ids = store::Identities::load(&base);
     // Keep the QA identity in the roster under a fixed dir so re-runs stay isolated from
@@ -262,6 +311,7 @@ fn startup_identity() -> Result<Option<Startup>> {
 
 /// Run the full GUI app.
 pub fn run() {
+    init_logging();
     // Fresh install → no engine; the frontend shows the welcome screen and `onboard_*` relaunches.
     let existing = startup_identity().expect("resolve identity");
 
@@ -335,6 +385,11 @@ pub fn run() {
                 // reach. No-op unless HAVEN_DEMO=1 (and absent entirely from release).
                 #[cfg(debug_assertions)]
                 demo::seed(&setup_engine);
+
+                // qa-cmd v2 driver (DEBUG builds only): watch <data-dir>/qa-cmd.json and answer
+                // with qa-dump.json — the desktop leg of `Scripts/qa-e2e-full.mjs`.
+                #[cfg(debug_assertions)]
+                qa::start(setup_engine.clone());
 
                 let e = setup_engine.clone();
                 tauri::async_runtime::spawn(async move {
@@ -423,6 +478,11 @@ pub fn run() {
             commands::reports,
             commands::dm_threads,
             commands::mark_dm_read,
+            commands::pinned_dms,
+            commands::set_pinned_dms,
+            commands::activity,
+            commands::activity_seen,
+            commands::mark_activity_seen,
             commands::delete_conversation,
             commands::start_dm,
             commands::start_group_dm,
@@ -533,6 +593,7 @@ pub fn run() {
 /// without the app open. The messaging keys stay on this machine (the relay still never sees
 /// plaintext); the relay node id is derived from a distinct relay-specific seed.
 pub fn run_headless() {
+    init_logging();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

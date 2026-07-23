@@ -43,6 +43,9 @@ final class DMReadStore: ObservableObject {
         guard mark > (lastRead[circleId] ?? 0) else { return }
         lastRead[circleId] = mark
         persist()
+        // A LOCAL read (never `applySynced`) clears the badge on my other devices in seconds via a
+        // debounced forced self-sync pass — viewing a thread re-marks per arrival but coalesces.
+        FeedStore.shared.nudgeSelfSyncSoon()
     }
 
     /// Merge watermarks synced from my other devices: per-key MAX (monotonic — always safe).

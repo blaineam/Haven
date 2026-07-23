@@ -141,9 +141,13 @@ object SelfSyncCoordinator {
         if (p.emoji.isNotEmpty()) m["profile:emoji"] = p.emoji.toByteArray(Charsets.UTF_8)
         if (p.bio.isNotEmpty()) m["profile:bio"] = p.bio.toByteArray(Charsets.UTF_8)
         if (p.link.isNotEmpty()) m["profile:link"] = p.link.toByteArray(Charsets.UTF_8)
+        // Profile photo (small base64 JPEG, UTF-8 bytes of the base64 string — byte-identical to
+        // iOS SelfSync) — so a freshly-linked device gets the avatar too, not just the name/bio.
+        // Was missing, which is why the avatar showed on posts but not on the profile.
+        if (p.avatarB64.isNotEmpty()) m["profile:avatar"] = p.avatarB64.toByteArray(Charsets.UTF_8)
         // LWW timestamps per profile field — so two of my devices resolve a profile edit by WHO EDITED
         // LAST, not who synced last (the endless profile ping-pong). See ProfileStore.fieldTs.
-        for (f in listOf("name", "emoji", "bio", "link")) {
+        for (f in listOf("name", "emoji", "bio", "link", "avatar")) {
             val ts = p.fieldTimestamp(f); if (ts > 0) m["profile-at:$f"] = int64LE(ts)
         }
         // Settings live on ProfileStore on Android. Use iOS's exact key names where the concept
@@ -157,6 +161,15 @@ object SelfSyncCoordinator {
         for (k in listOf(ProfileStore.TS_SAVE, ProfileStore.TS_SAVE_OTHERS, ProfileStore.TS_OPT, ProfileStore.TS_RET)) {
             val ts = p.settingTimestamp(k); if (ts > 0) m["setting-at:$k"] = int64LE(ts)
         }
+        // Pinned DM conversations (ordered) sync across my devices, last-writer-wins. Only broadcast
+        // when non-empty so a fresh device can't blank a sibling's pins (absence ≠ authoritative).
+        // Newline-joined circle ids — byte-identical to iOS `setting:pinnedDMs`.
+        if (DmPins.pinned.isNotEmpty()) {
+            m["setting:pinnedDMs"] = DmPins.pinned.joinToString("\n").toByteArray(Charsets.UTF_8)
+        }
+        // Activity-list read watermark — reading the bell on one device clears its badge on the
+        // others. 8-byte LE ms, merged per-key MAX on apply (monotonic — no device can un-read).
+        ActivityStore.seenAt().takeIf { it > 0 }?.let { m["setting:activitySeenAt"] = int64LE(it) }
         // DM read watermarks — reading a thread on one device clears its badge on the others. JSON
         // map circleId → unix-ms (the iOS wire format), merged per-key MAX on apply (monotonic —
         // no device can un-read another). Never published empty (a fresh device changes nothing).
@@ -269,6 +282,11 @@ object SelfSyncCoordinator {
             if (ts == 0L && p.fieldTimestamp("link") == 0L && p.link.isEmpty() && s.isNotEmpty()) ts = 1L
             p.applyRemoteField("link", s, ts)
         }
+        strValue(h, "profile:avatar")?.let { s ->
+            var ts = tsOf("profile-at:avatar")
+            if (ts == 0L && p.fieldTimestamp("avatar") == 0L && p.avatarB64.isEmpty() && s.isNotEmpty()) ts = 1L
+            p.applyRemoteField("avatar", s, ts)
+        }
 
         // Settings are LWW by per-key timestamp — same fix as profiles. An untimestamped legacy record (old
         // peer) maps to ts=1 so it seeds a never-touched device but can never overwrite a real local edit.
@@ -278,6 +296,15 @@ object SelfSyncCoordinator {
         boolValue(h, "setting:autoOptimize")?.let { p.applyRemoteSettingBool(ProfileStore.TS_OPT, it, settingTs(ProfileStore.TS_OPT)) }
         h.get("setting:retentionDays")?.let { v ->
             if (v.size == 4) p.applyRemoteRetention(int32LEValue(v), settingTs(ProfileStore.TS_RET))
+        }
+        // Pinned DM conversations — plain LWW: the converged value IS the pin order (the CRDT
+        // already resolved which device wrote last). Applied only when it differs (no ping-pong).
+        strValue(h, "setting:pinnedDMs")?.let { s ->
+            DmPins.applySynced(s.split("\n").filter { it.isNotEmpty() })
+        }
+        // Activity-list read watermark: per-key MAX merge (monotonic — always safe).
+        h.get("setting:activitySeenAt")?.takeIf { it.size == 8 }?.let {
+            ActivityStore.applySyncedSeenAt(int64LEValue(it))
         }
         // DM read watermarks from my other devices: per-key MAX merge (monotonic — always safe).
         // DmRead bumps its own version on change, so unread badges recompose by themselves.
@@ -391,9 +418,12 @@ object SelfSyncCoordinator {
                         runCatching { social.removeFromCircle(cid, hex) }   // purge + engine tombstone
                     }
                 } else if (readd > 0L) {
-                    // Newest is a re-add: merge the client re-add ts. The engine tombstone is lifted ONLY by
-                    // an explicit LOCAL re-add; the member's bundle comes back via the additive circle: record.
+                    // Newest is a re-add: merge the client re-add ts AND lift the engine tombstone —
+                    // without the clear, a re-add made on my OTHER device left this engine dropping
+                    // the member's hellos/events forever (SelfSync.swift parity). The member's
+                    // bundle comes back via the additive circle: record.
                     CircleRemovals.mergeReaddedAt(key, readd)
+                    if (social != null) runCatching { social.clearCircleRemoval(cid, hex) }
                 }
             }
         }
@@ -493,10 +523,15 @@ object SelfSyncCoordinator {
      * apply the converged result locally, persist, and re-publish our own slot. Safe to call on a
      * timer; coalesces if already running. No-op without an account or any transport (relay OR S3).
      * Returns true if the merge brought in changes from another device (so the caller can refresh).
+     *
+     * [force] (the debounced local-mutation nudge — [HavenNet.selfSyncNudge], iOS `sync(force:)`
+     * parity): instead of coalescing away against an in-flight pass, WAIT for it and run anyway —
+     * the pass in flight snapshotted state from BEFORE the edit, so skipping would leave the edit
+     * waiting out the periodic cadence (exactly what the nudge exists to avoid).
      */
-    suspend fun sync(social: HavenSocial?): Boolean {
+    suspend fun sync(social: HavenSocial?, force: Boolean = false): Boolean {
         if (!initialized) return false
-        if (mutex.isLocked) return false   // coalesce (iOS `inFlight`)
+        if (!force && mutex.isLocked) return false   // coalesce (iOS `inFlight`)
         return mutex.withLock { syncLocked(social) }
     }
 
@@ -505,32 +540,62 @@ object SelfSyncCoordinator {
      * user-owned S3 bucket — self-sync needs only ONE, matching iOS's relay-or-ownerS3() choice.
      */
     private interface Transport {
+        /** Short PII-free label for pass logging ("relay:fe263256" / "s3"). */
+        val label: String
         suspend fun list(prefix: String): List<String>?
         suspend fun get(key: String): ByteArray?
         suspend fun put(key: String, data: ByteArray): Boolean
     }
 
+    /**
+     * Ladder per op (mailbox-path parity): our OWN hosted store first (no self-dial), then the
+     * iroh dial, then the relay's signed-HTTP interface. The HTTP rung is what lets slots ride
+     * relays this device cannot iroh-dial at all — an HTTP-only announce, a dial in backoff, a
+     * friend's relay — which used to leave two linked devices sharing only a friend's relay never
+     * self-syncing (they'd each converge with nobody). Same auth as the mailbox HTTP path: a
+     * per-request node-key signature with the token folded in, never sent.
+     */
     private class RelayTransport(val nodeHex: String) : Transport {
+        override val label: String get() = "relay:${nodeHex.take(8)}"
         override suspend fun list(prefix: String): List<String>? {
-            val client = HavenNet.selfSyncRelayClient(nodeHex) ?: return null
-            val keys = runCatching { client.list(prefix) }.getOrNull()
-            if (keys == null) HavenNet.selfSyncRelayFailed(nodeHex) else HavenNet.selfSyncRelayOk(nodeHex)
-            return keys
+            HavenNet.selfSyncLocalStore(nodeHex)?.let { host ->
+                return runCatching { host.localList(prefix) }.getOrNull()
+            }
+            val client = HavenNet.selfSyncRelayClient(nodeHex)
+            if (client != null) {
+                val keys = runCatching { client.list(prefix) }.getOrNull()
+                if (keys != null) { HavenNet.selfSyncRelayOk(nodeHex); return keys }
+                HavenNet.selfSyncRelayFailed(nodeHex)
+            }
+            return HavenNet.selfSyncHttpList(nodeHex, prefix)
         }
         override suspend fun get(key: String): ByteArray? {
-            val client = HavenNet.selfSyncRelayClient(nodeHex) ?: return null
-            return runCatching { client.get(key) }.getOrNull()
+            HavenNet.selfSyncLocalStore(nodeHex)?.let { host ->
+                return runCatching { host.localGet(key) }.getOrNull()
+            }
+            val client = HavenNet.selfSyncRelayClient(nodeHex)
+            if (client != null) {
+                runCatching { client.get(key) }.getOrNull()?.let { return it }
+            }
+            return HavenNet.selfSyncHttpGet(nodeHex, key)
         }
         override suspend fun put(key: String, data: ByteArray): Boolean {
-            val client = HavenNet.selfSyncRelayClient(nodeHex) ?: return false
-            return runCatching { client.put(key, data) }
-                .onSuccess { HavenNet.selfSyncRelayOk(nodeHex) }
-                .onFailure { Log.d(TAG, "slot put failed ($nodeHex): ${it.message}"); HavenNet.selfSyncRelayFailed(nodeHex) }
-                .isSuccess
+            HavenNet.selfSyncLocalStore(nodeHex)?.let { host ->
+                return runCatching { host.localPut(key, data) }.getOrDefault(false)
+            }
+            val client = HavenNet.selfSyncRelayClient(nodeHex)
+            if (client != null) {
+                val r = runCatching { client.put(key, data) }
+                    .onSuccess { HavenNet.selfSyncRelayOk(nodeHex) }
+                    .onFailure { Log.d(TAG, "slot put failed ($nodeHex): ${it.message}"); HavenNet.selfSyncRelayFailed(nodeHex) }
+                if (r.isSuccess) return true
+            }
+            return HavenNet.selfSyncHttpPut(nodeHex, key, data)
         }
     }
 
     private class S3Transport(val config: S3ConfigFfi) : Transport {
+        override val label: String get() = "s3"
         override suspend fun list(prefix: String): List<String>? =
             runCatching { s3List(config, prefix) }.getOrElse { Log.d(TAG, "s3 list failed: ${it.message}"); null }
         override suspend fun get(key: String): ByteArray? =
@@ -556,7 +621,13 @@ object SelfSyncCoordinator {
         val transports = ArrayList<Transport>()
         for (nodeHex in HavenNet.selfSyncRelays()) transports.add(RelayTransport(nodeHex))
         StorageStore.s3Config(appContext)?.let { transports.add(S3Transport(it)) }
-        if (transports.isEmpty()) return false   // nothing to sync over
+        if (transports.isEmpty()) {
+            // Permanent breadcrumb (desktop parity): the silent early return here is what made the
+            // dead lane undebuggable — an empty transport list looks identical to a healthy no-op.
+            Log.i(TAG, "no transport (no relay, no S3) — pass skipped")
+            return false   // nothing to sync over
+        }
+        Log.i(TAG, "pass: account=${accountHex.take(8)} transports=[${transports.joinToString(",") { it.label }}]")
 
         // 1.0.7 self-sync key rotation (docs/SWITCH-FLIP-1.0.7.md §6). Before choosing the seal/open path,
         // a non-minting device adopts the current rotated key from any grant addressed to it (published by
@@ -622,10 +693,14 @@ object SelfSyncCoordinator {
         val prefix = "haven/" + selfSyncSlotPrefix(accountHex)
         val ownKey = "haven/" + selfSyncSlotKey(accountHex, deviceHex)
         for (t in transports) {
-            val keys = t.list(prefix) ?: continue
+            val keys = t.list(prefix)
+            if (keys == null) { Log.i(TAG, "${t.label}: list failed/refused"); continue }
+            var fetched = 0
+            var opened = 0
             for (key in keys) {
                 if (key == ownKey) continue
                 val blob = t.get(key) ?: continue
+                fetched++
                 val peer = runCatching {
                     when {
                         // v1 rotatable path: honor only the current epoch's key; a stale-epoch (revoked
@@ -635,8 +710,12 @@ object SelfSyncCoordinator {
                         else -> openAccountState(seed, blob)
                     }
                 }.getOrNull() ?: continue
+                opened++
                 base.merge(peer)
             }
+            // Per-transport outcome (counts only, never contents — desktop poll_self_sync parity):
+            // opened < fetched is a key/epoch mismatch, fetched < listed-1 a GET failure.
+            Log.i(TAG, "${t.label}: listed=${keys.size} peer_slots_fetched=$fetched opened=$opened")
         }
 
         val changed = !base.toBytes().contentEquals(preMerge)
@@ -646,6 +725,7 @@ object SelfSyncCoordinator {
 
         // 4. Apply the converged state locally + persist the new base.
         applyLocal(base, social)
+        Log.i(TAG, "converged: entries=${base.entries().size} merged_change=$changed")
         runCatching { baseFile.writeBytes(base.toBytes()) }
             .onFailure { Log.e(TAG, "persist base failed", it) }
         if (changed) HavenNet.selfSyncDidApply()
@@ -657,7 +737,12 @@ object SelfSyncCoordinator {
                 seedless -> sealAccountStateWithKey(selfSyncKey!!, base)
                 else -> sealAccountState(seed, base)
             }
-        }.getOrNull() ?: return changed
+        }.getOrNull()
+        if (sealed == null) {
+            // Still heal any refusal recorded above — the seal failing must not strand the 403 fix.
+            runCatching { HavenNet.selfSyncHealRefusals() }
+            return changed
+        }
         for (t in transports) t.put(ownKey, sealed)
 
         // 6. Publish any freshly-minted rotation grants (primary side, §6) so every still-authorized device
@@ -675,6 +760,13 @@ object SelfSyncCoordinator {
             }
             if (allOk) SelfSyncKeyStore.clearPendingGrants()
         }
+
+        // A refusal anywhere above means a relay doesn't know this DEVICE id yet — publish the
+        // roster to the refusers now (rate-limited; no-op when nothing refused) so the NEXT pass
+        // converges instead of 403ing forever. Desktop `poll_self_sync` parity: on Android only
+        // the MEDIA paths ever ran the heal, so the selfsync ladder's noteRefused was write-only
+        // and a device the relay had never seen could not self-sync until some media op healed it.
+        runCatching { HavenNet.selfSyncHealRefusals() }
         return changed
     }
 

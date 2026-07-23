@@ -295,7 +295,7 @@ struct CircleSettingsView: View {
                 } header: {
                     Text("Your name")
                 } footer: {
-                    Text("Only you see this. It never reaches anyone else in the circle, and it doesn't change the circle's name for them. Leave it empty to use the circle's own name.")
+                    Text("Only you see this nickname — it doesn't rename the circle for anyone else.")
                 }
 
                 Section {
@@ -402,7 +402,7 @@ struct CircleSettingsView: View {
                 TextField("Your name for this circle", text: $nick)
                     .onSubmit { circleSettings.setNickname(nick, for: circleId) }
                     .havenPillField()
-                footnote("Only you see this. It never reaches anyone else in the circle, and it doesn't change the circle's name for them. Leave it empty to use the circle's own name.")
+                footnote("Only you see this nickname — it doesn't rename the circle for anyone else.")
             }
 
             VStack(alignment: .leading, spacing: 8) {

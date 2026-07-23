@@ -72,7 +72,15 @@ final class CallManager: NSObject, ObservableObject {
     /// Drives the glowing highlight on the active speaker's grid tile / local PiP.
     @Published private(set) var activeSpeaker: String?
 
-    private var active = false        // a call exists (ringing, connecting, or in progress)
+    private var active = false {      // a call exists (ringing, connecting, or in progress)
+        didSet {
+            guard oldValue != active else { return }
+            // Arm/disarm the feed's live-call HTTP poll timer with the call lifecycle — the
+            // 3s timer used to run forever and wake the main actor for a no-op guard when idle.
+            let on = active
+            Task { @MainActor in FeedStore.shared.callActivityChanged(on) }
+        }
+    }
     private var isCaller = false
     /// True for the WHOLE call lifecycle (ringing → connecting → in progress). Feed/story/DM
     /// media playback checks this so post music and video audio never compete with call audio.
@@ -95,7 +103,7 @@ final class CallManager: NSObject, ObservableObject {
     private var speakerStreak: [String: Int] = [:]
     /// Audio level above which a participant is considered "speaking".
     private let speakingThreshold = 0.02
-    /// Consecutive winning polls (≈300ms each) before we switch the highlight, to avoid flicker.
+    /// Consecutive winning polls (1s each) before we switch the highlight, to avoid flicker.
     private let speakerDebounce = 2
 
     // Mac in-app ringing (no CallKit on Catalyst).
@@ -702,12 +710,15 @@ final class CallManager: NSObject, ObservableObject {
 
     // MARK: - Active-speaker detection
 
-    /// Poll WebRTC audio levels (~300ms) across all pairwise connections: the loudest inbound peer
+    /// Poll WebRTC audio levels (1s) across all pairwise connections: the loudest inbound peer
     /// vs. our own outbound mic level. A small debounce + threshold keep `activeSpeaker` from
-    /// flickering between near-silent participants.
+    /// flickering between near-silent participants. 1s, not 0.3s — each poll walks a FULL stats
+    /// report per connection, and 3×/s of that was measurable call heat for a highlight that only
+    /// needs ~1s responsiveness. 1:1 calls skip entirely (see pollAudioLevels): with one remote
+    /// peer there is nothing to disambiguate, so the highlight isn't worth any stats traffic.
     private func startSpeakerDetection() {
         guard speakerTimer == nil else { return }
-        speakerTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
+        speakerTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.pollAudioLevels() }
         }
     }
@@ -721,6 +732,13 @@ final class CallManager: NSObject, ObservableObject {
     private func pollAudioLevels() {
         let conns = Array(peers.values)
         guard !conns.isEmpty else { return }
+        // 1:1 call: no ambiguity to resolve — skip the stats polling entirely. (The report parse
+        // itself already runs off the main actor, on WebRTC's stats queue; see WebRTCCall.audioLevels.)
+        guard conns.count > 1 else {
+            if activeSpeaker != nil { activeSpeaker = nil }
+            speakerStreak.removeAll()
+            return
+        }
         // Gather one async stats read per connection, then pick the loudest once all return.
         var remaining = conns.count
         var bestPeer = ""           // loudest remote peer hex

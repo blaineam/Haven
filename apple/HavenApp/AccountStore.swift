@@ -250,6 +250,15 @@ final class AccountStore: ObservableObject {
     /// implicit grant for the app, no repeated "X wants to use your keychain" prompts on macOS) rather
     /// than the legacy file keychain. Reads fall back to the legacy keychain and migrate forward, so a
     /// pre-migration seed is never mistaken for "no identity". (SE keys are token-backed and unaffected.)
+    ///
+    /// QA stub exception: the stub never touches the legacy keychain AT ALL — not even the fallback
+    /// read probes or the both-domain deletes. Its binary is re-signed every QA build, so any legacy
+    /// item access re-prompts, and its items are QA fixtures with nothing to migrate. See
+    /// `SecureEnclaveBox.dataProtectionKeychainOnly`; `keychainDomains` below gates the delete loops.
+    private static var keychainDomains: [Bool] {
+        SecureEnclaveBox.dataProtectionKeychainOnly ? [true] : [true, false]
+    }
+
     private static func baseQuery(dataProtection: Bool = true) -> [String: Any] {
         var q: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -334,6 +343,8 @@ final class AccountStore: ObservableObject {
         let (dpStatus, dpData) = readPlain(dataProtection: true)
         if dpStatus == errSecSuccess { return dpData.map { .found($0) } ?? .lockedOrError }
         if dpStatus != errSecItemNotFound { return .lockedOrError }
+        // QA stub: absent in the DP keychain IS absent — a legacy probe would prompt on rebuild.
+        if SecureEnclaveBox.dataProtectionKeychainOnly { return .notFound }
         let (legStatus, legData) = readPlain(dataProtection: false)
         switch legStatus {
         case errSecSuccess:
@@ -358,8 +369,9 @@ final class AccountStore: ObservableObject {
     /// Secure-Enclave private key itself is intentionally LEFT in place: it holds no identity (it
     /// only wraps the seed) and is reused for the next `saveSeed`, avoiding needless key churn.
     private static func deleteSeed() {
-        // Clear both the data-protection AND legacy keychains so neither representation lingers.
-        for dp in [true, false] {
+        // Clear both the data-protection AND legacy keychains so neither representation lingers
+        // (stub: DP only — see keychainDomains).
+        for dp in keychainDomains {
             var query = baseQuery(dataProtection: dp)
             query[kSecAttrSynchronizable as String] = kSecAttrSynchronizableAny   // delete either variant
             SecItemDelete(query as CFDictionary)
@@ -388,6 +400,8 @@ final class AccountStore: ObservableObject {
         let (dpStatus, dpData) = read(dataProtection: true)
         if dpStatus == errSecSuccess { return dpData.map { .found($0) } ?? .locked }
         if dpStatus != errSecItemNotFound { return .locked }   // locked/error → never "absent"
+        // QA stub: absent in the DP keychain IS absent — a legacy probe would prompt on rebuild.
+        if SecureEnclaveBox.dataProtectionKeychainOnly { return .notFound }
         // Absent in the DP keychain → check the legacy keychain and migrate it forward if present.
         let (legStatus, legData) = read(dataProtection: false)
         switch legStatus {
@@ -456,7 +470,7 @@ final class AccountStore: ObservableObject {
     /// than waiting for the next identity change.
     private static func storeHistory(_ hist: [String]) {
         guard let json = try? JSONEncoder().encode(hist) else { return }
-        for dp in [true, false] {   // clear both keychains so no stale legacy archive lingers
+        for dp in keychainDomains {   // clear both keychains so no stale legacy archive lingers (stub: DP only)
             var del = historyQuery(dataProtection: dp); del[kSecAttrSynchronizable as String] = kSecAttrSynchronizableAny
             SecItemDelete(del as CFDictionary)
         }
@@ -492,7 +506,9 @@ final class AccountStore: ObservableObject {
         }
         // DP keychain (covers synced + migrated archives) first, then the legacy keychain — the next
         // archive()/storeHistory writes it back to DP, so this only needs to keep recovery working.
-        guard let d = read(dataProtection: true) ?? read(dataProtection: false) else { return [] }
+        // (Stub: DP only — a legacy probe prompts on every rebuilt binary.)
+        guard let d = read(dataProtection: true)
+            ?? (SecureEnclaveBox.dataProtectionKeychainOnly ? nil : read(dataProtection: false)) else { return [] }
         // Plaintext/synced JSON decodes directly; otherwise it's an SE-wrapped blob to open first.
         if let arr = try? JSONDecoder().decode([String].self, from: d) { return arr }
         if case .ok(let json) = seedBox.open(d),

@@ -55,6 +55,9 @@ object DmRead {
         lastRead[circleId] = mark
         persist()
         version.intValue++
+        // A LOCAL read — nudge a debounced forced self-sync so the badge clears on my other
+        // devices in seconds (applySyncedJson, the remote path, never lands here).
+        HavenNet.selfSyncNudge()
     }
 
     /** The full map as `setting:dmLastRead` bytes (iOS-compatible JSON), or null when empty —

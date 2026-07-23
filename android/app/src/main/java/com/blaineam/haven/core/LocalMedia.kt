@@ -39,6 +39,8 @@ object LocalMedia {
         val files = context.applicationContext.filesDir
         dir = File(files, "media").apply { mkdirs() }
         plainDir = File(files, "media-plain").apply { mkdirs() }
+        thumbPrefs = context.applicationContext
+            .getSharedPreferences("haven.media.thumbs", Context.MODE_PRIVATE)
     }
 
     /** Above this plaintext size, seal file→file (off-heap) instead of holding the sealed envelope in RAM. */
@@ -85,7 +87,58 @@ object LocalMedia {
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
             recordPixelSize(ref, bounds.outWidth, bounds.outHeight)
         }
+        // Mint the tiny thumb companion (~256px, ≤32KB) for photos worth one: recipients render it
+        // blurred behind the loading placeholder long before the full bytes land. The pairing marker
+        // (`thumb:<ref>:<thumbRef>`) joins the SIGNED media list at post time — see
+        // HavenNet.withThumbMarkers — so old clients simply ignore it (synthetic scheme). Apple
+        // MediaStore.addImage parity.
+        if (!isVideo && bytes.size > 64 * 1024) runCatching { mintThumbCompanion(circleId, ref, bytes) }
         return ref
+    }
+
+    // ---- Thumb companions (compose-time tiny previews — see MediaVariants `thumb:`) -------------
+
+    private lateinit var thumbPrefs: android.content.SharedPreferences
+
+    /** The thumb companion ref minted for a photo at compose time, if one exists. */
+    fun thumbCompanion(ref: String): String? =
+        if (this::thumbPrefs.isInitialized) thumbPrefs.getString("t|$ref", null) else null
+
+    /**
+     * Encode + store a ≤32KB, ~256px JPEG companion for [ref] and remember the pairing. Skipped
+     * silently when the encode can't get small enough — a "thumb" that isn't tiny is just waste.
+     */
+    private fun mintThumbCompanion(circleId: String, ref: String, bytes: ByteArray) {
+        if (!this::thumbPrefs.isInitialized || thumbCompanion(ref) != null) return
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return
+        // Power-of-two subsample close to 256px, then an exact scale — cheap and heap-bounded.
+        var sample = 1
+        while (max(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 256) sample *= 2
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return
+        val longSide = max(decoded.width, decoded.height)
+        val small = if (longSide > 256) {
+            val scale = 256f / longSide
+            Bitmap.createScaledBitmap(
+                decoded, max(1, (decoded.width * scale).toInt()), max(1, (decoded.height * scale).toInt()), true)
+        } else decoded
+        var quality = 60
+        var data: ByteArray
+        do {
+            val out = ByteArrayOutputStream()
+            small.compress(Bitmap.CompressFormat.JPEG, quality, out)
+            data = out.toByteArray()
+            quality -= 15
+        } while (data.size > 32 * 1024 && quality > 25)
+        if (small !== decoded) small.recycle()
+        decoded.recycle()
+        if (data.size > 48 * 1024) return
+        val thumbRef = store(circleId, data, isVideo = false)   // small — never re-mints (≤48KB)
+        thumbPrefs.edit().putString("t|$ref", thumbRef).apply()
+        // Bound: old pairings only matter until the post is sealed; drop everything past ~2000.
+        if (thumbPrefs.all.size > 2000) runCatching { thumbPrefs.edit().clear().putString("t|$ref", thumbRef).apply() }
     }
 
     /** Store a recorded voice message; returns an `aud_` ref (sealed at rest like other media). */

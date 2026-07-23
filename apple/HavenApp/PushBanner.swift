@@ -10,7 +10,10 @@ import Foundation
 ///   "b": "<human body line>",
 ///   "c": "<circleId>",            // for locked-circle redaction
 ///   "k": "post|story|dm|react|comment|edit|unsend|…",
-///   "e": "<emoji>" }              // optional, reactions
+///   "e": "<emoji>",               // optional, reactions
+///   "p": "<postId>",              // optional — the authored/PARENT post, for an exact tap route
+///   "mk": "<mailbox key>",        // optional — where the sealed envelope lives (NSE prefetch)
+///   "mr": ["<ref>", …] }          // optional — media to prefetch, thumbs/posters first
 /// ```
 /// Older NSEs only read `t`/`b`/`c` and ignore the rest — so adding fields is forward-compatible.
 enum PushBanner: Sendable {
@@ -23,6 +26,11 @@ enum PushBanner: Sendable {
     case unsend(isDM: Bool)
     /// Fallback when the caller doesn't know (legacy / rare paths).
     case generic(isDM: Bool, circleName: String)
+    /// Wrapper carrying deep-link/prefetch coordinates alongside any banner: the authored or
+    /// PARENT post id (`p` — a reaction's tap opens the post it reacted to, not just the circle)
+    /// and the post's fetchable media refs (`mr`, thumbs/posters first). Indirect so a banner
+    /// stays one value; every presentation property delegates to the wrapped case.
+    indirect case tagged(PushBanner, postId: String?, mediaRefs: [String])
 
     /// Kind tag for the NSE / future rich UI. Keep short and stable.
     var kind: String {
@@ -35,6 +43,7 @@ enum PushBanner: Sendable {
         case .edit:      return "edit"
         case .unsend:    return "unsend"
         case .generic:   return "activity"
+        case .tagged(let inner, _, _): return inner.kind
         }
     }
 
@@ -66,6 +75,8 @@ enum PushBanner: Sendable {
             return isDM ? "Unsent a message" : "Unsent a post"
         case .generic(let isDM, let circle):
             return isDM ? "Sent you a message" : "Posted in \(circle)"
+        case .tagged(let inner, _, _):
+            return inner.body
         }
     }
 
@@ -91,19 +102,39 @@ enum PushBanner: Sendable {
             return isDM ? "Unsent a message" : "Unsent a post"
         case .generic(let isDM, _):
             return isDM ? "Sent you a message" : "New activity in your circle"
+        case .tagged(let inner, _, _):
+            return inner.privateBody
         }
     }
 
     /// Optional reaction emoji for the wire field `e`.
     var emoji: String? {
-        if case .reaction(let emoji, _) = self { return emoji.isEmpty ? nil : emoji }
+        switch self {
+        case .reaction(let emoji, _): return emoji.isEmpty ? nil : emoji
+        case .tagged(let inner, _, _): return inner.emoji
+        default: return nil
+        }
+    }
+
+    /// The authored/PARENT post id this banner is about (wire field `p`), if the caller knew it.
+    var postId: String? {
+        if case .tagged(_, let postId, _) = self { return postId }
         return nil
+    }
+
+    /// Fetchable media refs to prefetch (wire field `mr`), thumbs/posters first.
+    var mediaRefs: [String] {
+        if case .tagged(_, _, let refs) = self { return refs }
+        return []
     }
 
     /// JSON object ready to seal. `title` is the sender display name.
     /// Always includes both `b` (full) and `bp` (private) so the *recipient* chooses detail
     /// level — the sender must not decide how much of someone else's lock screen to expose.
-    func jsonObject(title: String, circleId: String) -> [String: Any] {
+    /// `mailboxKey` is the deterministic store-and-forward key the envelope is uploaded under —
+    /// it rides INSIDE the sealed blob so the recipient's NSE can fetch the content the moment
+    /// the banner lands (push-before-content), without the relay learning what was announced.
+    func jsonObject(title: String, circleId: String, mailboxKey: String? = nil) -> [String: Any] {
         var o: [String: Any] = [
             "t": title,
             "b": body,
@@ -112,6 +143,10 @@ enum PushBanner: Sendable {
             "k": kind,
         ]
         if let emoji { o["e"] = emoji }
+        if let postId { o["p"] = postId }
+        if let mailboxKey { o["mk"] = mailboxKey }
+        let refs = mediaRefs
+        if !refs.isEmpty { o["mr"] = Array(refs.prefix(4)) }   // bounded — APNs budget
         return o
     }
 
@@ -147,33 +182,48 @@ enum PushBanner: Sendable {
     }
 
     // MARK: - Factories used by FeedStore
+    //
+    // Each takes the authored/PARENT post id when the caller has it (reactions, comments, edits
+    // and unsends always do — it's their target), so the recipient's tap opens the exact post.
+    // A nil id keeps the old circle/thread route.
 
     static func forPost(circleId: String, circleName: String, body: String,
-                        media: [String], story: Bool) -> PushBanner {
-        if story {
-            return .story(circleName: circleName, hasCaption: !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        }
+                        media: [String], story: Bool, postId: String? = nil) -> PushBanner {
         let real = media.filter { !isSyntheticRef($0) }
-        if circleId.hasPrefix("dm:") {
+        let inner: PushBanner
+        if story {
+            inner = .story(circleName: circleName, hasCaption: !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } else if circleId.hasPrefix("dm:") {
             let hasAudio = real.contains(where: isAudioRef)
-            return .dm(preview: body, hasMedia: !real.isEmpty, hasAudio: hasAudio)
+            inner = .dm(preview: body, hasMedia: !real.isEmpty, hasAudio: hasAudio)
+        } else {
+            inner = .post(circleName: circleName, preview: body, hasMedia: !real.isEmpty)
         }
-        return .post(circleName: circleName, preview: body, hasMedia: !real.isEmpty)
+        // Prefetch coordinates for the recipient's NSE: thumbs first (tiny — they unblock the
+        // placeholder), then posters, then content — the same priority as the relay upload order.
+        let refs = MediaVariants.uploadOrder(media)
+        guard postId != nil || !refs.isEmpty else { return inner }
+        return .tagged(inner, postId: postId, mediaRefs: refs)
     }
 
-    static func forReaction(emoji: String, circleId: String) -> PushBanner {
-        .reaction(emoji: emoji, isDM: circleId.hasPrefix("dm:"))
+    static func forReaction(emoji: String, circleId: String, postId: String? = nil) -> PushBanner {
+        tag(.reaction(emoji: emoji, isDM: circleId.hasPrefix("dm:")), postId)
     }
 
-    static func forComment(body: String, circleId: String, circleName: String) -> PushBanner {
-        .comment(preview: body, isDM: circleId.hasPrefix("dm:"), circleName: circleName)
+    static func forComment(body: String, circleId: String, circleName: String, postId: String? = nil) -> PushBanner {
+        tag(.comment(preview: body, isDM: circleId.hasPrefix("dm:"), circleName: circleName), postId)
     }
 
-    static func forEdit(circleId: String, circleName: String) -> PushBanner {
-        .edit(isDM: circleId.hasPrefix("dm:"), circleName: circleName)
+    static func forEdit(circleId: String, circleName: String, postId: String? = nil) -> PushBanner {
+        tag(.edit(isDM: circleId.hasPrefix("dm:"), circleName: circleName), postId)
     }
 
-    static func forUnsend(circleId: String) -> PushBanner {
-        .unsend(isDM: circleId.hasPrefix("dm:"))
+    static func forUnsend(circleId: String, postId: String? = nil) -> PushBanner {
+        tag(.unsend(isDM: circleId.hasPrefix("dm:")), postId)
+    }
+
+    private static func tag(_ inner: PushBanner, _ postId: String?) -> PushBanner {
+        guard let postId, !postId.isEmpty else { return inner }
+        return .tagged(inner, postId: postId, mediaRefs: [])
     }
 }

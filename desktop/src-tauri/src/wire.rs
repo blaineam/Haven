@@ -532,6 +532,26 @@ fn encode_token(s: &str) -> String {
 ///
 /// The link is a POINTER, not a capability — it carries no key. Only a device already in the circle
 /// can decrypt the post; everyone else gets "post not found".
+/// Tap-target for a notification / activity row: DMs open the Messages thread, circle posts open
+/// the post, a bare circle id opens the circle. Percent-encoded with the SAME token charset as the
+/// web post link, so a `dm:hex-hex` circle id survives URL parsing. Mirrors Apple
+/// `DeepLink.interactionLink` byte-for-byte.
+pub fn interaction_link(circle_id: &str, post_id: Option<&str>) -> String {
+    let cid = encode_token(circle_id);
+    let pid = post_id.filter(|p| !p.is_empty()).map(encode_token);
+    if circle_id.starts_with("dm:") {
+        match pid {
+            Some(p) => format!("haven://m/{cid}/{p}"),
+            None => format!("haven://m/{cid}"),
+        }
+    } else {
+        match pid {
+            Some(p) => format!("haven://p/{cid}/{p}"),
+            None => format!("haven://c/{cid}"),
+        }
+    }
+}
+
 pub fn post_url(circle_id: &str, post_id: &str) -> Option<String> {
     if circle_id.is_empty() || post_id.is_empty() {
         return None;

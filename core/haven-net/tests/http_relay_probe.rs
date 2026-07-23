@@ -229,12 +229,20 @@ async fn devroster_write_requires_a_valid_account_signature() {
         assert_eq!(status(&r), 200, "a genuine account-signed enrollment roster must be accepted");
         assert_eq!(std::fs::read(dir.join(&key)).unwrap(), roster_v2, "the signed roster is stored");
 
-        // [ROLLBACK] a validly-signed OLDER version (v1) must NOT clobber the stored v2.
+        // [ROLLBACK] a validly-signed OLDER version (v1) must NOT clobber the stored v2 on disk.
+        // Its listed device ids still join the auth union — the account signature vouches for them,
+        // which is exactly how a late-joining linked device escapes the chicken-and-egg lockout — so
+        // the PUT reports 200, but the newer blob is never downgraded. The rollback defense now
+        // protects the stored BLOB, not the return code.
         let roster_v1 = signed_roster(&account, 1, vec![dev]);
         let r = put(&account_node, &key, &roster_v1);
         log.push_str(&format!("[ROLLBACK] PUT /k/{key} (v1, signed but STALE) -> {}\n", status(&r)));
-        assert_ne!(status(&r), 200, "a replayed older-version roster must be refused");
-        assert_eq!(std::fs::read(dir.join(&key)).unwrap(), roster_v2, "v2 must survive the rollback");
+        assert_eq!(status(&r), 200, "a version-losing but signed roster is accepted for the auth union");
+        assert_eq!(
+            std::fs::read(dir.join(&key)).unwrap(),
+            roster_v2,
+            "v2 must survive the rollback — the stored blob is never downgraded"
+        );
 
         // [LEGIT] a newer version (v3) is adopted — the roster genuinely advances.
         let roster_v3 = signed_roster(&account, 3, vec![dev, [6u8; 32]]);

@@ -34,6 +34,12 @@ class MainActivity : FragmentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         DemoEnv.configure(intent)   // DEBUG-only: arms demo mode from launch-intent extras
+        if (BuildConfig.DEBUG) {
+            // qa-cmd v2 driver (docs/QA.md): adopt the fleet seed BEFORE anything boots the engine
+            // (RootScreen inits HavenNet from whatever identity exists once we setContent below).
+            com.blaineam.haven.core.QaDriver.adoptSeedIfPresent(this)
+            com.blaineam.haven.core.QaDriver.start(this)
+        }
         handleShare(intent)
         maybeRequestNearby()
         setContent {
@@ -50,6 +56,18 @@ class MainActivity : FragmentActivity() {
         setIntent(intent)
         handleShare(intent)
         if (BuildConfig.DEBUG) scheduleQaExtras(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // qa-cmd v2: the 1.5s drop-file poll runs only while the app is foregrounded (DEBUG only —
+        // QaDriver no-ops in release).
+        com.blaineam.haven.core.QaDriver.onResume()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        com.blaineam.haven.core.QaDriver.onPause()
     }
 
     /** Poll until [HavenNet.isReady], then run [handleQaExtras] (DEBUG matrix only). */
@@ -200,13 +218,29 @@ class MainActivity : FragmentActivity() {
     /** Text / links / photos / videos shared into Haven → prefill the composer + attach media. */
     private fun handleShare(intent: Intent?) {
         when (intent?.action) {
-            // A haven:// or https link the app was opened with (tap in a browser/DM). Invites and
-            // post links share a domain AND both ride the #fragment, so discriminate on grammar
-            // BEFORE routing — otherwise a post link lands in Connect and dies there.
+            // A haven:// or https link the app was opened with (tap in a browser/DM, or one of our
+            // own notifications). Invites and post links share a domain AND both ride the
+            // #fragment, so discriminate on grammar BEFORE routing — otherwise a post link lands
+            // in Connect and dies there. `m/` (DM thread) and `c/` (circle) are notification
+            // tap-targets (DeepLink.interactionLink) — one route table for every link source.
             Intent.ACTION_VIEW -> {
                 val link = intent.data?.toString()
+                // qa-cmd v2 (DEBUG only): `haven://qa` pokes the drop-file consumer and is never
+                // routed further — parity with iOS FeedStore.handleMatrixQaURL.
+                if (com.blaineam.haven.core.QaDriver.handleUrl(link)) return
+                val dm = DeepLink.parseDm(link)
+                val circle = DeepLink.parseCircle(link)
                 val post = DeepLink.parsePost(link)
-                if (post != null) PostLinkInbox.offer(post) else InviteInbox.offer(link)
+                when {
+                    // Open the Messages THREAD: RootScreen switches to the Messages tab on this
+                    // signal and MessagesScreen consumes it to open the conversation.
+                    dm != null -> com.blaineam.haven.core.DmDrafts.openThread.value = dm.circleId
+                    // Switch to the circle's feed — RootScreen honors CircleLock.needsUnlock the
+                    // same way the post path does (the lock screen takes over, never a peek).
+                    circle != null -> com.blaineam.haven.core.CircleLinkInbox.offer(circle)
+                    post != null -> PostLinkInbox.offer(post)
+                    else -> InviteInbox.offer(link)
+                }
             }
             Intent.ACTION_SEND -> {
                 if (intent.type?.startsWith("text") == true) {

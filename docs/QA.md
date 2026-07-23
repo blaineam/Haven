@@ -61,6 +61,86 @@ npm link`), it's just `soren run Haven`.
 | `fabric` | cargo | Path proxy + WebSocket hairpin + Haven-first DERP policy (`haven-net` integration) | Rust |
 | `vm-linux` | utm | **launches** the `haven-linux` UTM VM and confirms it reaches `started` (reuses an already-running VM) | UTM + the VM present |
 | `vm-windows` | utm | **launches** the `Windows` UTM VM and confirms `started` | UTM + the VM present |
+| `e2e` | cmd | **full cross-device E2E with perf gates** — see below | DEBUG builds of all four clients |
+
+## Full cross-device E2E (`soren run Haven e2e`)
+
+`Scripts/qa-e2e-full.mjs` assembles the whole fleet — iOS Simulator + Android
+emulator + the isolated **HavenStub** (relay host *and* the "friend" account B)
++ Tauri desktop, the last three linked to the iOS identity (account A) — then
+exercises every in-app action and asserts convergence on **every** device:
+
+profile edit · circle create + invite · membership · text/photo/video posts ·
+story + caption · file post · music card · DMs both directions (+ own-device
+echo) · reactions from two devices · comments — plus the **media-blob gate**:
+the post's media must actually be present (not just the event) on every device.
+
+Every step records propagation latency (author → each device) against budgets
+(`E2E_BUDGET_TEXT` 30s, `E2E_BUDGET_MEDIA_EVENT` 45s, `E2E_BUDGET_MEDIA_BLOB`
+120s), and each run appends to `build/e2e-history.jsonl` — a step that gets
+**>2× slower** than the previous run fails the suite even inside budget, so
+performance regressions are caught the same day they land.
+
+Safety: the mac leg is **always** `com.blaineam.kith.qa.stub` under
+`HOME=/tmp/haven-mac-stub-home`; the desktop leg always uses the `qa-matrix`
+data dir. The personal account, container, and daily-driver desktop data root
+are never touched, and the script refuses to run otherwise.
+
+Subsets + reuse: `E2E_STEPS=post,dm node Scripts/qa-e2e-full.mjs`,
+`E2E_BOOTSTRAP=skip` to reuse a hot fleet, `E2E_KILL=1` to tear down after.
+
+### qa-cmd v2 — the cross-platform QA driver contract
+
+DEBUG builds of all four clients accept a one-shot JSON drop file and answer
+with a dump. Paths: iOS/macStub `Application Support/qa-cmd.json` (+
+`haven://qa` deep link to poke iOS); Android `/sdcard/Download/qa-cmd.json`
+(+ `am start -d haven://qa`); desktop `<data-dir>/qa-cmd.json` (file watcher).
+
+Android scoped storage: adb-pushed files in `/sdcard/Download` are shell-owned,
+so the DEBUG build declares `MANAGE_EXTERNAL_STORAGE` (debug manifest overlay
+only) and the harness grants it — `adb shell appops set com.blaineam.haven
+MANAGE_EXTERNAL_STORAGE allow` (qa-e2e-bootstrap.sh does this on install).
+`/data/local/tmp/<name>` is accepted as a fallback for every staged input. The
+Android driver also adopts `/sdcard/Download/qa-seed.txt` at startup when the
+install has no identity yet (never over an onboarded/seedless one), and dumps
+its account + device hexes to `/sdcard/Download/qa-device-hex.txt` for the
+stub-authorization step.
+
+```json
+{"op":"post|story|dm|react|comment|profile|circle_create|circle_invite|file|music_post|dump|mark_read",
+ "body":"…","media":"photo|video","photo_path":"…","video_path":"…","file_path":"…",
+ "target_id":"<event id>","emoji":"❤️","dm_to":"<64hex>","name":"…","circle_id":"…",
+ "music":{"title":"…","artist":"…"},"caption":"…"}
+```
+
+Every op (and `{"op":"dump"}`) refreshes `qa-dump.json` next to the drop file
+(Android: `/sdcard/Download/qa-dump-<pkg>.json`):
+
+```json
+{"device":"ios","account_hex":"…","ts_ms":0,
+ "posts":[{"id":"…","body":"…","circle":"…","story":false,"caption":null,
+           "media_refs":["…"],"media_present":[true],
+           "reactions":{"❤️":1},"comments":[{"id":"…","body":"…"}]}],
+ "dms":{"<peer-hex>":[{"id":"…","body":"…","media_present":[]}]},
+ "profile":{"name":"…"},"circles":[{"id":"…","name":"…","members":["…"]}]}
+```
+
+The v1 keys (`post`/`story`/`dm_to`+`dm`/`call_to` without `op`) stay accepted
+on iOS for the older matrix scripts.
+
+Two contract points every driver honors:
+
+- **Content ops honor `circle_id`** — `post` / `story` / `file` / `music_post`
+  author into the named circle (iOS/Android switch the active circle through the
+  UI's own picker path; desktop passes the id to the engine author call). A
+  missing or **unknown** id keeps current behavior — the active circle
+  (desktop: `default`). `dm` is unaffected (its circle is the DM thread).
+- **Active-cadence semantics** — a qa op models a user actively using the app.
+  Every recognized op resets the adaptive idle multiplier exactly like the real
+  user-activity/foreground hook; every **mutating** op additionally nudges one
+  immediate mailbox poll so authored content uploads now. The non-mutating
+  `dump` op never forces a poll — receivers converge at their real
+  active-cadence poll, keeping measured convergence latency honest.
 
 ### Multi-device fabric (Mac + iOS Simulator + Android Emulator)
 

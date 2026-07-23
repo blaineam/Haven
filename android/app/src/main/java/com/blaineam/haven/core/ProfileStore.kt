@@ -111,10 +111,15 @@ class ProfileStore private constructor(context: Context) {
     private fun stampField(field: String) {
         if (applyingRemote) return
         fieldTs[field] = System.currentTimeMillis(); persistFieldTs()
+        // A real LOCAL profile edit (the applyingRemote guard above keeps sync-applied values out) —
+        // nudge a debounced forced self-sync so it reaches my other devices in seconds, not on the
+        // stretched periodic cadence.
+        HavenNet.selfSyncNudge()
     }
     private fun stampSetting(key: String) {
         if (applyingRemote) return
         settingTs[key] = System.currentTimeMillis(); persistSettingTs()
+        HavenNet.selfSyncNudge()   // real LOCAL setting change (incl. retentionDays) — push it now
     }
     fun fieldTimestamp(field: String): Long = fieldTs[field] ?: 0L
     fun settingTimestamp(key: String): Long = settingTs[key] ?: 0L
@@ -130,6 +135,8 @@ class ProfileStore private constructor(context: Context) {
             "emoji" -> if (value.isNotEmpty() && value != emoji) emoji = value // never a blank emoji (has a default)
             "bio" -> if (value != bio) bio = value
             "link" -> if (value != link) link = value
+            // Profile photo (base64 JPEG) — save() below persists it AND mirrors AvatarStore.
+            "avatar" -> if (value.isNotEmpty() && value != avatarB64) avatarB64 = value
         }
         save()
         applyingRemote = false
@@ -203,6 +210,7 @@ class ProfileStore private constructor(context: Context) {
 
     /** Set + persist my avatar, and mirror it into [AvatarStore] so my own posts show it too. */
     fun setAvatar(base64: String) {
+        if (base64 != avatarB64) stampField("avatar")   // LWW: an avatar edit resolves by WHO edited last
         avatarB64 = base64
         prefs.edit().putString(KEY_AVATAR, base64).apply()
         AvatarStore.put(HavenNet.nodeIdHex, base64, emoji)

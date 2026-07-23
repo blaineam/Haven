@@ -46,6 +46,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.AccessTime
+import androidx.compose.material.icons.filled.HourglassEmpty
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material.icons.filled.PlayCircle
@@ -633,7 +634,7 @@ private fun CircleRelaySection(circleId: String) {
             )
         }
     }
-    Text("Choose which configured relays this circle uses. The default relay (if set) always applies — change it under Settings ▸ Relays.",
+    Text("Pick which relays this circle uses. The default (★) always applies.",
         color = HavenTheme.textSecondary, fontSize = 11.sp)
 }
 
@@ -772,7 +773,7 @@ private fun FollowUpgradeCard(circleId: String, offer: CircleUpgradeOffer) {
             Spacer(Modifier.height(2.dp))
             // Say plainly what we can and can't vouch for — the user is the one deciding.
             Text(
-                "They say they made this circle. We can't check that, so only follow if that's right — whoever you follow will be able to remove people.",
+                "We can't verify they made this circle. Whoever you follow can remove people — only follow if that's right.",
                 color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp,
             )
         }
@@ -796,7 +797,7 @@ private fun OfferUpgradeCard(circleId: String) {
             Text("Upgrade this circle", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(2.dp))
             Text(
-                "If you made this circle, give it a verified owner so removing someone cuts them off for good. Everyone here chooses whether to follow you.",
+                "If you made this circle, give it a verified owner so removals stick. Everyone here chooses whether to follow you.",
                 color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp,
             )
         }
@@ -896,12 +897,15 @@ private fun MediaBitmapContent(circleId: String, ref: String, bmp: ImageBitmap?,
     }
 }
 
-/** A graceful placeholder for a referenced blob whose bytes aren't on disk. Four states, mirroring
- *  iOS `MissingMediaPlaceholder`:
+/** A graceful placeholder for a referenced blob whose bytes aren't on disk. Honest states,
+ *  mirroring iOS `MissingMediaPlaceholder`:
  *   • deliberately evicted ("Manage media" / limit sweep) → a "Download N" affordance (re-fetches on tap);
- *   • actively downloading (post-tap) → a spinner;
- *   • relay/peers no longer have it → "No longer available" + Retry;
- *   • simply still syncing (never evicted) → the plain "still loading" spinner. */
+ *   • actively downloading → a spinner, with chunk progress (i/n) for large chunked blobs;
+ *   • relays reachable but empty → "Waiting for sender…" (their device hasn't uploaded it yet);
+ *   • relay/peers no longer have it → "No longer available" + Retry (+ Ask for it back);
+ *   • simply still syncing (never evicted) → the plain "still loading" spinner.
+ *  Rendered over the post's blurred `thumb:` companion when its tiny bytes are held, so the card
+ *  has real shape + color instead of a grey box. */
 @Composable
 private fun MissingMediaPlaceholder(circleId: String, ref: String, isVideo: Boolean, modifier: Modifier) {
     val context = LocalContext.current
@@ -909,14 +913,45 @@ private fun MissingMediaPlaceholder(circleId: String, ref: String, isVideo: Bool
     com.blaineam.haven.core.EvictedMediaStore.version.value
     val downloading = com.blaineam.haven.core.HavenNet.downloadingMedia.contains(ref)
     val unavailable = com.blaineam.haven.core.HavenNet.unavailableMedia.contains(ref)
+    val waiting = com.blaineam.haven.core.HavenNet.waitingForSenderMedia.contains(ref)
+    val progress = com.blaineam.haven.core.HavenNet.mediaRestoreProgress[ref]
     val evictedBytes = com.blaineam.haven.core.EvictedMediaStore.size(ref)
+    // The post's blurred tiny thumb companion, when declared AND its ≤32KB bytes have arrived —
+    // prefetched unconditionally, so the loading card usually looks like the photo.
+    val fv = com.blaineam.haven.core.HavenNet.feedVersion.value
+    val thumbBmp = remember(ref, fv) {
+        com.blaineam.haven.core.HavenNet.thumbRefFor(ref)
+            ?.takeIf { LocalMedia.has(it) }
+            ?.let { LocalMedia.imageBitmap(circleId, it, reqDim = 512)?.asImageBitmap() }
+    }
     Box(modifier.background(HavenTheme.card), contentAlignment = Alignment.Center) {
+        if (thumbBmp != null) {
+            Image(thumbBmp, contentDescription = null,
+                modifier = Modifier.matchParentSize().blur(12.dp),
+                contentScale = ContentScale.Crop)
+            Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.25f)))
+        }
         when {
             downloading -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 androidx.compose.material3.CircularProgressIndicator(
                     color = HavenTheme.pink, strokeWidth = 2.dp, modifier = Modifier.size(22.dp))
                 Spacer(Modifier.height(8.dp))
-                Text("Downloading…", color = HavenTheme.textSecondary, fontSize = 12.sp)
+                // Honest i/n while a big chunked blob reassembles (resumable across retries).
+                Text(
+                    if (progress != null && progress.second > 1) "Downloading… ${progress.first}/${progress.second}"
+                    else "Downloading…",
+                    color = if (thumbBmp != null) Color.White else HavenTheme.textSecondary, fontSize = 12.sp,
+                )
+            }
+            waiting && !unavailable -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                // The relays answered and none holds it — the SENDER hasn't uploaded it yet. A
+                // different truth from "downloading" (we aren't) and "gone" (it never arrived).
+                Icon(Icons.Filled.HourglassEmpty, null,
+                    tint = if (thumbBmp != null) Color.White else HavenTheme.textSecondary,
+                    modifier = Modifier.size(28.dp))
+                Spacer(Modifier.height(6.dp))
+                Text("Waiting for sender…",
+                    color = if (thumbBmp != null) Color.White else HavenTheme.textSecondary, fontSize = 12.sp)
             }
             unavailable -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(Icons.Filled.WifiOff, null, tint = HavenTheme.textSecondary, modifier = Modifier.size(28.dp))
@@ -968,7 +1003,7 @@ private fun MissingMediaPlaceholder(circleId: String, ref: String, isVideo: Bool
                     color = HavenTheme.pink, strokeWidth = 2.dp, modifier = Modifier.size(22.dp))
                 Spacer(Modifier.height(8.dp))
                 Text(if (isVideo) "Video still loading…" else "Media still loading…",
-                    color = HavenTheme.textSecondary, fontSize = 12.sp)
+                    color = if (thumbBmp != null) Color.White else HavenTheme.textSecondary, fontSize = 12.sp)
             }
         }
     }

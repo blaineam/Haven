@@ -217,6 +217,7 @@ export default {
             : {
                 aps: {
                   "mutable-content": 1,                              // triggers the on-device NSE
+                  "content-available": 1,                            // wakes a backgrounded app to fetch before the user opens it
                   alert: { title: "Haven", body: "New activity" },  // fallback if the NSE can't decrypt
                   sound: "default",
                 },

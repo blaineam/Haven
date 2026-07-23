@@ -41,6 +41,13 @@ object DeepLink {
 
     data class Post(val circleId: String, val postId: String)
 
+    /** A DM thread link (`haven://m/<dm-circle>[/<msgId>]`). [messageId] is optional — today it
+     *  only disambiguates which message the notification was about; the thread opens either way. */
+    data class Dm(val circleId: String, val messageId: String?)
+
+    /** A bare circle link (`haven://c/<circleId>`) — switch to that circle's feed. */
+    data class Circle(val circleId: String)
+
     /**
      * The link a post's share sheet hands out — web-routed so it crosses to iOS/Android and
      * survives being pasted anywhere. Inverse of [webPost]; null for empty ids.
@@ -63,6 +70,31 @@ object DeepLink {
     fun internalPostUrl(circleId: String, postId: String): String? {
         if (circleId.isEmpty() || postId.isEmpty()) return null
         return "haven://p/${Uri.encode(circleId)}/${Uri.encode(postId)}"
+    }
+
+    /** `haven://m/<dm-circle>[/<msgId>]` — a notification tap opens the Messages THREAD, not the
+     *  feed. Encoded with [encodeToken] (the shared TOKEN_SAFE charset) so a `dm:<a>-<b>` circle id
+     *  survives URL parsing byte-identically to Apple `DeepLink.interactionLink`. */
+    fun dmUrl(circleId: String, messageId: String? = null): String? {
+        if (circleId.isEmpty()) return null
+        val base = "haven://m/${encodeToken(circleId)}"
+        return if (messageId.isNullOrEmpty()) base else "$base/${encodeToken(messageId)}"
+    }
+
+    /** `haven://c/<circleId>` — switch to a circle's feed (used when only the circle is known). */
+    fun circleUrl(circleId: String): String? {
+        if (circleId.isEmpty()) return null
+        return "haven://c/${encodeToken(circleId)}"
+    }
+
+    /** Tap-target for a notification, mirroring Apple `DeepLink.interactionLink`: DMs open the
+     *  Messages thread (`m/`), circle posts open the post (`p/`), and a bare circle falls back to
+     *  the circle feed (`c/`). */
+    fun interactionLink(circleId: String, postId: String? = null): String? {
+        if (circleId.isEmpty()) return null
+        if (circleId.startsWith("dm:")) return dmUrl(circleId, postId)
+        if (!postId.isNullOrEmpty()) return internalPostUrl(circleId, postId)
+        return circleUrl(circleId)
     }
 
     /** Not `Uri.encode` — its unreserved set keeps `.` literal, which would let a `dm:<a>-<b>`
@@ -107,6 +139,33 @@ object DeepLink {
         val parts = uri.pathSegments ?: return null
         if (parts.size < 2) return null
         return post(parts[0], parts[1])
+    }
+
+    /** `haven://m/<dm-circle>[/<msgId>]` — Uri already percent-decodes path segments. */
+    fun parseDm(raw: String?): Dm? {
+        val uri = havenUri(raw, "m") ?: return null
+        val parts = uri.pathSegments ?: return null
+        val cid = parts.getOrNull(0) ?: return null
+        if (!cid.startsWith("dm:")) return null
+        return Dm(cid, parts.getOrNull(1)?.takeIf { it.isNotEmpty() })
+    }
+
+    /** `haven://c/<circleId>`. */
+    fun parseCircle(raw: String?): Circle? {
+        val uri = havenUri(raw, "c") ?: return null
+        val cid = uri.pathSegments?.getOrNull(0) ?: return null
+        if (cid.isEmpty()) return null
+        return Circle(cid)
+    }
+
+    /** A parsed `haven://<host>/…` uri, or null when [raw] isn't one. */
+    private fun havenUri(raw: String?, host: String): Uri? {
+        val text = raw?.trim().orEmpty()
+        if (text.isEmpty()) return null
+        val uri = runCatching { Uri.parse(text) }.getOrNull() ?: return null
+        if (!uri.scheme.equals("haven", ignoreCase = true)) return null
+        if (!uri.host.equals(host, ignoreCase = true)) return null
+        return uri
     }
 
     private fun decode(s: String): String? = runCatching { Uri.decode(s) }.getOrNull()

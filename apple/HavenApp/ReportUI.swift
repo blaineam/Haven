@@ -161,7 +161,7 @@ struct ReportSheet: View {
             .padding(.horizontal, 16).padding(.vertical, 10)
             .havenGlass(in: Capsule())
 
-            Text("The post disappears from your feed right away, and everyone in the circle sees your report so they can act too. Only who reported whom and the category are logged — never the content.")
+            Text("Hides the post for you now; your circle sees the report. Nothing is ever logged.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 4).padding(.top, 6)

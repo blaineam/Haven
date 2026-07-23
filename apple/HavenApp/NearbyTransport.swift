@@ -71,9 +71,29 @@ final class NearbyTransport: NSObject {
     /// Minimum gap after stop before start again (Bonjour cancel is async on the run loop).
     /// 0.75s was still too short under macOS 27 + Multipeer advertiser concurrent publish.
     private static let discoveryRestartSettle: TimeInterval = 1.5
-    /// Keep stopped browser/advertiser objects alive until CFNetwork finishes cancel.
-    private var retiringDiscovery: [AnyObject] = []
-    private var retirePurgeWork: DispatchWorkItem?
+    // MARK: - Static retire pool (main-confined)
+    //
+    // Stopped/failed browser/advertiser objects must stay alive until CFNetwork's async
+    // `_BrowserCancel` runloop source finishes — freeing one in the same runloop turn as its
+    // cancel is the `_CFAssertMismatchedTypeID` EXC_BREAKPOINT. The pool used to live on the
+    // INSTANCE, so deinit (reconfigure / seedless enroll / bringOnline re-entry tearing the
+    // transport down) dropped the retiring objects along with the instance — exactly the
+    // same-turn free the pool exists to prevent. Process-wide + main-confined instead: it
+    // outlives every instance and purges ≥3s after the LAST retire.
+    nonisolated(unsafe) private static var retiredPool: [AnyObject] = []
+    nonisolated(unsafe) private static var retiredPurgeWork: DispatchWorkItem?
+    /// Park objects in the static pool (hops to main if needed — deinit runs anywhere).
+    static func retireToPool(_ objects: [AnyObject]) {
+        guard !objects.isEmpty else { return }
+        let park = {
+            retiredPool.append(contentsOf: objects)
+            retiredPurgeWork?.cancel()
+            let work = DispatchWorkItem { retiredPool.removeAll(); retiredPurgeWork = nil }
+            retiredPurgeWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: work)
+        }
+        if Thread.isMainThread { park() } else { DispatchQueue.main.async(execute: park) }
+    }
 
     /// `displayName` should be our node id hex (truncated to Multipeer's 63-byte limit).
     init(displayName: String, onInbound: @escaping (Data) -> Void, onPeerConnected: @escaping () -> Void) {
@@ -98,6 +118,9 @@ final class NearbyTransport: NSObject {
         if isAdvertising { advertiser.stopAdvertisingPeer() }
         if isBrowsing { browser.stopBrowsingForPeers() }
         session.disconnect()
+        // Push the freshly-cancelled objects into the STATIC pool so they outlive this instance —
+        // never free a browser in the same runloop turn as its cancel (the Bonjour cancel crash).
+        NearbyTransport.retireToPool([advertiser, browser])
     }
 
     private let peersLock = NSLock()
@@ -233,14 +256,14 @@ final class NearbyTransport: NSObject {
             // Detach before stop so late Bonjour callbacks don't re-enter us mid-cancel.
             advertiser.delegate = nil
             advertiser.stopAdvertisingPeer()
-            retiringDiscovery.append(advertiser)
+            Self.retireToPool([advertiser])
             isAdvertising = false
             didStop = true
         }
         if isBrowsing {
             browser.delegate = nil
             browser.stopBrowsingForPeers()
-            retiringDiscovery.append(browser)
+            Self.retireToPool([browser])
             isBrowsing = false
             didStop = true
         }
@@ -249,7 +272,6 @@ final class NearbyTransport: NSObject {
             // Fresh objects for the next start — never call startBrowsing on a browser that
             // still has a `_BrowserCancel` source pending (the EXC_BREAKPOINT path).
             rebuildDiscoveryObjects()
-            scheduleRetirePurge()
         }
     }
 
@@ -261,16 +283,6 @@ final class NearbyTransport: NSObject {
         br.delegate = self
         advertiser = adv
         browser = br
-    }
-
-    private func scheduleRetirePurge() {
-        retirePurgeWork?.cancel()
-        // Hold retired discovery objects long enough for CFNetwork's async cancel to complete.
-        let work = DispatchWorkItem { [weak self] in
-            self?.retiringDiscovery.removeAll()
-        }
-        retirePurgeWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: work)
     }
 
     func stop() {
@@ -417,11 +429,20 @@ extension NearbyTransport: MCNearbyServiceAdvertiserDelegate {
     }
     func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) {
         // Mark inactive so a later start rebuilds rather than double-starting a dead advertiser.
+        // The failed object goes into the STATIC retire pool (CFNetwork may still be cancelling
+        // its half-published service) and a fresh one takes its place; stamping the stop time
+        // makes the next start wait out the settle window like any other stop.
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            advertiser.delegate = nil
+            NearbyTransport.retireToPool([advertiser])
+            self.lastDiscoveryStopAt = Date()
             if advertiser === self.advertiser {
                 self.isAdvertising = false
                 self.isDiscovering = self.isBrowsing
+                let adv = MCNearbyServiceAdvertiser(peer: self.peerID, discoveryInfo: nil, serviceType: self.serviceType)
+                adv.delegate = self
+                self.advertiser = adv
             }
         }
     }
@@ -435,11 +456,19 @@ extension NearbyTransport: MCNearbyServiceBrowserDelegate {
     }
     func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {}
     func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {
+        // Same treatment as the advertiser above: retire the failed browser into the static pool,
+        // stamp the stop time, and build a fresh replacement for the next start.
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            browser.delegate = nil
+            NearbyTransport.retireToPool([browser])
+            self.lastDiscoveryStopAt = Date()
             if browser === self.browser {
                 self.isBrowsing = false
                 self.isDiscovering = self.isAdvertising
+                let br = MCNearbyServiceBrowser(peer: self.peerID, serviceType: self.serviceType)
+                br.delegate = self
+                self.browser = br
             }
         }
     }

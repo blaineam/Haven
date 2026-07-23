@@ -357,6 +357,12 @@ pub struct FeedItem {
     pub poll: Option<FeedPoll>,
 }
 
+/// Freshness clamp (audit M2): `created_at` is author-supplied, so a malicious member could
+/// far-future-date an event to pin it to the top of the feed forever or dodge a poll-close /
+/// retention. Ignore anything dated more than a day ahead of the viewer's clock (generous enough
+/// to absorb honest device skew); it simply surfaces once that time legitimately arrives.
+const FUTURE_TOLERANCE_MS: u64 = 24 * 60 * 60 * 1000;
+
 /// Reduce a set of decrypted events into a timeline. Newest posts first; comments
 /// oldest-first. Edits/unsends apply only to the original author's own events.
 pub fn build_feed(
@@ -372,11 +378,7 @@ pub fn build_feed(
     events.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
     events.dedup_by(|a, b| a.id == b.id);
 
-    // Freshness clamp (audit M2): `created_at` is author-supplied, so a malicious member could
-    // far-future-date an event to pin it to the top of the feed forever or dodge a poll-close /
-    // retention. Ignore anything dated more than a day ahead of the viewer's clock (generous enough
-    // to absorb honest device skew); it simply surfaces once that time legitimately arrives.
-    const FUTURE_TOLERANCE_MS: u64 = 24 * 60 * 60 * 1000;
+    // Freshness clamp — see [`FUTURE_TOLERANCE_MS`].
     let horizon = now_ms.saturating_add(FUTURE_TOLERANCE_MS);
     events.retain(|e| e.created_at <= horizon);
 
@@ -635,6 +637,137 @@ fn comment_target(events: &[Event], comment_id: &str) -> Option<String> {
     })
 }
 
+// ----- Activity reduction -----
+
+/// One row of the activity feed — "what happened that concerns me": someone reacted to,
+/// commented on, or voted on MY event, posted to a shared circle, or messaged a DM.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityItem {
+    /// The originating event's id.
+    pub id: String,
+    /// `"react" | "comment" | "vote" | "post" | "story" | "dm"`.
+    pub kind: String,
+    /// FULL node hex of who did it (the UI resolves a display name).
+    pub actor_hex: String,
+    /// The parent post/comment/poll id where applicable (reactions, comments, votes).
+    pub target_id: Option<String>,
+    /// Body prefix (~120 chars) for the preview line.
+    pub snippet: String,
+    pub created_at: u64,
+    /// The reaction emoji (kind == "react").
+    pub emoji: Option<String>,
+}
+
+/// Body prefix for an activity row (~120 chars, char-boundary safe).
+fn snippet(body: &str) -> String {
+    body.chars().take(120).collect()
+}
+
+/// Reduce one circle's decrypted events into activity rows, newest-first: reactions / comments /
+/// votes on events *I* authored, others' posts and stories, and messages (`"dm"` when `circle_id`
+/// is `dm:`-prefixed, else they render like posts). My own actions never notify me. Mirrors
+/// [`build_feed`]'s pairing: a reaction removed by a LATER `Unreact` from the same author (same
+/// target + emoji) yields no row, only an author's latest pre-close vote counts, and an event its
+/// author later `Unsend`s is dropped. `since_ms` is the caller's watermark — rows dated before it
+/// are skipped.
+pub fn build_activity(
+    mut events: Vec<Event>,
+    me: &str,
+    circle_id: &str,
+    since_ms: u64,
+    now_ms: u64,
+) -> Vec<ActivityItem> {
+    // Same deterministic order + freshness clamp as build_feed.
+    events.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+    events.dedup_by(|a, b| a.id == b.id);
+    let horizon = now_ms.saturating_add(FUTURE_TOLERANCE_MS);
+    events.retain(|e| e.created_at <= horizon);
+
+    // One pass in time order to learn who authored what (targets are event ids), poll close
+    // times, and the pairings that net rows out: the surviving reaction per (author, target,
+    // emoji), the latest pre-close vote per (author, poll), and author-confirmed unsends.
+    let author_of: BTreeMap<&str, &str> =
+        events.iter().map(|e| (e.id.as_str(), e.author.as_str())).collect();
+    let mine = |target: &str| author_of.get(target).copied() == Some(me);
+    let mut poll_close: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut live_reacts: BTreeMap<(&str, &str, &str), &str> = BTreeMap::new();
+    let mut live_votes: BTreeMap<(&str, &str), &str> = BTreeMap::new();
+    let mut unsent: Vec<&str> = Vec::new();
+    for e in &events {
+        match &e.kind {
+            EventKind::Poll { close_at_ms, .. } => {
+                poll_close.insert(e.id.as_str(), *close_at_ms);
+            }
+            EventKind::Reaction { target, emoji } => {
+                live_reacts.insert((e.author.as_str(), target.as_str(), emoji.as_str()), e.id.as_str());
+            }
+            EventKind::Unreact { target, emoji } => {
+                live_reacts.remove(&(e.author.as_str(), target.as_str(), emoji.as_str()));
+            }
+            EventKind::Vote { target, .. } => {
+                // Votes at/after a poll's close are ignored, exactly as build_feed tallies.
+                let locked = poll_close.get(target.as_str()).is_some_and(|c| *c != 0 && e.created_at >= *c);
+                if !locked {
+                    live_votes.insert((e.author.as_str(), target.as_str()), e.id.as_str());
+                }
+            }
+            EventKind::Unsend { target } => {
+                if author_of.get(target.as_str()) == Some(&e.author.as_str()) {
+                    unsent.push(target.as_str());
+                }
+            }
+            _ => {}
+        }
+    }
+    let live_reacts: Vec<&str> = live_reacts.into_values().collect();
+    let live_votes: Vec<&str> = live_votes.into_values().collect();
+
+    let is_dm = circle_id.starts_with("dm:");
+    let mut out = Vec::new();
+    for e in events.iter().rev() {
+        // My own actions never notify me; rows before the watermark are the caller's already.
+        if e.created_at < since_ms || e.author == me || unsent.contains(&e.id.as_str()) {
+            continue;
+        }
+        let (kind, target_id, body, emoji) = match &e.kind {
+            EventKind::Reaction { target, emoji } if mine(target) => {
+                if !live_reacts.contains(&e.id.as_str()) {
+                    continue;
+                }
+                ("react", Some(target.clone()), "", Some(emoji.clone()))
+            }
+            EventKind::Comment { target, body, .. } if mine(target) => {
+                ("comment", Some(target.clone()), body.as_str(), None)
+            }
+            EventKind::Vote { target, .. } if mine(target) => {
+                if !live_votes.contains(&e.id.as_str()) {
+                    continue;
+                }
+                ("vote", Some(target.clone()), "", None)
+            }
+            EventKind::Post { body, story, .. } => {
+                (if *story { "story" } else { "post" }, None, body.as_str(), None)
+            }
+            // A poll renders like a post; its question is the preview.
+            EventKind::Poll { question, .. } => ("post", None, question.as_str(), None),
+            EventKind::Message { body } => {
+                (if is_dm { "dm" } else { "post" }, None, body.as_str(), None)
+            }
+            _ => continue,
+        };
+        out.push(ActivityItem {
+            id: e.id.clone(),
+            kind: kind.into(),
+            actor_hex: e.author.clone(),
+            target_id,
+            snippet: snippet(body),
+            created_at: e.created_at,
+            emoji,
+        });
+    }
+    out
+}
+
 /// Effective retention = the SHORTER of the sender's override and the viewer's
 /// default (None = keep forever). Returns true once `created_at + retention` is past.
 /// Public because the engine's `purge_expired` sweep must agree byte-for-byte with the
@@ -732,6 +865,97 @@ mod edit_tests {
 
         assert_eq!(feed[0].body, "beach day", "a stranger's edit must not apply");
         assert_eq!(feed[0].media, photos, "and must not re-point the media");
+    }
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+
+    fn ev(author: u8, t: u64, kind: EventKind) -> Event {
+        Event::new(&[author; 32], t, kind)
+    }
+
+    fn post(author: u8, t: u64, body: &str) -> Event {
+        ev(author, t, EventKind::Post {
+            body: body.into(),
+            media: vec![],
+            music: None,
+            retention_secs: None,
+            story: false,
+            mute_video: false,
+        })
+    }
+
+    fn me() -> String {
+        hex(&[1u8; 32])
+    }
+
+    #[test]
+    fn react_then_unreact_nets_out() {
+        let p = post(1, 100, "mine");
+        let pid = p.id.clone();
+        let react = ev(2, 200, EventKind::Reaction { target: pid.clone(), emoji: "❤️".into() });
+
+        // A live reaction to MY post is a row (my own post is not — my actions never notify me) …
+        let rows = build_activity(vec![p.clone(), react.clone()], &me(), "fam", 0, 1_000);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "react");
+        assert_eq!(rows[0].target_id.as_deref(), Some(pid.as_str()));
+        assert_eq!(rows[0].emoji.as_deref(), Some("❤️"));
+
+        // … but reacting and then taking it back leaves nothing to announce.
+        let unreact = ev(2, 300, EventKind::Unreact { target: pid, emoji: "❤️".into() });
+        let rows = build_activity(vec![p, react, unreact], &me(), "fam", 0, 1_000);
+        assert!(rows.is_empty(), "a retracted reaction must not survive as activity");
+    }
+
+    #[test]
+    fn comments_only_count_on_my_events() {
+        let my_post = post(1, 100, "mine");
+        let their_post = post(2, 110, "theirs");
+        let on_mine = ev(2, 200, EventKind::Comment {
+            target: my_post.id.clone(), body: "nice".into(), media: vec![],
+        });
+        let on_theirs = ev(3, 210, EventKind::Comment {
+            target: their_post.id.clone(), body: "cool".into(), media: vec![],
+        });
+
+        let rows = build_activity(
+            vec![my_post.clone(), their_post, on_mine, on_theirs], &me(), "fam", 0, 1_000,
+        );
+        let comments: Vec<_> = rows.iter().filter(|r| r.kind == "comment").collect();
+        assert_eq!(comments.len(), 1, "only the comment on MY post is my activity");
+        assert_eq!(comments[0].target_id.as_deref(), Some(my_post.id.as_str()));
+        assert_eq!(comments[0].snippet, "nice");
+    }
+
+    #[test]
+    fn since_watermark_cuts_old_rows() {
+        let old = post(2, 100, "old");
+        let fresh = post(2, 500, "fresh");
+        let rows = build_activity(vec![old, fresh], &me(), "fam", 300, 1_000);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].snippet, "fresh");
+    }
+
+    #[test]
+    fn message_kind_follows_the_circle() {
+        let msg = ev(2, 100, EventKind::Message { body: "hey".into() });
+        let dm = build_activity(vec![msg.clone()], &me(), "dm:aa-bb", 0, 1_000);
+        assert_eq!(dm[0].kind, "dm");
+        let chat = build_activity(vec![msg], &me(), "fam", 0, 1_000);
+        assert_eq!(chat[0].kind, "post");
+    }
+
+    #[test]
+    fn rows_are_newest_first() {
+        let a = post(2, 100, "a");
+        let b = post(3, 300, "b");
+        let c = post(4, 200, "c");
+        let rows = build_activity(vec![a, b, c], &me(), "fam", 0, 1_000);
+        let order: Vec<&str> = rows.iter().map(|r| r.snippet.as_str()).collect();
+        assert_eq!(order, ["b", "c", "a"]);
     }
 }
 

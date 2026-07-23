@@ -58,10 +58,22 @@ final class SharedMailboxStore: ObservableObject {
 @MainActor
 final class MediaBackupQueue {
     static let shared = MediaBackupQueue()
-    private struct Job: Codable, Equatable { let ref: String; let cid: String }
+    /// `at` (authored ms, priority lane only) lets the drain announce a FRESH post's media to the
+    /// circle the moment it lands (frame 32) — optional so old persisted queues still decode.
+    private struct Job: Codable, Equatable { let ref: String; let cid: String; var at: UInt64? }
     private let key = "haven.mediaBackupQueue"
+    private let hiKey = "haven.mediaBackupQueue.hi"
     private var pending: [Job]
+    /// High-priority lane, drained FIRST: media of just-authored posts. Without it a fresh story's
+    /// blob queued behind a long historical backfill and friends saw the post minutes before its
+    /// media could possibly land.
+    private var priorityPending: [Job]
     private var draining = false
+    /// Jobs a drain pass has taken off the lanes and is uploading RIGHT NOW, per lane. Keeps
+    /// `hasPending` honest (upload indicator), the enqueue dedup tight, and `save()` complete
+    /// (the disk copy must never lose an in-flight job to a kill mid-pass) while a pass owns them.
+    private var inFlightHi: [Job] = []
+    private var inFlightLo: [Job] = []
 
     private init() {
         if let d = UserDefaults.standard.data(forKey: key), let list = try? JSONDecoder().decode([Job].self, from: d) {
@@ -69,19 +81,41 @@ final class MediaBackupQueue {
         } else {
             pending = []
         }
+        if let d = UserDefaults.standard.data(forKey: hiKey), let list = try? JSONDecoder().decode([Job].self, from: d) {
+            priorityPending = list
+        } else {
+            priorityPending = []
+        }
     }
     private func save() {
-        if let d = try? JSONEncoder().encode(pending) { UserDefaults.standard.set(d, forKey: key) }
+        // In-flight jobs lead their lane on disk: a kill mid-pass relaunches with them queued first.
+        if let d = try? JSONEncoder().encode(inFlightLo + pending) { UserDefaults.standard.set(d, forKey: key) }
+        if let d = try? JSONEncoder().encode(inFlightHi + priorityPending) { UserDefaults.standard.set(d, forKey: hiKey) }
     }
 
     /// Whether a specific blob is still waiting to reach a relay (drives the post upload indicator).
-    func hasPending(_ ref: String) -> Bool { pending.contains { $0.ref == ref } }
+    func hasPending(_ ref: String) -> Bool {
+        inFlightHi.contains { $0.ref == ref } || inFlightLo.contains { $0.ref == ref }
+            || pending.contains { $0.ref == ref } || priorityPending.contains { $0.ref == ref }
+    }
 
-    func enqueue(_ ref: String, circleId: String, social: HavenSocial) {
+    /// `priority`: a just-authored event's media — drained before any backfill backlog. Callers
+    /// enqueue in the media list's order (thumbs/posters ride before the video), which the lane
+    /// preserves, so a poster is on the relay before its (much larger) video starts.
+    func enqueue(_ ref: String, circleId: String, social: HavenSocial, priority: Bool = false) {
         if MediaStore.isSynthetic(ref) { return }   // geo: pins et al. carry no bytes — never relay-storable
-        if !pending.contains(where: { $0.ref == ref && $0.cid == circleId }) {
-            pending.append(Job(ref: ref, cid: circleId))
-            if pending.count > 10_000 { pending.removeFirst(pending.count - 10_000) }   // bound the queue itself
+        let queued = (inFlightHi + inFlightLo).contains(where: { $0.ref == ref && $0.cid == circleId })
+            || pending.contains(where: { $0.ref == ref && $0.cid == circleId })
+            || priorityPending.contains(where: { $0.ref == ref && $0.cid == circleId })
+        if !queued {
+            if priority {
+                priorityPending.append(Job(ref: ref, cid: circleId,
+                                           at: UInt64(Date().timeIntervalSince1970 * 1000)))
+                if priorityPending.count > 500 { priorityPending.removeFirst(priorityPending.count - 500) }
+            } else {
+                pending.append(Job(ref: ref, cid: circleId, at: nil))
+                if pending.count > 10_000 { pending.removeFirst(pending.count - 10_000) }   // bound the queue itself
+            }
             save()
         }
         drain(social: social)
@@ -92,7 +126,7 @@ final class MediaBackupQueue {
     func drainPersisted(social: HavenSocial) { drain(social: social) }
 
     private func drain(social: HavenSocial) {
-        guard !draining, !pending.isEmpty else { return }
+        guard !draining, !pending.isEmpty || !priorityPending.isEmpty else { return }
         draining = true
         Task { @MainActor in
             // Keep the upload alive after the app backgrounds (iOS suspends otherwise). No-op on macOS.
@@ -103,21 +137,53 @@ final class MediaBackupQueue {
             // BUDGETED pass. A Mac hosting a circle relay with a large library used to seal+upload
             // every pending ref in one go (videos × 2 in RAM) → multi‑GB footprint and beachball.
             // Failures + leftovers stay queued; we re-arm after a short rest so the UI can breathe.
+            // Priority lane (just-authored posts) drains FIRST; backfill takes what's left.
+            //
+            // The taken jobs come OFF the live lanes for the duration of the pass (inFlight covers
+            // them for hasPending/dedup). The previous shape — snapshot the leftovers up front,
+            // assign the snapshot back after the awaits — silently DROPPED any job enqueued while
+            // the pass was in flight: a fresh video post authored during a retry/backfill pass had
+            // its blob clobbered out of the queue, and the post's media never uploaded until the
+            // 2-min backfill stumbled on it. The disk copy keeps the full pre-pass set until the
+            // end-of-pass save, so a kill mid-pass still restores the in-flight jobs on relaunch.
             let budget = 5
-            let work = Array(pending.prefix(budget))
-            var stillPending: [Job] = Array(pending.dropFirst(work.count))
-            for job in work {
+            let hiWork = Array(priorityPending.prefix(budget))
+            let loWork = Array(pending.prefix(budget - hiWork.count))
+            priorityPending.removeFirst(hiWork.count)
+            pending.removeFirst(loWork.count)
+            inFlightHi = hiWork
+            inFlightLo = loWork
+            var failedHi: [Job] = []
+            var failedLo: [Job] = []
+            for (job, isPriority) in hiWork.map({ ($0, true) }) + loWork.map({ ($0, false) }) {
                 // Own hosted store: if the blob is already local under the media key, ledger it and
                 // skip the expensive seal path for that dest (backup still mirrors to remote peers).
                 let ok = await SharedStore.backup(ref: job.ref, circleId: job.cid, social: social)
-                if !ok { stillPending.append(job) }
+                if !ok {
+                    HavenLog.sync("media-backup RETRY ref=\(job.ref.prefix(16)) circle=\(job.cid.prefix(12)) lane=\(isPriority ? "hi" : "lo") — pass failed, requeued")
+                    if isPriority { failedHi.append(job) } else { failedLo.append(job) }
+                } else if isPriority, let at = job.at,
+                          UInt64(Date().timeIntervalSince1970 * 1000) &- at < 600_000 {
+                    // A FRESH post's blob just landed on a relay — tell the circle so their devices
+                    // prefetch NOW instead of on their next missing-media sweep (frame 32).
+                    FeedStore.shared.announceMediaLanded(ref: job.ref, circleId: job.cid)
+                }
                 // Yield between large jobs so SwiftUI / Multipeer can run.
                 try? await Task.sleep(nanoseconds: 50_000_000)
             }
-            pending = stillPending
+            inFlightHi = []
+            inFlightLo = []
+            // Failures rejoin the BACK of their lane (no head-of-line starvation) — and only if the
+            // same ref+circle wasn't re-enqueued while this pass ran.
+            priorityPending.append(contentsOf: failedHi.filter { j in
+                !priorityPending.contains(where: { $0.ref == j.ref && $0.cid == j.cid })
+            })
+            pending.append(contentsOf: failedLo.filter { j in
+                !pending.contains(where: { $0.ref == j.ref && $0.cid == j.cid })
+            })
             save()
             draining = false
-            if !pending.isEmpty {
+            if !pending.isEmpty || !priorityPending.isEmpty {
                 // Continue later without stacking concurrent drains.
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -340,6 +406,62 @@ enum SharedStore {
         guard let obj = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
               let n = obj["chunks"] as? Int, n > 0 else { return nil }
         return n
+    }
+
+    // MARK: - Resumable chunked restore (.part bookkeeping)
+    //
+    // A chunked relay download used to be all-or-nothing: any chunk miss threw the temp file away,
+    // so a 600 MB video over a flaky tunnel restarted from chunk 0 every retry — the mirror image
+    // of the upload-resume problem (frame-33 peer resume already fixed the peer path). Chunks are
+    // fetched IN ORDER and appended, so resume state is just "how many leading chunks are in the
+    // .part file", persisted in a sidecar next to it. The manifest's chunk count keys validity: a
+    // count mismatch (different seal uploaded meanwhile) discards the partial.
+    nonisolated private static var restorePartsDir: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("haven-relay-parts", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+    nonisolated private static func restorePartURL(_ ref: String) -> URL {
+        let safe = SHA256.hash(data: Data(ref.utf8)).map { String(format: "%02x", $0) }.joined().prefix(32)
+        return restorePartsDir.appendingPathComponent("\(safe).part")
+    }
+    private struct RestorePartMeta: Codable { let chunks: Int; var got: Int }
+    nonisolated private static func restoreMetaURL(_ ref: String) -> URL {
+        restorePartURL(ref).appendingPathExtension("meta")
+    }
+    private static func loadRestorePart(_ ref: String, chunks: Int) -> Int {
+        guard let d = try? Data(contentsOf: restoreMetaURL(ref)),
+              let m = try? JSONDecoder().decode(RestorePartMeta.self, from: d),
+              m.chunks == chunks, m.got > 0, m.got <= chunks,
+              FileManager.default.fileExists(atPath: restorePartURL(ref).path) else { return 0 }
+        return m.got
+    }
+    private static func saveRestorePart(_ ref: String, chunks: Int, got: Int) {
+        if let d = try? JSONEncoder().encode(RestorePartMeta(chunks: chunks, got: got)) {
+            try? d.write(to: restoreMetaURL(ref), options: .atomic)
+        }
+    }
+    private static func clearRestorePart(_ ref: String) {
+        try? FileManager.default.removeItem(at: restorePartURL(ref))
+        try? FileManager.default.removeItem(at: restoreMetaURL(ref))
+    }
+    /// Reclaim abandoned partials (untouched > 7 days) — cheap, called opportunistically.
+    private static var sweptRestoreParts = false
+    private static func sweepRestorePartsOnce() {
+        guard !sweptRestoreParts else { return }
+        sweptRestoreParts = true
+        let dir = restorePartsDir
+        Task.detached(priority: .utility) {
+            let fm = FileManager.default
+            guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+            for url in items {
+                if let m = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
+                   Date().timeIntervalSince(m) > 7 * 86_400 {
+                    try? fm.removeItem(at: url)
+                }
+            }
+        }
     }
 
     /// The relay node ids serving a circle (the common path) — posts are mirrored to ALL of them
@@ -1053,21 +1175,44 @@ enum SharedStore {
 
     /// LIST keys under a prefix via the relay's plain-HTTP interface. Three-way like `httpGet`.
     private static func httpList(_ base: String, _ token: String, _ prefix: String) async -> Result<[String], Error> {
+        switch await httpListDelta(base, token, prefix, digest: nil) {
+        case .success(let r): return .success(r.keys ?? [])
+        case .failure(let e): return .failure(e)
+        }
+    }
+
+    /// Delta-LIST (the radio saver): echo the last-seen `X-Haven-List-Digest` for this prefix and
+    /// an UNCHANGED key set comes back as a bodiless 204 (`keys == nil`) instead of the same list
+    /// again. A 200 carries the fresh keys plus the digest to echo next time. A relay that doesn't
+    /// speak the header simply never answers 204 and never hands us a digest — today's behavior.
+    private static func httpListDelta(_ base: String, _ token: String, _ prefix: String,
+                                      digest: String?) async -> Result<(keys: [String]?, digest: String?), Error> {
         guard let url = httpListURL(base, prefix) else { return .failure(URLError(.badURL)) }
         guard let auth = httpAuth(token, "GET", prefix, Data()) else { return .failure(URLError(.userAuthenticationRequired)) }
         var req = URLRequest(url: url, timeoutInterval: 60)
         req.setValue(auth, forHTTPHeaderField: "Authorization")
+        if let digest, !digest.isEmpty { req.setValue(digest, forHTTPHeaderField: "X-Haven-List-Digest") }
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
-            switch (resp as? HTTPURLResponse)?.statusCode ?? 0 {
+            let http = resp as? HTTPURLResponse
+            let respDigest = http?.value(forHTTPHeaderField: "X-Haven-List-Digest")
+            switch http?.statusCode ?? 0 {
+            case 204:
+                return .success((keys: nil, digest: respDigest))   // nothing new — skip the GETs
             case 200...299:
                 let text = String(data: data, encoding: .utf8) ?? ""
-                return .success(text.split(whereSeparator: \.isNewline).map(String.init).filter { !$0.isEmpty })
+                let keys = text.split(whereSeparator: \.isNewline).map(String.init).filter { !$0.isEmpty }
+                return .success((keys: keys, digest: respDigest))
             case 401, 403: return .failure(RelayForbidden())
             default: return .failure(URLError(.badServerResponse))
             }
         } catch { return .failure(error) }
     }
+
+    /// Last-seen LIST digest per (relay, circle prefix). Only committed once a listing's GET batch
+    /// finished WITHOUT deferrals/failures — otherwise a 204 on the next poll would skip keys we
+    /// listed but never fetched (the seen-set semantics stay exactly as they were).
+    private static var mailboxListDigests: [String: String] = [:]
 
     /// Sign ONE request. Never cache the result: it carries a timestamp, a one-shot nonce and a
     /// digest of THIS body, so a reused header is a replay and the relay refuses it.
@@ -1127,6 +1272,83 @@ enum SharedStore {
             default: return .failure(URLError(.badServerResponse))
             }
         } catch { return .failure(error) }
+    }
+
+    // MARK: - Self-sync slot transport (the relay-HTTP rung of SelfSyncCoordinator's ladder)
+    //
+    // Self-sync used to be iroh-only, which made it a dead lane for exactly the relays that carry
+    // everything else (in-app stub / free-CF / cold DERP: HTTP answers while the dial can't) — the
+    // "linked devices each receive different things" complaint. These wrappers give the coordinator
+    // the same own-relay → signed-HTTP → iroh ladder as uploadEvent, without leaking base URLs or
+    // tokens out of this file. Keys are the canonical `haven/self/…` slots; the relay serves them
+    // to the account's own fleet only (owner-or-roster-device gate, core blobstore).
+
+    /// Outcome of one self-sync HTTP fetch. `hit`/`miss` both mean the relay was REACHED — it
+    /// serves the same store as its iroh path, so the caller must NOT redial for the same key.
+    enum RelayHttpFetch { case hit(Data); case miss; case unavailable }
+
+    /// LIST a self-sync prefix over a relay's HTTP interface. nil = no usable interface or every
+    /// URL failed/refused → the caller falls through to iroh. A refusal is roster lag, not an
+    /// outage: note it so `healForbiddenRelays` republishes the devroster that authorizes us.
+    static func selfSyncHttpList(_ node: String, prefix: String) async -> [String]? {
+        guard let http = RelayMailboxStore.shared.httpInterface(node) else { return nil }
+        for base in http.urls where !httpUrlBad(base) {
+            switch await httpList(base, http.token, prefix) {
+            case .success(let keys):
+                RelayHealth.shared.recordSuccess(node)
+                RelayMailboxStore.shared.markSeen(node)
+                return keys
+            case .failure(is RelayForbidden):
+                noteRefused(node, "selfsync list")
+                RelayHealth.shared.recordSuccess(node)   // reachable enough to refuse
+                return nil
+            case .failure:
+                markHttpUrlBad(base)
+            }
+        }
+        return nil
+    }
+
+    /// GET one self-sync slot over a relay's HTTP interface (three-way, see `RelayHttpFetch`).
+    static func selfSyncHttpGet(_ node: String, key: String) async -> RelayHttpFetch {
+        guard let http = RelayMailboxStore.shared.httpInterface(node) else { return .unavailable }
+        for base in http.urls where !httpUrlBad(base) {
+            switch await httpGet(base, http.token, key) {
+            case .success(let data):
+                RelayHealth.shared.recordSuccess(node)
+                RelayMailboxStore.shared.markSeen(node)
+                if let data, !data.isEmpty { return .hit(data) }
+                return .miss
+            case .failure(is RelayForbidden):
+                noteRefused(node, "selfsync get")
+                RelayHealth.shared.recordSuccess(node)
+                return .unavailable
+            case .failure:
+                markHttpUrlBad(base)
+            }
+        }
+        return .unavailable
+    }
+
+    /// PUT one self-sync slot over a relay's HTTP interface. false = didn't land here (no
+    /// interface, unreachable, or refused pending roster) → the caller may still try iroh.
+    static func selfSyncHttpPut(_ node: String, key: String, data: Data) async -> Bool {
+        guard let http = RelayMailboxStore.shared.httpInterface(node) else { return false }
+        for base in http.urls where !httpUrlBad(base) {
+            switch await httpPut(base, http.token, key, data) {
+            case .success:
+                RelayHealth.shared.recordSuccess(node)
+                RelayMailboxStore.shared.markSeen(node)
+                return true
+            case .failure(is RelayForbidden):
+                noteRefused(node, "selfsync put")
+                RelayHealth.shared.recordSuccess(node)
+                return false
+            case .failure:
+                markHttpUrlBad(base)
+            }
+        }
+        return false
     }
 
     /// Fetch a media blob from the circle's mailbox and open it for whichever circle it belongs to.
@@ -1209,33 +1431,59 @@ enum SharedStore {
             // whole time, and the device simply wasn't allowed to ask for it.
             if rosterNeeded.isEmpty {
                 HavenLog.relay("media restore \(ref.prefix(12)): NOT FOUND on any relay/S3")
+                // Honest placeholder state: the relays answered and none holds it — we are now
+                // waiting on the SENDER to put it (back) up, which is a different thing from
+                // "downloading" or "gone forever".
+                FeedStore.shared.noteMediaMissingOnRelays(ref)
             } else {
                 HavenLog.relay("media restore \(ref.prefix(12)): REFUSED by \(rosterNeeded.count) relay(s) — not missing; re-publishing our roster so the retry is allowed")
             }
             return nil
         }
 
-        // Reassemble the SEALED bytes. If `head` is a manifest, stream each chunk to a temp file on disk
-        // (bounded RAM: one 8 MB chunk at a time); otherwise `head` IS the sealed blob (legacy/small).
+        // Reassemble the SEALED bytes. If `head` is a manifest, stream each chunk to a PERSISTENT
+        // .part file on disk (bounded RAM: one 8 MB chunk at a time); otherwise `head` IS the
+        // sealed blob (legacy/small). RESUMABLE: chunks append in order and the sidecar records how
+        // many landed, so a retry after a mid-download failure fetches only the missing chunks
+        // (mirror of the frame-33 peer resume) instead of restarting a multi-hundred-MB pull.
         let sealed: Data?
         if let chunkCount = parseManifest(head) {
-            let temp = MediaStore.shared.makeTempFile()
-            guard let handle = try? FileHandle(forWritingTo: temp) else {
+            sweepRestorePartsOnce()
+            let temp = restorePartURL(ref)
+            var have = loadRestorePart(ref, chunks: chunkCount)
+            if have == 0 {
+                // No (valid) partial — start fresh.
                 try? FileManager.default.removeItem(at: temp)
+                FileManager.default.createFile(atPath: temp.path, contents: nil)
+            }
+            guard let handle = try? FileHandle(forWritingTo: temp) else {
+                clearRestorePart(ref)
                 HavenLog.relay("media restore \(ref.prefix(12)): temp-open FAIL"); return nil
             }
             var ok = true
-            for i in 0..<chunkCount {
-                guard let part = await fetch(source, chunkKey(ref, i)) else { ok = false; break }
-                do { try handle.write(contentsOf: part) } catch { ok = false; break }
+            do { try handle.seekToEnd() } catch { ok = false }
+            if have > 0 {
+                HavenLog.relay("media restore \(ref.prefix(12)): resuming at chunk \(have)/\(chunkCount)")
+            }
+            if ok {
+                for i in have..<chunkCount {
+                    guard let part = await fetch(source, chunkKey(ref, i)) else { ok = false; break }
+                    do { try handle.write(contentsOf: part) } catch { ok = false; break }
+                    have = i + 1
+                    saveRestorePart(ref, chunks: chunkCount, got: have)
+                    // Honest progress for the placeholder: i/n while a chunked blob reassembles.
+                    FeedStore.shared.noteRestoreProgress(ref, done: have, total: chunkCount)
+                }
             }
             try? handle.close()
+            FeedStore.shared.clearRestoreProgress(ref)
             guard ok else {
-                try? FileManager.default.removeItem(at: temp)
-                HavenLog.relay("media restore \(ref.prefix(12)): chunked reassemble FAIL via \(src)"); return nil
+                // KEEP the partial + sidecar — the next attempt resumes from `have`.
+                HavenLog.relay("media restore \(ref.prefix(12)): chunked reassemble STALLED at \(have)/\(chunkCount) via \(src) — partial kept for resume")
+                return nil
             }
             sealed = try? Data(contentsOf: temp)   // read the reassembled sealed blob to open it
-            try? FileManager.default.removeItem(at: temp)
+            clearRestorePart(ref)
         } else {
             sealed = head
         }
@@ -1249,6 +1497,9 @@ enum SharedStore {
             }
         }
         HavenLog.relay("media restore \(ref.prefix(12)): found via \(src) (\(blob.count)B) but OPEN FAILED for all \(circleIds.count) circles")
+        // Present-but-undecryptable: remember it for this session so the missing-media sweeps stop
+        // re-downloading the same bad blob every cycle (Android/desktop parity — unopenableMedia).
+        FeedStore.shared.noteUnopenableMedia(ref)
         // The bytes are THERE and cannot be decrypted — the stored copy is bad, not missing. Until now
         // that was a permanent dead end: every cycle re-fetched the same unopenable blob, failed
         // identically, and nothing ever replaced it.
@@ -1342,6 +1593,36 @@ enum SharedStore {
         if removed > 0 {
             HavenLog.relay("mailbox seen: linked-host repair forgot \(removed) DM keys")
             scheduleSeenSave()
+            mailboxListDigests.removeAll()   // re-list in full so the re-queued keys re-GET
+        }
+    }
+
+    /// One-shot recovery for the hello lane. Earlier builds marked EVERY `__hello__` key seen —
+    /// including slots addressed to OTHER ids (other members, sibling devices, stale device ids)
+    /// — which (a) consumed circle invites that a correct claim filter would have delivered, and
+    /// (b) the sender-side global mark suppressed putHello re-offers to later-adopted relays.
+    /// Forget all hello seen-cursors once: the claim filter (pollMailbox/pullMailbox) and the
+    /// per-(relay,key) putHello marks now do the right thing, and re-ingesting an already-applied
+    /// hello is idempotent (handleHello upserts + reply cooldown). Idempotent via defaults.
+    ///
+    /// v2: builds through 1.1.4 also marked hellos seen at CLAIM time even when handleHello HELD
+    /// them (connection-approval gate, verification hold) — the circle grant riding the hello was
+    /// consumed without ever applying (hosting-Mac / E2E-stub "invite never lands" symptom). Now
+    /// that pullMailbox marks only CONSUMED hellos, sweep the polluted marks once more so grants
+    /// still sitting in a mailbox (own store or a friend's relay) get re-offered and re-judged.
+    @MainActor static func repairHelloSeenOnce() {
+        let flag = "haven.repair.helloSeen.v2"
+        guard !UserDefaults.standard.bool(forKey: flag) else { return }
+        UserDefaults.standard.set(true, forKey: flag)
+        let removed: Int = withSeen { set in
+            let before = set.count
+            set = set.filter { !$0.contains("/__hello__/") }
+            return before - set.count
+        }
+        if removed > 0 {
+            HavenLog.relay("mailbox seen: hello repair forgot \(removed) keys")
+            scheduleSeenSave()
+            mailboxListDigests.removeAll()   // re-list in full so re-claimable hellos re-GET
         }
     }
 
@@ -1371,6 +1652,7 @@ enum SharedStore {
     static func resetSeenMailbox() {
         withSeen { $0.removeAll() }
         try? FileManager.default.removeItem(at: seenURL)
+        mailboxListDigests.removeAll()   // a fresh cursor must re-list everything
     }
 
     /// Force the seen-set to disk NOW (called on background/terminate). The normal save is debounced
@@ -1390,6 +1672,13 @@ enum SharedStore {
     private static func mailboxKey(_ circleId: String, _ env: Data) -> String {
         let h = SHA256.hash(data: env).map { String(format: "%02x", $0) }.joined()
         return "haven/mailbox/\(circleId)/\(h)"
+    }
+
+    /// The deterministic mailbox key an envelope will be uploaded under — PUBLIC so the author can
+    /// seal it into the push banner (`mk`): the recipient's NSE then GETs exactly this key the
+    /// moment the banner lands (push-before-content), no LIST, no sweep.
+    static func mailboxKeyHint(circleId: String, env: Data) -> String {
+        mailboxKey(circleId, env)
     }
 
     /// Content-addressed live-call frame key under an existing circle mailbox
@@ -1546,6 +1835,9 @@ enum SharedStore {
         if seenContains(key) { return true }
         // Relay (common path) → owner's own bucket → member's pre-signed pool → legacy creds.
         let nodes = relayNodes(circleId)
+        if nodes.isEmpty {
+            HavenLog.net("uploadEvent: no relays for circle=\(circleId.prefix(20)) — mailbox skip")
+        }
         if !nodes.isEmpty {
             // Mirror to EVERY configured relay (redundancy). Content-addressed key → idempotent;
             // a relay in backoff is skipped. Success on ANY relay means it's safely in a mailbox.
@@ -1679,34 +1971,158 @@ enum SharedStore {
     }
 
     /// Store-and-forward a HELLO when iroh cannot dial the peer (matrix / cross-NAT).
-    static func putHello(circleId: String, toHex: String, fromHex: String, hello: Data) async {
-        let key = helloMailboxKey(circleId: circleId, toHex: toHex, fromHex: fromHex, body: hello)
-        for node in relayNodes(circleId) where !node.hasPrefix("s3:") {
+    /// The key is content-addressed over the hello body, and the dedupe is per (RELAY, key):
+    /// "landed SOMEWHERE once" used to mark the bare key seen and short-circuit every later call,
+    /// so a relay adopted (or wired via its HTTP interface) AFTER the hello first landed never
+    /// received it — and the circle invite riding that hello never reached the member that relay
+    /// hosts. The per-relay suffix keeps each relay's copy independently retried until it lands;
+    /// sibling relays that mesh-replicate converge anyway, so a redundant PUT is just idempotent.
+    static func putHello(circleId: String, toHex: String, fromHex: String, hello: Data, force: Bool = false) async {
+        // Route under a mailbox prefix the RECIPIENT actually polls. A freshly-created
+        // circle has no relay association yet (relayNodes(circleId) is empty → the PUT
+        // silently dropped, losing the invite), and the recipient can't poll a circle
+        // it hasn't learned about — so fall back to the shared "default" prefix. The
+        // hello PAYLOAD carries the real circle grant; handleHello reads the circle
+        // from the payload, never from the key path.
+        let route = "default"
+        let key = helloMailboxKey(circleId: route, toHex: toHex, fromHex: fromHex, body: hello)
+        // Mark shape puts the node FIRST so the mark never shares the `haven/mailbox/…` prefix —
+        // seenKeys()/touchHeldKeys sweep that prefix into relay TOUCH bodies, and a mark is not a
+        // mailbox key. (repairHelloSeenOnce still matches it via the embedded `/__hello__/`.)
+        func relayMark(_ node: String) -> String { "hello@\(node.lowercased())|\(key)" }
+        let due = relayNodes(route).filter { !$0.hasPrefix("s3:") && !seenContains(relayMark($0)) }
+        if due.isEmpty {
+            HavenLog.net("putHello drop: no due relays (route=\(route) all=\(relayNodes(route).count)) to=\(toHex.prefix(8))")
+            return
+        }
+        // Warm device: the ROUTINE hello fan-out is deferrable radio — iroh + nearby still
+        // carry the live path. But a FORCED hello (invite grant, handshake reply, connection
+        // request) is a user action whose loss is user-visible — it ships through heat.
+        if !force, ThermalPolicy.skipHelloFanOut {
+            HavenLog.net("putHello drop: thermal skip to=\(toHex.prefix(8))")
+            return
+        }
+        for node in due {
             if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
-                _ = RelayHost.shared.localPut(key, hello)
-                HavenLog.relay("hello local-put OK to=\(toHex.prefix(8))")
+                if RelayHost.shared.localPut(key, hello) {
+                    HavenLog.relay("hello local-put OK to=\(toHex.prefix(8))")
+                    markSeen(relayMark(node))
+                }
                 continue
             }
             guard let http = RelayMailboxStore.shared.httpInterface(node) else { continue }
+            var done = false   // one PUT per node — its URLs serve the same store
             for base in http.urls where !httpUrlBad(base) {
                 switch await httpPut(base, http.token, key, hello) {
                 case .success:
                     RelayMailboxStore.shared.markSeen(node)
                     HavenLog.relay("hello http-put OK to=\(toHex.prefix(8)) relay=\(node.prefix(8))")
-                    break
+                    // Only a SUCCESSFUL PUT marks this relay's copy seen, so a failed upload
+                    // retries next tick rather than being silently dropped.
+                    markSeen(relayMark(node))
+                    done = true
                 case .failure(is RelayForbidden):
                     noteRefused(node, "hello put")
                 case .failure:
                     markHttpUrlBad(base)
                 }
+                if done { break }
             }
         }
+    }
+
+    /// Per-poll GET batch cap (mirrors the own-relay cap): a cold device drains a fat mailbox
+    /// over a few polls instead of one unbounded burst. Control-plane keys rank first — they
+    /// unlock everything else. (Mailbox keys are content hashes, so "newest first" is not
+    /// derivable from the key; control-first is the useful half.)
+    static let mailboxFetchCap = 200
+    private static func controlKeyRank(_ key: String) -> Int {
+        if key.contains("/__hello__/") { return 0 }
+        if key.contains("/__relay__/") { return 1 }
+        return 2
+    }
+
+    /// Drop cached LIST digests for a circle so the next poll re-lists in full — required after a
+    /// key-commit re-queue (`forgetSeenPrefix`), where previously-seen keys must be re-GET even
+    /// though the relay's key SET (and so its digest) hasn't changed.
+    static func invalidateMailboxListDigests(circleId: String) {
+        let suffix = "|\(circleId)"
+        for k in mailboxListDigests.keys where k.hasSuffix(suffix) {
+            mailboxListDigests.removeValue(forKey: k)
+        }
+    }
+
+    /// Targeted single-key GET — NO LIST. The push-hints fast path: a push names the exact mailbox
+    /// key it announced, so the app fetches just that envelope instead of sweeping every circle
+    /// first. Returns nil when already ingested (seen) or when no relay serves it; the caller
+    /// routes the bytes through the same ingest/mark-seen path as a polled envelope.
+    static func fetchMailboxKey(circleId: String, key: String) async -> Data? {
+        guard key.hasPrefix("haven/mailbox/\(circleId)/") else { return nil }   // hint sanity
+        if seenContains(key) { return nil }
+        for node in relayNodes(circleId) where !node.hasPrefix("s3:") {
+            if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
+                if let d = RelayHost.shared.localGet(key), !d.isEmpty { return d }
+                continue
+            }
+            if let http = RelayMailboxStore.shared.httpInterface(node) {
+                var reached = false
+                for base in http.urls where !httpUrlBad(base) {
+                    switch await httpGet(base, http.token, key) {
+                    case .success(let d):
+                        RelayHealth.shared.recordSuccess(node)
+                        RelayMailboxStore.shared.markSeen(node)
+                        if let d, !d.isEmpty { return d }
+                        reached = true   // reachable, doesn't hold it → next node
+                    case .failure(is RelayForbidden):
+                        noteRefused(node, "hinted mailbox get")
+                        reached = true
+                    case .failure:
+                        markHttpUrlBad(base)
+                    }
+                    if reached { break }
+                }
+                if reached { continue }
+            }
+            guard let c = await RelayClients.client(node) else { continue }
+            if let d = await c.get(key: key), !d.isEmpty {
+                RelayHealth.shared.recordSuccess(node)
+                RelayMailboxStore.shared.markSeen(node)
+                return d
+            }
+        }
+        return nil
+    }
+
+    /// The ids a mailbox HELLO addressed to THIS device may be claimed under: our account hex
+    /// (the canonical slot every sender now targets) plus our CURRENT transport device id
+    /// (transition-build senders addressed hellos per dial target). STALE/former device ids are
+    /// deliberately absent — those slots are dead and stay unclaimed for the relay's TTL.
+    static func myHelloClaimIds() -> Set<String> {
+        var ids = Set<String>()
+        let acct = FeedStore.shared.myNodeHex.lowercased()
+        if !acct.isEmpty { ids.insert(acct) }
+        let dev = FeedStore.shared.transportNodeHex.lowercased()
+        if !dev.isEmpty { ids.insert(dev) }
+        return ids
+    }
+
+    /// Non-hello keys always pass. A `__hello__` key names its recipient in the path
+    /// (`…/__hello__/<to>/…`): fetch only slots addressed to one of `myIds`. Slots addressed to
+    /// OTHER ids are left entirely alone — never fetched, never marked seen — so their real owner
+    /// (or the relay TTL) gets them. Claiming them is how circle invites died: whichever member
+    /// or sibling device polled first mark-seen'd every hello slot in the circle, and the invite
+    /// riding a hello addressed to someone else evaporated.
+    nonisolated static func helloKeyClaimable(_ key: String, myIds: Set<String>) -> Bool {
+        guard let r = key.range(of: "/__hello__/") else { return true }
+        let to = key[r.upperBound...].prefix(while: { $0 != "/" }).lowercased()
+        return myIds.contains(String(to))
     }
 
     /// Poll the mailbox for envelopes we haven't seen. Returns (circleId, key, envelope) triples.
     /// Keys are needed so HELLO blobs (`/__hello__/`) can be routed to handleHello, not receive().
     static func pollMailbox(circleIds: [String]) async -> [(String, String, Data)] {
         var out: [(String, String, Data)] = []
+        let myHelloIds = myHelloClaimIds()   // hello slots addressed to anyone else stay untouched
         for cid in circleIds {
             let prefix = "haven/mailbox/\(cid)/"
             let nodes = relayNodes(cid)
@@ -1737,7 +2153,7 @@ enum SharedStore {
                         // duplicates and we stop thrashing.
                         let scan: (all: Int, want: [String]) = await Task.detached(priority: .utility) {
                             let all = host.localList(prefix).filter { !$0.contains("/__live__/") }
-                            var want = all.filter { !seenContains($0) }
+                            var want = all.filter { !seenContains($0) && helloKeyClaimable($0, myIds: myHelloIds) }
                             // Re-probe seen control-plane keys (bounded). Prefer unread first.
                             // Cap both hits and files inspected so a fat circle (thousands of
                             // already-seen event blobs) does not re-read the whole store every poll.
@@ -1782,22 +2198,46 @@ enum SharedStore {
                         continue
                     }
                     // Plain-HTTP LIST+GET first — same reason as uploadEvent: iroh dial may be
-                    // unreachable while the relay's media port answers.
+                    // unreachable while the relay's media port answers. Delta-LIST: echo the last
+                    // digest for this (relay, circle) so an unchanged mailbox is one bodiless 204
+                    // instead of a full key dump + N seen-set walks (the idle radio saver).
                     if let http = RelayMailboxStore.shared.httpInterface(node) {
                         var listedViaHttp = false
+                        let digestKey = "\(node)|\(cid)"
                         for base in http.urls where !httpUrlBad(base) {
-                            switch await httpList(base, http.token, prefix) {
-                            case .success(let keys):
+                            switch await httpListDelta(base, http.token, prefix, digest: mailboxListDigests[digestKey]) {
+                            case .success(let r):
                                 listedViaHttp = true
                                 // HTTP LIST is a real reachability proof — without this the UI only
                                 // greened on iroh dial success, so free-CF (HTTP-only) relays flapped
                                 // orange whenever a dial timed out while HTTP was fine.
                                 RelayHealth.shared.recordSuccess(node)
                                 RelayMailboxStore.shared.markSeen(node)
-                                for key in keys where !seenContains(key) {
+                                guard let keys = r.keys else { break }   // 204: nothing new — skip the GETs
+                                // Unclaimed live-call frames are NOT content: they're claimed by the
+                                // in-call 2s poll, and GETting them here just re-fetched frames that
+                                // then failed receive() forever. Same for hello slots addressed to
+                                // other ids (theirs to claim). Control-plane first, capped batch.
+                                var fresh = keys.filter {
+                                    !seenContains($0) && !$0.contains("/__live__/")
+                                        && helloKeyClaimable($0, myIds: myHelloIds)
+                                }
+                                fresh.sort { controlKeyRank($0) < controlKeyRank($1) }
+                                let deferred = max(0, fresh.count - mailboxFetchCap)
+                                if deferred > 0 { fresh = Array(fresh.prefix(mailboxFetchCap)) }
+                                var allFetched = true
+                                for key in fresh {
                                     if case .success(let data?) = await httpGet(base, http.token, key) {
                                         out.append((cid, key, data))
+                                    } else {
+                                        allFetched = false
                                     }
+                                }
+                                // Commit the digest ONLY when this listing is fully drained — a 204
+                                // next poll must never hide keys we still owe a GET.
+                                if allFetched, deferred == 0, let d = r.digest, !d.isEmpty {
+                                    mailboxListDigests[digestKey] = d
+                                    if mailboxListDigests.count > 500 { mailboxListDigests.removeAll() }
                                 }
                             case .failure(is RelayForbidden):
                                 noteRefused(node, "mailbox list")
@@ -1811,10 +2251,19 @@ enum SharedStore {
                         if listedViaHttp { continue }
                     }
                     guard let c = await RelayClients.client(node) else { continue }
-                    let keys = await c.list(prefix: prefix)
+                    // list() now throws so a dead iroh dial isn't read as an empty mailbox;
+                    // a failure means this relay gave us nothing — try the next one.
+                    guard let keys = try? await c.list(prefix: prefix) else { continue }
                     RelayHealth.shared.recordSuccess(node)
                     RelayMailboxStore.shared.markSeen(node)
-                    for key in keys where !seenContains(key) {
+                    // Same shape as the HTTP path: skip unclaimed live-call frames + other ids'
+                    // hello slots, control first, cap.
+                    var fresh = keys.filter {
+                        !seenContains($0) && !$0.contains("/__live__/")
+                            && helloKeyClaimable($0, myIds: myHelloIds)
+                    }
+                    fresh.sort { controlKeyRank($0) < controlKeyRank($1) }
+                    for key in fresh.prefix(mailboxFetchCap) {
                         if let data = await c.get(key: key) { out.append((cid, key, data)) }
                     }
                 }
@@ -1834,5 +2283,36 @@ enum SharedStore {
             }
         }
         return out
+    }
+}
+
+// MARK: - Push hints (app-group hand-off from the NSE/push worker)
+
+/// One hint the push pipeline wrote for the app: which circle (`c`), the exact mailbox key the
+/// push announced (`mk`), media refs to prefetch (`mr`), and the post to deep-link (`p`).
+struct SharedPushHint: Decodable {
+    let c: String
+    let mk: String?
+    let mr: [String]?
+    let p: String?
+}
+
+/// Reader for the app-group push-hint drop (`haven.push.hints.v1`): the NSE appends hints as it
+/// processes pushes; the app drains them on foreground/push and turns each into a targeted mailbox
+/// GET + media prefetch — closing the "banner arrived before the content was fetchable" gap.
+/// Tolerant of the key not existing yet (older NSE builds simply never write it).
+enum SharedPushHints {
+    static let key = "haven.push.hints.v1"
+
+    @MainActor static func drain() -> [SharedPushHint] {
+        guard let d = UserDefaults(suiteName: SharedNotificationPrivacy.appGroup) else { return [] }
+        let raw: Data?
+        if let data = d.data(forKey: key) { raw = data }
+        else if let s = d.string(forKey: key) { raw = Data(s.utf8) }
+        else { raw = nil }
+        guard let raw, !raw.isEmpty else { return [] }
+        d.removeObject(forKey: key)
+        guard let hints = try? JSONDecoder().decode([SharedPushHint].self, from: raw) else { return [] }
+        return hints.filter { !$0.c.isEmpty }
     }
 }

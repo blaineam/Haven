@@ -317,14 +317,13 @@ struct AuthorizedDevicesView: View {
     private var thisDeviceAuthorized: Bool { DeviceCredentialStore.isAuthorized }
     private var hasSeed: Bool { AccountStore.storedSeed() != nil }
 
-    /// The truth about what revoking buys you, stated where the user decides. Linking copies the master
-    /// key, so revoking removes a device's access only if nobody pulled that key off it; against a
-    /// genuinely compromised device the remedy is a new identity, and a user staring at a "revoked"
-    /// checkmark should not think otherwise. Kept in one place so the dialog and the footer can't drift.
+    /// The truth about what revoking buys you, stated where the user decides. Seed-drop enrollment
+    /// means a linked device never receives the master key, so revoking really does cut it off — the
+    /// honest remainder is that it keeps whatever it already downloaded. Kept in one place so the
+    /// dialog and the footer can't drift.
     static let revocationCaveat =
-        "Revoking works if the device is simply out of your hands — lost or stolen. It can’t help if "
-        + "someone has extracted your master key from it: linked devices hold a copy of that key, and "
-        + "revoking doesn’t take it back. If you think that happened, start a new identity in Advanced."
+        "Revoking cuts a device off from everything shared afterward — it never received your master "
+        + "key, so it can’t let itself back in. It keeps only what it already downloaded."
 
     /// This device's role, shown at the top so a linked Mac clearly reads as "linked", not "primary".
     private var role: (icon: String, title: String, subtitle: String) {
@@ -333,7 +332,7 @@ struct AuthorizedDevicesView: View {
                     "It holds your master key and authorizes or revokes your other devices.")
         } else if thisDeviceAuthorized {
             return ("checkmark.seal.fill", "This is a linked device",
-                    "It holds a copy of your master key and syncs with your primary device, which can revoke it.")
+                    "It acts under its own key — never your master key — and your primary device can revoke it.")
         } else {
             return ("laptopcomputer", "This device isn’t linked yet",
                     "Make it your primary, or link it to the device that already is.")
@@ -363,7 +362,7 @@ struct AuthorizedDevicesView: View {
                         NavigationLink { EnrollDeviceView() } label: {
                             Label("Link a device…", systemImage: "qrcode")
                         }
-                    } footer: { Text("Show a QR/code for your new device to scan on its welcome screen (“Add this as another of my devices”). It gets its own key and a copy of your circles — never your master key, so you can revoke it anytime.")
+                    } footer: { Text("Your new device scans this and gets its own revocable key — never your master key.")
                         .fixedSize(horizontal: false, vertical: true) }
 
                     // Setting up Haven somewhere else is two different jobs and people pick the wrong
@@ -375,7 +374,7 @@ struct AuthorizedDevicesView: View {
                             Label {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("Keeping this device too?").font(.subheadline.weight(.semibold))
-                                    Text("Use “Link a device…” above, and on the new device choose “Add this as another of my devices”. Both stay signed in and stay in sync.")
+                                    Text("Use “Link a device…” above, then “Add this as another of my devices” there — both stay in sync.")
                                         .font(.caption).foregroundStyle(.secondary)
                                         .fixedSize(horizontal: false, vertical: true)
                                 }
@@ -384,7 +383,7 @@ struct AuthorizedDevicesView: View {
                             Label {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("Replacing this device?").font(.subheadline.weight(.semibold))
-                                    Text("Use Advanced ▸ Transfer my identity instead, and on the new device choose “Move my account to this device”. Your identity moves rather than being copied.")
+                                    Text("Use Advanced ▸ Transfer my identity — your identity moves instead of being copied.")
                                         .font(.caption).foregroundStyle(.secondary)
                                         .fixedSize(horizontal: false, vertical: true)
                                 }
@@ -415,7 +414,7 @@ struct AuthorizedDevicesView: View {
                         }
                     }
                 } header: { Text("Authorized devices") }
-                footer: { Text("Each linked device holds a copy of your master key and has its own key on top, authorized by it. Revoking stops a device receiving what you post afterward. " + Self.revocationCaveat)
+                footer: { Text(Self.revocationCaveat)
                     .fixedSize(horizontal: false, vertical: true) }
 
                 // Only a device that ISN'T already the primary offers these. The primary (roster on) shows
@@ -425,7 +424,7 @@ struct AuthorizedDevicesView: View {
                         // Glass pill on macOS (a bare Form Button bezels there); iOS row unchanged.
                         Button { store.enableDeviceRoster() } label: { Label("Make this my primary device", systemImage: "checkmark.shield") }
                             .havenToolbarPill()
-                    } footer: { Text("The primary holds the master key and authorizes/revokes your other devices. Do this on ONE device (e.g. your iPhone).")
+                    } footer: { Text("The primary holds your master key and authorizes your other devices — pick ONE (e.g. your iPhone).")
                         .fixedSize(horizontal: false, vertical: true) }
                 }
                 // This device IS the primary — let it step down if the wrong device claimed the role.
@@ -435,7 +434,7 @@ struct AuthorizedDevicesView: View {
                             Label("This isn’t my primary device", systemImage: "arrow.uturn.backward")
                         }
                         .havenToolbarPill(tint: .red)   // keep the destructive red the mac pill would drop
-                    } footer: { Text("Stop this device acting as the primary (master key). Use it on your iPhone instead, then link this device to it.")
+                    } footer: { Text("Hand the primary role back to your iPhone, then link this device to it.")
                         .fixedSize(horizontal: false, vertical: true) }
                 }
                 if !roster.isEnabled {
@@ -446,8 +445,8 @@ struct AuthorizedDevicesView: View {
                         }
                         .havenToolbarPill()
                     } footer: { Text(thisDeviceAuthorized
-                        ? "This device is authorized. Pull your profile + posts from your primary device again (keep it nearby or online)."
-                        : "Asks your primary device (keep it nearby or online) to authorize this device with its own key and send your profile + posts.")
+                        ? "Pull your profile + posts from your primary again — keep it nearby or online."
+                        : "Asks your primary device to authorize this one and send your profile + posts.")
                         .fixedSize(horizontal: false, vertical: true) }
                 }
             }

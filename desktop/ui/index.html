@@ -29,8 +29,15 @@
         <button class="tab" data-view="you" role="tab">You</button>
       </nav>
 
+      <!-- Activity bell — the in-app notification list. Rides beside the per-tab trailing slot
+           (the tabs pill is absolutely centred, so this is the flow position "next to the tabs");
+           app.js fills the glyph, wires the panel, and drives the unread badge. -->
+      <button class="icon-btn glass" id="bell-btn" title="Activity" aria-label="Activity"
+              style="margin-left:auto;position:relative"><i class="badge" id="badge-bell"
+              style="position:absolute;top:-4px;right:-6px;margin-left:0"></i></button>
+
       <!-- Per-tab trailing controls, rendered by app.js (macOS toolbar `.havenTrailing`). -->
-      <div class="tb-right" id="tb-right"></div>
+      <div class="tb-right" id="tb-right" style="margin-left:0"></div>
     </div>
 
     <main class="content">

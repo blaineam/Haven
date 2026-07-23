@@ -10,10 +10,13 @@ import Foundation
 ///
 ///   `poster:<videoRef>:<imageRef>`   — poster JPEG for a video
 ///   `orig:<optimizedRef>:<originalRef>` — uncompressed original sitting beside the optimized
+///   `thumb:<contentRef>:<thumbRef>`  — tiny (~256px, ≤32KB) preview companion for a photo
 ///
 /// Display rules:
 /// - Posters are images; they may render as the video's still, or as their own slide.
 /// - Originals are NOT shown in the feed carousel — only via "Show original" when present.
+/// - Thumbs never render as slides — they back the loading placeholder (blurred) until the
+///   full-size bytes arrive, and are prefetched everywhere (tiny, so exempt from data saver).
 /// - Markers themselves never render.
 enum MediaVariants {
 
@@ -25,6 +28,10 @@ enum MediaVariants {
 
     static func originalMarker(optimized: String, original: String) -> String {
         "orig:\(optimized):\(original)"
+    }
+
+    static func thumbMarker(content: String, thumb: String) -> String {
+        "thumb:\(content):\(thumb)"
     }
 
     /// `poster:<video>:<image>` → (video, poster image).
@@ -49,6 +56,17 @@ enum MediaVariants {
         let original = String(rest[rest.index(after: colon)...])
         guard !optimized.isEmpty, !original.isEmpty else { return nil }
         return (optimized, original)
+    }
+
+    /// `thumb:<content>:<thumb>` → (content, thumb image).
+    static func parseThumb(_ ref: String) -> (content: String, thumb: String)? {
+        guard ref.hasPrefix("thumb:") else { return nil }
+        let rest = String(ref.dropFirst("thumb:".count))
+        guard let colon = rest.lastIndex(of: ":") else { return nil }
+        let content = String(rest[..<colon])
+        let thumb = String(rest[rest.index(after: colon)...])
+        guard !content.isEmpty, !thumb.isEmpty else { return nil }
+        return (content, thumb)
     }
 
     // MARK: - Lookups
@@ -84,6 +102,19 @@ enum MediaVariants {
         media.compactMap { parsePoster($0)?.poster }
     }
 
+    /// Thumb companion for a content ref, if the post/DM declared one.
+    static func thumb(for content: String, in media: [String]) -> String? {
+        for r in media {
+            if let t = parseThumb(r), t.content == content { return t.thumb }
+        }
+        return nil
+    }
+
+    /// Every thumb image ref declared in the list (prefetched everywhere — tiny by contract).
+    static func allThumbs(in media: [String]) -> [String] {
+        media.compactMap { parseThumb($0)?.thumb }
+    }
+
     // MARK: - Display filtering
 
     /// Refs the feed/DM bubble should actually render as slides.
@@ -96,11 +127,14 @@ enum MediaVariants {
     static func displayRefs(_ media: [String]) -> [String] {
         let originals = Set(allOriginals(in: media))
         let posterImages = Set(allPosters(in: media))
+        let thumbImages = Set(allThumbs(in: media))
         return media.filter { ref in
             if parsePoster(ref) != nil { return false }
             if parseOriginal(ref) != nil { return false }
+            if parseThumb(ref) != nil { return false }
             if originals.contains(ref) { return false }
             if posterImages.contains(ref) { return false }
+            if thumbImages.contains(ref) { return false }
             return true
         }
     }
@@ -124,7 +158,30 @@ enum MediaVariants {
         }
         // Always include declared posters even if their video is the only display ref.
         for p in allPosters(in: media) where !out.contains(p) { out.append(p) }
+        // Thumbs are ≤32KB by contract — always worth fetching, data saver included.
+        for t in allThumbs(in: media) where !out.contains(t) { out.append(t) }
         return out
+    }
+
+    /// The relay-upload order for a media list's fetchable refs: thumbs first (tiny, unblock the
+    /// placeholder), then posters, then everything else in list order. Synthetic markers dropped.
+    static func uploadOrder(_ media: [String]) -> [String] {
+        let thumbs = Set(allThumbs(in: media))
+        let posters = Set(allPosters(in: media))
+        func rank(_ r: String) -> Int {
+            if thumbs.contains(r) { return 0 }
+            if posters.contains(r) { return 1 }
+            return 2
+        }
+        // Keep list order within a rank (stable sort) and skip markers — a ':' at index > 1 is a
+        // synthetic scheme (mirror of MediaStore.isSynthetic, inlined so this file stays test-only).
+        let real = media.filter { r in
+            guard let i = r.firstIndex(of: ":") else { return true }
+            return r.distance(from: r.startIndex, to: i) <= 1
+        }
+        return real.enumerated()
+            .sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }
+            .map(\.element)
     }
 
     /// Build the media array slice for a prepared video: poster (if any) + optimized + markers +

@@ -120,6 +120,22 @@ struct DynState {
     /// the current session's bandwidth, and a restart re-serving once is fine.
     media_served_at: HashMap<String, u64>,
     media_serving: HashSet<String>,
+    /// Last-seen LIST digest per `"<relay>|<circle>"` (delta-LIST, `X-Haven-List-Digest`):
+    /// echoing it turns an unchanged mailbox LIST into a bodiless 204 — the idle radio saver.
+    /// In-memory on purpose: a fresh process re-lists once and re-caches. Only committed once a
+    /// listing's GET batch finished WITHOUT deferrals, or a 204 on the next poll would skip keys
+    /// we listed but never fetched (iOS `mailboxListDigests` parity).
+    mailbox_list_digests: HashMap<String, String>,
+    /// FRESH-lane retry state for missing media of events < 5 min old: ref -> (round, next-due ms).
+    /// 5s/10s/20s/45s/90s then parked — a just-posted photo must not wait out the 5-min direct
+    /// throttle while its author is right there uploading it (iOS `fastReq` parity).
+    fast_req: HashMap<String, (u8, u64)>,
+    /// True while a fresh-lane re-sweep timer is armed (single-flight — the 5s re-arm must not stack).
+    fast_sweep_armed: bool,
+    /// Per-ref throttle for `thumb:` companion prefetches (plain 90s — tiny by contract, no lanes).
+    thumb_req_at: HashMap<String, u64>,
+    /// Per-ref throttle for acting on unsolicited frame-32 announces (the author push-ahead).
+    announced_media_at: HashMap<String, u64>,
     /// Chunk serves currently streaming, keyed `ref|requester`.
     ///
     /// A serve is slow by construction, so the requester re-asks while it waits — and that second
@@ -136,6 +152,14 @@ struct DynState {
     foreground: bool,
     /// Coalesces overlapping self-sync passes (the loop must never run two at once).
     self_syncing: bool,
+    /// Debounced "self-sync now" nudge (0 = none armed). A LOCAL mutation of self-sync-carried
+    /// state (profile edit, circle create/membership, DM pin, read watermark, synced setting) arms
+    /// a short deadline via `nudge_self_sync`; the heartbeat honors it with ONE forced pass, so
+    /// the edit reaches the user's other devices in seconds instead of waiting out the adaptive
+    /// poll cadence (30s base, stretched to minutes when idle). Each further mutation slides the
+    /// deadline (a burst coalesces into a single pass); no mutation, no extra pass — the periodic
+    /// cadence itself is untouched (the heat fixes stand).
+    selfsync_nudge_at_ms: u64,
     /// Adaptive sync cadence (device-heat control) — see start_mailbox_loop. `last_activity_ms` is
     /// stamped by bump_activity on any real activity (foreground, an authored post, an arriving
     /// message, a peer connecting); the two due timestamps gate the expensive poll/fan-out work so an
@@ -154,6 +178,78 @@ struct DynState {
 enum SelfSyncTransport {
     Relay(String),
     S3(Arc<S3Mailbox>),
+}
+
+impl SelfSyncTransport {
+    /// Short PII-free label for pass logging ("relay:fe263256" / "s3").
+    fn label(&self) -> String {
+        match self {
+            SelfSyncTransport::Relay(hex) => {
+                format!("relay:{}", hex.chars().take(8).collect::<String>())
+            }
+            SelfSyncTransport::S3(_) => "s3".into(),
+        }
+    }
+}
+
+/// One row of the in-app activity list (the bell). Core rows come from `social.activity()` — who
+/// reacted to / commented on / voted on MY events, plus others' posts and DMs; APP rows are the
+/// deep-linked notifications this device raised ("media is back"), appended by `notify_with_link`.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct ActivityRow {
+    pub id: String,
+    /// `"react" | "comment" | "vote" | "post" | "story" | "dm" | "app"`.
+    pub kind: String,
+    pub circle_id: String,
+    /// Display name for the row's actor (resolved here — the UI holds no contact table).
+    pub actor_name: String,
+    /// Body/preview line.
+    pub snippet: String,
+    pub created_at: u64,
+    /// The reaction emoji (kind == "react").
+    pub emoji: Option<String>,
+    /// `haven://…` link the row jumps to (same route table as a pasted link).
+    pub link: Option<String>,
+}
+
+/// Load the persisted app-layer activity rows (bounded — see `append_app_activity`).
+fn load_app_activity(paths: &Paths) -> Vec<ActivityRow> {
+    std::fs::read(paths.root.join("activity-app.json"))
+        .ok()
+        .and_then(|d| serde_json::from_slice(&d).ok())
+        .unwrap_or_default()
+}
+
+/// Load the persisted seen-mailbox set, with a ONE-SHOT repair (latched by a marker file): builds
+/// before the control-plane routing fix marked `/__hello__/` keys seen while DROPPING their blobs,
+/// and builds before the claim-filter fix marked hellos addressed to our DEVICE id (or to anyone
+/// else) seen without ever routing them — either way a connection request stored-and-forwarded to
+/// this account never surfaced. Forget hello keys once so the next poll re-routes what's ours;
+/// foreign hellos are no longer marked seen at all (they're skipped pre-GET, unfetched).
+/// (`/__relay__/` keys need no repair — the pre-fix build fed them to `receive()`, which refused
+/// them, so they were never marked seen.) Latch v2: installs that latched v1 under the
+/// account-only claim filter must forget once more.
+fn load_seen_mailbox(paths: &Paths) -> HashSet<String> {
+    let mut set: HashSet<String> = std::fs::read_to_string(paths.root.join("mailbox-seen.txt"))
+        .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
+        .unwrap_or_default();
+    let latch = paths.root.join("seen-hello-repair-2.done");
+    if !latch.exists() {
+        let before = set.len();
+        set.retain(|k| !k.contains("/__hello__/"));
+        if set.len() != before {
+            log::info!(
+                "mailbox seen: one-shot repair forgot {} hello key(s) a pre-fix build marked-and-dropped",
+                before - set.len()
+            );
+            let _ = std::fs::write(
+                paths.root.join("mailbox-seen.txt"),
+                set.iter().cloned().collect::<Vec<_>>().join("\n"),
+            );
+        }
+        let _ = std::fs::write(&latch, b"1");
+    }
+    set
 }
 
 /// One row of the #1 "Manage media" cleanup screen: a stored blob, its size, and the post/DM it
@@ -292,6 +388,9 @@ pub struct Engine {
     /// HTTP relay URLs that recently failed to answer → retry-after epoch ms (2-min backoff), so a
     /// dead LAN address doesn't cost a connect-timeout per chunk.
     http_url_bad: StdMutex<HashMap<String, u64>>,
+    /// App-layer activity rows (deep-linked notifications raised on this device) — the bell's
+    /// non-core half, persisted to `activity-app.json` and bounded on append.
+    app_activity: StdMutex<Vec<ActivityRow>>,
     /// Frame-9 mesh-relay msgIds already seen (dedup / loop protection, parity with iOS seenRelay).
     seen_relay: StdMutex<std::collections::HashSet<String>>,
     /// Circles whose expired events were already really-purged this app session (purging is
@@ -299,6 +398,11 @@ pub struct Engine {
     media_purged: StdMutex<std::collections::HashSet<String>>,
     /// Relays that refused us since our roster last reached them (see `note_refused`).
     roster_needed: StdMutex<std::collections::HashSet<String>>,
+    /// `"<relay>|<key>"` hello offers that LANDED (see `offer_hello_mailbox`). Per (relay, key) —
+    /// never per key alone — so a relay learned AFTER the first offer still gets the hello on the
+    /// next greet cycle. In-memory: a relaunch re-PUTs one idempotent content-addressed blob per
+    /// relay, which is cheaper than another persisted set.
+    hello_offered: StdMutex<std::collections::HashSet<String>>,
     /// Last `heal_forbidden_relays` publish, epoch ms — rate-limits the self-heal to one per 30s.
     last_heal_ms: StdMutex<u64>,
     /// Relays that already hold this exact roster: node → (wire content hash, confirmed at epoch ms).
@@ -512,10 +616,9 @@ impl Engine {
         // `reapply_crypto_switches` (start()). Docs: `docs/SWITCH-FLIP-1.0.7.md` §3/§4.
         social.set_mls_keying(true);
         social.set_seed_drop_retire(true);
+        let app_activity = load_app_activity(&paths);
         let dyn_state = DynState {
-            seen_mailbox: std::fs::read_to_string(paths.root.join("mailbox-seen.txt"))
-                .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
-                .unwrap_or_default(),
+            seen_mailbox: load_seen_mailbox(&paths),
             notified: std::fs::read_to_string(paths.root.join("notified.txt"))
                 .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
                 .unwrap_or_default(),
@@ -572,9 +675,11 @@ impl Engine {
                 .build()
                 .unwrap_or_default(),
             http_url_bad: StdMutex::new(HashMap::new()),
+            app_activity: StdMutex::new(app_activity),
             seen_relay: StdMutex::new(std::collections::HashSet::new()),
             media_purged: StdMutex::new(std::collections::HashSet::new()),
             roster_needed: StdMutex::new(std::collections::HashSet::new()),
+            hello_offered: StdMutex::new(std::collections::HashSet::new()),
             last_heal_ms: StdMutex::new(0),
             roster_published: StdMutex::new(HashMap::new()),
             fabric_rebind: StdMutex::new(FabricRebindState::default()),
@@ -619,10 +724,9 @@ impl Engine {
         let scheduled = crate::scheduled::ScheduledStore::load(&paths.scheduled_file());
         // NB: NO register_device — the primary is the sole roster authority (guarded in-core too, but
         // we never even call it here). The transport still binds to the device seed in `start()`.
+        let app_activity = load_app_activity(&paths);
         let dyn_state = DynState {
-            seen_mailbox: std::fs::read_to_string(paths.root.join("mailbox-seen.txt"))
-                .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
-                .unwrap_or_default(),
+            seen_mailbox: load_seen_mailbox(&paths),
             notified: std::fs::read_to_string(paths.root.join("notified.txt"))
                 .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
                 .unwrap_or_default(),
@@ -679,9 +783,11 @@ impl Engine {
                 .build()
                 .unwrap_or_default(),
             http_url_bad: StdMutex::new(HashMap::new()),
+            app_activity: StdMutex::new(app_activity),
             seen_relay: StdMutex::new(std::collections::HashSet::new()),
             media_purged: StdMutex::new(std::collections::HashSet::new()),
             roster_needed: StdMutex::new(std::collections::HashSet::new()),
+            hello_offered: StdMutex::new(std::collections::HashSet::new()),
             last_heal_ms: StdMutex::new(0),
             roster_published: StdMutex::new(HashMap::new()),
             fabric_rebind: StdMutex::new(FabricRebindState::default()),
@@ -726,10 +832,6 @@ impl Engine {
         }
     }
 
-    fn notify(&self, title: &str, body: &str) {
-        self.notify_with_link(title, body, None)
-    }
-
     /// [`Self::notify`] with an optional `haven://…` deep link describing what the notification is
     /// ABOUT, so acting on it can open that rather than just raising the window.
     ///
@@ -740,6 +842,11 @@ impl Engine {
     /// That's an honest limitation rather than a silently-broken affordance — the in-app toast is
     /// clickable, and the fetch happens either way.
     fn notify_with_link(&self, title: &str, body: &str, deep_link: Option<&str>) {
+        // Every deep-linked notification is also an ACTIVITY row, so the bell holds what a missed
+        // toast said (the toast is ephemeral; the bell is where you catch up).
+        if deep_link.is_some() {
+            self.append_app_activity(title, body, deep_link);
+        }
         // A deep-linked notification is worth showing while FOREGROUND too — "your media is back"
         // silently doing nothing for someone already looking at the app is the case this exists for.
         if deep_link.is_none() && self.dyn_state.lock().unwrap().foreground {
@@ -758,6 +865,137 @@ impl Engine {
                 serde_json::json!({ "title": title, "body": body, "deepLink": deep_link }),
             );
         }
+    }
+
+    /// Append one app-layer row to the activity list (bounded, persisted). Called from
+    /// `notify_with_link` — the bell mirrors every deep-linked notification this device raises.
+    fn append_app_activity(&self, title: &str, body: &str, deep_link: Option<&str>) {
+        let snapshot = {
+            let mut rows = self.app_activity.lock().unwrap();
+            rows.insert(0, ActivityRow {
+                id: format!("app-{}", now_ms()),
+                kind: "app".into(),
+                circle_id: String::new(),
+                actor_name: title.to_string(),
+                snippet: body.to_string(),
+                created_at: now_ms(),
+                emoji: None,
+                link: deep_link.map(str::to_string),
+            });
+            rows.truncate(200);
+            rows.clone()
+        };
+        if let Ok(d) = serde_json::to_vec(&snapshot) {
+            let _ = std::fs::write(self.paths.root.join("activity-app.json"), d);
+        }
+    }
+
+    /// The activity feed for the bell: core rows (reactions / comments / votes on MY events plus
+    /// others' posts, stories and DMs, across every circle — `social.activity()`) merged with the
+    /// app-layer rows, newest-first, capped. Names are resolved here; each row carries the
+    /// interaction deep link the UI jumps to.
+    pub fn activity(&self) -> Vec<ActivityRow> {
+        let now = now_ms();
+        let mut out: Vec<ActivityRow> = self
+            .social
+            .activity(0, now)
+            .into_iter()
+            .map(|it| {
+                let link = if it.kind == "dm" {
+                    Some(wire::interaction_link(&it.circle_id, Some(&it.id)))
+                } else {
+                    // Reactions/comments/votes link to the PARENT post; posts/stories to themselves.
+                    let pid = it.target_id.clone().unwrap_or_else(|| it.id.clone());
+                    Some(wire::interaction_link(&it.circle_id, Some(&pid)))
+                };
+                ActivityRow {
+                    id: it.id,
+                    kind: it.kind,
+                    circle_id: it.circle_id,
+                    actor_name: self.display_name(&it.actor_short),
+                    snippet: it.snippet,
+                    created_at: it.created_at,
+                    emoji: it.emoji,
+                    link,
+                }
+            })
+            .collect();
+        out.extend(self.app_activity.lock().unwrap().iter().cloned());
+        out.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(a.id.cmp(&b.id)));
+        out.truncate(200);
+        out
+    }
+
+    /// The bell's "seen up to" watermark (unix ms) — rows newer than this badge.
+    pub fn activity_seen_at(&self) -> u64 {
+        self.prefs.lock().unwrap().activity_seen_at
+    }
+
+    /// Opening the bell marks everything current as seen. MONOTONIC — merged per-key MAX across my
+    /// devices via `setting:activitySeenAt`, so this clears the badge fleet-wide.
+    pub fn mark_activity_seen(&self) {
+        {
+            let mut p = self.prefs.lock().unwrap();
+            let now = now_ms();
+            if now <= p.activity_seen_at {
+                return;
+            }
+            p.activity_seen_at = now;
+            let _ = p.save(&self.paths);
+        }
+        self.nudge_self_sync(); // clear the bell badge on my other devices promptly
+        self.emit_changed();
+    }
+
+    /// Pinned DM ids in pin order (synced via `setting:pinnedDMs`).
+    pub fn pinned_dms(&self) -> Vec<String> {
+        self.prefs.lock().unwrap().pinned_dms.clone()
+    }
+
+    /// Replace the pinned-DM list (the UI enforces the 6-cap; clamped here too).
+    pub fn set_pinned_dms(&self, ids: Vec<String>) {
+        let changed = {
+            let mut p = self.prefs.lock().unwrap();
+            let ids: Vec<String> = ids.into_iter().take(6).collect();
+            let changed = ids != p.pinned_dms;
+            p.pinned_dms = ids;
+            let _ = p.save(&self.paths);
+            changed
+        };
+        if changed {
+            self.nudge_self_sync(); // pin/unpin reaches my other devices promptly
+        }
+    }
+
+    /// One blind wake through the push Worker (`/notify`): `ciphertext` = a sealed+SIGNED banner
+    /// only the recipient's device can open (the Worker forwards it blind); `event` inlines the
+    /// sealed circle envelope for push-inline sync; `silent` delivers with no banner (syncSelf /
+    /// republish traffic). Fire-and-forget — polling still carries everything if push is down.
+    /// Parity with iOS `PushManager.wake` / `syncSelf`.
+    fn push_wake(&self, node_hex: &str, ciphertext: Option<String>, event: Option<String>, silent: bool) {
+        if node_hex.is_empty() {
+            return;
+        }
+        let mut body = serde_json::json!({
+            "nodeId": node_hex,
+            "ciphertext": ciphertext.unwrap_or_else(|| "_".into()),
+        });
+        if let Some(e) = event {
+            body["event"] = e.into();
+        }
+        if silent {
+            body["silent"] = true.into();
+        }
+        let http = self.http.clone();
+        tauri::async_runtime::spawn(async move {
+            // Manual JSON body — this crate's reqwest is built without the `json` feature.
+            let _ = http
+                .post(format!("{PUSH_RELAY}/notify"))
+                .header("content-type", "application/json")
+                .body(body.to_string())
+                .send()
+                .await;
+        });
     }
 
     // ---- identity / profile -----------------------------------------------------------
@@ -865,7 +1103,7 @@ impl Engine {
     }
 
     pub fn set_profile(self: &Arc<Self>, profile: Profile) {
-        {
+        let edited = {
             let mut p = self.prefs.lock().unwrap();
             // Stamp each field the user actually CHANGED (LWW), so a remote sibling edit only overrides
             // ours when it's newer. Mirrors iOS ProfileStore.stamp on each edited field.
@@ -881,8 +1119,17 @@ impl Engine {
             if p.profile.link != profile.link {
                 p.stamp_profile_field("link");
             }
+            let edited = p.profile.name != profile.name
+                || p.profile.emoji != profile.emoji
+                || p.profile.bio != profile.bio
+                || p.profile.link != profile.link
+                || p.profile.avatar != profile.avatar;
             p.profile = profile;
             let _ = p.save(&self.paths);
+            edited
+        };
+        if edited {
+            self.nudge_self_sync(); // reach my other devices in seconds, not next scheduled pass
         }
         // Re-greet contacts so the new name/card propagates.
         self.sync_with_contacts();
@@ -1195,6 +1442,45 @@ impl Engine {
         st.next_poll_due_ms = 0;
     }
 
+    /// qa-cmd v2 cadence contract (DEBUG driver only — see `qa.rs`): a qa op represents a user
+    /// ACTIVELY using the app. A MUTATING op is the real user-activity hook verbatim
+    /// (`bump_activity`) plus ONE immediate off-schedule mailbox pass, so freshly authored
+    /// content uploads NOW instead of on the next 10s heartbeat (off-schedule polls already
+    /// overlap the loop elsewhere — relay add, s3_configure — so this is the same tolerance).
+    /// The non-mutating `dump` op resets the adaptive idle multiplier but must NOT force a
+    /// poll — receivers converge at their real active-cadence poll, keeping measured
+    /// convergence latency honest — so armed (possibly idle-stretched) due times are clamped
+    /// down to the tight base, never to "now".
+    #[cfg(debug_assertions)]
+    pub fn qa_mark_user_active(self: &Arc<Self>, mutating: bool) {
+        if mutating {
+            self.bump_activity();
+            let me = self.clone();
+            tauri::async_runtime::spawn(async move {
+                me.poll_mailbox().await;
+                me.poll_self_sync().await;
+            });
+        } else {
+            let now = now_ms();
+            let mut st = self.dyn_state.lock().unwrap();
+            st.last_activity_ms = now;
+            // Base cadences from start_mailbox_loop: poll 30s, sync 20s.
+            st.next_poll_due_ms = st.next_poll_due_ms.min(now + 30_000);
+            st.next_sync_due_ms = st.next_sync_due_ms.min(now + 20_000);
+        }
+    }
+
+    /// A LOCAL mutation of self-sync-carried state just happened (profile edit, circle
+    /// create/membership, DM pin, read watermark, synced setting…) → arm a short debounced
+    /// deadline; the heartbeat runs ONE self-sync pass when it expires (see `start_mailbox_loop`).
+    /// Without this, an edit only propagated on the next scheduled pass — 30s base, stretched to
+    /// minutes when idle — so a profile change took "never within 30s" to reach the user's other
+    /// devices. Each call slides the deadline, coalescing an edit burst (renaming twice, pinning
+    /// three DMs) into a single pass. Deliberately does NOT touch the periodic cadence.
+    fn nudge_self_sync(&self) {
+        self.dyn_state.lock().unwrap().selfsync_nudge_at_ms = now_ms() + 4_000;
+    }
+
     // Adaptive sync cadence (device-heat control). The loop keeps a cheap 10s heartbeat, but the
     // EXPENSIVE work (mailbox poll, mesh dials, relay re-announce, media retry/backfill) only runs
     // when it's DUE. When the app is idle — foregrounded but nothing arriving/authored — the due
@@ -1222,8 +1508,22 @@ impl Engine {
                         false
                     }
                 };
+                // Debounced "self-sync now" nudge (see nudge_self_sync): a local edit of synced
+                // state armed a deadline — honor it here, off-schedule, so the edit reaches the
+                // user's other devices in seconds. A due poll bucket clears any pending nudge too
+                // (its own pass snapshots the same mutation), so a burst never runs twice.
+                let nudge_due = {
+                    let mut st = me.dyn_state.lock().unwrap();
+                    let due = st.selfsync_nudge_at_ms != 0 && now >= st.selfsync_nudge_at_ms;
+                    if due || poll_due {
+                        st.selfsync_nudge_at_ms = 0;
+                    }
+                    due
+                };
                 if poll_due {
                     me.poll_mailbox().await;
+                    me.poll_self_sync().await;
+                } else if nudge_due {
                     me.poll_self_sync().await;
                 }
 
@@ -1416,12 +1716,19 @@ impl Engine {
     }
 
     pub fn set_host_on_launch(self: &Arc<Self>, on: bool) {
-        let mut p = self.prefs.lock().unwrap();
-        if p.host_on_launch != on {
-            p.stamp_setting("host_on_launch"); // LWW so two desktops don't ping-pong this toggle
+        let changed = {
+            let mut p = self.prefs.lock().unwrap();
+            let changed = p.host_on_launch != on;
+            if changed {
+                p.stamp_setting("host_on_launch"); // LWW so two desktops don't ping-pong this toggle
+            }
+            p.host_on_launch = on;
+            let _ = p.save(&self.paths);
+            changed
+        };
+        if changed {
+            self.nudge_self_sync(); // synced setting — reach my other devices promptly
         }
-        p.host_on_launch = on;
-        let _ = p.save(&self.paths);
     }
 
     pub fn video_sound_on(&self) -> bool {
@@ -2067,6 +2374,7 @@ impl Engine {
             let _ = p.save(&self.paths);
         }
         self.persist();
+        self.nudge_self_sync(); // the new circle rides a prompt pass to my other devices
         self.emit_changed();
         id
     }
@@ -2111,6 +2419,7 @@ impl Engine {
             }
         }
         self.persist();
+        self.nudge_self_sync(); // replacement circle + legacy tombstone ride a prompt pass
         self.emit_changed();
         Some(id)
     }
@@ -2122,6 +2431,7 @@ impl Engine {
         let ok = self.social.accept_circle_upgrade(circle_id, new_circle_id);
         if ok {
             self.persist();
+            self.nudge_self_sync();
             self.emit_changed();
         }
         ok
@@ -2130,6 +2440,7 @@ impl Engine {
     pub fn rename_circle(self: &Arc<Self>, id: String, name: String) {
         self.social.rename_circle(id, name);
         self.persist();
+        self.nudge_self_sync();
         self.emit_changed();
     }
 
@@ -2168,6 +2479,7 @@ impl Engine {
         }
         self.social.leave_circle(id);
         self.persist();
+        self.nudge_self_sync(); // the deletion tombstone rides a prompt pass (delete here = delete everywhere)
         self.emit_changed();
     }
 
@@ -2176,6 +2488,7 @@ impl Engine {
         self.clear_circle_removal(&circle_id, &contact_id_hex); // deliberate re-add un-bans them
         let _ = self.social.add_existing_to_circle(circle_id.clone(), contact_id_hex.clone());
         self.persist();
+        self.nudge_self_sync();
         self.emit_changed();
         self.send_hello(&circle_id, &contact_id_hex);
     }
@@ -2195,6 +2508,7 @@ impl Engine {
         }
         self.social.remove_from_circle(circle_id, contact_id_hex);
         self.persist();
+        self.nudge_self_sync(); // the severance rides a prompt pass so no sibling re-adds them meanwhile
         self.authorize_membership();
         self.emit_changed();
     }
@@ -2443,6 +2757,7 @@ impl Engine {
             media
         };
         self.pin_media(media);
+        self.nudge_self_sync(); // the kept entry rides a prompt pass to my other devices
     }
 
     /// Stop keeping it — and release the pin, so the blobs are eligible for cleanup again.
@@ -2462,6 +2777,7 @@ impl Engine {
             release
         };
         self.unpin_media(release);
+        self.nudge_self_sync(); // the un-keep tombstone rides a prompt pass
     }
 
     /// The `setting:keptStories` payload, or None when there is nothing at all to say — never
@@ -2755,11 +3071,9 @@ impl Engine {
     /// only the media array changes. The new blob is then uploaded exactly as a fresh post's would
     /// be, so members who are offline right now still find it waiting for them.
     ///
-    /// SILENT by construction on this platform: `after_author` sends the event to members and to my
-    /// own devices, and desktop has no push/banner leg at all (the sealed-notification wake in
-    /// Apple's `broadcastEvent`, which its `silent:` flag suppresses, has no desktop analogue). So
-    /// the property Apple's flag exists to guarantee — 25 re-shares must not fire 25 alerts on every
-    /// member's phone for content nobody wrote — holds here without a flag to set.
+    /// SILENT: `after_author` is passed `banner: None`, so the push leg sends content-available
+    /// wakes only — the property Apple's `silent:` flag guarantees (25 re-shares must not fire 25
+    /// alerts on every member's phone for content nobody wrote) holds here the same way.
     ///
     /// THE OLD BLOB IS DELIBERATELY NOT DELETED. A member who is offline right now still holds the
     /// PRE-edit post naming the old ref; if they ask for it while our copy is gone they get a
@@ -2805,7 +3119,7 @@ impl Engine {
             now_ms(),
         ) {
             Ok(env) => {
-                self.after_author(&circle_id, &env);
+                self.after_author(&circle_id, &env, None, None);
                 let me = self.clone();
                 tauri::async_runtime::spawn(async move {
                     for r in media {
@@ -3069,31 +3383,41 @@ impl Engine {
         if body.trim().is_empty() && media.is_empty() && music.is_none() {
             return;
         }
-        match self.social.post(circle_id.clone(), body, media.clone(), music, None, false, mute_video, now_ms()) {
+        let banner = {
+            let refs: Vec<&str> = media.iter().map(|s| s.as_str()).collect();
+            haven_p2p::pushbanner::for_post(&circle_id, &self.circle_name(&circle_id), &body, &refs, false)
+        };
+        // Hoist the timestamp so the engine-derived id of THIS post can be read back (ids are
+        // content-addressed at author time) — the sealed banner's `p` tag. Apple FeedView parity.
+        let ts = now_ms();
+        match self.social.post(circle_id.clone(), body, media.clone(), music, None, false, mute_video, ts) {
             Ok(env) => {
-                self.after_author(&circle_id, &env);
-                let me = self.clone();
-                tauri::async_runtime::spawn(async move {
-                    for r in media {
-                        me.upload_media(&circle_id, &r).await;
-                    }
-                });
+                let post_id = self.social.last_authored_event_id(circle_id.clone(), ts);
+                self.after_author(&circle_id, &env, Some(banner), post_id);
+                self.upload_authored_media(circle_id, media);
             }
             Err(e) => log::error!("post failed: {e}"),
         }
     }
 
-    pub fn post_story(self: &Arc<Self>, body: String, media: Option<String>, music: Option<TrackRefFfi>) {
+    /// The UI always passes `DEFAULT_CIRCLE` (stories live in the personal circle); the circle is
+    /// a parameter so the qa-cmd driver can honor an explicit `circle_id` (docs/QA.md).
+    pub fn post_story(self: &Arc<Self>, circle_id: String, body: String, media: Option<String>, music: Option<TrackRefFfi>) {
         if body.trim().is_empty() && media.is_none() && music.is_none() {
             return;
         }
         let media_vec: Vec<String> = media.iter().cloned().collect();
-        match self.social.post(DEFAULT_CIRCLE.to_string(), body, media_vec, music, Some(86_400), true, false, now_ms()) {
+        let banner = {
+            let refs: Vec<&str> = media_vec.iter().map(|s| s.as_str()).collect();
+            haven_p2p::pushbanner::for_post(&circle_id, &self.circle_name(&circle_id), &body, &refs, true)
+        };
+        let ts = now_ms(); // hoisted for the `p` read-back (see `post`)
+        match self.social.post(circle_id.clone(), body, media_vec.clone(), music, Some(86_400), true, false, ts) {
             Ok(env) => {
-                self.after_author(DEFAULT_CIRCLE, &env);
-                if let Some(r) = media {
-                    let me = self.clone();
-                    tauri::async_runtime::spawn(async move { me.upload_media(DEFAULT_CIRCLE, &r).await; });
+                let post_id = self.social.last_authored_event_id(circle_id.clone(), ts);
+                self.after_author(&circle_id, &env, Some(banner), post_id);
+                if media.is_some() {
+                    self.upload_authored_media(circle_id, media_vec);
                 }
             }
             Err(e) => log::error!("post_story failed: {e}"),
@@ -3104,20 +3428,23 @@ impl Engine {
         if body.trim().is_empty() {
             return;
         }
-        if let Ok(env) = self.social.comment(circle_id.clone(), target, body, vec![], now_ms()) {
-            self.after_author(&circle_id, &env);
+        let banner = haven_p2p::pushbanner::for_comment(&body, &circle_id, &self.circle_name(&circle_id));
+        if let Ok(env) = self.social.comment(circle_id.clone(), target.clone(), body, vec![], now_ms()) {
+            // `p` = the PARENT post, so the tap opens the thread the comment landed on.
+            self.after_author(&circle_id, &env, Some(banner), Some(target));
         }
     }
 
     pub fn react(self: &Arc<Self>, circle_id: String, target: String, emoji: String) {
-        if let Ok(env) = self.social.react(circle_id.clone(), target, emoji, now_ms()) {
-            self.after_author(&circle_id, &env);
+        let banner = haven_p2p::pushbanner::for_reaction(&emoji, &circle_id);
+        if let Ok(env) = self.social.react(circle_id.clone(), target.clone(), emoji, now_ms()) {
+            self.after_author(&circle_id, &env, Some(banner), Some(target)); // `p` = the reacted post
         }
     }
 
     pub fn unreact(self: &Arc<Self>, circle_id: String, target: String, emoji: String) {
         if let Ok(env) = self.social.unreact(circle_id.clone(), target, emoji, now_ms()) {
-            self.after_author(&circle_id, &env);
+            self.after_author(&circle_id, &env, None, None); // taking a reaction back is not news
         }
     }
 
@@ -3155,13 +3482,13 @@ impl Engine {
         if let Ok(env) =
             self.social.edit(circle_id.clone(), target, body, media, music, mute_video, now_ms())
         {
-            self.after_author(&circle_id, &env);
+            self.after_author(&circle_id, &env, None, None); // edits keep their place — no banner
         }
     }
 
     pub fn unsend_post(self: &Arc<Self>, circle_id: String, target: String) {
         if let Ok(env) = self.social.unsend(circle_id.clone(), target, now_ms()) {
-            self.after_author(&circle_id, &env);
+            self.after_author(&circle_id, &env, None, None);
         }
     }
 
@@ -3175,7 +3502,7 @@ impl Engine {
     pub fn report(self: &Arc<Self>, circle_id: String, target: String, reason: String, comment: String) -> Option<String> {
         match self.social.report(circle_id.clone(), target.clone(), reason.clone(), comment, now_ms()) {
             Ok(env) => {
-                self.after_author(&circle_id, &env);
+                self.after_author(&circle_id, &env, None, None);
                 let author = self
                     .social
                     .reports(circle_id)
@@ -3225,13 +3552,62 @@ impl Engine {
     }
 
     /// Persist, bump the UI, and broadcast a freshly-authored sealed envelope to members.
-    fn after_author(self: &Arc<Self>, circle_id: &str, env: &[u8]) {
+    ///
+    /// `banner` is the lock-screen copy each recipient's device shows after decrypting the sealed
+    /// notification — decided HERE at send time, sealed+SIGNED per recipient, forwarded blind by
+    /// the push Worker (it never sees plaintext). `None` is SILENT: the event still delivers and
+    /// syncs, but nobody's phone banners (re-optimize republishes / edits / unsends / un-reacts —
+    /// content nobody just wrote). Mirrors iOS `broadcastEvent(_:banner:silent:)`.
+    ///
+    /// `post_id` is the banner's `p` deep-link tag — the authored post's engine-derived id (read
+    /// back via `last_authored_event_id`, Apple parity) or the reaction/comment's PARENT post — so
+    /// the recipient's tap opens THAT item. Best-effort: `None` keeps the legacy circle route.
+    fn after_author(
+        self: &Arc<Self>,
+        circle_id: &str,
+        env: &[u8],
+        banner: Option<haven_p2p::pushbanner::BannerCopy>,
+        post_id: Option<String>,
+    ) {
         self.bump_activity(); // I just posted/messaged → keep sync tight
         self.persist();
         self.emit_changed();
         let payload = wire::event_payload(circle_id, env);
-        for id_hex in self.social.contact_node_ids(circle_id.to_string()) {
-            self.send_frame(wire::EVENT, &payload, &id_hex);
+        let members = self.social.contact_node_ids(circle_id.to_string());
+        for id_hex in &members {
+            self.send_frame(wire::EVENT, &payload, id_hex);
+        }
+        // Push leg (the desktop hole until now): a blind wake per member so their PHONES banner /
+        // fetch even when no live path is up, plus a silent syncSelf wake so my own sleeping
+        // devices ingest the inline event without a mailbox round-trip.
+        let event_b64 = base64::engine::general_purpose::STANDARD.encode(env);
+        self.push_wake(&self.node_id_hex(), None, Some(event_b64.clone()), true);
+        let notif_json: Option<Vec<u8>> = banner.map(|b| {
+            let my_name = self.prefs.lock().unwrap().profile.name.clone();
+            let title = if my_name.is_empty() { "Someone".to_string() } else { my_name };
+            // `{t,b,bp,c,k,e?,p?}` — the cross-platform sealed-banner wire (Apple PushBanner.jsonObject).
+            let mut o = serde_json::json!({
+                "t": title, "b": b.body, "bp": b.private_body, "c": circle_id, "k": b.kind,
+            });
+            if let Some(e) = &b.emoji {
+                o["e"] = e.clone().into();
+            }
+            if let Some(p) = post_id.as_ref().filter(|p| !p.is_empty()) {
+                o["p"] = p.clone().into();
+            }
+            serde_json::to_vec(&o).unwrap_or_default()
+        });
+        for member in &members {
+            let sealed = notif_json.as_ref().filter(|j| !j.is_empty()).and_then(|j| {
+                self.social.seal_signed_notification(member.clone(), j.clone()).ok()
+            });
+            let silent = sealed.is_none();
+            self.push_wake(
+                member,
+                sealed.map(|sd| base64::engine::general_purpose::STANDARD.encode(sd)),
+                Some(event_b64.clone()),
+                silent,
+            );
         }
         // Hand it to MY other devices too while they're online. contact_node_ids deliberately
         // excludes us, so before this a post authored here only reached my other devices via their
@@ -3279,12 +3655,75 @@ impl Engine {
         format!("dm:{}", all.join("-"))
     }
 
+    /// Materialize a `dm:` thread this device doesn't hold yet when a LIVE-delivered event names
+    /// it (see `handle_event`). The id is deterministic and names its participants, so this only
+    /// fires when it names MY account and every OTHER participant is an existing CONTACT — the
+    /// own-device echo and a friend's first DM both qualify; a stranger's id never does. The
+    /// envelope still has to open/verify inside `receive`, so nothing is admitted that a (much
+    /// slower) self-sync apply wouldn't have admitted anyway. Deliberately NO hello: the thread
+    /// demonstrably exists on the sender's side already — this only creates the local circle,
+    /// wires it to the active relays so the next mailbox poll covers it, and lets my own devices
+    /// learn it over self-sync.
+    fn adopt_unknown_dm_circle(self: &Arc<Self>, circle_id: &str) {
+        if !circle_id.starts_with("dm:") {
+            return;
+        }
+        if self.social.circles().iter().any(|c| c.id == circle_id) {
+            return;
+        }
+        let me = self.node_id_hex().to_lowercase();
+        let parts: Vec<String> =
+            circle_id.trim_start_matches("dm:").split('-').map(str::to_lowercase).collect();
+        if parts.len() < 2
+            || parts.iter().any(|p| p.len() != 64 || !p.bytes().all(|b| b.is_ascii_hexdigit()))
+            || !parts.contains(&me)
+        {
+            return;
+        }
+        let contacts = self.contacts();
+        let mut members: Vec<(String, String)> = Vec::new(); // (hex, display name)
+        for p in parts.iter().filter(|p| **p != me) {
+            match contacts.iter().find(|c| c.id_hex.eq_ignore_ascii_case(p)) {
+                Some(c) => members.push((p.clone(), c.name.clone())),
+                None => return, // a non-contact participant → not ours to open
+            }
+        }
+        if members.is_empty() {
+            return;
+        }
+        let title = members.iter().map(|(_, n)| n.clone()).collect::<Vec<_>>().join(", ");
+        self.social.create_circle(circle_id.to_string(), title);
+        for (hex, _) in &members {
+            let _ = self.social.add_existing_to_circle(circle_id.to_string(), hex.clone());
+        }
+        self.pin_dm_authority(circle_id);
+        {
+            let mut p = self.prefs.lock().unwrap();
+            let actives = p.all_active_relay_hexes();
+            let list = p.relays.entry(circle_id.to_string()).or_default();
+            for hex in actives {
+                if !list.contains(&hex) {
+                    list.push(hex);
+                }
+            }
+            let _ = p.save(&self.paths);
+        }
+        self.persist();
+        self.nudge_self_sync(); // my other devices learn the thread on the next pass
+        log::info!(
+            "adopted live-delivered DM thread {}… ({} member(s))",
+            &circle_id.chars().take(20).collect::<String>(),
+            members.len()
+        );
+    }
+
     pub fn start_dm(self: &Arc<Self>, contact_id_hex: String, contact_name: String) -> String {
         let id = self.dm_circle_id(&contact_id_hex);
         self.social.create_circle(id.clone(), contact_name);
         let _ = self.social.add_existing_to_circle(id.clone(), contact_id_hex.clone());
         self.pin_dm_authority(&id); // §5 live-lane + §2 deterministic creator pin
         self.persist();
+        self.nudge_self_sync(); // the new thread's `circle:` record rides a prompt pass
         self.send_hello(&id, &contact_id_hex);
         id
     }
@@ -3303,6 +3742,7 @@ impl Engine {
         }
         self.pin_dm_authority(&id); // §5 live-lane + §2 deterministic creator pin
         self.persist();
+        self.nudge_self_sync(); // the new thread's `circle:` record rides a prompt pass
         for (hex, _) in &members {
             self.send_hello(&id, hex);
         }
@@ -3343,14 +3783,15 @@ impl Engine {
         if body.trim().is_empty() && media.is_empty() && music.is_none() {
             return;
         }
-        if let Ok(env) = self.social.post(circle_id.clone(), body, media.clone(), music, None, false, false, now_ms()) {
-            self.after_author(&circle_id, &env);
-            let me = self.clone();
-            tauri::async_runtime::spawn(async move {
-                for r in media {
-                    me.upload_media(&circle_id, &r).await;
-                }
-            });
+        let banner = {
+            let refs: Vec<&str> = media.iter().map(|s| s.as_str()).collect();
+            haven_p2p::pushbanner::for_post(&circle_id, &self.circle_name(&circle_id), &body, &refs, false)
+        };
+        let ts = now_ms(); // hoisted for the `p` read-back (see `post`)
+        if let Ok(env) = self.social.post(circle_id.clone(), body, media.clone(), music, None, false, false, ts) {
+            let post_id = self.social.last_authored_event_id(circle_id.clone(), ts);
+            self.after_author(&circle_id, &env, Some(banner), post_id);
+            self.upload_authored_media(circle_id, media);
         }
     }
 
@@ -3404,12 +3845,15 @@ impl Engine {
     pub fn mark_dm_read(&self, circle_id: String) {
         let newest = self.messages(&circle_id).iter().map(|m| m.created_at).max().unwrap_or(0);
         let mark = now_ms().max(newest);
-        let mut p = self.prefs.lock().unwrap();
-        if mark <= p.dm_last_read.get(&circle_id).copied().unwrap_or(0) {
-            return;
+        {
+            let mut p = self.prefs.lock().unwrap();
+            if mark <= p.dm_last_read.get(&circle_id).copied().unwrap_or(0) {
+                return;
+            }
+            p.dm_last_read.insert(circle_id, mark);
+            let _ = p.save(&self.paths);
         }
-        p.dm_last_read.insert(circle_id, mark);
-        let _ = p.save(&self.paths);
+        self.nudge_self_sync(); // clear the badge on my other devices promptly
     }
 
     /// DM threads as (circleId, partnerName, lastBody, lastAt, memberCount, unread). Sorted
@@ -3481,6 +3925,7 @@ impl Engine {
             // stay dropped (handshake guard) and self-sync re-severs them on every pass.
             self.clear_circle_removal(DEFAULT_CIRCLE, &req.id_hex);
             self.accept_contact(DEFAULT_CIRCLE, &req.bundle, &req.id_hex, &req.name, &req.verify_hex, true);
+            self.nudge_self_sync(); // the new contact (+ lifted tombstone) rides a prompt pass
             self.emit_changed();
         }
     }
@@ -3515,13 +3960,17 @@ impl Engine {
         }
         self.dyn_state.lock().unwrap().pending.retain(|r| r.id_hex != id_hex);
         self.persist();
+        self.nudge_self_sync(); // block + contact tombstone reach my other devices promptly
         self.emit_changed();
     }
 
     pub fn unblock(self: &Arc<Self>, id_hex: String) {
-        let mut p = self.prefs.lock().unwrap();
-        p.blocked.retain(|b| *b != id_hex);
-        let _ = p.save(&self.paths);
+        {
+            let mut p = self.prefs.lock().unwrap();
+            p.blocked.retain(|b| *b != id_hex);
+            let _ = p.save(&self.paths);
+        }
+        self.nudge_self_sync();
     }
 
     fn accept_contact(self: &Arc<Self>, circle_id: &str, bundle: &[u8], id_hex: &str, name: &str, verify_hex: &str, hello_back: bool) {
@@ -3588,6 +4037,16 @@ impl Engine {
     }
 
     /// Resolve a feed item's short author id (8 hex) to a contact's display name.
+    /// A circle's display name (falls back to the generic copy the banners use).
+    fn circle_name(&self, circle_id: &str) -> String {
+        self.social
+            .circles()
+            .into_iter()
+            .find(|c| c.id == circle_id)
+            .map(|c| c.name)
+            .unwrap_or_else(|| "your circle".into())
+    }
+
     pub fn display_name(&self, author_short: &str) -> String {
         let p = self.prefs.lock().unwrap();
         p.contacts
@@ -3625,10 +4084,115 @@ impl Engine {
         Some(wire::hello_payload(circle_id, &circle_name, &bundle, &signed))
     }
 
+    /// Content-addressed store-and-forward slot for a HELLO under a circle mailbox
+    /// (membership-gated like events): `haven/mailbox/<circle>/__hello__/<toAcct>/<fromAcct>/<sha256>`.
+    /// Both id slots are ACCOUNT hexes — a device id in the recipient slot rots the moment the
+    /// peer rotates or relinks (the matrix "invite never arrived" shape: the hello sat in a slot
+    /// none of their current ids match), while the account slot is claimed by every device they
+    /// own. iOS `helloMailboxKey` parity.
+    fn hello_mailbox_key(circle_id: &str, to_hex: &str, from_hex: &str, body: &[u8]) -> String {
+        let mut h = Sha256::new();
+        h.update(body);
+        let digest: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        format!(
+            "haven/mailbox/{circle_id}/__hello__/{}/{}/{digest}",
+            to_hex.to_lowercase(),
+            from_hex.to_lowercase()
+        )
+    }
+
+    /// Store-and-forward leg of [`Self::send_hello`]: park the hello on every relay serving the
+    /// circle, for when no direct iroh path to the peer ever comes up (matrix / cross-NAT — the
+    /// exact case where the invite otherwise silently vanishes). Deduped per (relay, key), NOT
+    /// per key alone, so a relay learned AFTER the first offer still receives it on a later greet
+    /// cycle instead of being starved by an "any relay landed" latch. Only a landed PUT marks the
+    /// pair, so a failed upload retries next tick.
+    async fn offer_hello_mailbox(self: &Arc<Self>, circle_id: &str, to_hex: &str, hello: &[u8]) {
+        let key = Self::hello_mailbox_key(circle_id, to_hex, &self.node_id_hex(), hello);
+        let hosted = self.relay_host.lock().unwrap().as_ref().map(|h| h.node_id_hex());
+        for node_hex in self.relays_for(circle_id) {
+            // The S3 mailbox loop feeds receive() only — a hello parked there would never route.
+            if node_hex.starts_with("s3:") {
+                continue;
+            }
+            let offered = format!("{node_hex}|{key}");
+            if self.hello_offered.lock().unwrap().contains(&offered) {
+                continue;
+            }
+            // Our OWN hosted relay: store directly into the local mailbox (no iroh self-dial).
+            if hosted.as_deref() == Some(node_hex.as_str()) {
+                let ok = match self.relay_host.lock().unwrap().as_ref() {
+                    Some(h) => h.local_put(key.clone(), hello.to_vec()),
+                    None => false,
+                };
+                if ok {
+                    self.hello_offered.lock().unwrap().insert(offered);
+                }
+                continue;
+            }
+            // Plain-HTTP first (an HTTP-mailbox-only host never iroh-dials), then the warm iroh
+            // client — the same ladder the mailbox poll runs, in the same order.
+            let mut landed = false;
+            if let Some((bases, token)) = self.relay_http_reachable(&node_hex) {
+                for base in &bases {
+                    if self.http_url_bad(base) {
+                        continue;
+                    }
+                    match self.http_put(base, &token, &key, hello.to_vec()).await {
+                        Ok(()) => {
+                            self.mark_relay_ok(&node_hex);
+                            landed = true;
+                            break;
+                        }
+                        Err(RelayErr::Forbidden) => {
+                            self.note_refused(&node_hex, "hello put");
+                            break; // same store behind every URL — the refusal stands
+                        }
+                        Err(RelayErr::Unreachable) => self.mark_http_url_bad(base),
+                    }
+                }
+            }
+            if !landed {
+                if let Some(client) = self.relay_client_for(&node_hex).await {
+                    match client.put(key.clone(), hello.to_vec()).await {
+                        Ok(()) => {
+                            self.mark_relay_ok(&node_hex);
+                            landed = true;
+                        }
+                        Err(e) => {
+                            log::debug!("hello put failed ({node_hex}): {e}");
+                            self.relay_failed(&node_hex).await;
+                        }
+                    }
+                }
+            }
+            if landed {
+                log::info!(
+                    "hello offered to={} relay={}",
+                    &to_hex.chars().take(8).collect::<String>(),
+                    &node_hex.chars().take(8).collect::<String>()
+                );
+                self.hello_offered.lock().unwrap().insert(offered);
+            }
+        }
+    }
+
     /// Send our Hello + back-fill this circle's events to one node.
     fn send_hello(self: &Arc<Self>, circle_id: &str, to_node_hex: &str) {
         let Some(hello) = self.hello_payload(circle_id) else { return };
         self.send_frame(wire::HELLO, &hello, to_node_hex);
+        // Park the same hello on the circle's relays for a peer no direct path reaches. Callers
+        // hand this an ACCOUNT id (the transport expansion to device ids happens in send_frame),
+        // which is exactly what the recipient slot must carry.
+        {
+            let me = self.clone();
+            let cid = circle_id.to_string();
+            let to = to_node_hex.to_string();
+            let hello = hello.clone();
+            tauri::async_runtime::spawn(async move {
+                me.offer_hello_mailbox(&cid, &to, &hello).await;
+            });
+        }
         for env in self.social.sync_envelopes(circle_id.to_string()) {
             self.send_frame(wire::EVENT, &wire::event_payload(circle_id, &env), to_node_hex);
         }
@@ -3963,7 +4527,26 @@ impl Engine {
                     || self.my_other_device_hexes().iter().any(|d| *d == l)
             })
             .unwrap_or(false);
-        let changed = self.social.receive(ev.circle_id.clone(), ev.envelope).unwrap_or(false);
+        // A live-delivered event for a DM thread this device hasn't learned yet was silently
+        // DROPPED: `social.receive` returns Ok(false) for an unknown circle id, and a dm:<a>-<b>
+        // circle only reached this device via a (minutes-slow) self-sync apply — the "dm echo
+        // (own devices) never lands inside the budget" E2E RED. A DM circle id is deterministic
+        // and names its participants, so when it names MY account and every other participant is
+        // an existing CONTACT (the own-device echo and a friend's first DM both qualify — a
+        // stranger's cannot), create the thread first and let the envelope ingest now. The
+        // envelope itself still has to open/verify inside `receive`, so this admits no content a
+        // later self-sync apply wouldn't have admitted anyway.
+        self.adopt_unknown_dm_circle(&ev.circle_id);
+        let changed = match self.social.receive(ev.circle_id.clone(), ev.envelope) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!(
+                    "live event receive FAILED circle={}: {e}",
+                    &ev.circle_id.chars().take(12).collect::<String>()
+                );
+                false
+            }
+        };
         if changed {
             // FAN OUT to my other devices. A sender dials the device ids ITS copy of my roster
             // resolves — often just one — so a DM delivered straight to one device never reached the
@@ -3991,14 +4574,25 @@ impl Engine {
     // ---- relay / mailbox ----------------------------------------------------------------
 
     async fn handle_relay_node(self: &Arc<Self>, body: &[u8]) {
+        let Some(circle_id) = self.ingest_relay_announce(body) else { return };
+        self.refresh_haven_fabric();
+        self.backfill_mailbox(&circle_id).await;
+        self.poll_mailbox().await;
+    }
+
+    /// Decode + apply one sealed frame-19 relay announce (live frame OR a durable `__relay__/`
+    /// mailbox blob — the bytes are identical). Pure state: learns/reactivates the relay, records
+    /// its HTTP/DERP/TURN interface. Returns the circle id on success so the LIVE path can chase
+    /// it with a backfill+poll; the mailbox path must NOT (it is already inside a poll).
+    fn ingest_relay_announce(&self, body: &[u8]) -> Option<String> {
         let mut r = wire::Reader::new(body);
-        let Some(cid) = r.lp() else { return };
+        let cid = r.lp()?;
         let circle_id = String::from_utf8_lossy(&cid).into_owned();
         let sealed = r.rest();
         if circle_id.is_empty() || sealed.is_empty() {
-            return;
+            return None;
         }
-        let Some(opened) = self.social.open_circle_media_sender(circle_id.clone(), sealed) else { return };
+        let opened = self.social.open_circle_media_sender(circle_id.clone(), sealed)?;
         let announcer_hex = opened.sender_hex.to_lowercase(); // authenticated envelope sender (account id)
         let text = String::from_utf8_lossy(&opened.data).trim().to_string();
         // Extended announce: JSON {node, urls, token, derp, turn, turnUser, turnPass}.
@@ -4011,7 +4605,7 @@ impl Engine {
         let mut announced_turn_user = String::new();
         let mut announced_turn_pass = String::new();
         let node_hex = if text.starts_with('{') {
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return None };
             announced_urls = v["urls"]
                 .as_array()
                 .map(|a| {
@@ -4046,7 +4640,7 @@ impl Engine {
             text.to_lowercase()
         };
         if node_hex.len() != 64 {
-            return;
+            return None;
         }
         {
             // A contact RE-ANNOUNCED a circle relay. Reactivating a deactivated/forgotten entry is
@@ -4075,7 +4669,7 @@ impl Engine {
                 // third-party echo and a legacy announce (addedAt=0) also lose. iOS/Android parity (the
                 // "deleted relays came back when mom opened the app" fix).
                 if announced_added_at <= p.relay_forgotten_at_ms(&node_hex) {
-                    return;
+                    return None;
                 }
                 // Clear the forget AND record a re-add timestamp so this legit newer re-add propagates
                 // to my other devices via self-sync (relay-readd) — else a sibling keeps it deleted.
@@ -4086,7 +4680,7 @@ impl Engine {
                 // re-add. Keeps a PC's relay coming back on the phone when the PC re-announces it.
                 let newer_re_add = announced_added_at > 0 && announced_added_at > p.relay_forgotten_at_ms(&node_hex);
                 if !announcer_owns_relay && !newer_re_add {
-                    return;
+                    return None;
                 }
                 was_reactivated = true;
             }
@@ -4121,9 +4715,7 @@ impl Engine {
                 self.relay_health.lock().unwrap().remove(&node_hex);
             }
         }
-        self.refresh_haven_fabric();
-        self.backfill_mailbox(&circle_id).await;
-        self.poll_mailbox().await;
+        Some(circle_id)
     }
 
     pub fn relay_status(&self) -> (bool, bool, bool, bool, bool) {
@@ -5274,6 +5866,7 @@ impl Engine {
             let http_iface = self.relay_http_reachable(&node_hex);
             if let Some((urls, token)) = http_iface {
                 let mut done = false;
+                let mut refused = false;
                 for base in urls.iter().filter(|u| !self.http_url_bad(u)) {
                     match self.http_put(base, &token, &key, wire.clone()).await {
                         Ok(()) => {
@@ -5283,18 +5876,31 @@ impl Engine {
                             break;
                         }
                         // The devroster key is permission-FREE, so a refusal here is the relay rejecting
-                        // our SIGNATURE, not our membership — `note_refused` would only schedule a heal
-                        // that repeats this very publish. Still never back the URL off: this is the one
-                        // write that authorizes all the others, and sealing it for two minutes is how a
-                        // device stays unauthorized (and unable to upload) far longer than it needs to.
-                        Err(RelayErr::Forbidden) => log::info!(
-                            "devroster http-put REFUSED relay={} — signature rejected, trying dial",
-                            &node_hex.chars().take(8).collect::<String>()
-                        ),
+                        // our roster BODY (rollback defense: it already holds a NEWER version of our own
+                        // account's roster, usually published by a sibling device) — `note_refused` would
+                        // only schedule a heal that repeats this very publish. Still never back the URL
+                        // off: this is the one write that authorizes all the others, and sealing it for
+                        // two minutes is how a device stays unauthorized far longer than it needs to.
+                        Err(RelayErr::Forbidden) => {
+                            refused = true;
+                            log::info!(
+                                "devroster http-put REFUSED relay={} — out-versioned or rejected, adopting theirs",
+                                &node_hex.chars().take(8).collect::<String>()
+                            );
+                        }
                         Err(RelayErr::Unreachable) => self.mark_http_url_bad(base),
                     }
                 }
                 if done {
+                    continue;
+                }
+                if refused {
+                    // The deadlock-breaker (see `adopt_newer_own_roster_and_retry`): this used to fall
+                    // through to the iroh dial with the SAME stale wire — refused again (or lost to a
+                    // dial cooldown on an HTTP-only relay), so the device stayed unauthorized until a
+                    // SIBLING happened to republish a roster containing it. On the matrix fleet that
+                    // was a ~20-minute mailbox blackout for every circle on the stub.
+                    self.adopt_newer_own_roster_and_retry(&node_hex, &key, &wire, "forbidden").await;
                     continue;
                 }
             }
@@ -5346,6 +5952,25 @@ impl Engine {
         if fresh.wire == sent {
             log::info!("devroster: adopted roster is identical to the one refused — refusal is NOT a version rollback on {short}");
             return;
+        }
+        // Retry over the SAME transport ladder as the publish: plain HTTP first (an HTTP-only
+        // relay — the matrix stub, a free-CF NAS — never accepts an iroh dial, so retrying only
+        // via dial left the recovery dead exactly where it was needed), then the iroh client.
+        if let Some((urls, token)) = self.relay_http_reachable(node_hex) {
+            for base in urls.iter().filter(|u| !self.http_url_bad(u)) {
+                match self.http_put(base, &token, key, fresh.wire.clone()).await {
+                    Ok(()) => {
+                        self.mark_relay_ok(node_hex);
+                        log::info!("devroster put OK relay={short} after adopting its newer roster — this device is authorized again");
+                        return;
+                    }
+                    Err(RelayErr::Forbidden) => {
+                        log::info!("devroster STILL refused by {short} over http after adopting");
+                        return;
+                    }
+                    Err(RelayErr::Unreachable) => self.mark_http_url_bad(base),
+                }
+            }
         }
         let Some(client) = self.relay_client_for(node_hex).await else { return };
         match client.put(key.to_string(), fresh.wire).await {
@@ -5548,6 +6173,7 @@ impl Engine {
         // A forgotten relay may be wiped — drop its media confirmations so a re-adopted one is re-mirrored.
         self.forget_media_backed_up(&hex);
         self.flush_media_backed_up();
+        self.nudge_self_sync(); // the relay deletion (LWW) rides a prompt pass to my other devices
         self.emit_changed();
     }
 
@@ -5563,6 +6189,7 @@ impl Engine {
             let _ = p.save(&self.paths);
         }
         self.relay_health.lock().unwrap().remove(&hex);
+        self.nudge_self_sync(); // the re-add (LWW) rides a prompt pass
         self.emit_changed();
     }
 
@@ -6033,8 +6660,35 @@ impl Engine {
         let mut landed = false;
         // 1) Mirror to EVERY configured Haven relay (redundancy). Content-addressed keys make
         //    re-puts idempotent, and a relay in backoff is skipped — graceful fallback.
+        //    SYMMETRIC with poll_mailbox's ephemeral fallback: a selfsync-learned circle whose
+        //    winning record carried an EMPTY relay list has NO key in prefs.relays (circle-sync
+        //    records only ever learn real associations from announces/sync). Its explicit set is
+        //    empty, so an authored event (post OR reaction/comment — all funnel through here via
+        //    after_author) would upload to ZERO relays and relay-only members (cross-NAT peers,
+        //    the matrix stub) would never receive it. So for such a circle, upload to every ACTIVE
+        //    relay this device knows — exactly what the poll side reads from. Ephemeral by design:
+        //    this never writes prefs.relays.
+        let relay_hexes: Vec<String> = {
+            let p = self.prefs.lock().unwrap();
+            let explicit = p.active_relays_for(circle_id);
+            if !explicit.is_empty() || p.relays.contains_key(circle_id) {
+                explicit
+            } else {
+                p.all_active_relay_hexes()
+                    .into_iter()
+                    .filter(|h| !h.starts_with("s3:"))
+                    .collect()
+            }
+        };
+        // One info line per authored upload so a future empty-relay-set drop (relays=0 → nothing
+        // reaches relay-only members) is visible in the log instead of silently vanishing.
+        log::info!(
+            "upload_event circle={} relays={}",
+            &circle_id.chars().take(16).collect::<String>(),
+            relay_hexes.len()
+        );
         let hosted = self.relay_host.lock().unwrap().as_ref().map(|h| h.node_id_hex());
-        for node_hex in self.relays_for(circle_id) {
+        for node_hex in relay_hexes {
             // Our OWN hosted relay: store directly into the local mailbox (no iroh self-dial).
             if hosted.as_deref() == Some(node_hex.as_str()) {
                 if let Some(h) = self.relay_host.lock().unwrap().as_ref() {
@@ -6044,16 +6698,51 @@ impl Engine {
                 }
                 continue;
             }
-            if let Some(client) = self.relay_client_for(&node_hex).await {
-                match client.put(key.clone(), env.to_vec()).await {
-                    Ok(()) => {
-                        self.mark_relay_ok(&node_hex);
-                        self.dyn_state.lock().unwrap().relay_active = true;
-                        landed = true;
+            // Plain-HTTP FIRST (an HTTP-mailbox-only host — a cloudflared / free-CF / LAN-NAS relay,
+            // the DEFAULT cross-NAT transport — never iroh-dials), then the warm iroh client: the
+            // SAME ladder the mailbox poll + hello-put run, in the same order. upload_event was the
+            // one mailbox-WRITE path still iroh-only, so an authored envelope could only ride the
+            // iroh blob ALPN — which drops on pure-relay cross-NAT paths — and never reached an
+            // HTTP-only relay. That is the SEND half of the exact "iOS put via HTTP, Tauri polled
+            // via iroh, nothing landed" gap poll_mailbox already fixed on the read side: relay-only
+            // members (the matrix stub, cross-NAT peers) never saw this device's posts/reactions.
+            let mut put_ok = false;
+            if let Some((bases, token)) = self.relay_http_reachable(&node_hex) {
+                for base in &bases {
+                    if self.http_url_bad(base) {
+                        continue;
                     }
-                    Err(e) => {
-                        log::debug!("mailbox put failed ({node_hex}): {e}");
-                        self.relay_failed(&node_hex).await;
+                    match self.http_put(base, &token, &key, env.to_vec()).await {
+                        Ok(()) => {
+                            self.mark_relay_ok(&node_hex);
+                            self.dyn_state.lock().unwrap().relay_active = true;
+                            put_ok = true;
+                            landed = true;
+                            break;
+                        }
+                        // Same store behind every URL — a membership refusal stands, don't fall
+                        // through to iroh (it would be refused too) or hammer the other bases.
+                        Err(RelayErr::Forbidden) => {
+                            self.note_refused(&node_hex, "mailbox put");
+                            put_ok = true; // "handled" — skip the iroh leg for a refusal
+                            break;
+                        }
+                        Err(RelayErr::Unreachable) => self.mark_http_url_bad(base),
+                    }
+                }
+            }
+            if !put_ok {
+                if let Some(client) = self.relay_client_for(&node_hex).await {
+                    match client.put(key.clone(), env.to_vec()).await {
+                        Ok(()) => {
+                            self.mark_relay_ok(&node_hex);
+                            self.dyn_state.lock().unwrap().relay_active = true;
+                            landed = true;
+                        }
+                        Err(e) => {
+                            log::debug!("mailbox put failed ({node_hex}): {e}");
+                            self.relay_failed(&node_hex).await;
+                        }
                     }
                 }
             }
@@ -6071,7 +6760,15 @@ impl Engine {
     }
 
     async fn backfill_mailbox(self: &Arc<Self>, circle_id: &str) {
-        let has_relay = !self.relays_for(circle_id).is_empty();
+        // Mirror upload_event's fallback: a selfsync-learned circle with no explicit relay set
+        // (no prefs.relays key) still has somewhere to land if this device knows any active relay,
+        // so the catch-up sweep must not short-circuit it the way an S3-less, relay-less circle is.
+        let has_relay = {
+            let p = self.prefs.lock().unwrap();
+            !p.active_relays_for(circle_id).is_empty()
+                || (!p.relays.contains_key(circle_id)
+                    && p.all_active_relay_hexes().iter().any(|h| !h.starts_with("s3:")))
+        };
         let has_s3 = self.prefs.lock().unwrap().s3.is_some();
         if !has_relay && !has_s3 {
             return;
@@ -6146,6 +6843,10 @@ impl Engine {
 
     pub async fn poll_mailbox(self: &Arc<Self>) {
         let mut changed = false;
+        // Control-plane blobs ROUTED this pass (hellos to me / durable frame-19 announces) — they
+        // change engine/prefs state without being circle events, so they persist+emit on their own.
+        let mut routed_control = false;
+        let mut relay_announced = false;
         // Circles whose engine state changed this pass — notified ONCE each, after ingest,
         // through notify_circle's freshness + dedupe guards. Notifying per changed ENVELOPE
         // (the old shape) fired for key commits and epoch-rotation re-seals of old history
@@ -6156,15 +6857,50 @@ impl Engine {
         // polled first and never reached the rest when their mailbox auth/relay set differed.
         // (`handle_event` already live-delivers for direct/iroh paths.)
         let mut newly_ingested: Vec<(String, Vec<u8>)> = Vec::new();
+        // Every id a stored hello can legitimately address to reach THIS device: the account hex
+        // (the canonical slot addressing) plus my transport device id(s) — a legacy sender
+        // addressed the recipient's TRANSPORT id, and the account-only claim filter dropped those
+        // hellos forever (the "circle invite never arrived" leg of the dead hello lane).
+        let my_hello_ids: Vec<String> = {
+            let acct = self.node_id_hex().to_lowercase();
+            let mut ids = vec![acct.clone(), self.social.my_device_node_hex().to_lowercase()];
+            for d in self.social.device_node_ids_for(acct) {
+                ids.push(d.to_lowercase());
+            }
+            ids.sort();
+            ids.dedup();
+            ids
+        };
         // (circle_id, relay_node_hex) for every circle × every configured relay — reading from
         // all of them means a message present on any reachable relay still arrives.
         let relay_targets: Vec<(String, String)> = {
+            let engine_circles: Vec<String> =
+                self.social.circles().into_iter().map(|c| c.id).collect();
             let prefs = self.prefs.lock().unwrap();
-            prefs
+            let mut out: Vec<(String, String)> = prefs
                 .relays
                 .iter()
                 .flat_map(|(cid, list)| list.iter().map(move |hex| (cid.clone(), hex.clone())))
-                .collect()
+                .collect();
+            // Circles the ENGINE holds but no relay announce / synced circle record has wired yet —
+            // a fresh selfsync-learned circle whose winning record carried an empty relay list, or a
+            // live-adopted DM thread. Un-polled they stay content-less forever (the "photo/DM never
+            // lands on the linked desktop" E2E RED), so read them from every ACTIVE relay. Ephemeral
+            // by design: prefs.relays (what circle-sync records export) only ever learns real
+            // associations from announces/sync, never these fallback guesses.
+            let actives: Vec<String> = prefs
+                .all_active_relay_hexes()
+                .into_iter()
+                .filter(|h| !h.starts_with("s3:"))
+                .collect();
+            for cid in engine_circles {
+                if !prefs.relays.contains_key(&cid) {
+                    for hex in &actives {
+                        out.push((cid.clone(), hex.clone()));
+                    }
+                }
+            }
+            out
         };
         for (circle_id, node_hex) in relay_targets {
             let prefix = format!("haven/mailbox/{circle_id}/");
@@ -6173,20 +6909,44 @@ impl Engine {
             // the linked-device RED: iOS put via HTTP, Tauri polled via iroh, nothing landed.
             let mut keys: Vec<String> = Vec::new();
             let mut got_via_http = false;
+            // Delta-LIST (the idle radio saver): echo the last digest for this (relay, circle) so
+            // an unchanged mailbox is one bodiless 204 instead of a full key dump + N seen-set
+            // walks. The fresh digest is only COMMITTED once this pass's GET batch finished with
+            // no deferrals — otherwise a 204 next poll would skip keys we listed but never fetched.
+            let digest_key = format!("{node_hex}|{circle_id}");
+            let mut fresh_digest: Option<String> = None;
             if let Some((bases, token)) = self.relay_http_reachable(&node_hex) {
+                let cached =
+                    self.dyn_state.lock().unwrap().mailbox_list_digests.get(&digest_key).cloned();
                 for base in &bases {
                     if self.http_url_bad(base) {
                         continue;
                     }
-                    match self.http_list(base, &token, &prefix).await {
-                        Ok(list) => {
+                    match self.http_list_delta(base, &token, &prefix, cached.as_deref()).await {
+                        // 204: byte-identical key set — nothing to walk, nothing to GET.
+                        Ok((None, _)) => {
+                            got_via_http = true;
+                            self.mark_relay_ok(&node_hex);
+                            self.dyn_state.lock().unwrap().relay_active = true;
+                            break;
+                        }
+                        Ok((Some(list), digest)) => {
                             keys = list;
+                            fresh_digest = digest;
                             got_via_http = true;
                             self.mark_relay_ok(&node_hex);
                             break;
                         }
                         Err(RelayErr::Forbidden) => {
-                            self.note_refused(&node_hex, "mailbox list");
+                            // Name the CIRCLE: a bare "mailbox list" hid WHICH prefix a relay was
+                            // refusing (a stale circle vs the one the user is staring at).
+                            self.note_refused(
+                                &node_hex,
+                                &format!(
+                                    "mailbox list {}",
+                                    &circle_id.chars().take(16).collect::<String>()
+                                ),
+                            );
                             let _ = self.heal_forbidden_relays().await;
                         }
                         Err(RelayErr::Unreachable) => {
@@ -6197,8 +6957,12 @@ impl Engine {
             }
             if !got_via_http {
                 let Some(client) = self.relay_client_for(&node_hex).await else { continue };
-                keys = client.list(prefix.clone()).await;
-                self.mark_relay_ok(&node_hex);
+                // list() now surfaces transport errors (was unwrap_or_default, which hid a dead
+                // dial as an empty mailbox); a failed iroh list here just means try the next relay.
+                match client.list(prefix.clone()).await {
+                    Ok(k) => { keys = k; self.mark_relay_ok(&node_hex); }
+                    Err(_) => continue,
+                }
             }
             if !keys.is_empty() {
                 self.dyn_state.lock().unwrap().relay_active = true;
@@ -6208,8 +6972,12 @@ impl Engine {
             // multi-minute 90%+ CPU. 48 opens/pass drains backlog without melting the laptop.
             const MAX_FRESH_PER_PASS: usize = 48;
             let mut fresh = 0usize;
+            // A deferral (cap hit, failed GET, or an envelope that only buffered) means listed
+            // keys remain un-ingested — the fresh LIST digest must NOT be committed below.
+            let mut deferred = false;
             for key in keys {
                 if fresh >= MAX_FRESH_PER_PASS {
+                    deferred = true;
                     break;
                 }
                 // seen_mailbox is keyed by the content-addressed key, so the same envelope
@@ -6217,11 +6985,33 @@ impl Engine {
                 if self.dyn_state.lock().unwrap().seen_mailbox.contains(&key) {
                     continue;
                 }
-                // Live-call frames + HTTP HELLO blobs are not circle events — mark & skip so they
-                // never burn crypto budget on the poll path (iOS handles hellos separately).
-                if key.contains("/__live__/") || key.contains("/__hello__/") {
+                // Live-call frames are claimed by the in-call poll — never content; mark & skip.
+                if key.contains("/__live__/") {
                     self.mark_mailbox_seen(key);
                     continue;
+                }
+                // Control-plane blobs are ROUTED below, not fed to receive() (iOS pullMailbox
+                // parity): a `__hello__/` blob is a connection request and a `__relay__/` blob is
+                // a durable frame-19 announce. Feeding them to receive() burned crypto budget
+                // forever (announces never open) or dropped them on the floor (hellos to me).
+                let is_hello = key.contains("/__hello__/");
+                let is_relay_announce = key.contains("/__relay__/");
+                // A hello names its recipient IN THE KEY, so filter BEFORE spending a GET: claim
+                // it for any of MY ids, and skip one addressed to someone else WITHOUT marking it
+                // seen — it isn't ours to retire (mark-and-drop was how this device buried hellos
+                // it would recognize under a later claim set), and unfetched it costs nothing.
+                if is_hello {
+                    let parts: Vec<&str> = key.split('/').collect();
+                    let to = parts
+                        .iter()
+                        .position(|p| *p == "__hello__")
+                        .and_then(|i| parts.get(i + 1))
+                        .map(|s| s.to_lowercase());
+                    let mine =
+                        to.map(|t| my_hello_ids.iter().any(|m| *m == t)).unwrap_or(false);
+                    if !mine {
+                        continue;
+                    }
                 }
                 // Prefer HTTP GET when we listed over HTTP (same URL set).
                 let env = if got_via_http {
@@ -6238,7 +7028,14 @@ impl Engine {
                                 }
                                 Ok(None) => {}
                                 Err(RelayErr::Forbidden) => {
-                                    self.note_refused(&node_hex, "mailbox get");
+                                    self.note_refused(
+                                        &node_hex,
+                                        &format!(
+                                            "mailbox get {}",
+                                            key.rsplit('/').next().unwrap_or(&key)
+                                                .chars().take(16).collect::<String>()
+                                        ),
+                                    );
                                 }
                                 Err(RelayErr::Unreachable) => {
                                     self.mark_http_url_bad(base);
@@ -6254,21 +7051,74 @@ impl Engine {
                 } else {
                     None
                 };
-                let Some(env) = env else { continue };
+                let Some(env) = env else {
+                    deferred = true;
+                    continue;
+                };
                 // Only mark seen after a successful open (iOS parity). Marking first left
                 // epoch-buffered envelopes permanently unretried — the linked-matrix
                 // "story green / photo+video RED" shape when commit landed after the first poll.
                 let env_len = env.len();
                 fresh += 1; // count attempts (open or buffer) toward the pass budget
-                if self.social.receive(circle_id.clone(), env.clone()).unwrap_or(false) {
-                    self.mark_mailbox_seen(key);
-                    changed = true;
-                    changed_circles.insert(circle_id.clone());
-                    newly_ingested.push((circle_id.clone(), env));
+                if is_hello {
+                    // Addressed to me (filtered above the GET) — route into the pending-request
+                    // path (the rest of the circle's requests ride the same shared prefix).
+                    self.handle_hello(&env);
+                    routed_control = true;
                     log::info!(
-                        "mailbox ingest circle={} via_http={got_via_http} bytes={env_len}",
-                        &circle_id.chars().take(12).collect::<String>(),
+                        "hello mailbox-ingest circle={}",
+                        &circle_id.chars().take(12).collect::<String>()
                     );
+                    self.mark_mailbox_seen(key);
+                    continue;
+                }
+                if is_relay_announce {
+                    // Durable frame-19: friends who can't iroh-dial the host still learn the relay
+                    // (+ public media URLs/token) from the mailbox — iOS handleRelayNode parity.
+                    if self.ingest_relay_announce(&env).is_some() {
+                        routed_control = true;
+                        relay_announced = true;
+                    }
+                    self.mark_mailbox_seen(key);
+                    continue;
+                }
+                match self.social.receive(circle_id.clone(), env.clone()) {
+                    Ok(true) => {
+                        self.mark_mailbox_seen(key);
+                        changed = true;
+                        changed_circles.insert(circle_id.clone());
+                        newly_ingested.push((circle_id.clone(), env));
+                        log::info!(
+                            "mailbox ingest circle={} via_http={got_via_http} bytes={env_len}",
+                            &circle_id.chars().take(12).collect::<String>(),
+                        );
+                    }
+                    Ok(false) => {
+                        // Buffered (epoch key / roster not here yet) or an already-held duplicate —
+                        // the key stays unseen and must re-GET. This silence is what made a stuck
+                        // envelope invisible for 20 minutes, so name the key at debug level.
+                        log::debug!(
+                            "mailbox receive deferred circle={} key={} bytes={env_len} (buffered/dup)",
+                            &circle_id.chars().take(12).collect::<String>(),
+                            key.rsplit('/').next().unwrap_or(&key).chars().take(16).collect::<String>(),
+                        );
+                        deferred = true;
+                    }
+                    Err(e) => {
+                        // A hard per-key failure (malformed envelope, verify error) was previously
+                        // indistinguishable from "buffered" — log it once per attempt.
+                        log::warn!(
+                            "mailbox receive FAILED circle={} key={} bytes={env_len}: {e}",
+                            &circle_id.chars().take(12).collect::<String>(),
+                            key.rsplit('/').next().unwrap_or(&key).chars().take(16).collect::<String>(),
+                        );
+                        deferred = true;
+                    }
+                }
+            }
+            if !deferred {
+                if let Some(d) = fresh_digest {
+                    self.dyn_state.lock().unwrap().mailbox_list_digests.insert(digest_key, d);
                 }
             }
         }
@@ -6287,19 +7137,35 @@ impl Engine {
                         Ok(Some(e)) => e,
                         _ => continue,
                     };
-                    if self.social.receive(c.id.clone(), env.clone()).unwrap_or(false) {
-                        self.mark_mailbox_seen(key);
-                        changed = true;
-                        changed_circles.insert(c.id.clone());
-                        newly_ingested.push((c.id.clone(), env));
+                    match self.social.receive(c.id.clone(), env.clone()) {
+                        Ok(true) => {
+                            self.mark_mailbox_seen(key);
+                            changed = true;
+                            changed_circles.insert(c.id.clone());
+                            newly_ingested.push((c.id.clone(), env));
+                        }
+                        Ok(false) => {}
+                        Err(e) => log::warn!(
+                            "s3 mailbox receive FAILED circle={} key={}: {e}",
+                            &c.id.chars().take(12).collect::<String>(),
+                            key.rsplit('/').next().unwrap_or(&key).chars().take(16).collect::<String>(),
+                        ),
                     }
                 }
             }
+        }
+        if relay_announced {
+            self.refresh_haven_fabric();
         }
         for cid in changed_circles {
             self.notify_circle(&cid);
         }
         self.flush_seen_mailbox();
+        if routed_control && !changed {
+            // A hello/announce changed engine/prefs state without any circle event ingesting.
+            self.persist();
+            self.emit_changed();
+        }
         if changed {
             if !newly_ingested.is_empty() {
                 let payloads: Vec<Vec<u8>> = newly_ingested
@@ -6307,6 +7173,17 @@ impl Engine {
                     .map(|(cid, env)| wire::event_payload(cid, env))
                     .collect();
                 self.live_deliver_many_to_my_devices(wire::EVENT, payloads);
+                // Push leg of the same fan-out: a silent syncSelf wake with the inline event so my
+                // SLEEPING devices ingest without their own mailbox round-trip (iOS parity; capped
+                // — a cold-drain backlog still converges via their poll).
+                for (_cid, env) in newly_ingested.iter().take(10) {
+                    self.push_wake(
+                        &self.node_id_hex(),
+                        None,
+                        Some(base64::engine::general_purpose::STANDARD.encode(env)),
+                        true,
+                    );
+                }
             }
             self.bump_activity(); // a message arrived → keep sync tight while the conversation is live
             self.persist();
@@ -6319,7 +7196,7 @@ impl Engine {
     /// is genuinely fresh (< 10 min) and hasn't been notified before (persisted dedupe). The
     /// change signal alone also fires for key commits, backfilled history, and epoch-rotation
     /// re-seals of old events; none of those deserve a banner.
-    fn notify_circle(&self, circle_id: &str) {
+    fn notify_circle(self: &Arc<Self>, circle_id: &str) {
         let feed = self.social.feed(circle_id.to_string(), now_ms(), None);
         let Some(newest) = feed.iter().filter(|i| !i.is_me).max_by_key(|i| i.created_at) else { return };
         if now_ms().saturating_sub(newest.created_at) > 10 * 60 * 1000 {
@@ -6377,12 +7254,94 @@ impl Engine {
             Some(copy.kind),
             &detail,
         );
-        let title = if use_name {
+        let title: String = if use_name {
             if author.is_empty() { "Someone".into() } else { author }
         } else {
             "Haven".into()
         };
-        self.notify(&title, &body);
+        // The tap target: DMs open the Messages thread, circle posts open the post — routed through
+        // the same DeepLink table a pasted link uses. (The OS toast itself still only raises the
+        // window — see notify_with_link — but the in-app toast and the bell row both jump.)
+        let link = wire::interaction_link(circle_id, Some(&newest.id));
+        // PREFETCH-BEFORE-NOTIFY: pull the item's small companions (thumbs, posters, images) so
+        // that by the time the user acts on the banner the card has real pixels, not placeholders.
+        // Bounded + time-capped; videos never prefetch here.
+        let mut prefetch: Vec<String> = Self::thumb_refs(&newest.media);
+        prefetch.extend(
+            newest.media.iter().filter_map(|m| haven_p2p::mediavariants::parse_poster(m).map(|(_, p)| p.to_string())),
+        );
+        prefetch.extend(
+            haven_p2p::mediavariants::display_refs(&newest.media)
+                .into_iter()
+                .filter(|r| r.starts_with("img_") || r.starts_with("i:")),
+        );
+        prefetch.dedup();
+        prefetch.truncate(4);
+        prefetch.retain(|r| !LocalMedia::is_synthetic(r) && !self.media.has(r) && !self.evicted_contains(r));
+        let me = self.clone();
+        let cid = circle_id.to_string();
+        tauri::async_runtime::spawn(async move {
+            for r in &prefetch {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    me.fetch_media_healing(&cid, r),
+                )
+                .await;
+            }
+            if !prefetch.is_empty() {
+                me.emit_changed();
+            }
+            me.notify_with_link(&title, &body, Some(&link));
+        });
+    }
+
+    // ---- `thumb:` companions (MediaVariants parity — tiny compose-time previews) ----------
+
+    /// `thumb:<content>:<thumb>` → (content, thumb). Desktop mirror of Apple
+    /// `MediaVariants.parseThumb` (the Rust core doesn't carry thumb helpers yet).
+    fn parse_thumb_marker(r: &str) -> Option<(&str, &str)> {
+        let rest = r.strip_prefix("thumb:")?;
+        let colon = rest.rfind(':')?;
+        let (content, thumb) = rest.split_at(colon);
+        let thumb = &thumb[1..];
+        if content.is_empty() || thumb.is_empty() {
+            None
+        } else {
+            Some((content, thumb))
+        }
+    }
+
+    /// Every thumb image ref a media list declares (≤32KB by contract — prefetched everywhere).
+    fn thumb_refs(media: &[String]) -> Vec<String> {
+        media.iter().filter_map(|r| Self::parse_thumb_marker(r).map(|(_, t)| t.to_string())).collect()
+    }
+
+    /// Relay-upload order for a fresh post's media: thumbs FIRST (tiny — they unblock every
+    /// member's placeholder), then posters, then content in list order. Markers/synthetic refs
+    /// (they carry no bytes) are dropped. Mirrors Apple `MediaVariants.uploadOrder`.
+    fn upload_order(media: &[String]) -> Vec<String> {
+        let thumbs = Self::thumb_refs(media);
+        let posters: Vec<String> = media
+            .iter()
+            .filter_map(|r| haven_p2p::mediavariants::parse_poster(r).map(|(_, p)| p.to_string()))
+            .collect();
+        let rank = |r: &String| {
+            if thumbs.contains(r) {
+                0
+            } else if posters.contains(r) {
+                1
+            } else {
+                2
+            }
+        };
+        // Thumbs ride only inside their marker, so surface them explicitly, then the real refs.
+        let mut out: Vec<String> = thumbs.clone();
+        out.extend(media.iter().filter(|r| !LocalMedia::is_synthetic(r)).cloned());
+        out.dedup();
+        let mut indexed: Vec<(usize, String)> = out.into_iter().enumerate().collect();
+        indexed.sort_by_key(|(i, r)| (rank(r), *i));
+        let mut seen = std::collections::HashSet::new();
+        indexed.into_iter().map(|(_, r)| r).filter(|r| seen.insert(r.clone())).collect()
     }
 
     fn flush_notified(&self) {
@@ -6509,7 +7468,12 @@ impl Engine {
         // them again this session just re-downloads the same unopenable bytes; only the author's
         // re-seal can fix them, and the set is dropped on restart so a repair is picked up.
         let unopenable = self.dyn_state.lock().unwrap().media_unopenable.clone();
-        let mut missing: Vec<(String, String)> = vec![]; // (ref, circleId)
+        let now = now_ms();
+        // A ref on an event < 5 min old rides the FRESH lane below: its author is right there
+        // uploading it, so it retries at 5s..90s instead of waiting out the 5-min throttle.
+        const FRESH_WINDOW_MS: u64 = 5 * 60 * 1000;
+        let mut missing: Vec<(String, String, bool)> = vec![]; // (ref, circleId, fresh)
+        let mut thumbs: Vec<(String, String)> = vec![]; // declared `thumb:` companions, missing
         for c in self.social.circles() {
             let feed = self.social.feed(c.id.clone(), now_ms(), None);
             for item in feed {
@@ -6518,15 +7482,22 @@ impl Engine {
                 // Skip refs the user DELIBERATELY evicted (#3 cleanup screen / #4 limit sweep): auto-
                 // refetching them would silently undo the space the user just freed — they re-download
                 // only on an explicit "Download" tap (media_download clears the eviction first).
+                let fresh = now.saturating_sub(item.created_at) < FRESH_WINDOW_MS;
+                for t in Self::thumb_refs(&item.media) {
+                    if !self.media.has(&t) && !unopenable.contains(&t) && !thumbs.iter().any(|(tt, _)| tt == &t) {
+                        thumbs.push((t, c.id.clone()));
+                    }
+                }
                 for r in item.media {
-                    if !LocalMedia::is_synthetic(&r) && !self.media.has(&r) && !self.evicted_contains(&r) && !unopenable.contains(&r) && !missing.iter().any(|(rr, _)| rr == &r) {
-                        missing.push((r, c.id.clone()));
+                    if !LocalMedia::is_synthetic(&r) && !self.media.has(&r) && !self.evicted_contains(&r) && !unopenable.contains(&r) && !missing.iter().any(|(rr, _, _)| rr == &r) {
+                        missing.push((r, c.id.clone(), fresh));
                     }
                 }
                 for cm in item.comments {
+                    let cm_fresh = now.saturating_sub(cm.created_at) < FRESH_WINDOW_MS;
                     for r in cm.media {
-                        if !LocalMedia::is_synthetic(&r) && !self.media.has(&r) && !self.evicted_contains(&r) && !unopenable.contains(&r) && !missing.iter().any(|(rr, _)| rr == &r) {
-                            missing.push((r, c.id.clone()));
+                        if !LocalMedia::is_synthetic(&r) && !self.media.has(&r) && !self.evicted_contains(&r) && !unopenable.contains(&r) && !missing.iter().any(|(rr, _, _)| rr == &r) {
+                            missing.push((r, c.id.clone(), cm_fresh));
                         }
                     }
                 }
@@ -6536,27 +7507,70 @@ impl Engine {
         // on every 15s sweep, so a backlog of missing media flooded the network with hundreds of thousands
         // of frames per cycle, drowning real delivery (the iOS "nothing communicates" flood). Direct-request
         // each ref at most once per 5 min, and only a handful per cycle — the relay/mailbox restore below is
-        // the real, idempotent path and runs unthrottled.
-        let now = now_ms();
+        // the real, idempotent path and runs unthrottled. FRESH refs ride their own 5s..90s lane
+        // instead (then park and age into this throttle naturally).
+        const FAST_STEPS: [u64; 5] = [5_000, 10_000, 20_000, 45_000, 90_000];
         let mut direct_budget = 8;
         {
             let mut st = self.dyn_state.lock().unwrap();
             if st.media_req_at.len() > 4000 {
                 st.media_req_at.clear(); // bound the throttle map
             }
+            if st.fast_req.len() > 500 {
+                st.fast_req.clear();
+            }
         }
-        for (reference, circle_id) in missing {
+        // Thumbs: no lanes, no data-saver gate — tiny by contract; a plain 90s per-ref throttle.
+        for (t, cid) in thumbs {
+            {
+                let mut st = self.dyn_state.lock().unwrap();
+                if st.thumb_req_at.get(&t).is_some_and(|&at| now.saturating_sub(at) < 90_000) {
+                    continue;
+                }
+                st.thumb_req_at.insert(t.clone(), now);
+                if st.thumb_req_at.len() > 2000 {
+                    st.thumb_req_at.clear();
+                }
+            }
+            let me = self.clone();
+            tauri::async_runtime::spawn(async move {
+                if me.fetch_media_healing(&cid, &t).await {
+                    me.emit_changed();
+                }
+            });
+        }
+        // Fresh refs first so the shared per-cycle budget favors the post someone is watching land.
+        let mut missing = missing;
+        missing.sort_by_key(|(_, _, fresh)| !*fresh);
+        let mut fast_active = false;
+        for (reference, circle_id, fresh) in missing {
             // Decide direct-eligibility up front (cooldown + per-cycle budget) so the spawned task only
             // peer-blasts when the gate allows; the relay restore always runs.
             let direct_ok = {
                 let mut st = self.dyn_state.lock().unwrap();
-                let stale = st.media_req_at.get(&reference).map(|&t| now - t > 300_000).unwrap_or(true);
-                if stale && direct_budget > 0 {
-                    st.media_req_at.insert(reference.clone(), now);
-                    direct_budget -= 1;
-                    true
+                if fresh {
+                    // FRESH lane: 5s/10s/20s/45s/90s, then park (the ref ages into the old lane).
+                    let (n, due) = st.fast_req.get(&reference).copied().unwrap_or((0, 0));
+                    if (n as usize) < FAST_STEPS.len() {
+                        fast_active = true;
+                    }
+                    if (n as usize) < FAST_STEPS.len() && now >= due && direct_budget > 0 {
+                        st.fast_req.insert(reference.clone(), (n + 1, now + FAST_STEPS[n as usize]));
+                        st.media_req_at.insert(reference.clone(), now);
+                        direct_budget -= 1;
+                        true
+                    } else {
+                        false
+                    }
                 } else {
-                    false
+                    let stale = st.media_req_at.get(&reference).map(|&t| now - t > 300_000).unwrap_or(true);
+                    if stale && direct_budget > 0 {
+                        st.media_req_at.insert(reference.clone(), now);
+                        direct_budget -= 1;
+                        true
+                    } else {
+                        false
+                    }
                 }
             };
             let me = self.clone();
@@ -6586,6 +7600,22 @@ impl Engine {
                 // finishes on its missing chunks instead of re-sending everything each sweep.
                 me.ask_for_media(&reference, &my_hex, payload, ids);
             });
+        }
+        // Re-arm while any fresh-lane retry is pending — the ordinary sweeps run on a much coarser
+        // cadence than 5s. Single-flight so bursts of calls can't stack timers.
+        if fast_active {
+            let arm = {
+                let mut st = self.dyn_state.lock().unwrap();
+                !std::mem::replace(&mut st.fast_sweep_armed, true)
+            };
+            if arm {
+                let me = self.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    me.dyn_state.lock().unwrap().fast_sweep_armed = false;
+                    me.request_missing_media();
+                });
+            }
         }
     }
 
@@ -6653,26 +7683,45 @@ impl Engine {
         }
     }
 
-    /// LIST keys under a store prefix over the plain-HTTP interface (matrix / free CF path where
-    /// iroh dial to the stub never lands). Signed over `prefix` like Android/iOS.
-    async fn http_list(&self, base: &str, token: &str, prefix: &str) -> Result<Vec<String>, RelayErr> {
+    /// Delta-LIST (the radio saver): echo the last-seen `X-Haven-List-Digest` for this prefix and
+    /// an UNCHANGED key set comes back as a bodiless 204 (`keys == None`) instead of the same list
+    /// again. A 200 carries the fresh keys plus the digest to echo next time. A relay that doesn't
+    /// speak the header simply never answers 204 and never hands us a digest — today's behavior.
+    async fn http_list_delta(
+        &self,
+        base: &str,
+        token: &str,
+        prefix: &str,
+        digest: Option<&str>,
+    ) -> Result<(Option<Vec<String>>, Option<String>), RelayErr> {
         let auth = self.http_auth(token, "GET", prefix, b"").ok_or(RelayErr::Unreachable)?;
-        let resp = self
+        let mut req = self
             .http
             .get(Self::http_list_url(base, prefix))
-            .header("authorization", auth)
-            .send()
-            .await
-            .map_err(|_| RelayErr::Unreachable)?;
+            .header("authorization", auth);
+        if let Some(d) = digest.filter(|d| !d.is_empty()) {
+            req = req.header(haven_net::httprelay::LIST_DIGEST_HEADER, d);
+        }
+        let resp = req.send().await.map_err(|_| RelayErr::Unreachable)?;
+        let resp_digest = resp
+            .headers()
+            .get(haven_net::httprelay::LIST_DIGEST_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
         match resp.status().as_u16() {
+            204 => Ok((None, resp_digest)), // nothing new — skip the GETs
             200..=299 => {
                 let text = resp.text().await.map_err(|_| RelayErr::Unreachable)?;
-                Ok(text
-                    .lines()
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty())
-                    .map(str::to_string)
-                    .collect())
+                Ok((
+                    Some(
+                        text.lines()
+                            .map(str::trim)
+                            .filter(|l| !l.is_empty())
+                            .map(str::to_string)
+                            .collect(),
+                    ),
+                    resp_digest,
+                ))
             }
             401 | 403 => Err(RelayErr::Forbidden),
             _ => Err(RelayErr::Unreachable),
@@ -6743,9 +7792,9 @@ impl Engine {
         }
     }
 
-    async fn upload_media(self: &Arc<Self>, circle_id: &str, reference: &str) {
+    async fn upload_media(self: &Arc<Self>, circle_id: &str, reference: &str) -> bool {
         if self.upload_media_inner(circle_id, reference, false).await {
-            return;
+            return true;
         }
         // Nothing took the blob and at least one relay REFUSED it rather than being down: publish our
         // roster to the refusers and try once more, exactly as `fetch_media_healing` does for the read
@@ -6753,8 +7802,63 @@ impl Engine {
         // — and because that upload failure is invisible, the damage surfaces much later as a fetch
         // that genuinely 404s, an absence manufactured entirely by a permissions problem.
         if self.heal_forbidden_relays().await {
-            self.upload_media_inner(circle_id, reference, false).await;
+            return self.upload_media_inner(circle_id, reference, false).await;
         }
+        false
+    }
+
+    /// PRIORITY LANE for a just-authored event's media: upload thumbs first, then posters, then
+    /// content (see `upload_order` — the placeholder-feeding bytes land before the big blob starts),
+    /// and ANNOUNCE each fresh blob to the circle the moment it lands (frame 32 + a silent push
+    /// wake) so members prefetch NOW instead of on their next missing-media sweep. Mirrors iOS
+    /// `MediaBackupQueue`'s priority lane + `announceMediaLanded`.
+    fn upload_authored_media(self: &Arc<Self>, circle_id: String, media: Vec<String>) {
+        if media.is_empty() {
+            return;
+        }
+        let ordered = Self::upload_order(&media);
+        let authored_at = now_ms();
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move {
+            for r in ordered {
+                let landed = me.upload_media(&circle_id, &r).await;
+                // Only a FRESH post's landing is worth announcing — a slow backlog drain isn't news.
+                if landed && now_ms().saturating_sub(authored_at) < 600_000 {
+                    me.announce_media_landed(&circle_id, &r);
+                }
+            }
+        });
+    }
+
+    /// Author push-ahead (frame 32): tell every member a fresh post's blob is now on a relay, plus
+    /// a silent push wake so a backgrounded phone fetches before its user opens the app. Unsolicited
+    /// on the receiving side — their `handle_media_available` prefetches bounded + deduped.
+    fn announce_media_landed(self: &Arc<Self>, circle_id: &str, reference: &str) {
+        let post_id = self
+            .social
+            .feed(circle_id.to_string(), now_ms(), None)
+            .into_iter()
+            .find(|i| {
+                i.is_me
+                    && (i.media.iter().any(|m| m == reference)
+                        || Self::thumb_refs(&i.media).iter().any(|t| t == reference)
+                        || i.media
+                            .iter()
+                            .filter_map(|m| haven_p2p::mediavariants::parse_poster(m))
+                            .any(|(_, po)| po == reference))
+            })
+            .map(|i| i.id)
+            .unwrap_or_default();
+        let body = self.media_frame_body(reference, circle_id, &post_id);
+        for member in self.social.contact_node_ids(circle_id.to_string()) {
+            self.send_call_frame(wire::MEDIA_AVAILABLE, &body, &member);
+            self.push_wake(&member, None, None, true);
+        }
+        log::info!(
+            "media-landed {} announced to circle {}",
+            &reference.chars().take(10).collect::<String>(),
+            &circle_id.chars().take(12).collect::<String>()
+        );
     }
 
     /// `force` = the 1.0.8 media-recovery path: skip every "already held?" probe and the persisted
@@ -7001,6 +8105,62 @@ impl Engine {
         landed
     }
 
+    // ---- Resumable chunked RESTORE bookkeeping ------------------------------------------------
+    // A chunked relay download used to be all-or-nothing: any chunk miss threw the part file away,
+    // so a 600 MB video over a flaky tunnel restarted from chunk 0 every retry — the mirror image
+    // of the upload-resume problem (`mediaresume` fixed the peer path). Chunks are fetched IN
+    // ORDER and appended, so resume state is just "how many leading chunks are in the part file",
+    // persisted in a sidecar next to it. The manifest's chunk count keys validity: a mismatch
+    // (a different seal uploaded meanwhile) discards the partial. iOS SharedStore parity.
+
+    fn restore_meta_path(part: &std::path::Path) -> std::path::PathBuf {
+        let name = part.file_name().and_then(|n| n.to_str()).unwrap_or("part");
+        part.with_file_name(format!("{name}.resume"))
+    }
+
+    /// How many leading chunks of `reference` are already on disk (0 = no valid partial).
+    fn restore_resume_load(&self, reference: &str, chunks: usize) -> usize {
+        let part = self.media.sealed_part_path(reference);
+        let Ok(txt) = std::fs::read_to_string(Self::restore_meta_path(&part)) else { return 0 };
+        let mut it = txt.split_whitespace();
+        let (Some(c), Some(g)) = (
+            it.next().and_then(|v| v.parse::<usize>().ok()),
+            it.next().and_then(|v| v.parse::<usize>().ok()),
+        ) else {
+            return 0;
+        };
+        if c == chunks && g > 0 && g <= chunks && part.exists() {
+            g
+        } else {
+            0
+        }
+    }
+
+    fn restore_resume_save(&self, reference: &str, chunks: usize, got: usize) {
+        let part = self.media.sealed_part_path(reference);
+        let _ = std::fs::write(Self::restore_meta_path(&part), format!("{chunks} {got}"));
+    }
+
+    fn restore_resume_clear(&self, reference: &str) {
+        let part = self.media.sealed_part_path(reference);
+        let _ = std::fs::remove_file(Self::restore_meta_path(&part));
+    }
+
+    /// Open (or start) the resumable part file for `reference` given the manifest's chunk count.
+    /// Returns (part path, chunks already held).
+    fn restore_resume_open(&self, reference: &str, chunks: usize) -> (std::path::PathBuf, usize) {
+        let have = self.restore_resume_load(reference, chunks);
+        if have == 0 {
+            (self.media.new_sealed_part(reference), 0)
+        } else {
+            log::info!(
+                "media restore {}: resuming at chunk {have}/{chunks}",
+                &reference.chars().take(12).collect::<String>()
+            );
+            (self.media.sealed_part_path(reference), have)
+        }
+    }
+
     async fn fetch_media_from_relay(self: &Arc<Self>, circle_id: &str, reference: &str) -> bool {
         let key = Self::media_key(reference);
         // S3/HTTP bucket FIRST — the DEFAULT media transport (see upload_media): an iroh blob dial
@@ -7008,18 +8168,21 @@ impl Engine {
         if let Some(s3) = self.s3_client().await {
             if let Ok(Some(head)) = s3.get(&key).await {
                 if let Some(count) = Self::parse_manifest(&head) {
-                    let part = self.media.new_sealed_part(reference);
+                    let (part, have) = self.restore_resume_open(reference, count);
                     let mut ok = true;
-                    for i in 0..count {
+                    for i in have..count {
                         match s3.get(&Self::media_chunk_key(reference, i)).await {
-                            Ok(Some(chunk)) if self.media.append_sealed_part(&part, &chunk) => {}
+                            Ok(Some(chunk)) if self.media.append_sealed_part(&part, &chunk) => {
+                                self.restore_resume_save(reference, count, i + 1);
+                            }
                             _ => { ok = false; break; }
                         }
                     }
                     if ok && self.media.adopt_sealed_part(reference, &part) {
+                        self.restore_resume_clear(reference);
                         return true;
                     }
-                    let _ = std::fs::remove_file(&part);
+                    // KEEP the partial + sidecar — the next attempt resumes where this one stalled.
                 } else {
                     self.media.write_raw_sealed(reference, &head);
                     return true;
@@ -7049,19 +8212,22 @@ impl Engine {
                         Ok(None) => { http_miss = true; break; } // reachable, doesn't hold it
                         Ok(Some(head)) => {
                             if let Some(count) = Self::parse_manifest(&head) {
-                                let part = self.media.new_sealed_part(reference);
+                                let (part, have) = self.restore_resume_open(reference, count);
                                 let mut ok = true;
-                                for i in 0..count {
+                                for i in have..count {
                                     match self.http_get(base, &token, &Self::media_chunk_key(reference, i)).await {
-                                        Ok(Some(chunk)) if self.media.append_sealed_part(&part, &chunk) => {}
+                                        Ok(Some(chunk)) if self.media.append_sealed_part(&part, &chunk) => {
+                                            self.restore_resume_save(reference, count, i + 1);
+                                        }
                                         _ => { ok = false; break; }
                                     }
                                 }
                                 if ok && self.media.adopt_sealed_part(reference, &part) {
+                                    self.restore_resume_clear(reference);
                                     self.mark_relay_ok(&node_hex);
                                     return true;
                                 }
-                                let _ = std::fs::remove_file(&part);
+                                // Partial + sidecar kept — the retry resumes on the missing chunks.
                             } else {
                                 self.mark_relay_ok(&node_hex);
                                 self.media.write_raw_sealed(reference, &head);
@@ -7079,20 +8245,24 @@ impl Engine {
             if let Some(client) = self.relay_client_for(&node_hex).await {
                 if let Some(head) = client.get(key.clone()).await {
                     if let Some(count) = Self::parse_manifest(&head) {
-                        // Stream each chunk to a temp file on disk — never the whole blob in RAM.
-                        let part = self.media.new_sealed_part(reference);
+                        // Stream each chunk to the resumable part file on disk — never the whole
+                        // blob in RAM, never chunk 0 again after a stall.
+                        let (part, have) = self.restore_resume_open(reference, count);
                         let mut ok = true;
-                        for i in 0..count {
+                        for i in have..count {
                             match client.get(Self::media_chunk_key(reference, i)).await {
-                                Some(chunk) if self.media.append_sealed_part(&part, &chunk) => {}
+                                Some(chunk) if self.media.append_sealed_part(&part, &chunk) => {
+                                    self.restore_resume_save(reference, count, i + 1);
+                                }
                                 _ => { ok = false; break; }
                             }
                         }
                         if ok && self.media.adopt_sealed_part(reference, &part) {
+                            self.restore_resume_clear(reference);
                             self.mark_relay_ok(&node_hex);
                             return true;
                         }
-                        let _ = std::fs::remove_file(&part);
+                        // Partial + sidecar kept for the next attempt.
                         continue;
                     }
                     self.mark_relay_ok(&node_hex);
@@ -7707,12 +8877,23 @@ impl Engine {
         if !self.is_contact(&from) {
             return;
         }
-        // Only act on something we actually asked for — an unsolicited "it's back" is just noise.
+        // Something we asked for → the full "it's back" flow below. Anything else is the author's
+        // push-ahead announce (their fresh post's media just landed on a relay): prefetch it
+        // quietly — bounded, deduped, data-saver aware — with NO notification; the post's own
+        // banner is the news, this is just its media arriving on time.
         {
             let mut p = self.prefs.lock().unwrap();
-            let Some(i) = p.media_wanted.iter().position(|r| *r == reference) else { return };
-            p.media_wanted.remove(i);
-            let _ = p.save(&self.paths);
+            match p.media_wanted.iter().position(|r| *r == reference) {
+                Some(i) => {
+                    p.media_wanted.remove(i);
+                    let _ = p.save(&self.paths);
+                }
+                None => {
+                    drop(p);
+                    self.prefetch_announced_media(&reference, &circle_id);
+                    return;
+                }
+            }
         }
         self.clear_evicted(&reference);
         self.media_download(reference.clone()); // pull it now, while we know it's there
@@ -7727,6 +8908,51 @@ impl Engine {
         );
         log::info!("media-wanted {}: author says it's back — fetching", short(&reference));
         self.emit_changed();
+    }
+
+    /// Act on an UNSOLICITED frame-32 announce (author push-ahead): fetch the just-landed blob so
+    /// it's here before the user opens the post. Bounded: per-ref 60s throttle, skip held/evicted/
+    /// synthetic refs, and under super data saver only small kinds prefetch (videos stay
+    /// tap-to-play). Mirrors the iOS `handleMediaAvailable` push-ahead branch.
+    fn prefetch_announced_media(self: &Arc<Self>, reference: &str, circle_id: &str) {
+        if LocalMedia::is_synthetic(reference)
+            || self.media.has(reference)
+            || self.evicted_contains(reference)
+        {
+            return;
+        }
+        if self.prefs.lock().unwrap().super_data_saver
+            && !(reference.starts_with("img_")
+                || reference.starts_with("i:")
+                || reference.starts_with("aud_")
+                || reference.starts_with("a:")
+                || reference.starts_with("file_"))
+        {
+            return;
+        }
+        {
+            let mut st = self.dyn_state.lock().unwrap();
+            let now = now_ms();
+            if st.announced_media_at.get(reference).is_some_and(|&at| now.saturating_sub(at) < 60_000) {
+                return;
+            }
+            st.announced_media_at.insert(reference.to_string(), now);
+            if st.announced_media_at.len() > 1000 {
+                st.announced_media_at.clear();
+            }
+        }
+        let me = self.clone();
+        let reference = reference.to_string();
+        let circle_id = circle_id.to_string();
+        tauri::async_runtime::spawn(async move {
+            if me.fetch_media_healing(&circle_id, &reference).await {
+                me.emit_changed();
+                log::info!(
+                    "media push-ahead {}: prefetched on announce",
+                    &reference.chars().take(10).collect::<String>()
+                );
+            }
+        });
     }
 
     /// A contact's FULL node id from the short (8-hex) author id a feed item carries — the short id
@@ -8211,8 +9437,16 @@ impl Engine {
         }
         let transports = self.gather_self_sync_transports().await;
         if transports.is_empty() {
+            // Permanent breadcrumb: the silent early return here is what made the dead lane
+            // undebuggable (an empty transport list looks identical to a healthy no-op pass).
+            log::info!("selfsync: no transport (no active relay, no S3) — pass skipped");
             return; // needs a relay OR an S3 bucket
         }
+        log::info!(
+            "selfsync pass: account={} transports=[{}]",
+            &account_hex.chars().take(8).collect::<String>(),
+            transports.iter().map(|t| t.label()).collect::<Vec<_>>().join(",")
+        );
 
         // §6: a seedless survivor first checks the keygrant mailbox — if the primary rotated the key
         // on a revocation, adopt the new epoch/key before reading (else it opens nothing at the new
@@ -8283,15 +9517,26 @@ impl Engine {
         );
         for t in &transports {
             let keys = self.self_sync_list(t, &prefix).await;
+            let listed = keys.len();
+            let (mut fetched, mut opened) = (0usize, 0usize);
             for key in keys {
                 if key == own_key {
                     continue;
                 }
                 let Some(blob) = self.self_sync_fetch(t, &key).await else { continue };
+                fetched += 1;
                 if let Ok(peer) = AccountState::open_any(&blob, seed_key.as_ref(), &accepted) {
+                    opened += 1;
                     base.merge(&peer);
                 }
             }
+            // Per-transport outcome (counts only, never contents): `opened < fetched` is a key-
+            // derivation/epoch mismatch, `fetched < listed-1` a GET failure, `listed == 0` an
+            // empty/refused LIST — each of which previously failed in total silence.
+            log::info!(
+                "selfsync {}: listed={listed} peer_slots_fetched={fetched} opened={opened}",
+                t.label()
+            );
         }
 
         let changed = base.to_bytes() != pre_merge;
@@ -8311,6 +9556,10 @@ impl Engine {
             self.persist();
             self.emit_changed();
         }
+        log::info!(
+            "selfsync converged: entries={} merged_change={changed} applied={applied}",
+            entries.len()
+        );
         let _ = std::fs::write(self.paths.selfsync_state_file(), base.to_bytes());
 
         // 5. Re-publish our own slot (sealed) to every relay/bucket for redundancy. Seal under the
@@ -8323,7 +9572,10 @@ impl Engine {
             self.self_sync_put(t, &own_key, &sealed).await;
         }
 
-        let _ = changed; // change-detection is folded into `applied`; kept for parity with iOS.
+        // A refusal anywhere above means a relay doesn't know this DEVICE id yet — publish the
+        // roster to the refusers now (rate-limited; no-op when nothing refused) so the NEXT pass
+        // converges instead of 403ing forever.
+        let _ = self.heal_forbidden_relays().await;
     }
 
     /// Every place this device can read/write its self-sync slots: all distinct configured relays
@@ -8349,13 +9601,56 @@ impl Engine {
         out
     }
 
+    /// Our in-process hosted relay's handle when `node_hex` IS that relay. Its store must be
+    /// served locally: `relay_client_for` self-guards (a self-dial is THE runaway leak), so the
+    /// iroh path can never reach it, and the self-sync ladder would otherwise silently skip the
+    /// one relay a hosting desktop always has.
+    fn hosted_relay_for(&self, node_hex: &str) -> Option<Arc<RelayServerHandle>> {
+        let g = self.relay_host.lock().unwrap();
+        g.as_ref().filter(|h| h.node_id_hex() == node_hex).cloned()
+    }
+
+    // The three self-sync transport ops run the SAME ladder as the mailbox poll, in the same
+    // order: own hosted store → signed plain-HTTP → warm iroh client. Iroh-only was the
+    // desktop leg of the dead self-sync lane: an HTTP-mailbox-only relay (matrix stub, free-CF
+    // NAS) never iroh-dials, so two linked devices sharing only such a relay never converged.
+
     async fn self_sync_list(self: &Arc<Self>, t: &SelfSyncTransport, prefix: &str) -> Vec<String> {
         match t {
             SelfSyncTransport::Relay(node_hex) => {
+                if let Some(h) = self.hosted_relay_for(node_hex) {
+                    return h.local_list(prefix.to_string());
+                }
+                if let Some((bases, token)) = self.relay_http_reachable(node_hex) {
+                    for base in &bases {
+                        if self.http_url_bad(base) {
+                            continue;
+                        }
+                        // No digest echo — a slot prefix is a handful of keys, not a fat mailbox.
+                        match self.http_list_delta(base, &token, prefix, None).await {
+                            Ok((keys, _)) => {
+                                self.mark_relay_ok(node_hex);
+                                return keys.unwrap_or_default();
+                            }
+                            Err(RelayErr::Forbidden) => {
+                                // The refusal stands for the WHOLE relay (same store + same gate
+                                // behind every URL AND the iroh path), so don't fall through to an
+                                // iroh dial that will be refused too — a slow-failing dial here
+                                // stalls the coalesced pass for minutes. The roster heal at the end
+                                // of the pass is the remedy; the NEXT pass converges. (Android's
+                                // selfSyncHttpList returns null on 403 for the same reason.)
+                                self.note_refused(node_hex, "selfsync list");
+                                return vec![];
+                            }
+                            Err(RelayErr::Unreachable) => self.mark_http_url_bad(base),
+                        }
+                    }
+                }
                 let Some(client) = self.relay_client_for(node_hex).await else { return vec![] };
-                let keys = client.list(prefix.to_string()).await;
-                self.mark_relay_ok(node_hex);
-                keys
+                match client.list(prefix.to_string()).await {
+                    Ok(keys) => { self.mark_relay_ok(node_hex); keys }
+                    Err(_) => vec![],
+                }
             }
             SelfSyncTransport::S3(c) => c.list(prefix).await.unwrap_or_default(),
         }
@@ -8364,6 +9659,30 @@ impl Engine {
     async fn self_sync_fetch(self: &Arc<Self>, t: &SelfSyncTransport, key: &str) -> Option<Vec<u8>> {
         match t {
             SelfSyncTransport::Relay(node_hex) => {
+                if let Some(h) = self.hosted_relay_for(node_hex) {
+                    return h.local_get(key.to_string());
+                }
+                if let Some((bases, token)) = self.relay_http_reachable(node_hex) {
+                    for base in &bases {
+                        if self.http_url_bad(base) {
+                            continue;
+                        }
+                        match self.http_get(base, &token, key).await {
+                            // Some = bytes; None = a REAL miss — the iroh path serves the same
+                            // store, so don't burn a dial re-asking it.
+                            Ok(found) => {
+                                self.mark_relay_ok(node_hex);
+                                return found;
+                            }
+                            Err(RelayErr::Forbidden) => {
+                                // Same-gate refusal — the iroh path would 403 too; heal, next pass.
+                                self.note_refused(node_hex, "selfsync get");
+                                return None;
+                            }
+                            Err(RelayErr::Unreachable) => self.mark_http_url_bad(base),
+                        }
+                    }
+                }
                 let client = self.relay_client_for(node_hex).await?;
                 client.get(key.to_string()).await
             }
@@ -8374,6 +9693,29 @@ impl Engine {
     async fn self_sync_put(self: &Arc<Self>, t: &SelfSyncTransport, key: &str, data: &[u8]) {
         match t {
             SelfSyncTransport::Relay(node_hex) => {
+                if let Some(h) = self.hosted_relay_for(node_hex) {
+                    h.local_put(key.to_string(), data.to_vec());
+                    return;
+                }
+                if let Some((bases, token)) = self.relay_http_reachable(node_hex) {
+                    for base in &bases {
+                        if self.http_url_bad(base) {
+                            continue;
+                        }
+                        match self.http_put(base, &token, key, data.to_vec()).await {
+                            Ok(()) => {
+                                self.mark_relay_ok(node_hex);
+                                return;
+                            }
+                            Err(RelayErr::Forbidden) => {
+                                // Same-gate refusal — the iroh path would 403 too; heal, next pass.
+                                self.note_refused(node_hex, "selfsync put");
+                                return;
+                            }
+                            Err(RelayErr::Unreachable) => self.mark_http_url_bad(base),
+                        }
+                    }
+                }
                 if let Some(client) = self.relay_client_for(node_hex).await {
                     match client.put(key.to_string(), data.to_vec()).await {
                         Ok(()) => self.mark_relay_ok(node_hex),
@@ -8588,4 +9930,27 @@ pub struct MessageAuthorTarget {
     pub dm: String,
     pub name: String,
     pub draft: String,
+}
+
+// ---- qa-cmd v2 driver support (DEBUG builds only — see qa.rs / docs/QA.md) ----------------
+
+#[cfg(debug_assertions)]
+impl Engine {
+    /// The active identity's data dir — where `qa-cmd.json` / `qa-dump.json` live (next to the
+    /// `qa-account-hex.txt` / `qa-device-hex.txt` the matrix harness already reads).
+    pub(crate) fn data_root(&self) -> std::path::PathBuf {
+        self.paths.root.clone()
+    }
+
+    /// The dump's media-blob gate for one ref: real refs are "present" when the sealed blob is on
+    /// disk; synthetic refs (geo pins etc.) are vacuously present — nothing can ever fetch them,
+    /// so gating on them would fail every media check forever.
+    pub(crate) fn media_present(&self, reference: &str) -> bool {
+        LocalMedia::is_synthetic(reference) || self.media.has(reference)
+    }
+
+    /// A circle's member account ids (excludes me) — the dump's `members` array.
+    pub(crate) fn circle_member_ids(&self, circle_id: &str) -> Vec<String> {
+        self.social.contact_node_ids(circle_id.to_string())
+    }
 }

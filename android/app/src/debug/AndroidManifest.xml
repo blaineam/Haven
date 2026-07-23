@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- DEBUG-ONLY overlay — merged into debug builds, never release.
+
+     qa-cmd v2 QA driver (docs/QA.md): the harness stages qa-cmd.json / qa-seed.txt / fixture
+     media in /sdcard/Download via `adb push`, which makes them shell-owned — on scoped storage
+     (API 30+) the app cannot read another owner's non-media files without All-Files access.
+     Declared here so the harness can grant it:
+       adb shell appops set com.blaineam.haven MANAGE_EXTERNAL_STORAGE allow
+     Ungranted it is inert, and QaDriver falls back to /data/local/tmp staging. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+</manifest>

@@ -1,5 +1,5 @@
 import XCTest
-@testable import Haven
+@testable import HavenLogicTests
 
 /// Locks Haven-first WebRTC ICE: Google STUN is fallback-only when no fabric is known.
 final class HavenFabricTests: XCTestCase {

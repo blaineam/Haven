@@ -63,3 +63,13 @@ object PostLinkInbox {
     fun offer(post: DeepLink.Post?) { if (post != null) pending = post }
     fun consume(): DeepLink.Post? = pending.also { pending = null }
 }
+
+/// A bare circle deep link (`haven://c/<circleId>`, e.g. a notification that only names the
+/// circle). RootScreen observes it, switches to that circle's feed (honoring the circle lock the
+/// same way the post path does), and clears it.
+object CircleLinkInbox {
+    var pending by mutableStateOf<DeepLink.Circle?>(null)
+        private set
+    fun offer(circle: DeepLink.Circle?) { if (circle != null) pending = circle }
+    fun consume(): DeepLink.Circle? = pending.also { pending = null }
+}

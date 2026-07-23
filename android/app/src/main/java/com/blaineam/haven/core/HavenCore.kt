@@ -116,6 +116,23 @@ class HavenCore private constructor(
             }
 
         /**
+         * DEBUG/QA only: write a master seed straight to the identity prefs BEFORE the singleton is
+         * built, so the first [get] adopts it via [loadOrCreate] instead of minting a throwaway.
+         * `importSeed` on an already-built instance only rewrites prefs — the live `account` field
+         * keeps the minted identity until a restart that the QA boot flow never does. No-op if the
+         * singleton is already live or an identity already exists. Returns true when the seed landed.
+         */
+        fun qaPreseed(context: Context, seedB64: String): Boolean {
+            if (instance != null) return false
+            val p = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            if (!p.getString(KEY_SEED, null).isNullOrEmpty()) return false
+            val s = runCatching { Base64.decode(seedB64.trim(), Base64.NO_WRAP) }.getOrNull() ?: return false
+            if (s.size != 32) return false
+            p.edit().putString(KEY_SEED, Base64.encodeToString(s, Base64.NO_WRAP)).apply()
+            return true
+        }
+
+        /**
          * Adopt an accepted enrollment grant and become a seedless device. Persists the grant via
          * [SeedlessStore], discards the throwaway account master seed generated at first run (so the
          * next launch boots seedless), and resets the self-sync base — the absence-as-deletion guard,

@@ -323,8 +323,10 @@ struct AdvancedView: View {
             Text("Under the hood").font(.headline)
             row("Your id", String(account.nodeIdHex().prefix(24)) + "…")
             row("Safety words", SafetyWords.words(fromHex: account.verificationHex()).joined(separator: " · "))
-            Text("Haven uses hybrid post-quantum encryption (X25519 + ML-KEM-768, Ed25519 + ML-DSA). Your keys never leave this device.")
+            Text("Hybrid post-quantum encryption. Your keys never leave this device.")
                 .font(.caption2).foregroundStyle(.secondary)
+            Link("Learn more", destination: URL(string: "https://wemiller.com/apps/haven/docs/#encryption")!)
+                .font(.caption2)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .havenCard()
@@ -446,7 +448,7 @@ struct IdentityBackupView: View {
                         }
                     }
                 } header: { Text("Your identities") }
-                footer: { Text("Every identity you've used on this device. Tap one to switch to it — your current identity is kept here so you can switch back anytime. With iCloud backup on, these follow you to your other Apple devices.") }
+                footer: { Text("Every identity you've used on this device — tap one to switch.") }
 
                 Section {
                     Toggle(isOn: $iCloudSync) {
@@ -455,7 +457,7 @@ struct IdentityBackupView: View {
                     .tint(HavenTheme.pink)
                     .onChange(of: iCloudSync) { _, on in accountStore.setICloudSync(on) }
                 } header: { Text("iCloud backup") }
-                footer: { Text("Securely keep your identities in your iCloud Keychain (end-to-end encrypted by Apple) so they're restored automatically when you sign into iCloud on a new iPhone, iPad, or Mac. Your active keys still never leave the device — only an encrypted recovery copy is backed up.") }
+                footer: { Text("Backs up an encrypted recovery copy to your iCloud Keychain — active keys never leave this device.") }
 
                 Section {
                     NavigationLink { TransferIdentityView(accountStore: accountStore) } label: {
@@ -500,7 +502,7 @@ struct IdentityBackupView: View {
             }
             Button("Cancel", role: .cancel) { switchTarget = nil }
         } message: {
-            Text("Haven will switch to this identity. Your circles, posts, and DMs for it appear; your current identity stays saved here to switch back to.")
+            Text("Your current identity stays saved here, so you can switch back anytime.")
         }
         .alert("Rename identity", isPresented: Binding(get: { renameTarget != nil }, set: { if !$0 { renameTarget = nil } })) {
             TextField("Name", text: $renameDraft)

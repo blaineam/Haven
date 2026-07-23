@@ -53,46 +53,32 @@ AND_DERP_B="http://127.0.0.1:8675"
 echo "Wiring stub node=${NODE:0:12}… token=${TOKEN:0:8}… sim=$SIM lan=${LAN:-none}"
 
 # ---- iOS ----
-DATA="$(xcrun simctl get_app_container "$SIM" "$IOS_BUNDLE" data)"
-PLIST="$DATA/Library/Preferences/${IOS_BUNDLE}.plist"
-python3 - "$PLIST" "$NODE" "$TOKEN" "$IOS_MEDIA" "$IOS_DERP" "${LAN:-}" <<'PY'
-import plistlib, json, time, sys
-from pathlib import Path
-plist_path, node, token, media, derp, lan = sys.argv[1:7]
-p = Path(plist_path)
-d = plistlib.load(open(p, "rb")) if p.exists() else {}
-now = int(time.time() * 1000)
-urls = [media]
-if lan:
-    urls.append(f"http://{lan}:8674")
-# HTTP mailbox only on iOS sim. Do NOT set derpUrl / fabric.derpUrls to the path
-# proxy: apply_derp_urls with a non-empty list disables n0, and a plain http://127.0.0.1
-# path-proxy is not a real iroh RelayUrl fabric — that left the sim stuck Offline.
-entries = {
-    node: {
-        "hex": node,
-        "name": "HavenStub matrix",
-        "active": True,
-        "lastSeenMs": now,
-        "isS3": False,
-        "httpUrls": urls,
-        "httpToken": token,
-        "addedAtMs": now,
-    }
-}
-d["haven.relay.entries"] = json.dumps(entries, separators=(",", ":")).encode()
-d["haven.relay.default"] = node
-d["haven.relay.relaysByCircle"] = {"default": [node]}
-d["haven.fabric.derpUrls"] = []
-d.pop("haven.relay.derpURL", None)
-d["haven.relay.httpToken"] = token
-d.pop("haven.relay.suppressed", None)
-plistlib.dump(d, open(p, "wb"))
-print(f"iOS prefs → {p}")
-PY
+# Prefs go THROUGH the sim's cfprefsd (simctl spawn defaults write) — editing the plist
+# file directly races the daemon's cache, which flushes stale values right back over the
+# file on a fresh container (the silent no-relay wiring failure).
 xcrun simctl terminate "$SIM" "$IOS_BUNDLE" 2>/dev/null || true
 sleep 1
-xcrun simctl launch "$SIM" "$IOS_BUNDLE" >/dev/null
+ENTRIES_JSON=$(python3 - "$NODE" "$TOKEN" "$IOS_MEDIA" "${LAN:-}" <<'PY'
+import json, sys, time
+node, token, media, lan = sys.argv[1:5]
+urls = [media] + ([f"http://{lan}:8674"] if lan else [])
+now = int(time.time() * 1000)
+print(json.dumps({node: {"hex": node, "name": "HavenStub matrix", "active": True,
+  "lastSeenMs": now, "isS3": False, "httpUrls": urls, "httpToken": token,
+  "addedAtMs": now}}, separators=(",", ":")))
+PY
+)
+ENTRIES_HEX=$(printf '%s' "$ENTRIES_JSON" | xxd -p | tr -d '\n')
+SD() { xcrun simctl spawn "$SIM" defaults write "$IOS_BUNDLE" "$@"; }
+SD haven.relay.entries -data "$ENTRIES_HEX"
+SD haven.relay.default -string "$NODE"
+SD haven.relay.relaysByCircle -dict default "(\"$NODE\")"
+SD haven.fabric.derpUrls -array
+SD haven.relay.httpToken -string "$TOKEN"
+xcrun simctl spawn "$SIM" defaults delete "$IOS_BUNDLE" haven.relay.derpURL 2>/dev/null || true
+xcrun simctl spawn "$SIM" defaults delete "$IOS_BUNDLE" haven.relay.suppressed 2>/dev/null || true
+echo "iOS prefs → via cfprefsd (simctl spawn defaults)"
+SIMCTL_CHILD_HAVEN_SKIP_ONBOARDING=1 xcrun simctl launch "$SIM" "$IOS_BUNDLE" >/dev/null
 echo "iOS relaunched"
 
 # ---- Android ----

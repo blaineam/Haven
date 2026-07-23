@@ -156,13 +156,13 @@ struct RelayWalkthroughSheet: View {
     private var why: some View {
         VStack(alignment: .leading, spacing: 14) {
             point("tray.and.arrow.down.fill", "Nobody has to be online at once",
-                  "Your posts and media are uploaded sealed. Anyone in the circle picks them up whenever they next open Haven — even if you've long since closed the app.")
+                  "Posts upload sealed; friends pick them up next time they open Haven.")
             point("photo.on.rectangle.angled", "Photos and videos actually arrive",
-                  "Media is fetched from the relay instead of waiting on the person who posted it, so it still lands when two phones' networks can't reach each other directly.")
+                  "Media comes from the relay, not the sender — it lands even on tricky networks.")
             point("point.3.connected.trianglepath.dotted", "It routes around home routers",
-                  "When a member can't be dialed directly, the relay forwards their sealed messages onward. No port forwarding, no domain, no ports to open.")
+                  "The relay forwards sealed messages when a member can't be dialed directly.")
             point("lock.shield.fill", "The relay can't read a thing",
-                  "It only ever holds sealed blobs and a routing header — node ids, a hop count, sizes. No content key ever goes near it, so hosting one can never turn it into a reader.")
+                  "It only holds sealed blobs and routing info — never a key, so it can never read anything.")
         }
     }
 

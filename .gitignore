@@ -62,3 +62,6 @@ apple/Helpers/*.version
 desktop/src-tauri/binaries/*.version
 !apple/Helpers/README.md
 !apple/Helpers/cloudflared.entitlements
+
+# QA harness artifacts + local build scratch
+build/

@@ -340,6 +340,12 @@ jobs:
           # Empty string is falsy to the action, so a non-staged release simply omits it.
           userFraction: ${{ steps.cfg.outputs.user_fraction }}
           whatsNewDirectory: ${{ env.whatsnew }}
+          # Closed-testing (beta) commits REQUIRE this when the app has any change pending
+          # review: internal releases skip review entirely and always landed, while every beta
+          # publish died at commit with "Precondition check failed" AFTER a successful AAB
+          # upload (rc.23–rc.25, 4/4). True is safe for internal too — it only means "don't
+          # bundle unrelated pending console changes into this edit's review".
+          changesNotSentForReview: true
 
       # `continue-on-error` above deliberately keeps a Play-side gate from red-X'ing the release — but a
       # failure there was also INVISIBLE in the job list. A release-notes overflow (Play caps them at 500

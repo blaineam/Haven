@@ -71,6 +71,21 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Runaway re-ingest storm on relay-hosting Macs — 16.8 GB of RAM in five minutes, UI
+  frozen, and a push-notification firehose at your own phone (core + Apple).** Since
+  device-signed key commits, a contact's devices each mint a random key for the same
+  (account, epoch) — and BOTH competing commits live in the content-addressed mailbox
+  forever. The engine adopted whichever it saw last and reported "state changed" on every
+  flip; the Mac's linked-host control-envelope re-offer turned that into an endless loop:
+  wipe the circle's seen-set, re-fetch the whole mailbox, re-ingest everything, push-notify
+  per envelope, repeat — every poll. Epoch-key slots now CONVERGE deterministically
+  (numerically-larger key wins, same rule the writer's own devices use), losing keys are
+  retained so content sealed under them still opens, and re-applying a known commit is a
+  reported no-op. Same convergence applied to state-blob imports, which used to pin
+  whichever key imported first — one of the ways linked devices ended up seeing different
+  things. Belt-and-braces on Apple: seen-set wipes are throttled to one per circle per
+  10 minutes, mailbox-ingest self-sync pushes are capped at the newest 3 per circle per
+  pass, and the fabric-rebind debounce no longer cancels itself under a caller stream.
 - **Self-sync over relays was dead on every platform (core + Apple).** Three stacked
   causes, live-fleet diagnosed: the relay authorized only the legacy bare `self/…`
   namespace while every client keys `haven/self/…` (which fell to the catch-all deny);

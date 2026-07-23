@@ -219,7 +219,7 @@ final class FeedStore: ObservableObject {
     private var lastNearbyMediaPushMs: UInt64 = 0
     /// Fabric soft-rebind: DERP URLs the live messaging node was bound with + debounce/guard.
     private var fabricBoundUrls: [String] = []
-    private var fabricRebindGen: UInt64 = 0
+    private var fabricRebindPending = false
     private var fabricRebindInFlight = false
     /// Base cadences and the idle multipliers. Idle <3min = base; <15min = ×3; else ×6.
     /// Thermal pressure and super data saver stretch further so a warm phone (or one the user
@@ -1649,13 +1649,18 @@ final class FeedStore: ObservableObject {
     /// already live on a different map, debounce and soft-rebind (iroh RelayMap is bind-time).
     func noteFabricUrlsChanged(_ urls: [String]) {
         let target = urls.sorted()
-        guard node != nil, !target.isEmpty, target != fabricBoundUrls, !fabricRebindInFlight else { return }
-        fabricRebindGen &+= 1
-        let gen = fabricRebindGen
+        guard node != nil, !target.isEmpty, target != fabricBoundUrls,
+              !fabricRebindInFlight, !fabricRebindPending else { return }
+        // Schedule-ONCE debounce. The old generation-bump pattern cancelled the pending rebind on
+        // every call, so a caller stream (e.g. re-ingested __relay__ frames during a mailbox storm)
+        // both starved the rebind forever AND logged "scheduled" dozens of times a second. The
+        // pending task recomputes the target from RelayMailboxStore at fire time, so coalescing
+        // later calls into it loses nothing.
+        fabricRebindPending = true
         HavenLog.net("fabric rebind scheduled (urls=\(target.count))")
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
-            guard gen == fabricRebindGen else { return }
+            fabricRebindPending = false
             await rebindTransportForFabric()
         }
     }
@@ -2790,6 +2795,10 @@ final class FeedStore: ObservableObject {
     /// Last own-device catch-up sweep. Throttled hard (5 min): it re-seals every envelope it sends,
     /// so it must not ride the 20s sync tick. See the sweep for why it exists.
     private var lastOwnDeviceCatchupMs: UInt64 = 0
+    /// Last seen-set wipe per circle (the key-commit re-open). One wipe per circle per 10 min —
+    /// the backstop that keeps any future "receive reported a change" bug from turning the poll
+    /// loop into an unbounded re-ingest storm (the 16.8 GB Mac incident).
+    private var lastSeenWipeMs: [String: UInt64] = [:]
     func syncWithContacts() {
         guard let social else { return }
         // Re-blasting our ENTIRE history (every post → every contact) on every 20s tick flooded the
@@ -3705,14 +3714,29 @@ final class FeedStore: ObservableObject {
         // no peer_epoch_keys — classic linked-Mac-host symptom: iPhone has mom's DMs, Mac store
         // holds hundreds of sealed blobs, feed stays empty.
         if !batch.unlockedCircles.isEmpty {
+            // DAMPER: one seen-wipe per circle per 10 minutes, no matter what receive() reports.
+            // The 16.8 GB Mac storm was this block firing on EVERY poll: competing key commits
+            // flip-flopped the engine's epoch slot (fixed in core by deterministic convergence),
+            // each flip reported "changed", and each report wiped the circle's seen-set — so every
+            // poll re-fetched and re-ingested the whole mailbox, fanning out pushes per envelope.
+            // The core fix ends the flip; this throttle guarantees no future "changed" bug can
+            // escalate a poll loop into an unbounded re-ingest storm again. A genuinely-new commit
+            // still re-opens immediately (its circle won't have wiped recently).
+            let nowMs = now()
+            var reopened = 0
             for cid in batch.unlockedCircles {
+                if let last = lastSeenWipeMs[cid], nowMs &- last < 600_000 { continue }
+                lastSeenWipeMs[cid] = nowMs
+                reopened += 1
                 SharedStore.forgetSeenPrefix("haven/mailbox/\(cid)/")
                 // The relay's key SET didn't change, so its LIST digest didn't either — drop ours
                 // or the next poll 204s and the re-queued keys never re-GET.
                 SharedStore.invalidateMailboxListDigests(circleId: cid)
                 for k in batch.controlKeys[cid] ?? [] { SharedStore.markSeenPublic(k) }
             }
-            HavenLog.relay("mailbox: re-open \(batch.unlockedCircles.count) circle(s) after key commit")
+            if reopened > 0 {
+                HavenLog.relay("mailbox: re-open \(reopened) circle(s) after key commit")
+            }
         }
         // Persist whenever we ran ANY receive: an envelope that only BUFFERED (event arrived before
         // its key commit / the sender's roster) mutated the now-durable pending_epoch buffer, and the
@@ -3744,7 +3768,13 @@ final class FeedStore: ObservableObject {
         // liveDelivered over iroh, but a sleeping/cellular iPhone that missed iroh never got a
         // push with the inline event — so Mac showed the DM and iPhone stayed empty until a
         // successful HTTP mailbox poll (often blocked by free-CF DNS flaps).
-        for item in ingested {
+        // CAPPED at the newest 3 per circle per pass: a catch-up burst (or any re-ingest bug) used
+        // to fire one APNs push PER envelope — the Mac storm pushed dozens a second at the iPhone
+        // (heat + battery). The push's job is waking the device and painting the newest message;
+        // the woken device drains the rest from the mailbox itself.
+        var syncSelfSent: [String: Int] = [:]
+        for item in ingested.reversed() where syncSelfSent[item.circleId, default: 0] < 3 {
+            syncSelfSent[item.circleId, default: 0] += 1
             PushManager.shared.syncSelf(event: item.envelope.base64EncodedString())
         }
         for item in ingested {

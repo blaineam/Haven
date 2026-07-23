@@ -1368,6 +1368,16 @@ struct Circle {
     my_epoch: u64,
     my_epoch_keys: HashMap<u64, [u8; 32]>,
     peer_epoch_keys: HashMap<(String, u64), [u8; 32]>,
+    /// LOSING candidates for an epoch slot, kept so content sealed under them still opens.
+    /// Since device-signed commits (seed-drop S3), an account's devices each mint a RANDOM key for
+    /// the same (account, epoch) until they converge on the numerically-larger one — so COMPETING
+    /// commits for one slot are the NORM, not a glitch. The primary maps hold the deterministic
+    /// winner (max), these hold the bounded losers ([`ALT_KEYS_PER_SLOT`]). Adopting last-writer
+    /// into the primary instead used to FLIP the slot on every re-offered commit and report
+    /// "changed" each time — the relay-hosting Mac turned that into an infinite re-ingest storm
+    /// (16.8 GB / 5 min) and every other platform silently kept whichever key polled last.
+    my_epoch_keys_alt: HashMap<u64, Vec<[u8; 32]>>,
+    peer_epoch_keys_alt: HashMap<(String, u64), Vec<[u8; 32]>>,
     pending_epoch: Vec<Vec<u8>>,
     /// My STABLE circle secret (zeros = not yet generated) — derives opaque storage-key prefixes for
     /// my blobs; distributed in my key commits. Peers' secrets are stored so I can find their blobs.
@@ -1474,6 +1484,8 @@ impl Circle {
             my_epoch: 0,
             my_epoch_keys: HashMap::new(),
             peer_epoch_keys: HashMap::new(),
+            my_epoch_keys_alt: HashMap::new(),
+            peer_epoch_keys_alt: HashMap::new(),
             pending_epoch: vec![],
             my_circle_secret: [0u8; 32],
             peer_circle_secrets: HashMap::new(),
@@ -1582,6 +1594,9 @@ impl Circle {
                 }
             }
         }
+        // Alt (loser) keys live and die with their slot's primary — same retention window.
+        self.my_epoch_keys_alt.retain(|e, _| self.my_epoch_keys.contains_key(e));
+        self.peer_epoch_keys_alt.retain(|k, _| self.peer_epoch_keys.contains_key(k));
         // M6 (§6.5): drop any ratchet chain whose content epoch fell out of the retained window —
         // the chains age out on the SAME pruner as their epoch key, and dropping wipes them (the
         // `Drop` impls on `SenderChain`/`RatchetReceiver` zero every held key, incl. cached skipped
@@ -1602,6 +1617,51 @@ impl Circle {
             self.my_epoch_keys.get(&epoch).copied()
         } else {
             self.peer_epoch_keys.get(&(author_hex.to_string(), epoch)).copied()
+        }
+    }
+    /// LOSING keys retained for the slot (see the alt maps on [`Circle`]): tried in order when the
+    /// primary fails to open a non-ratcheted envelope — content sealed pre-convergence stays readable.
+    fn alt_keys_for(&self, me_hex: &str, author_hex: &str, epoch: u64) -> Vec<[u8; 32]> {
+        if author_hex == me_hex {
+            self.my_epoch_keys_alt.get(&epoch).cloned().unwrap_or_default()
+        } else {
+            self.peer_epoch_keys_alt.get(&(author_hex.to_string(), epoch)).cloned().unwrap_or_default()
+        }
+    }
+}
+
+/// Losers kept per epoch slot. Two devices per account is the norm, three the realistic ceiling —
+/// beyond that the weekly rotation + re-seal backstop recovers anything sealed under a dropped key.
+const ALT_KEYS_PER_SLOT: usize = 4;
+
+/// Deterministically converge an epoch-key slot on a new candidate: the numerically-larger key wins
+/// the primary (every device applies the same rule, so all replicas agree without coordination); the
+/// loser is retained in `alts` (bounded) so envelopes sealed under it still open. Returns whether
+/// this candidate taught us anything new (primary changed, or a previously-unknown loser was kept) —
+/// re-applying a known key is a reported no-op, which is what makes mailbox re-offers convergent
+/// instead of an infinite "state changed" loop.
+fn converge_epoch_key(primary: &mut Option<[u8; 32]>, alts: &mut Vec<[u8; 32]>, candidate: [u8; 32]) -> bool {
+    match *primary {
+        None => {
+            *primary = Some(candidate);
+            true
+        }
+        Some(cur) if cur == candidate => false,
+        Some(cur) => {
+            let (winner, loser) = if candidate > cur { (candidate, cur) } else { (cur, candidate) };
+            let mut changed = false;
+            if winner != cur {
+                *primary = Some(winner);
+                changed = true;
+            }
+            if !alts.contains(&loser) {
+                if alts.len() >= ALT_KEYS_PER_SLOT {
+                    alts.remove(0);
+                }
+                alts.push(loser);
+                changed = true;
+            }
+            changed
         }
     }
 }
@@ -3552,19 +3612,17 @@ fn receive_key_commit(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool
         let c = &mut st.circles[idx];
         if committer_account_hex == me_hex {
             // OWN-DEVICE convergence — my own account key OR one of my authorized devices (seed-drop S3).
-            // `ensure_epoch` mints a RANDOM key per epoch on each device, so my
-            // iPhone and Mac each generated a DIFFERENT key for the same circle+epoch. A plain `or_insert`
-            // kept my stale key and refused my other device's — so I could never open my sibling's events
-            // (the "my Mac never shows my iPhone's latest post / a received DM" bug: every event was
-            // buffered forever). Deterministically converge on the numerically-larger key — both devices
-            // pick the SAME winner independently — and count an adopted change as `new` so buffered events
-            // drain and future re-seals use the agreed key. The media circle-secret converges the same way.
-            let winner = match c.my_epoch_keys.get(&opened.epoch).copied() {
-                Some(k) if k >= opened.epoch_key => k,
-                _ => opened.epoch_key,
-            };
-            is_new = c.my_epoch_keys.get(&opened.epoch).copied() != Some(winner);
-            c.my_epoch_keys.insert(opened.epoch, winner);
+            // `ensure_epoch` mints a RANDOM key per epoch on each device, so my iPhone and Mac each
+            // generated a DIFFERENT key for the same circle+epoch. Converge on the numerically-larger
+            // key (both devices pick the SAME winner independently) and RETAIN the loser as an alt so
+            // events my sibling sealed pre-convergence still open. Re-applying a known key is a
+            // reported no-op — see `converge_epoch_key`.
+            let mut primary = c.my_epoch_keys.get(&opened.epoch).copied();
+            let alts = c.my_epoch_keys_alt.entry(opened.epoch).or_default();
+            is_new = converge_epoch_key(&mut primary, alts, opened.epoch_key);
+            if let Some(k) = primary {
+                c.my_epoch_keys.insert(opened.epoch, k);
+            }
             if opened.circle_secret != [0u8; 32]
                 && (c.my_circle_secret == [0u8; 32] || opened.circle_secret > c.my_circle_secret)
             {
@@ -3574,17 +3632,33 @@ fn receive_key_commit(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool
                 c.my_epoch = opened.epoch;
             }
         } else {
-            // A contact's epoch key, stored under their ACCOUNT (whether they committed under their account
-            // key or an authorized device) — the same slot the read path looks up by the event's author.
-            // ALWAYS adopt a successfully-opened commit (do not first-wins `or_insert`): a peer who
-            // re-sealed the same epoch after membership change produces a NEW key material for that
-            // epoch, and keeping the stale key permanently bricks reverse-path open of later posts.
-            let key = (committer_account_hex.clone(), opened.epoch);
-            let prev = c.peer_epoch_keys.insert(key, opened.epoch_key);
-            is_new = prev != Some(opened.epoch_key);
-            // Store the committer's stable circle secret so I can derive their opaque storage prefix.
+            // A contact's epoch key, stored under their ACCOUNT (whether they committed under their
+            // account key or an authorized device) — the same slot the read path looks up by the
+            // event's author. Since device-signed commits (S3), a contact's OWN devices routinely
+            // mint different keys for the same (account, epoch), and BOTH commits sit in the
+            // content-addressed mailbox forever. The old last-writer-wins insert flipped this slot on
+            // every re-offer — each flip reported "state changed", which the relay-hosting Mac
+            // amplified into an endless re-ingest storm — and left every replica holding whichever
+            // key it happened to apply last. Converge exactly like the own-device path: larger key
+            // wins the primary (the committer's own devices agree on the same winner and seal future
+            // content under it), losers are retained as alts so pre-convergence seals still open.
+            let slot = (committer_account_hex.clone(), opened.epoch);
+            let mut primary = c.peer_epoch_keys.get(&slot).copied();
+            let alts = c.peer_epoch_keys_alt.entry(slot.clone()).or_default();
+            is_new = converge_epoch_key(&mut primary, alts, opened.epoch_key);
+            if let Some(k) = primary {
+                c.peer_epoch_keys.insert(slot, k);
+            }
+            // The committer's stable circle secret (opaque storage-prefix derivation). Converge by
+            // the same larger-wins rule the account's own devices use for their secret — a plain
+            // overwrite flip-flopped between two devices' secrets on every competing commit.
             if opened.circle_secret != [0u8; 32] {
-                c.peer_circle_secrets.insert(committer_account_hex.clone(), opened.circle_secret);
+                match c.peer_circle_secrets.get(&committer_account_hex) {
+                    Some(cur) if *cur >= opened.circle_secret => {}
+                    _ => {
+                        c.peer_circle_secrets.insert(committer_account_hex.clone(), opened.circle_secret);
+                    }
+                }
             }
         }
         c.prune_epoch_keys(); // bounded forward secrecy: drop stale keys
@@ -3684,7 +3758,23 @@ fn receive_epoch_event(st: &mut NetState, idx: usize, body: &[u8]) -> Result<boo
     }
     let event = match opened {
         Ok(e) => e,
-        Err(_) => return Ok(false),
+        Err(_) => {
+            // Pre-convergence seal: the author used a key that LOST the slot convergence (its
+            // sibling's larger key won the primary). Try the bounded alt (loser) keys before giving
+            // up. Ratcheted lanes stay primary-only — their chain derives from the slot winner, and
+            // the epoch-keyed re-seal backstop recovers anything the ratchet can't.
+            if env.ratchet_index().is_some() {
+                return Ok(false);
+            }
+            let alts = st.circles[idx].alt_keys_for(&me_hex, key_author_hex, env.epoch);
+            match alts
+                .iter()
+                .find_map(|k| open_event_in_epoch_authored(&sender, k, &env, expected_author.as_deref()).ok())
+            {
+                Some(e) => e,
+                None => return Ok(false),
+            }
+        }
     };
     let c = &mut st.circles[idx];
     if c.seen.contains(&event.id) {
@@ -3813,6 +3903,12 @@ struct PersistCircle {
     my_epoch_keys: Vec<(u64, [u8; 32])>,
     #[serde(default)]
     peer_epoch_keys: Vec<(String, u64, [u8; 32])>,
+    /// Losing candidates per epoch slot (see `Circle::my_epoch_keys_alt`). Defaulted so state files
+    /// from before slot convergence load with none; older builds simply ignore the field.
+    #[serde(default)]
+    my_epoch_keys_alt: Vec<(u64, [u8; 32])>,
+    #[serde(default)]
+    peer_epoch_keys_alt: Vec<(String, u64, [u8; 32])>,
     #[serde(default)]
     my_circle_secret: [u8; 32],
     #[serde(default)]
@@ -5945,6 +6041,16 @@ impl HavenSocial {
                 my_epoch: c.my_epoch,
                 my_epoch_keys: c.my_epoch_keys.iter().map(|(e, k)| (*e, *k)).collect(),
                 peer_epoch_keys: c.peer_epoch_keys.iter().map(|((a, e), k)| (a.clone(), *e, *k)).collect(),
+                my_epoch_keys_alt: c
+                    .my_epoch_keys_alt
+                    .iter()
+                    .flat_map(|(e, ks)| ks.iter().map(move |k| (*e, *k)))
+                    .collect(),
+                peer_epoch_keys_alt: c
+                    .peer_epoch_keys_alt
+                    .iter()
+                    .flat_map(|((a, e), ks)| ks.iter().map(move |k| (a.clone(), *e, *k)))
+                    .collect(),
                 my_circle_secret: c.my_circle_secret,
                 peer_circle_secrets: c.peer_circle_secrets.iter().map(|(a, s)| (a.clone(), *s)).collect(),
                 rotated_at: c.rotated_at,
@@ -6009,6 +6115,8 @@ impl HavenSocial {
                 my_epoch: 0,
                 my_epoch_keys: vec![],
                 peer_epoch_keys: vec![],
+                my_epoch_keys_alt: vec![],
+                peer_epoch_keys_alt: vec![],
                 my_circle_secret: [0u8; 32],
                 peer_circle_secrets: vec![],
                 rotated_at: 0,
@@ -6062,14 +6170,58 @@ impl HavenSocial {
         }
         // Union epoch keys + keep the highest epoch (multi-device sync / reload must not lose any key
         // or we'd be unable to open content sealed under an epoch another device advanced to).
+        // Slots CONVERGE (larger key wins, loser kept as alt) exactly like live commit ingest — the
+        // old first-wins `or_insert` let whichever state imported first pin a loser forever, one of
+        // the ways linked devices ended up holding different keys for the same slot.
         for (e, k) in pc.my_epoch_keys {
-            st.circles[idx].my_epoch_keys.entry(e).or_insert(k);
+            let c = &mut st.circles[idx];
+            let mut primary = c.my_epoch_keys.get(&e).copied();
+            let alts = c.my_epoch_keys_alt.entry(e).or_default();
+            converge_epoch_key(&mut primary, alts, k);
+            if let Some(w) = primary {
+                c.my_epoch_keys.insert(e, w);
+            }
         }
         if pc.my_epoch > st.circles[idx].my_epoch {
             st.circles[idx].my_epoch = pc.my_epoch;
         }
         for (a, e, k) in pc.peer_epoch_keys {
-            st.circles[idx].peer_epoch_keys.entry((a, e)).or_insert(k);
+            let c = &mut st.circles[idx];
+            let slot = (a, e);
+            let mut primary = c.peer_epoch_keys.get(&slot).copied();
+            let alts = c.peer_epoch_keys_alt.entry(slot.clone()).or_default();
+            converge_epoch_key(&mut primary, alts, k);
+            if let Some(w) = primary {
+                c.peer_epoch_keys.insert(slot, w);
+            }
+        }
+        // Alt (loser) keys ride the state blob too — union them as alts (never displacing a primary).
+        for (e, k) in pc.my_epoch_keys_alt {
+            let c = &mut st.circles[idx];
+            if c.my_epoch_keys.get(&e) == Some(&k) {
+                continue; // already the winner here
+            }
+            let alts = c.my_epoch_keys_alt.entry(e).or_default();
+            if !alts.contains(&k) {
+                if alts.len() >= ALT_KEYS_PER_SLOT {
+                    alts.remove(0);
+                }
+                alts.push(k);
+            }
+        }
+        for (a, e, k) in pc.peer_epoch_keys_alt {
+            let c = &mut st.circles[idx];
+            let slot = (a, e);
+            if c.peer_epoch_keys.get(&slot) == Some(&k) {
+                continue;
+            }
+            let alts = c.peer_epoch_keys_alt.entry(slot).or_default();
+            if !alts.contains(&k) {
+                if alts.len() >= ALT_KEYS_PER_SLOT {
+                    alts.remove(0);
+                }
+                alts.push(k);
+            }
         }
         if pc.my_circle_secret != [0u8; 32] && st.circles[idx].my_circle_secret == [0u8; 32] {
             st.circles[idx].my_circle_secret = pc.my_circle_secret;
@@ -8543,6 +8695,65 @@ mod net_tests {
         let reopened = bob.open_circle_media(cid.clone(), resealed);
         assert_eq!(reopened.as_deref(), Some(&b"a sunset photo"[..]),
                    "the recovery re-seal of the same media opens for a friend lacking the device roster");
+    }
+
+    /// COMPETING key commits for the same (account, epoch) — the norm since device-signed commits:
+    /// a friend's iPhone and Mac each mint a random key for the same slot, and BOTH commits sit in
+    /// the content-addressed mailbox forever. The old last-writer-wins adoption flipped the stored
+    /// key on every re-offer and reported "state changed" each time; the relay-hosting Mac's
+    /// control-envelope re-offer amplified that into an endless re-ingest storm (16.8 GB in 5 min,
+    /// main thread pinned on the engine lock, a push notification per re-ingested envelope). Slots
+    /// must converge: re-applying a known commit is a reported no-op, and content sealed under the
+    /// losing key still opens via the retained alt.
+    #[test]
+    fn competing_key_commits_converge_instead_of_flip_flopping() {
+        let cid = "fam".to_string();
+        // The same account restored on two devices (multi-master): each instance mints its OWN
+        // random epoch-0 key for the circle, producing two competing commits for one slot.
+        let alice1 = HavenSocial::new([1u8; 32].to_vec()).unwrap();
+        let alice2 = HavenSocial::new([1u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([2u8; 32].to_vec()).unwrap();
+        let a_bundle = alice1.my_bundle();
+        let b_bundle = bob.my_bundle();
+        for s in [&alice1, &alice2, &bob] {
+            s.create_circle(cid.clone(), "Family".into());
+        }
+        alice1.add_contact_bundle(cid.clone(), b_bundle.clone()).unwrap();
+        alice2.add_contact_bundle(cid.clone(), b_bundle).unwrap();
+        bob.add_contact_bundle(cid.clone(), a_bundle).unwrap();
+
+        // One post per device, then each device's bundle (its key commit + its re-sealed events).
+        alice1.post(cid.clone(), "from device one".into(), vec![], None, None, false, false, 1_000).unwrap();
+        alice2.post(cid.clone(), "from device two".into(), vec![], None, None, false, false, 2_000).unwrap();
+        let env1 = alice1.sync_envelopes(cid.clone());
+        let env2 = alice2.sync_envelopes(cid.clone());
+        let commit1 = env1.iter().find(|e| e.first() == Some(&TAG_KEY_COMMIT)).expect("d1 commit").clone();
+        let commit2 = env2.iter().find(|e| e.first() == Some(&TAG_KEY_COMMIT)).expect("d2 commit").clone();
+        assert_ne!(commit1, commit2, "two devices must have minted competing commits");
+
+        // First sight of each distinct key may legitimately report a change…
+        let _ = bob.receive(cid.clone(), commit1.clone()).unwrap();
+        let _ = bob.receive(cid.clone(), commit2.clone()).unwrap();
+        // …but from here on, RE-OFFERING either commit must be a reported no-op, in any order.
+        // This is the storm regression: any `true` below re-triggered a full circle re-ingest.
+        for round in 0..3 {
+            for (name, c) in [("commit1", &commit1), ("commit2", &commit2)] {
+                assert!(
+                    !bob.receive(cid.clone(), c.clone()).unwrap(),
+                    "re-offered {name} reported a state change on round {round} — flip-flop is back"
+                );
+            }
+        }
+
+        // Content sealed by BOTH devices opens: one sealed under the slot winner, one under the
+        // retained alt (loser) key. Losing either would resurrect \"my friend's post never shows\".
+        for env in env1.iter().chain(env2.iter()).filter(|e| e.first() != Some(&TAG_KEY_COMMIT)) {
+            let _ = bob.receive(cid.clone(), env.clone());
+        }
+        let feed = bob.feed(cid.clone(), 10_000, None);
+        let texts: Vec<&str> = feed.iter().map(|i| i.body.as_str()).collect();
+        assert!(texts.contains(&"from device one"), "post sealed under one competing key must open");
+        assert!(texts.contains(&"from device two"), "post sealed under the other competing key must open");
     }
 
     /// A member you remove stays removed after a state merge that still lists them — the multi-device

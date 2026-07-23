@@ -6,7 +6,25 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest wave (built, batched for next upload)
-- **Epoch-key convergence — the 16.8 GB Mac storm (2026-07-23, 1.1.4 b347, core + Apple)** —
+- **The receiver-side history-blast storm — b349 "still beachballing" + hot iPhone
+  (2026-07-23, 1.1.4 b350, core + Apple)** — two live `sample`s of the beachballing Mac
+  (b349, 4.6 GB RSS seven minutes after launch) split the freeze in half: (1) the main
+  thread 100%-pegged re-running LinkScanner/NSDataDetector + URL-strip `range(of:)`
+  splices per message per frame under FeedView.body, and (2) the main actor parked in
+  `__psynch_mutexwait` on the engine mutex while one background EngineGate batch ran
+  100%-duty crypto — the periodic full-history re-blast being decrypted BY THE RECEIVER
+  just to prove every envelope a duplicate. The b344 gen-cache had only fixed the
+  sender's half; receivers (Mac + iPhone + every peer) kept paying full-history unseals
+  every cycle, forever, growing with history — the standing all-devices heat. Fixes:
+  `receive()` hash-skips re-delivered key-commit/epoch-event bytes BEFORE the engine
+  lock (deterministic sealing makes outer bytes proof; session-scoped, cleared on
+  leave/purge, MLS/roster tags exempt — they may park and need re-delivery;
+  regression-tested incl. the two MLS flows that caught the first over-broad version);
+  senders skip blasting circles whose gen hasn't moved for that target (mailbox upload
+  deduped from per-envelope-per-target to per-generation); `LinkScanner.urls`/
+  `stripping` memoized on body text (NSCache); sealed call/media frame opens (types
+  30/31/32 burst in media sweeps) moved off the main actor through EngineGate.
+  Android/desktop inherit the receive() skip through the shared core.
   a `sample` of the frozen Mac app showed the main thread ~89% blocked on the engine
   lock while one background FFI call churned huge buffers, and the unified log showed
   the smoking gun: dozens of `push /notify ok` + `fabric rebind scheduled` a second and

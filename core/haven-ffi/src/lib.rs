@@ -3976,6 +3976,12 @@ struct LegacyPersistState {
 #[derive(uniffi::Object)]
 pub struct HavenSocial {
     state: Mutex<NetState>,
+    /// Outer-bytes hashes of envelopes `receive` has already processed, per circle. Envelopes
+    /// seal deterministically, and peers re-blast full histories on a timer — so the same bytes
+    /// arrive over and over, and proving "duplicate" used to cost a full unseal UNDER THE ENGINE
+    /// LOCK per envelope. Session-scoped ON PURPOSE (never persisted): a restart re-ingests each
+    /// envelope once, so a cleared circle or imported state can never be wedged by a stale set.
+    seen_envelopes: Mutex<std::collections::HashMap<String, std::collections::HashSet<[u8; 32]>>>,
 }
 
 #[uniffi::export]
@@ -4017,6 +4023,7 @@ impl HavenSocial {
                 mls_keying: false,
                 live_lane_circles: std::collections::HashSet::new(),
             }),
+            seen_envelopes: Mutex::new(std::collections::HashMap::new()),
         }))
     }
 
@@ -4065,6 +4072,7 @@ impl HavenSocial {
                 mls_keying: false,
                 live_lane_circles: std::collections::HashSet::new(),
             }),
+            seen_envelopes: Mutex::new(std::collections::HashMap::new()),
         }))
     }
 
@@ -4562,6 +4570,9 @@ impl HavenSocial {
     pub fn leave_circle(&self, id: String) {
         let mut st = self.state.lock().unwrap();
         st.circles.retain(|c| c.id != id || c.id == DEFAULT_CIRCLE);
+        drop(st);
+        // Re-joining must be able to re-ingest the history this circle held.
+        self.seen_envelopes.lock().unwrap().remove(&id);
     }
 
     /// Remove a member from ONE circle (their membership + their events there) without
@@ -4571,6 +4582,10 @@ impl HavenSocial {
         if let Some(c) = st.circles.iter_mut().find(|c| c.id == circle_id) {
             purge_member_from_circle(c, &node_hex);
         }
+        drop(st);
+        // Their events were just purged; if they're re-added, their re-sent history must be able
+        // to land again rather than be skipped as already-seen.
+        self.seen_envelopes.lock().unwrap().remove(&circle_id);
     }
 
     /// Block a node: remove them from every circle (members + their events) so their
@@ -5510,59 +5525,37 @@ impl HavenSocial {
         if envelope.is_empty() {
             return Ok(false);
         }
-        let mut st = self.state.lock().unwrap();
-        let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return Ok(false) };
-        match envelope[0] {
-            TAG_KEY_COMMIT => receive_key_commit(&mut st, idx, &envelope[1..]),
-            TAG_EPOCH_EVENT => receive_epoch_event(&mut st, idx, &envelope[1..]),
-            // TreeKEM tree tags. In M2 shadow (keying switch OFF) these never touch content. In M3
-            // (switch ON, fully-joined) a commit/welcome/join can change which tree epoch keys the
-            // content, so after ingesting one we recompute the flip (`mls_refresh_keying`) and drain
-            // the pending buffer — a Remove that advances the epoch, or a Welcome/join that completes
-            // the all-joined gate, then unlocks content immediately. Still returns the handler's value
-            // (no direct content change from the wire itself); a non-capable circle ignores them.
-            TAG_MLS_COMMIT => {
-                let r = receive_mls_commit(&mut st, idx, &envelope[1..]);
-                mls_refresh_keying(&mut st, idx);
-                drain_pending(&mut st, idx);
-                r
+        // Identical bytes can't change state (sealing is deterministic; the engine's own dedupe
+        // returns false for them) — but proving that costs a full unseal under the engine lock,
+        // and peers re-blast entire histories (key commit + epoch events) every few minutes.
+        // Reject those re-deliveries by outer hash BEFORE the engine lock, so a history blast
+        // costs N hash lookups, not N unseals. ONLY these two tags dedupe: an epoch event that
+        // can't open yet parks in the DURABLE pending buffer (persisted; drains when its key
+        // arrives) and a key commit re-applies as a convergent no-op — so skipping a re-delivery
+        // loses nothing. Every other tag (MLS commit/welcome/join, rosters, legacy JSON) may
+        // legitimately park with NO durable buffer and complete via re-delivery once its
+        // prerequisites land — those keep paying the unseal, and they're rare control traffic.
+        // An envelope for an UNKNOWN circle is never recorded, so the same bytes still apply
+        // once the circle exists.
+        let dedupe = matches!(envelope[0], TAG_KEY_COMMIT | TAG_EPOCH_EVENT);
+        let outer = *blake3::hash(&envelope).as_bytes();
+        if dedupe {
+            let seen = self.seen_envelopes.lock().unwrap();
+            if seen.get(&circle_id).is_some_and(|s| s.contains(&outer)) {
+                return Ok(false);
             }
-            TAG_MLS_WELCOME => {
-                let r = receive_mls_welcome(&mut st, idx, &envelope[1..]);
-                mls_refresh_keying(&mut st, idx);
-                drain_pending(&mut st, idx);
-                r
-            }
-            TAG_MLS_JOIN => {
-                let r = receive_mls_join(&mut st, idx, &envelope[1..]);
-                mls_refresh_keying(&mut st, idx);
-                drain_pending(&mut st, idx);
-                r
-            }
-            TAG_ADMIN_GRANT => receive_admin_grant(&mut st, idx, &envelope[1..]),
-            TAG_CIRCLE_UPGRADE => receive_circle_upgrade(&mut st, idx, &envelope[1..]),
-            // Unbundled proposals (§4.2 roster path) are reserved for M4; a stray one is inert.
-            TAG_MLS_PROPOSAL => Ok(false),
-            TAG_DEVICE_ROSTER => {
-                // Account-level (not circle-specific) — verify against the carried account bundle, store,
-                // and rotate affected epochs. Forged/stale rosters are rejected inside the verifier.
-                match decode_roster(&envelope[1..]).and_then(|(acct, list, creds, trailer)| {
-                    HavenId::from_bytes(&acct).ok().map(|a| (a, list, creds, trailer))
-                }) {
-                    Some((account, list, creds, trailer)) => {
-                        let stored = verify_and_store_roster(&mut st, &account, &list, &creds);
-                        note_roster_capability(&mut st, &account, &trailer); // S0: learn capability (absence-safe)
-                        note_seedless_own_roster_wire(&mut st, &account, &envelope); // A3: verbatim primary wire
-                        // A newly-learned roster may make a previously "unknown sender" event openable —
-                        // drain the durable buffer so multi-device roster lag no longer loses posts.
-                        let drained = drain_all_pending(&mut st);
-                        Ok(stored || drained)
-                    }
-                    None => Ok(false),
-                }
-            }
-            _ => receive_legacy(&mut st, idx, &envelope), // untagged JSON `{…}` = legacy envelope
         }
+        let Some(result) = self.receive_locked(&circle_id, &envelope) else { return Ok(false) };
+        if dedupe && result.is_ok() {
+            let mut seen = self.seen_envelopes.lock().unwrap();
+            let set = seen.entry(circle_id).or_default();
+            // Growth guard only — clearing merely re-prices those envelopes at one unseal each.
+            if set.len() >= 65_536 {
+                set.clear();
+            }
+            set.insert(outer);
+        }
+        result
     }
 
     /// Re-seal everything **I** authored to a circle — to sync a peer that just
@@ -6131,6 +6124,64 @@ impl HavenSocial {
 }
 
 impl HavenSocial {
+    /// The dispatch half of `receive`, under the engine lock. `None` means the circle doesn't
+    /// exist (yet) — the caller must NOT record the envelope as seen in that case.
+    fn receive_locked(&self, circle_id: &str, envelope: &[u8]) -> Option<Result<bool, HavenError>> {
+        let mut st = self.state.lock().unwrap();
+        let idx = st.circles.iter().position(|c| c.id == circle_id)?;
+        Some(match envelope[0] {
+            TAG_KEY_COMMIT => receive_key_commit(&mut st, idx, &envelope[1..]),
+            TAG_EPOCH_EVENT => receive_epoch_event(&mut st, idx, &envelope[1..]),
+            // TreeKEM tree tags. In M2 shadow (keying switch OFF) these never touch content. In M3
+            // (switch ON, fully-joined) a commit/welcome/join can change which tree epoch keys the
+            // content, so after ingesting one we recompute the flip (`mls_refresh_keying`) and drain
+            // the pending buffer — a Remove that advances the epoch, or a Welcome/join that completes
+            // the all-joined gate, then unlocks content immediately. Still returns the handler's value
+            // (no direct content change from the wire itself); a non-capable circle ignores them.
+            TAG_MLS_COMMIT => {
+                let r = receive_mls_commit(&mut st, idx, &envelope[1..]);
+                mls_refresh_keying(&mut st, idx);
+                drain_pending(&mut st, idx);
+                r
+            }
+            TAG_MLS_WELCOME => {
+                let r = receive_mls_welcome(&mut st, idx, &envelope[1..]);
+                mls_refresh_keying(&mut st, idx);
+                drain_pending(&mut st, idx);
+                r
+            }
+            TAG_MLS_JOIN => {
+                let r = receive_mls_join(&mut st, idx, &envelope[1..]);
+                mls_refresh_keying(&mut st, idx);
+                drain_pending(&mut st, idx);
+                r
+            }
+            TAG_ADMIN_GRANT => receive_admin_grant(&mut st, idx, &envelope[1..]),
+            TAG_CIRCLE_UPGRADE => receive_circle_upgrade(&mut st, idx, &envelope[1..]),
+            // Unbundled proposals (§4.2 roster path) are reserved for M4; a stray one is inert.
+            TAG_MLS_PROPOSAL => Ok(false),
+            TAG_DEVICE_ROSTER => {
+                // Account-level (not circle-specific) — verify against the carried account bundle, store,
+                // and rotate affected epochs. Forged/stale rosters are rejected inside the verifier.
+                match decode_roster(&envelope[1..]).and_then(|(acct, list, creds, trailer)| {
+                    HavenId::from_bytes(&acct).ok().map(|a| (a, list, creds, trailer))
+                }) {
+                    Some((account, list, creds, trailer)) => {
+                        let stored = verify_and_store_roster(&mut st, &account, &list, &creds);
+                        note_roster_capability(&mut st, &account, &trailer); // S0: learn capability (absence-safe)
+                        note_seedless_own_roster_wire(&mut st, &account, envelope); // A3: verbatim primary wire
+                        // A newly-learned roster may make a previously "unknown sender" event openable —
+                        // drain the durable buffer so multi-device roster lag no longer loses posts.
+                        let drained = drain_all_pending(&mut st);
+                        Ok(stored || drained)
+                    }
+                    None => Ok(false),
+                }
+            }
+            _ => receive_legacy(&mut st, idx, envelope), // untagged JSON `{…}` = legacy envelope
+        })
+    }
+
     fn merge_circle(st: &mut NetState, pc: PersistCircle) {
         let idx = match st.circles.iter().position(|c| c.id == pc.id) {
             Some(i) => i,
@@ -6737,6 +6788,40 @@ mod net_tests {
         assert_eq!(bob.feed("fam".into(), 4_000, None).len(), 1, "fam post lands in fam circle");
         assert_eq!(bob.feed(cid, 4_000, None).len(), 1, "default circle is unchanged");
         assert_eq!(alice.circles().len(), 2, "alice now has two circles");
+    }
+
+    #[test]
+    fn envelope_outer_dedupe_skips_re_deliveries_but_never_wedges() {
+        let alice = HavenSocial::new([3u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([4u8; 32].to_vec()).unwrap();
+        let cid = DEFAULT_CIRCLE.to_string();
+        alice.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+        bob.add_contact_bundle(cid, alice.my_bundle()).unwrap();
+
+        // An envelope for a circle Bob doesn't have yet is ignored AND not recorded as seen —
+        // the identical bytes must still land once the circle exists.
+        alice.create_circle("fam".into(), "Family".into());
+        alice.add_contact_bundle("fam".into(), bob.my_bundle()).unwrap();
+        let fam_env = alice.post("fam".into(), "family only".into(), vec![], None, None, false, false, 1_000).unwrap();
+        assert!(!bob.receive("fam".into(), fam_env.clone()).unwrap(), "unknown circle is ignored");
+        bob.create_circle("fam".into(), "Family".into());
+        bob.add_contact_bundle("fam".into(), alice.my_bundle()).unwrap();
+        let _ = bob.receive("fam".into(), fam_env.clone()); // buffers until the key commit arrives
+        sync(&alice, &bob, "fam");
+        assert_eq!(bob.feed("fam".into(), 2_000, None).len(), 1, "post lands once the circle exists");
+
+        // Re-blasting the full history (what peers do on a timer) is rejected by outer hash
+        // before the engine lock — and stays exactly as much of a no-op as engine dedupe was.
+        sync(&alice, &bob, "fam");
+        assert!(!bob.receive("fam".into(), fam_env.clone()).unwrap(), "identical bytes skip early");
+        assert_eq!(bob.feed("fam".into(), 2_000, None).len(), 1, "re-blast stays deduped");
+
+        // Leaving a circle clears its seen-set: a re-join re-ingests the same bytes.
+        bob.leave_circle("fam".into());
+        bob.create_circle("fam".into(), "Family".into());
+        bob.add_contact_bundle("fam".into(), alice.my_bundle()).unwrap();
+        sync(&alice, &bob, "fam");
+        assert_eq!(bob.feed("fam".into(), 2_000, None).len(), 1, "history re-lands after leave + re-join");
     }
 
     #[test]

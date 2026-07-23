@@ -2792,6 +2792,16 @@ final class FeedStore: ObservableObject {
         syncBundleGen[circleId, default: 0] += 1
         syncBundleCache.removeValue(forKey: circleId)
     }
+    /// Generation each target last got a circle's FULL history blast at ("cid|nodehex" → gen), and
+    /// the generation each circle's bundle was last mailbox-uploaded at. The b344 gen-cache made an
+    /// unchanged circle cheap to RE-SEAL — but the bytes still went out every cycle, and every
+    /// RECEIVER paid a full unseal-to-dedupe pass per envelope every few minutes, forever (the
+    /// standing all-devices CPU/heat storm; the receiver-side hash skip in `receive` is the other
+    /// half of this fix). Send the blast only when the circle changed since THAT target last got
+    /// it, or when a target is new this session. Session-scoped: a restart re-blasts once, and
+    /// offline/gappy peers were never served by this path anyway — the mailbox covers them.
+    private var historyBlastGen: [String: UInt64] = [:]
+    private var historyUploadGen: [String: UInt64] = [:]
     /// Last own-device catch-up sweep. Throttled hard (5 min): it re-seals every envelope it sends,
     /// so it must not ride the 20s sync tick. See the sweep for why it exists.
     private var lastOwnDeviceCatchupMs: UInt64 = 0
@@ -2835,8 +2845,10 @@ final class FeedStore: ObservableObject {
             // re-send their cached bundle bytes (siblings dedupe, so identical bytes are fine).
             var cachedBundles: [(String, [Data])] = []
             var toSeal: [(cid: String, gen: UInt64)] = []
+            var genSnap: [String: UInt64] = [:]
             for (cid, _) in circleSnap {
                 let gen = syncBundleGen[cid] ?? 0
+                genSnap[cid] = gen
                 if let hit = syncBundleCache[cid], hit.gen == gen {
                     cachedBundles.append((cid, hit.envs))
                 } else {
@@ -2857,8 +2869,17 @@ final class FeedStore: ObservableObject {
                             self.syncBundleCache[s.cid] = (gen: s.gen, envs: s.envs)
                         }
                     }
-                    let sealed = freshSealed.map { ($0.cid, $0.envs) } + cachedBundles
-                    for (cid, envs) in sealed where !envs.isEmpty {
+                    let sealed = freshSealed.map { ($0.cid, $0.gen, $0.envs) }
+                        + cachedBundles.map { ($0.0, genSnap[$0.0] ?? 0, $0.1) }
+                    for (cid, gen, envs) in sealed where !envs.isEmpty {
+                        // Mailbox upload is target-independent — once per circle per generation,
+                        // not (as before) once per envelope PER TARGET per cycle.
+                        if self.historyUploadGen[cid] != gen {
+                            self.historyUploadGen[cid] = gen
+                            for env in envs {
+                                Task { await SharedStore.uploadEvent(circleId: cid, env: env) }
+                            }
+                        }
                         var targets = Set(self.dialTargets(cid))
                         if cid == "default" {
                             for c in ContactsStore.shared.contacts { targets.insert(c.idHex) }
@@ -2867,9 +2888,12 @@ final class FeedStore: ObservableObject {
                             let shares = shareMap[nodeHex.lowercased()]
                                 ?? ConnectionsStore.shared.sharesHistory(nodeHex)
                             guard shares else { continue }
+                            // Unchanged since this target's last blast → nothing to teach them.
+                            let blastKey = cid + "|" + nodeHex.lowercased()
+                            guard self.historyBlastGen[blastKey] != gen else { continue }
+                            self.historyBlastGen[blastKey] = gen
                             for env in envs {
                                 self.sendIroh(1, self.eventPayload(cid, env), to: nodeHex)
-                                Task { await SharedStore.uploadEvent(circleId: cid, env: env) }
                             }
                         }
                     }
@@ -4000,7 +4024,7 @@ final class FeedStore: ObservableObject {
         // once per transition instead of once per packet.
         if viaNearby { if !nearbyActive { nearbyActive = true } }
         else { if !internetActive { internetActive = true } }
-        var payload = Data(data.dropFirst())
+        let payload = Data(data.dropFirst())
         // Call-signaling frames are SEALED + SIGNED to us (audit R1). Open + verify BEFORE anything
         // else: reject any frame we can't decrypt or whose signature doesn't verify (a relay-forged,
         // relay-rewritten, or replayed-as-another-type frame all fail here), and reject one whose
@@ -4020,47 +4044,79 @@ final class FeedStore: ObservableObject {
             // like: the accept (11) is dropped here and nothing, anywhere, records that it arrived.
             // Log which guard fired. The frame is already authenticated-or-not by this point, so the
             // log leaks nothing an attacker doesn't already know they sent.
-            guard let opened = social?.openCallFrame(frameType: type, blob: payload) else {
-                // "seal/signature did not verify" collapsed two opposite causes into one line. Ask
-                // which: a decrypt failure means the frame wasn't sealed to a key we hold, while a
-                // signature failure means it WAS addressed to us and the signature is checked against
-                // the wrong id of ours. Diagnostics only — the frame is already refused either way.
-                let why = social?.diagnoseCallFrame(frameType: type, blob: payload) ?? "no social"
-                HavenLog.call("call frame type=\(type) DROPPED — \(why)")
-                return
+            //
+            // The unseal + roster resolution are ENGINE calls; frames 30/31/32 ride this path and
+            // burst during media sweeps, and opening each on the main actor parked the UI on the
+            // engine mutex for as long as any storm held it (beachball sample, b349). Hop through
+            // EngineGate for the crypto, back to the main actor to dispatch. Consecutive frames
+            // enqueue in arrival order; the rare cross-frame reorder this could allow is harmless
+            // to the handlers (SDP/ICE tolerate it, invite/accept/hangup key on call ids).
+            Task { [weak self] in
+                guard let self else { return }
+                let social = self.social
+                struct OpenedFrame {
+                    let plaintext: Data
+                    let verified: String
+                    let resolved: String?
+                    let transportAcct: String?
+                }
+                let opened: OpenedFrame? = await EngineGate.shared.run {
+                    guard let social else {
+                        HavenLog.call("call frame type=\(type) DROPPED — no social")
+                        return nil
+                    }
+                    guard let o = social.openCallFrame(frameType: type, blob: payload) else {
+                        // "seal/signature did not verify" collapsed two opposite causes into one
+                        // line. Ask which: a decrypt failure means the frame wasn't sealed to a key
+                        // we hold, while a signature failure means it WAS addressed to us and the
+                        // signature is checked against the wrong id of ours. Diagnostics only.
+                        let why = social.diagnoseCallFrame(frameType: type, blob: payload)
+                        HavenLog.call("call frame type=\(type) DROPPED — \(why)")
+                        return nil
+                    }
+                    let verified = o.senderHex.lowercased()
+                    return OpenedFrame(
+                        plaintext: Data(o.data),
+                        verified: verified,
+                        // The signer's ACCOUNT. A SEEDLESS sender (S4, D9) signs call/notification
+                        // frames with its DEVICE key and carries the device bundle, so `verified`
+                        // is a device id — resolve it to the account that authorized it (a seeded
+                        // sender signs with the account key, where the account resolves to itself).
+                        // This is the receive-side half of accepting device-signed frames.
+                        resolved: social.accountForDevice(deviceHex: verified)?.lowercased(),
+                        transportAcct: (senderDevice?.count == 64)
+                            ? senderDevice.flatMap { social.accountForDevice(deviceHex: $0)?.lowercased() }
+                            : nil
+                    )
+                }
+                guard let opened else { return }
+                let declared = String(data: opened.plaintext.prefix(64), encoding: .utf8)?.lowercased() ?? ""
+                let signerAccount = opened.resolved ?? opened.verified
+                guard opened.verified.count == 64, declared == signerAccount else {   // proven signer's account == self-declared
+                    // If `resolved` is nil the sender signed as a DEVICE we can't map to an account —
+                    // i.e. we don't hold their device roster — so a perfectly genuine frame from a
+                    // seedless/linked device fails this check. That is a roster-propagation problem
+                    // wearing a signature-mismatch costume; it is NOT a forgery.
+                    HavenLog.call("call frame type=\(type) DROPPED — declared=\(declared.prefix(8)) != signerAccount=\(signerAccount.prefix(8)) (signer device=\(opened.verified.prefix(8)), device→account \(opened.resolved == nil ? "UNRESOLVED — we lack their roster" : "resolved"))")
+                    return
+                }
+                // Defense in depth: when the transport gave us a verified device id, it must resolve
+                // to the SAME account as the signer (nil on the relay path, where the signature
+                // already did the work).
+                if let acct = opened.transportAcct, acct != signerAccount {
+                    HavenLog.call("call frame type=\(type) DROPPED — transport device \(senderDevice?.prefix(8) ?? "") maps to \(acct.prefix(8)), signer is \(signerAccount.prefix(8))")
+                    return
+                }
+                if ConnectionsStore.shared.isBlocked(opened.verified) {
+                    HavenLog.call("call frame type=\(type) DROPPED — sender \(opened.verified.prefix(8)) is blocked")
+                    return
+                }
+                HavenLog.call("call frame type=\(type) accepted from \(signerAccount.prefix(8))")
+                self.dispatchInboundFrame(type, opened.plaintext, viaNearby: viaNearby, senderDevice: senderDevice)
             }
-            let verified = opened.senderHex.lowercased()
-            let plaintext = Data(opened.data)
-            let declared = String(data: plaintext.prefix(64), encoding: .utf8)?.lowercased() ?? ""
-            // The signer's ACCOUNT. A SEEDLESS sender (S4, D9) signs call/notification frames with its
-            // DEVICE key and carries the device bundle, so `verified` is a device id — resolve it to the
-            // account that authorized it (a seeded sender signs with the account key, where the account
-            // resolves to itself). This is the receive-side half of accepting device-signed frames.
-            let resolved = social?.accountForDevice(deviceHex: verified)?.lowercased()
-            let signerAccount = resolved ?? verified
-            guard verified.count == 64, declared == signerAccount else {   // proven signer's account == self-declared
-                // If `resolved` is nil the sender signed as a DEVICE we can't map to an account —
-                // i.e. we don't hold their device roster — so a perfectly genuine frame from a
-                // seedless/linked device fails this check. That is a roster-propagation problem
-                // wearing a signature-mismatch costume; it is NOT a forgery.
-                HavenLog.call("call frame type=\(type) DROPPED — declared=\(declared.prefix(8)) != signerAccount=\(signerAccount.prefix(8)) (signer device=\(verified.prefix(8)), device→account \(resolved == nil ? "UNRESOLVED — we lack their roster" : "resolved"))")
-                return
-            }
-            // Defense in depth: when the transport gave us a verified device id, it must resolve to the
-            // SAME account as the signer (nil on the relay path, where the signature already did the work).
-            if let senderDevice, senderDevice.count == 64,
-               let acct = social?.accountForDevice(deviceHex: senderDevice)?.lowercased(),
-               acct != signerAccount {
-                HavenLog.call("call frame type=\(type) DROPPED — transport device \(senderDevice.prefix(8)) maps to \(acct.prefix(8)), signer is \(signerAccount.prefix(8))")
-                return
-            }
-            if ConnectionsStore.shared.isBlocked(verified) {
-                HavenLog.call("call frame type=\(type) DROPPED — sender \(verified.prefix(8)) is blocked")
-                return
-            }
-            HavenLog.call("call frame type=\(type) accepted from \(signerAccount.prefix(8))")
-            payload = plaintext
-        } else if [3, 13, 15, 33].contains(type) {
+            return
+        }
+        if [3, 13, 15, 33].contains(type) {
             // Remaining sender-prefixed frames (media req + resume req + call audio/video
             // placeholders): drop if blocked (audit F4). These are not call SIGNALING and keep the
             // plaintext-prefix check. 33 sits here rather than in the sealed set above because it asks
@@ -4068,6 +4124,13 @@ final class FeedStore: ObservableObject {
             let head = String(data: payload.prefix(64), encoding: .utf8) ?? ""
             if head.count == 64, ConnectionsStore.shared.isBlocked(head) { return }
         }
+        dispatchInboundFrame(type, payload, viaNearby: viaNearby, senderDevice: senderDevice)
+    }
+
+    /// Route one authenticated inbound frame to its handler. Call-signaling frames arrive here
+    /// AFTER the sealed-open + signer checks in `handleInbound` (with `payload` already the opened
+    /// plaintext); everything else arrives as it came off the wire.
+    private func dispatchInboundFrame(_ type: UInt8, _ payload: Data, viaNearby: Bool, senderDevice: String?) {
         switch type {
         case 0: handleHello(payload, viaNearby: viaNearby, senderDevice: senderDevice)
         case 1: handleEvent(payload, senderDevice: senderDevice, viaNearby: viaNearby)

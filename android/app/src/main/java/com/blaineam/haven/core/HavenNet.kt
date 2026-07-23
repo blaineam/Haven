@@ -4279,7 +4279,12 @@ object HavenNet : InboundListener {
                 }
                 else -> {
                     if (ingestMailboxEnv(circleId, env)) { changed = true; return true }
-                    return false
+                    // Duplicate (nothing changed), BUFFERED durably in pending_epoch (persisted
+                    // below — receiveRan), or garbage that identical bytes can never improve: mark
+                    // seen either way. Leaving false-returns unseen re-fetched and re-decrypted the
+                    // same envelopes on every poll forever once slot convergence made re-applied
+                    // key commits honest no-ops (the instant-beachball / 6 GB relay-hosting Mac).
+                    return true
                 }
             }
         }

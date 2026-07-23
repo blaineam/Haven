@@ -7208,25 +7208,29 @@ impl Engine {
                         );
                     }
                     Ok(false) => {
-                        // Buffered (epoch key / roster not here yet) or an already-held duplicate —
-                        // the key stays unseen and must re-GET. This silence is what made a stuck
-                        // envelope invisible for 20 minutes, so name the key at debug level.
+                        // Duplicate (nothing changed) or BUFFERED until its key/roster arrives —
+                        // mark seen EITHER way: the pending buffer is durable (persist() runs right
+                        // after this loop), so the mailbox copy is redundant. Leaving false-returns
+                        // unseen melted the relay-hosting Mac once convergence made re-applied
+                        // commits honest no-ops: a storm-wiped seen-set re-fetched and re-decrypted
+                        // thousands of envelopes on every poll, forever.
                         log::debug!(
-                            "mailbox receive deferred circle={} key={} bytes={env_len} (buffered/dup)",
+                            "mailbox receive no-op circle={} key={} bytes={env_len} (buffered/dup) — marked seen",
                             &circle_id.chars().take(12).collect::<String>(),
                             key.rsplit('/').next().unwrap_or(&key).chars().take(16).collect::<String>(),
                         );
-                        deferred = true;
+                        self.mark_mailbox_seen(key);
                     }
                     Err(e) => {
-                        // A hard per-key failure (malformed envelope, verify error) was previously
-                        // indistinguishable from "buffered" — log it once per attempt.
+                        // Hard per-key failure (malformed envelope, verify error). Re-fetching the
+                        // SAME bytes cannot improve — mark seen; the deterministic re-seal backstop
+                        // delivers a fresh copy under a new key if the content still matters.
                         log::warn!(
-                            "mailbox receive FAILED circle={} key={} bytes={env_len}: {e}",
+                            "mailbox receive FAILED circle={} key={} bytes={env_len}: {e} — marked seen",
                             &circle_id.chars().take(12).collect::<String>(),
                             key.rsplit('/').next().unwrap_or(&key).chars().take(16).collect::<String>(),
                         );
-                        deferred = true;
+                        self.mark_mailbox_seen(key);
                     }
                 }
             }
@@ -7258,12 +7262,17 @@ impl Engine {
                             changed_circles.insert(c.id.clone());
                             newly_ingested.push((c.id.clone(), env));
                         }
-                        Ok(false) => {}
-                        Err(e) => log::warn!(
-                            "s3 mailbox receive FAILED circle={} key={}: {e}",
-                            &c.id.chars().take(12).collect::<String>(),
-                            key.rsplit('/').next().unwrap_or(&key).chars().take(16).collect::<String>(),
-                        ),
+                        // Duplicate/buffered-durable/garbage: seen either way (see the relay-path
+                        // comment above — unmarked false-returns re-fetch forever).
+                        Ok(false) => self.mark_mailbox_seen(key),
+                        Err(e) => {
+                            log::warn!(
+                                "s3 mailbox receive FAILED circle={} key={}: {e} — marked seen",
+                                &c.id.chars().take(12).collect::<String>(),
+                                key.rsplit('/').next().unwrap_or(&key).chars().take(16).collect::<String>(),
+                            );
+                            self.mark_mailbox_seen(key);
+                        }
                     }
                 }
             }

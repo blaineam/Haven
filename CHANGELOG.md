@@ -71,6 +71,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Instant beachball on 348: duplicate envelopes were re-fetched forever (all clients).**
+  The mailbox marked a key seen only when `receive()` reported a change. Once epoch-key
+  convergence made re-applied commits honest no-ops, any circle whose seen-set had been
+  wiped by the earlier storm re-fetched and re-decrypted its whole mailbox — 200 envelopes
+  a pass, several passes a second, under the engine lock (6.3 GB in 105 s). A processed
+  envelope is now marked seen regardless of the result: `false` means duplicate (nothing
+  left to extract) or buffered — and the pending buffer is durable precisely so the
+  mailbox copy is redundant. Held hellos still keep their slots.
 - **Media stuck on "Waiting for sender…" while the blob sat on the relay (core + relay +
   all clients).** A CLI relay's HTTP front door only ever reached clients as a pasted wire
   string — so a relay that gained (or rotated) its free-tunnel URL after adoption left

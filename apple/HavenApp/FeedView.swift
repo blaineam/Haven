@@ -3694,8 +3694,19 @@ final class FeedStore: ObservableObject {
                 var controlKeys: [String: [String]] = [:]
                 var unlocked = Set<String>()
                 for (cid, key, env) in content {
-                    if (try? social.receive(circleId: cid, envelope: env)) == true {
-                        SharedStore.markSeenPublic(key)
+                    let applied = (try? social.receive(circleId: cid, envelope: env)) == true
+                    // Mark seen for EVERY processed envelope, not just applied==true. `false` means
+                    // "duplicate — nothing changed" or "buffered until its key/roster arrives", and
+                    // the pending buffer is DURABLE (persist() runs right after this batch), so the
+                    // mailbox copy is redundant either way. Marking only on `true` melted the Mac:
+                    // once convergence made re-applied key commits honest no-ops, a storm-wiped
+                    // seen-set left 8k+ envelopes that returned false forever — re-fetched and
+                    // re-decrypted under the engine lock on EVERY poll, several times a second
+                    // (6.3 GB RSS in 105 s, instant beachball). An envelope that failed to open
+                    // outright is also marked: re-fetching identical bytes can't improve, and the
+                    // deterministic re-seal backstop delivers a fresh copy under a NEW key.
+                    SharedStore.markSeenPublic(key)
+                    if applied {
                         changed.append((cid, env))
                         // Key commit (0x03) or roster (0x04) that actually changed state — peer keys
                         // may now open events that were previously marked seen while unopenable.

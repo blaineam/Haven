@@ -235,7 +235,9 @@ struct PrivacyBlurView: View {
 /// leave it. Mirrors the You settings screen, reached from the gear in the circle view.
 struct CircleSettingsView: View {
     let circleId: String
-    @ObservedObject private var store = FeedStore.shared
+    // Do NOT @ObservedObject FeedStore — every sync/mailbox tick republishes and re-lays out this
+    // sheet on the main actor while the engine lock is contested (field: Mac freezes the moment
+    // circle settings opens). Snapshot the name once; mutations go through FeedStore.shared.
     @ObservedObject private var circleSettings = CircleSettingsStore.shared
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
@@ -252,11 +254,11 @@ struct CircleSettingsView: View {
             // rather than at each presentation site so it holds wherever this is opened from.
             .havenPausesPostAudio()
             .onAppear {
-                name = store.circles.first { $0.id == circleId }?.name ?? ""
+                name = FeedStore.shared.circles.first { $0.id == circleId }?.name ?? ""
                 nick = circleSettings.nickname(circleId) ?? ""
             }
             .onDisappear {
-                store.renameCircle(circleId, to: name)   // persist a rename made without hitting return
+                FeedStore.shared.renameCircle(circleId, to: name)   // persist a rename made without hitting return
                 circleSettings.setNickname(nick, for: circleId)
             }
     }
@@ -280,7 +282,7 @@ struct CircleSettingsView: View {
             Form {
                 Section {
                     TextField("Circle name", text: $name)
-                        .onSubmit { store.renameCircle(circleId, to: name) }
+                        .onSubmit { FeedStore.shared.renameCircle(circleId, to: name) }
                 } header: {
                     Text("Name")
                 } footer: {
@@ -367,7 +369,7 @@ struct CircleSettingsView: View {
                 if !isDefault {
                     Section {
                         Button(role: .destructive) {
-                            store.leaveActiveCircle(); dismiss()
+                            FeedStore.shared.leaveActiveCircle(); dismiss()
                         } label: {
                             Label("Leave this circle", systemImage: "rectangle.portrait.and.arrow.right")
                         }
@@ -390,7 +392,7 @@ struct CircleSettingsView: View {
             VStack(alignment: .leading, spacing: 8) {
                 sectionHeader("Name")
                 TextField("Circle name", text: $name)
-                    .onSubmit { store.renameCircle(circleId, to: name) }
+                    .onSubmit { FeedStore.shared.renameCircle(circleId, to: name) }
                     .havenPillField()
                 footnote("What this circle is called for you and everyone in it.")
             }
@@ -460,7 +462,7 @@ struct CircleSettingsView: View {
             }
 
             if !isDefault {
-                Button { store.leaveActiveCircle(); dismiss() } label: {
+                Button { FeedStore.shared.leaveActiveCircle(); dismiss() } label: {
                     Label("Leave this circle", systemImage: "rectangle.portrait.and.arrow.right")
                 }
                 .buttonStyle(GlassPillButtonStyle(tint: .red))

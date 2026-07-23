@@ -32,6 +32,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **iPhone scorch + Mac 10 GB / freeze (Apple, field sample build 344).** Live profile: Mac host
+  at **237% CPU / 10.6 GB RSS**, path-proxy log **~98% `__live__` LIST** (6–17/sec) while idle;
+  main thread still mutex-waiting; Circle Settings sheet re-rendered on every `FeedStore`
+  publish. Fix: **no idle live-call HTTP poll** (only while `callInProgress`, one-in-flight,
+  ≤6 circles); park Multipeer harder on launch; slow sync/mailbox/media cadences; Circle
+  Settings no longer `@ObservedObject`s the full feed store; opening a DM no longer
+  `forceSync()`s the world.
+
 - **Mac beachballs / main-thread engine lock (Apple, field sample build 343).** Sample of a
   linked Mac host: main + ~14 cooperative utility threads all stuck in `__psynch_mutexwait` on
   the single `HavenSocial` mutex (2.1–2.6 GB RSS). Root causes: (1) `messages(in:)` re-ran full

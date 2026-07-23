@@ -519,7 +519,12 @@ struct DMThreadView: View {
                 .disabled(store.dmMemberHexes(circleId).isEmpty)
             }
         }
-        .onAppear { store.forceSync(); store.markThreadRead(circleId) }
+        .onAppear {
+            // forceSync() used to re-fan hello/history/Multipeer every open — cooked phones and
+            // locked the engine while the thread painted. Pull this circle's mailbox only.
+            store.markThreadRead(circleId)
+            store.pollMailboxNow()
+        }
         // Messages arriving WHILE the thread is open are being read — keep the watermark current
         // so backing out never leaves a stale badge for a conversation the user just watched.
         .onChange(of: store.postTick) { store.markThreadRead(circleId) }

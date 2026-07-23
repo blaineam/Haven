@@ -50,6 +50,19 @@ struct PresentedURL: Identifiable {
 enum LinkScanner {
     private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
 
+    // Both entry points run PER MESSAGE PER RENDER on the main thread (feed cards, comments, DM
+    // bubbles), and a sync burst re-renders the whole feed several times a second — an NSDataDetector
+    // pass plus repeated `range(of:)` splices per bubble per frame was a solid slice of the Mac
+    // beachball. Bodies are immutable once rendered, so memoize on the exact text. NSCache is
+    // thread-safe and drops entries under memory pressure on its own; the count caps are just
+    // pathology guards (a cache miss only re-pays one scan).
+    private static let urlsCache: NSCache<NSString, NSArray> = {
+        let c = NSCache<NSString, NSArray>(); c.countLimit = 4096; return c
+    }()
+    private static let stripCache: NSCache<NSString, NSString> = {
+        let c = NSCache<NSString, NSString>(); c.countLimit = 4096; return c
+    }()
+
     /// Remove one URL's text from a body, tidying the whitespace it leaves behind so the remaining
     /// sentence doesn't keep a hole where the link was.
     ///
@@ -59,6 +72,15 @@ enum LinkScanner {
     /// `LinkedText` left the raw URL sitting in every DM, which is exactly what "Message the author"
     /// produces. Any new surface that shows a card should strip through this too.
     static func stripping(_ url: URL, from text: String) -> String {
+        // \u{1F} (unit separator) can't appear in a URL, so the key never collides across pairs.
+        let key = (url.absoluteString + "\u{1F}" + text) as NSString
+        if let hit = stripCache.object(forKey: key) { return hit as String }
+        let out = stripUncached(url, from: text)
+        stripCache.setObject(out as NSString, forKey: key)
+        return out
+    }
+
+    private static func stripUncached(_ url: URL, from text: String) -> String {
         guard let range = text.range(of: url.absoluteString) else { return text }
         var out = text
         out.removeSubrange(range)
@@ -70,12 +92,16 @@ enum LinkScanner {
 
     static func urls(in text: String) -> [URL] {
         guard let detector else { return [] }
+        let key = text as NSString
+        if let hit = urlsCache.object(forKey: key) as? [URL] { return hit }
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        return detector.matches(in: text, range: range).compactMap { match -> URL? in
+        let found = detector.matches(in: text, range: range).compactMap { match -> URL? in
             guard let url = match.url, let scheme = url.scheme?.lowercased(),
                   scheme == "http" || scheme == "https" else { return nil }
             return url
         }
+        urlsCache.setObject(found as NSArray, forKey: key)
+        return found
     }
 }
 

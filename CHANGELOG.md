@@ -71,6 +71,30 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **The standing every-few-minutes CPU/heat storm on every device (core + Apple).** The
+  periodic full-history re-send was cheap for the *sender* since the b344 gen-cache — but
+  every *receiver* still decrypted the entire blast under the engine lock just to discover
+  it was all duplicates, every cycle, on every linked device and history-sharing peer,
+  scaling with total history forever (100%-duty engine batches in the b349 beachball
+  sample; the hot iPhone). Two halves: `receive()` now rejects re-delivered key-commit and
+  epoch-event envelopes by outer-bytes BLAKE3 hash *before* the engine lock (sealing is
+  deterministic, so identical bytes provably can't change state; session-scoped so a
+  restart, circle leave, or member purge always re-ingests; MLS/roster/legacy tags still
+  process every delivery — they may legitimately park and complete via re-delivery), and
+  the sender now skips blasting a circle whose change generation hasn't moved since that
+  target last got it (new-this-session targets still get one; the mailbox upload also
+  de-duplicated from once per envelope *per target* per cycle to once per generation).
+- **Mac beachball, render half: the feed re-paid a full text scan per message per frame.**
+  Every SwiftUI invalidation re-ran an NSDataDetector pass per visible post/comment and
+  re-spliced URLs out of every DM bubble (`range(of:)` loops) — during a sync burst that's
+  the whole feed, several times a second, on the main thread (the 100%-pegged 5-second
+  sample). `LinkScanner.urls`/`stripping` are now memoized on the exact body text
+  (NSCache, pressure-evicting), so re-renders cost a dictionary hit.
+- **Main thread no longer opens sealed call/media frames.** The call-frame preamble
+  (unseal + device→account roster resolution) ran on the main actor per frame — and
+  frames 30/31/32 burst during media sweeps, so each one parked the UI on the engine
+  mutex for as long as any storm held it. The crypto now hops through EngineGate off-main
+  and only the dispatch returns to the main actor.
 - **Instant beachball on 348: duplicate envelopes were re-fetched forever (all clients).**
   The mailbox marked a key seen only when `receive()` reported a change. Once epoch-key
   convergence made re-applied commits honest no-ops, any circle whose seen-set had been

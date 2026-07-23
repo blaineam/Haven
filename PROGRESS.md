@@ -6,6 +6,22 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest wave (built, batched for next upload)
+- **Epoch-key convergence — the 16.8 GB Mac storm (2026-07-23, 1.1.4 b347, core + Apple)** —
+  a `sample` of the frozen Mac app showed the main thread ~89% blocked on the engine
+  lock while one background FFI call churned huge buffers, and the unified log showed
+  the smoking gun: dozens of `push /notify ok` + `fabric rebind scheduled` a second and
+  `re-open N circle(s) after key commit` repeating forever. Root cause: since
+  device-signed commits, a contact's devices each mint a random key for the same
+  (account, epoch); both competing commits live in the mailbox forever, and the engine
+  adopted whichever it saw last — every re-offered duplicate "changed state", wiped the
+  circle's seen-set, and re-ingested the whole mailbox, every poll. Epoch-key slots now
+  converge deterministically (larger key wins, matching the writer side), losers are
+  retained so their content still opens, duplicates are reported no-ops, and state-blob
+  imports converge the same way (first-wins imports were another way linked devices
+  drifted apart). Apple dampers: seen-wipes ≤1/circle/10 min, mailbox syncSelf pushes
+  ≤3/circle/pass (the per-envelope firehose was cooking the iPhone), fabric rebind is
+  schedule-once. Regression-tested in core; Android/desktop pick the fix up through the
+  shared core. Xcode Cloud #347 → TestFlight; Play rc.24 → internal + closed.
 - **Self-sync + hello lane resurrection (2026-07-23, core + Apple)** — live-fleet
   diagnosis found the self-sync-over-relay lane DEAD everywhere (three stacked causes)
   and circle invites dying in unclaimable hello slots; the root of "my linked devices

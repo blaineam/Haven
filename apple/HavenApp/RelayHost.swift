@@ -771,7 +771,29 @@ final class RelayHost: ObservableObject {
     #endif
 
     /// Every up, non-loopback, non-link-local IPv4 on this device (getifaddrs).
+    ///
+    /// TTL-cached: `getifaddrs` is a sysctl walk of every interface, and this is called from
+    /// `urlPlausiblyReachable` — per URL, per relay, per circle, per poll — which put the walk on
+    /// the MAIN thread hundreds of times a second (20% of a b350 beachball sample). Interfaces
+    /// change on the timescale of network hops, not polls; 15 s of staleness only delays a
+    /// LAN-plausibility verdict, never breaks it.
+    private static let lanIPv4Lock = NSLock()
+    private static var lanIPv4Cache: (ips: [String], at: Date)?
     static func lanIPv4s() -> [String] {
+        lanIPv4Lock.lock()
+        if let c = lanIPv4Cache, Date().timeIntervalSince(c.at) < 15 {
+            lanIPv4Lock.unlock()
+            return c.ips
+        }
+        lanIPv4Lock.unlock()
+        let fresh = lanIPv4sUncached()
+        lanIPv4Lock.lock()
+        lanIPv4Cache = (fresh, Date())
+        lanIPv4Lock.unlock()
+        return fresh
+    }
+
+    private static func lanIPv4sUncached() -> [String] {
         var out: [String] = []
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddr) == 0 else { return out }

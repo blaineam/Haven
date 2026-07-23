@@ -123,8 +123,18 @@ final class AccountStore: ObservableObject {
             let hex = AccountPublicStore.hex()
             if !hex.isEmpty { return hex }
         }
+        seedCacheLock.lock()
+        if let cachedNodeHex {
+            seedCacheLock.unlock()
+            return cachedNodeHex
+        }
+        seedCacheLock.unlock()
         guard let seed = loadSeed(), let acct = try? Account.fromSeed(seed: seed) else { return "" }
-        return acct.nodeIdHex()
+        let hex = acct.nodeIdHex()
+        seedCacheLock.lock()
+        cachedNodeHex = hex
+        seedCacheLock.unlock()
+        return hex
     }
 
     /// Posted after `adoptSeedless` persists the seedless anchors, so any live `AccountStore` flips its
@@ -285,6 +295,7 @@ final class AccountStore: ObservableObject {
     /// item only when no Enclave is available. Always clears the *other* representation first so a
     /// migrated user never leaves a stale plaintext copy behind.
     private static func saveSeed(_ data: Data, synced: Bool = false) {
+        invalidateSeedCache()
         deleteSeed()
         if wrapAndStore(data) { return }   // Secure-Enclave path (device hardware).
         // Fallback: no Secure Enclave (Simulator / unsupported) → plaintext, device-local only.
@@ -295,8 +306,36 @@ final class AccountStore: ObservableObject {
         SecItemAdd(query as CFDictionary, nil)
     }
 
+    // Session cache for the unwrapped seed + derived node hex. Every load was a Secure-Enclave
+    // ECIES unwrap — a synchronous XPC round-trip to the SEP — and hot paths call these
+    // constantly (RelayClients' self-dial guard per relay per circle per poll, seed-holder
+    // gates per sync tick): a b350 beachball sample had the MAIN thread spending 27% of its
+    // time inside SecKeyECIES. The seed already lives in the engine's memory for the process
+    // lifetime, so caching the successful load adds no new exposure class. Only `.found` is
+    // cached — locked/SE-error keep retrying so a pre-first-unlock launch still heals — and
+    // every seed mutation invalidates.
+    private static let seedCacheLock = NSLock()
+    private static var cachedSeed: Data?
+    private static var cachedNodeHex: String?
+    private static func invalidateSeedCache() {
+        seedCacheLock.lock(); defer { seedCacheLock.unlock() }
+        cachedSeed = nil
+        cachedNodeHex = nil
+    }
+
     private static func loadSeed() -> Data? {
-        if case .found(let d) = loadSeedStatus() { return d }
+        seedCacheLock.lock()
+        if let cachedSeed {
+            seedCacheLock.unlock()
+            return cachedSeed
+        }
+        seedCacheLock.unlock()
+        if case .found(let d) = loadSeedStatus() {
+            seedCacheLock.lock()
+            cachedSeed = d
+            seedCacheLock.unlock()
+            return d
+        }
         return nil
     }
 
@@ -369,6 +408,7 @@ final class AccountStore: ObservableObject {
     /// Secure-Enclave private key itself is intentionally LEFT in place: it holds no identity (it
     /// only wraps the seed) and is reused for the next `saveSeed`, avoiding needless key churn.
     private static func deleteSeed() {
+        invalidateSeedCache()
         // Clear both the data-protection AND legacy keychains so neither representation lingers
         // (stub: DP only — see keychainDomains).
         for dp in keychainDomains {

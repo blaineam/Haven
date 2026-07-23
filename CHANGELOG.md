@@ -71,6 +71,18 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Three per-call crypto/syscall storms behind the residual Mac heat (Apple + core).** Live
+  `sample`s of the b350 direct-run found the main thread split between (1) a Secure-Enclave
+  ECIES unwrap on EVERY `storedSeed()`/`currentNodeHex()` call — RelayClients' self-dial
+  guard alone called it per relay per circle per poll (now session-cached, invalidated on
+  every seed mutation; the seed already lives in engine memory, so no new exposure),
+  (2) a full `getifaddrs` interface walk per URL-plausibility check (now 15 s TTL-cached),
+  and (3) `http_auth_header` deriving the ENTIRE hybrid post-quantum identity from seed on
+  every signed HTTP request — hundreds per poll while draining a mailbox backlog, ~10 GB of
+  Malloc-Small churn (the seed→signing-secret derivation is now cached in the FFI; the
+  per-request transcript signature is untouched). Also: the activity bell badge offset no
+  longer displaces the glyph — the bell stays centered and the count tucks inside the glass
+  circle's own padding.
 - **The standing every-few-minutes CPU/heat storm on every device (core + Apple).** The
   periodic full-history re-send was cheap for the *sender* since the b344 gen-cache — but
   every *receiver* still decrypted the entire blast under the engine lock just to discover

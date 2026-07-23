@@ -566,8 +566,28 @@ pub fn parse_relay_link(uri: String) -> Option<RelayLinkInfo> {
 #[uniffi::export]
 pub fn http_auth_header(seed: Vec<u8>, token: String, method: String, key: String, body: Vec<u8>) -> Result<String, HavenError> {
     let seed: [u8; 32] = seed.try_into().map_err(|_| HavenError::Invalid { msg: "seed must be 32 bytes".into() })?;
-    let id = Identity::from_seed(&seed);
-    Ok(haven_net::httprelay::auth_header(&id.node_secret_bytes(), &token, &method, &key, &body))
+    Ok(haven_net::httprelay::auth_header(&auth_node_secret(&seed), &token, &method, &key, &body))
+}
+
+/// seed → node-signing-secret, cached. `Identity::from_seed` derives the FULL hybrid identity —
+/// classical + post-quantum keypairs, real CPU and a burst of small allocations — and clients sign
+/// EVERY HTTP request (per-request transcripts are the design; see `http_auth_header`). Deriving
+/// per call put `Identity::from_seed` at the top of a main-thread beachball sample while a client
+/// drained a large mailbox backlog (hundreds of signed GETs per poll, ~10 GB of Malloc-Small churn).
+/// Only the derivation is cached — the SIGNATURE stays strictly per-request. Bounded: an app holds
+/// at most its account seed + device seed (+ QA stubs), so four slots cover everyone.
+fn auth_node_secret(seed: &[u8; 32]) -> [u8; 32] {
+    static CACHE: std::sync::Mutex<Vec<([u8; 32], [u8; 32])>> = std::sync::Mutex::new(Vec::new());
+    let mut cache = CACHE.lock().unwrap();
+    if let Some((_, sec)) = cache.iter().find(|(s, _)| s == seed) {
+        return *sec;
+    }
+    let sec = Identity::from_seed(seed).node_secret_bytes();
+    if cache.len() >= 4 {
+        cache.remove(0);
+    }
+    cache.push((*seed, sec));
+    sec
 }
 
 /// Client to a circle's blob mailbox (a relay's local-disk store, reached over Haven Net /

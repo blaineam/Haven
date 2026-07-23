@@ -505,7 +505,10 @@ final class FeedStore: ObservableObject {
                 default: break
                 }
                 #endif
-                self.nextPollDueMs = self.now() + self.adaptiveInterval(base: pollBaseMs)
+                // A backlog drain in progress overrides the idle stretch: keep base cadence so
+                // 200-per-poll actually finishes (8k keys in ~30 min, not hours).
+                self.nextPollDueMs = self.now() + (SharedStore.anyOutstandingBacklog()
+                    ? pollBaseMs : self.adaptiveInterval(base: pollBaseMs))
                 self.pollMailboxNow()
                 self.dailyMailboxRefreshIfDue()   // long-lived sessions refresh without a relaunch
             }
@@ -2809,6 +2812,9 @@ final class FeedStore: ObservableObject {
     /// the backstop that keeps any future "receive reported a change" bug from turning the poll
     /// loop into an unbounded re-ingest storm (the 16.8 GB Mac incident).
     private var lastSeenWipeMs: [String: UInt64] = [:]
+    /// Circles owed a re-open seen-wipe once their mailbox backlog finishes draining (a wipe
+    /// mid-drain resets the drain — see the guard in pullMailbox's unlockedCircles block).
+    private var pendingReopenCircles: Set<String> = []
     func syncWithContacts() {
         guard let social else { return }
         // Re-blasting our ENTIRE history (every post → every contact) on every 20s tick flooded the
@@ -3409,6 +3415,9 @@ final class FeedStore: ObservableObject {
     /// Poll the shared mailbox and ingest any envelopes uploaded while we (or the sender)
     /// were offline. This is what delivers posts without both ends being online at once.
     private var lastSelfSyncMs: UInt64 = 0
+    // pullMailbox single-flight (see its doc comment): overlap stacks duplicate ingest batches.
+    private var pullMailboxInFlight = false
+    private var pullMailboxQueued = false
     /// Set by explicit user actions (device link, force-sync, foreground pull): the next self-sync
     /// pass runs FORCED — past the thermal gate and the step-3/5 skip caches.
     private var selfSyncForced = false
@@ -3627,9 +3636,32 @@ final class FeedStore: ObservableObject {
     /// Pull every sealed post/DM waiting in the given circles' relay mailboxes and ingest them.
     /// Returns how many envelopes actually ingested (the BG-refresh slim sync ends its window
     /// early on 0).
+    ///
+    /// SINGLE-FLIGHT. Keys are marked seen when the ingest BATCH runs (inside the EngineGate
+    /// queue), but the fetch-time filter reads the seen-set immediately — so two overlapping
+    /// pulls fetch the SAME unmarked keys and stack duplicate 200-envelope batches. With many
+    /// pollMailboxNow() triggers (timer, push, relay-announce ingest tails) and a big backlog,
+    /// polls outran the batches and the EngineGate queue grew without bound: 55 GB and a jetsam
+    /// kill in 8 minutes on the relay-hosting Mac, `+7747 next poll` frozen across polls being
+    /// the fingerprint. A pull that arrives while one is running coalesces into ONE follow-up
+    /// sweep of all circles after the current pass (and its marks) complete.
     @discardableResult
     @MainActor func pullMailbox(circleIds ids: [String]) async -> Int {
         guard let social, ids.contains(where: { SharedStore.hasMailbox($0) }) else { return 0 }
+        if pullMailboxInFlight {
+            pullMailboxQueued = true
+            return 0
+        }
+        pullMailboxInFlight = true
+        defer {
+            pullMailboxInFlight = false
+            if pullMailboxQueued {
+                pullMailboxQueued = false
+                Task { @MainActor in
+                    await self.pullMailbox(circleIds: self.circles.map { $0.id })
+                }
+            }
+        }
         let msgs = await SharedStore.pollMailbox(circleIds: ids)
         guard !msgs.isEmpty else { return 0 }
         let me = social.myNodeHex().lowercased()
@@ -3761,6 +3793,16 @@ final class FeedStore: ObservableObject {
             var reopened = 0
             for cid in batch.unlockedCircles {
                 if let last = lastSeenWipeMs[cid], nowMs &- last < 600_000 { continue }
+                // NEVER wipe mid-drain: the wipe's purpose (re-open events marked seen while
+                // unopenable) is served just as well AFTER the current backlog finishes, and
+                // wiping while thousands of keys are still deferred resets the drain to zero —
+                // the wipe cadence beat the ~30-minute drain time and the backlog never shrank
+                // (the 351/352 "deferred frozen at ~8k" treadmill). Park the request; the
+                // post-drain check below performs it once the circle's backlog reaches zero.
+                guard SharedStore.readyForReopen(cid) else {
+                    pendingReopenCircles.insert(cid)
+                    continue
+                }
                 lastSeenWipeMs[cid] = nowMs
                 reopened += 1
                 SharedStore.forgetSeenPrefix("haven/mailbox/\(cid)/")
@@ -3771,6 +3813,19 @@ final class FeedStore: ObservableObject {
             }
             if reopened > 0 {
                 HavenLog.relay("mailbox: re-open \(reopened) circle(s) after key commit")
+            }
+        }
+        // Parked re-opens: perform each one exactly when its circle's drain completes. Runs every
+        // pass because the completing poll is usually a later one than the pass that parked it.
+        if !pendingReopenCircles.isEmpty {
+            let nowMs = now()
+            for cid in pendingReopenCircles where SharedStore.readyForReopen(cid) {
+                pendingReopenCircles.remove(cid)
+                if let last = lastSeenWipeMs[cid], nowMs &- last < 600_000 { continue }
+                lastSeenWipeMs[cid] = nowMs
+                SharedStore.forgetSeenPrefix("haven/mailbox/\(cid)/")
+                SharedStore.invalidateMailboxListDigests(circleId: cid)
+                HavenLog.relay("mailbox: parked re-open of \(cid.prefix(12)) after drain")
             }
         }
         // Persist whenever we ran ANY receive: an envelope that only BUFFERED (event arrived before

@@ -4205,6 +4205,26 @@ object HavenNet : InboundListener {
     /** Poll every circle's mailbox; ingest envelopes we haven't seen. */
     suspend fun pollMailbox() {
         if (!ready) return
+        // SINGLE-FLIGHT (iOS parity): overlapping sweeps both LIST before either finishes
+        // marking, so they GET + ingest the same backlog twice — with a big backlog that
+        // stacks duplicate work faster than it drains (the 55 GB relay-hosting-Mac spiral).
+        // A poll that arrives mid-sweep coalesces into ONE follow-up sweep.
+        if (!pollMailboxInFlight.compareAndSet(false, true)) {
+            pollMailboxQueued.set(true)
+            return
+        }
+        try {
+            pollMailboxOnce()
+            while (pollMailboxQueued.compareAndSet(true, false)) pollMailboxOnce()
+        } finally {
+            pollMailboxInFlight.set(false)
+        }
+    }
+
+    private val pollMailboxInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val pollMailboxQueued = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private suspend fun pollMailboxOnce() {
         ensureSeenMailboxLoaded()
         repairMailboxSeenOnce()
         var changed = false

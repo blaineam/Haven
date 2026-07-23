@@ -1656,6 +1656,38 @@ enum SharedStore {
         if inserted { scheduleSeenSave() }
     }
 
+    // Per-circle drain state from the latest mailbox poll. The re-open-after-key-commit seen-wipe
+    // consults this: wiping a circle's seen-set while thousands of keys are STILL draining resets
+    // the drain to zero — at 200 keys per poll an 8.5k mailbox needs ~30 minutes, so any wipe
+    // cadence shorter than the drain keeps the backlog permanently full (the "deferred never
+    // shrinks" treadmill). The gate is a POSITIVE fully-drained proof (a real listing with nothing
+    // new and nothing deferred) rather than "no backlog recorded": a transient empty LIST (relay
+    // store handle flip logs "0 keys, 0 new") records zero and would otherwise unlock the wipe
+    // mid-drain — exactly the min9 relapse in the 352 direct-run.
+    nonisolated(unsafe) private static var drainByCircle: [String: (keys: Int, fresh: Int, deferred: Int)] = [:]
+    private static let backlogLock = NSLock()
+    nonisolated private static func noteBacklog(_ cid: String, keys: Int, fresh: Int, deferred: Int) {
+        backlogLock.lock()
+        drainByCircle[cid] = (keys, fresh, deferred)
+        backlogLock.unlock()
+    }
+    /// True only when the latest poll proves the circle's mailbox is fully drained.
+    nonisolated static func readyForReopen(_ cid: String) -> Bool {
+        backlogLock.lock()
+        defer { backlogLock.unlock() }
+        guard let d = drainByCircle[cid] else { return false }
+        return d.keys > 0 && d.fresh == 0 && d.deferred == 0
+    }
+
+    /// Any circle still owing deferred keys? While true, the poll scheduler holds its tight base
+    /// cadence instead of the idle stretch — an idle Mac otherwise drains 200 keys every ~5–9 min
+    /// and an 8k backlog takes hours.
+    nonisolated static func anyOutstandingBacklog() -> Bool {
+        backlogLock.lock()
+        defer { backlogLock.unlock() }
+        return drainByCircle.contains { $0.value.deferred > 0 }
+    }
+
     /// Wipe the persisted seen-set — identity reset/adoption must not inherit the old identity's
     /// ingestion cursor (its keys are meaningless to the new engine state).
     static func resetSeenMailbox() {
@@ -2191,6 +2223,7 @@ enum SharedStore {
                         let cap = 200
                         let deferred = max(0, fresh.count - cap)
                         if deferred > 0 { fresh = Array(fresh.prefix(cap)) }
+                        noteBacklog(cid, keys: localKeys, fresh: fresh.count, deferred: deferred)
                         HavenLog.relay("poll OWN relay \(cid): \(localKeys) keys, \(fresh.count) new\(deferred > 0 ? " (+\(deferred) next poll)" : "")")
                         // Read OFF the main actor — RelayHost's accessors are nonisolated precisely so
                         // this file I/O doesn't have to happen on the thread drawing the UI.
@@ -2234,6 +2267,7 @@ enum SharedStore {
                                 fresh.sort { controlKeyRank($0) < controlKeyRank($1) }
                                 let deferred = max(0, fresh.count - mailboxFetchCap)
                                 if deferred > 0 { fresh = Array(fresh.prefix(mailboxFetchCap)) }
+                                noteBacklog(cid, keys: keys.count, fresh: fresh.count, deferred: deferred)
                                 var allFetched = true
                                 for key in fresh {
                                     if case .success(let data?) = await httpGet(base, http.token, key) {
@@ -2277,6 +2311,8 @@ enum SharedStore {
                             && helloKeyClaimable($0, myIds: myHelloIds)
                     }
                     fresh.sort { controlKeyRank($0) < controlKeyRank($1) }
+                    noteBacklog(cid, keys: keys.count, fresh: min(fresh.count, mailboxFetchCap),
+                                deferred: max(0, fresh.count - mailboxFetchCap))
                     for key in fresh.prefix(mailboxFetchCap) {
                         if let data = await c.get(key: key) { out.append((cid, key, data)) }
                     }

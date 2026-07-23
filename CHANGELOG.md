@@ -71,6 +71,20 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **The 55 GB jetsam kill: overlapping mailbox pulls stacked unbounded ingest batches
+  (Apple + Android).** Keys are marked seen when the ingest batch RUNS (inside the engine
+  queue), but the fetch-time filter reads the seen-set immediately — so with no
+  single-flight guard, every overlapping `pullMailbox` re-fetched the same 200 unmarked
+  keys and appended another duplicate batch. Once a legitimate 8-circle re-open dumped
+  ~8k keys, polls outran the batches and the queue grew to a jetsam kill in 8 minutes
+  (`+7747 next poll` frozen across polls was the fingerprint). Pulls are now
+  single-flight with coalescing on Apple and Android (desktop was already serialized
+  with inline marks). Also: the re-open-after-key-commit seen-wipe now waits for a
+  POSITIVE fully-drained proof (real listing, nothing new, nothing deferred) instead of
+  firing on a 10-minute clock — any wipe cadence shorter than the ~30-minute drain kept
+  the backlog permanently full, and a transient empty LIST must not fake "drained".
+  While a backlog is outstanding the poll scheduler holds base cadence instead of the
+  idle stretch, so drains finish in ~30 minutes rather than hours.
 - **Three per-call crypto/syscall storms behind the residual Mac heat (Apple + core).** Live
   `sample`s of the b350 direct-run found the main thread split between (1) a Secure-Enclave
   ECIES unwrap on EVERY `storedSeed()`/`currentNodeHex()` call — RelayClients' self-dial

@@ -97,6 +97,26 @@ final class CallManager: NSObject, ObservableObject {
     /// still dead (field: both sides "Connected", zero audio). The label now tells the truth.
     var mediaConnected: Bool {
         lastPeerState.values.contains { $0 == .connected || $0 == .completed }
+            || !hairpinPeers.isEmpty
+    }
+    /// Peers whose media is currently relayed over the /webrtc/hairpin WebSocket (ICE failed).
+    private var hairpinPeers: Set<String> = []
+
+    /// The relay produced a decoded remote video track for a hairpin peer — publish it into the
+    /// same map the call UI renders, so relayed video appears with no view changes.
+    func adoptHairpinRemoteVideo(peer: String, track: RTCVideoTrack) {
+        remoteVideoTracks[peer] = track
+    }
+
+    /// Hand the mic between WebRTC's audio unit and the hairpin bridge's `AVAudioEngine`. Two
+    /// mic consumers conflict on iOS, so when the relay takes over audio (ICE failed) WebRTC's
+    /// dead audio path is silenced; restored if ICE recovers. Only reached on the failed path,
+    /// so it can't disturb a working direct call.
+    func setNativeAudioSuspendedForHairpin(_ suspended: Bool) {
+        #if os(iOS)
+        let rtc = RTCAudioSession.sharedInstance()
+        rtc.isAudioEnabled = !suspended
+        #endif
     }
     /// One pairwise connection per OTHER participant.
     private var peers: [String: PeerConn] = [:]
@@ -871,11 +891,22 @@ final class CallManager: NSObject, ObservableObject {
                         provider.reportOutgoingCall(with: uuid, connectedAt: nil)
                     }
                     #endif
-                } else if state == .failed || state == .closed {
-                    // A single pairwise link dying drops just that peer; the call ends only when
-                    // there's nobody left.
+                } else if state == .failed {
+                    // ICE couldn't pair this peer (two hard NATs, no TURN). Rather than drop the
+                    // call, RELAY the media over the /webrtc/hairpin WebSocket through the circle's
+                    // public HTTPS origin (the cloudflared tunnel fronts WSS fine — only UDP TURN
+                    // can't ride it). Audio + video hop onto the relay; the call survives with zero
+                    // router config. An explicit hangup frame (12) still ends it.
+                    CallMediaBridge.shared.activate(remote: peer, sessionId: self.sessionId,
+                                                    me: self.myHex, localVideoTrack: self.localVideoTrack)
+                    self.hairpinPeers.insert(peer)
+                } else if state == .closed {
                     self.dropPeer(peer)
                     if self.roster.subtracting([self.myHex]).isEmpty { self.endCall() }
+                } else if state == .connected || state == .completed, self.hairpinPeers.contains(peer) {
+                    // ICE recovered — drop back to WebRTC's own (better) media path.
+                    CallMediaBridge.shared.deactivate(remote: peer)
+                    self.hairpinPeers.remove(peer)
                 } else if state == .disconnected {
                     // The link went quiet — a transient blip, OR the peer left and their fire-and-forget
                     // hangup frame never reached us (the "hanging up on Android didn't end the call on iOS"
@@ -903,6 +934,7 @@ final class CallManager: NSObject, ObservableObject {
     private func dropPeer(_ peer: String) {
         peers[peer]?.call.close()
         peers[peer] = nil
+        if hairpinPeers.remove(peer) != nil { CallMediaBridge.shared.deactivate(remote: peer) }
         remoteVideoTracks[peer] = nil
         remoteScreenTracks[peer] = nil
         remoteCameraOff.remove(peer)
@@ -1290,6 +1322,8 @@ final class CallManager: NSObject, ObservableObject {
         CallTones.shared.stop()
         stopInAppRinging()
         stopSpeakerDetection()
+        CallMediaBridge.shared.stopAll()
+        hairpinPeers.removeAll()
         CallHairpin.shared.closeAll()
         #if !os(macOS)
         UIApplication.shared.isIdleTimerDisabled = false

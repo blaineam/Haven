@@ -15,6 +15,11 @@ final class CallHairpin {
 
     private var tasks: [String: URLSessionWebSocketTask] = [:]
     private var paired: Set<String> = []
+    /// Delivered every inbound binary frame from a paired remote (the relay bipipes them opaque).
+    /// `CallMediaBridge` decodes them into audio/video. Set before opening.
+    var onBinary: ((_ remote: String, _ data: Data) -> Void)?
+    /// Fired the instant a remote pairs, so the media bridge can start pushing frames.
+    var onPaired: ((_ remote: String) -> Void)?
     private let session: URLSession = {
         let c = URLSessionConfiguration.default
         c.waitsForConnectivity = true
@@ -84,6 +89,13 @@ final class CallHairpin {
 
     func isPaired(_ remote: String) -> Bool { paired.contains(remote) }
 
+    /// Send one media frame to a paired remote (fire-and-forget; real-time media tolerates loss,
+    /// so a failed send is dropped, not retried — retrying would only add latency to a live call).
+    func send(remote: String, _ data: Data) {
+        guard paired.contains(remote), let task = tasks[remote] else { return }
+        task.send(.data(data)) { _ in }
+    }
+
     func close(remote: String) {
         tasks[remote]?.cancel(with: .goingAway, reason: nil)
         tasks.removeValue(forKey: remote)
@@ -112,16 +124,18 @@ final class CallHairpin {
                            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                             if obj["paired"] as? Bool == true
                                 || (obj["ok"] as? Bool == true && obj["waiting"] as? Bool != true) {
-                                self.paired.insert(remote)
-                                HavenLog.relay("hairpin paired \(remote.prefix(8))…")
+                                if self.paired.insert(remote).inserted {
+                                    HavenLog.relay("hairpin paired \(remote.prefix(8))…")
+                                    self.onPaired?(remote)
+                                }
                             }
                             if let err = obj["err"] as? String {
                                 HavenLog.relay("hairpin err \(remote.prefix(8)): \(err)")
                             }
                         }
-                    case .data:
-                        // Binary media frames — reserved for PCM/DTLS fallback (desktop uses this).
-                        break
+                    case .data(let d):
+                        // Inbound media frame — hand to the bridge to decode into audio/video.
+                        self.onBinary?(remote, d)
                     @unknown default:
                         break
                     }

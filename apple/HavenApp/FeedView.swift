@@ -480,6 +480,7 @@ final class FeedStore: ObservableObject {
         // Hello-lane recovery: forget hello seen-cursors claimed under the old claim-everything
         // filter, so invites swallowed by the wrong device become claimable again.
         SharedStore.repairHelloSeenOnce()
+        SharedStore.repairStormBurnedSeenOnce()
         forceSelfSyncNextPoll()
         pollMailboxNow()
         // 10s heartbeat, but the actual poll only runs when due (30s base, stretching when idle).
@@ -3744,24 +3745,26 @@ final class FeedStore: ObservableObject {
         // reached the rest when their mailbox auth/relay set differed).
         let batch: (ingested: [(circleId: String, envelope: Data)],
                     controlKeys: [String: [String]],
-                    unlockedCircles: Set<String>) = await Task.detached(priority: .utility) {
+                    unlockedCircles: Set<String>,
+                    processedKeys: [String]) = await Task.detached(priority: .utility) {
             await EngineGate.shared.run {
                 var changed: [(String, Data)] = []
                 var controlKeys: [String: [String]] = [:]
                 var unlocked = Set<String>()
+                var processed: [String] = []
                 for (cid, key, env) in content {
                     let applied = (try? social.receive(circleId: cid, envelope: env)) == true
-                    // Mark seen for EVERY processed envelope, not just applied==true. `false` means
-                    // "duplicate — nothing changed" or "buffered until its key/roster arrives", and
-                    // the pending buffer is DURABLE (persist() runs right after this batch), so the
-                    // mailbox copy is redundant either way. Marking only on `true` melted the Mac:
-                    // once convergence made re-applied key commits honest no-ops, a storm-wiped
-                    // seen-set left 8k+ envelopes that returned false forever — re-fetched and
-                    // re-decrypted under the engine lock on EVERY poll, several times a second
-                    // (6.3 GB RSS in 105 s, instant beachball). An envelope that failed to open
-                    // outright is also marked: re-fetching identical bytes can't improve, and the
-                    // deterministic re-seal backstop delivers a fresh copy under a NEW key.
-                    SharedStore.markSeenPublic(key)
+                    // Every processed envelope is marked seen — `false` means "duplicate" or
+                    // "buffered until its key/roster arrives" and the pending buffer is durable,
+                    // so the mailbox copy is redundant either way (marking only on `true` melted
+                    // the Mac: honest no-op duplicates re-fetched forever). BUT the marks are
+                    // COLLECTED here and written only AFTER persist() lands the engine state:
+                    // marking inside this loop put the seen-save (2s debounce, independent file)
+                    // AHEAD of the engine save, and a process kill in that gap burned the batch —
+                    // keys durably seen, events (including friends' KEY COMMITS) never in the
+                    // engine. A day of storm-kills did exactly that fleet-wide: pushes flowed,
+                    // every layer of content underneath went dark.
+                    processed.append(key)
                     if applied {
                         changed.append((cid, env))
                         // Key commit (0x03) or roster (0x04) that actually changed state — peer keys
@@ -3772,7 +3775,7 @@ final class FeedStore: ObservableObject {
                         }
                     }
                 }
-                return (changed, controlKeys, unlocked)
+                return (changed, controlKeys, unlocked, processed)
             }
         }.value
         let ingested = batch.ingested
@@ -3829,11 +3832,15 @@ final class FeedStore: ObservableObject {
             }
         }
         // Persist whenever we ran ANY receive: an envelope that only BUFFERED (event arrived before
-        // its key commit / the sender's roster) mutated the now-durable pending_epoch buffer, and the
-        // mailbox already marked its key seen at fetch time — so if we don't save the engine state
-        // here, a kill before the key arrives loses the buffered event forever (the exact
-        // random-non-delivery failure). Cheap: msgs is only non-empty when the mailbox served bytes.
+        // its key commit / the sender's roster) mutated the now-durable pending_epoch buffer — if we
+        // don't save the engine state here, a kill before the key arrives loses the buffered event.
         persist()
+        // Seen-marks STRICTLY AFTER the engine state that contains their events is on disk. Kill
+        // before persist(): nothing marked, everything re-fetched, receive() is idempotent. Kill
+        // after persist() before marks: events safe, keys re-fetched once and marked as duplicates.
+        // Either way nothing is ever both "seen" and absent from the engine — the invariant whose
+        // violation blacked out all content while pushes kept arriving.
+        for k in batch.processedKeys { SharedStore.markSeenPublic(k) }
         if helloIngested { refresh(); syncWithContacts() }
         if relayIngested { objectWillChange.send() }   // Storage / circle relay chips re-read the store
         guard !ingested.isEmpty else {

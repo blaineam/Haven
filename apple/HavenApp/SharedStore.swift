@@ -1635,6 +1635,31 @@ enum SharedStore {
         }
     }
 
+    /// One-shot recovery from the 2026-07-23 storm-kill burn: builds 349–354 marked mailbox keys
+    /// seen INSIDE the ingest batch while the engine state persisted only after it — every process
+    /// kill in that gap (three jetsams plus the direct-run iteration kills, fleet-wide) left keys
+    /// durably "seen" whose events — including friends' KEY COMMITS — never reached the engine.
+    /// Downstream content then buffered forever against commits that would never re-deliver:
+    /// pushes flowed, every layer beneath went dark, both directions. The mailboxes still hold
+    /// everything (30-day TTL); clearing the whole mailbox seen-cursor once re-drains it through
+    /// the now-safe machinery (single-flight, mark-after-persist, bounded drain). Live-call frames
+    /// keep their marks — re-feeding stale call lanes rings ghosts.
+    @MainActor static func repairStormBurnedSeenOnce() {
+        let flag = "haven.repair.stormBurnedSeen.v1"
+        guard !UserDefaults.standard.bool(forKey: flag) else { return }
+        UserDefaults.standard.set(true, forKey: flag)
+        let removed: Int = withSeen { set in
+            let before = set.count
+            set = set.filter { $0.contains("/__live__/") }
+            return before - set.count
+        }
+        if removed > 0 {
+            HavenLog.relay("mailbox seen: storm-burn repair forgot \(removed) keys — full re-drain")
+            scheduleSeenSave()
+            mailboxListDigests.removeAll()
+        }
+    }
+
     nonisolated private static func scheduleSeenSave() {
         let schedule: Bool = withSeen { _ in
             guard !seenSavePending else { return false }
@@ -2202,9 +2227,10 @@ enum SharedStore {
                         // while the iPhone (linked, push-capable) decrypts the same traffic fine.
                         // Cap keeps the retry cheap; once keys land, receive returns false for
                         // duplicates and we stop thrashing.
-                        let scan: (all: Int, want: [String]) = await Task.detached(priority: .utility) {
+                        let scan: (all: Int, want: [String], reoffered: Int) = await Task.detached(priority: .utility) {
                             let all = host.localList(prefix).filter { !$0.contains("/__live__/") }
                             var want = all.filter { !seenContains($0) && helloKeyClaimable($0, myIds: myHelloIds) }
+                            let unseenOnly = want.count
                             // Re-probe seen control-plane keys (bounded). Prefer unread first.
                             // Cap both hits and files inspected so a fat circle (thousands of
                             // already-seen event blobs) does not re-read the whole store every poll.
@@ -2219,7 +2245,7 @@ enum SharedStore {
                                     controlBudget -= 1
                                 }
                             }
-                            return (all.count, want)
+                            return (all.count, want, want.count - unseenOnly)
                         }.value
                         var fresh = scan.want
                         let localKeys = scan.all
@@ -2233,7 +2259,11 @@ enum SharedStore {
                         let cap = 200
                         let deferred = max(0, fresh.count - cap)
                         if deferred > 0 { fresh = Array(fresh.prefix(cap)) }
-                        noteBacklog(node, cid, keys: localKeys, fresh: fresh.count, deferred: deferred)
+                        // Drained-proof gating must ignore the ALWAYS-present control re-offer
+                        // (≤48 already-seen 0x03/0x04 keys re-fed by design) — counting them kept
+                        // `fresh` nonzero forever and permanently blocked parked re-opens.
+                        noteBacklog(node, cid, keys: localKeys,
+                                    fresh: max(0, fresh.count - scan.reoffered), deferred: deferred)
                         HavenLog.relay("poll OWN relay \(cid): \(localKeys) keys, \(fresh.count) new\(deferred > 0 ? " (+\(deferred) next poll)" : "")")
                         // Read OFF the main actor — RelayHost's accessors are nonisolated precisely so
                         // this file I/O doesn't have to happen on the thread drawing the UI.

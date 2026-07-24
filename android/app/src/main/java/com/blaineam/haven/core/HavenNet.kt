@@ -5640,7 +5640,7 @@ object HavenNet : InboundListener {
             runCatching {
                 if (chunked) {
                     // `has` is an exact, cheap existence check here — no download, unlike the S3/HTTP probes.
-                    val skip = resumeSkip(nodeHex, ref, fp, ranges.size, force) { i -> client.has(mediaChunkKey(ref, i)) }
+                    val skip = resumeSkip(nodeHex, ref, fp, ranges.size, force) { i -> runCatching { client.has(mediaChunkKey(ref, i)) }.getOrDefault(false) }
                     for ((i, r) in ranges.withIndex()) {
                         if (i >= skip) client.put(mediaChunkKey(ref, i), blob.copyOfRange(r.first, r.second))
                         recordUploaded(nodeHex, ref, fp, i + 1)

@@ -280,6 +280,7 @@ final class FeedStore: ObservableObject {
     /// Tears down the old engine, networking, and on-disk state, then configures fresh.
     func reconfigure(seed: Data) {
         node = nil
+        RelayClients.clearAll()   // cached clients wrap the old node's (now dead) endpoint
         // Stop Multipeer cleanly BEFORE dropping the reference — deinit-time teardown cancels the
         // browser in the same runloop turn it's freed (the Bonjour cancel crash); stop() parks
         // discovery properly and the static retire pool holds the cancelled objects.
@@ -1607,6 +1608,7 @@ final class FeedStore: ObservableObject {
                 // before start (iroh RelayMap is construct-time).
                 RelayMailboxStore.refreshHavenFabric()
                 let n = try await HavenNode.start(accountSeed: deviceSeed, listener: bridge)
+                RelayClients.clearAll()   // never inherit clients bound to a previous endpoint
                 self.node = n
                 self.fabricBoundUrls = RelayMailboxStore.shared.allDerpUrls()
                 self.internetReady = true
@@ -1698,6 +1700,9 @@ final class FeedStore: ObservableObject {
         if let old = node {
             await old.shutdown()
             node = nil
+            // The cached RelayClients wrap BlobClients bound to the endpoint we just closed. Left
+            // in place they fail every op with "endpoint stopping" for the rest of the process.
+            RelayClients.clearAll()
             internetReady = false
             // Let OS / accept loop finish teardown before same-seed spawn.
             try? await Task.sleep(nanoseconds: 250_000_000)
@@ -4580,6 +4585,7 @@ final class FeedStore: ObservableObject {
         }
         nearby?.stop()   // clean Multipeer teardown before the reference drops (Bonjour cancel crash)
         node = nil; nearby = nil; social = nil; items.removeAll(); circles.removeAll()
+        RelayClients.clearAll()
         configure(mode: .seedless(accountBundle: grant.accountBundle, deviceSeed: deviceSeed))
         // 4. Ask the primary to push full state now (profile/circles/posts) → it answers with the
         //    type-23 slot that seeds our base, plus the circle events.
@@ -4925,6 +4931,22 @@ final class FeedStore: ObservableObject {
         // the UI (adoptRelayNode → self-sync `relay-readd`, LWW), never from an announce. So: drop the
         // announce entirely for a forgotten relay, and never re-add it below.
         if RelayMailboxStore.shared.isForgotten(lower) { return }
+        // NEVER let an announce tell us about our OWN running relay. The live front door is
+        // authoritative; an announce blob is only ever a stale photograph of it.
+        //
+        // Announces are content-addressed over a randomized seal, so each one is a distinct mailbox
+        // key and they accumulate — and `forgetSeenPrefix` (the re-open after a key commit) un-sees
+        // the whole circle prefix, re-offering WEEKS of our own older announces, each naming
+        // whichever free trycloudflare hostname was live that day. Adopting one overwrote our
+        // httpUrls/derpUrl with a dead hostname, and changing the fabric triggers a full transport
+        // rebind — which detached the relay, minted a NEW tunnel hostname, and published yet another
+        // announce for the next pass to adopt. That is the relay "cycling", the ever-rotating URL
+        // the iPhone could never resolve, and (via the rebind) the dead relay-client cache that
+        // stopped media and DMs from crossing at all.
+        if RelayHost.shared.enabled, !RelayHost.shared.nodeId.isEmpty,
+           lower == RelayHost.shared.nodeId.lowercased() {
+            return
+        }
         // A contact advertised their circle relay → ADD it to our redundant set for this circle, so
         // members automatically pool relays (more redundancy, no manual setup) — desktop parity.
         let wasNew = !RelayMailboxStore.shared.relays(forCircle: circleId).contains(lower)

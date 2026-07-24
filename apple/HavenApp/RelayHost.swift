@@ -1800,4 +1800,23 @@ enum RelayClients {
     /// genuinely dropped, and `RelayHealth` backoff still throttles how often we try a sick relay.
     /// (Same fix as e91ee62 on the relay-to-relay mesh tick; this is the app-side half.)
     static func forget(_ nodeHex: String) { cache[nodeHex] = nil }
+
+    /// Drop EVERY cached client — mandatory whenever the underlying `HavenNode` is replaced or torn
+    /// down.
+    ///
+    /// A cached `RelayClient` wraps a `BlobClient` built over that node's iroh endpoint. When the
+    /// node is shut down the endpoint closes, and every op on a client still holding it fails with
+    /// "endpoint stopping" — forever, because nothing here noticed. The Rust side already clears its
+    /// own blob-client cache on `Node::shutdown` (core/haven-net/src/lib.rs); this cache never did,
+    /// so a single fabric rebind silently killed relay I/O for the rest of the process:
+    /// `BlobClient::conn` stamped a dial failure, the cooldown escalated 60s → 900s, and because
+    /// `has()` reported a transport error as "the relay does not have it", every media backfill
+    /// re-queued an upload that then bailed instantly on the cooldown. The own relay's local copy
+    /// still said `landed`, so the job was reported a success and dropped. That is why posts,
+    /// media and DMs stopped crossing while the app looked healthy.
+    static func clearAll() {
+        guard !cache.isEmpty else { return }
+        HavenLog.relay("relay clients: dropping \(cache.count) cached client(s) — transport replaced")
+        cache.removeAll()
+    }
 }

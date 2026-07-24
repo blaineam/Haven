@@ -630,8 +630,19 @@ impl RelayClient {
         self.inner.get(&key).await.ok().flatten()
     }
 
-    pub async fn has(&self, key: String) -> bool {
-        self.inner.has(&key).await.unwrap_or(false)
+    /// Does the relay hold `key`? Failures SURFACE — same contract, and same reason, as `list`
+    /// below. `unwrap_or(false)` reported an unreachable relay as "reachable, and it does not have
+    /// this blob", which is the most expensive lie this API can tell: the media backfill read that
+    /// as a genuine miss, queued an upload, and the put then bailed instantly on the very dial
+    /// cooldown the failed probe had just re-armed. Each pass re-sealed the whole file (~2× its
+    /// size in RAM) to reach a relay it had already been told was down, and since the author's own
+    /// in-process relay counted as `landed`, the job was reported a SUCCESS and dropped. Callers
+    /// must treat an error as "unknown, try later", never as "missing".
+    pub async fn has(&self, key: String) -> Result<bool, HavenError> {
+        self.inner
+            .has(&key)
+            .await
+            .map_err(|e| HavenError::Invalid { msg: format!("relay has: {e}") })
     }
 
     /// List keys under a prefix (e.g. `mailbox/<circle>`) to poll the mailbox.

@@ -639,11 +639,26 @@ enum SharedStore {
                 HavenLog.sync("backup probe SKIP ref=\(ref) relay=\(node.prefix(8)) — unreachable/backing off (no http, no dial)")
                 continue
             }
-            if !force, await c.has(key: key(ref)) {
-                RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
-                MediaBackupLedger.mark(node, ref); landed = true
-            } else {
+            if force {
                 uploads.append((node, .dial(c)))
+            } else {
+                // A THROW here means the dial failed — NOT that the relay lacks the blob. Queueing
+                // an upload on a failed probe is what burned a full re-seal (~2× file size in RAM)
+                // every pass: the probe re-armed the dial cooldown microseconds before the put,
+                // which then bailed on it. Unreachable ⇒ skip this relay, retry next pass.
+                do {
+                    if try await c.has(key: key(ref)) {
+                        RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
+                        MediaBackupLedger.mark(node, ref); landed = true
+                    } else {
+                        RelayHealth.shared.recordSuccess(node)   // it answered — it just lacks it
+                        uploads.append((node, .dial(c)))
+                    }
+                } catch {
+                    HavenLog.sync("backup probe SKIP ref=\(ref) relay=\(node.prefix(8)) — dial failed: \(error.localizedDescription)")
+                    RelayHealth.shared.recordFailure(node)
+                    continue
+                }
             }
         }
 
@@ -766,7 +781,7 @@ enum SharedStore {
                         try await putMediaFile(ref: ref, dest: node, sealedURL: sealedURL, size: sealedSize,
                                                sealFp: sealFp, force: force,
                                                // `has` is an exact, cheap existence check here — no download.
-                                               exists: { await c.has(key: $0) }) { try await c.put(key: $0, data: $1) }
+                                               exists: { (try? await c.has(key: $0)) ?? false }) { try await c.put(key: $0, data: $1) }
                         RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
                         HavenLog.sync("backup blob-dial OK ref=\(ref) relay=\(node.prefix(8)) size=\(sealedSize) — cross-NAT blob path WORKS")
                         MediaBackupLedger.mark(node, ref); landed = true
@@ -781,7 +796,7 @@ enum SharedStore {
                     try await putMediaFile(ref: ref, dest: node, sealedURL: sealedURL, size: sealedSize,
                                            sealFp: sealFp, force: force,
                                            // `has` is an exact, cheap existence check here — no download.
-                                           exists: { await c.has(key: $0) }) { try await c.put(key: $0, data: $1) }
+                                           exists: { (try? await c.has(key: $0)) ?? false }) { try await c.put(key: $0, data: $1) }
                     RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
                     HavenLog.sync("backup blob-dial OK ref=\(ref) relay=\(node.prefix(8)) size=\(sealedSize) — cross-NAT blob path WORKS")
                     MediaBackupLedger.mark(node, ref); landed = true
@@ -1957,7 +1972,7 @@ enum SharedStore {
                     if done { continue }
                 }
                 guard let c = await RelayClients.client(node) else { continue }
-                if await c.has(key: key) { RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node); markSeen("put:\(node)|\(key)"); landed = true; continue }
+                if (try? await c.has(key: key)) == true { RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node); markSeen("put:\(node)|\(key)"); landed = true; continue }
                 do {
                     try await c.put(key: key, data: env)
                     RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)

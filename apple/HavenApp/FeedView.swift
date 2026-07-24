@@ -3792,7 +3792,7 @@ final class FeedStore: ObservableObject {
             let nowMs = now()
             var reopened = 0
             for cid in batch.unlockedCircles {
-                if let last = lastSeenWipeMs[cid], nowMs &- last < 600_000 { continue }
+                if let last = lastSeenWipeMs[cid], nowMs &- last < 21_600_000 { continue }
                 // NEVER wipe mid-drain: the wipe's purpose (re-open events marked seen while
                 // unopenable) is served just as well AFTER the current backlog finishes, and
                 // wiping while thousands of keys are still deferred resets the drain to zero —
@@ -3821,7 +3821,7 @@ final class FeedStore: ObservableObject {
             let nowMs = now()
             for cid in pendingReopenCircles where SharedStore.readyForReopen(cid) {
                 pendingReopenCircles.remove(cid)
-                if let last = lastSeenWipeMs[cid], nowMs &- last < 600_000 { continue }
+                if let last = lastSeenWipeMs[cid], nowMs &- last < 21_600_000 { continue }
                 lastSeenWipeMs[cid] = nowMs
                 SharedStore.forgetSeenPrefix("haven/mailbox/\(cid)/")
                 SharedStore.invalidateMailboxListDigests(circleId: cid)

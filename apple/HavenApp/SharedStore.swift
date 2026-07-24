@@ -1664,19 +1664,29 @@ enum SharedStore {
     // new and nothing deferred) rather than "no backlog recorded": a transient empty LIST (relay
     // store handle flip logs "0 keys, 0 new") records zero and would otherwise unlock the wipe
     // mid-drain — exactly the min9 relapse in the 352 direct-run.
-    nonisolated(unsafe) private static var drainByCircle: [String: (keys: Int, fresh: Int, deferred: Int)] = [:]
+    // Keyed by "(relay-node)|(circle)": a circle is read from SEVERAL relays, and each has its
+    // own drain state. Keying by circle alone let the NAS relay's fully-seen HTTP listing
+    // (fresh 0 / deferred 0 from ITS side) overwrite the own-relay record that still had
+    // thousands deferred — readyForReopen went true and the wipe fired mid-drain anyway.
+    nonisolated(unsafe) private static var drainByRelayCircle: [String: (keys: Int, fresh: Int, deferred: Int)] = [:]
     private static let backlogLock = NSLock()
-    nonisolated private static func noteBacklog(_ cid: String, keys: Int, fresh: Int, deferred: Int) {
+    nonisolated private static func noteBacklog(_ node: String, _ cid: String, keys: Int, fresh: Int, deferred: Int) {
+        // An EMPTY listing carries no gating information: it's either a truly-empty mailbox
+        // (then other relays' records decide) or a transient store flip ("0 keys, 0 new" during
+        // a relay handle swap) — and letting the flip overwrite a mid-drain record is how a wipe
+        // sneaks in. Never write zero-key records.
+        guard keys > 0 else { return }
         backlogLock.lock()
-        drainByCircle[cid] = (keys, fresh, deferred)
+        drainByRelayCircle["\(node)|\(cid)"] = (keys, fresh, deferred)
         backlogLock.unlock()
     }
-    /// True only when the latest poll proves the circle's mailbox is fully drained.
+    /// True only when EVERY relay we poll for this circle proves fully drained.
     nonisolated static func readyForReopen(_ cid: String) -> Bool {
         backlogLock.lock()
         defer { backlogLock.unlock() }
-        guard let d = drainByCircle[cid] else { return false }
-        return d.keys > 0 && d.fresh == 0 && d.deferred == 0
+        let records = drainByRelayCircle.filter { $0.key.hasSuffix("|\(cid)") }.values
+        guard !records.isEmpty else { return false }
+        return records.allSatisfy { $0.fresh == 0 && $0.deferred == 0 }
     }
 
     /// Any circle still owing deferred keys? While true, the poll scheduler holds its tight base
@@ -1685,7 +1695,7 @@ enum SharedStore {
     nonisolated static func anyOutstandingBacklog() -> Bool {
         backlogLock.lock()
         defer { backlogLock.unlock() }
-        return drainByCircle.contains { $0.value.deferred > 0 }
+        return drainByRelayCircle.contains { $0.value.deferred > 0 }
     }
 
     /// Wipe the persisted seen-set — identity reset/adoption must not inherit the old identity's
@@ -2223,7 +2233,7 @@ enum SharedStore {
                         let cap = 200
                         let deferred = max(0, fresh.count - cap)
                         if deferred > 0 { fresh = Array(fresh.prefix(cap)) }
-                        noteBacklog(cid, keys: localKeys, fresh: fresh.count, deferred: deferred)
+                        noteBacklog(node, cid, keys: localKeys, fresh: fresh.count, deferred: deferred)
                         HavenLog.relay("poll OWN relay \(cid): \(localKeys) keys, \(fresh.count) new\(deferred > 0 ? " (+\(deferred) next poll)" : "")")
                         // Read OFF the main actor — RelayHost's accessors are nonisolated precisely so
                         // this file I/O doesn't have to happen on the thread drawing the UI.
@@ -2267,7 +2277,7 @@ enum SharedStore {
                                 fresh.sort { controlKeyRank($0) < controlKeyRank($1) }
                                 let deferred = max(0, fresh.count - mailboxFetchCap)
                                 if deferred > 0 { fresh = Array(fresh.prefix(mailboxFetchCap)) }
-                                noteBacklog(cid, keys: keys.count, fresh: fresh.count, deferred: deferred)
+                                noteBacklog(node, cid, keys: keys.count, fresh: fresh.count, deferred: deferred)
                                 var allFetched = true
                                 for key in fresh {
                                     if case .success(let data?) = await httpGet(base, http.token, key) {
@@ -2311,7 +2321,7 @@ enum SharedStore {
                             && helloKeyClaimable($0, myIds: myHelloIds)
                     }
                     fresh.sort { controlKeyRank($0) < controlKeyRank($1) }
-                    noteBacklog(cid, keys: keys.count, fresh: min(fresh.count, mailboxFetchCap),
+                    noteBacklog(node, cid, keys: keys.count, fresh: min(fresh.count, mailboxFetchCap),
                                 deferred: max(0, fresh.count - mailboxFetchCap))
                     for key in fresh.prefix(mailboxFetchCap) {
                         if let data = await c.get(key: key) { out.append((cid, key, data)) }

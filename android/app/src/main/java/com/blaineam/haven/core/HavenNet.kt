@@ -4061,7 +4061,6 @@ object HavenNet : InboundListener {
         // mailbox entry per event per run — the bloat behind the slow cold start).
         val key = mailboxKey(circleId, env)
         ensureSeenMailboxLoaded()
-        if (seenMailbox.contains(key)) return
         var landed = false
         // S3 pre-signed pool (the BYO-bucket path many circles use).
         if (Presign.hasBootstrap(circleId)) {
@@ -4086,19 +4085,26 @@ object HavenNet : InboundListener {
         // reaches relay-only members) is visible in logcat instead of silently vanishing.
         Log.i(TAG, "uploadEvent circle=${circleId.take(16)} relays=${relayHexes.size}")
         val hostedHex = runCatching { relayHost?.nodeIdHex() }.getOrNull()
-        for (nodeHex in relayHexes) {
+        // PER-(relay,key) skip (iOS parity): the old global "seen once anywhere -> skip forever"
+        // starved every relay adopted, recovered, or GC-swept AFTER a key first landed. The
+        // epoch-head KEY COMMIT has a stable content-addressed key, so it landed once long ago
+        // and never reached the relay a peer actually polls -- their copy of every event sealed
+        // under that epoch buffered in pending_epoch forever (the content blackout's sender half).
+        val unlanded = relayHexes.filter { !seenMailbox.contains("put:$it|$key") }
+        if (relayHexes.isNotEmpty() && unlanded.isEmpty()) return
+        for (nodeHex in unlanded) {
             // S3-bucket relay (store-and-forward): PUT the sealed blob straight into the bucket via the
             // direct S3 FFI using the device-local creds (StorageStore). Content-addressed key.
             if (nodeHex.startsWith("s3:")) {
                 val cfg = StorageStore.s3Config(appContext) ?: continue
                 runCatching { uniffi.haven_ffi.s3Put(cfg, key, env) }
-                    .onSuccess { landed = true; markRelaySeen(nodeHex); withContext(Dispatchers.Main) { relayActive.value = true } }
+                    .onSuccess { landed = true; markRelaySeen(nodeHex); markMailboxSeen("put:$nodeHex|$key"); withContext(Dispatchers.Main) { relayActive.value = true } }
                     .onFailure { Log.d(TAG, "s3 relay put failed ($nodeHex): ${it.message}") }
                 continue
             }
             // Our OWN hosted relay: store directly into the local mailbox (no iroh self-dial).
             if (hostedHex != null && nodeHex == hostedHex) {
-                runCatching { relayHost?.localPut(key, env) }.onSuccess { landed = true }
+                runCatching { relayHost?.localPut(key, env) }.onSuccess { landed = true; markMailboxSeen("put:$nodeHex|$key") }
                 withContext(Dispatchers.Main) { relayActive.value = true }
                 continue
             }
@@ -4116,6 +4122,7 @@ object HavenNet : InboundListener {
                     val r = relayHttpPut(base, entry.httpToken, key, env)
                     if (r.isSuccess) {
                         markRelayOk(nodeHex); landed = true; putOk = true
+                        markMailboxSeen("put:$nodeHex|$key")
                         withContext(Dispatchers.Main) { relayActive.value = true }
                         break
                     }
@@ -4131,6 +4138,7 @@ object HavenNet : InboundListener {
                     .onSuccess {
                         landed = true
                         markRelayOk(nodeHex)
+                        markMailboxSeen("put:$nodeHex|$key")
                         withContext(Dispatchers.Main) { relayActive.value = true }
                     }
                     .onFailure { Log.d(TAG, "mailbox put failed ($nodeHex): ${it.message}"); relayFailed(nodeHex) }

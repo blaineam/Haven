@@ -6760,12 +6760,6 @@ impl Engine {
 
     async fn upload_event(self: &Arc<Self>, circle_id: &str, env: &[u8]) {
         let key = Self::mailbox_key(circle_id, env);
-        // Skip anything already confirmed in a mailbox: event envelopes re-seal deterministically
-        // now, so a backfill reproduces the same content-addressed key and the persisted seen-set
-        // turns the whole re-upload into a no-op instead of a network sweep.
-        if self.dyn_state.lock().unwrap().seen_mailbox.contains(&key) {
-            return;
-        }
         let mut landed = false;
         // 1) Mirror to EVERY configured Haven relay (redundancy). Content-addressed keys make
         //    re-puts idempotent, and a relay in backoff is skipped — graceful fallback.
@@ -6797,6 +6791,18 @@ impl Engine {
             relay_hexes.len()
         );
         let hosted = self.relay_host.lock().unwrap().as_ref().map(|h| h.node_id_hex());
+        // PER-(relay,key) skip (iOS parity): the old global "seen once anywhere -> skip forever"
+        // starved every relay adopted, recovered, or GC-swept AFTER a key first landed. The
+        // epoch-head KEY COMMIT has a stable content-addressed key, so it landed once long ago and
+        // never reached the relay a peer actually polls -- their copy of every event sealed under
+        // that epoch buffered in pending_epoch forever (the content blackout's sender half).
+        let relay_hexes: Vec<String> = {
+            let st = self.dyn_state.lock().unwrap();
+            relay_hexes
+                .into_iter()
+                .filter(|n| !st.seen_mailbox.contains(&format!("put:{n}|{key}")))
+                .collect()
+        };
         for node_hex in relay_hexes {
             // Our OWN hosted relay: store directly into the local mailbox (no iroh self-dial).
             if hosted.as_deref() == Some(node_hex.as_str()) {
@@ -6805,6 +6811,7 @@ impl Engine {
                     self.dyn_state.lock().unwrap().relay_active = true;
                     landed = true;
                 }
+                self.mark_mailbox_seen(format!("put:{node_hex}|{key}"));
                 continue;
             }
             // Plain-HTTP FIRST (an HTTP-mailbox-only host — a cloudflared / free-CF / LAN-NAS relay,
@@ -6825,6 +6832,7 @@ impl Engine {
                         Ok(()) => {
                             self.mark_relay_ok(&node_hex);
                             self.dyn_state.lock().unwrap().relay_active = true;
+                            self.mark_mailbox_seen(format!("put:{node_hex}|{key}"));
                             put_ok = true;
                             landed = true;
                             break;
@@ -6846,6 +6854,7 @@ impl Engine {
                         Ok(()) => {
                             self.mark_relay_ok(&node_hex);
                             self.dyn_state.lock().unwrap().relay_active = true;
+                            self.mark_mailbox_seen(format!("put:{node_hex}|{key}"));
                             landed = true;
                         }
                         Err(e) => {

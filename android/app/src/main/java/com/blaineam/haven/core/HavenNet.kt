@@ -4250,12 +4250,24 @@ object HavenNet : InboundListener {
     }
 
     private val pollMailboxInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val launchHeadsPublished = java.util.concurrent.atomic.AtomicBoolean(false)
     private val pollMailboxQueued = java.util.concurrent.atomic.AtomicBoolean(false)
 
     private suspend fun pollMailboxOnce() {
         ensureSeenMailboxLoaded()
         repairMailboxSeenOnce()
         repairStormBurnedSeenOnce()
+        // Publish every circle's epoch HEAD (roster + current key commit) once per launch (iOS
+        // parity): a member who hasn't posted since a relay was adopted/recovered/GC-swept never
+        // re-offers the commit, and peers buffer every event of theirs forever. Cheap: cached
+        // commit + per-(relay,key) upload marks make repeats a no-op.
+        if (launchHeadsPublished.compareAndSet(false, true)) {
+            for (cid in runCatching { social.circles().map { it.id } }.getOrDefault(emptyList())) {
+                for (head in runCatching { social.exportEpochHead(cid) }.getOrDefault(emptyList())) {
+                    uploadEvent(cid, head)
+                }
+            }
+        }
         var changed = false
         // Whether ANY receive() ran this pass. receive() can change engine state without reporting
         // a new event — an envelope that arrives before its key commit is BUFFERED in

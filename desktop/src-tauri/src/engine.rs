@@ -6968,6 +6968,20 @@ impl Engine {
         // the engine state persisted; a kill in the gap burned keys whose events — including
         // friends' KEY COMMITS — never landed. Clear the whole mailbox seen-set once (live-call
         // lanes kept) so everything re-drains under the mark-after-persist contract above.
+        // Publish every circle's epoch HEAD (roster + current key commit) once per launch (iOS
+        // parity): a member who hasn't posted since a relay was adopted/recovered/GC-swept never
+        // re-offers the commit, and peers buffer every event of theirs forever. Cheap: cached
+        // commit + per-(relay,key) upload marks make repeats a no-op.
+        static LAUNCH_HEADS_PUBLISHED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !LAUNCH_HEADS_PUBLISHED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let cids: Vec<String> = self.social.circles().into_iter().map(|c| c.id).collect();
+            for cid in cids {
+                for head in self.social.export_epoch_head(cid.clone()) {
+                    self.upload_event(&cid, &head).await;
+                }
+            }
+        }
         let repair_marker = self.paths.root.join("repair-storm-burn-v1");
         if !repair_marker.exists() {
             let removed = {

@@ -481,6 +481,19 @@ final class FeedStore: ObservableObject {
         // filter, so invites swallowed by the wrong device become claimable again.
         SharedStore.repairHelloSeenOnce()
         SharedStore.repairStormBurnedSeenOnce()
+        // Publish every circle's epoch HEAD (my roster + current key commit) on EVERY launch.
+        // Heads already ride each post, but a member who hasn't posted since a relay was adopted,
+        // recovered, or GC-swept never re-offers the commit — and every event of theirs sealed
+        // under that epoch buffers forever on peers polling that relay (the content blackout).
+        // Cheap: the commit is cached until the epoch/recipients change, and the per-(relay,key)
+        // upload marks make repeat launches a set-lookup no-op.
+        if let social {
+            for cid in circles.map(\.id) {
+                for head in social.exportEpochHead(circleId: cid) {
+                    BackgroundUploader.shared.enqueue(circleId: cid, env: head)
+                }
+            }
+        }
         forceSelfSyncNextPoll()
         pollMailboxNow()
         // 10s heartbeat, but the actual poll only runs when due (30s base, stretching when idle).

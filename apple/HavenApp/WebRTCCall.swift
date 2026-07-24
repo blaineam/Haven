@@ -152,9 +152,15 @@ final class WebRTCCall: NSObject {
     }
 
     func setRemoteAnswer(_ sdp: RTCSessionDescription) {
-        // HTTP live-lane can redeliver the same (or a prior session's) answer; a second
-        // setRemoteDescription while already stable fails and is noise.
-        if pc.remoteDescription != nil { return }
+        // Accept an answer whenever WE have an offer in flight (initial OR renegotiation).
+        // The old guard bailed whenever remoteDescription was non-nil — which is true forever
+        // after the first negotiation — so every RENEGOTIATION answer (video/screen toggle →
+        // renegotiateAll → makeOffer) was dropped: the offerer wedged in have-local-offer,
+        // makeOffer's .stable guard then no-op'd all future renegotiations, and toggling video
+        // never reached the remote even on a healthy ICE path. Redelivered/stale answers (the
+        // HTTP live-lane repeats itself) are exactly the ones that arrive while we're .stable
+        // with no offer outstanding — still ignored.
+        guard pc.signalingState == .haveLocalOffer else { return }
         pc.setRemoteDescription(sdp) { [weak self] err in
             if let err { HavenLog.call("answer set fail: \(err.localizedDescription)"); return }
             self?.onRemoteReady?()

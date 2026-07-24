@@ -94,6 +94,18 @@ struct StorageSettingsView: View {
                         Text("Keeps relaying with no window after you close it — launch Haven again to reopen.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                    #if os(macOS)
+                    if relay.enabled {
+                        Toggle(isOn: Binding(
+                            get: { SettingsStore.shared.keepAwakeWhileHosting },
+                            set: { SettingsStore.shared.keepAwakeWhileHosting = $0 })) {
+                            Label("Keep this Mac awake while relaying", systemImage: "moon.zzz")
+                        }
+                        .tint(HavenTheme.pink)
+                        Text("Stops idle sleep so friends stay connected. Closing the lid still sleeps the Mac.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    #endif
                     // Mac: front-door controls (bundled cloudflared / custom domain / manual).
                     // Without this, Auto is invisible and users never see stable-domain options.
                     #if os(macOS)
@@ -106,7 +118,7 @@ struct StorageSettingsView: View {
                 } footer: {
                     Text(relay.isDesktopClass
                          ? "This Mac holds your circles' sealed posts & media for anyone who was offline."
-                         : "Holds your circles' sealed posts for offline members while Haven is open — a Mac is best for always-on.")
+                         : "Holds sealed posts for offline members while Haven is open. A Mac is best.")
                 }
                 // Reuse a mailbox you already set up on another circle — a simple one-tap pick.
                 let others = RelayMailboxStore.shared.circlesWithRelay(excluding: cid)
@@ -161,7 +173,7 @@ struct StorageSettingsView: View {
                         Label("Advanced", systemImage: "slider.horizontal.3")
                     }
                 } footer: {
-                    Text("Point Haven at an external `haven-relay` or your own S3 bucket. Most people can skip this.")
+                    Text("External `haven-relay` or your own S3 bucket. Most people can skip this.")
                 }
             }
             .scrollContentBackground(.hidden)
@@ -243,7 +255,7 @@ struct RelayPoolSection: View {
             } header: {
                 Text(relays.count == 1 ? "Relay" : "Relays · \(relays.count)")
             } footer: {
-                Text("Posts mirror to every relay; any one reachable keeps the circle syncing. Swipe to forget one.")
+                Text("Posts mirror to every relay — any reachable one keeps the circle syncing.")
             }
         }
     }
@@ -264,11 +276,11 @@ struct RelayFrontDoorControls: View {
     private var help: String {
         switch tunnel.frontDoorMode {
         case "manual":
-            return "Manual: point your proxy at http://127.0.0.1:8675 (path router: media + DERP) or :8674/:3340 separately. Haven only announces the HTTPS URL(s) — works even if free Cloudflare tunnels are blocked."
+            return "Manual: point your proxy at http://127.0.0.1:8675 — Haven only announces the URL(s)."
         case "bundled":
-            return "Custom domain: paste media domain + Zero Trust install token. CF origin → http://127.0.0.1:8675 (path router fronts media + DERP). Optional sibling DERP URL if you dual-route without the path router."
+            return "Custom domain: paste your media domain + install token, and point the origin at http://127.0.0.1:8675."
         default:
-            return "Auto: one free trycloudflare tunnel to the path proxy (:8675) so media + DERP + calls share one public origin. A second free tunnel for DERP is only started if the path proxy cannot start — both URLs are shown below. Hostnames change on restart; use Custom domain or Manual for stable always-on."
+            return "Auto: one free trycloudflare tunnel serves media, calls, and DERP. Hostnames change on restart — use Custom domain or Manual for always-on."
         }
     }
 
@@ -338,7 +350,7 @@ struct RelayFrontDoorControls: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("Recommended: switch to “Custom domain” or “Manual / external tunnel” — free trycloudflare will keep minting hostnames that NXDOMAIN here.")
+                Text("Switch to Custom domain or Manual — free tunnel hostnames won't resolve on this network.")
                     .font(.caption2)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
@@ -364,7 +376,7 @@ struct RelayFrontDoorControls: View {
                         .textSelection(.enabled)
                         .lineLimit(2)
                 }
-                Text("Writes cloudflared-main.log (+ derp/dns) under Application Support/Haven/logs — useful when free hostnames NXDOMAIN.")
+                Text("Logs live in Application Support/Haven/logs.")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -393,7 +405,7 @@ struct RelayFrontDoorControls: View {
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                 if tunnel.freeTunnelDNSBroken {
-                    Text("Hostname shown above is live in cloudflared but NXDOMAIN in system DNS — browsers on this LAN cannot open it.")
+                    Text("Tunnel is up, but this network's DNS can't resolve it.")
                         .font(.caption2)
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
@@ -568,11 +580,11 @@ struct AdvancedStorageView: View {
                     }
                 } header: { Text("Connect an external relay") }
                 footer: {
-                    Text("Running `haven-relay` on a Mac, Linux box, or a spare device? Copy the link above and start it with `haven-relay run --link <link>`, then paste back the interface JSON it prints (or the bare node id from `haven-relay id`). The JSON also carries media URL + Haven fabric DERP so n0 is not required. No cloud, no credentials.")
+                    Text("Start your relay with `haven-relay run --link <link>`, then paste the JSON (or node id) it prints. No cloud, no credentials.")
                 }
 
                 Section {
-                    Text("Bring your own S3-compatible bucket instead: your key stays on this device and the circle gets scoped, expiring **pre-signed URLs**, never the secret.")
+                    Text("Or bring your own S3 bucket — your key stays here; the circle only gets expiring links.")
                         .font(.caption).foregroundStyle(.secondary)
                 } header: { Text("Your own S3 bucket") }
 
@@ -596,7 +608,7 @@ struct AdvancedStorageView: View {
                 Label("Saved on this device", systemImage: "checkmark.seal.fill").foregroundStyle(.green).font(.caption)
             }
         } header: { Text("Your S3-compatible bucket") }
-        footer: { Text("Works with AWS S3, Cloudflare R2, Backblaze B2, etc. Keys stay in this device's Keychain — never on any server.") }
+        footer: { Text("Works with AWS S3, R2, B2, and more. Keys never leave this device's Keychain.") }
 
         if store.s3Configured {
             Section {
@@ -614,8 +626,8 @@ struct AdvancedStorageView: View {
             } header: { Text("Volunteer as tribute") }
             footer: {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Your own S3 bucket keeps your circle synced. Credentials never leave your circle's devices.")
-                    Text("Heads up: members you share with can read (still sealed) and write to the bucket, so only share with a circle you trust, and rotate the key if someone leaves.")
+                    Text("Your bucket keeps the circle synced; credentials stay on the circle's devices.")
+                    Text("Members can write to the bucket — share only with people you trust, and rotate the key if someone leaves.")
                     Link("Learn more", destination: URL(string: "https://wemiller.com/apps/haven/docs/#byo")!)
                 }
                 .fixedSize(horizontal: false, vertical: true)
@@ -728,7 +740,7 @@ struct RelayRetentionControls: View {
 
             Text(relay.serving
                  ? "Changes apply next time the relay starts — flip it off and on to apply now."
-                 : "Whichever limit hits first wins, oldest media first. Undelivered messages are never swept.")
+                 : "Whichever limit hits first wins. Undelivered messages are never swept.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
@@ -784,7 +796,7 @@ struct RelaysView: View {
                     Section {
                         ForEach(entries) { e in relayRow(e) }
                     } header: { Text("Configured relays · \(entries.count)") }
-                    footer: { Text("The default (★) is inherited by circles without their own pick. Removing deactivates — the config survives.") }
+                    footer: { Text("★ covers circles without their own pick. Removing only deactivates.") }
                 }
 
                 Section {
@@ -837,7 +849,7 @@ struct RelaysView: View {
             // informational: it explains why some members connect slower, and must NOT read as
             // "broken" or send anyone hunting for a different relay.
             if privateOnly(e) {
-                Label("Direct address works on your network only — others connect peer-to-peer (slower first connect).",
+                Label("Address works on your network only — others connect peer-to-peer.",
                       systemImage: "info.circle")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -949,14 +961,14 @@ struct AddRelaySheet: View {
                                     .foregroundStyle(linkCopied ? Color.green : HavenTheme.pink)
                             }
                         } header: { Text("Running your own relay?") }
-                        footer: { Text("For a `haven-relay` daemon or the Docker relay: copy this link, start the relay with it (`haven-relay run --link <link>`), then paste back the node id it prints below.") }
+                        footer: { Text("Copy this link, run `haven-relay run --link <link>`, then paste the node id it prints below.") }
 
                         Section {
                             TextField("Node id (64 hex) or interface JSON", text: $nodeInput)
                                 .autocorrectionDisabled().havenAutocap(.never)
                                 .font(.system(.footnote, design: .monospaced))
                         } header: { Text("Haven relay") }
-                        footer: { Text("Paste the interface JSON (or bare node id) printed by a `haven-relay` daemon, or another device that's acting as a relay. JSON includes media + Haven DERP fabric so the circle can drop n0.") }
+                        footer: { Text("Paste the interface JSON or node id your relay printed.") }
                     } else {
                         Section {
                             TextField("Endpoint (e.g. s3.amazonaws.com)", text: $endpoint).autocorrectionDisabled().havenAutocap(.never)
@@ -968,7 +980,7 @@ struct AddRelaySheet: View {
                         footer: {
                             HStack(alignment: .top, spacing: 6) {
                                 Image(systemName: "info.circle.fill").foregroundStyle(.orange)
-                                Text("Store-and-forward only — holds sealed posts for offline delivery, not a live P2P relay. Your secret stays in this device's Keychain, never on any server.")
+                                Text("Store-and-forward only, not a live P2P relay. Your secret stays in this device's Keychain.")
                             }.font(.caption)
                         }
                     }

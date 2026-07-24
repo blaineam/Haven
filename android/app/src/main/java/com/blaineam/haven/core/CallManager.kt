@@ -115,18 +115,40 @@ object CallManager {
         val user = prefs.getString("turnUser", "") ?: ""
         val pass = prefs.getString("turnPass", "") ?: ""
         val policy = FabricIcePolicy.resolve(derp, turn, user, pass)
+        // iOS parity (field fix): a TURN-only list turned one dead/unroutable TURN entry (the
+        // dockerized relay advertised its container IP) into ZERO usable ICE servers — host
+        // candidates only, calls "connected" with no media. Circle infra stays first; STUN is
+        // derived from the circle TURN host (same socket, no credentials), and Google STUN is
+        // added only when the circle offers no publicly-routable server of its own.
+        val servers = mutableListOf<PeerConnection.IceServer>()
+        var havePublicTurn = false
         if (policy.turnUrls.isNotEmpty()) {
-            return listOf(
+            servers.add(
                 PeerConnection.IceServer.builder(policy.turnUrls)
                     .setUsername(policy.turnUser)
                     .setPassword(policy.turnPass)
                     .createIceServer(),
             )
+            val stun = policy.turnUrls.mapNotNull { url ->
+                url.substringAfter(":", "").ifEmpty { null }?.let { "stun:$it" }
+            }
+            if (stun.isNotEmpty()) servers.add(PeerConnection.IceServer.builder(stun).createIceServer())
+            havePublicTurn = policy.turnUrls.any { !hostLooksPrivate(it) }
         }
-        if (policy.hostOnly) return emptyList()
-        return FabricIcePolicy.googleStunUrls.map {
-            PeerConnection.IceServer.builder(it).createIceServer()
+        if (!havePublicTurn) {
+            servers.addAll(FabricIcePolicy.googleStunUrls.map {
+                PeerConnection.IceServer.builder(it).createIceServer()
+            })
         }
+        return servers
+    }
+
+    /** Best-effort "is this turn:/stun: URL's host a private/unroutable address" check. */
+    private fun hostLooksPrivate(url: String): Boolean {
+        val host = url.substringAfter(":", "").substringBefore(":")
+        val second = host.split(".").getOrNull(1)?.toIntOrNull() ?: -1
+        return host.startsWith("10.") || host.startsWith("192.168.") || host.startsWith("127.") ||
+            host.startsWith("169.254.") || (host.startsWith("172.") && second in 16..31)
     }
 
     fun init(context: Context, myNodeHex: String) {

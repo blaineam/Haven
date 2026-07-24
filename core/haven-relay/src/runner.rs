@@ -387,8 +387,14 @@ pub async fn run(cfg: Config) -> Result<()> {
 
                 // Circle TURN: own UDP socket for WebRTC ICE (not a second iroh Endpoint).
                 if cfg.turn_enabled {
-                    let lan = primary_lan_ip();
-                    let public_ip = cfg
+                    // Inside a container, primary_lan_ip() (UDP-connect trick) returns the
+                    // CONTAINER's bridge address (e.g. 172.20.0.2) — unreachable from every
+                    // client. Advertising it poisoned the whole fleet's ICE config in the
+                    // field: turn:172.20.0.2:3478 became each phone's ONLY ICE server, so
+                    // cross-NAT calls "connected" with zero media. A container's own LAN view
+                    // is never trustworthy; only an explicit --turn-public-ip / env is.
+                    let lan = if in_container() { None } else { primary_lan_ip() };
+                    let advertised_ip = cfg
                         .turn_public_ip
                         .clone()
                         .or_else(|| lan.clone())
@@ -397,8 +403,16 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 .as_ref()
                                 .and_then(|u| haven_net::host_from_http_url(u))
                                 .filter(|h| !h.contains("trycloudflare.com"))
-                        })
-                        .unwrap_or_else(|| "127.0.0.1".into());
+                        });
+                    if advertised_ip.is_none() {
+                        println!(
+                            "⚠ TURN not announced: no routable address (containerized, no \
+                             HAVEN_RELAY_TURN_PUBLIC_IP/--turn-public-ip, tunnel-only front \
+                             door). Calls fall back to STUN; set the host's LAN IP (same-network \
+                             peers) or public IP + UDP 3478 port-forward for full call relay."
+                        );
+                    }
+                    let public_ip = advertised_ip.clone().unwrap_or_else(|| "127.0.0.1".into());
                     let media_list: Vec<String> = public.iter().cloned().collect();
                     let suggested = if cfg.turn_urls.is_empty() {
                         haven_net::suggest_turn_urls(
@@ -413,6 +427,13 @@ pub async fn run(cfg: Config) -> Result<()> {
                         )
                     } else {
                         cfg.turn_urls.clone()
+                    };
+                    // No routable address → announce NOTHING. An absent TURN entry lets clients
+                    // fall back to STUN; a poisoned one becomes their only (dead) ICE server.
+                    let suggested = if advertised_ip.is_none() && cfg.turn_urls.is_empty() {
+                        Vec::new()
+                    } else {
+                        suggested
                     };
                     let tcfg = haven_net::TurnConfig {
                         enabled: true,
@@ -575,6 +596,17 @@ pub async fn run(cfg: Config) -> Result<()> {
 }
 
 /// This machine's primary LAN IPv4 (UDP-connect trick — no packet is actually sent).
+/// Are we running inside a container (Docker/containerd/podman)? A container's own network view
+/// (bridge address) must never be advertised to clients as a reachable TURN host.
+fn in_container() -> bool {
+    if std::path::Path::new("/.dockerenv").exists() || std::path::Path::new("/run/.containerenv").exists() {
+        return true;
+    }
+    std::fs::read_to_string("/proc/1/cgroup")
+        .map(|s| s.contains("docker") || s.contains("containerd") || s.contains("kubepods"))
+        .unwrap_or(false)
+}
+
 fn primary_lan_ip() -> Option<String> {
     let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     s.connect("8.8.8.8:80").ok()?;

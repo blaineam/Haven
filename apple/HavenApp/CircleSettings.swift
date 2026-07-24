@@ -317,8 +317,8 @@ struct CircleSettingsView: View {
                     Text("Privacy")
                 } footer: {
                     Text(circleSettings.biometricRequired(circleId)
-                         ? "Locked — hidden from Spotlight, and notifications won't show content until you unlock with Face ID."
-                         : "Spotlight finds this circle's posts in system search (on-device only). Face ID locks the circle each time you open the app.")
+                         ? "Locked — hidden from Spotlight; notifications hide content until you unlock."
+                         : "Spotlight searches this circle on-device only. Face ID relocks it on each open.")
                 }
 
                 Section {
@@ -417,8 +417,8 @@ struct CircleSettingsView: View {
                                "Require Face ID to open", "faceid")
                 }
                 footnote(circleSettings.biometricRequired(circleId)
-                         ? "Locked — hidden from Spotlight, and notifications won't show content until you unlock with Face ID."
-                         : "Spotlight finds this circle's posts in system search (on-device only). Face ID locks the circle each time you open the app.")
+                         ? "Locked — hidden from Spotlight; notifications hide content until you unlock."
+                         : "Spotlight searches this circle on-device only. Face ID relocks it on each open.")
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -503,7 +503,7 @@ struct CircleRelayOverrideSection: View {
     private var configured: [RelayEntry] { store.allEntries().filter { $0.active } }
     private var explicit: Set<String> { Set(store.explicitRelays(forCircle: circleId)) }
 
-    private let footerText = "Choose which configured relays this circle uses, overriding the default. Posts are mirrored to every relay turned on here and read from any that's reachable. The default relay (if set) always applies — change it under Settings ▸ Relays."
+    private let footerText = "Pick which relays this circle uses. Posts mirror to every one turned on. The default (★) always applies — manage it in Settings ▸ Relays."
 
     var body: some View {
         if configured.isEmpty {

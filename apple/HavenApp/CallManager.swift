@@ -92,6 +92,12 @@ final class CallManager: NSObject, ObservableObject {
     /// All participant hexes INCLUDING me (canonical roster).
     private var roster: Set<String> = []
     private var lastPeerState: [String: RTCIceConnectionState] = [:]   // for the grace-then-drop on .disconnected
+    /// TRUE only when at least one peer's ICE path is actually up. The call UI used to say
+    /// "Connected" the moment the ACCEPT frame arrived — app-level signaling — while ICE was
+    /// still dead (field: both sides "Connected", zero audio). The label now tells the truth.
+    var mediaConnected: Bool {
+        lastPeerState.values.contains { $0 == .connected || $0 == .completed }
+    }
     /// One pairwise connection per OTHER participant.
     private var peers: [String: PeerConn] = [:]
     /// Whether we've started media at all (after accept / first offer).
@@ -1716,6 +1722,9 @@ struct CallOverlay: View {
 
     private var statusText: String {
         if call.connecting { return "Calling…" }
+        // Answered but no ICE path yet: say so — "Connected" with silence erodes trust in the
+        // label (and hides real media-path failures from the person staring at the screen).
+        guard call.mediaConnected else { return "Connecting media…" }
         let n = call.participants.count
         return n > 1 ? "\(n) participants" : "Connected"
     }

@@ -162,15 +162,14 @@ final class RelayHost: ObservableObject {
             return
         }
         startWaitAttempts = 0
-        #if os(macOS)
-        PlatformIdle.disabled = true
-        #endif
+        updateSleepAssertion()
         let h = RelayServerHandle.attachWithLimits(node: node, dir: storeDir,
                                                    mediaMaxAgeDays: UInt32(max(0, mediaMaxAgeDays)),
                                                    mediaMaxBytes: mediaMaxBytes)
         setHandle(h)
         nodeId = h.nodeIdHex()
         serving = true
+        updateSleepAssertion()
         authorizeMembership()
         // HTTP only — tunnels/DERP already running from the original start.
         // CRITICAL: re-publish the *live tunnel* media URL. reachableHttpUrls() without the
@@ -225,8 +224,8 @@ final class RelayHost: ObservableObject {
         // major battery/heat source (user field: multi-% drain in minutes while "just open").
         // iOS already suspends background work when the screen dims; that's the right trade-off
         // for a phone. Desktop-class is the always-on path.
+        updateSleepAssertion()
         #if os(macOS)
-        PlatformIdle.disabled = true
         // Clear any orphan free tunnels before we bind so port/origin chaos cannot stick.
         DispatchQueue.global(qos: .userInitiated).async {
             CloudflaredTunnel.killOrphanCloudflareds(except: [])
@@ -238,6 +237,7 @@ final class RelayHost: ObservableObject {
         setHandle(h)
         nodeId = h.nodeIdHex()   // == the account node id now (the relay shares the node)
         serving = true
+        updateSleepAssertion()
         RelayMailboxStore.shared.unforget(nodeId)   // hosting is an explicit adoption of our own relay
         // Lock the mailbox down to circle members before announcing it (audit transport-F4).
         authorizeMembership()
@@ -853,8 +853,16 @@ final class RelayHost: ObservableObject {
         setHandle(nil)         // releases the FFI handle (best-effort; OS reclaims on exit)
         serving = false
         nodeId = ""
+        updateSleepAssertion()
+    }
+
+    /// Hold/release the macOS keep-awake assertion from (serving × the user's toggle). The
+    /// assertion prevents IDLE system sleep only — a closed lid or an explicit Sleep still
+    /// sleeps the Mac, and Power Nap cannot keep third-party sockets alive; the toggle's UI
+    /// copy says so honestly.
+    func updateSleepAssertion() {
         #if os(macOS)
-        PlatformIdle.disabled = false
+        PlatformIdle.disabled = serving && SettingsStore.shared.keepAwakeWhileHosting
         #endif
     }
 

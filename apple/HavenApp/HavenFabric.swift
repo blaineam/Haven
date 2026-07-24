@@ -78,26 +78,47 @@ final class HavenFabric: ObservableObject {
     ///
     /// | Fabric | TURN | ICE |
     /// |---|---|---|
-    /// | no | — | Google STUN (fallback only) |
-    /// | yes | no | empty (host candidates; media may use `/webrtc/hairpin`) |
-    /// | yes | yes | circle TURN only |
+    /// | no | — | Google STUN |
+    /// | yes | public TURN | circle TURN + STUN on the same host |
+    /// | yes | private/no TURN | circle TURN (if any) + Google STUN fallback |
+    ///
+    /// The old policy returned the circle TURN as the ONLY server, and an EMPTY list when a
+    /// fabric existed without TURN. In the field the relay advertised a Docker-internal TURN
+    /// host (`turn:172.20.0.2:3478`), so both phones ended up with one unreachable server, no
+    /// STUN, host candidates only — calls "connected" at the app layer with zero media both
+    /// ways. ICE server lists are candidates, not commitments: a dead entry costs a lookup,
+    /// a missing STUN costs the call. Circle infrastructure stays FIRST; Google STUN is added
+    /// only when the circle can't possibly provide a server-reflexive path itself.
     nonisolated static func iceServersFromDefaults() -> [[String: Any]] {
         let turn = UserDefaults.standard.stringArray(forKey: "haven.fabric.turnUrls") ?? []
-        let derp = UserDefaults.standard.stringArray(forKey: "haven.fabric.derpUrls") ?? []
         let user = UserDefaults.standard.string(forKey: "haven.fabric.turnUser") ?? ""
         let pass = UserDefaults.standard.string(forKey: "haven.fabric.turnPass") ?? ""
+        var servers: [[String: Any]] = []
+        var havePublicTurn = false
         if !turn.isEmpty, !user.isEmpty, !pass.isEmpty {
-            return [[
-                "urls": turn,
-                "username": user,
-                "credential": pass,
-            ]]
+            servers.append(["urls": turn, "username": user, "credential": pass])
+            // The circle TURN host doubles as a STUN server (same socket, no credentials) —
+            // srflx candidates from our own infrastructure, no third party involved.
+            let stun = turn.compactMap { url -> String? in
+                let hostPort = url.split(separator: ":").dropFirst().joined(separator: ":")
+                return hostPort.isEmpty ? nil : "stun:\(hostPort)"
+            }
+            if !stun.isEmpty { servers.append(["urls": stun]) }
+            havePublicTurn = turn.contains { !Self.hostLooksPrivate($0) }
         }
-        if !derp.isEmpty || !turn.isEmpty {
-            return [] // fabric present — never Google STUN as first path
+        if !havePublicTurn {
+            // No circle server that the open internet can reach — without STUN, two home NATs
+            // can never find each other. Connectivity beats purity here.
+            servers.append(["urls": googleStunUrls])
         }
-        return [[
-            "urls": googleStunUrls,
-        ]]
+        return servers
+    }
+
+    /// Best-effort "is this turn:/stun: URL's host a private/unroutable address" check.
+    nonisolated private static func hostLooksPrivate(_ url: String) -> Bool {
+        let host = url.split(separator: ":").dropFirst().first.map(String.init) ?? ""
+        return host.hasPrefix("10.") || host.hasPrefix("192.168.") || host.hasPrefix("127.")
+            || host.hasPrefix("169.254.")
+            || (host.hasPrefix("172.") && (16...31).contains(Int(host.split(separator: ".").dropFirst().first ?? "") ?? -1))
     }
 }

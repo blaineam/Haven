@@ -77,6 +77,10 @@ services:
       # DERP public HTTPS URL (proxy → container :3340). Optional if LAN-only.
       HAVEN_RELAY_DERP_URL: ${HAVEN_RELAY_DERP_URL:-}
       # TURN public URI(s) and the IP TURN advertises in ALLOCATE. UDP 3478 must reach this box.
+      # REQUIRED for working call media under bridge networking: the container cannot see your
+      # LAN/public IP, so without one of these TURN is not announced and calls rely on STUN
+      # alone. Set HAVEN_RELAY_TURN_PUBLIC_IP to the NAS LAN IP (same-network peers) or the
+      # public IP + router port-forward of UDP 3478 (remote peers) — or use network_mode: host.
       HAVEN_RELAY_TURN_URL: ${HAVEN_RELAY_TURN_URL:-}
       HAVEN_RELAY_TURN_PUBLIC_IP: ${HAVEN_RELAY_TURN_PUBLIC_IP:-}
       # Set to 1 to disable embedded DERP / TURN (n0 + Google STUN remain fallbacks for clients).

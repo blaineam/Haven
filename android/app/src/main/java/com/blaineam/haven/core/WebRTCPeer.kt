@@ -144,10 +144,12 @@ class WebRTCPeer(
     }
 
     private fun applyRemoteAnswer(sdp: String) {
-        // HTTP live-lane can redeliver the same answer (or a prior session's) after markSeen races;
-        // applying a second answer while already stable fails with "Called in wrong state: stable".
-        if (remoteSet) {
-            Log.d(TAG, "$peerHex ignoring duplicate remote answer")
+        // Accept an answer whenever WE have an offer in flight (initial OR renegotiation) — the
+        // old once-forever `remoteSet` guard dropped every RENEGOTIATION answer, so video/screen
+        // toggles wedged the offerer in HAVE_LOCAL_OFFER and never reached the remote (iOS
+        // parity fix). Redelivered/stale answers arrive while STABLE and are still ignored.
+        if (pc?.signalingState() != PeerConnection.SignalingState.HAVE_LOCAL_OFFER) {
+            Log.d(TAG, "$peerHex ignoring answer in state ${pc?.signalingState()}")
             return
         }
         pc?.setRemoteDescription(object : SimpleSdp() {

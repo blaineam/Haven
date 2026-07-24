@@ -79,7 +79,7 @@ struct RelayNudgeBanner: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Give this circle a relay")
                                 .font(.subheadline.weight(.semibold)).foregroundStyle(.white)
-                            Text("A few of you are here now — a relay holds your sealed posts so nobody has to be online at the same time.")
+                            Text("A relay holds your sealed posts so nobody has to be online at once.")
                                 .font(.caption).foregroundStyle(.white.opacity(0.85))
                                 .fixedSize(horizontal: false, vertical: true)
                                 .multilineTextAlignment(.leading)
@@ -175,7 +175,7 @@ struct RelayWalkthroughSheet: View {
             point("desktopcomputer", "The easy way — a device you leave on",
                   hostBlurb)
             point("terminal", "Or a spare machine",
-                  "On a Mac, Linux box, or Raspberry Pi, one line installs it:\ncurl -fsSL https://wemiller.com/apps/haven/relay/install.sh | sh\n\nOn Windows, in PowerShell:\nirm https://wemiller.com/apps/haven/relay/install.ps1 | iex\n\nIt sets itself to start on every reboot. “Add a relay I'm running” below hands you this circle's link to start it with, then takes back the node id it prints.")
+                  "One line installs it on a Mac, Linux box, or Pi:\ncurl -fsSL https://wemiller.com/apps/haven/relay/install.sh | sh\n\nWindows (PowerShell):\nirm https://wemiller.com/apps/haven/relay/install.ps1 | iex\n\nIt restarts on reboot — “Add a relay I'm running” below handles the link and node id.")
         }
     }
 
@@ -189,9 +189,9 @@ struct RelayWalkthroughSheet: View {
             // on device-roster changes, and on the periodic rotate_circle — never on adding a member.
             // Claiming add rotates would imply a new member is fenced off from earlier posts. They aren't.
             point("key.fill", "Only the people you added can read it",
-                  "Everything you post is sealed on your device to your circle's members. Remove someone and the circle's key rotates, so they can't read anything posted afterwards.")
+                  "Posts are sealed to your circle. Remove someone and the key rotates — they can't read anything new.")
             point("atom", "Encrypted for the long haul",
-                  "Haven pairs today's proven encryption with post-quantum encryption — X25519 with ML-KEM-768, signed with Ed25519 and ML-DSA-65. An attacker has to break both halves, so ciphertext saved today isn't a bet on a future quantum computer. No promises beyond that: keys live on your devices, and Haven never holds them.")
+                  "Proven encryption plus post-quantum (X25519 + ML-KEM-768; Ed25519 + ML-DSA-65) — an attacker must break both. Keys live on your devices; Haven never holds them.")
         }
     }
 
@@ -216,9 +216,9 @@ struct RelayWalkthroughSheet: View {
     /// so the phone relays while Haven is foregrounded (RelayHost's own platform note).
     private var hostBlurb: String {
         #if os(macOS)
-        return "One tap below and this Mac holds the circle's sealed mailbox for as long as Haven is open. A Mac that stays awake is ideal. You can turn it off any time under Settings ▸ Relays."
+        return "This Mac holds the circle's sealed mailbox while Haven is open. Turn it off any time in Settings ▸ Relays."
         #else
-        return "One tap below and this device serves the circle's sealed mailbox while Haven is open and awake — fine on a charger, but a Mac or a spare machine left running is the real fix. Turn it off any time under Settings ▸ Relays."
+        return "Relays while Haven is open and awake — fine on a charger, but an always-on Mac is the real fix. Turn off any time in Settings ▸ Relays."
         #endif
     }
 

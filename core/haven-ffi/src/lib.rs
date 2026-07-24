@@ -3689,6 +3689,22 @@ fn receive_key_commit(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool
     Ok(is_new)
 }
 
+/// Park an epoch-sealed envelope in the circle's durable pending buffer (capped + de-duped).
+/// EVICT-OLDEST when full: the old `if len < 512` drop-NEWEST policy guaranteed that once a
+/// circle wedged at cap (hundreds of permanently-dead entries starved by epoch-key skew — the
+/// live field state of both stuck DM circles), every FRESH event — the DM just sent, whose key
+/// commit lands seconds later — was the one silently discarded, while its mailbox key was still
+/// marked seen: deterministic permanent loss of exactly the newest content.
+fn park_pending(c: &mut Circle, body: &[u8]) {
+    if c.pending_epoch.iter().any(|p| p == body) {
+        return;
+    }
+    if c.pending_epoch.len() >= 512 {
+        c.pending_epoch.remove(0);
+    }
+    c.pending_epoch.push(body.to_vec());
+}
+
 /// Apply (or buffer, if its epoch key hasn't arrived yet) an epoch-sealed event.
 fn receive_epoch_event(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool, HavenError> {
     let env = EpochEnvelope::from_bytes(body)
@@ -3724,9 +3740,7 @@ fn receive_epoch_event(st: &mut NetState, idx: usize, body: &[u8]) -> Result<boo
         // so once the roster arrives the event is recovered. (A genuinely-removed sender's event
         // simply never opens and ages out of the buffer.)
         let c = &mut st.circles[idx];
-        if c.pending_epoch.len() < 512 && !c.pending_epoch.iter().any(|p| p == body) {
-            c.pending_epoch.push(body.to_vec());
-        }
+        park_pending(c, body);
         return Ok(false);
     };
     // The epoch key is keyed by the ACCOUNT (the committer), not the signing device — so a device-signed
@@ -3736,9 +3750,7 @@ fn receive_epoch_event(st: &mut NetState, idx: usize, body: &[u8]) -> Result<boo
     let Some(key) = st.circles[idx].key_for(&me_hex, key_author_hex, env.epoch) else {
         // Epoch key not learned yet — buffer (capped + de-duped); a later key commit unlocks it.
         let c = &mut st.circles[idx];
-        if c.pending_epoch.len() < 512 && !c.pending_epoch.iter().any(|p| p == body) {
-            c.pending_epoch.push(body.to_vec());
-        }
+        park_pending(c, body);
         return Ok(false);
     };
     // M6 (§6.5): a DM sealed under the sender ratchet carries an AUTHENTICATED index. Re-derive its
@@ -3841,6 +3853,37 @@ fn drain_pending(st: &mut NetState, idx: usize) {
     for raw in pending {
         let _ = receive_epoch_event(st, idx, &raw);
     }
+    // GC provably-DEAD parked entries so they can't starve the 512-slot buffer. An envelope
+    // sealed at epoch E is unrecoverable once every key-holder has pruned past E: senders keep
+    // only the last KEEP_EPOCHS(4) epochs (`prune_epoch_keys`), so when the newest epoch we know
+    // for that sender is > E + 4, the commit that opens E can never be re-offered. The field
+    // failure state was two circles wedged AT cap with exactly such fossils (peer events at
+    // epoch 5 against a held window of 7–10) while fresh DMs bounced off the full buffer.
+    let me_hex = hex(&st.me().node_id_bytes());
+    let c = &mut st.circles[idx];
+    let my_epoch = c.my_epoch;
+    let newest_by_author: std::collections::HashMap<String, u64> = {
+        let mut m: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for ((acct, e), _) in c.peer_epoch_keys.iter() {
+            let cur = m.entry(acct.clone()).or_insert(0);
+            if *e > *cur {
+                *cur = *e;
+            }
+        }
+        m.insert(me_hex.clone(), my_epoch);
+        m
+    };
+    c.pending_epoch.retain(|raw| {
+        let Ok(env) = EpochEnvelope::from_bytes(raw) else { return false };
+        let author = env.sender_hex();
+        match newest_by_author.get(&author) {
+            // Keep anything whose sealing epoch is still within (or ahead of) the recoverable
+            // window; drop fossils more than KEEP_EPOCHS behind the newest key we hold.
+            Some(&newest) => env.epoch + 4 >= newest,
+            // Unknown author (roster not learned yet) — keep; the roster drain recovers it.
+            None => true,
+        }
+    });
 }
 
 /// Drain the retry buffer of EVERY circle — called after a roster is learned (a member's newly-known
@@ -5304,7 +5347,20 @@ impl HavenSocial {
         // viewer input, and a display preference must not destroy data it never promised to
         // delete. Wall clock is how `rotate_if_stale` keys its window too; the core has no
         // injected clock on this path.
-        purge_expired_from_circle(&mut st.circles[idx], None, None, now_secs().saturating_mul(1000));
+        //
+        // 48h RE-SEAL GRACE: the purge is evaluated against (now − 48h), NOT now. This path runs
+        // on every epoch-head export — i.e. on the author's very next post and every launch — so
+        // an exact-deadline purge deleted a 24h STORY from the author's engine the moment its
+        // window lapsed, before the daily full-history backfill could ever re-deliver it to a
+        // receiver that stalled (commit lag, offline). Display still hides expired content at the
+        // exact deadline everywhere (`build_feed` is_expired + the app-driven purge_expired), so
+        // the promise the viewer sees is unchanged — the grace only keeps the bytes exportable
+        // long enough for late receivers to reconcile history.
+        let grace_ms: u64 = 48 * 60 * 60 * 1000;
+        purge_expired_from_circle(
+            &mut st.circles[idx], None, None,
+            now_secs().saturating_mul(1000).saturating_sub(grace_ms),
+        );
         // TreeKEM tree wires (genesis commit + Welcomes for the creator; cached Remove commits) go on
         // the bundle regardless of the keying decision — a receiver needs them to build the tree AND
         // (M3) to derive the content epoch. Built BEFORE the flip decision so the tree exists when we
@@ -6313,10 +6369,9 @@ impl HavenSocial {
         // Restore the durable retry buffer (capped + deduped). A drain runs after this whole import
         // (import_state → drain_all_pending) so any key/roster we already hold unlocks it immediately.
         for raw in pc.pending_epoch {
-            let c = &mut st.circles[idx];
-            if c.pending_epoch.len() < 512 && !c.pending_epoch.iter().any(|p| *p == raw) {
-                c.pending_epoch.push(raw);
-            }
+            // Evict-oldest on overflow (same policy as park_pending) — an import must not
+            // silently discard restored entries past the cap and re-wedge a healed buffer.
+            park_pending(&mut st.circles[idx], &raw);
         }
         // MLS M3 / AUDIT M2 authority: adopt the creator, giving a DEFINITION-pinned creator priority.
         // A signed circle-sync record (or another of my devices) carrying a definition-pinned creator is

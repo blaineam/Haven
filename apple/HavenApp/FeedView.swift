@@ -7899,15 +7899,21 @@ private struct BlurredMediaBackdrop: View {
         .task(id: ref) {
             if let cached = Self.cachedSource(ref) { img = cached; loadedRef = ref; return }
             img = nil; loadedRef = nil
-            // Awaited purely as the completion signal the peek never had. Deliberately the 1200px
-            // bucket — the tile in FRONT of this backdrop decodes exactly that, so `thumbnailAsync`'s
-            // single-flight makes this the same decode rather than a second one. (Asking for the 64px
-            // thumb instead would be a separate cache bucket, i.e. real extra work, and for a video a
-            // whole second poster generation.)
-            _ = await MediaStore.shared.thumbnailAsync(ref, maxDimension: 1200)
+            // Deliberately the 1200px bucket — the tile in FRONT of this backdrop decodes exactly
+            // that, so `thumbnailAsync`'s single-flight makes this the same decode, not a second one.
+            //
+            // KEEP the returned bitmap. The old code discarded it and re-peeked the NSCache —
+            // which iOS purges on every memory warning — so under pressure the peek came back nil,
+            // `img` stayed nil forever, and the letterbox rendered the card's pure-black dark-mode
+            // surface (the "background blur is just black on my iPhone" report). The front tile
+            // never broke because FeedImage keeps its decode's return value; now the backdrop is
+            // exactly as pressure-proof.
+            let decoded = await MediaStore.shared.thumbnailAsync(ref, maxDimension: 1200)
             guard !Task.isCancelled else { return }
-            img = Self.cachedSource(ref)
-            loadedRef = ref
+            img = Self.cachedSource(ref) ?? decoded
+            // Decode failed outright (e.g. a video poster not generated yet): leave loadedRef nil
+            // so a later .task re-run retries instead of pinning an empty backdrop.
+            loadedRef = img == nil ? nil : ref
         }
     }
 

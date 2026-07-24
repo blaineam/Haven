@@ -108,6 +108,13 @@ fi
 if [ -n "${HAVEN_RELAY_TURN_PUBLIC_IP:-}" ]; then
   set -- --turn-public-ip "$HAVEN_RELAY_TURN_PUBLIC_IP" "$@"
 fi
+if [ -z "${HAVEN_RELAY_TURN_URL:-}" ] && [ -z "${HAVEN_RELAY_TURN_PUBLIC_IP:-}" ] && [ "${HAVEN_RELAY_NO_TURN:-0}" != "1" ]; then
+  echo "⚠ TURN: no HAVEN_RELAY_TURN_URL / HAVEN_RELAY_TURN_PUBLIC_IP set. Under bridge"
+  echo "  networking the container cannot see a routable address, so TURN will NOT be"
+  echo "  announced (clients fall back to STUN). For full call relay set"
+  echo "  HAVEN_RELAY_TURN_PUBLIC_IP to this box's LAN IP (same-network peers) or its"
+  echo "  public IP with UDP 3478 port-forwarded — or use network_mode: host."
+fi
 if [ -n "${HAVEN_RELAY_TURN_BIND:-}" ]; then
   set -- --turn-bind "$HAVEN_RELAY_TURN_BIND" "$@"
 fi

@@ -21,6 +21,16 @@ final class SettingsStore: ObservableObject {
     /// "Show original" in a post's menu downloads the uncompressed companion if the author sent one.
     /// Not synced: data saver is about *this* device's radio and storage, not the account.
     @Published var superDataSaver: Bool { didSet { d.set(superDataSaver, forKey: kDataSaver) } }
+    #if os(macOS)
+    /// Hold a power assertion while hosting a relay so the Mac doesn't sleep out from under the
+    /// circle (Power Nap can't keep third-party sockets alive). DEVICE-LOCAL, default ON.
+    @Published var keepAwakeWhileHosting: Bool {
+        didSet {
+            d.set(keepAwakeWhileHosting, forKey: kKeepAwake)
+            RelayHost.shared.updateSleepAssertion()
+        }
+    }
+    #endif
     /// When composing, also upload the uncompressed original beside the optimized copy.
     /// Independent of `autoOptimize`: optimize still produces the small playable version; this
     /// just keeps the camera original available via "Show original" for recipients who want it.
@@ -102,12 +112,16 @@ final class SettingsStore: ObservableObject {
     private let kVideoSound = "haven.videoSoundOn"
     private let kLocMaxDays = "haven.localMediaMaxDays"
     private let kLocMaxGB = "haven.localMediaMaxGB"
+    private let kKeepAwake = "haven.relay.keepAwake"
 
     private init() {
         saveToPhotos = d.object(forKey: kSave) as? Bool ?? true   // default ON
         saveOthersToPhotos = d.object(forKey: kSaveOthers) as? Bool ?? false   // default OFF — only my own posts auto-save
         autoOptimize = d.object(forKey: kOpt) as? Bool ?? true
         superDataSaver = d.object(forKey: kDataSaver) as? Bool ?? false
+        #if os(macOS)
+        keepAwakeWhileHosting = d.object(forKey: kKeepAwake) as? Bool ?? true
+        #endif
         sendOriginal = d.object(forKey: kSendOriginal) as? Bool ?? false
         notificationDetail = SharedNotificationPrivacy.detail
         retentionDays = d.object(forKey: kRet) as? Int ?? 0       // default forever
@@ -215,7 +229,7 @@ struct SettingsView: View {
                         Image(systemName: "lock.shield.fill").font(.title3).foregroundStyle(.green)
                         VStack(alignment: .leading, spacing: 3) {
                             Text("Your circle is private").font(.subheadline.weight(.semibold))
-                            Text("Everything you share is locked so only your people can see it. No ads, no tracking — ever.")
+                            Text("Only your people can see what you share. No ads, no tracking — ever.")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -333,12 +347,7 @@ struct SettingsView: View {
                     ReoptimizeMediaRow(onFinished: { await measureStorage() })
                 } header: { Text("Storage") }
                 footer: {
-                    Text("""
-                    **Manage media** lists everything by size; kept items are never removed.
-                    Cached media stays under your caps — posts stay and re-download on demand.
-                    **Clean up** removes media nothing references anymore, on this device only.
-                    **Re-optimize** re-shares smaller copies so the whole circle gets space back.
-                    """)
+                    Text("**Clean up** frees space on this device only. **Re-optimize** re-shares smaller copies for everyone. Kept items are never removed; evicted posts re-download on demand.")
                 }
                 .task { await measureStorage() }
                 Section {

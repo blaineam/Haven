@@ -71,6 +71,28 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Field-test wave (mom test): call media, DM/story loss, relay sleep, blur, copy.**
+  (1) *Calls connected with zero audio/video*: the dockerized relay advertised its
+  container-internal IP as the TURN host (`turn:172.20.0.2:3478`) and the client ICE policy
+  made that dead entry the ONLY server (no STUN). Relay now refuses to advertise
+  container/unroutable addresses (absent TURN beats poisoned TURN) and warns how to set
+  `HAVEN_RELAY_TURN_PUBLIC_IP`; clients derive STUN from the circle TURN host and add
+  Google STUN whenever the circle has no public server. Also: renegotiation answers were
+  dropped forever after the first negotiation (`remoteDescription != nil` guard), wedging
+  video/screen toggles — answers now apply whenever an offer is in flight. The call label
+  says "Connecting media…" until ICE is actually up instead of lying "Connected".
+  (2) *DMs/stories silently lost*: the pending-epoch buffer dropped the NEWEST envelope
+  when full at 512 — and stalled circles sat at cap full of permanently-dead entries.
+  Now evict-oldest, plus a drain-time GC for envelopes whose epoch keys are provably
+  pruned everywhere. Stories additionally got a 48 h re-seal grace on the author-side
+  export purge so a late receiver can still reconcile (display still hides at exactly 24 h).
+  (3) *Mac relay slept*: new "Keep this Mac awake while relaying" toggle (idle-sleep
+  assertion; honest copy — a closed lid still sleeps).
+  (4) *Black letterbox behind post media on iPhone*: the backdrop discarded its decoded
+  bitmap and re-peeked an NSCache that iOS purges under pressure; it now keeps the decode
+  like the front tile always did.
+  (5) Copy: "Ask for it back" → "Notify me when it's back", plus a settings-wide pass
+  shortening thirty-odd verbose explainer strings.
 - **The 55 GB jetsam kill: overlapping mailbox pulls stacked unbounded ingest batches
   (Apple + Android).** Keys are marked seen when the ingest batch RUNS (inside the engine
   queue), but the fetch-time filter reads the seen-set immediately — so with no

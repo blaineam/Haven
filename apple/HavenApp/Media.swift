@@ -2003,7 +2003,7 @@ struct MissingMediaPlaceholder: View {
                         feed.requestMediaWhenAvailable(ref: ref, circleId: ctx.circleId,
                                                        postId: ctx.postId, authorShort: ctx.authorShort)
                     } label: {
-                        Label("Ask for it back", systemImage: "bell")
+                        Label("Notify me when it's back", systemImage: "bell")
                     }
                     .font(.caption.weight(.semibold)).buttonStyle(.borderless).tint(HavenTheme.pink)
                 }
@@ -2082,7 +2082,7 @@ struct MediaCleanupView: View {
                         Text("\(rows.count) item\(rows.count == 1 ? "" : "s") · \(fmt(totalBytes))"
                              + (pinnedBytes > 0 ? " · \(fmt(pinnedBytes)) kept" : ""))
                     } footer: {
-                        Text("Frees space on this device only — posts stay and re-download. Kept items are never removed.")
+                        Text("Frees space on this device only — posts re-download on demand. Kept items stay.")
                     }
                 }
                 #if os(iOS)

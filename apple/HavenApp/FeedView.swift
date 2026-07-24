@@ -4841,11 +4841,20 @@ final class FeedStore: ObservableObject {
             for ref in refs {
                 guard enqueued < perCircleCap else { break }
                 guard MediaStore.shared.has(ref), !MediaBackupBackoff.shouldSkip(ref) else { continue }
-                // Only skip when confirmed on a relay SOMEONE ELSE can read. hasAny alone counted
-                // our own in-process relay (local file copy) and permanently skipped remote
-                // mirrors — "previously shared content never reaches an available relay".
-                if MediaBackupLedger.hasAnyRemote(ref, ownRelayHex: ownRelay) {
-                    continue
+                // Skip only when EVERY relay this circle publishes to already holds it. The old
+                // test was "any relay a DIFFERENT DEVICE can read" — one remote copy stopped the
+                // mirroring forever, so a blob that landed on the NAS never reached this Mac's
+                // relay (and vice versa), and any relay adopted, recovered, or GC-swept afterwards
+                // stayed empty for good. Redundancy across relays is the entire point of having
+                // several: a peer polls the relays IT knows, not the one that happened to win the
+                // race here. Exactly the per-(relay,key) shape the EVENT upload path needed.
+                let wanted = RelayMailboxStore.shared.relays(forCircle: cid)
+                if wanted.isEmpty {
+                    // No explicit relay set for this circle — fall back to the old remote test.
+                    if MediaBackupLedger.hasAnyRemote(ref, ownRelayHex: ownRelay) { continue }
+                } else {
+                    let held = Set(MediaBackupLedger.destinations(for: ref))
+                    if wanted.allSatisfy({ held.contains($0) }) { continue }
                 }
                 MediaBackupQueue.shared.enqueue(ref, circleId: cid, social: social)
                 enqueued += 1

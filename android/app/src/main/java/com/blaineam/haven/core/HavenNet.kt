@@ -233,6 +233,26 @@ object HavenNet : InboundListener {
      * and is never re-marked, so a full forget would turn every poll into a full mailbox
      * re-download. Mirrors iOS `SharedStore.repairLinkedHostMailboxSeenOnce`.
      */
+    /** ONE-SHOT storm-burn repair (iOS `repairStormBurnedSeenOnce` parity): builds that marked
+     * keys seen before the engine state persisted burned keys whose events -- including friends'
+     * KEY COMMITS -- never landed when a kill hit the gap. Clear the whole mailbox seen-set once
+     * (live-call lanes kept) so everything re-drains under mark-after-persist. */
+    private fun repairStormBurnedSeenOnce() {
+        val flag = "haven.repair.stormBurnedSeen.v1"
+        if (prefs.getBoolean(flag, false)) return
+        prefs.edit().putBoolean(flag, true).apply()
+        ensureSeenMailboxLoaded()
+        val removed = synchronized(seenMailbox) {
+            val before = seenMailbox.size
+            seenMailbox.retainAll { it.contains("/__live__/") }
+            before - seenMailbox.size
+        }
+        if (removed > 0) {
+            Log.i(TAG, "mailbox seen: storm-burn repair forgot $removed keys -- full re-drain")
+            saveSeenMailboxNow()
+        }
+    }
+
     private fun repairMailboxSeenOnce() {
         val flag = "haven.repair.mailboxSeen.v1"
         if (!prefs.getBoolean(flag, false)) {
@@ -4227,6 +4247,7 @@ object HavenNet : InboundListener {
     private suspend fun pollMailboxOnce() {
         ensureSeenMailboxLoaded()
         repairMailboxSeenOnce()
+        repairStormBurnedSeenOnce()
         var changed = false
         // Whether ANY receive() ran this pass. receive() can change engine state without reporting
         // a new event — an envelope that arrives before its key commit is BUFFERED in
@@ -4315,7 +4336,7 @@ object HavenNet : InboundListener {
             for ((key, env) in items.sortedBy { mailboxKeyRank(it.first) }) {
                 if (key.contains("/__live__/")) continue   // call frames — the in-call poll's lane
                 if (!helloSlotIsMine(key)) continue         // another id's hello slot — not ours to claim (or burn)
-                if (routeMailboxEntry(circleId, key, env)) markMailboxSeen(key)
+                if (routeMailboxEntry(circleId, key, env)) pendingSeenMarks.add(key)
             }
         }
         // (circleId, relayNodeHex) for every circle × every configured relay — reading from all of
@@ -4368,7 +4389,7 @@ object HavenNet : InboundListener {
                     if (!helloSlotIsMine(s3key)) continue   // another id's hello slot — skip before the GET
                     if (seenMailbox.contains(s3key)) continue
                     val env = runCatching { uniffi.haven_ffi.s3Get(cfg, s3key) }.getOrNull() ?: continue
-                    if (routeMailboxEntry(circleId, s3key, env)) markMailboxSeen(s3key)
+                    if (routeMailboxEntry(circleId, s3key, env)) pendingSeenMarks.add(s3key)
                 }
                 continue
             }
@@ -4420,7 +4441,7 @@ object HavenNet : InboundListener {
                 if (seenMailbox.contains(key)) continue
                 val env = (if (httpBase != null) relayHttpGet(httpBase, entry!!.httpToken, key).getOrNull()
                            else runCatching { client!!.get(key) }.getOrNull()) ?: continue
-                if (routeMailboxEntry(circleId, key, env)) markMailboxSeen(key)
+                if (routeMailboxEntry(circleId, key, env)) pendingSeenMarks.add(key)
             }
         }
         // HTTP live-lane call frames when iroh dial is down.
@@ -4460,7 +4481,15 @@ object HavenNet : InboundListener {
             requestMissingMedia()
             ActivityStore.poke(social)   // fresh rows for the bell without a per-envelope reduce
         }
+        // Seen-marks STRICTLY AFTER whichever persist() above landed the engine state (iOS
+        // parity). Marking inline put the seen file ahead of the engine save; a kill in that gap
+        // durably marked keys whose events -- including friends' KEY COMMITS -- never landed, and
+        // all content beneath the push layer went dark fleet-wide.
+        for (k in pendingSeenMarks) markMailboxSeen(k)
+        pendingSeenMarks.clear()
     }
+
+    private val pendingSeenMarks = mutableListOf<String>()
 
     // ---- Cross-device media bytes (frame 3 request / frame 5 sealed chunks), like iOS ----
 

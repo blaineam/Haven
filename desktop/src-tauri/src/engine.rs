@@ -6952,6 +6952,28 @@ impl Engine {
 
     pub async fn poll_mailbox(self: &Arc<Self>) {
         let mut changed = false;
+        // Content-envelope seen-marks, applied only AFTER persist() lands the engine state
+        // holding their events (see the tail of this function).
+        let mut pending_marks: Vec<String> = Vec::new();
+        // ONE-SHOT storm-burn repair (iOS/Android parity): earlier builds marked keys seen before
+        // the engine state persisted; a kill in the gap burned keys whose events — including
+        // friends' KEY COMMITS — never landed. Clear the whole mailbox seen-set once (live-call
+        // lanes kept) so everything re-drains under the mark-after-persist contract above.
+        let repair_marker = self.paths.root.join("repair-storm-burn-v1");
+        if !repair_marker.exists() {
+            let removed = {
+                let mut st = self.dyn_state.lock().unwrap();
+                let before = st.seen_mailbox.len();
+                st.seen_mailbox.retain(|k| k.contains("/__live__/"));
+                st.seen_mailbox_dirty = true;
+                before - st.seen_mailbox.len()
+            };
+            let _ = std::fs::write(&repair_marker, b"1");
+            if removed > 0 {
+                self.flush_seen_mailbox();
+                log::info!("mailbox seen: storm-burn repair forgot {removed} keys — full re-drain");
+            }
+        }
         // Control-plane blobs ROUTED this pass (hellos to me / durable frame-19 announces) — they
         // change engine/prefs state without being circle events, so they persist+emit on their own.
         let mut routed_control = false;
@@ -7198,7 +7220,7 @@ impl Engine {
                 }
                 match self.social.receive(circle_id.clone(), env.clone()) {
                     Ok(true) => {
-                        self.mark_mailbox_seen(key);
+                        pending_marks.push(key);
                         changed = true;
                         changed_circles.insert(circle_id.clone());
                         newly_ingested.push((circle_id.clone(), env));
@@ -7219,7 +7241,7 @@ impl Engine {
                             &circle_id.chars().take(12).collect::<String>(),
                             key.rsplit('/').next().unwrap_or(&key).chars().take(16).collect::<String>(),
                         );
-                        self.mark_mailbox_seen(key);
+                        pending_marks.push(key);
                     }
                     Err(e) => {
                         // Hard per-key failure (malformed envelope, verify error). Re-fetching the
@@ -7230,7 +7252,7 @@ impl Engine {
                             &circle_id.chars().take(12).collect::<String>(),
                             key.rsplit('/').next().unwrap_or(&key).chars().take(16).collect::<String>(),
                         );
-                        self.mark_mailbox_seen(key);
+                        pending_marks.push(key);
                     }
                 }
             }
@@ -7257,21 +7279,21 @@ impl Engine {
                     };
                     match self.social.receive(c.id.clone(), env.clone()) {
                         Ok(true) => {
-                            self.mark_mailbox_seen(key);
+                            pending_marks.push(key);
                             changed = true;
                             changed_circles.insert(c.id.clone());
                             newly_ingested.push((c.id.clone(), env));
                         }
                         // Duplicate/buffered-durable/garbage: seen either way (see the relay-path
                         // comment above — unmarked false-returns re-fetch forever).
-                        Ok(false) => self.mark_mailbox_seen(key),
+                        Ok(false) => pending_marks.push(key),
                         Err(e) => {
                             log::warn!(
                                 "s3 mailbox receive FAILED circle={} key={}: {e} — marked seen",
                                 &c.id.chars().take(12).collect::<String>(),
                                 key.rsplit('/').next().unwrap_or(&key).chars().take(16).collect::<String>(),
                             );
-                            self.mark_mailbox_seen(key);
+                            pending_marks.push(key);
                         }
                     }
                 }
@@ -7283,7 +7305,6 @@ impl Engine {
         for cid in changed_circles {
             self.notify_circle(&cid);
         }
-        self.flush_seen_mailbox();
         if routed_control && !changed {
             // A hello/announce changed engine/prefs state without any circle event ingesting.
             self.persist();
@@ -7313,6 +7334,15 @@ impl Engine {
             self.emit_changed();
             self.request_missing_media();
         }
+        // Seen-marks STRICTLY AFTER the persist() calls above land the engine state (iOS parity):
+        // marking (and flushing the seen file) ahead of the engine save let a kill burn keys whose
+        // events — including friends' KEY COMMITS — never landed; all content beneath the push
+        // layer went dark fleet-wide. Control-plane marks above are idempotent routes, and their
+        // file flush also happens here, after the saves.
+        for k in pending_marks {
+            self.mark_mailbox_seen(k);
+        }
+        self.flush_seen_mailbox();
     }
 
     /// Notify about a circle whose state just changed — but only when its newest INBOUND item

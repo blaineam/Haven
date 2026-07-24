@@ -1908,21 +1908,29 @@ enum SharedStore {
     @discardableResult
     static func uploadEvent(circleId: String, env: Data) async -> Bool {
         let key = mailboxKey(circleId, env)
-        if seenContains(key) { return true }
         // Relay (common path) → owner's own bucket → member's pre-signed pool → legacy creds.
         let nodes = relayNodes(circleId)
         if nodes.isEmpty {
+            if seenContains(key) { return true }
             HavenLog.net("uploadEvent: no relays for circle=\(circleId.prefix(20)) — mailbox skip")
         }
         if !nodes.isEmpty {
-            // Mirror to EVERY configured relay (redundancy). Content-addressed key → idempotent;
-            // a relay in backoff is skipped. Success on ANY relay means it's safely in a mailbox.
+            // Mirror to EVERY configured relay. The skip is PER (relay, key) — the old global
+            // "seen once anywhere → skip forever" starved every relay adopted, recovered, or
+            // GC-swept AFTER a key first landed. The epoch-head KEY COMMIT has a stable
+            // content-addressed key, so it landed once years of epochs ago and was never PUT to
+            // the relay a peer actually polls: their copy of every event sealed under that epoch
+            // sat in pending_epoch forever (512 buffered vs 177 applied on a live store — the
+            // "pushes arrive, nothing opens" blackout's sender half). Same fix the hello lane
+            // needed. Heads ride every post, so a missed relay converges on the next one.
+            let unlanded = nodes.filter { !seenContains("put:\($0)|\(key)") }
+            if unlanded.isEmpty { return true }
             var landed = false
-            for node in nodes {
+            for node in unlanded {
                 // Our OWN hosted relay: store directly into the local mailbox (no iroh self-connection,
                 // which blows up iroh's path machinery) so offline members can still pull our posts.
                 if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
-                    _ = RelayHost.shared.localPut(key, env)
+                    if RelayHost.shared.localPut(key, env) { markSeen("put:\(node)|\(key)") }
                     landed = true; continue
                 }
                 // Plain-HTTP first (same cross-NAT path as media/devroster). Event envelopes used to
@@ -1936,6 +1944,7 @@ enum SharedStore {
                             RelayHealth.shared.recordSuccess(node)
                             RelayMailboxStore.shared.markSeen(node)
                             HavenLog.relay("mailbox http-put OK relay=\(node.prefix(8))")
+                            markSeen("put:\(node)|\(key)")
                             landed = true; done = true
                         case .failure(is RelayForbidden):
                             noteRefused(node, "mailbox put")
@@ -1948,8 +1957,12 @@ enum SharedStore {
                     if done { continue }
                 }
                 guard let c = await RelayClients.client(node) else { continue }
-                if await c.has(key: key) { RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node); landed = true; continue }
-                do { try await c.put(key: key, data: env); RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node); landed = true }
+                if await c.has(key: key) { RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node); markSeen("put:\(node)|\(key)"); landed = true; continue }
+                do {
+                    try await c.put(key: key, data: env)
+                    RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
+                    markSeen("put:\(node)|\(key)"); landed = true
+                }
                 catch { RelayHealth.shared.recordFailure(node) }   // backoff applies; the CLIENT is kept (RelayClients.forget)
             }
             if landed { markSeen(key); FeedStore.shared.markRelay(true); return true }

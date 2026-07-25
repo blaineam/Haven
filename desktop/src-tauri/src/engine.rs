@@ -7362,6 +7362,22 @@ impl Engine {
         // events — including friends' KEY COMMITS — never landed; all content beneath the push
         // layer went dark fleet-wide. Control-plane marks above are idempotent routes, and their
         // file flush also happens here, after the saves.
+        //
+        // ...but "after persist()" only holds when a persist actually RAN. Both branches above are
+        // conditional: a pass whose envelopes merely BUFFERED (receive() -> Ok(false), waiting on
+        // the author's key commit) leaves changed == false and routed_control == false, so nothing
+        // was saved — while the buffered keys below are still written to the seen file. The engine
+        // state holding pending_epoch dies with the process and those keys are never re-fetched.
+        // It is self-reinforcing: the KEY COMMIT itself buffers, gets marked seen, is never fetched
+        // again, and from then on nothing that peer authors can ever be opened. Own-account content
+        // hides the damage because it also rides self-sync, which persists separately — which is
+        // precisely the asymmetry the E2E fleet showed (peer posts/DMs/reactions/comments "never"
+        // on desktop, everything from our own devices fine).
+        //
+        // So: if anything is about to be marked seen and no persist ran, save FIRST.
+        if !pending_marks.is_empty() && !changed && !routed_control {
+            self.persist();
+        }
         for k in pending_marks {
             self.mark_mailbox_seen(k);
         }

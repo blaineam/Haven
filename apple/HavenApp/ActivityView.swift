@@ -9,9 +9,24 @@ struct ActivityView: View {
     @ObservedObject private var feed = FeedStore.shared
     @Environment(\.dismiss) private var dismiss
 
+    /// How many entries are currently materialised. `LazyVStack` already defers ROW rendering, but
+    /// `grouped` ran over the WHOLE store on every body evaluation — dictionary-grouping and sorting
+    /// thousands of entries just to draw the dozen on screen. That work is what made opening the
+    /// bell feel heavy. We now group only the window and grow it as the user reaches the bottom.
+    @State private var visibleCount = Self.pageSize
+    private static let pageSize = 40
+
+    /// Newest-first slice we actually render. `store.entries` is already kept sorted descending
+    /// (ActivityStore sorts on every insert), so this is a cheap prefix — no re-sort per render.
+    private var windowed: ArraySlice<ActivityStore.Entry> {
+        store.entries.prefix(visibleCount)
+    }
+
+    private var hasMore: Bool { store.entries.count > visibleCount }
+
     private var grouped: [(day: Date, rows: [ActivityStore.Entry])] {
         let cal = Calendar.current
-        let groups = Dictionary(grouping: store.entries) {
+        let groups = Dictionary(grouping: windowed) {
             cal.startOfDay(for: Date(timeIntervalSince1970: Double($0.at) / 1000))
         }
         return groups.map { (day: $0.key, rows: $0.value.sorted { $0.at > $1.at }) }
@@ -34,6 +49,15 @@ struct ActivityView: View {
                                     .foregroundStyle(.secondary)
                                     .padding(.top, 6)
                                 ForEach(group.rows) { row($0) }
+                            }
+                            // Reaching this marker means the user actually scrolled to the end of
+                            // what's materialised — only then do we pay for the next page. It sits
+                            // inside the LazyVStack so it is not created until it comes into view.
+                            if hasMore {
+                                ProgressView()
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 12)
+                                    .onAppear { visibleCount += Self.pageSize }
                             }
                         }
                         .padding(16)

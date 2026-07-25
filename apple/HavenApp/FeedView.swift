@@ -6757,11 +6757,15 @@ struct FeedView: View {
                 // badge cleared fleet-wide on open (seenAt syncs via SelfSync). Both platforms.
                 ToolbarItem(placement: .havenTrailing) {
                     Button { showActivity = true } label: {
-                        // The glyph stays UNPADDED (asymmetric padding shoved it off-center in its
-                        // glass circle). The badge rides the glyph's top-right with a nudge small
-                        // enough to stay inside the glass shape's own inner padding — the original
-                        // offset(9,-7) overshot that and the toolbar capsule clipped the count.
+                        // The toolbar's glass capsule CLIPS whatever overflows the label's bounds,
+                        // so a badge nudged outward with .offset always loses its top-right corner
+                        // — every previous attempt here was just tuning how much got cut. Instead
+                        // give the label uniform padding: the capsule grows to include it, the
+                        // glyph stays centred (asymmetric padding is what shoved it off-centre
+                        // before), and the badge lives INSIDE that padded corner where nothing
+                        // clips it. No offset at all.
                         Image(systemName: "bell.fill")
+                            .padding(5)
                             .overlay(alignment: .topTrailing) {
                                 if activity.unread > 0 {
                                     Text(activity.unread > 99 ? "99+" : "\(activity.unread)")
@@ -6769,7 +6773,7 @@ struct FeedView: View {
                                         .foregroundStyle(.white)
                                         .padding(.horizontal, 3).padding(.vertical, 1)
                                         .background(Capsule().fill(Color.red))
-                                        .offset(x: 5, y: -5)
+                                        .fixedSize()
                                 }
                             }
                     }

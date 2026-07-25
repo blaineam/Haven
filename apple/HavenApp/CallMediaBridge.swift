@@ -205,11 +205,24 @@ final class CallMediaBridge {
             outputCallback: nil, refcon: nil, compressionSessionOut: &session)
         guard status == noErr, let s = session else { return nil }
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        // High profile, not Baseline. Baseline has no CABAC and no 8x8 transform, so at the same
+        // bitrate it looks visibly softer/blockier — which is exactly how the relayed leg came
+        // across on the far end while the direct leg looked sharp. Every device that can run this
+        // app decodes High in hardware.
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ProfileLevel,
-                             value: kVTProfileLevel_H264_Baseline_AutoLevel)
+                             value: kVTProfileLevel_H264_High_AutoLevel)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 60 as CFNumber)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: 800_000 as CFNumber)
+        // Bitrate scaled to the frame size instead of a flat 800 kbps. 800k is fine for 480p and
+        // starves 720p+, and the capture here is whatever the camera track hands us — so a big
+        // frame got the same tiny budget and turned to mush. ~0.11 bits/pixel/frame at 30fps,
+        // clamped so we never flood a WebSocket that is riding a tunnel.
+        let pixels = Double(width) * Double(height)
+        let target = min(max(pixels * 30.0 * 0.11, 600_000), 2_500_000)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: Int(target) as CFNumber)
+        // Tell rate control the real frame rate, otherwise it budgets for a default that doesn't
+        // match and over-compresses the frames it does get.
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 30 as CFNumber)
         VTCompressionSessionPrepareToEncodeFrames(s)
         encoder = s
         return s

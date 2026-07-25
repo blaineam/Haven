@@ -908,24 +908,12 @@ final class CallManager: NSObject, ObservableObject {
                     // public HTTPS origin (the cloudflared tunnel fronts WSS fine — only UDP TURN
                     // can't ride it). Audio + video hop onto the relay; the call survives with zero
                     // router config. An explicit hangup frame (12) still ends it.
-                    CallMediaBridge.shared.activate(remote: peer, sessionId: self.sessionId,
-                                                    me: self.myHex, localVideoTrack: self.localVideoTrack)
-                    self.hairpinPeers.insert(peer)
-                    // The relay IS the media path now, so the call is CONNECTED — say so. Without
-                    // this the UI sat on "connecting media" while audio was already flowing over
-                    // the hairpin, the dialing tone kept looping, the audio session was never forced
-                    // live, and CallKit never got its connected report. Same treatment the ICE path
-                    // gets above; the only difference is which pipe carries the frames.
-                    self.connecting = false; self.inCall = true
-                    CallTones.shared.stop()
-                    #if os(iOS)
-                    self.ensureWebRTCAudioLive(reason: "hairpin-connected", forceEnable: true)
-                    #endif
-                    #if !os(macOS)
-                    if self.isCaller, let provider = self.provider, let uuid = self.callUUID {
-                        provider.reportOutgoingCall(with: uuid, connectedAt: nil)
-                    }
-                    #endif
+                    // The relay IS the media path now, so the call is CONNECTED — startHairpin says
+                    // so. Without that the UI sat on "connecting media" while audio was already
+                    // flowing over the hairpin, the dialing tone kept looping, the audio session was
+                    // never forced live, and CallKit never got its connected report. Usually the
+                    // grace timer in createPeer has already raced us here.
+                    self.startHairpin(for: peer)
                 } else if state == .closed {
                     self.dropPeer(peer)
                     if self.roster.subtracting([self.myHex]).isEmpty { self.endCall() }
@@ -956,7 +944,51 @@ final class CallManager: NSObject, ObservableObject {
         // If we're already sharing our screen, add the screen track to this new peer as well.
         if screenShareOn { c.startScreenShare() }
         peers[peer] = conn
+        // RACE THE RELAY. We used to wait for ICE to declare `.failed` before relaying — and that
+        // verdict takes WebRTC's full ~30s failure timer. The result was 30 seconds of "connecting
+        // media" after both sides had already accepted, then media finally appearing. Nobody waits
+        // 30s for a phone call.
+        //
+        // Instead: give the direct path a short head start, and if it hasn't paired by then, bring
+        // the hairpin up ALONGSIDE it. Whichever wins, wins. The moment ICE connects, the
+        // `.connected` arm tears the relay down and we are back on WebRTC's own adaptive encoder —
+        // which is also why the relayed leg looked soft: its encoder is a fixed-bitrate fallback,
+        // not the negotiated one. Racing means we only ever look soft for those first seconds
+        // instead of the whole call.
+        let deadlinePeer = peer
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.directMediaGraceSecs) { [weak self] in
+            guard let self, self.peers[deadlinePeer] != nil else { return }
+            let st = self.lastPeerState[deadlinePeer]
+            guard st != .connected, st != .completed else { return }          // direct path won
+            guard !self.hairpinPeers.contains(deadlinePeer) else { return }    // already relaying
+            HavenLog.relay("direct media not up in \(Int(Self.directMediaGraceSecs))s — racing hairpin for \(deadlinePeer.prefix(8))")
+            self.startHairpin(for: deadlinePeer)
+        }
         return conn
+    }
+
+    /// How long the DIRECT path gets before we bring the relay up next to it. Short enough that a
+    /// caller never sits on a silent screen, long enough that a normal same-network pairing (sub-second
+    /// once candidates arrive) is never relayed at all.
+    private static let directMediaGraceSecs: TimeInterval = 4
+
+    /// Bring the hairpin relay up for `peer` and reflect it in the UI/CallKit. Shared by the grace
+    /// timer above and the ICE `.failed` arm, so both paths report CONNECTED the same way.
+    private func startHairpin(for peer: String) {
+        guard !hairpinPeers.contains(peer) else { return }
+        CallMediaBridge.shared.activate(remote: peer, sessionId: sessionId,
+                                        me: myHex, localVideoTrack: localVideoTrack)
+        hairpinPeers.insert(peer)
+        connecting = false; inCall = true
+        CallTones.shared.stop()
+        #if os(iOS)
+        ensureWebRTCAudioLive(reason: "hairpin-connected", forceEnable: true)
+        #endif
+        #if !os(macOS)
+        if isCaller, let provider = provider, let uuid = callUUID {
+            provider.reportOutgoingCall(with: uuid, connectedAt: nil)
+        }
+        #endif
     }
 
     /// Remove a peer from the roster + tear down its connection + its remote tile.

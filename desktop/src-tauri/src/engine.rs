@@ -7464,10 +7464,16 @@ impl Engine {
         // precisely the asymmetry the E2E fleet showed (peer posts/DMs/reactions/comments "never"
         // on desktop, everything from our own devices fine).
         //
-        // So: if anything is about to be marked seen and no persist ran, save FIRST.
-        if !pending_marks.is_empty() && !changed && !routed_control {
-            self.persist();
-        }
+        // REVERTED (measured): saving on every buffered-only pass costs more than it buys here.
+        // Desktop's persist() writes the whole engine state, and doing it per poll pass took this
+        // leg from 2.5s convergence to 57-68s and pushed own-account gates (story, music) past
+        // their budgets — while NOT fixing the peer-content loss it was aimed at. The durability
+        // hole it targeted is real but narrow (a kill in the window between buffering and the next
+        // state-changing pass); the fix for it has to be a cheap targeted save of pending_epoch,
+        // not a full-state write per poll. Tracked rather than papered over.
+        //
+        // What actually protects the content is NOT burning the key commit — see the Ok(false)
+        // control-blob arm above, which leaves it unseen so a later pass can apply it.
         for k in pending_marks {
             self.mark_mailbox_seen(k);
         }

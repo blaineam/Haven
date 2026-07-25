@@ -882,6 +882,17 @@ final class CallManager: NSObject, ObservableObject {
                 if state == .connected || state == .completed {
                     self.connecting = false; self.inCall = true
                     CallTones.shared.stop()   // first peer connected → stop the dialing loop
+                    // ICE RECOVERED while we were relaying — drop back to WebRTC's own (better)
+                    // path. This used to live in a fourth `else if state == .connected ...` arm,
+                    // which this very branch already swallows, so it was unreachable: once the
+                    // hairpin engaged it relayed FOREVER, encoding + decoding + pushing WebSocket
+                    // frames alongside the WebRTC media that had come back. That is two full media
+                    // pipelines for one call — the "iPhone got noticeably hot after a few minutes".
+                    if self.hairpinPeers.contains(peer) {
+                        CallMediaBridge.shared.deactivate(remote: peer)
+                        self.hairpinPeers.remove(peer)
+                        HavenLog.relay("ice recovered \(peer.prefix(8)) — hairpin relay stopped")
+                    }
                     // ICE/media path is up — audio session must be live or UI says Connected with silence.
                     #if os(iOS)
                     self.ensureWebRTCAudioLive(reason: "ice-connected", forceEnable: true)
@@ -900,13 +911,24 @@ final class CallManager: NSObject, ObservableObject {
                     CallMediaBridge.shared.activate(remote: peer, sessionId: self.sessionId,
                                                     me: self.myHex, localVideoTrack: self.localVideoTrack)
                     self.hairpinPeers.insert(peer)
+                    // The relay IS the media path now, so the call is CONNECTED — say so. Without
+                    // this the UI sat on "connecting media" while audio was already flowing over
+                    // the hairpin, the dialing tone kept looping, the audio session was never forced
+                    // live, and CallKit never got its connected report. Same treatment the ICE path
+                    // gets above; the only difference is which pipe carries the frames.
+                    self.connecting = false; self.inCall = true
+                    CallTones.shared.stop()
+                    #if os(iOS)
+                    self.ensureWebRTCAudioLive(reason: "hairpin-connected", forceEnable: true)
+                    #endif
+                    #if !os(macOS)
+                    if self.isCaller, let provider = self.provider, let uuid = self.callUUID {
+                        provider.reportOutgoingCall(with: uuid, connectedAt: nil)
+                    }
+                    #endif
                 } else if state == .closed {
                     self.dropPeer(peer)
                     if self.roster.subtracting([self.myHex]).isEmpty { self.endCall() }
-                } else if state == .connected || state == .completed, self.hairpinPeers.contains(peer) {
-                    // ICE recovered — drop back to WebRTC's own (better) media path.
-                    CallMediaBridge.shared.deactivate(remote: peer)
-                    self.hairpinPeers.remove(peer)
                 } else if state == .disconnected {
                     // The link went quiet — a transient blip, OR the peer left and their fire-and-forget
                     // hangup frame never reached us (the "hanging up on Android didn't end the call on iOS"
@@ -915,6 +937,13 @@ final class CallManager: NSObject, ObservableObject {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
                         guard let self, self.peers[peer] != nil,
                               self.lastPeerState[peer] == .disconnected else { return }
+                        // NEVER drop a peer whose media is riding the hairpin. When the relay is
+                        // carrying the call, ICE legitimately sits in disconnected/failed — that is
+                        // the whole reason we relayed. Dropping on it hung up a call whose audio was
+                        // flowing perfectly ("stuck on connecting media, then connected, then it
+                        // hung itself up"). The relay has its own liveness; an explicit hangup
+                        // frame (12) still ends the call, as does the peer actually leaving.
+                        if self.hairpinPeers.contains(peer) { return }
                         self.dropPeer(peer)
                         if self.roster.subtracting([self.myHex]).isEmpty { self.endCall() }
                     }

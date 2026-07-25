@@ -99,8 +99,17 @@ pub struct Profile {
 /// A known contact (their verified identity + display name).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Contact {
+    /// `alias` accepts Apple's camelCase `idHex`. The self-sync `contact:` value was documented as
+    /// "each platform's own struct, stable per-platform" — but the practical effect was that a
+    /// linked desktop could never learn ANY contact its iPhone created: every iOS-authored record
+    /// (`{"name":…,"idHex":…,"avatarB64":…}`) failed `from_slice::<Contact>` silently, so
+    /// prefs.contacts stayed empty forever on a seed-adopted device. Aliases make the decode
+    /// tolerant without changing what we EMIT, so no other platform has to move.
+    #[serde(alias = "idHex")]
     pub id_hex: String,
     pub name: String,
+    /// Absent in Apple's record — default rather than reject the whole contact over it.
+    #[serde(alias = "verifyHex", default)]
     pub verify_hex: String,
 }
 

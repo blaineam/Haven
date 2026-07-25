@@ -126,6 +126,11 @@ struct DynState {
     /// listing's GET batch finished WITHOUT deferrals, or a 204 on the next poll would skip keys
     /// we listed but never fetched (iOS `mailboxListDigests` parity).
     mailbox_list_digests: HashMap<String, String>,
+    /// mailbox key -> last time a control blob (0x03/0x04) there was fetched and found NOT yet
+    /// applicable (ms). It stays UNSEEN so it can still apply later, but the loop head skips the
+    /// GET until this ages out: a commit can be unauthorizable for a long time (126 attempts in
+    /// one observed run) and re-fetching + re-verifying it every poll is pure tax.
+    control_retry_at: HashMap<String, u64>,
     /// circle id -> last time we re-queued its mailbox after a key commit unlocked it (ms).
     /// DAMPER for the repair below: competing (account, epoch) commits are NORMAL, so an
     /// undamped re-queue would re-fetch and re-decrypt a circle's whole mailbox on every poll
@@ -7155,6 +7160,20 @@ impl Engine {
                 if self.dyn_state.lock().unwrap().seen_mailbox.contains(&key) {
                     continue;
                 }
+                // A control blob we already fetched and could not apply yet: skip the GET until its
+                // backoff ages out. It deliberately stays UNSEEN (so it can still apply later), and
+                // `deferred` keeps the LIST digest uncommitted so we keep seeing the key.
+                {
+                    const CONTROL_RETRY_MS: u64 = 120_000;
+                    let st = self.dyn_state.lock().unwrap();
+                    if let Some(t) = st.control_retry_at.get(&key) {
+                        if now_ms().saturating_sub(*t) < CONTROL_RETRY_MS {
+                            drop(st);
+                            deferred = true;
+                            continue;
+                        }
+                    }
+                }
                 // Live-call frames are claimed by the in-call poll — never content; mark & skip.
                 if key.contains("/__live__/") {
                     self.mark_mailbox_seen(key);
@@ -7282,8 +7301,14 @@ impl Engine {
                     Ok(false)
                         if matches!(env.first(), Some(0x03) | Some(0x04)) =>
                     {
+                        // Leave it UNSEEN so a later pass can apply it — but BACK OFF. A commit can
+                        // be unauthorizable for a long time (126 attempts in one observed run), and
+                        // re-GETting + re-verifying it every poll is a measurable tax on a leg that
+                        // is already the slowest in the fleet. Retry roughly every 2 minutes.
+                        // Stamp it; the loop head skips the GET entirely until the stamp ages out.
+                        self.dyn_state.lock().unwrap().control_retry_at.insert(key.clone(), now_ms());
                         log::debug!(
-                            "mailbox control blob not yet applicable circle={} key={} — leaving UNSEEN for retry",
+                            "mailbox control blob not yet applicable circle={} key={} — UNSEEN, retry later",
                             &circle_id.chars().take(12).collect::<String>(),
                             key.rsplit('/').next().unwrap_or(&key).chars().take(16).collect::<String>(),
                         );
@@ -7366,7 +7391,14 @@ impl Engine {
         // the repair for installs already in that state; the two fixes above only stop NEW damage.
         // iOS FeedView parity, damper included: competing (account, epoch) commits are normal, so
         // an undamped re-queue would re-fetch and re-decrypt the whole mailbox every poll.
-        if !unlocked_circles.is_empty() {
+        // DISABLED (measured): re-queuing did NOT recover the content, because the key commit that
+        // would open it is not merely missing — it is UNAUTHORIZABLE on this device (126 "control
+        // blob not yet applicable" vs 2 unlocks in one run). So every re-queue re-fetched and
+        // re-decrypted the circle's whole mailbox, everything re-buffered, all of it was marked
+        // seen again, and the next unlock repeated it. That storm pushed own-account gates
+        // (profile, story, music) past their budgets. Re-enable only once a peer's key commit can
+        // actually apply — see the devroster note in the task; until then this is pure cost.
+        if false && !unlocked_circles.is_empty() {
             const REQUEUE_DAMPER_MS: u64 = 10 * 60 * 1000;
             let now = now_ms();
             let mut requeued_any = false;

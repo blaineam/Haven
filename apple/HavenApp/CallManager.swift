@@ -1286,6 +1286,45 @@ final class CallManager: NSObject, ObservableObject {
         #endif
     }
 
+    #if DEBUG
+    // MARK: - QA introspection
+
+    /// Latest inbound RTP counters per peer, refreshed by [qaSnapshot]. Stats arrive on WebRTC's own
+    /// queue, so the snapshot reports the previous sample and kicks a refresh for the next one —
+    /// the E2E suite polls to convergence anyway.
+    private var qaInbound: [String: (audio: Int, video: Int, frames: Int)] = [:]
+
+    /// Call state for the QA dump. Reports BYTES RECEIVED, not just connection state: a call that
+    /// shows "connected" on both sides while carrying no audio is exactly the failure this has to
+    /// catch, and only the RTP counters distinguish the two.
+    func qaSnapshot() -> [String: Any] {
+        for (hex, conn) in peers {
+            conn.call.inboundMedia { [weak self] audio, video, frames in
+                Task { @MainActor in self?.qaInbound[hex] = (audio, video, frames) }
+            }
+        }
+        var audioTotal = 0, videoTotal = 0, framesTotal = 0
+        var perPeer: [String: [String: Int]] = [:]
+        for (hex, m) in qaInbound {
+            audioTotal += m.audio; videoTotal += m.video; framesTotal += m.frames
+            perPeer[hex] = ["audio_bytes": m.audio, "video_bytes": m.video, "video_frames": m.frames]
+        }
+        return [
+            "in_call": inCall,
+            "connecting": connecting,
+            "ringing": ringing,
+            "video_on": videoOn,
+            "participants": participants,
+            "hairpin_peers": Array(hairpinPeers),
+            "remote_video_tracks": Array(remoteVideoTracks.keys),
+            "inbound_audio_bytes": audioTotal,
+            "inbound_video_bytes": videoTotal,
+            "inbound_video_frames": framesTotal,
+            "peers": perPeer,
+        ]
+    }
+    #endif
+
     // MARK: - End
 
     func endCall() {

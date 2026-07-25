@@ -2260,6 +2260,28 @@ final class FeedStore: ObservableObject {
                 for c in social.circles() where c.id.hasPrefix("dm:") { DMReadStore.shared.markRead(c.id) }
             }
 
+        // Call ops. Calls were the one field failure the suite could not reproduce, because it had
+        // no way to place or answer one — so "connects but carries no media" shipped twice.
+        case "call":
+            let peer = str("dm_to").lowercased()
+            if peer.count == 64 {
+                let name = ContactsStore.shared.name(forNodePrefix: peer) ?? "Friend"
+                CallManager.shared.startCall(peerHex: peer, name: name)
+            } else {
+                HavenLog.net("matrix-qa call: bad dm_to")
+            }
+
+        case "call_accept":
+            CallManager.shared.accept()
+
+        case "call_end":
+            CallManager.shared.endCall()
+
+        case "call_video":
+            // Idempotent for QA: only toggle when the current state differs from what was asked.
+            let want = str("on") != "false"
+            if CallManager.shared.videoOn != want { CallManager.shared.toggleVideo() }
+
         case "dump":
             break   // the shared dump write below is the whole op
 
@@ -2403,6 +2425,10 @@ final class FeedStore: ObservableObject {
             "dms": dms,
             "profile": ["name": ProfileStore.shared.displayName],
             "circles": circles,
+            // Call state, including inbound RTP byte counters. "connected" is NOT evidence a call
+            // works — the field failure was both sides connected with zero audio either way — so QA
+            // asserts on bytes actually received (CallManager.qaMediaSnapshot, refreshed per dump).
+            "call": CallManager.shared.qaSnapshot(),
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: dump, options: [.sortedKeys]) else {
             HavenLog.net("matrix-qa dump: JSON encode failed")

@@ -30,7 +30,7 @@ const MARKER = `E2E_${stamp().replace(/-/g, '').slice(-6)}`;
 const REPORT = [];
 const PERF = [];
 const HISTORY = join(ROOT, 'build', 'e2e-history.jsonl');
-const STEPS = (process.env.E2E_STEPS || 'profile,circle,post,story,file,music,dm,react,comment,media').split(',');
+const STEPS = (process.env.E2E_STEPS || 'profile,circle,post,story,file,music,dm,call,react,comment,media').split(',');
 
 // Convergence budgets (ms). Generous but bounded; tune via env.
 // One active-cadence mailbox poll is ~30-45s; a budget must cover a full poll plus
@@ -329,6 +329,31 @@ async function main() {
       for (const d of fleet)
         perfGate('dm B→A', d, await converge(devices[d],
           (j) => Object.values(j.dms || {}).flat().some((m) => m.body === `${MARKER}_DM_BA`), BUDGET.text * 2));
+    }
+  }
+
+  // 7b. Call media A↔B. Asserts BYTES RECEIVED, not "connected" — the field failure was a call
+  // both sides showed as connected and answered while neither could hear the other, so connection
+  // state proves nothing. Audio only by default: the iOS Simulator has no camera, so a video
+  // assertion would fail for reasons that have nothing to do with the transport (set
+  // E2E_CALL_VIDEO=1 on a camera-capable fleet to include it).
+  if (STEPS.includes('call') && B) {
+    await op(devices.ios, { op: 'call', dm_to: B });
+    const ringing = await converge(devices.stub, (j) => j.call?.ringing || j.call?.in_call, BUDGET.text);
+    perfGate('call rings B', 'stub', ringing);
+    if (ringing >= 0) {
+      await op(devices.stub, { op: 'call_accept' });
+      // Media must flow BOTH ways — a one-way call is the same bug wearing a different hat.
+      perfGate('call audio A→B (bytes received)', 'stub', await converge(devices.stub,
+        (j) => (j.call?.inbound_audio_bytes || 0) > 0, BUDGET.mediaEvent));
+      perfGate('call audio B→A (bytes received)', 'ios', await converge(devices.ios,
+        (j) => (j.call?.inbound_audio_bytes || 0) > 0, BUDGET.mediaEvent));
+      if (process.env.E2E_CALL_VIDEO === '1') {
+        await op(devices.ios, { op: 'call_video', on: 'true' });
+        perfGate('call video A→B (frames decoded)', 'stub', await converge(devices.stub,
+          (j) => (j.call?.inbound_video_frames || 0) > 0, BUDGET.mediaEvent));
+      }
+      await op(devices.ios, { op: 'call_end' });
     }
   }
 

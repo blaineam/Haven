@@ -190,8 +190,9 @@ final class RelayHost: ObservableObject {
                 self.publishOwnInterface(urls: urls, token: token)
                 // Keep DERP on the same public origin when path-proxy single-tunnel is live.
                 #if os(macOS)
-                if CloudflaredTunnel.shared.usesPathProxy, let first = urls.first {
-                    RelayMailboxStore.shared.setDerpUrl(self.nodeId, url: first)
+                if CloudflaredTunnel.shared.usesPathProxy,
+                   let pub = Self.publicDerpCandidate(urls) {
+                    RelayMailboxStore.shared.setDerpUrl(self.nodeId, url: pub)
                 }
                 #endif
             }
@@ -516,8 +517,30 @@ final class RelayHost: ObservableObject {
                 }
 
                 // Hard: 2 ticks. Soft public-only: 4 ticks. Never recover solely for DNS NXDOMAIN.
+                // A failed GET of our OWN public URL is NOT proof the tunnel is down. We probe it
+                // from inside the same network, where hairpin NAT and this network's documented
+                // trycloudflare DNS filtering both make it fail while outside peers are served
+                // perfectly well by the very same connector. Recovering on that signal restarts
+                // cloudflared, and a FREE quick tunnel comes back with a DIFFERENT hostname —
+                // stranding every peer that holds the old one, whereupon the new hostname fails
+                // the same self-probe and the whole thing repeats. That churn is what kept the
+                // relay's address moving out from under peers all day.
+                //
+                // So: recover only when the LOCAL door or the connector is actually dead (a real,
+                // actionable failure). A public-only failure restarts nothing when the hostname
+                // would rotate; for a NAMED tunnel the hostname is stable, so a restart is
+                // harmless there and still allowed.
+                let freeTunnel = await MainActor.run {
+                    CloudflaredTunnel.shared.publicURL?.contains("trycloudflare") == true
+                }
+                if !dnsBroken, consecutivePublicFails >= 4, freeTunnel {
+                    HavenLog.relay(
+                        "relay health: public probe failing but connector is UP — NOT restarting a free tunnel (its hostname would change and strand peers)"
+                    )
+                    consecutivePublicFails = 0
+                }
                 let shouldRecover = consecutiveHardFails >= 2
-                    || (!dnsBroken && consecutivePublicFails >= 4)
+                    || (!dnsBroken && !freeTunnel && consecutivePublicFails >= 4)
                 if shouldRecover {
                     consecutiveHardFails = 0
                     consecutivePublicFails = 0
@@ -645,10 +668,10 @@ final class RelayHost: ObservableObject {
                     }
                 }
             }
-        } else if let first = urls.first {
+        } else if let pub = Self.publicDerpCandidate(urls) {
             await MainActor.run {
                 if !self.nodeId.isEmpty {
-                    RelayMailboxStore.shared.setDerpUrl(self.nodeId, url: first)
+                    RelayMailboxStore.shared.setDerpUrl(self.nodeId, url: pub)
                 }
             }
         }
@@ -724,6 +747,31 @@ final class RelayHost: ObservableObject {
         announceHttpUrls(mediaPort: port)
     }
 
+
+    /// The first URL usable as an iroh DERP origin: a PUBLIC https:// host only.
+    ///
+    /// DERP is the fabric peers dial from anywhere, so a LAN address is never a valid answer —
+    /// off-network peers cannot reach 10.x/192.168.x, and publishing one there silently strands
+    /// the fabric. The media announce list deliberately carries LAN addresses (a peer on this
+    /// network should use them for blobs), so the two lists must not be conflated: take the
+    /// public entry for DERP, or none at all.
+    static func publicDerpCandidate(_ urls: [String]) -> String? {
+        urls.first { u in
+            guard u.hasPrefix("https://"), let h = URL(string: u)?.host else { return false }
+            if h.hasSuffix(".local") { return false }
+            // Dotted-quad private ranges (and loopback) are LAN, never a DERP origin.
+            let parts = h.split(separator: ".")
+            if parts.count == 4, parts.allSatisfy({ UInt8($0) != nil }) {
+                let o = parts.compactMap { UInt8($0) }
+                if o[0] == 10 || o[0] == 127 { return false }
+                if o[0] == 192 && o[1] == 168 { return false }
+                if o[0] == 172 && (16...31).contains(o[1]) { return false }
+                if o[0] == 169 && o[1] == 254 { return false }
+            }
+            return true
+        }
+    }
+
     /// Build the media announce list (shared by host start, reattach, health recover).
     ///
     /// Public URL FIRST (reaches anyone), then this host's LAN addresses — never one INSTEAD of
@@ -774,8 +822,8 @@ final class RelayHost: ObservableObject {
         let urls = [CloudflaredTunnel.normalizePublicURL(t) ?? t]
         RelayMailboxStore.shared.setHttpInterface(nodeId, urls: urls, token: token)
         publishOwnInterface(urls: urls, token: token)
-        if CloudflaredTunnel.shared.usesPathProxy {
-            RelayMailboxStore.shared.setDerpUrl(nodeId, url: urls[0])
+        if CloudflaredTunnel.shared.usesPathProxy, let pub = Self.publicDerpCandidate(urls) {
+            RelayMailboxStore.shared.setDerpUrl(nodeId, url: pub)
         }
         HavenLog.relay("media announce restored public URL \(urls[0]) (was LAN-only=\(current))")
         reannounceBurst()

@@ -198,7 +198,22 @@ pub fn apply_derp_urls(urls: Vec<String>) {
         p.prefer_custom_relays = false;
         p.custom_derp_urls.clear();
     } else {
-        p.use_n0_relays = false;
+        // UNION with n0, never REPLACE it.
+        //
+        // Dropping the n0 relays the moment a circle announced its own DERP made the circle's
+        // hostname a single point of failure for the entire transport — and with free tunnels that
+        // hostname changes on every relay restart. The instant it moved, iroh held a relay map of
+        // exactly one dead URL: no rendezvous, no hole-punching, no address discovery. Two devices
+        // on the SAME WI-FI then could not connect, because peers still have to exchange addresses
+        // before a direct path can form. Everything — posts, DMs, stories, call signaling — went
+        // dark together, which is exactly the shape of a transport with nowhere to meet.
+        //
+        // A circle relay is an ADDITION (lower latency, self-hosted, private), never a substitute
+        // for the free public fallback. Keeping n0 means the worst case for a dead circle DERP is
+        // "slower rendezvous", not "no communication at all". iroh prefers the lowest-RTT path
+        // anyway, so a healthy circle relay still wins on merit, and a same-LAN pair still ends up
+        // on a direct path with no relay in the data path at all.
+        p.use_n0_relays = true;
         p.prefer_custom_relays = true;
         p.custom_derp_urls = cleaned;
     }

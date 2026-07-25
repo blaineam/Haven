@@ -124,12 +124,19 @@ class HavenCore private constructor(
          */
         fun qaPreseed(context: Context, seedB64: String): Boolean {
             if (instance != null) return false
-            val p = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            // MUST go through [identityPrefs]. This used to open PREFS_NAME as a PLAIN
+            // SharedPreferences while every reader opens it as EncryptedSharedPreferences — and
+            // encrypted prefs encrypt the KEY NAMES too, so the plaintext "master_seed_b64" was
+            // invisible to loadOrCreate(). It minted a throwaway account, wrote that back encrypted,
+            // and logged "joining the fleet account" anyway. Every Android E2E leg therefore ran under
+            // a stray account that shared nothing with the fleet, so the whole Android column of the
+            // suite was scoring propagation failures that could never have succeeded. (It also wrote
+            // an account master seed to disk in cleartext.)
+            val p = runCatching { identityPrefs(context.applicationContext) }.getOrNull() ?: return false
             if (!p.getString(KEY_SEED, null).isNullOrEmpty()) return false
             val s = runCatching { Base64.decode(seedB64.trim(), Base64.NO_WRAP) }.getOrNull() ?: return false
             if (s.size != 32) return false
-            p.edit().putString(KEY_SEED, Base64.encodeToString(s, Base64.NO_WRAP)).apply()
-            return true
+            return p.edit().putString(KEY_SEED, Base64.encodeToString(s, Base64.NO_WRAP)).commit()
         }
 
         /**
@@ -157,19 +164,21 @@ class HavenCore private constructor(
             runCatching { SelfSyncCoordinator.beginSeedlessEnrollment() }
         }
 
-        private fun build(appContext: Context): HavenCore {
+        private fun build(appContext: Context): HavenCore = HavenCore(identityPrefs(appContext))
+
+        /** The identity store. EVERY reader and writer must go through this — see [qaPreseed]. */
+        private fun identityPrefs(appContext: Context): SharedPreferences {
             SeedlessStore.init(appContext)
             val masterKey = MasterKey.Builder(appContext)
                 .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
                 .build()
-            val prefs = EncryptedSharedPreferences.create(
+            return EncryptedSharedPreferences.create(
                 appContext,
                 PREFS_NAME,
                 masterKey,
                 EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
                 EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
             )
-            return HavenCore(prefs)
         }
     }
 }

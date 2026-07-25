@@ -204,6 +204,27 @@ final class WebRTCCall: NSObject {
         }
     }
 
+    /// How much media has actually ARRIVED on this connection — bytes and decoded frames, not
+    /// track presence. The field failure was a call both sides showed as "connected", with tracks
+    /// attached, that carried no audio in either direction and never showed the remote video. Only
+    /// inbound-rtp byte counters can tell those apart, so this is what QA asserts on.
+    func inboundMedia(_ completion: @escaping (_ audioBytes: Int, _ videoBytes: Int, _ videoFrames: Int) -> Void) {
+        pc.statistics { report in
+            var audio = 0, video = 0, frames = 0
+            for (_, stat) in report.statistics where stat.type == "inbound-rtp" {
+                let bytes = (stat.values["bytesReceived"] as? NSNumber)?.intValue ?? 0
+                switch stat.values["kind"] as? String {
+                case "audio": audio += bytes
+                case "video":
+                    video += bytes
+                    frames += (stat.values["framesDecoded"] as? NSNumber)?.intValue ?? 0
+                default: break
+                }
+            }
+            completion(audio, video, frames)
+        }
+    }
+
     // MARK: Video (toggled mid-call)
 
     func startVideo() {

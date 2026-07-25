@@ -46,6 +46,29 @@ fi
 # NB: must be a SIGNED sim build — unsigned has no data-protection keychain, the seed
 # never persists, and the QA dumps (which need storedSeed) never appear on a fresh container.
 IOS_APP="${HAVEN_IOS_APP:-/tmp/haven-signed-ios-dd/Build/Products/Debug-iphonesimulator/Haven.app}"
+# Build it if it's missing or STALE. This step used to install whatever happened to be sitting in
+# that DerivedData path — a run could (and did) score a whole suite green against an iOS binary
+# built a day before the fix under test, which is worse than not running at all. Same freshness
+# rule as the stub: any newer apple/HavenApp or core/ source forces a rebuild.
+IOS_BIN="$IOS_APP/Haven"
+NEEDS_IOS=0
+if [[ ! -x "$IOS_BIN" ]]; then
+  NEEDS_IOS=1
+else
+  while IFS= read -r newer; do [[ -n "$newer" ]] && { NEEDS_IOS=1; break; }; done < <(
+    find "$ROOT/apple/HavenApp" "$ROOT/core" -type f \
+      \( -name '*.swift' -o -name '*.rs' \) -newer "$IOS_BIN" -print -quit 2>/dev/null
+  )
+fi
+if [[ "$NEEDS_IOS" == 1 ]]; then
+  log "building iOS sim app (missing or stale)…"
+  IOS_DD="$(dirname "$(dirname "$(dirname "$IOS_APP")")")"
+  ( cd "$ROOT/apple" && xcodegen generate >/dev/null && xcodebuild \
+      -project Haven.xcodeproj -scheme Haven -configuration Debug \
+      -destination "platform=iOS Simulator,id=$SIM" -derivedDataPath "$IOS_DD" \
+      DEVELOPMENT_TEAM=8ZVSPZYSVF build ) >"$OUT/ios-build.log" 2>&1 \
+    || { echo "error: iOS sim build FAILED — tail of $OUT/ios-build.log:"; tail -25 "$OUT/ios-build.log"; exit 1; }
+fi
 if [[ -d "$IOS_APP" ]]; then xcrun simctl install "$SIM" "$IOS_APP" || true; fi
 SIMCTL_CHILD_HAVEN_SKIP_ONBOARDING=1 xcrun simctl launch "$SIM" "$IOS_BUNDLE" >/dev/null 2>&1 || true
 
@@ -128,7 +151,12 @@ hexline() { [[ -s "$1" ]] && printf '%s\n' "$(tr -d ' \r\n' <"$1")"; }
 
 # ── 5. Tauri as linked device of A ────────────────────────────────────────────
 pkill -f 'target/debug/haven-desktop' 2>/dev/null || true; sleep 1
-[[ -x "$DESK" ]] || (cd "$ROOT/desktop/src-tauri" && cargo build -q)
+# Rebuild when missing OR stale — `[[ -x ]] ||` alone silently reran yesterday's binary.
+# cargo is incremental, so this is a no-op when nothing changed.
+if [[ ! -x "$DESK" ]] || [[ -n "$(find "$ROOT/core" "$ROOT/desktop/src-tauri/src" -type f -name '*.rs' -newer "$DESK" -print -quit 2>/dev/null)" ]]; then
+  log "building haven-desktop (missing or stale)…"
+  (cd "$ROOT/desktop/src-tauri" && cargo build -q) || { echo "error: desktop build FAILED"; exit 1; }
+fi
 mkdir -p "$DATA_DIR"
 python3 - "$DATA_DIR" "$NODE" "$TOKEN" <<'PY'
 import json, sys, time
@@ -185,6 +213,15 @@ if command -v adb >/dev/null 2>&1; then
     # gradle splits per ABI — universal covers every emulator arch.
     APK="$ROOT/android/app/build/outputs/apk/debug/app-universal-debug.apk"
     [[ -f "$APK" ]] || APK="$ROOT/android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk"
+    # Rebuild when missing or stale (same rule as the iOS/stub/desktop legs) — otherwise the
+    # emulator silently validates an old APK. gradle is incremental, so this is cheap when clean.
+    if [[ ! -f "$APK" ]] || [[ -n "$(find "$ROOT/android/app/src" "$ROOT/core" -type f \( -name '*.kt' -o -name '*.rs' \) -newer "$APK" -print -quit 2>/dev/null)" ]]; then
+      log "building android debug apk (missing or stale)…"
+      (cd "$ROOT/android" && ./gradlew assembleDebug -q) >>"$OUT/android-build.log" 2>&1 \
+        || log "WARN: android build failed — see $OUT/android-build.log"
+      [[ -f "$ROOT/android/app/build/outputs/apk/debug/app-universal-debug.apk" ]] \
+        && APK="$ROOT/android/app/build/outputs/apk/debug/app-universal-debug.apk"
+    fi
     if [[ -f "$APK" ]]; then
       adb install -r "$APK" >/dev/null 2>&1 || log "WARN: apk install failed"
     else

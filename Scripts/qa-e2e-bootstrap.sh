@@ -178,7 +178,11 @@ prefs["relays"] = {"default": [node]}
 p.write_text(json.dumps(prefs, indent=2))
 PY
 rm -f "$DATA_DIR/haven_social_state.bin" "$DATA_DIR/mailbox-seen.txt" "$DATA_DIR/selfsync-state.bin" 2>/dev/null || true
-(cd "$ROOT/desktop/src-tauri" && HAVEN_QA_SEED_FILE="$SEED_FILE" RUST_LOG=info "$DESK" >"$OUT/tauri.log" 2>&1) &
+# RUST_LOG was pinned to info, which hides the one line that explains a mailbox loss: the
+# "receive no-op ... (buffered/dup) — marked seen" path logs at debug!, so an envelope that was
+# fetched and then parked was indistinguishable from one never fetched. Override with
+# HAVEN_DESKTOP_LOG=debug when chasing content that "never arrives".
+(cd "$ROOT/desktop/src-tauri" && HAVEN_QA_SEED_FILE="$SEED_FILE" RUST_LOG="${HAVEN_DESKTOP_LOG:-info}" "$DESK" >"$OUT/tauri.log" 2>&1) &
 echo $! >"$OUT/tauri.pid"
 sleep 10
 for i in $(seq 1 30); do [[ -s "$DATA_DIR/qa-device-hex.txt" ]] && break; sleep 1; done

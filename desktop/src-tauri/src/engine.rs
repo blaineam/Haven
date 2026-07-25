@@ -9939,6 +9939,15 @@ impl Engine {
             "selfsync converged: entries={} merged_change={changed} applied={applied}",
             entries.len()
         );
+        // Membership just arrived (or moved), so the set of peers we need device rosters for has
+        // changed. sync_with_contacts is otherwise only called ONCE, at startup — on a linked
+        // device that runs BEFORE self-sync delivers any circle, so it saw no members, pulled no
+        // rosters, and the peer's key commit stayed unauthorizable forever. It is cheap to repeat:
+        // single-flighted, capped at 3 contacts per pass, with a 10-minute per-contact backoff, and
+        // the roster ingest is a no-op once we hold it.
+        if applied {
+            self.sync_with_contacts();
+        }
         let _ = std::fs::write(self.paths.selfsync_state_file(), base.to_bytes());
 
         // 5. Re-publish our own slot (sealed) to every relay/bucket for redundancy. Seal under the

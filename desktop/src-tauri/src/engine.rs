@@ -126,6 +126,11 @@ struct DynState {
     /// listing's GET batch finished WITHOUT deferrals, or a 204 on the next poll would skip keys
     /// we listed but never fetched (iOS `mailboxListDigests` parity).
     mailbox_list_digests: HashMap<String, String>,
+    /// circle id -> last time we re-queued its mailbox after a key commit unlocked it (ms).
+    /// DAMPER for the repair below: competing (account, epoch) commits are NORMAL, so an
+    /// undamped re-queue would re-fetch and re-decrypt a circle's whole mailbox on every poll
+    /// forever — the shape that once ran a relay-hosting Mac to 16.8 GB (iOS parity).
+    seen_requeued_at: HashMap<String, u64>,
     /// FRESH-lane retry state for missing media of events < 5 min old: ref -> (round, next-due ms).
     /// 5s/10s/20s/45s/90s then parked — a just-posted photo must not wait out the 5-min direct
     /// throttle while its author is right there uploading it (iOS `fastReq` parity).
@@ -6964,6 +6969,12 @@ impl Engine {
         // Content-envelope seen-marks, applied only AFTER persist() lands the engine state
         // holding their events (see the tail of this function).
         let mut pending_marks: Vec<String> = Vec::new();
+        // Circles whose peer keys just became usable because a KEY COMMIT actually applied, plus
+        // the control keys that did it. Content sitting in this circle's mailbox may have been
+        // marked seen back when it could not be opened, so it has to be re-queued — see the
+        // repair after the poll loop.
+        let mut unlocked_circles: std::collections::HashSet<String> = Default::default();
+        let mut applied_control_keys: std::collections::HashSet<String> = Default::default();
         // ONE-SHOT storm-burn repair (iOS/Android parity): earlier builds marked keys seen before
         // the engine state persisted; a kill in the gap burned keys whose events — including
         // friends' KEY COMMITS — never landed. Clear the whole mailbox seen-set once (live-call
@@ -7243,6 +7254,13 @@ impl Engine {
                 }
                 match self.social.receive(circle_id.clone(), env.clone()) {
                     Ok(true) => {
+                        // A key commit that ACTUALLY applied unlocks this circle's peer keys —
+                        // events already marked seen while unopenable can now be read, so flag the
+                        // circle for the re-queue repair below.
+                        if matches!(env.first(), Some(0x03)) {
+                            unlocked_circles.insert(circle_id.clone());
+                            applied_control_keys.insert(key.clone());
+                        }
                         pending_marks.push(key);
                         changed = true;
                         changed_circles.insert(circle_id.clone());
@@ -7251,6 +7269,25 @@ impl Engine {
                             "mailbox ingest circle={} via_http={got_via_http} bytes={env_len}",
                             &circle_id.chars().take(12).collect::<String>(),
                         );
+                    }
+                    // A KEY COMMIT (0x03) or DEVICE ROSTER (0x04) that did NOT take effect must be
+                    // retried, never retired. `receive()` answers Ok(false) for a commit whose
+                    // committer this device cannot authorize YET — B's roster hasn't landed, or the
+                    // commit arrived before it. Marking that key seen burns the ONE blob that would
+                    // ever have opened B's content: it is content-addressed, so nothing re-publishes
+                    // it, and from then on every envelope B authors parks in pending_epoch forever.
+                    // That is the whole "desktop never receives peer-authored content" failure — and
+                    // it is silent, because our own account's posts keep arriving over self-sync.
+                    // Unfetched costs one LIST entry; burned costs the conversation.
+                    Ok(false)
+                        if matches!(env.first(), Some(0x03) | Some(0x04)) =>
+                    {
+                        log::debug!(
+                            "mailbox control blob not yet applicable circle={} key={} — leaving UNSEEN for retry",
+                            &circle_id.chars().take(12).collect::<String>(),
+                            key.rsplit('/').next().unwrap_or(&key).chars().take(16).collect::<String>(),
+                        );
+                        deferred = true; // don't commit the LIST digest: we must see this key again
                     }
                     Ok(false) => {
                         // Duplicate (nothing changed) or BUFFERED until its key/roster arrives —
@@ -7320,6 +7357,59 @@ impl Engine {
                         }
                     }
                 }
+            }
+        }
+        // A NEW key commit landed: re-queue that circle's mailbox content (minus the control keys
+        // we just applied). Without this, a device that once marked an event seen while it could
+        // not be opened never looks at it again — the key that would have opened it arrives later,
+        // and the content stays dark forever even though it is still sitting on the relay. This is
+        // the repair for installs already in that state; the two fixes above only stop NEW damage.
+        // iOS FeedView parity, damper included: competing (account, epoch) commits are normal, so
+        // an undamped re-queue would re-fetch and re-decrypt the whole mailbox every poll.
+        if !unlocked_circles.is_empty() {
+            const REQUEUE_DAMPER_MS: u64 = 10 * 60 * 1000;
+            let now = now_ms();
+            let mut requeued_any = false;
+            for cid in &unlocked_circles {
+                {
+                    let mut st = self.dyn_state.lock().unwrap();
+                    let due = st
+                        .seen_requeued_at
+                        .get(cid)
+                        .map(|t| now.saturating_sub(*t) >= REQUEUE_DAMPER_MS)
+                        .unwrap_or(true);
+                    if !due {
+                        continue;
+                    }
+                    st.seen_requeued_at.insert(cid.clone(), now);
+                    let needle = format!("haven/mailbox/{cid}/");
+                    let before = st.seen_mailbox.len();
+                    // Keep the control keys just applied (re-reading them is pure waste) and the
+                    // live-call lane (claimed by the in-call poll, never content).
+                    st.seen_mailbox.retain(|k| {
+                        !k.contains(&needle)
+                            || k.contains("/__live__/")
+                            || applied_control_keys.contains(k)
+                    });
+                    let dropped = before.saturating_sub(st.seen_mailbox.len());
+                    if dropped > 0 {
+                        requeued_any = true;
+                        log::info!(
+                            "key commit unlocked circle={} — re-queued {dropped} mailbox keys",
+                            &cid.chars().take(12).collect::<String>()
+                        );
+                    }
+                }
+                // Drop the LIST digests for this circle too, or the next poll answers 204
+                // ("unchanged") and we never re-list the keys we just un-marked.
+                self.dyn_state
+                    .lock()
+                    .unwrap()
+                    .mailbox_list_digests
+                    .retain(|k, _| !k.ends_with(&format!("|{cid}")));
+            }
+            if requeued_any {
+                self.flush_seen_mailbox();
             }
         }
         if relay_announced {

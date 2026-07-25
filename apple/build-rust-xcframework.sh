@@ -15,6 +15,18 @@ RUSTUP="${RUSTUP:-$HOME/.cargo/bin/rustup}"
 # std, so the cross-compile fails with "can't find crate for `core`". Exporting RUSTC pins it.
 export RUSTC="${RUSTC:-$HOME/.cargo/bin/rustc}"
 
+# This repo lives in iCloud Drive, which resolves sync conflicts by leaving "name 2.ext"
+# copies next to the original. Inside the xcframework and Generated/ those duplicates are
+# poison: xcodegen globs Generated/*.swift, so a stale "haven_ffi 2.swift" compiles
+# alongside the real one and every FFI type collides. Sweep before we build anything.
+DUPES=$(find "$HERE/.." \( -name '* [0-9]' -o -name '* [0-9].*' \) \
+  -not -path '*/.git/*' -not -path '*/node_modules/*' -not -path '*/target/*' 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$DUPES" != "0" ]]; then
+  echo "▸ Removing $DUPES iCloud conflict copies…"
+  find "$HERE/.." \( -name '* [0-9]' -o -name '* [0-9].*' \) \
+    -not -path '*/.git/*' -not -path '*/node_modules/*' -not -path '*/target/*' -print0 2>/dev/null | xargs -0 rm -rf
+fi
+
 echo "▸ Ensuring Apple targets (iOS device + sim + Mac Catalyst + native macOS)…"
 # aarch64-apple-darwin = native macOS (Apple Silicon). Used by the native-macOS port (see
 # docs/MACOS-NATIVE-PORT.md); harmless for the Catalyst build.

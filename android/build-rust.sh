@@ -19,6 +19,17 @@ RUSTUP="${RUSTUP:-$HOME/.cargo/bin/rustup}"
 # "error[E0463]: can't find crate for `std`" even though rustup's targets ARE installed.
 export RUSTC="${RUSTC:-$HOME/.cargo/bin/rustc}"
 
+# iCloud Drive resolves sync conflicts by dropping "name 2.ext" copies beside the original.
+# In jniLibs/ that means a stale "libiroh… 2.so" gets packaged into the APK next to the real
+# one — dex/packaging errors at best, a silently stale native lib at worst. Sweep first.
+DUPES=$(find "$HERE" \( -name '* [0-9]' -o -name '* [0-9].*' \) \
+  -not -path '*/.git/*' -not -path '*/build/*' 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$DUPES" != "0" ]]; then
+  echo "▸ Removing $DUPES iCloud conflict copies…"
+  find "$HERE" \( -name '* [0-9]' -o -name '* [0-9].*' \) \
+    -not -path '*/.git/*' -not -path '*/build/*' -print0 2>/dev/null | xargs -0 rm -rf
+fi
+
 # --- Locate the Android SDK + NDK -------------------------------------------------
 ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/opt/homebrew/share/android-commandlinetools}}"
 if [[ -z "${ANDROID_NDK_HOME:-}" ]]; then

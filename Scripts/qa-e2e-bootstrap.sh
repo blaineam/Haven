@@ -68,6 +68,26 @@ if [[ -n "$APP_DATA_PRE" ]]; then
 fi
 
 # ── 2. Stub relay host (matrix-script conventions; isolated HOME) ─────────────
+# Build it if it's missing. The suite used to hard-fail here with "build HavenStub
+# first", which meant a transport regression could sit unverified because the QA
+# fleet refused to boot. Always rebuild when core/ or the app sources are newer so
+# a run can never silently validate a stale binary.
+STUB_APP="${MATRIX_DD:-/tmp/matrix-haven-mac-stub}/Build/Products/Debug/HavenStub.app"
+STUB_BIN="$STUB_APP/Contents/MacOS/HavenStub"
+NEEDS_STUB=0
+if [[ ! -x "$STUB_BIN" ]]; then
+  NEEDS_STUB=1
+else
+  while IFS= read -r newer; do [[ -n "$newer" ]] && { NEEDS_STUB=1; break; }; done < <(
+    find "$ROOT/apple/HavenApp" "$ROOT/core" -type f \
+      \( -name '*.swift' -o -name '*.rs' \) -newer "$STUB_BIN" -print -quit 2>/dev/null
+  )
+fi
+if [[ "$NEEDS_STUB" == 1 ]]; then
+  log "building HavenStub (missing or stale)…"
+  "$ROOT/Scripts/qa-e2e-build-stub.sh"
+fi
+
 "$ROOT/Scripts/qa-e2e-stub.sh" "$OUT"
 
 # The stub's relay node id IS its account node hex (RelayHost shares the node) —

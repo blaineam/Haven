@@ -9945,9 +9945,12 @@ impl Engine {
         // rosters, and the peer's key commit stayed unauthorizable forever. It is cheap to repeat:
         // single-flighted, capped at 3 contacts per pass, with a 10-minute per-contact backoff, and
         // the roster ingest is a no-op once we hold it.
-        if applied {
-            self.sync_with_contacts();
-        }
+        // NOT gated on `applied`: that means "this pass merged NEW state", which is false on the
+        // steady-state passes (measured: 0 of 5 passes applied) — yet those are exactly the passes
+        // where we already hold the membership and still have never pulled the peer's roster.
+        // Unconditional is safe: sync_with_contacts single-flights, takes at most 3 contacts per
+        // pass, backs off 10 minutes per contact, and skips anyone already resolvable.
+        self.sync_with_contacts();
         let _ = std::fs::write(self.paths.selfsync_state_file(), base.to_bytes());
 
         // 5. Re-publish our own slot (sealed) to every relay/bucket for redundancy. Seal under the

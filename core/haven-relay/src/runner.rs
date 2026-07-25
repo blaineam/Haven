@@ -500,9 +500,40 @@ pub async fn run(cfg: Config) -> Result<()> {
 
                 // Write a paste-ready interface blob so the app learns media URL + DERP fabric +
                 // TURN in one adopt (then re-announces frame 19 to the circle). Also on disk.
+                // Advertised URLs: the public tunnel FIRST (works from anywhere), then any LAN
+                // address.
+                //
+                // A relay used to advertise ONLY its tunnel hostname, which made the most common
+                // real-world case the most broken one: two phones and the relay all sitting on the
+                // same Wi-Fi, the relay answering on :8674 the whole time, and neither phone able
+                // to use it because the only address they had was a free-tunnel hostname that
+                // rotates on every relay restart (and that a system resolver may refuse while a
+                // browser resolves it fine). Peers try each URL in turn, so publishing the LAN
+                // address costs nothing off-network and makes same-network delivery immediate —
+                // no tunnel, no public DNS, no rotation to chase.
+                //
+                // Inside a container `primary_lan_ip()` returns the bridge address (172.x), which
+                // is useless to anyone else, so a containerized deployment must state its host
+                // address explicitly via HAVEN_RELAY_LAN_URLS (comma-separated).
+                let mut urls: Vec<String> = public.as_ref().map(|u| vec![u.clone()]).unwrap_or_default();
+                for extra in std::env::var("HAVEN_RELAY_LAN_URLS").unwrap_or_default().split(',') {
+                    let e = extra.trim();
+                    if !e.is_empty() && !urls.iter().any(|u| u == e) {
+                        urls.push(e.to_string());
+                    }
+                }
+                if !in_container() {
+                    if let Some(ip) = primary_lan_ip() {
+                        let lan = format!("http://{ip}:{port}");
+                        if !urls.iter().any(|u| u == &lan) { urls.push(lan); }
+                    }
+                }
+                if urls.len() > 1 {
+                    println!("  also on LAN : {}", urls[1..].join(", "));
+                }
                 let mut interface = serde_json::json!({
                     "node": my_hex,
-                    "urls": public.as_ref().map(|u| vec![u.clone()]).unwrap_or_default(),
+                    "urls": urls,
                     "token": cfg.http_token,
                     "derp": derp_public.clone().unwrap_or_default(),
                 });

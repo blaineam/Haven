@@ -8117,12 +8117,27 @@ impl Engine {
             if let Some(client) = self.relay_client_for(&node_hex).await {
                 if force {
                     dial_uploads.push((node_hex.clone(), client));
-                } else if client.has(key.clone()).await {
-                    self.mark_relay_ok(&node_hex);
-                    self.mark_media_backed_up(&node_hex, reference);
-                    landed = true;
                 } else {
-                    dial_uploads.push((node_hex.clone(), client));
+                    // An Err here is a FAILED DIAL, not "the relay lacks the blob" — the two used to
+                    // be conflated by `unwrap_or(false)`, which queued an upload the put then bailed
+                    // on, burning a full re-seal (~2x file size) every pass. Unreachable ⇒ skip this
+                    // relay and retry next pass, after its backoff. (Parity with the Apple path.)
+                    match client.has(key.clone()).await {
+                        Ok(true) => {
+                            self.mark_relay_ok(&node_hex);
+                            self.mark_media_backed_up(&node_hex, reference);
+                            landed = true;
+                        }
+                        Ok(false) => {
+                            self.mark_relay_ok(&node_hex);   // it answered — it just lacks it
+                            dial_uploads.push((node_hex.clone(), client));
+                        }
+                        Err(e) => {
+                            log::debug!("backup probe SKIP ref={reference} relay={} — dial failed: {e}",
+                                        &node_hex[..8.min(node_hex.len())]);
+                            self.mark_relay_fail(&node_hex);
+                        }
+                    }
                 }
             }
         }
@@ -8254,7 +8269,10 @@ impl Engine {
                     let client_ref = &client;
                     let skip = self
                         .resume_skip(&node_hex, reference, &seal_fp, window_count, force, |i| async move {
-                            client_ref.has(Self::media_chunk_key(reference, i)).await
+                            // A failed probe means "unknown", and the safe reading of unknown here is
+                            // "not stored" — re-putting a window we already have is idempotent, while
+                            // skipping one we don't have leaves a hole that reassembles to garbage.
+                            client_ref.has(Self::media_chunk_key(reference, i)).await.unwrap_or(false)
                         })
                         .await;
                     for (i, slice) in blob.chunks(MEDIA_CHUNK_BYTES).enumerate() {

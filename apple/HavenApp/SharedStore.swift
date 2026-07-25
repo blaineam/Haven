@@ -569,7 +569,20 @@ enum SharedStore {
         typealias Endpoint = (node: String, base: String, token: String)
         var holders: [(endpoint: Endpoint, head: Data)] = []
         var missing: [Endpoint] = []
-        for node in dests {
+        // OUR OWN HOSTED RELAY is a destination too, and it has no HTTP interface to itself — it is
+        // the local store. Without this the Mac that HOSTS a relay was skipped entirely by the
+        // mirror, so anything living only on the NAS relay never reached it. `backupOnce` has the
+        // same own-relay branch for the upload path; the mirror needs it for the same reason.
+        var ownRelayNeeds = false
+        let ownNode = RelayHost.shared.serving ? RelayHost.shared.nodeId.lowercased() : ""
+        if !ownNode.isEmpty, dests.contains(where: { $0.lowercased() == ownNode }) {
+            if RelayHost.shared.localHas(key(ref)) {
+                MediaBackupLedger.mark(ownNode, ref)
+            } else {
+                ownRelayNeeds = true
+            }
+        }
+        for node in dests where node.lowercased() != ownNode {
             guard let http = RelayMailboxStore.shared.httpInterface(node),
                   let base = http.urls.first(where: { !httpUrlBad($0) }) else { continue }
             switch await httpGet(base, http.token, key(ref)) {
@@ -596,12 +609,31 @@ enum SharedStore {
             MediaBackupBackoff.recordStalled(ref)
             return false
         }
-        guard !missing.isEmpty else { return true }             // everyone reachable already holds it
+        guard !missing.isEmpty || ownRelayNeeds else { return true }   // everyone reachable holds it
         let src = first.endpoint
         let head = first.head
         let chunks = parseManifest(head)
 
         var mirrored = false
+        // Fill our OWN hosted relay from the holder, straight into the local store — no HTTP round
+        // trip to ourselves. Same window-at-a-time discipline so a big video never lands in RAM whole.
+        if ownRelayNeeds {
+            var ok = true
+            if let n = chunks {
+                for i in 0..<n {
+                    guard case .success(let maybeWindow) = await httpGet(src.base, src.token, chunkKey(ref, i)),
+                          let window = maybeWindow else { ok = false; break }
+                    if !RelayHost.shared.localPut(chunkKey(ref, i), window) { ok = false; break }
+                }
+            }
+            if ok, RelayHost.shared.localPut(key(ref), head) {   // manifest last, same as below
+                MediaBackupLedger.mark(ownNode, ref)
+                mirrored = true
+                HavenLog.sync("media mirror ref=\(ref) \(src.node.prefix(8))→OWN relay windows=\(chunks ?? 1)")
+            } else {
+                HavenLog.sync("media mirror INCOMPLETE ref=\(ref) → OWN relay — windows unavailable")
+            }
+        }
         for dst in missing {
             var ok = true
             if let n = chunks {

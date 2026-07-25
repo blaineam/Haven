@@ -5309,12 +5309,28 @@ final class FeedStore: ObservableObject {
         // frame silently — nothing is transmitted and nothing is recorded. For an ACCEPT (11) that is
         // indistinguishable from the network eating it: the callee has already flipped itself in-call,
         // so it looks connected while the caller waits out the full invite timer. Say so.
-        let sealedOpt = try? social?.sealCallFrame(recipientNodeHex: nodeHex, frameType: type, data: payload)
-        guard let sealed = sealedOpt, !sealed.isEmpty else {
-            let known = (social?.deviceNodeIdsFor(accountHex: nodeHex).count ?? 0)
-            HavenLog.call("call frame type=\(type) NOT SENT to \(nodeHex.prefix(8)) — seal failed (recipient unresolvable: \(known) known device id(s), \(sealedOpt == nil ? "threw" : "empty"))")
-            return
+        // SEALING RUNS OFF THE MAIN ACTOR. This is per-frame crypto, and ICE emits a candidate
+        // frame per candidate — dozens during setup, each one previously sealing on the main
+        // thread while the user was tapping mute/video/flip. Combined with the AVCaptureSession
+        // work (now also off-main, see WebRTCCall.captureQueue) that is what made in-call controls
+        // feel dead. The hop back for delivery keeps send ordering on one actor as before.
+        guard let social else { return }
+        Task.detached(priority: .userInitiated) {
+            let sealedOpt = await EngineGate.shared.run {
+                try? social.sealCallFrame(recipientNodeHex: nodeHex, frameType: type, data: payload)
+            }
+            guard let sealed = sealedOpt, !sealed.isEmpty else {
+                let known = await EngineGate.shared.run { social.deviceNodeIdsFor(accountHex: nodeHex).count }
+                HavenLog.call("call frame type=\(type) NOT SENT to \(nodeHex.prefix(8)) — seal failed (recipient unresolvable: \(known) known device id(s), \(sealedOpt == nil ? "threw" : "empty"))")
+                return
+            }
+            await MainActor.run { FeedStore.shared.deliverSealedCallFrame(type, sealed, to: nodeHex) }
         }
+    }
+
+    /// Fan a SEALED call frame out over every transport. Split from `sendCallFrame` so the crypto
+    /// can happen off the main actor while delivery stays serialized here.
+    fileprivate func deliverSealedCallFrame(_ type: UInt8, _ sealed: Data, to nodeHex: String) {
         let wire = frame(type, sealed)
         sendIroh(type, sealed, to: nodeHex)
         // Cross-NAT fallback: hop the same SEALED frame LIVE through the circle relays (frame 9 — the

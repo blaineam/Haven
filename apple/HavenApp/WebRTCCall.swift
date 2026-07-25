@@ -345,25 +345,39 @@ final class WebRTCCall: NSObject {
     /// (and the rear camera, always) should not.
     var usingFrontCamera: Bool { cameraPosition == .front }
 
+    /// Camera work happens HERE, never on the main thread. Enumerating devices, querying supported
+    /// formats and starting an AVCaptureSession are each synchronous and slow (hundreds of ms), and
+    /// every caller of startCapture/stopCapture used to be on the @MainActor CallManager — so
+    /// toggling video, flipping the camera, or hanging up froze the UI mid-tap. That is the
+    /// "buttons need several taps, camera switch is the worst" experience: the taps landed, the
+    /// main thread was just blocked inside AVFoundation. Serial so start/stop can't interleave.
+    private static let captureQueue = DispatchQueue(label: "haven.call.capture", qos: .userInitiated)
+
     private func startCapture() {
-        let devices = RTCCameraVideoCapturer.captureDevices()
-        let picked: AVCaptureDevice?
-        if let id = preferredCameraUniqueID {
-            picked = devices.first(where: { $0.uniqueID == id })
-        } else {
-            picked = devices.first(where: { $0.position == cameraPosition })
+        // Read the actor-ish state on the CALLING thread, then do the blocking work off it.
+        guard let cap = capturer else { return }
+        let wantID = preferredCameraUniqueID
+        let wantPosition = cameraPosition
+        Self.captureQueue.async {
+            let devices = RTCCameraVideoCapturer.captureDevices()
+            let picked: AVCaptureDevice?
+            if let id = wantID {
+                picked = devices.first(where: { $0.uniqueID == id })
+            } else {
+                picked = devices.first(where: { $0.position == wantPosition })
+            }
+            guard let device = picked ?? devices.first else { return }
+            let formats = RTCCameraVideoCapturer.supportedFormats(for: device)
+            // A modest 640-wide format keeps the bitrate friendly.
+            let format = formats.min(by: { f1, f2 in
+                let d1 = CMVideoFormatDescriptionGetDimensions(f1.formatDescription)
+                let d2 = CMVideoFormatDescriptionGetDimensions(f2.formatDescription)
+                return abs(Int(d1.width) - 640) < abs(Int(d2.width) - 640)
+            }) ?? formats.first
+            guard let format else { return }
+            let fps = format.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 30
+            cap.startCapture(with: device, format: format, fps: Int(min(fps, 30)))
         }
-        guard let cap = capturer, let device = picked ?? devices.first else { return }
-        let formats = RTCCameraVideoCapturer.supportedFormats(for: device)
-        // A modest 640-wide format keeps the bitrate friendly.
-        let format = formats.min(by: { f1, f2 in
-            let d1 = CMVideoFormatDescriptionGetDimensions(f1.formatDescription)
-            let d2 = CMVideoFormatDescriptionGetDimensions(f2.formatDescription)
-            return abs(Int(d1.width) - 640) < abs(Int(d2.width) - 640)
-        }) ?? formats.first
-        guard let format else { return }
-        let fps = format.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 30
-        cap.startCapture(with: device, format: format, fps: Int(min(fps, 30)))
     }
 
     func close() {
@@ -371,7 +385,12 @@ final class WebRTCCall: NSObject {
         // stopCapture tears down the capturer's internal AVCaptureSession; dropping our references
         // releases the capturer + source + track so the device isn't retained.
         videoTrack?.isEnabled = false
-        capturer?.stopCapture()
+        // stopCapture tears down an AVCaptureSession synchronously — off the main thread, or the
+        // hang-up button takes a second to respond and reads as "the tap didn't register".
+        // Hand the capturer to the queue and drop our reference immediately.
+        if let cap = capturer {
+            Self.captureQueue.async { cap.stopCapture() }
+        }
         capturer = nil
         captureProxy = nil
         videoTrack = nil

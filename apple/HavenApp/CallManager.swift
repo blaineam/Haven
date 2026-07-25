@@ -343,6 +343,28 @@ final class CallManager: NSObject, ObservableObject {
         let name = String(data: payload.dropFirst(64), encoding: .utf8) ?? "Someone"
         guard from.count == 64, knownContact(from) else { return }   // strangers can't ring you (F3)
         if active {
+            // GLARE: we are ringing THEM while they are ringing US. Both sides were swallowing the
+            // other's invite here ("already active → just merge the roster"), so two people who
+            // called each other at the same moment both sat listening to ringback and NEITHER call
+            // ever connected. They obviously both want this call — so connect it.
+            //
+            // Both devices run this identical logic, so they must agree without another round trip:
+            // the session id is derived from the two hexes in sorted order, and the lower hex takes
+            // the caller role for negotiation politeness. Each side also sends an ACCEPT, which is
+            // what drives the other's normal accept path if it gets there first.
+            if isCaller, !inCall, roster.contains(from) {
+                let a = myHex.lowercased(), b = from.lowercased()
+                sessionId = "glare:\(min(a, b))-\(max(a, b))"
+                isCaller = a < b
+                inviteTimer?.invalidate(); inviteTimer = nil
+                ringTimeoutTimer?.invalidate(); ringTimeoutTimer = nil
+                ringing = false; stopInAppRinging()
+                connecting = false; inCall = true
+                HavenLog.call("glare with \(from.prefix(8)) — both dialing, adopting shared session \(sessionId)")
+                sendAccept(to: from)
+                startMesh()
+                return
+            }
             if roster.isEmpty || !roster.contains(from) { roster.insert(from); refreshParticipants() }
             return
         }
@@ -931,7 +953,20 @@ final class CallManager: NSObject, ObservableObject {
                         // flowing perfectly ("stuck on connecting media, then connected, then it
                         // hung itself up"). The relay has its own liveness; an explicit hangup
                         // frame (12) still ends the call, as does the peer actually leaving.
-                        if self.hairpinPeers.contains(peer) { return }
+                        if self.hairpinPeers.contains(peer) {
+                            // ...unless the RELAY has gone quiet too. Media riding the hairpin means
+                            // ICE is legitimately failed, so ICE can't tell us the peer is gone —
+                            // the relay's own inbound clock has to. Without this a relayed call
+                            // whose far end vanished (crash, killed app, no hangup frame) would sit
+                            // "connected" forever.
+                            if let quiet = CallMediaBridge.shared.silenceSecs(for: peer),
+                               quiet > Self.relaySilenceDropSecs {
+                                HavenLog.call("relay silent \(Int(quiet))s for \(peer.prefix(8)) — peer gone, ending")
+                                self.dropPeer(peer)
+                                if self.roster.subtracting([self.myHex]).isEmpty { self.endCall() }
+                            }
+                            return
+                        }
                         self.dropPeer(peer)
                         if self.roster.subtracting([self.myHex]).isEmpty { self.endCall() }
                     }
@@ -944,33 +979,36 @@ final class CallManager: NSObject, ObservableObject {
         // If we're already sharing our screen, add the screen track to this new peer as well.
         if screenShareOn { c.startScreenShare() }
         peers[peer] = conn
-        // RACE THE RELAY. We used to wait for ICE to declare `.failed` before relaying — and that
-        // verdict takes WebRTC's full ~30s failure timer. The result was 30 seconds of "connecting
-        // media" after both sides had already accepted, then media finally appearing. Nobody waits
-        // 30s for a phone call.
+        // Media must be there right after both sides accept — NOT after ICE's ~30s failure timer,
+        // which is what produced half a minute of "connecting media". So we race: the direct path
+        // gets a brief head start, then the relay comes up alongside it, and whichever pairs first
+        // carries the call. `.connected` tears the relay back down.
         //
-        // Instead: give the direct path a short head start, and if it hasn't paired by then, bring
-        // the hairpin up ALONGSIDE it. Whichever wins, wins. The moment ICE connects, the
-        // `.connected` arm tears the relay down and we are back on WebRTC's own adaptive encoder —
-        // which is also why the relayed leg looked soft: its encoder is a fixed-bitrate fallback,
-        // not the negotiated one. Racing means we only ever look soft for those first seconds
-        // instead of the whole call.
-        let deadlinePeer = peer
+        // Why a beat instead of literally instant: activating the relay SUSPENDS WebRTC's own audio
+        // and hands the mic to the hairpin's engine (CallMediaBridge.activate →
+        // setNativeAudioSuspendedForHairpin). Doing that unconditionally would seize and then
+        // return the mic on every healthy call, an audible glitch plus needless load. 1.5s is long
+        // enough that a normal pairing (sub-second once candidates land) never relays at all, and
+        // short enough that a failing one is talking almost immediately instead of after 30s.
+        let racePeer = peer
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.directMediaGraceSecs) { [weak self] in
-            guard let self, self.peers[deadlinePeer] != nil else { return }
-            let st = self.lastPeerState[deadlinePeer]
-            guard st != .connected, st != .completed else { return }          // direct path won
-            guard !self.hairpinPeers.contains(deadlinePeer) else { return }    // already relaying
-            HavenLog.relay("direct media not up in \(Int(Self.directMediaGraceSecs))s — racing hairpin for \(deadlinePeer.prefix(8))")
-            self.startHairpin(for: deadlinePeer)
+            guard let self, self.peers[racePeer] != nil else { return }
+            let st = self.lastPeerState[racePeer]
+            guard st != .connected, st != .completed else { return }        // direct path won
+            guard !self.hairpinPeers.contains(racePeer) else { return }      // already relaying
+            HavenLog.relay("direct media not up in \(Self.directMediaGraceSecs)s — racing hairpin for \(racePeer.prefix(8))")
+            self.startHairpin(for: racePeer)
         }
         return conn
     }
 
-    /// How long the DIRECT path gets before we bring the relay up next to it. Short enough that a
-    /// caller never sits on a silent screen, long enough that a normal same-network pairing (sub-second
-    /// once candidates arrive) is never relayed at all.
-    private static let directMediaGraceSecs: TimeInterval = 4
+    /// Head start for the DIRECT path before the relay races it. See createPeer for why this is a
+    /// beat rather than zero.
+    private static let directMediaGraceSecs: TimeInterval = 1.5
+
+    /// How long a RELAYED peer may be silent before we treat them as gone. Generous — the relay
+    /// carries audio continuously, so real silence this long means the far end is not there.
+    private static let relaySilenceDropSecs: TimeInterval = 20
 
     /// Bring the hairpin relay up for `peer` and reflect it in the UI/CallKit. Shared by the grace
     /// timer above and the ICE `.failed` arm, so both paths report CONNECTED the same way.

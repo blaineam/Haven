@@ -49,6 +49,20 @@ final class CallMediaBridge {
     private var remoteSources: [String: RTCVideoSource] = [:]
     private var remoteTracks: [String: RTCVideoTrack] = [:]
 
+    /// Last time a relay frame arrived from each peer. The ICE disconnect watchdog deliberately
+    /// never drops a peer we are relaying (ICE sits failed BECAUSE we relayed), so without this a
+    /// relayed call whose far end simply vanished — no hangup frame — would stay "connected"
+    /// forever. This is the relay's own liveness signal.
+    private var lastInboundAt: [String: Date] = [:]
+
+    /// Seconds since we last heard anything from `remote` over the relay, or nil if it is not being
+    /// relayed / has never been heard from.
+    func silenceSecs(for remote: String) -> TimeInterval? {
+        guard activePeers.contains(remote) else { return nil }
+        guard let t = lastInboundAt[remote] else { return nil }
+        return Date().timeIntervalSince(t)
+    }
+
     private init() {}
 
     // MARK: - Lifecycle
@@ -74,6 +88,7 @@ final class CallMediaBridge {
     /// when the last relayed peer goes.
     func deactivate(remote: String) {
         guard activePeers.remove(remote) != nil else { return }
+        lastInboundAt[remote] = nil
         HavenLog.call("hairpin media: deactivating relay for \(remote.prefix(8))")
         if let d = decoders.removeValue(forKey: remote) { VTDecompressionSessionInvalidate(d.session) }
         remoteTracks[remote] = nil
@@ -87,6 +102,7 @@ final class CallMediaBridge {
     func stopAll() {
         let wasActive = !activePeers.isEmpty
         activePeers.removeAll()
+        lastInboundAt.removeAll()
         stopAudio()
         if wasActive { CallManager.shared.setNativeAudioSuspendedForHairpin(false) }
         detachLocalVideo()
@@ -285,6 +301,7 @@ final class CallMediaBridge {
 
     private func ingest(remote: String, frame: Data) {
         guard let (type, seq, _, payload) = Self.unpack(frame) else { return }
+        lastInboundAt[remote] = Date()
         switch type {
         case .audio:
             playAudio(seq: seq, payload: payload)

@@ -4310,6 +4310,14 @@ impl Engine {
                 .take(ROSTER_PULL_PER_PASS)
                 .collect()
         };
+        // Diagnostic: distinguishes "we know nobody" from "everyone already resolves". Without it,
+        // a silent sync_with_contacts is ambiguous — and that ambiguity is what made the desktop
+        // blackout so hard to place (zero devroster lines could mean either).
+        log::info!(
+            "devroster: contacts={} unresolved-due={} (pull fires only when due>0)",
+            ids.len(),
+            due.len()
+        );
         if !due.is_empty()
             && !self
                 .roster_pull_in_flight

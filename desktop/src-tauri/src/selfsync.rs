@@ -224,19 +224,6 @@ pub fn current_local(prefs: &Prefs, social: &HavenSocial) -> BTreeMap<String, Ve
             continue;
         }
         let member_bundles = social.circle_member_bundles(ci.id.clone());
-        // Never PUBLISH an empty member set for a circle that is not ours-and-brand-new. This device
-        // folds its own `current_local` back in during the merge, so emitting members:[] for a circle
-        // we simply haven't learned the roster for yet lets the empty set compete with — and can
-        // clobber — a sibling's correct one. Measured: circle.members oscillating between populated
-        // and [] across reads minutes apart, and with members empty EVERY arm of the key-commit
-        // sender check fails (core lib.rs:3614-3628), so no peer content can ever open. A circle we
-        // genuinely created and that genuinely has no members yet still publishes (it is the truth).
-        if member_bundles.is_empty()
-            && !prefs.created_circles.iter().any(|c| c == &ci.id)
-            && ci.id != "default"
-        {
-            continue;
-        }
         let mut relays: Vec<String> = prefs.relays.get(&ci.id).cloned().unwrap_or_default();
         relays.sort();
         relays.dedup();

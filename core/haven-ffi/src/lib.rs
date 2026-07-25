@@ -5633,24 +5633,7 @@ impl HavenSocial {
             }
         }
         let Some(result) = self.receive_locked(&circle_id, &envelope) else { return Ok(false) };
-        // Record ONLY outcomes that are durable. `result.is_ok()` was too broad: a KEY COMMIT
-        // rejected at the sender-authorization gate (:3627 — we cannot yet name the committer,
-        // because their roster or circle membership has not landed) returns Ok(false) WITHOUT
-        // applying and WITHOUT parking anywhere. Caching that hash meant the peer's byte-identical
-        // re-emit (`cached_commit`) short-circuited here forever, so the commit could never be
-        // re-attempted once the missing prerequisite DID arrive — every later retry was free and
-        // useless. Measured: 126 retries doing zero authorization work, and a mid-run membership
-        // repair that could not take effect until the process was relaunched (seen_envelopes is
-        // in-memory). That is what made this failure look permanent and un-selfhealing.
-        //
-        // An EPOCH EVENT answering Ok(false) is different: it parked in the DURABLE pending buffer
-        // (or was a duplicate), so it genuinely never needs the bytes again.
-        let durable = match (&result, envelope[0]) {
-            (Ok(true), _) => true,                    // applied
-            (Ok(false), TAG_EPOCH_EVENT) => true,     // parked durably / duplicate
-            _ => false,                               // rejected commit — must stay re-processable
-        };
-        if dedupe && durable {
+        if dedupe && result.is_ok() {
             let mut seen = self.seen_envelopes.lock().unwrap();
             let set = seen.entry(circle_id).or_default();
             // Growth guard only — clearing merely re-prices those envelopes at one unseal each.

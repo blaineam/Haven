@@ -217,6 +217,17 @@ if command -v adb >/dev/null 2>&1; then
     # emulator silently validates an old APK. gradle is incremental, so this is cheap when clean.
     if [[ ! -f "$APK" ]] || [[ -n "$(find "$ROOT/android/app/src" "$ROOT/core" -type f \( -name '*.kt' -o -name '*.rs' \) -newer "$APK" -print -quit 2>/dev/null)" ]]; then
       log "building android debug apk (missing or stale)…"
+      # Resolve a JDK. There is no system Java on this Mac — gradle dies with "Unable to locate a
+      # Java Runtime", and with the output piped that failure surfaced as exit 0, so the emulator
+      # quietly kept running a days-old APK while the suite reported on it.
+      if [[ -z "${JAVA_HOME:-}" ]] || [[ ! -x "${JAVA_HOME:-}/bin/java" ]]; then
+        for cand in /opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home \
+                    "/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
+                    /opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home; do
+          [[ -x "$cand/bin/java" ]] && { export JAVA_HOME="$cand"; break; }
+        done
+      fi
+      [[ -x "${JAVA_HOME:-}/bin/java" ]] || log "WARN: no JDK found — android build will fail"
       (cd "$ROOT/android" && ./gradlew assembleDebug -q) >>"$OUT/android-build.log" 2>&1 \
         || log "WARN: android build failed — see $OUT/android-build.log"
       [[ -f "$ROOT/android/app/build/outputs/apk/debug/app-universal-debug.apk" ]] \

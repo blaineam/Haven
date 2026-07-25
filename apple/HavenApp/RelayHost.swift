@@ -725,25 +725,37 @@ final class RelayHost: ObservableObject {
     }
 
     /// Build the media announce list (shared by host start, reattach, health recover).
+    ///
+    /// Public URL FIRST (reaches anyone), then this host's LAN addresses — never one INSTEAD of
+    /// the other. Treating LAN as a mere fallback for "no tunnel yet" broke the most common case
+    /// there is: two phones and this relay on the same Wi-Fi, the relay serving on its media port
+    /// the whole time, and neither phone able to use it because the only address they were given
+    /// was a free-tunnel hostname — one that changes on every relay restart and that a system
+    /// resolver can refuse while Safari resolves it fine. Peers try each URL in turn, so shipping
+    /// the LAN address alongside costs nothing off-network and makes same-network delivery work
+    /// with no tunnel, no public DNS, and no rotating hostname to chase.
     static func announceHttpUrls(mediaPort: UInt16) -> [String] {
+        var urls: [String] = []
         #if os(macOS)
         // Live tunnel (free trycloudflare or named) — most important for remote peers.
         if let live = CloudflaredTunnel.shared.publicURL?
             .trimmingCharacters(in: .whitespacesAndNewlines), !live.isEmpty {
             var t = live
             while t.hasSuffix("/") { t.removeLast() }
-            if let n = CloudflaredTunnel.normalizePublicURL(t) { return [n] }
-            if t.hasPrefix("https://") || t.hasPrefix("http://") { return [t] }
+            if let n = CloudflaredTunnel.normalizePublicURL(t) { urls.append(n) }
+            else if t.hasPrefix("https://") || t.hasPrefix("http://") { urls.append(t) }
         }
         #endif
         // Manual / bundled configured domain.
-        if let pub = CloudflaredTunnel.normalizePublicURL(
+        if urls.isEmpty, let pub = CloudflaredTunnel.normalizePublicURL(
             UserDefaults.standard.string(forKey: "haven.relay.publicURL") ?? ""
         ) {
-            return [pub]
+            urls.append(pub)
         }
-        // LAN-only fallback (same network only).
-        return lanIPv4s().map { "http://\($0):\(mediaPort)" }
+        for lan in lanIPv4s().map({ "http://\($0):\(mediaPort)" }) where !urls.contains(lan) {
+            urls.append(lan)
+        }
+        return urls
     }
 
     /// If our entry lost the public media URL (LAN-only wipe), restore from the live tunnel.

@@ -4558,6 +4558,46 @@ impl Engine {
                 return;
             }
         }
+        // A hello from an account the ENGINE already lists as a member of one of my circles is not a
+        // stranger — we have an established relationship (I invited or approved them, possibly on a
+        // LINKED DEVICE before this device's own contact list ever converged). Re-gating them as a
+        // stranger strands every hello they send: it becomes a connection request nobody sees, the
+        // roster exchange never completes, so `st.device_lists` never learns their devices, so
+        // `receive_key_commit` can never authorize their DEVICE-signed commit, and every envelope
+        // they author parks in pending_epoch forever. Our own account's content keeps arriving over
+        // self-sync, which is what made it look like a mailbox bug for so long.
+        //
+        // This branch exists on Apple (FeedView.swift:6156) and Android (HavenNet.kt:1453) and was
+        // simply missing here — a seed-adopted desktop has an EMPTY prefs.contacts (measured: 0), so
+        // the known-contact branch above never fires for it either. Same principle as the
+        // device-of-known-account rule above, at account level.
+        let engine_knows = !self.prefs.lock().unwrap().is_contact_removed(&id_hex)
+            && self.social.circles().iter().any(|c| {
+                self.social
+                    .contact_node_ids(c.id.clone())
+                    .iter()
+                    .any(|m| m.eq_ignore_ascii_case(&id_hex))
+            });
+        if engine_knows {
+            let _ = self.social.add_contact_bundle(hello.circle_id.clone(), hello.bundle.clone());
+            {
+                let mut p = self.prefs.lock().unwrap();
+                if !p.contacts.iter().any(|c| c.id_hex == id_hex) {
+                    p.contacts.push(Contact {
+                        id_hex: id_hex.clone(),
+                        name: name.clone(),
+                        verify_hex: actual_verify.clone(),
+                    });
+                    let _ = p.save(&self.paths);
+                }
+            }
+            log::info!(
+                "hello from {} is an engine-known circle member — adopted as contact, handshake continues",
+                &id_hex.chars().take(8).collect::<String>()
+            );
+            self.persist();
+            return;
+        }
         if !hello.circle_id.starts_with("dm:") {
             let mut st = self.dyn_state.lock().unwrap();
             if !st.pending.iter().any(|p| p.id_hex == id_hex) {

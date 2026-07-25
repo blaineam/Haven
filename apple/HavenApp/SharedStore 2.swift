@@ -551,82 +551,6 @@ enum SharedStore {
         return await backupOnce(ref: ref, circleId: circleId, social: social, force: force)
     }
 
-    /// Copy a sealed blob from a relay that HOLDS it to the circle's relays that don't, for a ref this
-    /// device can no longer produce (the local plaintext is gone, so there is nothing to seal).
-    ///
-    /// This is a pure CIPHERTEXT copy and changes nothing about the privacy model: relays only ever
-    /// store sealed envelopes, and `key(ref)` is content-addressed on the PLAINTEXT, so another
-    /// relay's envelope is a valid blob under the same key even though its nonce (and therefore its
-    /// bytes) differ from any seal we would have made. The device moves bytes it usually cannot even
-    /// open. No key material is read, derived or transmitted.
-    ///
-    /// Memory: chunked blobs are copied ONE 8 MB window at a time, never reassembled — the whole
-    /// point of the chunk format. A single-blob media is by definition <= one window.
-    private static func mirrorSealedAcrossRelays(ref: String, circleId: String) async -> Bool {
-        let dests = mediaDests(circleId)
-        guard dests.count >= 2 else { return false }   // nothing to mirror between
-
-        typealias Endpoint = (node: String, base: String, token: String)
-        var holders: [(endpoint: Endpoint, head: Data)] = []
-        var missing: [Endpoint] = []
-        for node in dests {
-            guard let http = RelayMailboxStore.shared.httpInterface(node),
-                  let base = http.urls.first(where: { !httpUrlBad($0) }) else { continue }
-            switch await httpGet(base, http.token, key(ref)) {
-            case .success(let blob):
-                if let blob {
-                    MediaBackupLedger.mark(node, ref)
-                    // Keep the bytes from the probe: for a chunked blob this is just the manifest, and
-                    // for a single-blob media it IS the media — re-fetching to copy would double the
-                    // download for every mirror.
-                    holders.append(((node, base, http.token), blob))
-                } else {
-                    missing.append((node, base, http.token))
-                }
-            case .failure(is RelayForbidden):
-                noteRefused(node, "mirror probe")
-            case .failure:
-                markHttpUrlBad(base)   // unreachable — not "absent"
-            }
-        }
-        guard let first = holders.first else {
-            // Nobody reachable holds it and we cannot re-seal it — genuinely stalled, so take the
-            // backoff rather than re-probing every relay on every 2-minute pass forever.
-            HavenLog.sync("media mirror NO-SOURCE ref=\(ref) — no reachable relay holds it")
-            MediaBackupBackoff.recordStalled(ref)
-            return false
-        }
-        guard !missing.isEmpty else { return true }             // everyone reachable already holds it
-        let src = first.endpoint
-        let head = first.head
-        let chunks = parseManifest(head)
-
-        var mirrored = false
-        for dst in missing {
-            var ok = true
-            if let n = chunks {
-                for i in 0..<n {
-                    guard case .success(let maybeWindow) = await httpGet(src.base, src.token, chunkKey(ref, i)),
-                          let window = maybeWindow else { ok = false; break }
-                    if case .failure = await httpPut(dst.base, dst.token, chunkKey(ref, i), window) { ok = false; break }
-                }
-            }
-            guard ok else {
-                HavenLog.sync("media mirror INCOMPLETE ref=\(ref) → \(dst.node.prefix(8)) — windows unavailable")
-                continue
-            }
-            // Manifest LAST: its presence is what makes the media resolvable, so publishing it before
-            // its windows would advertise a blob that reassembles short.
-            if case .success = await httpPut(dst.base, dst.token, key(ref), head) {
-                MediaBackupLedger.mark(dst.node, ref)
-                mirrored = true
-                HavenLog.sync("media mirror ref=\(ref) \(src.node.prefix(8))→\(dst.node.prefix(8)) windows=\(chunks ?? 1)")
-            }
-        }
-        if mirrored { MediaBackupBackoff.recordLanded(ref) }
-        return true   // the blob is safe on at least one relay either way
-    }
-
     private static func backupOnce(ref: String, circleId: String, social: HavenSocial, force: Bool = false) async -> Bool {
         // Skip entirely if this blob is already confirmed on EVERY destination — before the expensive
         // file read + seal. Content-addressed keys never change, so a confirmed upload is permanent.
@@ -639,15 +563,7 @@ enum SharedStore {
             && destNodes.allSatisfy { MediaBackupLedger.has($0, ref) }
             && (s3 == nil || MediaBackupLedger.has("s3", ref))
         if allConfirmed && (!destNodes.isEmpty || s3 != nil) { MediaBackupBackoff.recordLanded(ref); return true }
-        guard let url = MediaStore.shared.storagePath(for: ref),
-              FileManager.default.fileExists(atPath: url.path) else {
-            // No local plaintext, so we cannot seal — but that must NOT mean a relay which lacks the
-            // blob stays empty forever. Adding a second relay after the fact (the Mac relay next to
-            // the NAS) left it permanently missing every older item: nothing in the system ever
-            // copies a blob relay→relay, and the only device that could re-upload had long since
-            // evicted the original file. Mirror the CIPHERTEXT instead.
-            return await mirrorSealedAcrossRelays(ref: ref, circleId: circleId)
-        }
+        guard let url = MediaStore.shared.storagePath(for: ref) else { return false }
 
         // ---- Probe phase: NO file read, NO seal. `key(ref)` is content-addressed — independent of
         // the sealed bytes — so every unconfirmed destination can be asked "do you already hold it?"

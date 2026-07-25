@@ -4220,7 +4220,36 @@ impl Engine {
     }
 
     pub fn sync_with_contacts(self: &Arc<Self>) {
-        let ids: Vec<String> = self.prefs.lock().unwrap().contacts.iter().map(|c| c.id_hex.clone()).collect();
+        // Contacts come from prefs (this device's own add-contact flow) UNION every circle's
+        // members. A LINKED DEVICE never runs add-contact — it adopts the account seed and learns
+        // circles over self-sync — so prefs.contacts is EMPTY on it (measured: 0 on the QA desktop).
+        // Driving roster announce/pull from prefs alone therefore did nothing at all there: it
+        // never announced its roster and, worse, never PULLED the peer's. With the peer's devices
+        // unresolvable, receive_key_commit can never authorize their commit, so every envelope they
+        // author parks in pending_epoch forever while our own posts keep arriving over self-sync.
+        // That is exactly the "desktop gets my content but never my friend's" blackout.
+        let ids: Vec<String> = {
+            let mut out: Vec<String> = self
+                .prefs
+                .lock()
+                .unwrap()
+                .contacts
+                .iter()
+                .map(|c| c.id_hex.clone())
+                .collect();
+            let me = self.social.my_node_hex().to_lowercase();
+            for c in self.social.circles() {
+                for m in self.social.contact_node_ids(c.id.clone()) {
+                    if m.to_lowercase() != me {
+                        out.push(m);
+                    }
+                }
+            }
+            out.iter_mut().for_each(|h| *h = h.to_lowercase());
+            out.sort();
+            out.dedup();
+            out
+        };
         for id_hex in &ids {
             self.send_hello(DEFAULT_CIRCLE, id_hex);
         }

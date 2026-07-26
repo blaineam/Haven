@@ -11,6 +11,24 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **Peers find each other without a shared relay (all platforms).** A contact holds
+  your ACCOUNT id — that is what an invite/QR carries — but has to dial your DEVICE
+  ids, and the only two ways to learn those (your signed roster, an invite `?d=`
+  hint) both need a route to arrive in the first place. Two peers with no relay in
+  common therefore had no route at all, even with both devices online and iroh
+  perfectly able to hole-punch between them. Haven now publishes the account →
+  device mapping in the public pkarr directory under the account key, and resolves
+  it for exactly the members it cannot otherwise reach. The record is a signed
+  packet, so only that account can write it; even so it is treated as a dial hint,
+  never an authorization — content stays sealed to the circle epoch key and inbound
+  frames stay gated on the signed roster, so a stale or hostile record costs one
+  wasted connect and nothing more.
+- **Deleted relays can be restored (all platforms).** "Delete now" used to be the one
+  action with no way back: it drops the relay entry, every circle association and the
+  default pick, and a relay is a 64-character node id. Deletions are now archived for
+  30 days and offered on the Relays screen; Restore puts the relay back in the circles
+  it served.
+
 - **In-app Activity list (all platforms).** A bell with an unread badge opens a
   time-ordered list of everything that happened to you — reactions and comments on
   your posts, new posts and stories, DMs, votes, connections, circle adds, linked

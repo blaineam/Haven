@@ -173,7 +173,10 @@
               everything is opaque encrypted bytes — the transport is interchangeable and completely blind
               to content.</p>
             <p>Finding a friend's current address uses signed records keyed by their public key, so a link
-              to someone is permanent with no central directory to maintain.</p>
+              to someone is permanent with no central directory to maintain. A link carries your
+              <em>account</em> key, but devices are what actually get dialled, so each account also
+              publishes its own device list in that same signed-record space — which is what lets two
+              people who share no relay still find each other and hole-punch directly.</p>
           </div>
         </details>
       </div>

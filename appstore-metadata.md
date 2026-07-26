@@ -32,6 +32,32 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 Launch sale — 50% off through September 30: $4.99, then $9.99. A private, end‑to‑end encrypted home for your closest people. No ads, no tracking, peer‑to‑peer.
 
 ## whats_new
+1.1.4 — your people find each other, with or without a relay.
+
+Connect without a relay
+• Two people who are both online now reach each other directly, even with no relay in common. Before, if you didn't share a relay, messages and DMs had nowhere to go — they'd sit until something else connected you. Haven now finds your friend's devices on its own and connects straight to them.
+• The relay you run is still yours and still private. It just isn't required any more for two online people to talk.
+
+Relays that look after themselves
+• Relays now share what they're holding with each other, so a relay that was switched off catches up on what it missed instead of staying permanently out of date.
+• A relay running on your NAS or Pi now also passes live messages along for people it can reach — previously only the app-hosted ones did.
+• Deleted a relay by mistake? Deleted relays are kept for 30 days and can be restored from the Relays screen, back into the circles they were serving.
+
+Notifications that say what happened
+• Group messages now say they went to the group, instead of "sent you a message".
+• Tapping through to a conversation that hasn't reached this device yet explains itself instead of opening an empty screen.
+
+Photos and video
+• Photos in a post now fill the space behind them properly again, instead of leaving flat grey bars.
+• A photo that's still arriving shows itself, sharp, and fades up to full quality when it lands — no more blurred placeholder with a status message over the top.
+
+Calls
+• Calling each other at the same moment now connects, instead of both sides ringing forever.
+
+Android
+• Fixed a compatibility problem that could crash Haven on newer devices.
+
+## whats_new_previous
 1.1.1 — notifications, calls, and messages, fixed properly.
 
 Notifications work again
@@ -62,7 +88,6 @@ Around the app
 
 Native on iPhone, iPad, and Mac. No ads, no tracking, no servers holding your data — same private Haven.
 
-## whats_new_previous
 1.1.0 — a reliability & polish release. Nothing to set up, nothing lost.
 
 Stories & media reliably reach a relay

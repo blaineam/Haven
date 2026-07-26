@@ -373,9 +373,14 @@ jobs:
             $cfd = $cfdCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
             if ($cfd) {
               Copy-Item $cfd "$stage\cloudflared.exe" -Force
-              Write-Host "  MSIX $arch: bundled cloudflared from $cfd"
+              # ${arch}, NOT $arch — in a double-quoted PowerShell string `$arch:` parses as a SCOPE
+              # qualifier (like $env:PATH), and with a space after the colon the scope name is empty,
+              # so the whole script fails to parse. It reported at the next structural token (the
+              # `} else {` below), and because this step is continue-on-error it went out as a green
+              # "Package MSIX" that produced no package at all — every release since.
+              Write-Host "  MSIX ${arch}: bundled cloudflared from $cfd"
             } else {
-              Write-Host "::warning::MSIX $arch: cloudflared.exe not found — Quick Tunnel will try PATH/download at runtime"
+              Write-Host "::warning::MSIX ${arch}: cloudflared.exe not found — Quick Tunnel will try PATH/download at runtime"
             }
 
             foreach ($a in 'StoreLogo','Square150x150Logo','Square44x44Logo','Square71x71Logo','Square310x310Logo') {
@@ -420,6 +425,24 @@ jobs:
           }
           "msix=$msix" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
+      # A packaging step that produced NOTHING must not read as a green release. `Package MSIX` is
+      # continue-on-error (an MSIX problem must never block the installers or the Release), and that
+      # is exactly how a PowerShell parse error — `"$arch:"` being read as a scope qualifier — shipped
+      # release after release as a successful step with no package behind it. The bug was invisible
+      # from the outside: the job was green, the Release looked complete, and the missing bundle only
+      # surfaced when a human went looking for something to upload to Partner Center.
+      - name: Verify the MSIX was actually produced
+        if: matrix.os == 'windows-latest' && startsWith(github.ref, 'refs/tags/v') && env.STORE_IDENTITY_NAME != ''
+        shell: pwsh
+        run: |
+          $m = "${{ steps.msix.outputs.msix }}"
+          if (-not $m -or -not (Test-Path $m)) {
+            Write-Host "::error::Package MSIX produced no package — the Microsoft Store update for this release CANNOT be uploaded. Check that step's log for a PowerShell ParserError."
+            exit 1
+          }
+          $size = [math]::Round((Get-Item $m).Length / 1MB, 1)
+          Write-Host "MSIX ok: $m ($size MB)"
+
       # Microsoft Store submission is DELIBERATELY not automated — it is a MANUAL step in Partner
       # Center. `msstore publish` only supports FREE products over GitHub Actions; Haven is a paid
       # listing, so the command exits non-zero and (under the old `continue-on-error: true`) reported
@@ -429,7 +452,9 @@ jobs:
       # that bundle to Partner Center and submits it there.
       #
       # To submit the Microsoft Store update after a release:
-      #   1. Partner Center → Haven → Packages → upload the Haven-<ver>.msixbundle from the GH Release
+      #   1. Partner Center → Haven → Packages → upload the Haven-<ver>.msixbundle. It rides the GH
+      #      Release only while PUBLISH_WINDOWS_TO_GH ≠ "false"; with the Store listing live it is in
+      #      the run's `desktop-windows` artifact instead (gh run download -n desktop-windows).
       #   2. Store listings (en-US) → paste this version's "What's new" — CLEAR the field first, then
       #      paste and Save, so Partner Center actually re-validates (an identical re-save is a no-op
       #      that can leave the section stuck "Incomplete").

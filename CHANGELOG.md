@@ -7,7 +7,7 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.1.4] — 2026-07-26
 
 ### Added
 

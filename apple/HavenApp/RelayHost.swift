@@ -1670,6 +1670,38 @@ final class RelayMailboxStore: ObservableObject {
         objectWillChange.send()
     }
 
+    /// Relays the user FORGOT but which are still recoverable — `forget` only clears the active
+    /// flag and keeps the entry plus its circle associations, so everything needed to bring one
+    /// back is still on disk. `eraseNow` is the one that is genuinely gone (entry removed), and
+    /// those correctly do not appear here.
+    var recoverableRelays: [RelayEntry] {
+        entries.values
+            .filter { !$0.active && (forgotAt[$0.hex] ?? 0) > 0 }
+            .sorted { ($0.name.isEmpty ? $0.hex : $0.name) < ($1.name.isEmpty ? $1.hex : $1.name) }
+    }
+
+    /// Undo a `forget`. Clears the suppression + the LWW deletion stamp and stamps a re-add at NOW,
+    /// which is what stops a sibling device's older `relay-removal:` record from simply forgetting
+    /// it again on the next self-sync pass (same mechanism `clearForget` uses when a re-add arrives
+    /// from another device — see the CLEARED-FORGET path).
+    func restore(nodeHex: String) {
+        let hex = nodeHex.hasPrefix("s3:") ? nodeHex : nodeHex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard var e = entries[hex] else { return }   // erased for good — nothing to recover
+        e.active = true
+        e.lastSeenMs = nowMs()
+        entries[hex] = e
+        suppressed.remove(hex)
+        forgotAt.removeValue(forKey: hex)
+        clearedRelayForgets[hex] = nowMs()
+        persistEntries()
+        UserDefaults.standard.set(Array(suppressed), forKey: suppressedKey)
+        UserDefaults.standard.set(forgotAt, forKey: forgotAtKey)
+        UserDefaults.standard.set(clearedRelayForgets, forKey: clearedRelayForgetsKey)
+        MediaBackupLedger.forgetDest(hex)   // re-mirror media to it; its copy may be stale or gone
+        HavenLog.relay("RESTORED relay \(hex.prefix(8)) — un-forgotten by the user")
+        objectWillChange.send()
+    }
+
     /// ERASE a relay for good — removes its associations across every circle, its entry, the default, and
     /// its caches. Used by "Delete now" in the Relays screen and by purgeStale.
     func eraseNow(_ nodeHex: String) {

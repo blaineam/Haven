@@ -1970,8 +1970,22 @@ struct MissingMediaPlaceholder: View {
     /// White-on-thumb when the blurred preview is behind, secondary on the plain fill.
     private var overlayStyle: Color { thumbImage != nil ? .white : .secondary }
 
+    /// The bytes are actually on disk. Trust the filesystem over the in-flight bookkeeping: if a
+    /// `downloadingMedia` entry is ever left behind (a path that returns without clearing it, a
+    /// restore that lands via a different route than the one that set the flag), the spinner would
+    /// otherwise sit on top of media that finished — reported from the field as "media obviously
+    /// downloaded and blurred, with a loading status hanging over it for a while".
+    private var bytesPresent: Bool {
+        guard let url = MediaStore.shared.storagePath(for: ref) else { return false }
+        return FileManager.default.fileExists(atPath: url.path)
+    }
+
     @ViewBuilder private var content: some View {
-        if feed.downloadingMedia.contains(ref) {
+        if bytesPresent {
+            // Present but the parent still had us on screen — show the preview WITHOUT any chrome;
+            // the real view swaps in on the next refresh. No spinner over finished media.
+            EmptyView()
+        } else if feed.downloadingMedia.contains(ref) {
             VStack(spacing: 8) {
                 ProgressView().tint(thumbImage != nil ? .white : nil)
                 if let p = feed.mediaRestoreProgress[ref], p.total > 1 {

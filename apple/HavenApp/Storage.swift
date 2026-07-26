@@ -258,6 +258,52 @@ struct RelayPoolSection: View {
                 Text("Posts mirror to every relay — any reachable one keeps the circle syncing.")
             }
         }
+        RecoverableRelaysSection()
+    }
+}
+
+/// "Forget" is not destructive — it clears the active flag and keeps the entry and its circle
+/// associations — so a relay removed by accident (or by a sibling device's stale removal record)
+/// was recoverable in principle but had no way back through the UI. Only "Delete now" (`eraseNow`)
+/// is permanent, and those entries are gone from here.
+///
+/// Tucked behind a disclosure and hidden entirely when there is nothing to recover, so it never
+/// clutters the common case.
+struct RecoverableRelaysSection: View {
+    @ObservedObject private var mailbox = RelayMailboxStore.shared
+    @State private var expanded = false
+
+    private var gone: [RelayEntry] { mailbox.recoverableRelays }
+
+    var body: some View {
+        if !gone.isEmpty {
+            Section {
+                DisclosureGroup(isExpanded: $expanded) {
+                    ForEach(gone, id: \.hex) { e in
+                        HStack(spacing: 10) {
+                            Image(systemName: "clock.arrow.circlepath")
+                                .font(.caption2).foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(e.name.isEmpty ? "\(e.hex.prefix(12))…" : e.name)
+                                    .font(.footnote)
+                                Text("\(e.hex.prefix(12))…")
+                                    .font(.system(.caption2, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Restore") { mailbox.restore(nodeHex: e.hex) }
+                                .buttonStyle(.borderless)
+                                .font(.caption)
+                        }
+                    }
+                } label: {
+                    Label("Removed relays · \(gone.count)", systemImage: "arrow.uturn.backward")
+                        .font(.footnote)
+                }
+            } footer: {
+                Text("Relays you removed. Restoring one puts it back on this circle and re-syncs its media. Relays deleted with “Delete now” are gone for good.")
+            }
+        }
     }
 }
 

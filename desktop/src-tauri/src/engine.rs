@@ -1163,6 +1163,12 @@ impl Engine {
             }
             log::info!("discovery resolved {} devices={}", &key[..8.min(key.len())], ids.len());
             me.record_device_hints(&key, ids);
+            // A peer we could not reach a moment ago is reachable NOW. Don't make them wait for the
+            // next sync tick and the announce cadence to find that out: re-announce our relays and
+            // sync immediately — what a peer with no relay in common is missing is exactly that
+            // announce.
+            me.reannounce_own_relay();
+            me.sync_with_contacts();
         });
     }
 

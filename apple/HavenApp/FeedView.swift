@@ -905,11 +905,24 @@ final class FeedStore: ObservableObject {
         }
         guard !ask.isEmpty else { return }
         Task.detached { [weak self] in
+            var learned = false
             for a in ask {
                 guard let ids = try? await node.resolveAccountDevices(accountHex: a), !ids.isEmpty else { continue }
+                learned = true
                 await MainActor.run {
                     HavenLog.net("discovery resolved \(a.prefix(8)) devices=\(ids.count)")
                     self?.recordDeviceHints(accountHex: a, deviceIds: ids)
+                }
+            }
+            // A peer we could not reach a moment ago is reachable NOW. Don't make them wait for the
+            // next 20s tick and the 45s announce cadence to discover that: sync tight and re-announce
+            // our relays immediately, which is the exact thing a peer with no relay in common is
+            // missing ("his app refuses to find any of the relays I have enabled").
+            if learned {
+                await MainActor.run {
+                    self?.bumpActivity()
+                    self?.reannounceOwnRelay()
+                    self?.syncWithContacts()
                 }
             }
         }

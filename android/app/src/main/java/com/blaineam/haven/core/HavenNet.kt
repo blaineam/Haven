@@ -1892,11 +1892,21 @@ object HavenNet : InboundListener {
         }
         if (ask.isEmpty()) return
         scope.launch {
+            var learned = false
             for (a in ask) {
                 val ids = runCatching { n.resolveAccountDevices(a) }.getOrNull() ?: continue
                 if (ids.isEmpty()) continue
+                learned = true
                 Log.i(TAG, "discovery resolved ${a.take(8)} devices=${ids.size}")
                 recordDeviceHints(a, ids)
+            }
+            // A peer we could not reach a moment ago is reachable NOW. Don't make them wait for the
+            // next sync tick and the announce cadence to find that out: sync tight and re-announce our
+            // relays immediately, which is exactly what a peer with no relay in common is missing.
+            if (learned) {
+                bumpActivity()
+                reannounceOwnRelay()
+                syncWithContacts()
             }
         }
     }

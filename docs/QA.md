@@ -246,11 +246,11 @@ clean `vX.Y.Z` tag for the official release.
 | release.yml **relay / desktop / flatpak builds** | ✅ build (CI verify) | ✅ build |
 | release.yml **MSIX packaging** | ✅ packaged (CI verify, artifact) | ✅ packaged |
 | release.yml **Microsoft Store submit** | ❌ **skipped** | ✅ (when Store secrets set) |
-| release.yml **public GitHub Release** (`publish` job) | ❌ **skipped** | ✅ cut |
-| release.yml **AUR push** | ❌ skipped (needs `publish`) | ✅ (when secret set) |
+| release.yml **GitHub Release** (`publish` job) | ✅ cut as a **pre-release**, under the rc tag | ✅ cut as the stable release |
+| release.yml **AUR push** | ❌ skipped (stable only) | ✅ (when secret set) |
 | android **APK/AAB build** | ✅ build (CI artifact) | ✅ build |
 | android **Play upload** | ✅ **internal track only** (production is downgraded→internal) | track per `PLAY_TRACK`/dispatch |
-| android **attach to GitHub Release** | ❌ **skipped** | ✅ (until Play public) |
+| android **attach to GitHub Release** | ✅ attached to the rc pre-release | ✅ (until Play public) |
 | **App Store submit** (`rocket submit`, manual) | — you don't submit an rc | ✅ when you choose |
 
 The guards are literal `!contains(github.ref, '-rc')` conditions on the
@@ -258,6 +258,14 @@ production-publish steps (and a production→internal downgrade in android's tra
 resolver). Pre-release/internal tracks and all artifact/CI-verify builds stay
 intact on rc, so a candidate is a real, installable build for testers — it just
 never reaches a production store.
+
+An rc **does** get a GitHub Release now, because a build that exists only as a CI
+artifact is a build nobody can install. It is published under the rc's OWN tag
+(`v1.1.4-rc.31`), with `prerelease: true` and `make_latest: false` — so it cannot
+overwrite the stable release's assets, and `/releases/latest` (which the website's
+download cards read) keeps pointing at the last stable version. AUR stays
+stable-only: its PKGBUILDs build *from* the tag, so pointing them at a candidate
+would make the package a moving target.
 
 > The App Store has no submit step in these workflows — iOS/macOS submission is a
 > deliberate manual `rocket submit` (see `_shared/rocket`). You simply don't run

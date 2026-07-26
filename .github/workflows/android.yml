@@ -249,12 +249,19 @@ jobs:
       # UNSET is the safe default so Android users aren't stranded before Play goes live.
       # rc GUARD: a `-rc.N` tag builds the APK (kept as a CI artifact above) but must NOT create/attach
       # to a public GitHub Release — only clean vX.Y.Z tags do. See docs/QA.md.
+      # rc tags included: their release is a PRE-RELEASE under the rc tag (see release.yml), so an
+      # APK attached there can't be mistaken for the stable download, and a candidate nobody can
+      # sideload is a candidate nobody tests.
       - name: Attach APKs to the GitHub Release (on v* tags, until Play is public)
-        if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-rc') && vars.PUBLISH_ANDROID_TO_GH != 'false'
+        if: startsWith(github.ref, 'refs/tags/v') && vars.PUBLISH_ANDROID_TO_GH != 'false'
         uses: softprops/action-gh-release@v2
         with:
           files: out/*.apk
           fail_on_unmatched_files: true
+          # This workflow races release.yml, and whichever arrives first CREATES the release — so
+          # both must agree on these or an rc could land as a normal "Latest" release.
+          prerelease: ${{ contains(github.ref, '-rc') }}
+          make_latest: ${{ !contains(github.ref, '-rc') }}
 
       # ── Google Play: build a signed AAB on tags + publish to the internal track ──────────────
       # Needs the release keystore (ANDROID_KEYSTORE_* — same one Play App Signing was enrolled
@@ -284,11 +291,13 @@ jobs:
       # Play is public + auto-publishing, set PUBLISH_ANDROID_TO_GH=false to keep it off GH.
       # rc GUARD (see above): rc AABs stay CI-artifact-only + go to the internal Play track for QA.
       - name: Attach AAB to the GitHub Release (stopgap for manual Play upload, until Play is public)
-        if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-rc') && steps.keystore.outputs.have_keystore == 'true' && vars.PUBLISH_ANDROID_TO_GH != 'false'
+        if: startsWith(github.ref, 'refs/tags/v') && steps.keystore.outputs.have_keystore == 'true' && vars.PUBLISH_ANDROID_TO_GH != 'false'
         uses: softprops/action-gh-release@v2
         with:
           files: out/*.aab
           fail_on_unmatched_files: false
+          prerelease: ${{ contains(github.ref, '-rc') }}
+          make_latest: ${{ !contains(github.ref, '-rc') }}
 
       - name: Check Play credentials
         id: play

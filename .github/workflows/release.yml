@@ -31,6 +31,10 @@ name: release
 # docs/RELEASING.md ("Release channels"). (Android's equivalent toggle is PUBLISH_ANDROID_TO_GH
 # in android.yml.)
 #
+# rc tags (`vX.Y.Z-rc.N`) publish a PRE-RELEASE under their own tag so testers have somewhere to
+# download a candidate. They never become "Latest" and never touch the stable release's assets; the
+# AUR push stays stable-only.
+#
 # The tag drives the version: it's stamped into tauri.conf.json + the relay crate before build.
 # Cut a release by tagging:  git tag v0.1.0 && git push origin v0.1.0
 # (relay-only hotfix? use a `relay-v*` tag → relay-release.yml instead.)
@@ -528,10 +532,15 @@ jobs:
     # Tags cut/refresh their release. A manual workflow_dispatch ALSO updates the existing release
     # for the current version (v<MARKETING_VERSION>) in place — so rebuilding to add an arch (arm64)
     # or fix an asset actually refreshes the download, instead of stranding artifacts in a CI run.
-    # rc GUARD: a `-rc.N` tag runs every BUILD job above (relay/desktop/flatpak — CI verify) but does
-    # NOT cut a public GitHub Release. The clean vX.Y.Z tag publishes the official download. The `aur`
-    # job needs `publish`, so it is skipped for rc automatically. See docs/QA.md.
-    if: (startsWith(github.ref, 'refs/tags/') && !contains(github.ref, '-rc')) || github.event_name == 'workflow_dispatch'
+    #
+    # rc TAGS PUBLISH TOO, as a PRE-RELEASE under their own tag (`v1.1.4-rc.31`), never under the
+    # clean `v1.1.4`. Testers need somewhere to download a candidate from — a build that exists only
+    # as a CI artifact is a build nobody can install. Two properties keep this safe:
+    #   • `tag_name` is the ACTUAL tag, so an rc can never overwrite the stable release's assets.
+    #   • `prerelease: true` + `make_latest: false`, so `/releases/latest` and the website's download
+    #     cards keep pointing at the last STABLE release, not at a candidate.
+    # The `aur` job stays stable-only (it publishes to Arch) — see its own guard.
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -615,12 +624,19 @@ jobs:
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
-          # Explicit tag so a workflow_dispatch updates the EXISTING v<version> release in place
-          # (on a tag push this is the same tag). Same-named assets are replaced.
-          tag_name: v${{ needs.meta.outputs.version }}
+          # A tag push publishes to THAT tag verbatim — which for an rc is `vX.Y.Z-rc.N`, so a
+          # candidate can never overwrite the stable `vX.Y.Z` release's assets. A workflow_dispatch
+          # (no tag) updates the existing v<MARKETING_VERSION> release in place. Same-named assets
+          # are replaced.
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', needs.meta.outputs.version) }}
           files: dist/*
           body_path: NOTES.md
           fail_on_unmatched_files: true
+          # A candidate is a pre-release and must never become "Latest": the website download cards
+          # and `/releases/latest` read that, and pointing them at an rc would ship a candidate to
+          # everyone who clicks Download.
+          prerelease: ${{ needs.meta.outputs.is_rc == 'true' }}
+          make_latest: ${{ needs.meta.outputs.is_rc != 'true' }}
 
   # ── AUR: push the PKGBUILDs to aur.archlinux.org (tags · only when AUR_SSH_PRIVATE_KEY is
   #    set). Inert otherwise — exactly like the Play/Microsoft Store steps — so a release
@@ -631,7 +647,9 @@ jobs:
   #    Setup is a one-time thing the maintainer does by hand — see docs/RELEASING.md.
   aur:
     needs: [meta, publish]
-    if: startsWith(github.ref, 'refs/tags/')
+    # Stable tags only. Arch users get releases, not candidates — and the PKGBUILDs build FROM the
+    # tag, so pointing them at an rc would make the AUR package a moving target.
+    if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref, '-rc')
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     strategy:

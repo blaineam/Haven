@@ -38,6 +38,11 @@ private const val TAG = "HavenNet"
 private const val ROSTER_PULL_PER_PASS = 3
 private const val ROSTER_PULL_BACKOFF_MS = 600_000L   // 10 min
 
+/** How long before re-asking the public directory about the same account (`resolveMissingDeviceIds`).
+ *  Most contacts have simply never published, so an unthrottled lookup would fire a DNS round-trip
+ *  per member per sync tick and learn nothing. iOS parity. */
+private const val DISCOVERY_RETRY_MS = 600_000L   // 10 min
+
 /** Events per circle handed to my own other devices by the catch-up sweep. Bounded because the
  *  sweep RE-SEALS every envelope it sends — real CPU per item, not a cheap re-broadcast. */
 private const val OWN_DEVICE_CATCHUP_LIMIT = 50u
@@ -590,6 +595,7 @@ object HavenNet : InboundListener {
                 fabricBoundUrls = activeFabricUrls()
                 withContext(Dispatchers.Main) { started.value = true }
                 Log.i(TAG, "node started: ${node?.nodeIdHex()}")
+                publishAccountDevices()   // account id -> my device ids, so contacts can dial me relay-free
                 // Matrix QA: dump our public identity so Scripts/qa-exchange-bundles.sh can seed iOS,
                 // and ingest qa-peer-bundle.bin if the driver staged a sim peer (HTTP-mailbox stub path
                 // where HELLO cannot dial). Without mutual addContactBundle reverse media never opens.
@@ -1853,6 +1859,48 @@ object HavenNet : InboundListener {
     private fun deviceHintsFor(accountHex: String): List<String> =
         deviceHints[accountHex.lowercase()] ?: emptyList()
 
+    // ---- Account device discovery (relay-optional reachability) --------------------------
+
+    /** Publish my account -> device-id mapping to the public directory, so a contact who holds only
+     *  my account id can dial one of my devices with NO relay in common. Fire-and-forget; the
+     *  publisher re-publishes on its own TTL for as long as the node lives. iOS parity. */
+    private fun publishAccountDevices() {
+        val n = node ?: return
+        scope.launch {
+            runCatching { n.publishAccountDevices(social) }
+                .onSuccess { if (it.isNotEmpty()) Log.i(TAG, "discovery published devices=${it.size}") }
+                .onFailure { Log.w(TAG, "discovery publish failed: ${it.message}") }   // additive - never fatal
+        }
+    }
+
+    /** Accounts we have asked the directory about recently, so a sync tick does not re-query a
+     *  contact who simply has not published (every pre-discovery install - the common case). */
+    private val discoveryAskedAt = HashMap<String, Long>()
+
+    /** Look up device ids for contacts we have NO way to dial - no signed roster, no invite hint,
+     *  just an account id that is not a transport address. Without this such a contact is only
+     *  reachable through a relay both sides happen to share; with it, two online devices can find
+     *  each other and let iroh hole-punch. Results land in the same hint store the invite `?d=` ids
+     *  use - a dial hint, never an authorization. */
+    private fun resolveMissingDeviceIds(accounts: List<String>) {
+        val n = node ?: return
+        val now = nowMs()
+        val ask = accounts.filter { a ->
+            val key = a.lowercase()
+            val at = discoveryAskedAt[key]
+            if (at != null && now - at < DISCOVERY_RETRY_MS) false else { discoveryAskedAt[key] = now; true }
+        }
+        if (ask.isEmpty()) return
+        scope.launch {
+            for (a in ask) {
+                val ids = runCatching { n.resolveAccountDevices(a) }.getOrNull() ?: continue
+                if (ids.isEmpty()) continue
+                Log.i(TAG, "discovery resolved ${a.take(8)} devices=${ids.size}")
+                recordDeviceHints(a, ids)
+            }
+        }
+    }
+
     /** Approve a pending request: add them, persist, and Hello back so they auto-accept us. */
     fun approve(req: PendingRequest) {
         // Approving IS a deliberate re-add — clear any old removal tombstone or their hellos stay
@@ -2164,11 +2212,18 @@ object HavenNet : InboundListener {
         val mineDev = runCatching { social.myDeviceNodeHex() }.getOrNull()?.lowercase()
         val out = LinkedHashSet<String>()
         fun add(h: String) { val l = h.lowercase(); if (l != mineAcct && l != mineDev) out.add(h) }
+        val undialable = ArrayList<String>()
         for (a in runCatching { social.contactNodeIds(circleId) }.getOrDefault(emptyList())) {
             add(a)
-            for (d in runCatching { social.deviceNodeIdsFor(a) }.getOrDefault(emptyList())) add(d)
-            for (h in deviceHintsFor(a)) add(h)   // invite-link hints (until their roster lands)
+            val devices = runCatching { social.deviceNodeIdsFor(a) }.getOrDefault(emptyList())
+            for (d in devices) add(d)
+            val hints = deviceHintsFor(a)
+            for (h in hints) add(h)   // invite-link hints (until their roster lands)
+            // Nothing but the account id, which is an identity and not an address: this member is
+            // unreachable except through a shared relay. Ask the public directory for their devices.
+            if (hints.isEmpty() && devices.all { it.lowercase() == a.lowercase() }) undialable.add(a)
         }
+        if (undialable.isNotEmpty()) resolveMissingDeviceIds(undialable)
         return out.toList()
     }
 
@@ -3628,8 +3683,16 @@ object HavenNet : InboundListener {
     fun eraseRelayNow(nodeHex: String) {
         val hex = if (nodeHex.startsWith("s3:")) nodeHex else nodeHex.trim().lowercase()
         scope.launch {
+            val servedCircles = relayNodes.filterValues { it.contains(hex) }.keys.toList()
             for (list in relayNodes.values) list.removeAll { it == hex }
             relayNodes.entries.removeAll { it.value.isEmpty() }
+            // Archive BEFORE the entry and its associations are gone — afterwards there is nothing
+            // left to reconstruct it from. Note relayNodes was already swept above, so the circle list
+            // is captured from the pre-sweep snapshot taken at the top of this block.
+            relayEntries[hex]?.let { e ->
+                erasedRelays[hex] = ErasedRelay(e, servedCircles, defaultRelayHex == hex, relayNow())
+                pruneErasedRelays()
+            }
             if (defaultRelayHex == hex) defaultRelayHex = ""
             relayEntries.remove(hex)
             suppressedRelays.add(hex)
@@ -3743,6 +3806,63 @@ object HavenNet : InboundListener {
     fun allRelayEntries(): List<RelayEntry> = relayEntries.values.sortedWith(
         compareByDescending<RelayEntry> { it.active }.thenBy { it.name.lowercase() }
     )
+
+    // ---- Deleted-relay archive (undo for "Delete now") -----------------------------------
+    //
+    // eraseRelayNow drops the entry, every circle association and the default pick, and a relay is a
+    // 64-character node id — not something anyone re-adds from memory. Archive enough to put it back.
+    // Apple parity (RelayMailboxStore.erasedRelays / restoreErased).
+
+    data class ErasedRelay(val entry: RelayEntry, val circles: List<String>, val wasDefault: Boolean, val erasedAt: Long)
+
+    private val erasedRelays = LinkedHashMap<String, ErasedRelay>()
+    private const val ERASED_KEEP_MAX = 12
+    private const val ERASED_TTL_MS = 30L * 24 * 60 * 60 * 1000
+
+    /** Deleted relays that can still be brought back, newest deletion first. */
+    fun erasedRelayList(): List<ErasedRelay> {
+        val cutoff = relayNow() - ERASED_TTL_MS
+        return erasedRelays.values.filter { it.erasedAt > cutoff }.sortedByDescending { it.erasedAt }
+    }
+
+    /** Undo a "Delete now": put the entry, its circle associations and (if it held it) the default
+     *  back, clearing the suppression + deletion stamps so the next self-sync pass cannot read our own
+     *  tombstone and delete it again. */
+    fun restoreErasedRelay(nodeHex: String) {
+        val hex = if (nodeHex.startsWith("s3:")) nodeHex else nodeHex.trim().lowercase()
+        val rec = erasedRelays.remove(hex) ?: return
+        scope.launch {
+            val now = relayNow()
+            relayEntries[hex] = rec.entry.copy(active = true, lastSeenMs = now, addedAtMs = now)
+            for (cid in rec.circles) {
+                val list = relayNodes.getOrPut(cid) { mutableListOf() }
+                if (!list.contains(hex)) list.add(hex)
+            }
+            if (rec.wasDefault && defaultRelayHex.isEmpty()) defaultRelayHex = hex
+            suppressedRelays.remove(hex)
+            forgotAtRelays.remove(hex)
+            clearedRelayForgets[hex] = now   // publish an explicit CLEAR so a sibling's tombstone loses
+            forgetBackedUp(hex)              // its copy of our media may be stale or gone — re-mirror
+            relayMutex.withLock { relayHealth.remove(hex) }
+            saveRelayNodes()
+            withContext(Dispatchers.Main) { bumpRelays() }
+        }
+    }
+
+    /** Forget an archived deletion for good (the user chose not to keep the undo around). */
+    fun dropErasedRelay(nodeHex: String) {
+        if (erasedRelays.remove(nodeHex) == null) return
+        saveRelayNodes(); bumpRelays()
+    }
+
+    private fun pruneErasedRelays() {
+        val cutoff = relayNow() - ERASED_TTL_MS
+        erasedRelays.entries.removeAll { it.value.erasedAt <= cutoff }
+        while (erasedRelays.size > ERASED_KEEP_MAX) {
+            val oldest = erasedRelays.values.minByOrNull { it.erasedAt } ?: break
+            erasedRelays.remove(oldest.entry.hex)
+        }
+    }
 
     /** The all-circles default relay hex, or null. */
     fun defaultRelay(): String? = defaultRelayHex.ifEmpty { null }
@@ -6394,6 +6514,35 @@ object HavenNet : InboundListener {
                 }
             }
         }
+        prefs.getString("relaysErased", null)?.let { raw ->
+            runCatching {
+                val a = JSONArray(raw)
+                for (i in 0 until a.length()) {
+                    val o = a.getJSONObject(i)
+                    val hex = o.getString("hex")
+                    erasedRelays[hex] = ErasedRelay(
+                        entry = RelayEntry(
+                            hex = hex,
+                            name = o.optString("name", shortRelayName(hex)),
+                            active = false,
+                            lastSeenMs = o.optLong("erasedAt", relayNow()),
+                            isS3 = o.optBoolean("isS3", hex.startsWith("s3:")),
+                            httpUrls = o.optJSONArray("httpUrls")?.let { arr ->
+                                (0 until arr.length()).mapNotNull { j -> arr.optString(j).takeIf { it.isNotEmpty() } }
+                            } ?: emptyList(),
+                            httpToken = o.optString("httpToken", ""),
+                            derpUrl = o.optString("derpUrl", ""),
+                        ),
+                        circles = o.optJSONArray("circles")?.let { arr ->
+                            (0 until arr.length()).mapNotNull { j -> arr.optString(j).takeIf { it.isNotEmpty() } }
+                        } ?: emptyList(),
+                        wasDefault = o.optBoolean("wasDefault", false),
+                        erasedAt = o.optLong("erasedAt", relayNow()),
+                    )
+                }
+                pruneErasedRelays()
+            }
+        }
         // Migrate any relay that only exists in relayNodes/the default into a RelayEntry.
         migrateRelayEntries()
         refreshHavenFabric()
@@ -6477,6 +6626,7 @@ object HavenNet : InboundListener {
             fabricBoundUrls = activeFabricUrls()
             withContext(Dispatchers.Main) { started.value = true; internetActive.value = true }
             Log.i(TAG, "fabric rebind ok urls=${fabricBoundUrls.size}")
+            publishAccountDevices()   // the record is per-endpoint - re-publish on the new node
             if (wasHosting) {
                 // Light re-attach (same as startHosting but without re-adopt storm).
                 val n = node
@@ -6551,6 +6701,17 @@ object HavenNet : InboundListener {
                 if (e.turnPass.isNotEmpty()) put("turnPass", e.turnPass)
             })
         }
+        val erasedArr = JSONArray()
+        erasedRelays.values.forEach { r ->
+            erasedArr.put(JSONObject().apply {
+                put("hex", r.entry.hex); put("name", r.entry.name); put("isS3", r.entry.isS3)
+                put("erasedAt", r.erasedAt); put("wasDefault", r.wasDefault)
+                put("circles", JSONArray(r.circles))
+                if (r.entry.httpUrls.isNotEmpty()) put("httpUrls", JSONArray(r.entry.httpUrls))
+                if (r.entry.httpToken.isNotEmpty()) put("httpToken", r.entry.httpToken)
+                if (r.entry.derpUrl.isNotEmpty()) put("derpUrl", r.entry.derpUrl)
+            })
+        }
         val forgotAtJson = JSONObject().apply { forgotAtRelays.forEach { (k, v) -> put(k, v) } }
         val clearedForgotJson = JSONObject().apply { clearedRelayForgets.forEach { (k, v) -> put(k, v) } }
         // Write the new format and clear the legacy key (completes the migration).
@@ -6560,6 +6721,7 @@ object HavenNet : InboundListener {
             .putString("relaysForgotAt", forgotAtJson.toString())
             .putString("relaysClearedForgot", clearedForgotJson.toString())
             .putString("relayEntries", entriesArr.toString())
+            .putString("relaysErased", erasedArr.toString())
             .putString("relayDefault", defaultRelayHex)
             .remove("relayNodes").apply()
     }
@@ -6572,7 +6734,7 @@ object HavenNet : InboundListener {
         relayNodes.clear(); relayClients.clear(); relayHealth.clear(); seenMailbox.clear()
         runCatching { seenMailboxFile.delete() }   // a new identity must not inherit the seen-set
         invalidateListDigests()   // a fresh seen-set must re-list everything (no 204 short-circuit)
-        relayEntries.clear(); suppressedRelays.clear(); forgotAtRelays.clear(); clearedRelayForgets.clear(); defaultRelayHex = ""
+        relayEntries.clear(); suppressedRelays.clear(); forgotAtRelays.clear(); clearedRelayForgets.clear(); erasedRelays.clear(); defaultRelayHex = ""
         Presign.reset()
         CircleLock.reset()
         AvatarStore.clear()

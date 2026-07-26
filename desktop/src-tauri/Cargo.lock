@@ -2473,6 +2473,7 @@ dependencies = [
  "haven-p2p",
  "iroh",
  "iroh-relay",
+ "n0-future",
  "rand 0.8.6",
  "rustls",
  "serde_json",

@@ -151,6 +151,19 @@ pub struct RelayEntry {
     pub turn_pass: String,
 }
 
+/// A deleted relay, kept just long enough to undo the deletion (see `Prefs::erased_relays`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ErasedRelay {
+    pub entry: RelayEntry,
+    /// The circles it served, so a restore puts it back where it was rather than nowhere.
+    #[serde(default)]
+    pub circles: Vec<String>,
+    #[serde(default)]
+    pub was_default: bool,
+    #[serde(default)]
+    pub erased_at: u64,
+}
+
 /// Erase an inactive+unseen relay entry after this long (7 days), matching iOS `staleAfterMs`.
 pub const RELAY_STALE_AFTER_MS: u64 = 7 * 24 * 3600 * 1000;
 
@@ -269,6 +282,12 @@ pub struct Prefs {
     /// `RelayMailboxStore.entries` (UserDefaults key `haven.relay.entries`).
     #[serde(default)]
     pub relay_entries: std::collections::HashMap<String, RelayEntry>,
+    /// Relays the user DELETED, archived so the delete can be undone. `erase_relay` drops the live
+    /// entry, every circle association and the default pick, so nothing about a deleted relay survives
+    /// otherwise — and a relay is a 64-character node id, not something anyone re-adds from memory.
+    /// Capped + TTL'd in `Engine::erase_relay`. Mirrors iOS `RelayMailboxStore.erasedRelays`.
+    #[serde(default)]
+    pub erased_relays: std::collections::HashMap<String, ErasedRelay>,
     /// Shared relay secret for OUR hosted relay's plain-HTTP interface (generated once at first
     /// host). A pre-filter mixed into request signatures — membership is what authorizes.
     #[serde(default)]

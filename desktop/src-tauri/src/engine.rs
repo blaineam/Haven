@@ -357,6 +357,8 @@ pub struct Engine {
     media: LocalMedia,
     app: StdMutex<Option<AppHandle>>,
     node: StdMutex<Option<Arc<HavenNode>>>,
+    /// Accounts we have asked the public directory about, and when (`resolve_missing_device_ids`).
+    discovery_asked: StdMutex<HashMap<String, u64>>,
     relay_host: StdMutex<Option<Arc<RelayServerHandle>>>,
     /// Live cloudflared process (quick or named) for the **public front door** (media, or
     /// path-router when fabric is unified). Dropped when hosting stops. Manual never sets this.
@@ -663,6 +665,7 @@ impl Engine {
             media,
             app: StdMutex::new(None),
             node: StdMutex::new(None),
+            discovery_asked: StdMutex::new(HashMap::new()),
             relay_host: StdMutex::new(None),
             quick_tunnel: StdMutex::new(None),
             derp_tunnel: StdMutex::new(None),
@@ -772,6 +775,7 @@ impl Engine {
             media,
             app: StdMutex::new(None),
             node: StdMutex::new(None),
+            discovery_asked: StdMutex::new(HashMap::new()),
             relay_host: StdMutex::new(None),
             quick_tunnel: StdMutex::new(None),
             derp_tunnel: StdMutex::new(None),
@@ -1113,6 +1117,55 @@ impl Engine {
         self.prefs.lock().unwrap().device_hints.get(&account_hex.to_lowercase()).cloned().unwrap_or_default()
     }
 
+    // ---- account device discovery (relay-optional reachability) --------------------------
+
+    /// Publish my account -> device-id mapping to the public directory, so a contact who holds only
+    /// my account id can dial one of my devices with NO relay in common. Fire-and-forget; the
+    /// publisher re-publishes on its own TTL for as long as the node lives. iOS/Android parity.
+    fn publish_account_devices(self: &Arc<Self>) {
+        let node = self.node.lock().unwrap().clone();
+        let Some(node) = node else { return };
+        let social = self.social.clone();
+        tauri::async_runtime::spawn(async move {
+            match node.publish_account_devices(social).await {
+                Ok(ids) if !ids.is_empty() => log::info!("discovery published devices={}", ids.len()),
+                Ok(_) => {}
+                Err(e) => log::debug!("discovery publish failed: {e}"),   // additive - never fatal
+            }
+        });
+    }
+
+    /// Look up device ids for a contact we have NO way to dial — no signed roster, no invite hint,
+    /// just an account id that is not a transport address. Results are recorded as dial HINTS, never
+    /// as authorization: content stays sealed to the circle epoch key and inbound frames stay gated
+    /// on the signed roster. Throttled per account (most contacts have simply never published, and
+    /// an unthrottled lookup would fire a DNS round-trip per peer per sync tick to learn nothing).
+    fn resolve_missing_device_ids(self: &Arc<Self>, account_hex: &str) {
+        const RETRY_MS: u64 = 600_000; // 10 min
+        let node = self.node.lock().unwrap().clone();
+        let Some(node) = node else { return };
+        let key = account_hex.to_lowercase();
+        {
+            let mut asked = self.discovery_asked.lock().unwrap();
+            let now = now_ms();
+            if let Some(at) = asked.get(&key) {
+                if now.saturating_sub(*at) < RETRY_MS {
+                    return;
+                }
+            }
+            asked.insert(key.clone(), now);
+        }
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let Ok(ids) = node.resolve_account_devices(key.clone()).await else { return };
+            if ids.is_empty() {
+                return;
+            }
+            log::info!("discovery resolved {} devices={}", &key[..8.min(key.len())], ids.len());
+            me.record_device_hints(&key, ids);
+        });
+    }
+
     pub fn get_profile(&self) -> Profile {
         self.prefs.lock().unwrap().profile.clone()
     }
@@ -1258,6 +1311,9 @@ impl Engine {
         match HavenNode::start(device_seed, listener).await {
             Ok(node) => {
                 *self.node.lock().unwrap() = Some(node);
+                // Account id -> my device ids in the public directory, so a contact who holds only
+                // my account id can dial me with NO relay in common (parity with iOS/Android).
+                self.publish_account_devices();
                 // Record which fabric map this bind used so mid-session learns can soft-rebind only
                 // when the set actually changes (not on every refresh).
                 self.fabric_rebind.lock().unwrap().bound_derp_urls = haven_net::active_derp_urls();
@@ -4405,10 +4461,17 @@ impl Engine {
         }
         // Invite-link dial hints bridge the roster bootstrap: until this contact's signed roster
         // lands, their account id resolves to no node — the hint is the only real id.
-        for h in self.device_hints_for(to_node_hex) {
-            if !targets.iter().any(|t| t.eq_ignore_ascii_case(&h)) {
-                targets.push(h);
+        let hints = self.device_hints_for(to_node_hex);
+        for h in &hints {
+            if !targets.iter().any(|t| t.eq_ignore_ascii_case(h)) {
+                targets.push(h.clone());
             }
+        }
+        // Nothing but the account id, which is an identity and not an address: this peer is
+        // unreachable except through a relay we happen to share. Ask the public directory for their
+        // devices — the answer lands in the hint store above and the NEXT send can dial it.
+        if hints.is_empty() && targets.iter().all(|t| t.eq_ignore_ascii_case(to_node_hex)) {
+            self.resolve_missing_device_ids(to_node_hex);
         }
         for to in targets {
             let node = node.clone();
@@ -6427,14 +6490,35 @@ impl Engine {
         let hex = Self::norm_relay_hex(&node_hex);
         {
             let mut p = self.prefs.lock().unwrap();
+            let served: Vec<String> =
+                p.relays.iter().filter(|(_, v)| v.contains(&hex)).map(|(k, _)| k.clone()).collect();
             for list in p.relays.values_mut() {
                 list.retain(|h| h != &hex);
             }
             p.relays.retain(|_, v| !v.is_empty());
+            // Archive BEFORE the entry and its associations are gone — afterwards there is nothing
+            // left to reconstruct it from. Capped at 12 / 30 days: enough to undo a mistake, not a
+            // permanent record of every relay the app ever auto-purged.
+            if let Some(e) = p.relay_entries.remove(&hex) {
+                let now = now_ms();
+                let was_default = p.default_relay == hex;
+                p.erased_relays.insert(
+                    hex.clone(),
+                    crate::store::ErasedRelay { entry: e, circles: served, was_default, erased_at: now },
+                );
+                let cutoff = now.saturating_sub(30 * 24 * 60 * 60 * 1000);
+                p.erased_relays.retain(|_, r| r.erased_at > cutoff);
+                while p.erased_relays.len() > 12 {
+                    if let Some(oldest) = p.erased_relays.values().min_by_key(|r| r.erased_at).map(|r| r.entry.hex.clone()) {
+                        p.erased_relays.remove(&oldest);
+                    } else {
+                        break;
+                    }
+                }
+            }
             if p.default_relay == hex {
                 p.default_relay.clear();
             }
-            p.relay_entries.remove(&hex);
             if !p.suppressed_relays.contains(&hex) {
                 p.suppressed_relays.push(hex.clone());
             }
@@ -6443,6 +6527,59 @@ impl Engine {
         }
         self.relay_clients.lock().await.remove(&hex);
         self.relay_health.lock().unwrap().remove(&hex);
+        self.emit_changed();
+    }
+
+    /// Deleted relays that can still be brought back, newest deletion first (the "Deleted relays"
+    /// disclosure on the Relays screen). Mirrors iOS `erasedRelays` / Android `erasedRelayList`.
+    pub fn erased_relays(&self) -> Vec<crate::store::ErasedRelay> {
+        let p = self.prefs.lock().unwrap();
+        let cutoff = now_ms().saturating_sub(30 * 24 * 60 * 60 * 1000);
+        let mut out: Vec<_> = p.erased_relays.values().filter(|r| r.erased_at > cutoff).cloned().collect();
+        out.sort_by(|a, b| b.erased_at.cmp(&a.erased_at));
+        out
+    }
+
+    /// Undo a "Delete now": put the entry, its circle associations and (if it held it) the default
+    /// pick back, clearing the suppression + deletion stamps so the next self-sync pass cannot read
+    /// our own tombstone and delete it again.
+    pub async fn restore_erased_relay(self: &Arc<Self>, node_hex: String) {
+        let hex = Self::norm_relay_hex(&node_hex);
+        {
+            let mut p = self.prefs.lock().unwrap();
+            let Some(rec) = p.erased_relays.remove(&hex) else { return };
+            let now = now_ms();
+            let mut entry = rec.entry.clone();
+            entry.active = true;
+            entry.last_seen_ms = now;
+            entry.added_at_ms = now;   // a re-add stamped NOW beats any sibling's older removal record
+            p.relay_entries.insert(hex.clone(), entry);
+            for cid in &rec.circles {
+                let list = p.relays.entry(cid.clone()).or_default();
+                if !list.contains(&hex) {
+                    list.push(hex.clone());
+                }
+            }
+            if rec.was_default && p.default_relay.is_empty() {
+                p.default_relay = hex.clone();
+            }
+            p.relay_clear_forget(&hex);   // publish an explicit CLEAR so a sibling's tombstone loses
+            let _ = p.save(&self.paths);
+        }
+        self.relay_health.lock().unwrap().remove(&hex);   // retry it immediately, not after a backoff
+        log::info!("restored deleted relay {}", &hex[..8.min(hex.len())]);
+        self.emit_changed();
+        self.poll_mailbox().await;
+    }
+
+    /// Forget an archived deletion for good (the user chose not to keep the undo around).
+    pub fn drop_erased_relay(self: &Arc<Self>, node_hex: String) {
+        let hex = Self::norm_relay_hex(&node_hex);
+        let mut p = self.prefs.lock().unwrap();
+        if p.erased_relays.remove(&hex).is_some() {
+            let _ = p.save(&self.paths);
+        }
+        drop(p);
         self.emit_changed();
     }
 

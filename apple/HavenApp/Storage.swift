@@ -845,6 +845,8 @@ struct RelaysView: View {
                     footer: { Text("★ covers circles without their own pick. Removing only deactivates.") }
                 }
 
+                DeletedRelaysSection()
+
                 Section {
                     Button { showAdd = true } label: {
                         Label("Add relay", systemImage: "plus.circle.fill").foregroundStyle(HavenTheme.pink)
@@ -948,6 +950,59 @@ struct RelaysView: View {
         // only provenAlive (recent successful op) paints green.
         if backedOff { return "Unreachable — retrying (still listed)" }
         return "Listed · not proven online (may be off)"
+    }
+}
+
+/// Deleted relays, on the screen you deleted them from. "Delete now" drops the entry, every circle
+/// association and the default pick, and a relay is a 64-character node id — not something anyone
+/// re-adds from memory. The archive (`RelayMailboxStore.erasedRelays`, 30 days) makes that one
+/// destructive action undoable; deactivated relays are NOT listed here because they're already in the
+/// list above with a Reactivate button.
+///
+/// Behind a disclosure and hidden entirely when nothing is recoverable, so it never clutters the
+/// common case.
+struct DeletedRelaysSection: View {
+    @ObservedObject private var store = RelayMailboxStore.shared
+    @State private var expanded = false
+
+    private var gone: [ErasedRelay] { store.erasedRelays }
+
+    var body: some View {
+        if !gone.isEmpty {
+            Section {
+                DisclosureGroup(isExpanded: $expanded) {
+                    ForEach(gone) { rec in
+                        HStack(spacing: 10) {
+                            Image(systemName: "clock.arrow.circlepath")
+                                .font(.caption2).foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(rec.entry.name.isEmpty ? "\(rec.entry.hex.prefix(12))…" : rec.entry.name)
+                                    .font(.footnote)
+                                Text(rec.circles.isEmpty
+                                     ? "\(rec.entry.hex.prefix(12))…"
+                                     : "\(rec.entry.hex.prefix(12))… · \(rec.circles.count) circle\(rec.circles.count == 1 ? "" : "s")")
+                                    .font(.system(.caption2, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Restore") { store.restoreErased(rec.entry.hex) }
+                                .buttonStyle(.borderless)
+                                .font(.caption)
+                        }
+                        .swipeActions {
+                            Button(role: .destructive) { store.dropErased(rec.entry.hex) } label: {
+                                Label("Forget", systemImage: "trash")
+                            }
+                        }
+                    }
+                } label: {
+                    Label("Deleted relays · \(gone.count)", systemImage: "arrow.uturn.backward")
+                        .font(.subheadline)
+                }
+            } footer: {
+                Text("Restore puts a deleted relay back in the circles it served. Cleared after 30 days.")
+            }
+        }
     }
 }
 

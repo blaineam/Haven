@@ -721,6 +721,8 @@ private fun StorageSyncCard(context: android.content.Context) {
 private fun RelaysHubCard(context: android.content.Context) {
     val relaysVersion by HavenNet.relaysVersion
     val entries = remember(relaysVersion) { HavenNet.allRelayEntries() }
+    val deleted = remember(relaysVersion) { HavenNet.erasedRelayList() }
+    var showDeleted by remember { mutableStateOf(false) }
     val default = remember(relaysVersion) { HavenNet.defaultRelay() }
     val detail = remember(relaysVersion) { HavenNet.relaysDetail().associate { it.first to (it.second to it.third) } }
     var showAdd by remember { mutableStateOf(false) }
@@ -796,6 +798,46 @@ private fun RelaysHubCard(context: android.content.Context) {
                     onRename = { renaming = e.hex; renameText = e.name },
                     onDelete = { HavenNet.eraseRelayNow(e.hex) },
                 )
+            }
+        }
+    }
+
+    // Deleted relays — the undo for "Delete now", which drops the entry, every circle association
+    // and the default pick. A relay is a 64-character node id, not something anyone re-adds from
+    // memory. Hidden entirely when there is nothing to recover. Apple parity (DeletedRelaysSection).
+    if (deleted.isNotEmpty()) {
+        Spacer(Modifier.height(16.dp))
+        Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { showDeleted = !showDeleted }.padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Text("Deleted relays · ${deleted.size}", color = HavenTheme.textPrimary,
+                    fontWeight = FontWeight.SemiBold, fontSize = 16.sp, modifier = Modifier.weight(1f))
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = HavenTheme.textSecondary)
+            }
+            if (!showDeleted) {
+                Spacer(Modifier.height(4.dp))
+                Text("Restore a relay you deleted. Cleared after 30 days.",
+                    color = HavenTheme.textSecondary, fontSize = 12.sp)
+            } else {
+                Spacer(Modifier.height(8.dp))
+                deleted.forEach { rec ->
+                    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(rec.entry.name.ifBlank { rec.entry.hex.take(12) + "…" },
+                                color = HavenTheme.textPrimary, fontSize = 14.sp)
+                            Text(if (rec.circles.isEmpty()) rec.entry.hex.take(12) + "…"
+                                 else rec.entry.hex.take(12) + "… · " + rec.circles.size +
+                                      (if (rec.circles.size == 1) " circle" else " circles"),
+                                color = HavenTheme.textSecondary, fontSize = 11.sp)
+                        }
+                        TextButton(onClick = { HavenNet.restoreErasedRelay(rec.entry.hex) }) {
+                            Text("Restore", color = HavenTheme.pink, fontSize = 13.sp)
+                        }
+                        TextButton(onClick = { HavenNet.dropErasedRelay(rec.entry.hex) }) {
+                            Text("Forget", color = HavenTheme.textSecondary, fontSize = 13.sp)
+                        }
+                    }
+                }
             }
         }
     }

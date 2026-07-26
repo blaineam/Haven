@@ -490,17 +490,31 @@ async function activityPanel() {
       el("div", { class: "h" }, "Nothing yet"),
       el("div", {}, "Reactions, comments, new posts and messages land here.")));
   }
-  for (const r of rows) {
+  // WINDOWED. An account that has been running a while accumulates thousands of activity rows, and
+  // building a DOM node for every one of them froze the panel on open for what looked like a hang.
+  // Render a page at a time; older rows cost nothing until asked for. Apple parity (ActivityView).
+  const PAGE = 40;
+  let shown = 0;
+  const row = (r) => {
     const unread = r.created_at > seenAt;
     const title = r.kind === "app" ? (r.actor_name || "Haven") : `${r.actor_name || "Someone"} · ${verb(r)}`;
-    list.append(el("div", { class: "thread-item", onclick: async () => { closeModal(); if (r.link) await routeDeepLink(r.link); } },
+    return el("div", { class: "thread-item", onclick: async () => { closeModal(); if (r.link) await routeDeepLink(r.link); } },
       el("div", { class: "avatar" }, r.kind === "app" ? "🔔" : initials(r.actor_name || "?")),
       el("div", { style: "flex:1;min-width:0" },
         el("div", { class: "name" + (unread ? " unread" : "") }, title),
         el("div", { class: "preview" + (unread ? " unread" : ""), style: "white-space:nowrap;overflow:hidden;text-overflow:ellipsis" }, r.snippet || "")),
       el("div", { class: "muted small" }, relTime(r.created_at)),
-    ));
-  }
+    );
+  };
+  const more = el("button", { class: "btn small", onclick: () => showMore() }, "Show older");
+  const showMore = () => {
+    const next = rows.slice(shown, shown + PAGE);
+    shown += next.length;
+    for (const r of next) list.insertBefore(row(r), more);
+    more.textContent = `Show older · ${rows.length - shown} left`;
+    if (shown >= rows.length) more.remove();
+  };
+  if (rows.length) { list.append(more); showMore(); }
   sheet("Activity", list);
   refreshBadges();   // opening marked everything seen — clear the badge now, not on the next sync
 }
@@ -3964,6 +3978,28 @@ async function relaySheet() {
     ));
   }
   if (!relayList.length) adoptCard.append(el("div", { class: "muted small" }, "No relays yet — host one above, adopt a friend's, or add an S3 bucket below."));
+  // Deleted relays — the undo for "Delete", which drops the entry, every circle association and the
+  // default pick. A relay is a 64-character node id, not something anyone re-adds from memory.
+  // Hidden entirely when there is nothing to recover. Apple/Android parity.
+  const erased = await invoke("erased_relays").catch(() => []);
+  if (erased.length) {
+    const det = el("details", { class: "list-item col", style: "align-items:stretch;gap:6px" });
+    det.append(el("summary", {}, `Deleted relays · ${erased.length}`));
+    for (const rec of erased) {
+      const e = rec.entry || {};
+      det.append(el("div", { class: "row", style: "gap:8px;align-items:center" },
+        el("div", { style: "flex:1;min-width:0" },
+          el("div", { style: "overflow:hidden;text-overflow:ellipsis" }, e.name || (e.hex || "").slice(0, 12) + "…"),
+          el("div", { class: "mono small muted" },
+            (e.hex || "").slice(0, 20) + "…" + (rec.circles && rec.circles.length ? ` · ${rec.circles.length} circle${rec.circles.length === 1 ? "" : "s"}` : "")),
+        ),
+        el("button", { class: "btn small primary", onclick: async () => { await invoke("restore_erased_relay", { nodeHex: e.hex }); toast("Relay restored"); renderRelay(); } }, "Restore"),
+        el("button", { class: "btn small", onclick: async () => { await invoke("drop_erased_relay", { nodeHex: e.hex }); renderRelay(); } }, "Forget"),
+      ));
+    }
+    det.append(el("div", { class: "muted small" }, "Restore puts a deleted relay back in the circles it served. Cleared after 30 days."));
+    adoptCard.append(det);
+  }
   adoptCard.append(el("div", { class: "row" }, adoptInput, el("button", { class: "btn primary", onclick: async () => {
     const v = adoptInput.value.trim();
     const okBare = v.length === 64 && /^[0-9a-fA-F]+$/.test(v);

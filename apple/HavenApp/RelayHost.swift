@@ -1143,6 +1143,16 @@ final class RelayHost: ObservableObject {
 /// One configured relay: a Haven relay node (isS3=false) or an S3 bucket transport (isS3=true).
 /// `hex` is the node id for a Haven relay, or a synthetic "s3:<bucket>" id for an S3 entry (so the
 /// same map can address both kinds — SharedStore already treats them as interchangeable transports).
+/// A deleted relay, kept just long enough to undo the deletion (see `RelayMailboxStore.erasedRelays`).
+struct ErasedRelay: Codable, Identifiable, Equatable {
+    var entry: RelayEntry
+    /// The circles it served, so Restore puts it back where it was rather than nowhere.
+    var circles: [String]
+    var wasDefault: Bool
+    var erasedAt: UInt64
+    var id: String { entry.hex }
+}
+
 struct RelayEntry: Codable, Identifiable, Equatable {
     var hex: String
     var name: String
@@ -1202,6 +1212,16 @@ final class RelayMailboxStore: ObservableObject {
     /// re-forget a re-added relay on every sibling's sync pass, forever.
     private var clearedRelayForgets: [String: UInt64] = [:]
     private let clearedRelayForgetsKey = "haven.relay.forgotAt.cleared"
+    /// Relays the user DELETED, archived so the delete can be undone. `eraseNow` drops the live entry,
+    /// every circle association and the default pick, so nothing about a deleted relay survives on disk
+    /// otherwise — "Delete now" was the one action in the app with no way back, and a relay you can no
+    /// longer name (it's a 64-char node id) is not something you re-add from memory.
+    private var erased: [String: ErasedRelay] = [:]
+    private let erasedKey = "haven.relay.erased"
+    /// Cap + TTL for the archive: enough to undo a mistake, not a permanent record of every relay the
+    /// app ever auto-purged.
+    private static let erasedKeepMax = 12
+    private static let erasedTtlMs: UInt64 = 30 * 24 * 60 * 60 * 1000
 
     private func nowMs() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
 
@@ -1305,6 +1325,10 @@ final class RelayMailboxStore: ObservableObject {
         suppressed = Set((d.array(forKey: suppressedKey) as? [String]) ?? [])
         forgotAt = (d.dictionary(forKey: forgotAtKey) as? [String: UInt64]) ?? [:]
         clearedRelayForgets = (d.dictionary(forKey: clearedRelayForgetsKey) as? [String: UInt64]) ?? [:]
+        if let data = d.data(forKey: erasedKey),
+           let decoded = try? JSONDecoder().decode([String: ErasedRelay].self, from: data) {
+            erased = decoded
+        }
         // MIGRATION: relays deleted on a build BEFORE the deletion-timestamp existed are in
         // `suppressed` but have no `forgotAt` entry. Without a deletion time the LWW gate can't tell
         // a deliberate re-add from an owner merely reopening the app, so those old deletions leaked
@@ -1702,6 +1726,64 @@ final class RelayMailboxStore: ObservableObject {
         objectWillChange.send()
     }
 
+    /// Relays the user DELETED that can still be brought back, newest deletion first.
+    var erasedRelays: [ErasedRelay] {
+        let cutoff = nowMs() &- Self.erasedTtlMs
+        return erased.values.filter { $0.erasedAt > cutoff }.sorted { $0.erasedAt > $1.erasedAt }
+    }
+
+    /// Undo a "Delete now": put the entry, its circle associations and (if it held it) the default pick
+    /// back, and clear the suppression/deletion stamps the same way `restore` does — otherwise the very
+    /// next self-sync pass would read our own tombstone and delete it again.
+    func restoreErased(_ nodeHex: String) {
+        let hex = nodeHex.hasPrefix("s3:") ? nodeHex : nodeHex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard let rec = erased.removeValue(forKey: hex) else { return }
+        var e = rec.entry
+        e.active = true
+        e.lastSeenMs = nowMs()
+        e.addedAtMs = nowMs()   // a re-add stamped NOW beats any sibling's older removal record
+        entries[hex] = e
+        for cid in rec.circles where !(relaysByCircle[cid]?.contains(hex) ?? false) {
+            relaysByCircle[cid, default: []].append(hex)
+        }
+        if rec.wasDefault, defaultNodeHex == nil { defaultNodeHex = hex }
+        suppressed.remove(hex)
+        forgotAt.removeValue(forKey: hex)
+        clearedRelayForgets[hex] = nowMs()
+        persistEntries()
+        persistErased()
+        UserDefaults.standard.set(relaysByCircle, forKey: key)
+        UserDefaults.standard.set(Array(suppressed), forKey: suppressedKey)
+        UserDefaults.standard.set(forgotAt, forKey: forgotAtKey)
+        UserDefaults.standard.set(clearedRelayForgets, forKey: clearedRelayForgetsKey)
+        MediaBackupLedger.forgetDest(hex)   // its copy of our media may be stale or gone — re-mirror
+        RelayHealth.shared.forget(hex)      // clear any stale backoff so it is retried immediately
+        HavenLog.relay("RESTORED deleted relay \(hex.prefix(8)) circles=\(rec.circles.count)")
+        objectWillChange.send()
+    }
+
+    /// Forget an archived deletion for good (the user chose not to keep the undo around).
+    func dropErased(_ nodeHex: String) {
+        guard erased.removeValue(forKey: nodeHex) != nil else { return }
+        persistErased()
+        objectWillChange.send()
+    }
+
+    private func pruneErased() {
+        let cutoff = nowMs() &- Self.erasedTtlMs
+        erased = erased.filter { $0.value.erasedAt > cutoff }
+        let excess = erased.count - Self.erasedKeepMax
+        if excess > 0 {
+            for r in erased.values.sorted(by: { $0.erasedAt < $1.erasedAt }).prefix(excess) {
+                erased.removeValue(forKey: r.entry.hex)
+            }
+        }
+    }
+
+    private func persistErased() {
+        if let data = try? JSONEncoder().encode(erased) { UserDefaults.standard.set(data, forKey: erasedKey) }
+    }
+
     /// ERASE a relay for good — removes its associations across every circle, its entry, the default, and
     /// its caches. Used by "Delete now" in the Relays screen and by purgeStale.
     func eraseNow(_ nodeHex: String) {
@@ -1709,6 +1791,15 @@ final class RelayMailboxStore: ObservableObject {
         for cid in relaysByCircle.keys {
             relaysByCircle[cid]?.removeAll { $0 == hex }
             if relaysByCircle[cid]?.isEmpty == true { relaysByCircle[cid] = nil }
+        }
+        // Archive BEFORE the entry and its associations are dropped — afterwards there is nothing
+        // left to reconstruct it from.
+        if let e = entries[hex] {
+            erased[hex] = ErasedRelay(entry: e,
+                                      circles: relaysByCircle.filter { $0.value.contains(hex) }.map(\.key),
+                                      wasDefault: defaultNodeHex == hex,
+                                      erasedAt: nowMs())
+            pruneErased()
         }
         if defaultNodeHex == hex { defaultNodeHex = nil }
         entries[hex] = nil
@@ -1723,6 +1814,7 @@ final class RelayMailboxStore: ObservableObject {
         UserDefaults.standard.set(forgotAt, forKey: forgotAtKey)
         if hadClear { UserDefaults.standard.set(clearedRelayForgets, forKey: clearedRelayForgetsKey) }
         persistEntries()
+        persistErased()
         MediaBackupLedger.forgetDest(hex)   // relay gone for good → re-mirror if this id ever returns
         RelayClients.forget(hex)
         RelayHealth.shared.forget(hex)

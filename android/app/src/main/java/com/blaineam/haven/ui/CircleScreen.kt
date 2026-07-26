@@ -912,6 +912,12 @@ private fun MissingMediaPlaceholder(circleId: String, ref: String, isVideo: Bool
     // Observe live download state + the evicted-store version so the tile reacts to taps/timeouts.
     com.blaineam.haven.core.EvictedMediaStore.version.value
     val downloading = com.blaineam.haven.core.HavenNet.downloadingMedia.contains(ref)
+    // The bytes are actually on disk. Trust the filesystem over the in-flight bookkeeping: a
+    // `downloadingMedia` entry left behind (a path that returns without clearing it, a restore that
+    // lands via a different route than the one that set the flag) would otherwise park a spinner on
+    // top of media that finished — reported from the field as "media obviously downloaded and
+    // blurred, with a loading status hanging over it". Apple parity (MissingMediaPlaceholder).
+    val bytesPresent = LocalMedia.has(ref)
     val unavailable = com.blaineam.haven.core.HavenNet.unavailableMedia.contains(ref)
     val waiting = com.blaineam.haven.core.HavenNet.waitingForSenderMedia.contains(ref)
     val progress = com.blaineam.haven.core.HavenNet.mediaRestoreProgress[ref]
@@ -932,6 +938,9 @@ private fun MissingMediaPlaceholder(circleId: String, ref: String, isVideo: Bool
             Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.25f)))
         }
         when {
+            // Present but the parent still had us on screen — show the blurred thumb with NO chrome;
+            // the real tile swaps in on the next recomposition. No spinner over finished media.
+            bytesPresent -> Unit
             downloading -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 androidx.compose.material3.CircularProgressIndicator(
                     color = HavenTheme.pink, strokeWidth = 2.dp, modifier = Modifier.size(22.dp))

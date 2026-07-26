@@ -1205,6 +1205,25 @@ pub async fn erase_relay(engine: Eng<'_>, node_hex: String) -> R<()> {
     Ok(())
 }
 
+/// Deleted relays that can still be restored — the undo list for "Delete now".
+#[tauri::command]
+pub fn erased_relays(engine: Eng) -> Vec<crate::store::ErasedRelay> {
+    engine.erased_relays()
+}
+
+/// Undo a "Delete now": the relay returns to the circles it served.
+#[tauri::command]
+pub async fn restore_erased_relay(engine: Eng<'_>, node_hex: String) -> R<()> {
+    engine.restore_erased_relay(node_hex).await;
+    Ok(())
+}
+
+/// Drop an archived deletion for good (no longer offered for restore).
+#[tauri::command]
+pub fn drop_erased_relay(engine: Eng, node_hex: String) {
+    engine.drop_erased_relay(node_hex);
+}
+
 /// Toggle a single relay's association with ONE circle (the per-circle override).
 #[tauri::command]
 pub async fn set_circle_relay(engine: Eng<'_>, node_hex: String, circle_id: String, on: bool) -> R<()> {

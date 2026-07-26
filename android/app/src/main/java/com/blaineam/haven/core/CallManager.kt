@@ -348,6 +348,31 @@ object CallManager {
             CallWire.GROUP_INVITE -> handleGroupInvite(body)
             CallWire.INVITE -> CallWire.parseInviteName(body)?.let { (from, name) ->
                 if (!knownContact(from)) return@let
+                // GLARE: we are ringing THEM while they are ringing US. Both sides used to swallow
+                // the other's invite here ("already active → just merge the roster"), so two people
+                // who called each other at the same moment both sat listening to ringback and NEITHER
+                // call ever connected. They obviously both want this call — so connect it.
+                //
+                // Both devices run this identical logic, so they must agree without another round
+                // trip: the session id is derived from the two hexes in sorted order, and the lower
+                // hex takes the caller role for negotiation politeness. Each side also sends an
+                // ACCEPT, which drives the other's normal accept path if it gets there first.
+                // iOS parity (CallManager.handleInvite).
+                if (isCaller && !inCall.value && roster.contains(from)) {
+                    val a = myHex.lowercase()
+                    val b = from.lowercase()
+                    sessionId = "glare:" + minOf(a, b) + "-" + maxOf(a, b)
+                    isCaller = a < b
+                    mainHandler.removeCallbacks(ringTimeoutRunnable)
+                    ringing.value = false
+                    connecting.value = false
+                    inCall.value = true
+                    Log.i(TAG, "glare with ${from.take(8)} — both dialing, adopting shared session ${sessionId.take(20)}")
+                    send(CallWire.ACCEPT, CallWire.accept(myHex, sessionId), from)
+                    startMesh()
+                    connectPeerIfNeeded(from)
+                    return@let
+                }
                 // Already in a call → the sender is joining, not ringing us afresh (iOS parity).
                 if (inCall.value || ringing.value || connecting.value) {
                     if (roster.add(from)) refreshParticipants()

@@ -5010,6 +5010,22 @@ async function onCallEvent(payload) {
     case "groupInvite":
     case "invite": {
       const members = new Set([...(c.roster || []), c.from, call.me]);
+      // GLARE: we are ringing THEM while they are ringing US. Both sides used to swallow the other's
+      // invite here (same session → merge the roster, different session → drop it), so two people who
+      // called each other at the same moment both sat listening to ringback and NEITHER call ever
+      // connected. They obviously both want this call — so connect it. Both ends run this identical
+      // logic and must agree without another round trip: the session id is derived from the two hexes
+      // in sorted order (offer/answer roles already follow the same smaller-hex rule). iOS parity.
+      if (call.connecting && !call.inCall && call.session !== c.sessionId && call.roster.has(c.from)) {
+        const a = (call.me || "").toLowerCase(), b = (c.from || "").toLowerCase();
+        call.session = `glare:${a < b ? a : b}-${a < b ? b : a}`;
+        members.forEach((m) => call.roster.add(m));
+        call.connecting = false; call.inCall = true;
+        clearTimeout(call.ringTimer); call.ringTimer = null;
+        await invoke("call_accept", { sessionId: call.session, to: [c.from] }).catch(() => {});
+        await startMesh(); connectPeerIfNeeded(c.from); renderCallOverlay();
+        return;
+      }
       if (call.inCall || call.ringing || call.connecting) {
         if (call.session === c.sessionId) { members.forEach((m) => call.roster.add(m)); if (call.localStream) invitees().forEach(connectPeerIfNeeded); }
         return;

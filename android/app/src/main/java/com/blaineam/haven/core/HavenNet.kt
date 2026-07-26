@@ -1884,7 +1884,7 @@ object HavenNet : InboundListener {
      *  use - a dial hint, never an authorization. */
     private fun resolveMissingDeviceIds(accounts: List<String>) {
         val n = node ?: return
-        val now = nowMs()
+        val now = System.currentTimeMillis()   // NOT nowMs() — that returns ULong; this map is Long
         val ask = accounts.filter { a ->
             val key = a.lowercase()
             val at = discoveryAskedAt[key]

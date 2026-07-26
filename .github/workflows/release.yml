@@ -406,6 +406,20 @@ jobs:
           $haveArm = $false
           try {
             rustup target add aarch64-pc-windows-msvc
+            # Tauri's externalBin resolves sidecars by TARGET TRIPLE, so an arm64 build demands
+            # binaries\cloudflared-aarch64-pc-windows-msvc.exe and hard-fails its build script
+            # without it ("resource path ... doesn't exist", exit 101) — before compiling a line.
+            # Cloudflare publishes no windows-arm64 asset for this pin, which is why the fetch step
+            # only ever produced the x64 one, and why every arm64 attempt has quietly fallen back to
+            # an x64-only package. Give it the x64 helper under the arm64 name: exactly the reuse the
+            # MSIX staging below already documents (WoA runs the helper under x64 emulation; the app
+            # itself is native arm64, which is the part that matters for performance).
+            $x64cfd = "desktop\src-tauri\binaries\cloudflared-x86_64-pc-windows-msvc.exe"
+            $armcfd = "desktop\src-tauri\binaries\cloudflared-aarch64-pc-windows-msvc.exe"
+            if ((Test-Path $x64cfd) -and -not (Test-Path $armcfd)) {
+              Copy-Item $x64cfd $armcfd -Force
+              Write-Host "arm64: reusing the x64 cloudflared helper as $armcfd"
+            }
             cargo build --release --manifest-path desktop\src-tauri\Cargo.toml --target aarch64-pc-windows-msvc
             if ($LASTEXITCODE -eq 0) { $haveArm = $true } else { Write-Host "arm64 cargo build exit $LASTEXITCODE" }
           } catch { Write-Host "arm64 cross-build failed: $_" }
@@ -432,7 +446,7 @@ jobs:
       # from the outside: the job was green, the Release looked complete, and the missing bundle only
       # surfaced when a human went looking for something to upload to Partner Center.
       - name: Verify the MSIX was actually produced
-        if: matrix.os == 'windows-latest' && startsWith(github.ref, 'refs/tags/v') && env.STORE_IDENTITY_NAME != ''
+        if: matrix.os == 'windows-latest' && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && env.STORE_IDENTITY_NAME != ''
         shell: pwsh
         run: |
           $m = "${{ steps.msix.outputs.msix }}"
@@ -442,6 +456,13 @@ jobs:
           }
           $size = [math]::Round((Get-Item $m).Length / 1MB, 1)
           Write-Host "MSIX ok: $m ($size MB)"
+          # x64-only is a SILENT downgrade: the file exists, the job is green, and Windows-on-ARM
+          # users get an emulated x64 build without anyone noticing. Say it loudly on a real release.
+          if ($m -notlike "*.msixbundle") {
+            Write-Host "::warning::MSIX is x64-ONLY (no .msixbundle) — Windows-on-ARM will run the emulated x64 build. Check the ARM64 cross-build output above."
+          } else {
+            Write-Host "MSIX carries both arches (bundle)."
+          }
 
       # Microsoft Store submission is DELIBERATELY not automated — it is a MANUAL step in Partner
       # Center. `msstore publish` only supports FREE products over GitHub Actions; Haven is a paid

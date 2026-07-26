@@ -30,7 +30,15 @@
 //! already gives for any node id, and strictly less than the account handle itself reveals — but it
 //! is a deliberate trade, which is why the caller decides when to publish.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
 use anyhow::{anyhow, Result};
+use iroh::address_lookup::pkarr::{PkarrPublisher, PkarrResolver};
+use iroh::address_lookup::{AddressLookup, EndpointData};
+use iroh::endpoint::Endpoint;
+use iroh::{EndpointId, SecretKey};
+use n0_future::StreamExt;
 
 /// Marks a Haven account record and versions the payload, so a future format can change shape
 /// without a resolver mistaking it for this one.
@@ -139,6 +147,70 @@ pub fn encode_devices_hex(hexes: &[String]) -> Result<String> {
         return Err(anyhow!("no valid 32-byte device ids among {} entries", hexes.len()));
     }
     Ok(encode_devices(&out))
+}
+
+/// Live publishers, keyed by account hex. A `PkarrPublisher` owns a background task that
+/// re-publishes on the pkarr TTL, so dropping it stops the record from being refreshed and the
+/// account silently becomes unreachable again once it expires. Keeping them here is what makes
+/// publish a fire-and-forget call the app can make on every roster change.
+static PUBLISHERS: OnceLock<Mutex<HashMap<String, PkarrPublisher>>> = OnceLock::new();
+
+fn publishers() -> &'static Mutex<HashMap<String, PkarrPublisher>> {
+    PUBLISHERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Publish this account's dialable device ids under the ACCOUNT key.
+///
+/// `account_secret` is the account's 32-byte Ed25519 seed — the same key that already signs the
+/// device roster, so this asserts nothing the account doesn't already assert. Non-blocking: the
+/// publisher updates in the background and re-publishes on its own TTL.
+///
+/// Idempotent per account: calling it again just updates the existing publisher's data, which is
+/// why the app can call it on every roster change without accumulating tasks.
+pub fn publish_account_devices(
+    ep: &Endpoint,
+    account_secret: &[u8; 32],
+    device_hexes: &[String],
+) -> Result<()> {
+    let payload = encode_devices_hex(device_hexes)?;
+    let user_data = payload
+        .parse()
+        .map_err(|_| anyhow!("device record too long for a pkarr TXT record: {} bytes", payload.len()))?;
+    let secret = SecretKey::from_bytes(account_secret);
+    let account_hex = to_hex(secret.public().as_bytes());
+
+    let mut map = publishers().lock().map_err(|_| anyhow!("publisher lock poisoned"))?;
+    let pubr = match map.get(&account_hex) {
+        Some(p) => p,
+        None => {
+            let p = PkarrPublisher::n0_dns().build(secret, ep.tls_config().clone());
+            map.entry(account_hex.clone()).or_insert(p)
+        }
+    };
+    // EndpointData with no addresses: we are publishing a DIRECTORY entry, not a reachable
+    // endpoint. The account key is not an endpoint anyone should dial — the device ids inside are.
+    pubr.update_endpoint_data(&EndpointData::default().with_user_data(user_data));
+    Ok(())
+}
+
+/// Resolve an account's device ids from its pkarr record. Returns an empty vec when the account has
+/// never published one, which is the normal case for older installs — callers must treat this as
+/// "no hint available", never as "this account has no devices".
+pub async fn resolve_account_devices(ep: &Endpoint, account_hex: &str) -> Result<Vec<String>> {
+    let raw = from_hex32(account_hex.trim()).ok_or_else(|| anyhow!("bad account hex"))?;
+    let id = EndpointId::from_bytes(&raw).map_err(|e| anyhow!("{e:?}"))?;
+    let resolver = PkarrResolver::n0_dns().build(ep.tls_config().clone());
+    let Some(mut stream) = resolver.resolve(id) else { return Ok(Vec::new()) };
+    while let Some(item) = stream.next().await {
+        let Ok(item) = item else { continue };
+        if let Some(ud) = item.user_data() {
+            let devices = decode_devices_hex(ud.as_ref());
+            if !devices.is_empty() {
+                return Ok(devices);
+            }
+        }
+    }
+    Ok(Vec::new())
 }
 
 #[cfg(test)]

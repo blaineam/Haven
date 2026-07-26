@@ -1289,6 +1289,44 @@ impl HavenNode {
         Ok(Arc::new(RelayClient { inner }))
     }
 
+    /// Publish MY account's device ids to the public pkarr directory, keyed by my ACCOUNT id.
+    ///
+    /// This is what makes relays optional. A contact holds my account id (that's what an invite/QR
+    /// carries) but dials my DEVICE ids — and until now the only ways to learn those were my signed
+    /// roster or an invite `?d=` hint, both of which need a route to arrive in the first place. If
+    /// the two of us shared no relay, that route never existed and nothing flowed, even with both
+    /// devices online and iroh perfectly able to hole-punch between them. Publishing the mapping
+    /// under the account key closes the loop: account id → device ids → iroh's own address lookup.
+    ///
+    /// Idempotent and cheap — call it on launch and whenever the roster changes. Returns the ids
+    /// published (empty on a seedless device, which has no account key: its primary publishes).
+    pub async fn publish_account_devices(&self, social: Arc<HavenSocial>) -> Result<Vec<String>, HavenError> {
+        let Some(secret) = social.account_secret_bytes() else { return Ok(Vec::new()) };
+        let ids = social.discovery_device_ids();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.node
+            .publish_account_devices(&secret, &ids)
+            .map_err(|e| HavenError::Invalid { msg: format!("publish devices: {e}") })?;
+        Ok(ids)
+    }
+
+    /// Look up a contact's device ids by their ACCOUNT id. Empty when they've never published (any
+    /// build older than this one), so callers must keep every existing dial path — this only ADDS
+    /// targets when we'd otherwise have none.
+    ///
+    /// The record is a pkarr signed packet under the account key, so only that account can write it.
+    /// Even so, treat the result as a dial HINT, never an authorization: content stays sealed to the
+    /// circle epoch key and inbound frames stay gated on the signed roster, so a stale or hostile
+    /// record costs a wasted connect attempt and nothing else.
+    pub async fn resolve_account_devices(&self, account_hex: String) -> Result<Vec<String>, HavenError> {
+        self.node
+            .resolve_account_devices(&account_hex)
+            .await
+            .map_err(|e| HavenError::Invalid { msg: format!("resolve devices: {e}") })
+    }
+
     /// A shareable ticket a peer dials to reach this node (full address form).
     pub async fn ticket(&self) -> Result<String, HavenError> {
         self.node.ticket().await.map_err(|e| HavenError::Invalid { msg: e.to_string() })
@@ -6228,6 +6266,33 @@ impl HavenSocial {
 }
 
 impl HavenSocial {
+    /// The ACCOUNT signing secret, for the in-process uses that must assert the account key itself.
+    /// Today that is exactly one caller: signing the public device-discovery record, which is
+    /// published under the account id because the account id is the only thing a contact holds.
+    ///
+    /// NOT exported — the seed must never cross the FFI boundary a second time. `None` on a seedless
+    /// device (seed-drop S4), which therefore cannot publish; the primary publishes for the account.
+    pub(crate) fn account_secret_bytes(&self) -> Option<[u8; 32]> {
+        let st = self.state.lock().unwrap();
+        st.me_secret.as_ref().map(|id| id.node_secret_bytes())
+    }
+
+    /// MY dialable device ids for the public discovery record — this device first (it is the one
+    /// definitely running), then the rest of my authorized roster. Excludes the account id: an
+    /// account key is an identity, never a transport address, so publishing it as a dial target
+    /// would only buy contacts a connect timeout.
+    pub(crate) fn discovery_device_ids(&self) -> Vec<String> {
+        let acct = self.my_node_hex().to_lowercase();
+        let mut out = vec![self.my_device_node_hex()];
+        for d in self.device_node_ids_for(acct.clone()) {
+            let l = d.to_lowercase();
+            if l != acct && !out.iter().any(|o| o.to_lowercase() == l) {
+                out.push(d);
+            }
+        }
+        out
+    }
+
     /// The dispatch half of `receive`, under the engine lock. `None` means the circle doesn't
     /// exist (yet) — the caller must NOT record the envelope as seen in that case.
     fn receive_locked(&self, circle_id: &str, envelope: &[u8]) -> Option<Result<bool, HavenError>> {

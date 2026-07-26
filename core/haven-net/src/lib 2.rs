@@ -647,24 +647,6 @@ impl Node {
         self.send(addr, payload).await
     }
 
-    /// Publish this ACCOUNT's dialable device ids to the public pkarr directory, so a contact who
-    /// holds only my account id (the contact handle from an invite/QR) can find a device to dial
-    /// **without any relay in common**. See [`crate::accountdiscovery`] for the record format.
-    ///
-    /// `account_secret` is the account key — the same key that signs the device roster, so this
-    /// asserts nothing new. Seedless devices don't hold it and must skip this (the primary
-    /// publishes for the whole account).
-    pub fn publish_account_devices(&self, account_secret: &[u8; 32], device_hexes: &[String]) -> Result<()> {
-        crate::accountdiscovery::publish_account_devices(&self.endpoint, account_secret, device_hexes)
-    }
-
-    /// Look up an account's device ids in the public pkarr directory. Empty when the account never
-    /// published one (every pre-discovery install) — a hint source, never an authorization: the
-    /// roster gate still decides whose frames are accepted.
-    pub async fn resolve_account_devices(&self, account_hex: &str) -> Result<Vec<String>> {
-        crate::accountdiscovery::resolve_account_devices(&self.endpoint, account_hex).await
-    }
-
     /// Fully close this endpoint (accept loop exits, UDP released) so a later
     /// [`Node::spawn`] with the **same secret** is safe. iroh same-key dual endpoints
     /// are a known path-churn scar — callers must await this before rebinding.

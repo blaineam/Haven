@@ -848,13 +848,71 @@ final class FeedStore: ObservableObject {
         var out = [String]()
         var seen = Set<String>()
         func add(_ h: String) { let l = h.lowercased(); if l != mineAcct && l != mineDev && seen.insert(l).inserted { out.append(h) } }
+        var undialable = [String]()
         for a in social.contactNodeIds(circleId: circleId) {
             add(a)                                              // account id (contact handle; reaches old-build peers)
-            for d in social.deviceNodeIdsFor(accountHex: a) { add(d) }   // their device node ids (actual reach)
-            for h in deviceHints(for: a) { add(h) }             // invite-link hints (until their roster lands)
+            let devices = social.deviceNodeIdsFor(accountHex: a)
+            for d in devices { add(d) }                         // their device node ids (actual reach)
+            let hints = deviceHints(for: a)
+            for h in hints { add(h) }                           // invite-link hints (until their roster lands)
+            // Nothing but the account id, which is an identity and not an address: this member is
+            // unreachable except through a shared relay. Ask the public directory for their devices.
+            if hints.isEmpty, devices.allSatisfy({ $0.lowercased() == a.lowercased() }) { undialable.append(a) }
         }
         dialTargetsCache[circleId] = (out, now())
+        if !undialable.isEmpty { resolveMissingDeviceIds(for: undialable) }
         return out
+    }
+
+    // MARK: - Account device discovery (relay-optional reachability)
+
+    /// Publish my account → device-id mapping to the public directory, so a contact who holds only
+    /// my account id can dial one of my devices with NO relay in common. Fire-and-forget; the
+    /// publisher re-publishes on its own TTL for as long as the node lives.
+    func publishAccountDevices() {
+        guard let node, let social else { return }
+        Task.detached {
+            do {
+                let ids = try await node.publishAccountDevices(social: social)
+                if !ids.isEmpty { HavenLog.net("discovery published devices=\(ids.count)") }
+            } catch {
+                HavenLog.net("discovery publish failed: \(error.localizedDescription)")   // additive — never fatal
+            }
+        }
+    }
+
+    /// Accounts we've asked the directory about recently, so a 20s sync tick doesn't re-query a
+    /// contact who simply hasn't published (every pre-discovery install — the common case).
+    private static let discoveryRetrySecs: UInt64 = 10 * 60 * 1000
+    private var discoveryAskedAt: [String: UInt64] = [:]
+
+    /// Look up device ids for contacts we have NO way to dial — no signed roster, no invite hint,
+    /// just an account id that isn't a transport address. Without this such a contact is only
+    /// reachable through a relay both sides happen to share; with it, two online devices can find
+    /// each other and let iroh hole-punch, which is the whole promise of the transport.
+    ///
+    /// Results land in the same hint store the invite `?d=` ids use — a dial hint, never an
+    /// authorization (see `resolve_account_devices`).
+    func resolveMissingDeviceIds(for accounts: [String]) {
+        guard let node else { return }
+        let n = now()
+        var ask = [String]()
+        for a in accounts {
+            let key = a.lowercased()
+            if let at = discoveryAskedAt[key], n - at < Self.discoveryRetrySecs { continue }
+            discoveryAskedAt[key] = n
+            ask.append(a)
+        }
+        guard !ask.isEmpty else { return }
+        Task.detached { [weak self] in
+            for a in ask {
+                guard let ids = try? await node.resolveAccountDevices(accountHex: a), !ids.isEmpty else { continue }
+                await MainActor.run {
+                    HavenLog.net("discovery resolved \(a.prefix(8)) devices=\(ids.count)")
+                    self?.recordDeviceHints(accountHex: a, deviceIds: ids)
+                }
+            }
+        }
     }
 
     // MARK: - Invite device-id hints (roster-bootstrap bridge)
@@ -1614,6 +1672,7 @@ final class FeedStore: ObservableObject {
                 self.internetReady = true
                 self.online = true
                 HavenLog.net("node started id=\(n.nodeIdHex().prefix(10)) account=\(social?.myNodeHex().prefix(10) ?? "?")")
+                self.publishAccountDevices()   // account id → my device ids, so contacts can dial me relay-free
                 // Matrix QA: dump public identity bundle so Scripts/qa-exchange-bundles.sh can seed
                 // the Android peer when HELLO cannot dial (HTTP-mailbox-only stub path).
                 if let b = social?.myBundle(), !b.isEmpty {
@@ -1720,6 +1779,7 @@ final class FeedStore: ObservableObject {
             internetReady = true
             online = true
             HavenLog.net("fabric rebind ok id=\(n.nodeIdHex().prefix(10)) urls=\(fabricBoundUrls.count)")
+            publishAccountDevices()   // the record is per-endpoint — re-publish on the new node
             if wasHosting {
                 RelayHost.shared.reattachAfterFabricRebind()
             }

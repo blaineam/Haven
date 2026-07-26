@@ -246,6 +246,15 @@ pub(crate) const VERB_AGES: u8 = b'A';
 /// policy-mutating op on the QUIC-authenticated path means the caller's identity is the endpoint
 /// key itself rather than a per-request signature over a shared token.
 pub(crate) const VERB_ENROLL: u8 = b'E';
+/// Teach the relay WHO ELSE serves a circle (key = `haven/enroll/<circle>`, body = newline-joined
+/// relay node hexes), so it can mesh-replicate with its siblings.
+///
+/// The apps mesh automatically — they know every relay in the circle and pull from each one. A
+/// HEADLESS relay knew only the `--peer` hexes its operator typed, so replication ran one way: the
+/// app pulled from the NAS, the NAS never pulled back, and anything uploaded while it was offline
+/// stayed missing there forever. It already auto-learns CIRCLES from paired members; this is the
+/// same idea for siblings. An older relay answers `ERR verb` — the same degrade path ENROLL has.
+pub(crate) const VERB_ENROLL_RELAYS: u8 = b'R';
 
 /// Sentinel returned by GET when the key is absent. Chosen to be distinguishable from a
 /// stored blob: it begins with a NUL and is exactly these 5 bytes.
@@ -1478,6 +1487,47 @@ pub fn save_learned_grant(root: &Path, circle: &str, members: &[String]) {
 /// never instead of them: `authorize()` REPLACES a circle's member set, so a learned expansion of a
 /// link circle would be silently dropped on every restart (and on every reconfigure) if we did not
 /// re-union it here. Same shape, and the same reason, as [`rehydrate_device_rosters`].
+fn learned_relays_path(root: &Path) -> std::path::PathBuf {
+    root.join("learned-relays.json")
+}
+
+/// Sibling relays this relay has been taught (see [`VERB_ENROLL_RELAYS`]). Re-validated on read:
+/// the file is ours, but a relay that trusts its own disk blindly would turn a corrupted byte into
+/// a host it dials on a timer.
+pub fn load_learned_relays(root: &Path) -> Vec<String> {
+    let Ok(bytes) = std::fs::read(learned_relays_path(root)) else { return Vec::new() };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return Vec::new() };
+    let Some(arr) = v.get("relays").and_then(|r| r.as_array()) else { return Vec::new() };
+    arr.iter()
+        .filter_map(|r| r.as_str())
+        .filter(|r| r.len() == 64 && r.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(|r| r.to_lowercase())
+        .take(MAX_LEARNED_RELAYS)
+        .collect()
+}
+
+/// Union `relays` into the learned-siblings file (idempotent, capped).
+pub fn save_learned_relays(root: &Path, relays: &[String]) {
+    let mut all = load_learned_relays(root);
+    for r in relays {
+        let r = r.to_lowercase();
+        if r.len() == 64 && !all.contains(&r) && all.len() < MAX_LEARNED_RELAYS {
+            all.push(r);
+        }
+    }
+    let doc = serde_json::json!({ "v": 1, "relays": all });
+    let Ok(bytes) = serde_json::to_vec(&doc) else { return };
+    let path = learned_relays_path(root);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, bytes);
+}
+
+/// Cap on remembered siblings. A circle's relay pool is a handful of hosts; the cap exists only so
+/// a compromised member can't grow the file (and our dial loop) without bound.
+const MAX_LEARNED_RELAYS: usize = 32;
+
 pub(crate) fn rehydrate_learned_grants(root: &Path, auth: &Arc<Mutex<RelayAuth>>) {
     let grants = load_learned_grants(root);
     if grants.is_empty() {
@@ -1546,7 +1596,9 @@ pub(crate) fn blob_forbidden(auth: &Arc<Mutex<RelayAuth>>, peer: &str, verb: u8,
     // returned deny one line above. The substantive rules (the caller must name itself, may not
     // escalate into a circle it isn't in, and is bounded by per-relay caps) need the request BODY,
     // so they live in `RelayAuth::learn` rather than here.
-    if verb == VERB_ENROLL {
+    if verb == VERB_ENROLL || verb == VERB_ENROLL_RELAYS {
+        // Same shape gate for both teaching verbs; ENROLL_RELAYS' substantive rule (the caller must
+        // already be in the circle) needs the request body and lives in the handler.
         return !key.starts_with(ENROLL_PREFIX) || key.len() <= ENROLL_PREFIX.len();
     }
     if (verb == VERB_LIST || verb == VERB_AGES || verb == VERB_TOUCH) && is_broad_prefix(key) {
@@ -1863,6 +1915,38 @@ pub(crate) async fn handle_request(
             }
             let _ = send.finish();
         }
+        VERB_ENROLL_RELAYS => {
+            // Body = newline-joined relay node hexes. Like ENROLL, nothing is stored: this only
+            // records who else serves the circle so the mesh loop can pull from them.
+            let blen = recv.read_u64().await.ah()?;
+            if blen > MAX_ENROLL_BODY {
+                let _ = send.write_all(b"ERR too big").await;
+                let _ = send.finish();
+                return Ok(());
+            }
+            let mut body = vec![0u8; blen as usize];
+            recv.read_exact(&mut body).await.ah()?;
+            let circle = key.strip_prefix(ENROLL_PREFIX).unwrap_or("").to_string();
+            let relays: Vec<String> = String::from_utf8_lossy(&body)
+                .lines()
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+                .take(MAX_ENROLL_MEMBERS)
+                .collect();
+            // Same trust rule as ENROLL: only someone ALREADY inside the circle may teach us about
+            // it. Without this any stranger who learned our node id could point our mesh loop at
+            // arbitrary hosts and make us dial them on a timer.
+            let ok = !circle.is_empty()
+                && !relays.is_empty()
+                && auth.lock().unwrap().is_member_of(&circle, &peer);
+            if ok {
+                save_learned_relays(&root, &relays);
+                let _ = send.write_all(b"OK").await;
+            } else {
+                let _ = send.write_all(b"ERR forbidden").await;
+            }
+            let _ = send.finish();
+        }
         _ => {
             let _ = send.write_all(b"ERR verb").await;
             let _ = send.finish();
@@ -2043,6 +2127,32 @@ impl BlobClient {
     /// Failure is informational, never fatal. An OLDER relay has no ENROLL verb and answers
     /// `ERR verb` — that is exactly the "new client, old relay" degrade path, and the caller simply
     /// keeps using whatever the relay's link already authorized, as it did before this verb existed.
+    /// Tell a relay who ELSE serves `circle`, so it can mesh-replicate with them. Best-effort:
+    /// an older relay has no such verb and answers `ERR verb`, which is not an error worth
+    /// surfacing — it simply keeps meshing with whatever its operator configured.
+    pub async fn enroll_relays(&self, circle: &str, relays: &[String]) -> Result<()> {
+        let key = format!("{ENROLL_PREFIX}{circle}");
+        let body = relays.join("\n");
+        if body.is_empty() || body.len() as u64 > MAX_ENROLL_BODY {
+            bail!("relay list empty or too large");
+        }
+        with_timeout("enroll_relays", async {
+            let conn = self.conn().await?;
+            let (mut send, mut recv) = conn.open_bi().await.ah()?;
+            write_header(&mut send, VERB_ENROLL_RELAYS, &key).await?;
+            send.write_u64(body.len() as u64).await.ah()?;
+            send.write_all(body.as_bytes()).await.ah()?;
+            send.finish().ah()?;
+            let reply = recv.read_to_end(64).await.ah()?;
+            if reply == b"OK" {
+                Ok(())
+            } else {
+                bail!("relay refused sibling list: {}", String::from_utf8_lossy(&reply))
+            }
+        })
+        .await
+    }
+
     pub async fn enroll(&self, circle: &str, members: &[String]) -> Result<()> {
         let key = format!("{ENROLL_PREFIX}{circle}");
         let body = members.join("\n");

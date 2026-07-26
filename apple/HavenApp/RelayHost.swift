@@ -1022,6 +1022,23 @@ final class RelayHost: ObservableObject {
     private var lastMeshSyncMs: UInt64 = 0
     private static let meshSyncMinIntervalMs: UInt64 = 300_000   // 5 minutes
 
+    /// Hand each relay the circle's full relay list so the mesh is symmetric. Throttled with the
+    /// mesh tick itself (≥5 min) — the list changes rarely and this is one round trip per relay.
+    private func teachSiblingRelays(pool: [String]) {
+        let hexes = pool.filter { $0.count == 64 }
+        guard hexes.count > 1 else { return }   // nothing to teach when we're the only relay
+        let circleIds = FeedStore.shared.circles.map(\.id)
+        guard !circleIds.isEmpty else { return }
+        Task.detached {
+            for target in hexes {
+                guard let client = await RelayClients.client(target) else { continue }
+                for cid in circleIds {
+                    _ = await client.teachRelays(circleId: cid, relays: hexes.filter { $0 != target })
+                }
+            }
+        }
+    }
+
     func meshSyncTick() {
         guard let handle, serving else { return }
         authorizeMembership() // keep the allow-list fresh as membership / relays change
@@ -1041,6 +1058,11 @@ final class RelayHost: ObservableObject {
                         .contains(where: { RelayMailboxStore.urlReachableByOthers($0) }) ?? false)
             }
         guard !peers.isEmpty else { return }
+        // Teach every relay in the pool about the others. We already pull from all of them; a
+        // HEADLESS relay knew only the `--peer` hexes its operator typed, so it never pulled back
+        // and anything uploaded while it was offline stayed missing there. Best-effort and silent —
+        // an older relay has no such verb.
+        teachSiblingRelays(pool: peers + [myHex])
         Task {
             var anyPull = false
             for peer in peers {

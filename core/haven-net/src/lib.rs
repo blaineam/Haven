@@ -432,6 +432,16 @@ impl Node {
     }
 
     /// The circles this relay LEARNED from paired members, as persisted in its data dir.
+    /// Sibling relays this relay has been TAUGHT (`VERB_ENROLL_RELAYS`), for the mesh loop. The
+    /// headless daemon previously meshed only with `--peer` hexes its operator typed, so a relay
+    /// nobody configured by hand never pulled from anyone and only self-healed one way.
+    pub fn relay_learned_relays(&self) -> Vec<String> {
+        lock(&self.relay)
+            .as_ref()
+            .map(|c| blobstore::load_learned_relays(&c.root))
+            .unwrap_or_default()
+    }
+
     pub fn relay_learned_grants(&self) -> Vec<(String, Vec<String>)> {
         lock(&self.relay)
             .as_ref()
@@ -782,7 +792,11 @@ impl RelayNode {
     }
 
     async fn handle_inbound(&self, from: [u8; 32], bytes: Vec<u8>, deliver: Option<InboundHandler>) {
-        let Some(frame) = relay::RoutingFrame::parse(&bytes) else {
+        // BOTH wires. The native `HVR1` layout is what `send_via_relay` and the tests emit; the
+        // `0x09` layout is what every shipping app emits — and until now only the first was
+        // understood here, so a headless relay dropped every forward request a real client ever
+        // made. `wire` is carried through so the forward below answers in the same encoding.
+        let Some((frame, wire)) = relay::RoutingFrame::parse_any(&bytes) else {
             // Not a relay frame: a bare payload addressed straight to us — the sender IS the
             // authenticated connection peer, so pass its id through (a relay-hosting member
             // otherwise never learns reply-path hints from direct hellos). Pure forwarders
@@ -841,7 +855,7 @@ impl RelayNode {
             };
             // Best-effort: a destination we can't reach right now is simply skipped; the
             // member will get it from the storage mailbox or a later online overlap.
-            let _ = self.node.send_to_node(&dh, &fwd.to_bytes()).await;
+            let _ = self.node.send_to_node(&dh, &wire.encode(&fwd)).await;
         }
     }
 

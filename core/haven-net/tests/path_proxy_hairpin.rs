@@ -244,11 +244,15 @@ fn fabric_policy_haven_first() {
     let p = haven_net::endpoint_policy();
     assert!(p.use_n0_relays);
 
-    // Non-empty → Haven only, n0 off.
+    // Non-empty → Haven PREFERRED, unioned with n0 — never replacing it. Dropping n0 the moment a
+    // circle announced its own DERP made that (rotating, free-tunnel) hostname a single point of
+    // failure for the entire transport: when it moved, iroh held a map of one dead URL and two
+    // devices on the same wi-fi could no longer even exchange addresses. This assertion is the
+    // inverse of what it once was, on purpose.
     haven_net::apply_derp_urls(vec!["https://relay.example.com".into()]);
     assert!(haven_net::haven_fabric_active());
     let p = haven_net::endpoint_policy();
-    assert!(!p.use_n0_relays);
+    assert!(p.use_n0_relays, "n0 must survive as the fallback rendezvous");
     assert!(p.prefer_custom_relays);
     assert_eq!(p.custom_derp_urls, vec!["https://relay.example.com".to_string()]);
 

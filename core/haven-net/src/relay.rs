@@ -42,6 +42,9 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 
 pub const RELAY_MAGIC: &[u8; 4] = b"HVR1";
+/// Frame type byte the APPS use for a relay-forward request (iOS/Android/desktop `[9]…`). Kept in
+/// sync with the clients' own wire tables (`wire::RELAY` on desktop, `case 9` on iOS).
+pub const CLIENT_RELAY_TAG: u8 = 9;
 /// Default starting hop budget. One relay in the middle is the common case; a small
 /// budget keeps fan-out bounded while tolerating a relay-to-relay hop.
 pub const DEFAULT_TTL: u8 = 4;
@@ -124,6 +127,87 @@ impl RoutingFrame {
     pub fn dest_hex(d: &[u8; 32]) -> String {
         d.iter().map(|x| format!("{x:02x}")).collect()
     }
+
+    /// Parse the CLIENT relay-forward frame — a different layout from [`Self::parse`], and the only
+    /// one any shipping app actually sends:
+    ///
+    /// ```text
+    /// [0x09][msg_id(16)][ttl(1)][n_dest(1)][dest * 32][inner frame]
+    /// ```
+    ///
+    /// The apps grew their own mesh-relay wire (iOS `originateRelayInternet`, desktop
+    /// `originate_relay_internet`, Android's equivalent) and forward it for each other in the client
+    /// (`handleRelay`). The headless relay only ever understood the native `HVR1` layout above —
+    /// which nothing outside tests emits — so it answered every one of those requests by dropping
+    /// the bytes as "not a relay frame". An always-on relay that cannot forward the only forward
+    /// request it is ever sent is a switchboard with the wires cut.
+    pub fn parse_client(b: &[u8]) -> Option<Self> {
+        if b.len() < 19 || b[0] != CLIENT_RELAY_TAG {
+            return None;
+        }
+        let mut msg_id = [0u8; 16];
+        msg_id.copy_from_slice(&b[1..17]);
+        let ttl = b[17];
+        let n = b[18] as usize;
+        if n == 0 || n > MAX_DEST {
+            return None;
+        }
+        let dest_start = 19;
+        let dest_end = dest_start + n * 32;
+        if b.len() <= dest_end {
+            return None; // header only, no inner frame — nothing to forward
+        }
+        let mut dest = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut id = [0u8; 32];
+            id.copy_from_slice(&b[dest_start + i * 32..dest_start + (i + 1) * 32]);
+            dest.push(id);
+        }
+        Some(Self { ttl, msg_id, dest, payload: b[dest_end..].to_vec() })
+    }
+
+    /// Re-encode in the CLIENT layout. A forwarded frame MUST go back out in the wire the sender
+    /// used: re-wrapping a client frame as `HVR1` would hand the destination app bytes its own
+    /// parser rejects, which is the same drop happening one hop later.
+    pub fn to_client_bytes(&self) -> Vec<u8> {
+        let n = self.dest.len().min(MAX_DEST);
+        let mut out = Vec::with_capacity(19 + n * 32 + self.payload.len());
+        out.push(CLIENT_RELAY_TAG);
+        out.extend_from_slice(&self.msg_id);
+        out.push(self.ttl);
+        out.push(n as u8);
+        for d in self.dest.iter().take(n) {
+            out.extend_from_slice(d);
+        }
+        out.extend_from_slice(&self.payload);
+        out
+    }
+
+    /// Parse either wire, reporting which one it was so the forward can answer in kind.
+    pub fn parse_any(b: &[u8]) -> Option<(Self, RelayWire)> {
+        if let Some(f) = Self::parse(b) {
+            return Some((f, RelayWire::Native));
+        }
+        Self::parse_client(b).map(|f| (f, RelayWire::Client))
+    }
+}
+
+/// Which relay wire a frame arrived on — a forward must be re-encoded in the SAME one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelayWire {
+    /// `HVR1` — [`RoutingFrame::to_bytes`]. Used by `Node::send_via_relay` and the tests.
+    Native,
+    /// `0x09` app frame — [`RoutingFrame::to_client_bytes`]. What every shipping client sends.
+    Client,
+}
+
+impl RelayWire {
+    pub fn encode(self, f: &RoutingFrame) -> Vec<u8> {
+        match self {
+            RelayWire::Native => f.to_bytes(),
+            RelayWire::Client => f.to_client_bytes(),
+        }
+    }
 }
 
 /// Loop/replay guard: remembers recently-seen `msg_id`s. RAM-only, no persistence — consistent
@@ -200,6 +284,52 @@ mod tests {
         // A normal sealed envelope (JSON) must not be mistaken for a relay frame.
         assert!(RoutingFrame::parse(b"{\"sender\":[]}").is_none());
         assert!(RoutingFrame::parse(b"short").is_none());
+    }
+
+    /// Byte-for-byte against the layout the APPS build (iOS `originateRelayInternet`, desktop
+    /// `originate_relay_internet`): `[9][msg_id 16][ttl][n][dest*32][inner]`. If this drifts, every
+    /// deployed relay silently stops forwarding for every client — which is exactly the failure this
+    /// parser was added to end, and it is invisible from the relay side (a dropped frame logs
+    /// nothing, by design).
+    #[test]
+    fn client_wire_matches_what_the_apps_actually_send() {
+        let a = [7u8; 32];
+        let b = [8u8; 32];
+        let mut app = Vec::new();
+        app.push(9u8);
+        app.extend_from_slice(&[0xAB; 16]);   // msg_id
+        app.push(4);                          // ttl
+        app.push(2);                          // n_dest
+        app.extend_from_slice(&a);
+        app.extend_from_slice(&b);
+        app.extend_from_slice(b"inner-sealed-frame");
+
+        let (f, wire) = RoutingFrame::parse_any(&app).expect("the app wire parses");
+        assert_eq!(wire, RelayWire::Client);
+        assert_eq!(f.ttl, 4);
+        assert_eq!(f.msg_id, [0xAB; 16]);
+        assert_eq!(f.dest, vec![a, b]);
+        assert_eq!(f.payload, b"inner-sealed-frame");
+        // And a forward must go back out in the SAME wire, or the destination app's parser rejects
+        // it and the drop just moves one hop downstream.
+        assert_eq!(wire.encode(&f), app);
+    }
+
+    #[test]
+    fn native_and_client_wires_do_not_collide() {
+        let f = RoutingFrame::new(vec![[3u8; 32]], b"x".to_vec(), DEFAULT_TTL);
+        // Native bytes must not be mistaken for the client wire, or vice versa.
+        assert!(RoutingFrame::parse_client(&f.to_bytes()).is_none());
+        assert!(RoutingFrame::parse(&f.to_client_bytes()).is_none());
+        assert_eq!(RoutingFrame::parse_any(&f.to_bytes()).unwrap().1, RelayWire::Native);
+        assert_eq!(RoutingFrame::parse_any(&f.to_client_bytes()).unwrap().1, RelayWire::Client);
+        // A header with no inner frame carries nothing to forward.
+        let mut header_only = vec![9u8];
+        header_only.extend_from_slice(&[0u8; 16]);
+        header_only.push(4);
+        header_only.push(1);
+        header_only.extend_from_slice(&[3u8; 32]);
+        assert!(RoutingFrame::parse_client(&header_only).is_none());
     }
 
     #[test]

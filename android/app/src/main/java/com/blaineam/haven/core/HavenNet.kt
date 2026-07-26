@@ -4116,6 +4116,21 @@ object HavenNet : InboundListener {
      * nodeIdHex), so we invoke it reflectively: this compiles + runs against the current .so once
      * the bindings are regenerated (android/build-rust.sh), and no-ops harmlessly until then.
      */
+    /** Hand each relay the circle's full relay list so replication is symmetric. Best-effort and
+     *  silent: an older relay has no such verb and simply keeps its configured peer set. */
+    private suspend fun teachSiblingRelays(pool: List<String>) {
+        val hexes = pool.distinct().filter { it.length == 64 }
+        if (hexes.size < 2) return   // nothing to teach when we're the only relay
+        val circleIds = runCatching { social.circles().map { it.id } }.getOrDefault(emptyList())
+        if (circleIds.isEmpty()) return
+        for (target in hexes) {
+            val client = relayClientFor(target) ?: continue
+            for (cid in circleIds) {
+                runCatching { client.teachRelays(cid, hexes.filter { it != target }) }
+            }
+        }
+    }
+
     private suspend fun meshSync() {
         val host = relayHost ?: return
         authorizeMembership()   // keep the allow-list fresh as membership / relays change
@@ -4126,6 +4141,10 @@ object HavenNet : InboundListener {
                     it.parameterTypes[0] == String::class.java
             }
         }.getOrNull() ?: return   // bindings predate sync_from — skip until regenerated
+        // Teach every relay in the pool about the others. We already pull from all of them; a
+        // HEADLESS relay knew only the `--peer` hexes its operator typed, so it never pulled back
+        // and anything uploaded while it was offline stayed missing there. Apple parity.
+        teachSiblingRelays(allRelays().filter { it.length == 64 } + myHex)
         for (peer in allRelays()) {
             if (peer == myHex || !relayAvailable(peer)) continue
             val pulled = runCatching {

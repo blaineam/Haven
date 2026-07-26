@@ -1668,6 +1668,26 @@ impl Engine {
 
     /// If we're hosting a relay, pull from every sibling relay so the mailbox self-replicates
     /// across the mesh — any relay can then join/leave freely without losing the circle's data.
+    /// Hand each relay the circle's full relay list so replication is symmetric. Best-effort and
+    /// silent: an older relay has no such verb and keeps whatever its operator configured.
+    async fn teach_sibling_relays(self: &Arc<Self>, pool: &[String]) {
+        if pool.len() < 2 {
+            return; // nothing to teach when we're the only relay
+        }
+        let circle_ids: Vec<String> =
+            self.social.circles().into_iter().map(|c| c.id).collect();
+        if circle_ids.is_empty() {
+            return;
+        }
+        for target in pool {
+            let Some(client) = self.relay_client_for(target).await else { continue };
+            let others: Vec<String> = pool.iter().filter(|h| *h != target).cloned().collect();
+            for cid in &circle_ids {
+                let _ = client.teach_relays(cid.clone(), others.clone()).await;
+            }
+        }
+    }
+
     async fn mesh_sync(self: &Arc<Self>) {
         let Some(host) = self.relay_host.lock().unwrap().clone() else { return };
         let my_hex = host.node_id_hex();
@@ -1675,6 +1695,16 @@ impl Engine {
             let p = self.prefs.lock().unwrap();
             p.relays.values().flatten().filter(|h| p.relay_is_active(h)).cloned().collect()
         };
+        // Teach every relay in the pool about the others. We already pull from all of them; a
+        // HEADLESS relay knew only the `--peer` hexes its operator typed, so it never pulled back
+        // and anything uploaded while it was offline stayed missing there. Apple/Android parity.
+        {
+            let mut pool: Vec<String> = peers.iter().filter(|h| h.len() == 64).cloned().collect();
+            if my_hex.len() == 64 && !pool.contains(&my_hex) {
+                pool.push(my_hex.clone());
+            }
+            self.teach_sibling_relays(&pool).await;
+        }
         for peer in peers {
             if peer == my_hex || !self.relay_available(&peer) {
                 continue;

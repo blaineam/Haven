@@ -100,7 +100,12 @@ dependencies {
     implementation("androidx.navigation:navigation-compose:2.8.3")
 
     // UniFFI Kotlin bindings need JNA (the Android @aar variant) + coroutines.
-    implementation("net.java.dev.jna:jna:5.14.0@aar")
+    // 5.19.1, not 5.14.0: Play Console flags the older AAR's bundled libjnidispatch.so as unsafe on
+    // 16 KB-page devices ("compiled using an older Android NDK version that can still cause
+    // crashes"). Verified from the artifacts themselves — 5.14.0's x86_64 PT_LOAD segments are 4 KB
+    // aligned (0x1000) where 16 KB devices need >=0x4000, and both ABIs in 5.19.1 are 0x4000. This
+    // is a transitive native lib we don't build, so bumping JNA is the only fix available to us.
+    implementation("net.java.dev.jna:jna:5.19.1@aar")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     // Persisted identity / prefs, encrypted at rest by the Android Keystore.
@@ -108,11 +113,16 @@ dependencies {
 
     // QR: generate + decode with zxing-core; scan with a custom in-app CameraX UI.
     implementation("com.google.zxing:core:3.5.3")
-    implementation("androidx.camera:camera-core:1.3.4")
-    implementation("androidx.camera:camera-camera2:1.3.4")
-    implementation("androidx.camera:camera-lifecycle:1.3.4")
-    implementation("androidx.camera:camera-view:1.3.4")
-    implementation("androidx.camera:camera-video:1.3.4")
+    // 1.4.2, not 1.3.4: camera-core ships libimage_processing_util_jni.so, and 1.3.4's is 4 KB
+    // aligned (0x1000) on both 64-bit ABIs — the same 16 KB-page hazard Play flagged for JNA, just
+    // not called out yet. Verified from the artifacts: 1.4.2's segments are 0x4000. Staying on the
+    // 1.4.x line rather than 1.5.0 keeps this a page-alignment fix, not a CameraX major-version
+    // migration on the eve of a store release.
+    implementation("androidx.camera:camera-core:1.4.2")
+    implementation("androidx.camera:camera-camera2:1.4.2")
+    implementation("androidx.camera:camera-lifecycle:1.4.2")
+    implementation("androidx.camera:camera-view:1.4.2")
+    implementation("androidx.camera:camera-video:1.4.2")
 
     // In-app browser (Chrome Custom Tabs) for opening shared links inside Haven.
     implementation("androidx.browser:browser:1.8.0")

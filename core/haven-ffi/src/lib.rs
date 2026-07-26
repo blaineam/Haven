@@ -604,6 +604,16 @@ pub struct RelayClient {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl RelayClient {
+    /// Tell this relay who ELSE serves `circleId`, so it mesh-replicates with them instead of only
+    /// with hexes its operator typed by hand. Best-effort and silent on failure: an older relay has
+    /// no such verb, and a relay that refuses simply keeps its existing peer set.
+    ///
+    /// This is what makes replication symmetric. The apps already pull from every relay they know;
+    /// a headless relay knew nobody, so anything uploaded while it was offline stayed missing there.
+    pub async fn teach_relays(&self, circle_id: String, relays: Vec<String>) -> bool {
+        self.inner.enroll_relays(&circle_id, &relays).await.is_ok()
+    }
+
     /// Connect to a relay by its node id (from the relay link). `seed` is this device's
     /// 32-byte identity (its own transport key).
     #[uniffi::constructor]

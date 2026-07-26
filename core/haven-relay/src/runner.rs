@@ -138,13 +138,34 @@ pub async fn run(cfg: Config) -> Result<()> {
 
             // Mesh replication: pull from each sibling relay every 30s so the mailbox
             // self-heals across the mesh (peers do the same in reverse → eventual set-union).
-            if !cfg.peers.is_empty() {
-                println!("  meshing with {} sibling relay(s) — mailbox self-replicates.", cfg.peers.len());
+            // Configured `--peer` hexes UNION whatever members have taught us
+            // (`VERB_ENROLL_RELAYS`). Re-read every cycle, so a relay added to the circle after
+            // this process started joins the mesh without a restart — the whole point being that an
+            // operator should never have to hand-configure who else serves their own circle.
+            {
+                if cfg.peers.is_empty() {
+                    println!("  meshing with siblings as members teach us about them.");
+                } else {
+                    println!(
+                        "  meshing with {} configured sibling relay(s) + any members teach us.",
+                        cfg.peers.len()
+                    );
+                }
                 let mesh_node = node.clone();
-                let peers = cfg.peers.clone();
+                let configured = cfg.peers.clone();
+                let me = my_hex.clone();
                 tokio::spawn(async move {
                     loop {
+                        let mut peers = configured.clone();
+                        for learned in mesh_node.relay_learned_relays() {
+                            if !peers.contains(&learned) {
+                                peers.push(learned);
+                            }
+                        }
                         for peer in &peers {
+                            if peer == &me {
+                                continue; // never dial ourselves (self-connect guard)
+                            }
                             let _ = mesh_node.relay_sync_from(peer).await;
                         }
                         tokio::time::sleep(std::time::Duration::from_secs(30)).await;

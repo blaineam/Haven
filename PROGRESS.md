@@ -6,6 +6,31 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest wave (built, batched for next upload)
+- **Two online peers no longer need a relay in common (2026-07-25, 1.1.4 b365, core +
+  all clients)** — a contact holds your ACCOUNT id (that is what an invite/QR carries)
+  but has to dial your DEVICE ids, and both ways of learning those — your signed roster,
+  an invite `?d=` hint — need a route to already exist. So two peers with no shared relay
+  had no route at all, even with both devices online and iroh perfectly able to hole-punch:
+  the friend whose app "refuses to find any of the relays I have enabled", whose DM never
+  arrived. Haven now publishes the account → device-id mapping in the public pkarr
+  directory under the ACCOUNT key (`haven-net/src/accountdiscovery.rs`, base64url, ≤5
+  devices to fit pkarr's 245-byte user-data cap) and resolves it lazily for exactly the
+  members it cannot otherwise reach — no roster, no hint — with a 10-minute per-account
+  retry floor. Published on node start and after a fabric rebind; a HIT triggers an
+  immediate tight sync + relay re-announce, because the relay list the far end is missing
+  travels in the sealed frame-19 announce. Security posture unchanged: the record is a
+  signed packet so only that account can write it, and it is still only a DIAL HINT —
+  content stays sealed to the circle epoch key and inbound frames stay gated on the signed
+  roster, so a stale or hostile record costs one wasted connect and nothing more. Live
+  round-trip test against the real n0 pkarr servers (`--test account_discovery --ignored`).
+- **Deleted relays are recoverable; both-dialing calls connect (2026-07-25, 1.1.4 b365,
+  all clients)** — "Delete now" was the one action with no way back (it drops the entry,
+  every circle association and the default pick, and a relay is a 64-character node id);
+  deletions are archived 30 days and Restore puts the relay back in the circles it served.
+  Calls: iOS's glare fix ported — two people who called each other at the same moment both
+  sat on ringback and neither call connected. Also: the Android media overlay trusts the
+  filesystem so a stale flag can't park a spinner on finished media, and the desktop
+  activity panel paginates instead of building a DOM node per row.
 - **The receiver-side history-blast storm — b349 "still beachballing" + hot iPhone
   (2026-07-23, 1.1.4 b350, core + Apple)** — two live `sample`s of the beachballing Mac
   (b349, 4.6 GB RSS seven minutes after launch) split the freeze in half: (1) the main

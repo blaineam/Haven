@@ -7976,8 +7976,14 @@ private struct BlurredMediaBackdrop: View {
         .task(id: ref) {
             if let cached = Self.cachedSource(ref) { img = cached; loadedRef = ref; return }
             img = nil; loadedRef = nil
-            // Deliberately the 1200px bucket — the tile in FRONT of this backdrop decodes exactly
-            // that, so `thumbnailAsync`'s single-flight makes this the same decode, not a second one.
+            // A 200px bucket, NOT the 1200px one. This is a 24pt-blurred wash stretched to fill —
+            // it cannot show detail, so decoding full-size for it buys nothing and costs plenty.
+            // The old code took 1200px to share the front tile's decode, but it also RETAINS that
+            // bitmap in @State for the life of the card: every visible post held a 1200px image
+            // alive purely to be blurred out of recognition. A feed of freshly-synced media is then
+            // tens of MB of retained bitmaps, which is memory pressure, which is cache churn and a
+            // warm phone — reported as the phone heating while pulling media from a peer's relay.
+            // 200px is ~36x fewer pixels and visually identical once blurred.
             //
             // KEEP the returned bitmap. The old code discarded it and re-peeked the NSCache —
             // which iOS purges on every memory warning — so under pressure the peek came back nil,
@@ -7985,7 +7991,7 @@ private struct BlurredMediaBackdrop: View {
             // surface (the "background blur is just black on my iPhone" report). The front tile
             // never broke because FeedImage keeps its decode's return value; now the backdrop is
             // exactly as pressure-proof.
-            let decoded = await MediaStore.shared.thumbnailAsync(ref, maxDimension: 1200)
+            let decoded = await MediaStore.shared.thumbnailAsync(ref, maxDimension: 200)
             guard !Task.isCancelled else { return }
             img = Self.cachedSource(ref) ?? decoded
             // Decode failed outright (e.g. a video poster not generated yet): leave loadedRef nil
@@ -8011,7 +8017,10 @@ private struct BlurredMediaBackdrop: View {
            min(small.size.width, small.size.height) >= 8 {
             return small
         }
-        return MediaStore.shared.cachedThumbnail(ref, maxDimension: 1200)
+        // 200 is what the decode below now produces; 1200 stays only as an opportunistic hit for
+        // cards that already have the front tile's bitmap resident (free — we don't ASK for it).
+        return MediaStore.shared.cachedThumbnail(ref, maxDimension: 200)
+            ?? MediaStore.shared.cachedThumbnail(ref, maxDimension: 1200)
             ?? MediaStore.shared.cachedThumbnail(ref, maxDimension: 64)
     }
 

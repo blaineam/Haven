@@ -985,7 +985,7 @@ struct DeletedRelaysSection: View {
                                     .foregroundStyle(.secondary)
                             }
                             Spacer()
-                            Button("Restore") { store.restoreErased(rec.entry.hex) }
+                            Button("Restore") { FeedStore.shared.restoreDeletedRelay(rec.entry.hex) }
                                 .buttonStyle(.borderless)
                                 .font(.caption)
                         }
@@ -1000,7 +1000,7 @@ struct DeletedRelaysSection: View {
                         .font(.subheadline)
                 }
             } footer: {
-                Text("Restore puts a deleted relay back in the circles it served. Cleared after 30 days.")
+                Text("Restore re-adds a deleted relay and tells your circles about it again. One deleted before this update comes back for every circle, since we only kept its id.")
             }
         }
     }

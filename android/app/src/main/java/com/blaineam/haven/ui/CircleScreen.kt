@@ -932,15 +932,21 @@ private fun MissingMediaPlaceholder(circleId: String, ref: String, isVideo: Bool
     }
     Box(modifier.background(HavenTheme.card), contentAlignment = Alignment.Center) {
         if (thumbBmp != null) {
+            // SHARP, and with nothing over it. The thumb IS the picture, just smaller — blurring it
+            // and dropping a scrim + a status line on top made a post that was loading fine look
+            // broken. It sits here until the full-res bytes arrive. Apple parity.
             Image(thumbBmp, contentDescription = null,
-                modifier = Modifier.matchParentSize().blur(12.dp),
+                modifier = Modifier.matchParentSize(),
                 contentScale = ContentScale.Crop)
-            Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.25f)))
         }
         when {
             // Present but the parent still had us on screen — show the blurred thumb with NO chrome;
             // the real tile swaps in on the next recomposition. No spinner over finished media.
             bytesPresent -> Unit
+            // We are holding a picture of it and it is on its way: show the picture. A spinner and a
+            // "Waiting for sender…" caption over a photo that is visibly there reads as an error, and
+            // it is not one — nothing here needs the user to do anything.
+            thumbBmp != null && (downloading || waiting) && !unavailable -> Unit
             downloading -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 androidx.compose.material3.CircularProgressIndicator(
                     color = HavenTheme.pink, strokeWidth = 2.dp, modifier = Modifier.size(22.dp))

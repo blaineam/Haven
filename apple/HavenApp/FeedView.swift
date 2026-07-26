@@ -4867,6 +4867,23 @@ final class FeedStore: ObservableObject {
         RelayMailboxStore.shared.forget(nodeHex: nodeHex)
     }
 
+    /// Bring a DELETED relay back. Restoring is a deliberate re-adoption, so it goes through the same
+    /// path as adding a relay by node id — clear the suppression + LWW tombstone, re-associate the
+    /// circles, re-announce it to those circles' members, and backfill what they missed. Anything
+    /// less produced an entry that existed but served nothing.
+    ///
+    /// A relay deleted BEFORE the archive existed has only its tombstone, so there are no circles to
+    /// put it back into: it re-adopts into every circle, exactly like adding it fresh would.
+    func restoreDeletedRelay(_ nodeHex: String) {
+        let store = RelayMailboxStore.shared
+        let hex = nodeHex.hasPrefix("s3:") ? nodeHex : nodeHex.lowercased()
+        let rec = store.erasedRelays.first { $0.entry.hex == hex }
+        let targets = (rec?.circles.isEmpty == false) ? rec!.circles : circles.map(\.id)
+        adoptRelayNode(hex, circleIds: targets, setDefault: rec?.wasDefault ?? false)
+        store.dropErased(hex)
+        HavenLog.relay("restored deleted relay \(hex.prefix(8)) into \(targets.count) circle(s)")
+    }
+
     /// Add an S3 bucket as a (store-and-forward) relay: persist its creds via SharedMailboxStore
     /// (secret → Keychain), record a RelayEntry(isS3:true) so it shows in the Relays list, and
     /// associate it with the given circles. Returns the synthetic relay id.

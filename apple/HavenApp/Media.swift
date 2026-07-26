@@ -1956,10 +1956,13 @@ struct MissingMediaPlaceholder: View {
     var body: some View {
         ZStack {
             if let img = thumbImage {
+                // SHARP, and with nothing over it. The thumb IS the picture, just smaller — blurring
+                // it and dropping a scrim + a status line on top made a post that was loading fine
+                // look broken. It sits here until the full-res bytes cross-fade in over it
+                // (`FeedImage`), which is the whole progressive-loading story: small then big, never
+                // "obscured then revealed".
                 Image(platformImage: img).resizable().scaledToFill()
-                    .blur(radius: 12)
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.black.opacity(0.25)))
             } else {
                 RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(.secondarySystemFill))
             }
@@ -1967,7 +1970,7 @@ struct MissingMediaPlaceholder: View {
         }
     }
 
-    /// White-on-thumb when the blurred preview is behind, secondary on the plain fill.
+    /// White reads on a photo; secondary reads on the plain fill.
     private var overlayStyle: Color { thumbImage != nil ? .white : .secondary }
 
     /// The bytes are actually on disk. Trust the filesystem over the in-flight bookkeeping: if a
@@ -1985,18 +1988,26 @@ struct MissingMediaPlaceholder: View {
             // Present but the parent still had us on screen — show the preview WITHOUT any chrome;
             // the real view swaps in on the next refresh. No spinner over finished media.
             EmptyView()
+        } else if thumbImage != nil,
+                  feed.downloadingMedia.contains(ref) || feed.waitingForSenderMedia.contains(ref),
+                  !feed.unavailableMedia.contains(ref) {
+            // We are holding a picture of it and it is on its way. Show the picture. A spinner and a
+            // "Waiting for sender…" caption over a photo that is visibly there reads as an error, and
+            // it is not one — nothing here needs the user to do anything. The full-res version
+            // cross-fades in when it lands.
+            EmptyView()
         } else if feed.downloadingMedia.contains(ref) {
+            // No thumb to show, so the tile would be a blank grey box: say something.
             VStack(spacing: 8) {
-                ProgressView().tint(thumbImage != nil ? .white : nil)
+                ProgressView()
                 if let p = feed.mediaRestoreProgress[ref], p.total > 1 {
                     Text("Downloading… \(p.done)/\(p.total)").font(.caption).foregroundStyle(overlayStyle)
-                } else {
-                    Text("Downloading…").font(.caption).foregroundStyle(overlayStyle)
                 }
             }
         } else if feed.waitingForSenderMedia.contains(ref), !feed.unavailableMedia.contains(ref) {
             // The relays answered and none holds it — the SENDER hasn't uploaded it yet. A different
-            // truth from "downloading" (we aren't) and from "gone" (it never arrived anywhere).
+            // truth from "downloading" (we aren't) and from "gone" (it never arrived anywhere). Only
+            // said out loud when there is no thumb, i.e. when the tile is otherwise empty.
             VStack(spacing: 8) {
                 Image(systemName: "clock.arrow.circlepath").font(.title3).foregroundStyle(overlayStyle)
                 Text("Waiting for sender…").font(.caption).foregroundStyle(overlayStyle)
@@ -2243,16 +2254,22 @@ struct FeedImage<Placeholder: View>: View {
     @State private var shown = false   // drives an OPACITY-only fade (never a layout animation)
 
     var body: some View {
-        Group {
+        // ZStack, not a Group that swaps branches: the placeholder holds the thumbnail, so swapping
+        // it OUT the instant the full-res image mounts cut to an empty tile and then faded the photo
+        // in from nothing. Keeping it underneath and fading its opacity to 0 makes the same moment a
+        // cross-dissolve from the small version to the big one.
+        //
+        // Fade via opacity ONLY — an `.animation(value:)`/`.transition` on a view being INSERTED into
+        // a scrolling LazyVStack bleeds into the cell's LAYOUT and jitters the scroll position. Both
+        // layers here are permanently mounted, so nothing about this can move layout.
+        ZStack {
+            placeholder()
+                .opacity(shown ? 0 : 1)
+                .allowsHitTesting(!shown)
             if let img, loadedRef == ref {
-                // Fade via opacity ONLY — an `.animation(value:)`/`.transition` on a view being inserted
-                // into a scrolling LazyVStack bleeds into the cell's LAYOUT and jitters the scroll position.
-                // A plain opacity state animated in `onAppear` fades the image without touching layout.
                 Image(platformImage: img).resizable().aspectRatio(contentMode: contentMode)
                     .opacity(shown ? 1 : 0)
                     .onAppear { withAnimation(.easeOut(duration: 0.22)) { shown = true } }
-            } else {
-                placeholder()
             }
         }
         .task(id: ref) {

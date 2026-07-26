@@ -1727,10 +1727,30 @@ final class RelayMailboxStore: ObservableObject {
     }
 
     /// Relays the user DELETED that can still be brought back, newest deletion first.
+    ///
+    /// Two sources. The ARCHIVE holds full records (name + the circles it served) but only for
+    /// deletions made since it existed. Everything deleted before that left only its LWW tombstone
+    /// in `forgotAt` — which is still enough to bring the relay back, because a relay IS its node
+    /// id: the name is cosmetic and the circle list is re-derivable. Without this second source the
+    /// feature would have shipped showing an empty list to anyone who deleted a relay yesterday.
+    ///
+    /// The 30-day TTL applies only to the archive. A legacy tombstone has no other home and is
+    /// shown regardless of age, capped so this can't become an unbounded wall of hex.
     var erasedRelays: [ErasedRelay] {
         let cutoff = nowMs() &- Self.erasedTtlMs
-        return erased.values.filter { $0.erasedAt > cutoff }.sorted { $0.erasedAt > $1.erasedAt }
+        var out = erased.values.filter { $0.erasedAt > cutoff }
+        for (hex, at) in forgotAt where at > 0 && entries[hex] == nil && erased[hex] == nil {
+            out.append(ErasedRelay(
+                entry: RelayEntry(hex: hex, name: Self.shortName(hex), active: false,
+                                  lastSeenMs: at, isS3: hex.hasPrefix("s3:")),
+                circles: [], wasDefault: false, erasedAt: at))
+        }
+        return Array(out.sorted { $0.erasedAt > $1.erasedAt }.prefix(20))
     }
+
+    /// Whether we hold a FULL archived record for this hex (name + circles), as opposed to a bare
+    /// legacy tombstone — the caller restores those two differently.
+    func hasErasedRecord(_ nodeHex: String) -> Bool { erased[nodeHex] != nil }
 
     /// Undo a "Delete now": put the entry, its circle associations and (if it held it) the default pick
     /// back, and clear the suppression/deletion stamps the same way `restore` does — otherwise the very

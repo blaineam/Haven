@@ -250,10 +250,13 @@ function syncingPlaceholder(circleId, ref, isVideo) {
   if (t) {
     invoke("media_data_url", { circleId, reference: t }).then((u) => {
       if (!u || !box.isConnected) return;
+      // SHARP, full opacity, nothing over it. The thumb IS the picture, just smaller — blurring it
+      // behind a spinner made a post that was loading fine look broken. Apple/Android parity.
       box.prepend(el("img", {
         src: u,
-        style: "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;filter:blur(12px);opacity:.75;z-index:0",
+        style: "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:0",
       }));
+      front.style.display = "none";   // the picture is the status; no caption over it
     }).catch(() => {});
   }
   const front = el("div", { class: "col", style: "position:relative;z-index:1;align-items:center;gap:6px" });
@@ -261,12 +264,16 @@ function syncingPlaceholder(circleId, ref, isVideo) {
   const waiting = () => front.replaceChildren(
     el("div", { class: "spinner" }),
     el("div", { class: "muted small" }, isVideo ? "Video still loading…" : "Still loading…"));
-  const gone = () => front.replaceChildren(
+  // `gone` is terminal and ACTIONABLE, so it always shows — even over a thumb. Re-show the front
+  // layer the thumb hid: the difference between "on its way" (say nothing) and "you need to do
+  // something" is the only thing chrome should be marking here.
+  const showFront = () => { front.style.display = ""; };
+  const gone = () => (showFront(), front.replaceChildren(
     el("div", { class: "muted small" }, "Not available yet"),
     el("button", { class: "btn small", onclick: () => {
       invoke("media_download", { reference: ref }).catch(() => {});
       start();
-    } }, "Retry"));
+    } }, "Retry")));
   let timer = null;
   const start = () => {
     waiting();

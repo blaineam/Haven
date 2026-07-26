@@ -22,6 +22,7 @@ use iroh::{
 pub mod blobstore;
 pub mod cfquicktunnel;
 pub mod derp;
+pub mod accountdiscovery;
 pub mod discovery;
 pub mod endpoint_builder;
 pub mod httprelay;

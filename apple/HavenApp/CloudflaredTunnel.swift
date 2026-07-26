@@ -53,6 +53,9 @@ final class CloudflaredTunnel: ObservableObject {
     /// "nodename nor servname") even though cloudflared is up. Common with router DNS filters —
     /// Safari and peers on the same network will also fail. DoH may still resolve the name.
     @Published private(set) var freeTunnelDNSBroken = false
+    /// The background re-probe that can take the DNS notice back down (see
+    /// `scheduleFreeTunnelDNSRecheck`). Cancelled on a new assessment or a tunnel restart.
+    private var dnsRecheck: Task<Void, Never>?
     /// Human-readable DNS diagnosis for Settings (nil when healthy / not applicable).
     @Published private(set) var freeTunnelDNSNote: String?
     /// Absolute path of the main cloudflared log file (media / path-proxy tunnel).
@@ -241,6 +244,7 @@ final class CloudflaredTunnel: ObservableObject {
         usesPathProxy = false
         localFrontDoor = nil
         dualTunnelNote = nil
+        dnsRecheck?.cancel(); dnsRecheck = nil
         freeTunnelDNSBroken = false
         freeTunnelDNSNote = nil
         // Keep log paths published so Settings can still open them after stop.
@@ -469,6 +473,39 @@ final class CloudflaredTunnel: ObservableObject {
         return nil
     }
 
+    /// Re-probe a hostname we flagged, and clear the flag as soon as it resolves or its URL answers.
+    /// Backs off from 15s to a minute over ~10 minutes, then stops: past that it really is the network.
+    private func scheduleFreeTunnelDNSRecheck(host: String, url: String) {
+        dnsRecheck?.cancel()
+        dnsRecheck = Task { [weak self] in
+            var delay: UInt64 = 15
+            var elapsed: TimeInterval = 0
+            while elapsed < 600 {
+                try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                if Task.isCancelled { return }
+                elapsed += Double(delay)
+                // `||` short-circuits through an autoclosure, which cannot carry an await — spell
+                // the two probes out so the cheap one still runs first.
+                var ok = await Task.detached(priority: .utility) { Self.systemResolves(host: host) }.value
+                if !ok {
+                    ok = await Self.quickPublicProbe(url.hasSuffix("/") ? url : url + "/")
+                }
+                guard let self else { return }
+                if ok {
+                    await MainActor.run {
+                        guard self.freeTunnelDNSBroken else { return }
+                        self.freeTunnelDNSBroken = false
+                        self.freeTunnelDNSNote = nil
+                        HavenLog.relay("cloudflared: \(host) resolves now — clearing the DNS notice")
+                        self.objectWillChange.send()
+                    }
+                    return
+                }
+                delay = min(delay * 2, 60)
+            }
+        }
+    }
+
     /// System getaddrinfo vs Cloudflare DoH for a free hostname. Sets `freeTunnelDNSBroken`.
     /// Free trycloudflare DNS often lags mint by a few seconds — we poll DoH before calling it dead.
     func assessFreeTunnelDNS(publicURL url: String) async {
@@ -509,8 +546,13 @@ final class CloudflaredTunnel: ObservableObject {
                 objectWillChange.send()
                 return
             }
-            // DoH success with system fail = filtering; no need to wait full window.
-            if !dohIPs.isEmpty { break }
+            // DoH answering is NOT evidence the system path is filtered — it only proves the name
+            // exists. The overwhelmingly common reason the system resolver says NXDOMAIN here is a
+            // NEGATIVE CACHE entry: something looked the hostname up moments before cloudflared
+            // minted it, mDNSResponder cached the miss for its TTL, and Cloudflare's own DoH answers
+            // instantly because it never had that cache. Breaking out of the poll on the first DoH
+            // hit turned that ordinary race into a permanent "your DNS is broken" verdict — which is
+            // exactly why the same URL then loads in Safari every single time. Keep polling.
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
 
@@ -519,14 +561,30 @@ final class CloudflaredTunnel: ObservableObject {
             freeTunnelDNSNote = nil
             return
         }
+        // Last word goes to an actual HTTPS fetch of the tunnel URL, because that is literally what a
+        // peer does. If it answers, the name resolved — whatever `getaddrinfo` said a second ago is
+        // stale, and telling the user their network is broken would be false.
+        if await Self.quickPublicProbe(url.hasSuffix("/") ? url : url + "/") {
+            freeTunnelDNSBroken = false
+            freeTunnelDNSNote = nil
+            HavenLog.relay("cloudflared: \(host) fetched over HTTPS despite a system-resolver miss — not flagging DNS")
+            Self.appendLogFile(
+                dnsURL,
+                line: "\(ISO8601DateFormatter().string(from: Date())) RESULT HTTPS_OK_despite_system_miss host=\(host)"
+            )
+            objectWillChange.send()
+            return
+        }
         freeTunnelDNSBroken = true
         if !dohIPs.isEmpty {
             freeTunnelDNSNote =
-                "System DNS returns NXDOMAIN for \(host), but encrypted DNS (DoH) still resolves it. "
-                + "Your router/DNS (\(Self.primaryDNSHint())) is filtering free Cloudflare tunnels — "
-                + "Safari and most peers on this network cannot use free trycloudflare URLs. "
-                + "Fix: System Settings → Network → DNS → 1.1.1.1 / 1.0.0.1 (or enable encrypted DNS), "
-                + "or switch front door to Custom domain / Manual. Logs: Application Support/Haven/logs/"
+                "This Mac's resolver hasn't picked up \(host) yet — encrypted DNS (DoH) already has it, "
+                + "and an HTTPS fetch didn't answer either. Usually this clears on its own within a "
+                + "minute or two (a fresh hostname your resolver looked up just before it existed, and "
+                + "cached the miss). We'll keep checking and this notice will disappear by itself. "
+                + "If it sticks around, your DNS (\(Self.primaryDNSHint())) may be filtering free "
+                + "Cloudflare tunnels: System Settings → Network → DNS → 1.1.1.1 / 1.0.0.1, or switch "
+                + "the front door to Custom domain / Manual. Logs: Application Support/Haven/logs/"
             HavenLog.relay(
                 "cloudflared: DNS BROKEN for free tunnel — system NXDOMAIN, DoH OK (\(dohIPs.joined(separator: ","))) host=\(host)"
             )
@@ -546,6 +604,11 @@ final class CloudflaredTunnel: ObservableObject {
             )
         }
         objectWillChange.send()
+        // The verdict above is a SNAPSHOT, and the usual cause of it (a negative-cached lookup from
+        // just before the hostname existed) expires on its own. Nothing used to re-evaluate it, so a
+        // transient miss painted a permanent scary banner while the URL worked everywhere else. Keep
+        // checking quietly in the background and take the notice down the moment it is wrong.
+        scheduleFreeTunnelDNSRecheck(host: host, url: url)
     }
 
     /// Best-effort primary DNS server for the warning string.
@@ -606,10 +669,10 @@ final class CloudflaredTunnel: ObservableObject {
 
     /// Probe that the free public origin reaches our path proxy (or at least answers HTTP).
     nonisolated private static func waitPublicPathProxy(url: String, timeout: TimeInterval) async -> Bool {
-        // If system DNS is NXDOMAIN, URLSession will always fail — skip waiting on public GET.
-        if let host = URL(string: url)?.host, !Self.systemResolves(host: host) {
-            return false
-        }
+        // NO resolver pre-check. It used to bail here when `getaddrinfo` missed — which made the
+        // verdict self-fulfilling: a stale negative cache meant we refused to attempt the one probe
+        // that would have disproved it, and the tunnel got written off while Safari loaded the same
+        // URL fine. Each probe below is bounded at 4s, so trying costs a timeout at worst.
         let deadline = Date().addingTimeInterval(timeout)
         let probe = url.hasSuffix("/") ? url : url + "/"
         while Date() < deadline {
@@ -621,10 +684,8 @@ final class CloudflaredTunnel: ObservableObject {
 
     nonisolated private static func quickPublicProbe(_ url: String) async -> Bool {
         guard let u = URL(string: url) else { return false }
-        // Avoid multi-second hangs when the name is NXDOMAIN.
-        if let host = u.host, !Self.systemResolves(host: host) {
-            return false
-        }
+        // Deliberately NO `systemResolves` pre-check — see `waitPublicPathProxy`. URLSession does its
+        // own resolution and the 4s timeout below bounds the cost of being wrong.
         var req = URLRequest(url: u)
         req.httpMethod = "GET"
         req.timeoutInterval = 4

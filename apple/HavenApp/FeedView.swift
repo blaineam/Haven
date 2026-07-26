@@ -3486,7 +3486,8 @@ final class FeedStore: ObservableObject {
         let myName = ProfileStore.shared.displayName.isEmpty ? "Someone" : ProfileStore.shared.displayName
         let isDM = circleId.hasPrefix("dm:")
         let circleName = circles.first(where: { $0.id == circleId })?.name ?? "your circle"
-        let resolved = banner ?? .generic(isDM: isDM, circleName: circleName)
+        let resolved = banner ?? .generic(isDM: isDM, circleName: circleName,
+                                          isGroupDM: PushBanner.isGroupDM(circleId))
         // `c` lets the recipient's NSE redact the banner if *they've* locked this circle.
         // `k`/`e` let a modern NSE group and format; older NSEs ignore unknown keys.
         // `mk` (the deterministic mailbox key this envelope uploads under, below) + `p`/`mr` from

@@ -57,6 +57,16 @@ fn is_audio(ref_: &str) -> bool {
 }
 
 /// Banner for a post / story / DM (the common author path).
+/// A `dm:` circle id encodes its participants as sorted node hexes joined by `-`, so 3+ hexes means
+/// a GROUP thread. "Sent you a message" is wrong there — nobody sent it to you specifically.
+/// Derived from the id alone so it works anywhere a banner is built, with no store to consult.
+pub fn is_group_dm(circle_id: &str) -> bool {
+    circle_id
+        .strip_prefix("dm:")
+        .map(|rest| rest.split('-').filter(|p| p.len() == 64).count() > 2)
+        .unwrap_or(false)
+}
+
 pub fn for_post(circle_id: &str, circle_name: &str, body: &str, media: &[&str], story: bool) -> BannerCopy {
     if story {
         return BannerCopy {
@@ -70,20 +80,22 @@ pub fn for_post(circle_id: &str, circle_name: &str, body: &str, media: &[&str], 
     if circle_id.starts_with("dm:") {
         let has_audio = real.iter().any(|r| is_audio(r));
         let has_media = !real.is_empty();
+        let group = is_group_dm(circle_id);
         if let Some(p) = clip(Some(body), 80) {
             return BannerCopy {
                 kind: kind::DM,
                 body: p,
-                private_body: "Sent you a message".into(),
+                private_body: if group { "Messaged the group".into() } else { "Sent you a message".into() },
                 emoji: None,
             };
         }
-        let (body, privb) = if has_audio {
-            ("Sent a voice note", "Sent a voice note")
-        } else if has_media {
-            ("Sent a photo", "Sent a photo")
-        } else {
-            ("Sent you a message", "Sent you a message")
+        let (body, privb) = match (has_audio, has_media, group) {
+            (true, _, true) => ("Sent the group a voice note", "Sent the group a voice note"),
+            (true, _, false) => ("Sent a voice note", "Sent a voice note"),
+            (_, true, true) => ("Sent the group a photo", "Sent the group a photo"),
+            (_, true, false) => ("Sent a photo", "Sent a photo"),
+            (_, _, true) => ("Messaged the group", "Messaged the group"),
+            _ => ("Sent you a message", "Sent you a message"),
         };
         return BannerCopy {
             kind: kind::DM,
@@ -245,7 +257,32 @@ mod tests {
     }
 
     #[test]
-    fn dm_preview_private() {
+fn group_dm_says_group_not_you() {
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let c = "c".repeat(64);
+        let one_to_one = format!("dm:{a}-{b}");
+        let group = format!("dm:{a}-{b}-{c}");
+        assert!(!is_group_dm(&one_to_one));
+        assert!(is_group_dm(&group));
+        assert!(!is_group_dm("c1SOMECIRCLE"), "a named circle is not a DM at all");
+
+        // With previews hidden (lock screen / "hide previews"), the 1:1 line is addressed to YOU and
+        // the group line is not — that difference is the whole point of the distinction.
+        let p1 = for_post(&one_to_one, "", "hey", &[], false);
+        let pg = for_post(&group, "", "hey", &[], false);
+        assert_eq!(p1.private_body, "Sent you a message");
+        assert_eq!(pg.private_body, "Messaged the group");
+
+        // And with no text at all, the visible body carries it too.
+        let m1 = for_post(&one_to_one, "", "", &[], false);
+        let mg = for_post(&group, "", "", &[], false);
+        assert_eq!(m1.body, "Sent you a message");
+        assert_eq!(mg.body, "Messaged the group");
+    }
+
+    #[test]
+        fn dm_preview_private() {
         let c = for_post("dm:aa-bb", "x", "on my way", &[], false);
         assert_eq!(c.body, "on my way");
         assert_eq!(c.private_body, "Sent you a message");

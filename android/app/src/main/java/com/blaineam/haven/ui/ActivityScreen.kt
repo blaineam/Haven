@@ -128,7 +128,11 @@ private fun ActivityRow(row: ActivityStore.Row, unseen: Boolean, onTap: () -> Un
         "comment" -> if (row.snippet.isBlank()) "Commented on your post" else "Commented: ${row.snippet}"
         "vote" -> "Voted in your poll"
         "story" -> "Shared a story"
-        "dm" -> if (row.snippet.isBlank()) "Sent you a message" else row.snippet
+        // A group thread says so — "sent you a message" is wrong when it went to everyone.
+        "dm" -> if (row.snippet.isBlank()) {
+            if (com.blaineam.haven.core.PushBanner.isGroupDm(row.circleId)) "Messaged the group"
+            else "Sent you a message"
+        } else row.snippet
         "connect" -> "You're now connected"
         "circle" -> "You were added to this circle"
         else -> if (row.snippet.isBlank()) "Shared something" else row.snippet

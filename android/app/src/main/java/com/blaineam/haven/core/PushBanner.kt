@@ -25,6 +25,12 @@ object PushBanner {
         return s
     }
 
+    /** A `dm:` circle id encodes its participants as sorted node hexes joined by `-`, so 3+ hexes
+     *  means a GROUP thread. "Sent you a message" is wrong there — nobody sent it to you
+     *  specifically. Derived from the id alone so it works with no store to consult. Apple parity. */
+    fun isGroupDm(circleId: String): Boolean =
+        circleId.removePrefix("dm:").split("-").count { it.length == 64 } > 2
+
     private fun isSynthetic(ref: String): Boolean {
         val i = ref.indexOf(':')
         return i > 1
@@ -58,14 +64,18 @@ object PushBanner {
         }
         val real = media.filter { !isSynthetic(it) }
         if (circleId.startsWith("dm:")) {
+            val group = isGroupDm(circleId)
             clip(body)?.let {
-                return Copy("dm", it, "Sent you a message")
+                return Copy("dm", it, if (group) "Messaged the group" else "Sent you a message")
             }
             val hasAudio = real.any { isAudio(it) }
             val hasMedia = real.isNotEmpty()
             return when {
+                hasAudio && group -> Copy("dm", "Sent the group a voice note", "Sent the group a voice note")
                 hasAudio -> Copy("dm", "Sent a voice note", "Sent a voice note")
+                hasMedia && group -> Copy("dm", "Sent the group a photo", "Sent the group a photo")
                 hasMedia -> Copy("dm", "Sent a photo", "Sent a photo")
+                group -> Copy("dm", "Messaged the group", "Messaged the group")
                 else -> Copy("dm", "Sent you a message", "Sent you a message")
             }
         }

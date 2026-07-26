@@ -178,7 +178,10 @@ struct ActivityView: View {
         case "comment": return e.snippet.isEmpty ? "Left a comment" : "Commented: \(e.snippet)"
         case "vote":    return "Voted on your poll"
         case "story":   return "Shared a story"
-        case "dm":      return e.snippet.isEmpty ? "Sent you a message" : e.snippet
+        // A group thread says so — "sent you a message" is wrong when it went to everyone.
+        case "dm":
+            if !e.snippet.isEmpty { return e.snippet }
+            return PushBanner.isGroupDM(e.circleId) ? "Messaged the group" : "Sent you a message"
         case "post":    return e.snippet.isEmpty ? "Shared something" : e.snippet
         default:        return e.snippet
         }

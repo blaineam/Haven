@@ -19,13 +19,15 @@ import Foundation
 enum PushBanner: Sendable {
     case post(circleName: String, preview: String?, hasMedia: Bool)
     case story(circleName: String, hasCaption: Bool)
-    case dm(preview: String?, hasMedia: Bool, hasAudio: Bool)
+    /// `isGroup` distinguishes a group thread from a 1:1 so the copy can say WHERE it landed.
+    /// "Sent you a message" is simply wrong for a group — nobody sent it to you specifically.
+    case dm(preview: String?, hasMedia: Bool, hasAudio: Bool, isGroup: Bool = false)
     case reaction(emoji: String, isDM: Bool)
     case comment(preview: String?, isDM: Bool, circleName: String)
     case edit(isDM: Bool, circleName: String)
     case unsend(isDM: Bool)
     /// Fallback when the caller doesn't know (legacy / rare paths).
-    case generic(isDM: Bool, circleName: String)
+    case generic(isDM: Bool, circleName: String, isGroupDM: Bool = false)
     /// Wrapper carrying deep-link/prefetch coordinates alongside any banner: the authored or
     /// PARENT post id (`p` — a reaction's tap opens the post it reacted to, not just the circle)
     /// and the post's fetchable media refs (`mr`, thumbs/posters first). Indirect so a banner
@@ -56,11 +58,11 @@ enum PushBanner: Sendable {
             return "Posted in \(circle)"
         case .story(let circle, _):
             return "Shared a story in \(circle)"
-        case .dm(let preview, let hasMedia, let hasAudio):
+        case .dm(let preview, let hasMedia, let hasAudio, let isGroup):
             if let p = Self.clip(preview), !p.isEmpty { return p }
-            if hasAudio { return "Sent a voice note" }
-            if hasMedia { return "Sent a photo" }
-            return "Sent you a message"
+            if hasAudio { return isGroup ? "Sent the group a voice note" : "Sent a voice note" }
+            if hasMedia { return isGroup ? "Sent the group a photo" : "Sent a photo" }
+            return isGroup ? "Messaged the group" : "Sent you a message"
         case .reaction(let emoji, let isDM):
             let e = emoji.isEmpty ? "👍" : emoji
             return isDM ? "Reacted \(e) to your message" : "Reacted \(e) to your post"
@@ -73,8 +75,9 @@ enum PushBanner: Sendable {
             return isDM ? "Edited a message" : "Edited a post in \(circle)"
         case .unsend(let isDM):
             return isDM ? "Unsent a message" : "Unsent a post"
-        case .generic(let isDM, let circle):
-            return isDM ? "Sent you a message" : "Posted in \(circle)"
+        case .generic(let isDM, let circle, let isGroup):
+            if isDM { return isGroup ? "Messaged the group" : "Sent you a message" }
+            return "Posted in \(circle)"
         case .tagged(let inner, _, _):
             return inner.body
         }
@@ -88,10 +91,10 @@ enum PushBanner: Sendable {
             return hasMedia ? "Shared a photo" : "Posted in your circle"
         case .story:
             return "Shared a story"
-        case .dm(_, let hasMedia, let hasAudio):
-            if hasAudio { return "Sent a voice note" }
-            if hasMedia { return "Sent a photo" }
-            return "Sent you a message"
+        case .dm(_, let hasMedia, let hasAudio, let isGroup):
+            if hasAudio { return isGroup ? "Sent the group a voice note" : "Sent a voice note" }
+            if hasMedia { return isGroup ? "Sent the group a photo" : "Sent a photo" }
+            return isGroup ? "Messaged the group" : "Sent you a message"
         case .reaction(_, let isDM):
             return isDM ? "Reacted to your message" : "Reacted to your post"
         case .comment(_, let isDM, _):
@@ -100,8 +103,9 @@ enum PushBanner: Sendable {
             return isDM ? "Edited a message" : "Edited a post"
         case .unsend(let isDM):
             return isDM ? "Unsent a message" : "Unsent a post"
-        case .generic(let isDM, _):
-            return isDM ? "Sent you a message" : "New activity in your circle"
+        case .generic(let isDM, _, let isGroup):
+            if isDM { return isGroup ? "Messaged the group" : "Sent you a message" }
+            return "New activity in your circle"
         case .tagged(let inner, _, _):
             return inner.privateBody
         }
@@ -187,6 +191,15 @@ enum PushBanner: Sendable {
     // and unsends always do — it's their target), so the recipient's tap opens the exact post.
     // A nil id keeps the old circle/thread route.
 
+    /// A `dm:` circle id encodes its participants as sorted node hexes joined by `-`, so 3+ hexes
+    /// means a group thread. Derived from the ID ALONE on purpose: the notification-service
+    /// extension builds banners with no access to the feed store, and a banner that reads correctly
+    /// only in-app is a banner that reads wrong exactly when it matters.
+    static func isGroupDM(_ circleId: String) -> Bool {
+        guard circleId.hasPrefix("dm:") else { return false }
+        return circleId.dropFirst(3).split(separator: "-").filter { $0.count == 64 }.count > 2
+    }
+
     static func forPost(circleId: String, circleName: String, body: String,
                         media: [String], story: Bool, postId: String? = nil) -> PushBanner {
         let real = media.filter { !isSyntheticRef($0) }
@@ -195,7 +208,8 @@ enum PushBanner: Sendable {
             inner = .story(circleName: circleName, hasCaption: !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         } else if circleId.hasPrefix("dm:") {
             let hasAudio = real.contains(where: isAudioRef)
-            inner = .dm(preview: body, hasMedia: !real.isEmpty, hasAudio: hasAudio)
+            inner = .dm(preview: body, hasMedia: !real.isEmpty, hasAudio: hasAudio,
+                        isGroup: Self.isGroupDM(circleId))
         } else {
             inner = .post(circleName: circleName, preview: body, hasMedia: !real.isEmpty)
         }

@@ -477,6 +477,14 @@ async function refreshBadges() {
 // plus app-raised rows ("media is back"). Rows are styled like the Messages list; tapping one jumps
 // through the same deep-link route table a pasted link uses. Opening marks everything seen
 // (monotonic watermark, synced to your other devices via `setting:activitySeenAt`).
+/** A `dm:` circle id encodes its participants as sorted node hexes joined by `-`, so 3+ hexes means
+ *  a GROUP thread. Derived from the id alone so it needs no store lookup. Apple/Android parity. */
+function isGroupDm(circleId) {
+  const id = String(circleId || "");
+  if (!id.startsWith("dm:")) return false;
+  return id.slice(3).split("-").filter((p) => p.length === 64).length > 2;
+}
+
 async function activityPanel() {
   const a = await invoke("activity").catch(() => ({ rows: [], seen_at: 0 }));
   const rows = a.rows || [], seenAt = a.seen_at || 0;
@@ -487,7 +495,9 @@ async function activityPanel() {
       case "comment": return "Commented";
       case "vote": return "Voted";
       case "story": return "Shared a story";
-      case "dm": return "Sent you a message";
+      // A `dm:` id encodes its participants as sorted node hexes joined by `-`, so 3+ means a GROUP
+      // thread, where "sent you a message" is wrong — nobody sent it to you specifically.
+      case "dm": return isGroupDm(r.circleId) ? "Messaged the group" : "Sent you a message";
       default: return "Posted";
     }
   };

@@ -442,9 +442,27 @@ struct DMThreadView: View {
         .fixedSize(horizontal: true, vertical: false)
     }
 
+    /// Is this thread actually on this device? A deep link (or a notification tap) can name a `dm:`
+    /// circle we have never synced — a group someone else created, or one whose circle hasn't
+    /// arrived yet. Pushing the normal view for it rendered an empty scroll area under an empty
+    /// header: a screen that looks broken rather than one that explains itself. Desktop already
+    /// said so out loud ("That conversation isn't on this device yet"); iOS did not.
+    private var threadKnown: Bool { store.circles.contains { $0.id == circleId } }
+
     var body: some View {
         ZStack {
             HavenBackground()
+            if !threadKnown {
+                VStack(spacing: 10) {
+                    Image(systemName: "bubble.left.and.exclamationmark.bubble.right")
+                        .font(.largeTitle).foregroundStyle(.secondary)
+                    Text("This conversation isn't on this device yet")
+                        .font(.headline).multilineTextAlignment(.center)
+                    Text("It'll appear here once it syncs from your circle. Nothing is lost.")
+                        .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                }
+                .padding(32)
+            } else {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 8) {
@@ -522,6 +540,7 @@ struct DMThreadView: View {
             .onPreferenceChange(DMComposerHeightKey.self) { h in
                 if h > 0, abs(h - composerHeight) > 1 { composerHeight = h }
             }
+            }   // threadKnown
         }
         .havenInlineNavTitle()
         .toolbar {

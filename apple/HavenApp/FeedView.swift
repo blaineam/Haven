@@ -8004,10 +8004,26 @@ struct PostCard: View {
         BlurredMediaBackdrop(ref: ref)
     }
 
-    /// The carousel's per-page backdrop: only pay for it when the page's media actually letterboxes
-    /// inside the shared page shape. (Single media gates on the page frame instead — see `mediaView`.)
+    /// The carousel's per-page backdrop.
+    ///
+    /// This used to be gated on `letterboxes(ref, in: containerAspect)` as a perf tweak — "only pay
+    /// for the blur when the page's media doesn't fill the page shape". That test is unsound, and it
+    /// silently removed the backdrop from entire carousels:
+    ///
+    ///  • `containerAspect` is `pageAspect(carouselAspect)`, and `pageAspect` falls back to the RAW
+    ///    aspect whenever `mediaWidth` is still 0 — which it is on the first layout pass, before the
+    ///    preference reports the card's width. Comparing a photo's aspect against the shared aspect
+    ///    *derived from that same photo* then matches, so the page that DEFINES the carousel shape
+    ///    never got a backdrop.
+    ///  • On any wide layout (iPad, landscape, macOS) `pageHeight` is capped at `singleMediaMaxHeight`,
+    ///    so the page is far wider than the fitted image no matter what the aspects say. Every page
+    ///    letterboxes; the comparison just couldn't see it.
+    ///
+    /// Single media never had this problem because it draws its backdrop unconditionally. Do the same
+    /// here. The cost is one 200px bitmap blurred once per visible page (`.drawingGroup` rasterizes
+    /// it), and carousel pages are lazy — which is a much better trade than a flat grey letterbox.
     @ViewBuilder private func pageBackdrop(_ ref: String, containerAspect: CGFloat) -> some View {
-        if letterboxes(ref, in: containerAspect) { blurredBackdrop(ref) }
+        blurredBackdrop(ref)
     }
 
     /// The measured width of a post's media column, so a page can span the card rather than shrink to the

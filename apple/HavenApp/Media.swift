@@ -1955,7 +1955,17 @@ struct MissingMediaPlaceholder: View {
 
     var body: some View {
         ZStack {
-            if let img = thumbImage {
+            if bytesPresent {
+                // The media is HERE. Draw nothing at all — not even the grey fill.
+                //
+                // `FeedImage` keeps this view mounted underneath the photo to cross-dissolve into it,
+                // and in a carousel the blurred letterbox backdrop is `FeedImage`'s own `.background`.
+                // An opaque fill here therefore sits BETWEEN the backdrop and the photo and paints the
+                // letterbox flat grey — which is exactly what happened to the carousel backdrop. The
+                // fill only ever existed to stop an empty tile looking broken, and a tile whose bytes
+                // are on disk is not empty.
+                Color.clear
+            } else if let img = thumbImage {
                 // SHARP, and with nothing over it. The thumb IS the picture, just smaller — blurring
                 // it and dropping a scrim + a status line on top made a post that was loading fine
                 // look broken. It sits here until the full-res bytes cross-fade in over it

@@ -158,6 +158,12 @@ enum DemoSeeder {
                             media: ["img_demo_pup"], at: mins(30))
         let p5 = friendPost(main, valid: valid, by: 3, body: "sunday slow brunch — the sourdough finally rose 🍞",
                             media: ["img_demo_brunch"], at: mins(12))
+        // A multi-photo post, so the demo actually exercises the CAROUSEL page shape (its own
+        // letterbox backdrop per page) and not just the single-media path — the two lay out through
+        // different code, and only the single one was represented here.
+        _ = friendPost(main, valid: valid, by: 1, body: "a few from the weekend 🌄",
+                       media: ["img_demo_ridge", "img_demo_sunset", "img_demo_trail", "img_demo_plant"],
+                       at: mins(8))
 
         // Reactions + comments fan in from the circle. Friends only react to posts they hold,
         // so we feed my posts to them first (done inside the helpers below).

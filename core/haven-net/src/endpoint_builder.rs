@@ -169,15 +169,16 @@ pub fn derp_urls_from_book(book: &crate::discovery::RelayBook) -> Vec<String> {
 
 /// Apply a circle's live relay book to the process policy.
 ///
-/// **Haven-first fabric:** when any live `derp_url` is known, n0 is **disabled** and the
-/// custom map is preferred. When the book has no DERP URLs, n0 remains the only NAT fallback.
+/// **Haven-first fabric:** when any live `derp_url` is known the custom map is PREFERRED — but
+/// n0 stays in the map as the fallback rendezvous (see `apply_derp_urls`). When the book has no
+/// DERP URLs, n0 is the only NAT fallback.
 /// Does **not** rebind existing endpoints — next spawn / restart picks up the map.
 pub fn apply_book_to_policy(book: &crate::discovery::RelayBook, _prefer_custom: bool) {
     apply_derp_urls(derp_urls_from_book(book));
 }
 
 /// Install known Haven DERP HTTPS URLs as the process-wide fabric policy.
-/// Empty → n0 only. Non-empty → Haven only (no n0).
+/// Empty → n0 only. Non-empty → Haven PREFERRED, unioned with n0 (never replacing it).
 ///
 /// Call **before** [`haven_endpoint_builder`] / `Node::spawn` / `HavenNode::start` whenever
 /// possible. Safe to call again after learn (frame 19 / adopt) so subsequent binds are Haven-first;
@@ -286,10 +287,14 @@ mod tests {
     }
 
     #[test]
-    fn apply_derp_urls_haven_first_disables_n0() {
+    fn apply_derp_urls_prefers_haven_but_keeps_n0() {
+        // A circle relay is an ADDITION, never a substitute. Dropping n0 the moment a circle
+        // announced its own DERP made that (free-tunnel, rotating) hostname a single point of
+        // failure for the whole transport — two devices on the same wi-fi could not even exchange
+        // addresses when it moved. This test used to assert the opposite; it is asserting the fix.
         apply_derp_urls(vec!["https://relay.example.com".into()]);
         let p = endpoint_policy();
-        assert!(!p.use_n0_relays);
+        assert!(p.use_n0_relays, "n0 must survive as the fallback rendezvous");
         assert!(p.prefer_custom_relays);
         assert!(haven_fabric_active());
         assert_eq!(active_derp_urls(), vec!["https://relay.example.com".to_string()]);

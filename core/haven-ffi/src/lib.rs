@@ -8056,16 +8056,35 @@ mod net_tests {
     }
 
     #[test]
-    fn bundles_auto_drop_sender_expired_content_without_an_explicit_purge() {
+    fn bundles_auto_drop_sender_expired_content_after_the_reseal_grace() {
         let alice = HavenSocial::new([62u8; 32].to_vec()).unwrap();
         let cid = DEFAULT_CIRCLE.to_string();
         let now = wall_ms();
-        // Already past its 10s sender expiry vs the wall clock; the fresh post is the control.
-        alice.post(cid.clone(), "stale promise".into(), vec![], None, Some(10), false, false, now - 60_000).unwrap();
+        let grace_ms: u64 = 48 * 60 * 60 * 1000;
+        // Three posts: one lapsed but INSIDE the 48h re-seal grace, one lapsed well OUTSIDE it, and a
+        // fresh control.
+        alice.post(cid.clone(), "just lapsed".into(), vec![], None, Some(10), false, false, now - 60_000).unwrap();
+        alice.post(cid.clone(), "long gone".into(), vec![], None, Some(10), false, false, now - grace_ms - 60_000).unwrap();
         alice.post(cid.clone(), "fresh".into(), vec![], None, None, false, false, now).unwrap();
-        // The app never calls purge_expired — building a bundle alone must drop the lapsed post.
-        assert_eq!(epoch_event_count(&alice.sync_envelopes(cid.clone())), 1, "sender-expired post never rides a bundle");
-        assert_eq!(epoch_event_count(&alice.export_recent_envelopes(cid.clone(), 0)), 1, "it was removed from the log, not just filtered");
+
+        // The app never calls purge_expired — building a bundle alone must do the purging. Only the
+        // post past the GRACE leaves: the 48h window is what lets a receiver that stalled (commit lag,
+        // offline) still reconcile a story from history instead of losing it the instant it lapsed.
+        assert_eq!(
+            epoch_event_count(&alice.sync_envelopes(cid.clone())), 2,
+            "a just-lapsed post stays exportable through the 48h re-seal grace"
+        );
+        assert_eq!(
+            epoch_event_count(&alice.export_recent_envelopes(cid.clone(), 0)), 2,
+            "the post past the grace was removed from the log, not just filtered"
+        );
+
+        // The promise the VIEWER sees is unchanged: display hides expired content at the exact
+        // deadline, grace or no grace. That separation is the whole point — the bytes linger only so
+        // late receivers can reconcile; nobody is shown them.
+        let feed = alice.feed(cid.clone(), now, None);
+        assert_eq!(feed.len(), 1, "only the un-expired post is displayed");
+        assert_eq!(feed[0].body, "fresh");
     }
 
     #[test]

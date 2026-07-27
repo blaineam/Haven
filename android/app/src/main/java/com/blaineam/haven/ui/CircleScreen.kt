@@ -4,6 +4,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Box
@@ -516,7 +518,15 @@ private fun CircleManageSheet(circleId: String, onDismiss: () -> Unit) {
         onDismissRequest = onDismiss, containerColor = HavenTheme.card,
         title = { Text("Circle settings", color = HavenTheme.textPrimary) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            // SCROLLABLE. An AlertDialog caps its own height, and this sheet carries a rename field,
+            // a private nickname, retention, the biometric lock and the member list — more than fits
+            // on a small phone. Without a scroll modifier the overflow is simply unreachable: the
+            // content is laid out past the bottom of the dialog and nothing can bring it into view,
+            // so on a 5.5" screen the lower half of circle settings did not exist.
+            Column(
+                Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
                 if (!isDefault) {
                     OutlinedTextField(
                         value = name, onValueChange = { name = it }, singleLine = true,

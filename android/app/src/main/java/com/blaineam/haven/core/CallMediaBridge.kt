@@ -81,9 +81,17 @@ object CallMediaBridge {
     private val jitter = JitterBuffer()
 
     // Video encode (MediaCodec H.264) fed by an EGL renderer on the local WebRTC track.
-    private var encoder: MediaCodec? = null
+    //
+    // Guarded by [videoLock], NOT by the CallMediaBridge monitor. The VideoSink below runs on
+    // WebRTC's capture thread at frame rate and can CREATE the codec (first frame, or a resolution
+    // change); hangup releases it from whichever thread called deactivate/stopAll. Without a shared
+    // lock those two race and the capture thread submits to a released MediaCodec — a native crash
+    // at the moment you end a relayed video call. A separate lock keeps that contention off the
+    // monitor that audio and frame ingest already take.
+    private val videoLock = Any()
+    @Volatile private var encoder: MediaCodec? = null
     private var encoderSurface: Surface? = null
-    private var encoderRenderer: EglRenderer? = null
+    @Volatile private var encoderRenderer: EglRenderer? = null
     private var localSink: VideoSink? = null
     private var localTrack: VideoTrack? = null
     private var encoderSize: Pair<Int, Int>? = null
@@ -309,22 +317,34 @@ object CallMediaBridge {
             val w = frame.rotatedWidth
             val h = frame.rotatedHeight
             if (w <= 0 || h <= 0) return@VideoSink
-            if (ensureEncoder(w, h, eglBase)) encoderRenderer?.onFrame(frame)
+            // `onFrame` only retains the buffer and posts to the renderer's own thread, so holding
+            // the lock across it is cheap — and it is the only way the renderer cannot be released
+            // between the check and the draw.
+            synchronized(videoLock) {
+                if (ensureEncoder(w, h, eglBase)) encoderRenderer?.onFrame(frame)
+            }
         }
         track.addSink(sink)
         localSink = sink
     }
 
     private fun detachLocalVideo() {
+        // Drop the sink FIRST and outside the lock: removeSink blocks until any in-flight delivery
+        // returns, and that delivery is itself waiting on videoLock — taking the lock first would
+        // deadlock hangup against the capture thread.
         localSink?.let { s -> runCatching { localTrack?.removeSink(s) } }
         localSink = null; localTrack = null
-        runCatching { encoderRenderer?.release() }; encoderRenderer = null
-        runCatching { encoder?.stop() }; runCatching { encoder?.release() }; encoder = null
-        runCatching { encoderSurface?.release() }; encoderSurface = null
-        encoderSize = null; encoderCsd = null
+        synchronized(videoLock) {
+            encoderDraining.set(false)   // stop the drain thread before the codec goes
+            runCatching { encoderRenderer?.release() }; encoderRenderer = null
+            runCatching { encoder?.stop() }; runCatching { encoder?.release() }; encoder = null
+            runCatching { encoderSurface?.release() }; encoderSurface = null
+            encoderSize = null; encoderCsd = null
+        }
     }
 
-    /** Create (or recreate on a size change) the H.264 encoder. Returns true when usable. */
+    /** Create (or recreate on a size change) the H.264 encoder. Returns true when usable.
+     *  MUST be called holding [videoLock] — it mutates the encoder/renderer/surface trio. */
     private fun ensureEncoder(width: Int, height: Int, eglBase: EglBase): Boolean {
         // Even dimensions only — H.264 4:2:0 cannot represent an odd width/height.
         val w = width and 1.inv()
@@ -451,20 +471,23 @@ object CallMediaBridge {
      * stream of errors rather than a picture.
      */
     private fun decodeRemote(remote: String, annexB: ByteArray, isKey: Boolean) {
-        val rv = synchronized(CallMediaBridge) { remoteVideo[remote] } ?: return
-        synchronized(CallMediaBridge) {
+        // Whole body under [videoLock]: this runs on the WebSocket thread while hangup releases the
+        // decoder from another, and submitting to a released MediaCodec is a native crash. Lock
+        // ORDER is always monitor → videoLock (see `ingest`, `deactivate`), never the reverse.
+        synchronized(videoLock) {
+            val rv = remoteVideo[remote] ?: return
             if (!isKey && awaitingKeyframe.contains(remote)) return
             if (isKey) awaitingKeyframe.remove(remote)
-        }
-        val codec = rv.decoder
-        val idx = runCatching { codec.dequeueInputBuffer(10_000) }.getOrDefault(-1)
-        if (idx < 0) return
-        val buf = runCatching { codec.getInputBuffer(idx) }.getOrNull() ?: return
-        buf.clear()
-        if (buf.capacity() < annexB.size) return
-        buf.put(annexB)
-        runCatching {
-            codec.queueInputBuffer(idx, 0, annexB.size, System.nanoTime() / 1000, 0)
+            val codec = rv.decoder
+            val idx = runCatching { codec.dequeueInputBuffer(10_000) }.getOrDefault(-1)
+            if (idx < 0) return
+            val buf = runCatching { codec.getInputBuffer(idx) }.getOrNull() ?: return
+            buf.clear()
+            if (buf.capacity() < annexB.size) return
+            buf.put(annexB)
+            runCatching {
+                codec.queueInputBuffer(idx, 0, annexB.size, System.nanoTime() / 1000, 0)
+            }
         }
     }
 
@@ -475,7 +498,7 @@ object CallMediaBridge {
      * UI already renders, so relayed video appears with no view changes.
      */
     private fun ensureRemoteVideo(remote: String, eglBase: EglBase, factory: PeerConnectionFactory) {
-        if (remoteVideo.containsKey(remote)) return
+        synchronized(videoLock) { if (remoteVideo.containsKey(remote)) return }
         val helper = runCatching {
             SurfaceTextureHelper.create("haven-hairpin-dec-${remote.take(6)}", eglBase.eglBaseContext)
         }.getOrNull() ?: return
@@ -503,8 +526,10 @@ object CallMediaBridge {
 
         helper.startListening { videoFrame -> source.capturerObserver.onFrameCaptured(videoFrame) }
         source.capturerObserver.onCapturerStarted(true)
-        remoteVideo[remote] = RemoteVideo(codec, helper, surface, source, track)
-        awaitingKeyframe.add(remote)
+        synchronized(videoLock) {
+            remoteVideo[remote] = RemoteVideo(codec, helper, surface, source, track)
+            awaitingKeyframe.add(remote)
+        }
         startDecoderDrain(remote, codec)
         CallManager.adoptHairpinRemoteVideo(remote, track)
         Log.i(TAG, "hairpin video decoder up for ${remote.take(8)}")
@@ -515,7 +540,7 @@ object CallMediaBridge {
         thread(name = "haven-hairpin-dec", isDaemon = true) {
             val info = MediaCodec.BufferInfo()
             while (true) {
-                val alive = synchronized(CallMediaBridge) { remoteVideo[remote]?.decoder === codec }
+                val alive = synchronized(videoLock) { remoteVideo[remote]?.decoder === codec }
                 if (!alive) break
                 // A throw here means the codec was released underneath us — stop, don't spin.
                 val idx = runCatching { codec.dequeueOutputBuffer(info, 20_000) }.getOrElse { -0xBAD }
@@ -530,8 +555,10 @@ object CallMediaBridge {
     }
 
     private fun tearDownRemoteVideo(remote: String) {
-        val rv = remoteVideo.remove(remote) ?: return
-        awaitingKeyframe.remove(remote)
+        val rv = synchronized(videoLock) {
+            awaitingKeyframe.remove(remote)
+            remoteVideo.remove(remote)
+        } ?: return
         runCatching { rv.decoder.stop() }; runCatching { rv.decoder.release() }
         runCatching { rv.helper.stopListening() }; runCatching { rv.helper.dispose() }
         runCatching { rv.surface.release() }

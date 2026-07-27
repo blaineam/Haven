@@ -2475,6 +2475,17 @@ struct ComposerAttachmentTile: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
+    /// Refs we have already reported as having no preview. Returns true the FIRST time only.
+    private static let missLock = NSLock()
+    nonisolated(unsafe) private static var reportedMisses: Set<String> = []
+    private static func notePreviewMiss(_ ref: String) -> Bool {
+        missLock.lock(); defer { missLock.unlock() }
+        guard !reportedMisses.contains(ref) else { return false }
+        reportedMisses.insert(ref)
+        if reportedMisses.count > 256 { reportedMisses.removeFirst() }
+        return true
+    }
+
     private var previewImage: PlatformImage? {
         // Prefer the poster/thumb companion the bundle already declared. For a just-encoded video that
         // JPEG is a content-addressed image sitting on disk RIGHT NOW, while `thumbnail(ref:)` has to
@@ -2485,6 +2496,11 @@ struct ComposerAttachmentTile: View {
         // Nothing to draw. Say exactly WHICH lookup came up empty — a tile that silently falls back
         // to its glyph is indistinguishable from a tile whose poster merely hasn't landed yet, and
         // guessing between those has already cost two wrong fixes.
+        //
+        // ONCE PER REF. A SwiftUI body re-evaluates constantly, and this fired on every pass — dozens
+        // of identical lines a second in the console, which is the same "diagnostic that is itself a
+        // cost" problem as the poster retry storm below it.
+        guard Self.notePreviewMiss(ref) else { return nil }
         HavenLog.sync("composer tile: no preview for \(ref.prefix(16)) " +
             "kind=\(MediaKind(ref: ref).map(String.init(describing:)) ?? "nil") " +
             "companion=\(companion?.prefix(16) ?? "none") " +

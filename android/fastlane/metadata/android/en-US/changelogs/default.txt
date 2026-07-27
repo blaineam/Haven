@@ -1,5 +1,6 @@
-1.1.4 — things reach people who weren't online:
-• Fixed relays not passing anything on between different networks — posts, replies and media now reach people who weren't online when you sent them.
-• Media sent in a conversation actually arrives instead of waiting to be asked for.
-• Big items resume where they left off instead of restarting.
-• Hosting a relay no longer makes the app crawl.
+1.1.5 — calls connect, and posts show up:
+• Calls between Android and iPhone now connect on networks where they used to ring, get answered, and then sit there forever.
+• Answering a call could close the app. Fixed.
+• Posts and messages arrive in about a minute instead of several, while you're watching.
+• Attached photos and videos always show a tile in the composer.
+• New: disappearing messages, and see which relays hold a post.

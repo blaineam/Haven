@@ -32,6 +32,25 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 Launch sale — 50% off through September 30: $4.99, then $9.99. A private, end‑to‑end encrypted home for your closest people. No ads, no tracking, peer‑to‑peer.
 
 ## whats_new
+1.1.5 — calls connect, and things show up when they should.
+
+Calls
+• Calls between Haven on Android and Haven on iPhone now connect. On networks that wouldn't let two devices reach each other directly, an Android call would ring, be answered, and then sit on "connecting" forever — there was no fallback path on that side. There is now, carrying both voice and video.
+• Answering a call could close Haven. It can't any more: a call that can't start now says so instead of taking the app down with it.
+• In a group call, whoever is speaking is highlighted — on every platform, not just iPhone.
+
+Things show up when they should
+• Posts, messages, reactions and stories now appear within about a minute of reaching a relay instead of several, when you're sitting there looking at the app. Haven was treating "reading without tapping" as being idle and backing off hard.
+• Tapping a message notification opens the conversation, reliably, including the second time.
+• A conversation stays where you left it instead of jerking to some other position every few seconds, and new messages land at the bottom where you can read them.
+
+Sharing
+• A photo, video or file you attach always shows a tile in the composer. A compressed video could attach and show nothing at all, which looked exactly like it had failed.
+• A photo that's still arriving no longer wears a "Media still loading…" label over the top of itself — it just gets sharper.
+• New: set a post or message to disappear after an hour, a day or a week — now on desktop too.
+• Tap the cloud on your own post or story to see exactly which relays are holding it.
+
+## whats_new_previous
 1.1.4 — your people find each other, with or without a relay.
 
 Connect without a relay
@@ -57,7 +76,7 @@ Calls
 Android
 • Fixed a compatibility problem that could crash Haven on newer devices.
 
-## whats_new_previous
+## whats_new_older
 1.1.1 — notifications, calls, and messages, fixed properly.
 
 Notifications work again

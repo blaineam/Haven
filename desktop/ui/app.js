@@ -4923,10 +4923,25 @@ function stopSpeakerDetection() {
   call.activeSpeaker = null;
 }
 
+/**
+ * Move the highlight by toggling a class on the tiles that already exist.
+ *
+ * NOT renderCallOverlay(): that does `replaceChildren` and builds fresh <video> elements with their
+ * `srcObject` reassigned. The active speaker changes as often as people take turns talking — doing
+ * a full rebuild for each change would tear down and re-attach every video in the call, which is a
+ * black flash on every sentence. The highlight is one CSS class; it has no business re-rendering
+ * anything.
+ */
+function paintActiveSpeaker() {
+  document.querySelectorAll(".call-tile[data-peer]").forEach((tile) => {
+    tile.classList.toggle("speaking", tile.dataset.peer === call.activeSpeaker);
+  });
+}
+
 async function pollAudioLevels() {
   const entries = [...call.pcs.entries()];
   if (entries.length <= 1) {
-    if (call.activeSpeaker !== null) { call.activeSpeaker = null; renderCallOverlay(); }
+    if (call.activeSpeaker !== null) { call.activeSpeaker = null; paintActiveSpeaker(); }
     call.speakerStreak = {};
     return;
   }
@@ -4947,14 +4962,14 @@ async function pollAudioLevels() {
 
   if (candidate === null) {
     call.speakerStreak = {};
-    if (call.activeSpeaker !== null) { call.activeSpeaker = null; renderCallOverlay(); }
+    if (call.activeSpeaker !== null) { call.activeSpeaker = null; paintActiveSpeaker(); }
     return;
   }
   const streak = (call.speakerStreak[candidate] || 0) + 1;
   call.speakerStreak = { [candidate]: streak };
   if (streak >= SPEAKER_DEBOUNCE && call.activeSpeaker !== candidate) {
     call.activeSpeaker = candidate;
-    renderCallOverlay();
+    paintActiveSpeaker();
   }
 }
 
@@ -5476,8 +5491,9 @@ function renderCallOverlay() {
   grid.append(localTile);
   for (const peer of invitees()) {
     // Who is talking, so a group call doesn't make you guess. Apple/Android parity.
+    // `data-peer` lets paintActiveSpeaker() repaint this tile IN PLACE — see why below.
     const speaking = call.activeSpeaker === peer;
-    const tile = el("div", { class: "call-tile" + (speaking ? " speaking" : "") });
+    const tile = el("div", { class: "call-tile" + (speaking ? " speaking" : ""), "data-peer": peer });
     const camOff = !!(call.camOff && call.camOff[peer]);
     // Camera off (told to us by frame 22) → show their avatar, NOT the frozen last frame their
     // stopped track left behind.

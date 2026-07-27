@@ -1931,9 +1931,10 @@ final class EvictedMediaStore: ObservableObject {
 ///  • actively downloading → a spinner, with chunk progress (i/n) for large chunked blobs;
 ///  • relays reachable but empty → "Waiting for sender…" (their device hasn't uploaded it yet);
 ///  • retries exhausted / relay swept it → "No longer available" (Retry + Ask-for-it-back).
-/// Media that's simply still syncing keeps the plain "still loading" spinner — rendered over the
-/// post's blurred `thumb:` companion when one is held, so the card has real shape + color instead
-/// of a grey box (and the layout doesn't jump when the full bytes land).
+/// Media that's simply still syncing keeps the plain "still loading" spinner — but ONLY when there is
+/// no `thumb:` companion to show. When one is held the tile is simply the picture, sharp and
+/// chrome-free, waiting for `FeedImage` to cross-dissolve the full-res over it: small then big, never
+/// "obscured then revealed". (And the layout doesn't jump when the full bytes land.)
 struct MissingMediaPlaceholder: View {
     let ref: String
     var isVideo: Bool = false
@@ -2054,9 +2055,19 @@ struct MissingMediaPlaceholder: View {
                 }
             }
             .buttonStyle(.plain)
+        } else if thumbImage != nil {
+            // We are holding the picture and no bookkeeping flag says anything is wrong: the bytes are
+            // simply not here YET. That is the ordinary progressive-load case and it needs no chrome —
+            // the sharp thumb is already on screen and `FeedImage` cross-dissolves the full-res over it
+            // when it lands, so the media just gets sharper on its own.
+            //
+            // This branch used to fall through to the spinner below, which is how a perfectly healthy,
+            // perfectly visible photo ended up wearing "Media still loading…". A status line only earns
+            // its place when the tile would otherwise be empty.
+            EmptyView()
         } else {
             VStack(spacing: 8) {
-                ProgressView().tint(thumbImage != nil ? .white : nil)
+                ProgressView()
                 Text(isVideo ? "Video still loading…" : "Media still loading…")
                     .font(.caption).foregroundStyle(overlayStyle)
             }
@@ -2290,6 +2301,80 @@ struct FeedImage<Placeholder: View>: View {
             img = nil; loadedRef = nil
             let decoded = await MediaStore.shared.thumbnailAsync(ref, maxDimension: maxDimension)
             if !Task.isCancelled { img = decoded; loadedRef = ref }
+        }
+    }
+}
+
+// MARK: - Composer attachment tile
+
+/// The preview tile for one staged attachment, shared by the post composer and the DM composer.
+///
+/// It draws something for EVERY attachment, unconditionally. Both trays used to require a decoded
+/// bitmap before they drew anything, with no final `else` — so an attachment with no pixels to show
+/// simply vanished from the composer. A freshly compressed video hits that exactly: `prepareVideo`
+/// caches the item with `image: nil` whenever `AVAssetImageGenerator` can't cut a poster frame from
+/// the encoded file, and `thumbnail(_:maxDimension:)` then returns nil now AND on every retry. The
+/// clip was attached and would have posted fine — the composer just never said so, which from the
+/// outside is indistinguishable from the attach having failed. (The DM tray additionally showed
+/// nothing at all for files, and iterated the raw ref list so companion markers appeared as chips.)
+///
+/// A tile you can't see is an attachment you don't trust. So: the picture when there is one, a
+/// labelled glyph when there isn't.
+struct ComposerAttachmentTile: View {
+    let ref: String
+    /// The whole staged list, so a video can borrow the poster/thumb companion its bundle declared.
+    var media: [String] = []
+    var size: CGFloat = 56
+    /// Observed so the tile upgrades from glyph to poster the moment an off-main poster generation
+    /// finishes and calls `scheduleRefresh()`.
+    @ObservedObject private var feed = FeedStore.shared
+
+    var body: some View {
+        Group {
+            if let img = previewImage {
+                Image(platformImage: img).resizable().scaledToFill()
+            } else {
+                Rectangle().fill(Color(.tertiarySystemFill)).overlay { glyphStack }
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var previewImage: PlatformImage? {
+        // Prefer the poster/thumb companion the bundle already declared. For a just-encoded video that
+        // JPEG is a content-addressed image sitting on disk RIGHT NOW, while `thumbnail(ref:)` has to
+        // run AVAssetImageGenerator against the video off-main and returns nil until it lands.
+        let companion = MediaVariants.poster(for: ref, in: media) ?? MediaVariants.thumb(for: ref, in: media)
+        if let c = companion, let img = MediaStore.shared.thumbnail(c, maxDimension: 160) { return img }
+        return MediaStore.shared.thumbnail(ref, maxDimension: 160)
+    }
+
+    @ViewBuilder private var glyphStack: some View {
+        let kind = MediaKind(ref: ref)
+        VStack(spacing: 2) {
+            Image(systemName: Self.glyph(kind)).font(.title3).foregroundStyle(.secondary)
+            Text(Self.label(kind)).font(.system(size: 9)).foregroundStyle(.secondary)
+        }
+    }
+
+    static func glyph(_ kind: MediaKind?) -> String {
+        switch kind {
+        case .video: return "video.fill"
+        case .audio: return "waveform"
+        case .image: return "photo"
+        case .file:  return "doc.zipper"
+        case nil:    return "paperclip"
+        }
+    }
+
+    static func label(_ kind: MediaKind?) -> String {
+        switch kind {
+        case .video: return "Video"
+        case .audio: return "Voice"
+        case .image: return "Photo"
+        case .file:  return "File"
+        case nil:    return "Attached"
         }
     }
 }

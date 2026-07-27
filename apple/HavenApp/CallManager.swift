@@ -51,6 +51,11 @@ final class CallManager: NSObject, ObservableObject {
     @Published private(set) var ringing = false
     @Published private(set) var speakerOn = false
     @Published private(set) var muted = false
+    /// WebRTC would not give us a peer connection for someone in this call, so there is no media path
+    /// to them and there never will be on this attempt. Surfaced so the call screen can say "Couldn't
+    /// start audio" instead of sitting on "Connecting…" forever — and, more to the point, so this
+    /// state is a message rather than the `fatalError` it used to be.
+    @Published private(set) var mediaFailed = false
     /// Collapsed to a floating pill so the user can use the rest of the app mid-call.
     @Published var minimized = false
     /// Per-peer remote video tracks for the grid (nil tile = audio-only / no camera).
@@ -689,8 +694,7 @@ final class CallManager: NSObject, ObservableObject {
         // caller ignored the sid and dialed us — this offer carries the real id).
         if sessionId.hasPrefix("push:"), !sid.isEmpty { sessionId = sid }
         if !mediaStarted { startMesh() }
-        let peer = peerConn(for: from)
-        guard let sdp = CallSignal.decodeSDP(json) else { return }
+        guard let peer = peerConn(for: from), let sdp = CallSignal.decodeSDP(json) else { return }
         peer.call.setRemoteOfferAndAnswer(sdp)   // flushes candidates via onRemoteReady
     }
     func handleAnswer(_ payload: Data) {
@@ -701,7 +705,7 @@ final class CallManager: NSObject, ObservableObject {
     func handleIce(_ payload: Data) {
         guard let (from, sid, json) = parseSignal(payload), validSession(sid), roster.contains(from),
               let cand = CallSignal.decodeCandidate(json) else { return }
-        let peer = peerConn(for: from)
+        guard let peer = peerConn(for: from) else { return }
         if peer.remoteDescriptionSet { peer.call.addRemoteCandidate(cand) }
         else { peer.pendingCandidates.append(cand) }
     }
@@ -834,19 +838,26 @@ final class CallManager: NSObject, ObservableObject {
 
     /// Ensure a `WebRTCCall` exists for `peer`; if I'm the offerer (smaller hex), kick off the offer.
     @discardableResult
-    private func connectPeerIfNeeded(_ peer: String) -> PeerConn {
-        let conn = peerConn(for: peer)
+    private func connectPeerIfNeeded(_ peer: String) -> PeerConn? {
+        guard let conn = peerConn(for: peer) else { return nil }
         if myHex < peer && mediaStarted {   // glare-free: smaller hex offers
             conn.call.makeOffer()
         }
         return conn
     }
 
-    /// Get-or-create the pairwise connection for `peer`, wiring its callbacks.
-    private func peerConn(for peer: String) -> PeerConn {
+    /// Get-or-create the pairwise connection for `peer`, wiring its callbacks. Nil when WebRTC
+    /// cannot give us a peer connection at all — see `WebRTCCall.make()`. That used to be a
+    /// `fatalError` inside the constructor, so a peer whose relay advertised an ICE server WebRTC
+    /// wouldn't parse killed the app at the moment of answering.
+    private func peerConn(for peer: String) -> PeerConn? {
         if let existing = peers[peer] { return existing }
         if !roster.contains(peer) { roster.insert(peer); refreshParticipants() }
-        let c = WebRTCCall()
+        guard let c = WebRTCCall.make() else {
+            HavenLog.call("no media for \(peer.prefix(8)) — WebRTC would not create a peer connection")
+            mediaFailed = true
+            return nil
+        }
         // Perfect-negotiation politeness: the larger-hex side is polite (yields on glare). This
         // lets EITHER side renegotiate when it adds a track (see renegotiateAll) without breaking.
         c.polite = myHex > peer
@@ -1457,6 +1468,7 @@ final class CallManager: NSObject, ObservableObject {
             }
         }
         ringTimeoutTimer?.invalidate(); ringTimeoutTimer = nil
+        mediaFailed = false   // per-attempt, never carried into the next call
         CallTones.shared.stop()
         stopInAppRinging()
         stopSpeakerDetection()

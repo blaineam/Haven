@@ -51,6 +51,10 @@ import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.InsertDriveFile
+// NOT `filled.Image` — that extension property collides with the `Image` composable this file calls
+// on nearly every screen. `Photo` is the same glyph family and unambiguous.
+import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
@@ -323,27 +327,30 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                     Modifier.fillMaxWidth().padding(start = 16.dp, bottom = 6.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    items(pendingMedia.size) { i ->
-                        val ref = pendingMedia[i]
-                        Box {
-                            when {
-                                com.blaineam.haven.core.LocationShare.isLocation(ref) ->
-                                    Box(Modifier.size(64.dp).clip(RoundedCornerShape(12.dp)).background(HavenTheme.card),
-                                        contentAlignment = Alignment.Center) {
-                                        Icon(Icons.Filled.Place, "Location", tint = HavenTheme.pink, modifier = Modifier.size(26.dp))
-                                    }
-                                LocalMedia.isVideo(ref) ->
-                                    Box(Modifier.size(64.dp).clip(RoundedCornerShape(12.dp)).background(HavenTheme.card),
-                                        contentAlignment = Alignment.Center) {
-                                        Icon(Icons.Filled.Videocam, "Video", tint = HavenTheme.textPrimary, modifier = Modifier.size(26.dp))
-                                    }
-                                else -> MediaImage(active, ref, Modifier.size(64.dp).clip(RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop)
+                    // `displayRefs`, not the raw list: poster/original/thumb companions ride with
+                    // their playable ref and would otherwise each draw their own tile.
+                    val staged = com.blaineam.haven.core.MediaVariants.displayRefs(pendingMedia)
+                    items(staged.size) { i ->
+                        val ref = staged[i]
+                        if (com.blaineam.haven.core.LocationShare.isLocation(ref)) {
+                            Box {
+                                Box(Modifier.size(64.dp).clip(RoundedCornerShape(12.dp)).background(HavenTheme.card),
+                                    contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Filled.Place, "Location", tint = HavenTheme.pink, modifier = Modifier.size(26.dp))
+                                }
+                                // White-on-black-scrim over the tile — not a theme surface.
+                                Text("✕", color = Color.White, fontSize = 13.sp,
+                                    modifier = Modifier.align(Alignment.TopEnd).padding(3.dp).clip(CircleShape)
+                                        .background(Color.Black.copy(alpha = 0.6f)).clickable { pendingMedia.remove(ref) }
+                                        .padding(horizontal = 6.dp, vertical = 1.dp))
                             }
-                            // White-on-black-scrim over the media thumb — not a theme surface.
-                            Text("✕", color = Color.White, fontSize = 13.sp,
-                                modifier = Modifier.align(Alignment.TopEnd).padding(3.dp).clip(CircleShape)
-                                    .background(Color.Black.copy(alpha = 0.6f)).clickable { pendingMedia.remove(ref) }
-                                    .padding(horizontal = 6.dp, vertical = 1.dp))
+                        } else {
+                            // A staged video now shows its POSTER rather than a generic camera glyph —
+                            // with several clips attached, identical icons gave no way to tell them apart.
+                            ComposerAttachmentTile(active, ref, size = 64.dp) {
+                                pendingMedia.removeAll(
+                                    com.blaineam.haven.core.MediaVariants.companionRefs(ref, pendingMedia))
+                            }
                         }
                     }
                 }
@@ -824,6 +831,82 @@ private fun UpgradeAction(text: String, onClick: () -> Unit) {
  * large synced video rendered). Media too big to decrypt on this device yields no bitmap: we show a
  * plain tile (a video overlays its play glyph) instead of an endless spinner.
  */
+/**
+ * The preview tile for one STAGED attachment, shared by the post composer and the DM composer.
+ *
+ * It draws something for every attachment, unconditionally: the poster/photo when there is one, a
+ * labelled glyph when there isn't — a video whose poster frame hasn't been cut yet, a zip, a voice
+ * note. An attachment you can't see is an attachment you don't trust, and "nothing in the tray" is
+ * indistinguishable from "the attach silently failed". Apple parity (`ComposerAttachmentTile`).
+ *
+ * Decoding runs on IO, not in composition: `videoPoster` is a MediaMetadataRetriever seek, which is
+ * exactly the kind of work that stutters a composer the moment you pick a clip.
+ */
+@Composable
+fun ComposerAttachmentTile(
+    circleId: String,
+    ref: String,
+    size: androidx.compose.ui.unit.Dp = 56.dp,
+    onRemove: (() -> Unit)? = null,
+) {
+    val fv = com.blaineam.haven.core.HavenNet.feedVersion.value
+    val bmp by androidx.compose.runtime.produceState<ImageBitmap?>(null, ref, circleId, fv) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            // Prefer the declared thumb companion — for a just-encoded video that JPEG is already on
+            // disk, while the poster seek may be slow or may not resolve a frame at all.
+            val companion = com.blaineam.haven.core.HavenNet.thumbRefFor(ref)
+                ?.takeIf { LocalMedia.has(it) }
+                ?.let { LocalMedia.imageBitmap(circleId, it, reqDim = 256) }
+            val raw = companion
+                ?: if (LocalMedia.isVideo(ref)) LocalMedia.videoPoster(circleId, ref)
+                   else LocalMedia.imageBitmap(circleId, ref, reqDim = 256)
+            raw?.asImageBitmap()
+        }
+    }
+    Box(
+        Modifier.size(size).clip(RoundedCornerShape(10.dp)).background(HavenTheme.card),
+        contentAlignment = Alignment.Center,
+    ) {
+        val shot = bmp
+        if (shot != null) {
+            Image(shot, contentDescription = null, modifier = Modifier.matchParentSize(),
+                  contentScale = ContentScale.Crop)
+            // White-on-media, so you can tell a clip from a photo at tile size.
+            if (LocalMedia.isVideo(ref)) {
+                Icon(Icons.Filled.Videocam, null, tint = Color.White, modifier = Modifier.size(20.dp))
+            }
+        } else {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(
+                    when {
+                        LocalMedia.isVideo(ref) -> Icons.Filled.Videocam
+                        LocalMedia.isAudio(ref) -> Icons.Filled.Mic
+                        LocalMedia.isFile(ref) -> Icons.Filled.InsertDriveFile
+                        else -> Icons.Filled.Photo
+                    },
+                    null, tint = HavenTheme.textSecondary, modifier = Modifier.size(22.dp),
+                )
+                Text(
+                    when {
+                        LocalMedia.isVideo(ref) -> "Video"
+                        LocalMedia.isAudio(ref) -> "Voice"
+                        LocalMedia.isFile(ref) -> "File"
+                        else -> "Photo"
+                    },
+                    color = HavenTheme.textSecondary, fontSize = 9.sp,
+                )
+            }
+        }
+        if (onRemove != null) {
+            // White-on-black-scrim over the media thumb — not a theme surface.
+            Text("✕", color = Color.White, fontSize = 13.sp,
+                modifier = Modifier.align(Alignment.TopEnd).padding(3.dp).clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.6f)).clickable { onRemove() }
+                    .padding(horizontal = 6.dp, vertical = 1.dp))
+        }
+    }
+}
+
 @Composable
 fun MediaImage(circleId: String, id: String, modifier: Modifier = Modifier,
                contentScale: ContentScale = ContentScale.FillWidth) {
@@ -882,7 +965,40 @@ private fun MediaBitmapContent(circleId: String, ref: String, bmp: ImageBitmap?,
     com.blaineam.haven.core.EvictedMediaStore.version.value
     val hasBytes = remember(ref, com.blaineam.haven.core.HavenNet.feedVersion.value) { LocalMedia.has(ref) }
     when {
-        bmp != null -> Image(bmp, contentDescription = "Photo", modifier = modifier, contentScale = contentScale)
+        // The full-res pixels are here. Cross-dissolve them OVER the tiny `thumb:` companion rather
+        // than cutting the branch: the thumb IS the same picture, only smaller, so fading between them
+        // is the entire progressive-loading story — the media just gets clearer where it sits, with no
+        // flicker and no status line to explain it. Apple parity (`FeedImage`).
+        //
+        // The photo is the sizing child; the placeholder underneath uses `matchParentSize()`, which
+        // contributes nothing to layout — so a `fillMaxWidth()` + `FillWidth` tile still takes its
+        // height from the photo's aspect ratio exactly as it did before.
+        bmp != null -> {
+            // Cheap: a map lookup plus a file-exists, no decode. With no thumb held there is nothing
+            // to fade FROM, and animating in from a grey card is a worse first frame than just
+            // drawing the photo — so those tiles skip the fade entirely.
+            val hasThumb = remember(ref) {
+                com.blaineam.haven.core.HavenNet.thumbRefFor(ref)?.let { LocalMedia.has(it) } == true
+            }
+            var shown by remember(ref) { mutableStateOf(false) }
+            val alpha by androidx.compose.animation.core.animateFloatAsState(
+                targetValue = if (shown || !hasThumb) 1f else 0f,
+                animationSpec = androidx.compose.animation.core.tween(220),
+                label = "mediaCrossfade",
+            )
+            Box {
+                // Mounted only for the length of the dissolve, so an established photo never pays for
+                // the thumb decode. `bytesPresent` is true by definition here, so the placeholder
+                // draws the thumb and nothing else — no spinner, no caption.
+                if (alpha < 1f) {
+                    MissingMediaPlaceholder(circleId, ref, LocalMedia.isVideo(ref), Modifier.matchParentSize())
+                }
+                Image(bmp, contentDescription = "Photo",
+                      modifier = modifier.graphicsLayer { this.alpha = alpha },
+                      contentScale = contentScale)
+            }
+            LaunchedEffect(ref) { shown = true }
+        }
         // Finished loading with no bitmap AND the bytes aren't on disk → the graceful placeholder
         // (a "Download N" affordance for a deliberately-evicted blob, a spinner while it's fetching,
         // or "No longer available"), NOT a perpetual blank spinner.
@@ -903,9 +1019,10 @@ private fun MediaBitmapContent(circleId: String, ref: String, bmp: ImageBitmap?,
  *   • actively downloading → a spinner, with chunk progress (i/n) for large chunked blobs;
  *   • relays reachable but empty → "Waiting for sender…" (their device hasn't uploaded it yet);
  *   • relay/peers no longer have it → "No longer available" + Retry (+ Ask for it back);
- *   • simply still syncing (never evicted) → the plain "still loading" spinner.
- *  Rendered over the post's blurred `thumb:` companion when its tiny bytes are held, so the card
- *  has real shape + color instead of a grey box. */
+ *   • simply still syncing (never evicted) → the plain "still loading" spinner, but ONLY when there
+ *     is no thumb to show; with a thumb held the tile is just the picture, waiting to get sharper.
+ *  Rendered over the post's `thumb:` companion when its tiny bytes are held, so the card has real
+ *  shape + color instead of a grey box. */
 @Composable
 private fun MissingMediaPlaceholder(circleId: String, ref: String, isVideo: Boolean, modifier: Modifier) {
     val context = LocalContext.current
@@ -1013,12 +1130,20 @@ private fun MissingMediaPlaceholder(circleId: String, ref: String, isVideo: Bool
                 Spacer(Modifier.height(2.dp))
                 Text("Removed to save space", color = HavenTheme.textSecondary, fontSize = 11.sp)
             }
+            // We are holding the picture and no bookkeeping flag says anything is wrong: the bytes are
+            // simply not here YET. That is the ordinary progressive-load case and it needs no chrome —
+            // the sharp thumb is already on screen and the full-res tile replaces it when it lands, so
+            // the media just gets sharper on its own. This used to fall through to the spinner below,
+            // which is how a perfectly healthy, perfectly visible photo ended up wearing "Media still
+            // loading…". A status line only earns its place when the tile would otherwise be empty.
+            // Apple parity (MissingMediaPlaceholder).
+            thumbBmp != null -> Unit
             else -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 androidx.compose.material3.CircularProgressIndicator(
                     color = HavenTheme.pink, strokeWidth = 2.dp, modifier = Modifier.size(22.dp))
                 Spacer(Modifier.height(8.dp))
                 Text(if (isVideo) "Video still loading…" else "Media still loading…",
-                    color = if (thumbBmp != null) Color.White else HavenTheme.textSecondary, fontSize = 12.sp)
+                    color = HavenTheme.textSecondary, fontSize = 12.sp)
             }
         }
     }

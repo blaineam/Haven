@@ -104,7 +104,9 @@ object CallManager {
      * Prefs `haven.fabric.derpUrls` + `turnUrls`/`turnUser`/`turnPass`.
      *
      * Fabric + TURN → circle TURN.
-     * Fabric without TURN → empty (host + WebSocket hairpin; **no Google STUN**).
+     * Fabric without TURN → host only, per [FabricIcePolicy] — but see below: this function
+     * deliberately adds STUN anyway, because Android has NO WebSocket media hairpin to fall back
+     * on when ICE fails (Apple and desktop do; Android's was only ever a comment).
      * No fabric → Google STUN as fallback only.
      * Call *signaling* rides sealed iroh over fabric DERP / direct QUIC.
      */

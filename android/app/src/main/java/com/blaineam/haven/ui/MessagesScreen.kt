@@ -468,12 +468,24 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
             // looked identical to the picker having silently failed.
             MediaProcessingCard(Modifier.padding(horizontal = 16.dp))
 
-            com.blaineam.haven.core.MediaVariants.displayRefs(pendingMedia).firstOrNull()?.let { ref ->
-                Box(Modifier.padding(start = 16.dp, bottom = 4.dp)) {
-                    if (com.blaineam.haven.core.LocalMedia.isVideo(ref))
-                        Box(Modifier.size(56.dp).clip(RoundedCornerShape(10.dp)).background(HavenTheme.card),
-                            contentAlignment = Alignment.Center) { Icon(Icons.Filled.Videocam, null, tint = HavenTheme.textPrimary) }
-                    else MediaImage(circleId, ref, Modifier.size(56.dp).clip(RoundedCornerShape(10.dp)))
+            // EVERY staged attachment, each removable — this drew only `firstOrNull()` with no remove
+            // control, so a second photo (or a file, or a voice note) was staged and about to send with
+            // nothing on screen saying so. A staged video now shows its poster instead of a generic
+            // camera glyph, and an attachment with no pixels yet still gets a labelled tile rather than
+            // vanishing. Apple parity (`ComposerAttachmentTile`).
+            val stagedDm = com.blaineam.haven.core.MediaVariants.displayRefs(pendingMedia)
+            if (stagedDm.isNotEmpty()) {
+                androidx.compose.foundation.lazy.LazyRow(
+                    Modifier.fillMaxWidth().padding(start = 16.dp, bottom = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(stagedDm.size) { i ->
+                        val ref = stagedDm[i]
+                        ComposerAttachmentTile(circleId, ref) {
+                            pendingMedia = pendingMedia -
+                                com.blaineam.haven.core.MediaVariants.companionRefs(ref, pendingMedia).toSet()
+                        }
+                    }
                 }
             }
             pendingMusic?.let { m ->

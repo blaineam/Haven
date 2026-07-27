@@ -65,13 +65,60 @@ final class WebRTCCall: NSObject {
     var polite = false
     private var isMakingOffer = false
 
-    override init() {
-        let config = RTCConfiguration()
-        // Haven-first ICE: circle TURN when known; fabric without TURN → host-only (no Google);
-        // no fabric → Google STUN fallback. Media may use /webrtc/hairpin when ICE fails.
-        let iceDicts = HavenFabric.iceServersFromDefaults()
-        config.iceServers = iceDicts.compactMap { d -> RTCIceServer? in
-            let urls = d["urls"] as? [String] ?? []
+    /// Fails (rather than crashing) when WebRTC won't give us a peer connection at all.
+    ///
+    /// This used to `fatalError`. `RTCPeerConnectionFactory.peerConnection` returns nil when it
+    /// REJECTS THE CONFIGURATION, and the configuration is not ours: `iceServers` is built from
+    /// `haven.fabric.turnUrls`, which arrives from whatever relay the circle is using. One
+    /// malformed entry there — a `turns:` URL with a bad port, a scheme WebRTC won't parse — makes
+    /// the whole list invalid, so the factory returns nil and the app terminated. On the ACCEPT
+    /// path (`startMesh` → `connectPeerIfNeeded` → here), that is an app that dies the instant you
+    /// pick up, which is exactly what a caller on another platform, in another circle, with
+    /// different relay config, was able to trigger.
+    ///
+    /// A bad ICE server should cost you server-reflexive candidates, never the process. So: try the
+    /// circle's config, then plain STUN, then no servers at all (host candidates + the hairpin still
+    /// carry a LAN or hairpinned call). Only if WebRTC refuses all three is there genuinely no peer
+    /// connection to be had, and then we return nil and the caller fails the call politely.
+    /// The only way to build one. Returns nil instead of terminating when WebRTC won't hand us a
+    /// peer connection; `CallManager` turns that into a failed call rather than a dead app.
+    static func make() -> WebRTCCall? {
+        guard let pc = makePeerConnection() else { return nil }
+        return WebRTCCall(pc: pc)
+    }
+
+    /// Try the circle's ICE config, then plain STUN, then no servers at all. Nil only if WebRTC
+    /// refuses every one of them.
+    private static func makePeerConnection() -> RTCPeerConnection? {
+        let attempts: [(String, [RTCIceServer])] = [
+            ("circle", configuredIceServers()),
+            ("stun-only", [RTCIceServer(urlStrings: HavenFabric.googleStunUrls)]),
+            ("host-only", []),
+        ]
+        let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
+        for (label, servers) in attempts {
+            let config = RTCConfiguration()
+            config.iceServers = servers
+            config.sdpSemantics = .unifiedPlan
+            config.continualGatheringPolicy = .gatherContinually
+            if let pc = factory.peerConnection(with: config, constraints: constraints, delegate: nil) {
+                if label != "circle" {
+                    HavenLog.call("ICE config rejected by WebRTC — fell back to \(label). This call may not traverse NAT.")
+                }
+                return pc
+            }
+            HavenLog.call("peerConnection(\(label)) returned nil — trying the next ICE fallback")
+        }
+        HavenLog.call("WebRTC refused a peer connection under every ICE configuration — cannot place media")
+        return nil
+    }
+
+    /// The circle's own ICE servers, as WebRTC objects. Entries with no URLs are dropped rather than
+    /// passed through — an empty `urls` array is one of the things that makes the factory reject the
+    /// whole configuration.
+    private static func configuredIceServers() -> [RTCIceServer] {
+        HavenFabric.iceServersFromDefaults().compactMap { d -> RTCIceServer? in
+            let urls = (d["urls"] as? [String] ?? []).filter { !$0.isEmpty }
             guard !urls.isEmpty else { return nil }
             if let user = d["username"] as? String, let pass = d["credential"] as? String,
                !user.isEmpty, !pass.isEmpty {
@@ -79,12 +126,9 @@ final class WebRTCCall: NSObject {
             }
             return RTCIceServer(urlStrings: urls)
         }
-        config.sdpSemantics = .unifiedPlan
-        config.continualGatheringPolicy = .gatherContinually
-        let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
-        guard let pc = WebRTCCall.factory.peerConnection(with: config, constraints: constraints, delegate: nil) else {
-            fatalError("WebRTC peer connection unavailable")
-        }
+    }
+
+    private init(pc: RTCPeerConnection) {
         self.pc = pc
 
         // Explicitly enable WebRTC's audio processing: acoustic echo cancellation, automatic

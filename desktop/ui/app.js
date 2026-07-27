@@ -4661,23 +4661,44 @@ const line = (label, ok) => el("div", { class: "row" }, el("span", { style: "fle
 // Haven-first ICE — parity with Apple HavenFabric / Android CallManager.
 // Fabric + circle TURN → TURN only. Fabric without TURN → empty ICE (host + WSS hairpin;
 // no Google STUN). No fabric → Google STUN as fallback only. Signaling uses iroh/fabric DERP.
+const GOOGLE_STUN = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"];
+
+// Best-effort "is this turn:/stun: URL's host a private/unroutable address" check.
+function hostLooksPrivate(url) {
+  const host = String(url).split(":")[1] || "";
+  const second = parseInt((host.split(".")[1] || ""), 10);
+  return host.startsWith("10.") || host.startsWith("192.168.") || host.startsWith("127.") ||
+    host.startsWith("169.254.") ||
+    (host.startsWith("172.") && second >= 16 && second <= 31);
+}
+
 function iceServers() {
-  const derp = (window.__havenFabricDerp && window.__havenFabricDerp.length)
-    ? window.__havenFabricDerp
-    : [];
   const turn = window.__havenFabricTurn || {};
   const turnUrls = Array.isArray(turn.urls) ? turn.urls.filter(Boolean) : [];
+  const servers = [];
+  let havePublicTurn = false;
   if (turnUrls.length > 0 && turn.user && turn.pass) {
-    return [{
-      urls: turnUrls,
-      username: turn.user,
-      credential: turn.pass,
-    }];
+    servers.push({ urls: turnUrls, username: turn.user, credential: turn.pass });
+    // The circle TURN host doubles as a STUN server (same socket, no credentials) — srflx
+    // candidates from our own infrastructure, no third party involved.
+    const stun = turnUrls
+      .map((u) => String(u).split(":").slice(1).join(":"))
+      .filter(Boolean)
+      .map((hostPort) => `stun:${hostPort}`);
+    if (stun.length > 0) servers.push({ urls: stun });
+    havePublicTurn = turnUrls.some((u) => !hostLooksPrivate(u));
   }
-  if (derp.length > 0 || turnUrls.length > 0) {
-    return []; // fabric on — never Google as first path
+  if (!havePublicTurn) {
+    // No circle server the open internet can reach — without STUN, two home NATs can never find
+    // each other. This branch used to return an EMPTY list whenever a fabric was configured, which
+    // is host-candidates-only: fine on a LAN, and unable to complete a single call across the
+    // internet. Apple and Android both corrected this after the field report where the relay
+    // advertised a Docker-internal TURN host; desktop was the last platform still doing it, so a
+    // desktop↔phone call over the internet had no server-reflexive path at all.
+    // Connectivity beats purity here.
+    servers.push({ urls: GOOGLE_STUN });
   }
-  return [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
+  return servers;
 }
 
 // ---- WebSocket call-media hairpin (path proxy /webrtc/hairpin) ----------------------------

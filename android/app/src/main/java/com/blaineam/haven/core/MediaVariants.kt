@@ -83,6 +83,28 @@ object MediaVariants {
         }
     }
 
+    /**
+     * Every ref that must leave a staged list when the user removes `ref` from a composer: the ref
+     * itself, its poster/original/thumb markers, and the companion images those markers name. Dropping
+     * only the playable ref strands its companions, which then ride along on the next post attached to
+     * nothing. Apple parity (`removeAttachment`).
+     */
+    fun companionRefs(ref: String, media: List<String>): List<String> {
+        val out = linkedSetOf(ref)
+        for (r in media) {
+            parsePoster(r)?.let { (video, poster) ->
+                if (video == ref || poster == ref) { out.add(r); out.add(poster) }
+            }
+            parseOriginal(r)?.let { (optimized, original) ->
+                if (optimized == ref || original == ref) { out.add(r); out.add(original) }
+            }
+            parseThumb(r)?.let { (content, thumb) ->
+                if (content == ref || thumb == ref) { out.add(r); out.add(thumb) }
+            }
+        }
+        return out.toList()
+    }
+
     fun dataSaverPrefetchRefs(media: List<String>): List<String> {
         val display = displayRefs(media)
         val posters = media.mapNotNull { parsePoster(it)?.second }.toSet()

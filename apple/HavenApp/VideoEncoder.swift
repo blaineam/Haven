@@ -107,7 +107,18 @@ enum VideoEncoder {
         // the video pump then never finishes, its continuation never resumes, and the caller hangs
         // forever. Sequential pumping is exactly that bug, and it took out recording and attaching
         // entirely for any clip with sound, which is all of them.
-        async let video: Void = pump(vIn, vOut, reader: reader, label: "video")
+        // Steal the FIRST decoded video frame on its way through.
+        //
+        // Everything downstream needs a still, and until now it got one by handing the finished file
+        // back to AVAssetImageGenerator — a SECOND full decode of a video we had just decoded. On a
+        // real device that second decode is what fails: the feed's players hold the app's video
+        // decode sessions, so the generator gets AVFoundation -11800 / OSStatus -12433 for a file
+        // that is provably readable, playable and intact, in every generator configuration. A frame
+        // we already have in hand costs nothing and cannot be refused.
+        let posterSink = FirstFrame()
+        async let video: Void = pump(vIn, vOut, reader: reader, label: "video") { buf in
+            posterSink.offer(buf)
+        }
         if let aIn, let aOut {
             async let audio: Void = pump(aIn, aOut, reader: reader, label: "audio")
             _ = await (video, audio)
@@ -117,7 +128,33 @@ enum VideoEncoder {
 
         guard reader.status != .failed else { writer.cancelWriting(); return false }
         await writer.finishWriting()
+        lastPoster = posterSink.image
         return writer.status == .completed
+    }
+
+    /// The still captured from the most recent [encode] — read it immediately after, before another
+    /// encode starts. Nil when the source had no decodable video frame at all.
+    nonisolated(unsafe) private(set) static var lastPoster: PlatformImage?
+
+    /// Keeps the first frame that comes past, converted once. The pump calls this for every sample;
+    /// all but the first are a single atomic check.
+    private final class FirstFrame: @unchecked Sendable {
+        private let lock = NSLock()
+        private var taken = false
+        private var _image: PlatformImage?
+        var image: PlatformImage? { lock.lock(); defer { lock.unlock() }; return _image }
+
+        func offer(_ buf: CMSampleBuffer) {
+            lock.lock()
+            if taken { lock.unlock(); return }
+            taken = true
+            lock.unlock()
+            guard let px = CMSampleBufferGetImageBuffer(buf) else { return }
+            let ci = CIImage(cvPixelBuffer: px)
+            let ctx = CIContext(options: [.useSoftwareRenderer: false])
+            guard let cg = ctx.createCGImage(ci, from: ci.extent) else { return }
+            lock.lock(); _image = PlatformImage(cgImage: cg); lock.unlock()
+        }
     }
 
     /// Target for audio-only files. Speech-friendly and a fraction of an uncompressed source.
@@ -182,7 +219,8 @@ enum VideoEncoder {
     private static func pump(_ input: AVAssetWriterInput,
                              _ output: AVAssetReaderOutput,
                              reader: AVAssetReader,
-                             label: String) async {
+                             label: String,
+                             onSample: ((CMSampleBuffer) -> Void)? = nil) async {
         let latch = ResumeOnce()
         // AVFoundation writer/reader types are not Sendable; the pump queue is exclusive to this
         // call and the latch ensures a single resume — treat them as serialized ownership.
@@ -197,6 +235,7 @@ enum VideoEncoder {
                         latch.fire { c.resume() }
                         return
                     }
+                    onSample?(buf)
                     if !inRef.append(buf) {
                         inRef.markAsFinished()
                         latch.fire { c.resume() }

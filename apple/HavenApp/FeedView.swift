@@ -3053,17 +3053,42 @@ final class FeedStore: ObservableObject {
                     let sealed = freshSealed.map { ($0.cid, $0.gen, $0.envs) }
                         + cachedBundles.map { ($0.0, genSnap[$0.0] ?? 0, $0.1) }
                     for (cid, gen, envs) in sealed where !envs.isEmpty {
-                        // Mailbox upload is target-independent — once per circle per generation,
-                        // not (as before) once per envelope PER TARGET per cycle.
-                        if self.historyUploadGen[cid] != gen {
+                        var targets = Set(self.dialTargets(cid))
+                        if cid == "default" {
+                            for c in ContactsStore.shared.contacts { targets.insert(c.idHex) }
+                        }
+                        // Does EVERY recipient of this circle's history consent to receiving it?
+                        //
+                        // This gate is why "Don't share history" was a lie. The per-target blast
+                        // below has always skipped a no-history contact — but the mailbox upload
+                        // underneath it was target-INDEPENDENT, one copy per circle, and
+                        // `syncEnvelopes` re-seals every event to the CURRENT epoch key. So the
+                        // moment a new contact joined the circle they could read the whole backfill
+                        // straight out of the relay, exactly as if the choice had never been made.
+                        // We asked, we stored the answer, and then we published anyway.
+                        //
+                        // A shared mailbox cannot express a per-contact choice: there is one copy
+                        // and every current member holds the key. So the conservative reading wins —
+                        // if anyone here opted out, this circle's history does not go to the relay
+                        // at all, and history reaches the people who SHOULD have it only over the
+                        // direct path below.
+                        //
+                        // What this deliberately does NOT change: new posts. Those upload on their
+                        // own authoring path, so a no-history contact still receives everything from
+                        // the moment they joined — which is what they were promised. The cost is
+                        // offline BACKFILL for entitled members of a circle that also contains
+                        // someone who opted out; they get history when the author is reachable
+                        // directly, rather than from the relay.
+                        let mayBackfillMailbox = targets.allSatisfy {
+                            shareMap[$0.lowercased()] ?? ConnectionsStore.shared.sharesHistory($0)
+                        }
+                        if mayBackfillMailbox, self.historyUploadGen[cid] != gen {
                             self.historyUploadGen[cid] = gen
                             for env in envs {
                                 Task { await SharedStore.uploadEvent(circleId: cid, env: env) }
                             }
-                        }
-                        var targets = Set(self.dialTargets(cid))
-                        if cid == "default" {
-                            for c in ContactsStore.shared.contacts { targets.insert(c.idHex) }
+                        } else if !mayBackfillMailbox {
+                            HavenLog.sync("history backfill withheld from \(cid) mailbox — a member opted out of history")
                         }
                         for nodeHex in targets {
                             let shares = shareMap[nodeHex.lowercased()]

@@ -177,7 +177,21 @@ object HavenNet : InboundListener {
         val turnPass: String = "",
     )
     /** Per-relay metadata records, keyed by hex. The config survives deactivation here. */
-    private val relayEntries = HashMap<String, RelayEntry>()
+    /**
+     * ConcurrentHashMap, not HashMap. This is written from the sync loop and every inbound frame
+     * handler (relay announces, health probes, adoptions) and read from the Compose UI thread by the
+     * Relays hub. A plain HashMap resizing under a concurrent read hands back garbage — including a
+     * NULL for a value the type system swears is non-null — and that is precisely how opening
+     * Settings crashed:
+     *
+     *   NullPointerException: 'boolean RelayEntry.getActive()' on a null object reference
+     *     at HavenNet$allRelayEntries$$inlined$compareByDescending$1.compare
+     *     at SettingsScreenKt.RelaysHubCard
+     *
+     * ConcurrentHashMap also forbids null values outright, so the corruption cannot reappear in that
+     * shape even if a new write path is added later.
+     */
+    private val relayEntries = java.util.concurrent.ConcurrentHashMap<String, RelayEntry>()
     /** The all-circles default relay (every present + future circle inherits it). "" = none. */
     private var defaultRelayHex: String = ""
     /** Erase inactive+unseen relay entries after this long (parity with iOS staleAfterMs). */
@@ -3830,7 +3844,9 @@ object HavenNet : InboundListener {
     }
 
     /** Every configured relay (active + inactive), active-first then by name — for the Relays hub. */
-    fun allRelayEntries(): List<RelayEntry> = relayEntries.values.sortedWith(
+    fun allRelayEntries(): List<RelayEntry> = relayEntries.values.toList().sortedWith(
+        // Snapshot to a list BEFORE sorting: sorting a live map view lets entries move underneath the
+        // comparator, and a comparator that sees an inconsistent set is how TimSort throws.
         compareByDescending<RelayEntry> { it.active }.thenBy { it.name.lowercase() }
     )
 
@@ -3909,8 +3925,14 @@ object HavenNet : InboundListener {
 
     /** Every distinct ACTIVE relay across all circles + the default — for mesh sync / active transport. */
     private fun allRelays(): List<String> {
-        val out = relayNodes.values.flatten().filter { isRelayActive(it) }.distinct().toMutableList()
-        if (defaultRelayHex.isNotEmpty() && isRelayActive(defaultRelayHex) && !out.contains(defaultRelayHex))
+        // `relayStoodDown` drops relays that are refusing us outright. They stay ACTIVE and
+        // configured — this is not a health verdict — they are just not worth a request until the
+        // backoff expires. See noteRefused for why a refusal cannot be retried out of existence.
+        val out = relayNodes.values.flatten()
+            .filter { isRelayActive(it) && !relayStoodDown(it) }
+            .distinct().toMutableList()
+        if (defaultRelayHex.isNotEmpty() && isRelayActive(defaultRelayHex) &&
+            !relayStoodDown(defaultRelayHex) && !out.contains(defaultRelayHex))
             out.add(defaultRelayHex)
         return out
     }
@@ -3935,6 +3957,9 @@ object HavenNet : InboundListener {
     private fun markRelayOk(nodeHex: String) {
         relayHealth.getOrPut(nodeHex) { RelayHealth() }.recordSuccess()
         markRelaySeen(nodeHex)   // stamp lastSeen so the stale-clock only ticks while truly unseen
+        // It answered — so whatever it was refusing us for is over. Drop the stand-down immediately
+        // rather than making the user wait out a backoff the relay has already stopped earning.
+        noteRelayAccepted(nodeHex)
     }
 
     private fun markRelayFail(nodeHex: String) {
@@ -5548,9 +5573,54 @@ object HavenNet : InboundListener {
     private val rosterNeeded = LinkedHashSet<String>()
     private var lastHealMs: Long = 0
 
+    /**
+     * How long a relay that keeps refusing us is left alone, and how many refusals in a row we have
+     * taken from it.
+     *
+     * A refusal is not an outage and must not mark the relay dead — that part of the design is right.
+     * But "not an outage" was read as "no backoff at all", so a relay that will NEVER authorize us
+     * got hit by every mailbox put, every list, every hello, every self-sync pass, several times a
+     * second, forever. On a real phone that is a hot device and a flat battery: 140 refusals in one
+     * log buffer, and a Nokia 6.1 that rebooted itself mid-test.
+     *
+     * The self-heal cannot rescue this case either. It answers a refusal by republishing our device
+     * roster — but the relay already HELD our exact roster ("1 relay(s) already hold this exact
+     * roster"), because the refusal is not about the roster. The relay simply does not serve this
+     * account. Asking harder cannot fix that, so the honest behaviour is to ask rarely.
+     */
+    private val refusedUntilMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val refusedStreak = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    private const val REFUSED_GRACE = 3          // genuine roster gaps heal within a few attempts
+    private const val REFUSED_BACKOFF_MIN_MS = 30_000L
+    private const val REFUSED_BACKOFF_MAX_MS = 600_000L
+
     private fun noteRefused(nodeHex: String, what: String) {
         synchronized(rosterNeeded) { rosterNeeded.add(nodeHex) }
+        val streak = refusedStreak.merge(nodeHex, 1) { a, b -> a + b } ?: 1
+        // The first few refusals are free: that is the window in which publishing our roster
+        // genuinely fixes things, and backing off early would slow down the case that DOES heal.
+        if (streak >= REFUSED_GRACE) {
+            val backoff = (REFUSED_BACKOFF_MIN_MS shl (streak - REFUSED_GRACE).coerceAtMost(5))
+                .coerceAtMost(REFUSED_BACKOFF_MAX_MS)
+            val until = System.currentTimeMillis() + backoff
+            val prev = refusedUntilMs.put(nodeHex, until)
+            // Log the transition, not every refusal — the spam was itself part of the cost.
+            if (prev == null || prev < System.currentTimeMillis()) {
+                Log.i(TAG, "relay ${nodeHex.take(8)} refused $streak× — standing down ${backoff / 1000}s " +
+                    "(not an outage; it does not authorize this device)")
+            }
+            return
+        }
         Log.i(TAG, "relay ${nodeHex.take(8)} REFUSED $what — not an outage; our device id isn't authorized there yet")
+    }
+
+    /** True while a relay is in refusal backoff — skip it rather than spending a request on a no. */
+    private fun relayStoodDown(nodeHex: String): Boolean =
+        (refusedUntilMs[nodeHex] ?: 0L) > System.currentTimeMillis()
+
+    /** A relay answered us properly again — forget the refusal history entirely. */
+    private fun noteRelayAccepted(nodeHex: String) {
+        if (refusedStreak.remove(nodeHex) != null) refusedUntilMs.remove(nodeHex)
     }
 
     /** Re-publish our device roster to every relay that refused us, so the next attempt is allowed.
@@ -5563,6 +5633,10 @@ object HavenNet : InboundListener {
             rosterNeeded.toList().also { rosterNeeded.clear() }
         }
         Log.i(TAG, "re-publishing device roster after refusal from [${nodes.joinToString(",") { it.take(8) }}]")
+        // Lift the backoff for exactly these relays so the publish that might FIX the refusal can
+        // still reach them — the stand-down is meant to stop the spin, not to prevent the remedy.
+        // If they refuse the publish too, noteRefused re-arms it, longer each time.
+        for (n in nodes) refusedUntilMs.remove(n)
         // force: a refusal means the relay does NOT have a usable roster from us, so the
         // "already holds these bytes" skip must not suppress the very publish that fixes it.
         runCatching { publishDeviceRoster(force = true) }

@@ -79,12 +79,40 @@ struct CameraView: View {
                         PhotoSaver.saveIfEnabled(item, to: .shared, circleId: FeedStore.shared.activeCircleId)
                     }
                 }
-                onCaptured(finalRefs)
+                onCaptured(Self.withPosterCompanions(finalRefs))
                 dismiss()
             } onRetake: {
                 reviewRefs = nil
             }
         }
+    }
+
+    /// Give every captured VIDEO the poster companion a picked video already gets.
+    ///
+    /// The camera attaches through `MediaStore.addVideo`, which runs the full `prepareVideo` —
+    /// poster and all — and then returns ONLY `bundle.videoRef`, discarding `posterRef` and
+    /// `mediaRefs`. `PreparedVideo`'s own doc says to prefer the bundle "at compose time so the
+    /// poster and original companions actually leave the device"; the camera was the one attach
+    /// path still taking the lossy route. So a camera-shot clip carried no `poster:` marker: the
+    /// composer tray had no still to draw (it fell back to the labelled glyph), and — worse — no
+    /// poster was ever published, so recipients and super data saver had nothing either.
+    ///
+    /// Done HERE rather than at capture because the review step re-encodes when a filter is chosen,
+    /// which mints a new ref. The poster has to describe the bytes that actually ship.
+    @MainActor
+    static func withPosterCompanions(_ refs: [String]) -> [String] {
+        var out: [String] = []
+        for ref in refs {
+            guard MediaKind(ref: ref) == .video else { out.append(ref); continue }
+            // Already carries one (a future caller composing its own bundle) — don't double up.
+            if MediaVariants.poster(for: ref, in: refs) != nil { out.append(ref); continue }
+            if let poster = MediaStore.shared.ensurePosterImage(for: ref) {
+                out.append(poster)
+                out.append(MediaVariants.posterMarker(video: ref, poster: poster))
+            }
+            out.append(ref)
+        }
+        return out
     }
 }
 

@@ -1191,7 +1191,17 @@ final class CallManager: NSObject, ObservableObject {
     private func requestCallKitMuted(_ m: Bool) {
         #if !targetEnvironment(macCatalyst) && !os(macOS)
         guard useCallKit, let uuid = callUUID else { applyMuted(m); return }
-        controller.request(CXTransaction(action: CXSetMutedCallAction(call: uuid, muted: m))) { _ in }
+        controller.request(CXTransaction(action: CXSetMutedCallAction(call: uuid, muted: m))) { [weak self] err in
+            guard let err else { return }   // fulfilled → the provider handler applies it
+            // CallKit REFUSED the transaction — most often because it doesn't consider this UUID an
+            // active call (answered through our own UI without CallKit ever reporting it, or already
+            // reported ended). Swallowing that error left the mute button doing NOTHING while every
+            // other control worked, because mute is the only one that round-trips through CallKit —
+            // "I can't reliably toggle mute but all the other buttons respond". A tap must always
+            // take effect, so apply it directly and say what happened.
+            HavenLog.call("CallKit refused mute: \(err.localizedDescription) — applying locally")
+            Task { @MainActor in self?.applyMuted(m) }
+        }
         #else
         applyMuted(m)
         #endif

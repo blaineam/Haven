@@ -857,7 +857,13 @@ final class MediaStore: ObservableObject {
         let outBytes = (try? dst.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         let inBytes = (try? src.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         HavenLog.sync("video add: optimize=\(wantOptimize) \(inBytes / 1_048_576)MB → \(outBytes / 1_048_576)MB ref=\(ref.prefix(12))")
-        let posterImage = Self.poster(for: dst)
+        // Prefer the frame the ENCODER already had. Re-decoding the file we just wrote is the step
+        // that fails on device (see posterAsync): the app's video decode sessions are spoken for, so
+        // AVAssetImageGenerator is refused for a file that is perfectly intact. The encoder tapped a
+        // frame on its way past at no cost. Fall back to the generator for the paths that did not
+        // run the encoder at all (passthrough remux, raw copy).
+        var posterImage = VideoEncoder.lastPoster
+        if posterImage == nil { posterImage = await Self.posterAsync(for: dst) }
         cachePut(ref, MediaItem(id: ref, kind: .video, image: posterImage, videoURL: dst))
 
         // Always cut a poster JPEG from the playable file and store it as its own content-addressed
@@ -1642,15 +1648,143 @@ final class MediaStore: ObservableObject {
     }
 
     /// Extract a poster frame so videos show something before playback.
-    nonisolated static func poster(for url: URL) -> PlatformImage? {
-        let asset = AVURLAsset(url: url)
-        let gen = AVAssetImageGenerator(asset: asset)
-        gen.appliesPreferredTrackTransform = true
-        gen.maximumSize = CGSize(width: 1080, height: 1080)
-        guard let cg = try? gen.copyCGImage(at: CMTime(seconds: 0.1, preferredTimescale: 600), actualTime: nil)
-        else { return nil }
-        return PlatformImage(cgImage: cg)
+    // Poster generation is a VideoToolbox decode, and VT sessions are a FINITE, PROCESS-WIDE
+    // resource. Nothing here was serialized and nothing remembered a failure, so a video whose
+    // poster failed once was retried by every feed refresh, forever — each attempt opening another
+    // decode session. That exhausts VideoToolbox and then EVERY generation fails with
+    // AVFoundation -11800 / NSOSStatusErrorDomain -12433, including for perfectly healthy files
+    // (readable=true playable=true vTracks=1 dur=13.81 — the asset was never the problem). The
+    // retry storm WAS the bug: it manufactured the failure it was retrying, and burned battery
+    // doing it.
+    //
+    // So: one generation at a time, on our own serial queue, and a failure is remembered.
+    private static let posterQueue = DispatchQueue(label: "haven.poster", qos: .userInitiated)
+    private static let posterFailLock = NSLock()
+    nonisolated(unsafe) private static var posterFailedPaths: Set<String> = []
+
+    /// A video we have already failed to get a frame out of. Asking again costs another decode
+    /// session and returns the same nil.
+    private nonisolated static func posterKnownBad(_ url: URL) -> Bool {
+        posterFailLock.lock(); defer { posterFailLock.unlock() }
+        return posterFailedPaths.contains(url.path)
     }
+
+    private nonisolated static func notePosterBad(_ url: URL) {
+        posterFailLock.lock(); defer { posterFailLock.unlock() }
+        posterFailedPaths.insert(url.path)
+        if posterFailedPaths.count > 512 { posterFailedPaths.removeFirst() }
+    }
+
+    /// Forget the negative cache for a ref whose bytes changed (re-download, re-optimize).
+    nonisolated static func clearPosterFailure(for url: URL) {
+        posterFailLock.lock(); defer { posterFailLock.unlock() }
+        posterFailedPaths.remove(url.path)
+    }
+
+    /// Async entry point. Hops onto [posterQueue] rather than blocking a cooperative thread.
+    nonisolated static func posterAsync(for url: URL) async -> PlatformImage? {
+        if posterKnownBad(url) { return nil }
+        return await withCheckedContinuation { cont in
+            posterQueue.async { cont.resume(returning: generatePosterSerialized(url)) }
+        }
+    }
+
+    /// Synchronous entry point for the non-async call sites. MUST NOT run on the main thread.
+    nonisolated static func poster(for url: URL) -> PlatformImage? {
+        if posterKnownBad(url) { return nil }
+        return posterQueue.sync { generatePosterSerialized(url) }
+    }
+
+    /// The one real generator. ONLY ever called on [posterQueue], so at most one VideoToolbox
+    /// session exists at a time. Blocking here is safe — it is our own serial queue, never the
+    /// Swift-concurrency cooperative pool.
+    private nonisolated static func generatePosterSerialized(_ url: URL) -> PlatformImage? {
+        dispatchPrecondition(condition: .onQueue(posterQueue))
+        // Try progressively PLAINER generator configurations, not just more timestamps.
+        //
+        // A healthy file (readable, playable, one video track, correct duration) failing with
+        // AVFoundation -11800 / OSStatus -12433 is not a bad frame position — it is the generator
+        // being asked for something it cannot produce. `maximumSize` makes it scale, and
+        // `appliesPreferredTrackTransform` makes it rotate; either can push it onto a path the
+        // decoder refuses. So: ask for the fancy version first, then drop the scale, then drop the
+        // transform too. Whichever works, we take — and we log which one, so the next person knows
+        // exactly which knob was the problem instead of guessing at four timestamps like I did.
+        struct Config { let name: String; let transform: Bool; let maxSize: CGSize? }
+        let configs = [
+            Config(name: "transform+1080", transform: true, maxSize: CGSize(width: 1080, height: 1080)),
+            Config(name: "transform+full", transform: true, maxSize: nil),
+            Config(name: "plain", transform: false, maxSize: nil),
+        ]
+        var lastText = "none"
+        for cfg in configs {
+            let asset = AVURLAsset(url: url)
+            let gen = AVAssetImageGenerator(asset: asset)
+            gen.appliesPreferredTrackTransform = cfg.transform
+            if let m = cfg.maxSize { gen.maximumSize = m }
+            gen.requestedTimeToleranceBefore = .positiveInfinity
+            gen.requestedTimeToleranceAfter = .positiveInfinity
+            let times = [0.1, 0.0, 0.5, 1.0].map {
+                NSValue(time: CMTime(seconds: $0, preferredTimescale: 600))
+            }
+            let sem = DispatchSemaphore(value: 0)
+            let box = PosterBox()
+            gen.generateCGImagesAsynchronously(forTimes: times) { _, image, _, result, error in
+                if result == .succeeded, let image, box.take(image) { sem.signal() }
+                else if let error { box.note(error) }
+                if box.finish(of: times.count) { sem.signal() }
+            }
+            if sem.wait(timeout: .now() + 15) == .timedOut { gen.cancelAllCGImageGeneration() }
+            if let img = box.image {
+                if cfg.name != configs[0].name {
+                    HavenLog.sync("poster OK for \(url.lastPathComponent) via '\(cfg.name)' — the default config is the one that fails here")
+                }
+                let out = PlatformImage(cgImage: img)
+                // A full-size frame is a big bitmap; bring it down to poster scale ourselves rather
+                // than asking the generator to do it (which is the step that may have failed).
+                return cfg.maxSize == nil ? downscale(out, maxDimension: 1080) : out
+            }
+            lastText = "\(cfg.name): \(box.errorText)"
+        }
+        notePosterBad(url)
+        HavenLog.sync("poster generation FAILED for \(url.lastPathComponent) in EVERY config; last=\(lastText) " +
+            "— not retrying this file (each attempt costs a VideoToolbox session)")
+        return nil
+    }
+
+    /// Tiny lock-guarded box so the generator's callbacks (which arrive on its own queue, once per
+    /// requested time) can hand the first successful frame back to the waiting caller exactly once.
+    private final class PosterBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _image: CGImage?
+        private var _error: Error?
+        private var done = 0
+        private var signalled = false
+        var image: CGImage? { lock.lock(); defer { lock.unlock() }; return _image }
+        var errorText: String {
+            lock.lock(); defer { lock.unlock() }
+            let ns = _error as NSError?
+            let under = (ns?.userInfo[NSUnderlyingErrorKey] as? NSError).map { "\($0.domain)/\($0.code)" } ?? "none"
+            return "\(ns?.domain ?? "?")/\(ns?.code ?? 0) \(_error?.localizedDescription ?? "unknown") underlying=\(under)"
+        }
+        func take(_ img: CGImage) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            done += 1
+            guard _image == nil else { return false }
+            _image = img
+            if signalled { return false }
+            signalled = true
+            return true
+        }
+        func note(_ e: Error) { lock.lock(); _error = e; done += 1; lock.unlock() }
+        func finish(of total: Int) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard done >= total, !signalled else { return false }
+            signalled = true
+            return true
+        }
+    }
+
+
 
     /// Content-address a poster still for an **already stored** video without re-encoding the clip.
     /// Used by re-optimize's poster-only path: already-compressed videos that never published a
@@ -2341,13 +2475,40 @@ struct ComposerAttachmentTile: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
+    /// Refs we have already reported as having no preview. Returns true the FIRST time only.
+    private static let missLock = NSLock()
+    nonisolated(unsafe) private static var reportedMisses: Set<String> = []
+    private static func notePreviewMiss(_ ref: String) -> Bool {
+        missLock.lock(); defer { missLock.unlock() }
+        guard !reportedMisses.contains(ref) else { return false }
+        reportedMisses.insert(ref)
+        if reportedMisses.count > 256 { reportedMisses.removeFirst() }
+        return true
+    }
+
     private var previewImage: PlatformImage? {
         // Prefer the poster/thumb companion the bundle already declared. For a just-encoded video that
         // JPEG is a content-addressed image sitting on disk RIGHT NOW, while `thumbnail(ref:)` has to
         // run AVAssetImageGenerator against the video off-main and returns nil until it lands.
         let companion = MediaVariants.poster(for: ref, in: media) ?? MediaVariants.thumb(for: ref, in: media)
         if let c = companion, let img = MediaStore.shared.thumbnail(c, maxDimension: 160) { return img }
-        return MediaStore.shared.thumbnail(ref, maxDimension: 160)
+        if let img = MediaStore.shared.thumbnail(ref, maxDimension: 160) { return img }
+        // Nothing to draw. Say exactly WHICH lookup came up empty — a tile that silently falls back
+        // to its glyph is indistinguishable from a tile whose poster merely hasn't landed yet, and
+        // guessing between those has already cost two wrong fixes.
+        //
+        // ONCE PER REF. A SwiftUI body re-evaluates constantly, and this fired on every pass — dozens
+        // of identical lines a second in the console, which is the same "diagnostic that is itself a
+        // cost" problem as the poster retry storm below it.
+        guard Self.notePreviewMiss(ref) else { return nil }
+        HavenLog.sync("composer tile: no preview for \(ref.prefix(16)) " +
+            "kind=\(MediaKind(ref: ref).map(String.init(describing:)) ?? "nil") " +
+            "companion=\(companion?.prefix(16) ?? "none") " +
+            "companionOnDisk=\(companion.map { MediaStore.shared.hasLocalFile($0) } ?? false) " +
+            "refOnDisk=\(MediaStore.shared.hasLocalFile(ref)) " +
+            "cachedItemImage=\(MediaStore.shared.item(ref)?.image != nil) " +
+            "media=\(media.map { String($0.prefix(12)) })")
+        return nil
     }
 
     @ViewBuilder private var glyphStack: some View {

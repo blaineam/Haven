@@ -6,6 +6,46 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest wave (built, batched for next upload)
+- **The call fallback only ever worked Apple↔Apple (2026-07-26, 1.1.5 b366, Android + desktop)** —
+  auditing what Apple had that the others didn't turned up the real reason cross-platform calls
+  ring, get accepted and never connect. `/webrtc/hairpin` is the media path when ICE cannot pair
+  two hard NATs, which on mobile carriers is the ordinary case. Android's hairpin was a COMMENT:
+  `FabricIcePolicy` and `CallManager` both promised "path-proxy WebSocket hairpin for media" and no
+  such code existed, so an Android leg with failed ICE had nothing. Desktop's existed but sent and
+  expected BARE PCM while Apple frames every packet `[type][seq][ptsMs]` — Apple dropped desktop's
+  frames as malformed, desktop played Apple's headers as audio. Both fixed: Android gets the full
+  bridge (AudioRecord/AudioTrack 16 kHz mono with platform AEC, MediaCodec H.264 with GPU rotation
+  through WebRTC's own EglRenderer, jitter buffer, ICE-failure trigger that comes up alongside ICE
+  and tears down when it recovers), desktop gets the shared framing. Also from the same audit:
+  "where this is stored" ported to Android and desktop, disappearing messages finally settable on
+  desktop (the engine always took `retention_secs`; the UI passed a hard-coded `None`), and the
+  active-speaker highlight ported with Apple's exact threshold and debounce.
+- **Answering a call could kill the app; posts took minutes to show (2026-07-26, 1.1.5
+  b366, all clients)** — 1.1.4 was pulled from App Store Connect and the Microsoft Store
+  before general release; this is the pass that makes it shippable. The crash: `WebRTCCall`'s
+  constructor `fatalError`'d when `RTCPeerConnectionFactory` handed back no peer connection,
+  and the factory returns nil when it REJECTS THE CONFIGURATION — which is not ours to
+  control, since `iceServers` is built from whatever `turn:` URLs the circle's relay
+  advertises. One unparseable entry invalidated the list, and the accept path
+  (`startMesh` → `connectPeerIfNeeded` → the constructor) terminated the process at the
+  exact moment of picking up, reproducibly from a caller on another platform in another
+  circle. Construction now degrades — circle config, then plain STUN, then host-only — and a
+  real refusal is a failed call, not a dead app. Desktop was also still running the OLD ICE
+  policy (empty server list whenever a fabric exists = host candidates only), which cannot
+  complete a call between two home NATs; it now matches Apple/Android.
+  The latency: the mailbox poll shared its idle back-off with the contact fan-out, and that
+  back-off measures INTERACTION, not attention — 30 seconds of reading without tapping put an
+  iPhone on ×4 (45s → 3 min), then ×10 (7.5 min), which is exactly "it takes a few minutes
+  after a relay has a copy before it loads". The two have nothing in common cost-wise: the
+  fan-out is hello+roster sealed to every contact (the thing that cooked phones, unchanged
+  here); the poll is one LIST of your own mailbox. The poll is now capped at 2× base while
+  the app is on screen, on both iOS and Android.
+  Also in this wave: a compressed video that attached to nothing visible (both composer trays
+  required a decoded bitmap and had no final `else`); "Media still loading…" narrating a photo
+  already sharp on screen; DM threads re-scrolling on every change to the active CIRCLE's feed
+  and anchoring short of the bottom; notification-tap requests wedged by clearing a
+  `@Published` from inside its own `willSet`; and the story cloud badge finally opening the
+  which-relays-hold-this sheet.
 - **Two online peers no longer need a relay in common (2026-07-25, 1.1.4 b365, core +
   all clients)** — a contact holds your ACCOUNT id (that is what an invite/QR carries)
   but has to dial your DEVICE ids, and both ways of learning those — your signed roster,

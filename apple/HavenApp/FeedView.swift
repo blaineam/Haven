@@ -255,6 +255,50 @@ final class FeedStore: ObservableObject {
         if SettingsStore.shared.superDataSaver { mult = mult * 2 }
         return base * max(1, mult)
     }
+
+    /// True while the app is on screen. Set from the scene-phase hook.
+    ///
+    /// The idle stretch above exists to stop a phone cooking itself, and it should keep doing that.
+    /// But it measures INTERACTION, not attention: reading the feed without touching it for 30
+    /// seconds is "idle", and someone watching the screen waiting for a reply is the most idle user
+    /// there is. See `mailboxPollInterval` for what that costs and why the two cadences now differ.
+    private(set) var appIsForeground = true
+
+    /// Foreground/background transition. Foregrounding also counts as activity — you just came back
+    /// to look at something.
+    func setForeground(_ on: Bool) {
+        guard appIsForeground != on else { return }
+        appIsForeground = on
+        if on { bumpActivity() } else { nextPollDueMs = now() &+ adaptiveInterval(base: 45_000) }
+    }
+
+    /// How long until the next MAILBOX poll — deliberately not `adaptiveInterval`.
+    ///
+    /// Both timers used to share one stretch, and that conflated two very different costs. The SYNC
+    /// timer's work is a fan-out: hello + roster sealed to every contact, relay re-announce, mesh
+    /// dials. That is the radio traffic that cooked phones, and it should keep stretching hard.
+    /// The MAILBOX poll is one LIST of our own mailbox — cheap, and the only thing that makes a post
+    /// a relay is already holding actually appear on this device.
+    ///
+    /// Sharing the stretch meant a foregrounded, visible, merely-not-being-tapped app went to a ×4
+    /// multiplier after 30 seconds — a 45s base becoming 180s, and ×10 (7.5 min) after two minutes.
+    /// That is the "it takes a few minutes after a relay has a copy before it loads into the app"
+    /// report, and it is worst exactly when the user is watching. So: while we are ON SCREEN, cap
+    /// the poll's stretch hard. Backgrounded, it keeps the full aggressive stretch, because then
+    /// nobody is waiting and pushes are what wake us anyway.
+    private func mailboxPollInterval(base: UInt64) -> UInt64 {
+        let full = adaptiveInterval(base: base)
+        guard appIsForeground else { return full }
+        #if os(iOS)
+        // Thermal pressure still wins: a hot phone stretches regardless of who is looking at it.
+        // (`adaptiveInterval` already folded ThermalPolicy in; this only caps the IDLE component.)
+        let thermalFloor = base * UInt64(max(1, ThermalPolicy.intervalMultiplier))
+        return max(thermalFloor, min(full, base * 2))
+        #else
+        return min(full, base * 2)
+        #endif
+    }
+
     /// Mark "something is happening" → snap both timers back to their tight base cadence immediately.
     func bumpActivity() {
         lastActivityMs = now()
@@ -500,7 +544,13 @@ final class FeedStore: ObservableObject {
         // 10s heartbeat, but the actual poll only runs when due (30s base, stretching when idle).
         #if os(iOS)
         // 45s base. Push + activity still force a poll immediately; idle LIST is pure heat.
-        let pollHeartbeat: TimeInterval = 30
+        //
+        // The HEARTBEAT is 15s, not 30s: it does nothing but compare two integers and return unless
+        // the poll is actually due, so its cost is noise — but at 30s it quantised every due time up
+        // by as much as 30 seconds, which is half the interval it was gating. The throttling lives in
+        // the due-gate (`mailboxPollInterval`), where it can be reasoned about; the heartbeat only
+        // decides how precisely that decision gets honoured.
+        let pollHeartbeat: TimeInterval = 15
         let pollBaseMs: UInt64 = 45_000
         #else
         // Host Mac: 45s base while serving — less self-LIST churn against the local mailbox.
@@ -523,7 +573,7 @@ final class FeedStore: ObservableObject {
                 // A backlog drain in progress overrides the idle stretch: keep base cadence so
                 // 200-per-poll actually finishes (8k keys in ~30 min, not hours).
                 self.nextPollDueMs = self.now() + (SharedStore.anyOutstandingBacklog()
-                    ? pollBaseMs : self.adaptiveInterval(base: pollBaseMs))
+                    ? pollBaseMs : self.mailboxPollInterval(base: pollBaseMs))
                 self.pollMailboxNow()
                 self.dailyMailboxRefreshIfDue()   // long-lived sessions refresh without a relaunch
             }
@@ -7223,45 +7273,7 @@ struct FeedView: View {
                 // Hide synthetic markers and original companions from the tray — they ride with
                 // the playable ref and would just look like duplicate chips.
                 ForEach(MediaVariants.displayRefs(attachedMedia), id: \.self) { ref in
-                    if let m = MediaStore.shared.item(ref), let img = MediaStore.shared.thumbnail(ref, maxDimension: 160) {
-                        ZStack(alignment: .topTrailing) {
-                            Image(platformImage: img).resizable().scaledToFill()
-                                .frame(width: 56, height: 56).clipShape(RoundedRectangle(cornerRadius: 10))
-                                .overlay(alignment: .bottomLeading) {
-                                    if m.kind == .video { videoEditMenu(ref) }
-                                }
-                            removeChip {
-                                // Drop the playable AND any poster/original companions tied to it.
-                                attachedMedia.removeAll { r in
-                                    if r == ref { return true }
-                                    if let p = MediaVariants.parsePoster(r), p.video == ref || p.poster == ref { return true }
-                                    if let o = MediaVariants.parseOriginal(r), o.optimized == ref || o.original == ref { return true }
-                                    if MediaVariants.poster(for: ref, in: attachedMedia) == r { return true }
-                                    if MediaVariants.original(for: ref, in: attachedMedia) == r { return true }
-                                    return false
-                                }
-                            }
-                        }
-                    } else if MediaKind(ref: ref) == .file {
-                        ZStack(alignment: .topTrailing) {
-                            RoundedRectangle(cornerRadius: 10).fill(Color(.tertiarySystemFill))
-                                .frame(width: 56, height: 56)
-                                .overlay {
-                                    Image(systemName: "doc.zipper").font(.title3).foregroundStyle(.secondary)
-                                }
-                            removeChip { attachedMedia.removeAll { $0 == ref } }
-                        }
-                    } else if SharedLocation.parse(ref) != nil {
-                        ZStack(alignment: .topTrailing) {
-                            VStack(spacing: 2) {
-                                Image(systemName: "mappin.circle.fill").font(.title3).foregroundStyle(HavenTheme.pink)
-                                Text("Location").font(.caption2).foregroundStyle(.secondary)
-                            }
-                            .frame(width: 56, height: 56)
-                            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
-                            removeChip { attachedMedia.removeAll { $0 == ref } }
-                        }
-                    }
+                    attachmentChip(ref)
                 }
                 if let track = attachedTrack {
                     HStack(spacing: 6) {
@@ -7299,6 +7311,47 @@ struct FeedView: View {
                     .background(Color(.tertiarySystemFill), in: Capsule())
                 }
             }
+        }
+    }
+
+    /// One tile in the composer's attachment tray. See `ComposerAttachmentTile` for why every
+    /// attachment draws one whether or not it has a picture to show.
+    @ViewBuilder private func attachmentChip(_ ref: String) -> some View {
+        if SharedLocation.parse(ref) != nil {
+            ZStack(alignment: .topTrailing) {
+                VStack(spacing: 2) {
+                    Image(systemName: "mappin.circle.fill").font(.title3).foregroundStyle(HavenTheme.pink)
+                    Text("Location").font(.caption2).foregroundStyle(.secondary)
+                }
+                .frame(width: 56, height: 56)
+                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+                removeChip { attachedMedia.removeAll { $0 == ref } }
+            }
+        } else {
+            ZStack(alignment: .topTrailing) {
+                ComposerAttachmentTile(ref: ref, media: attachedMedia)
+                    .overlay(alignment: .bottomLeading) {
+                        // Trim/mute stay reachable from the tile even when the tile is a glyph — the
+                        // clip is attached either way, so its controls apply either way.
+                        if MediaKind(ref: ref) == .video { videoEditMenu(ref) }
+                    }
+                removeChip { removeAttachment(ref) }
+            }
+        }
+    }
+
+    /// Drop an attachment AND every companion tied to it — a poster or original left behind would
+    /// ride along on the next post with no playable ref to belong to.
+    private func removeAttachment(_ ref: String) {
+        attachedMedia.removeAll { r in
+            if r == ref { return true }
+            if let p = MediaVariants.parsePoster(r), p.video == ref || p.poster == ref { return true }
+            if let o = MediaVariants.parseOriginal(r), o.optimized == ref || o.original == ref { return true }
+            if let t = MediaVariants.parseThumb(r), t.content == ref || t.thumb == ref { return true }
+            if MediaVariants.poster(for: ref, in: attachedMedia) == r { return true }
+            if MediaVariants.original(for: ref, in: attachedMedia) == r { return true }
+            if MediaVariants.thumb(for: ref, in: attachedMedia) == r { return true }
+            return false
         }
     }
 

@@ -30,6 +30,9 @@ class WebRTCPeer(
     private val onRemoteVideo: (VideoTrack?) -> Unit,
     private val onRemoteScreen: (VideoTrack?) -> Unit = {},
     private val onRemoteScreenEnded: () -> Unit = {},
+    /** ICE lifecycle for this peer. Drives the hairpin media relay: `FAILED` means WebRTC could not
+     *  pair us, and on Android that used to be the end of the call — nothing watched this at all. */
+    private val onIceState: (PeerConnection.IceConnectionState) -> Unit = {},
 ) {
     private var screenSender: org.webrtc.RtpSender? = null
 
@@ -64,7 +67,10 @@ class WebRTCPeer(
                     onRemoteScreenEnded()
                 }
             }
-            override fun onIceConnectionChange(s: PeerConnection.IceConnectionState) { Log.d(TAG, "$peerHex ice=$s") }
+            override fun onIceConnectionChange(s: PeerConnection.IceConnectionState) {
+                Log.d(TAG, "$peerHex ice=$s")
+                onIceState(s)
+            }
             override fun onConnectionChange(s: PeerConnection.PeerConnectionState) { Log.d(TAG, "$peerHex pc=$s") }
             override fun onSignalingChange(p: PeerConnection.SignalingState) {}
             override fun onIceGatheringChange(p: PeerConnection.IceGatheringState) {}
@@ -168,6 +174,31 @@ class WebRTCPeer(
     private fun flushCandidates() {
         pendingRemote.forEach { pc?.addIceCandidate(it) }
         pendingRemote.clear()
+    }
+
+    /**
+     * Pull the current audio levels for this connection — the REMOTE peer's inbound level and our
+     * own mic level on it, both 0…1. Delivered on WebRTC's stats thread. Apple parity
+     * (`WebRTCCall.audioLevels`); drives the active-speaker highlight.
+     */
+    fun audioLevels(onResult: (inbound: Double, outbound: Double) -> Unit) {
+        val conn = pc ?: return onResult(0.0, 0.0)
+        runCatching {
+            conn.getStats { report ->
+                var inbound = 0.0
+                var outbound = 0.0
+                for (stat in report.statsMap.values) {
+                    val kind = stat.members["kind"] as? String ?: continue
+                    if (kind != "audio") continue
+                    val level = (stat.members["audioLevel"] as? Number)?.toDouble() ?: continue
+                    when (stat.type) {
+                        "inbound-rtp" -> if (level > inbound) inbound = level
+                        "media-source" -> if (level > outbound) outbound = level
+                    }
+                }
+                onResult(inbound, outbound)
+            }
+        }.onFailure { onResult(0.0, 0.0) }
     }
 
     fun close() {

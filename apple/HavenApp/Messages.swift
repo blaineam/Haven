@@ -183,8 +183,25 @@ struct MessagesView: View {
         // Somewhere else in the app staged a draft (e.g. "Message the author" on a post) — open that
         // thread in this tab's stack, exactly as picking it from the list would.
         .onReceive(DMDraftStore.shared.$openThread.compactMap { $0 }) { id in
-            DMDraftStore.shared.openThread = nil
-            pushedDM = id
+            // Clear on the NEXT tick, not inline. `@Published` publishes from `willSet`, so this
+            // closure runs BEFORE the store has written the new value — an inline `= nil` is
+            // immediately overwritten by the assignment that woke us, and `openThread` stays pinned
+            // to this id forever. That left the request permanently "pending": every later
+            // subscription replayed it (re-pushing a thread the user had already backed out of), and
+            // a second tap on the SAME conversation published a value that was already there, so
+            // `pushedDM` never changed and nothing pushed at all.
+            DispatchQueue.main.async {
+                if DMDraftStore.shared.openThread == id { DMDraftStore.shared.openThread = nil }
+            }
+            // `navigationDestination(item:)` normally nils this out when the user backs out, but if
+            // anything left it set, assigning the same value again is a no-op and the tap does
+            // nothing. Bounce through nil on a separate tick so the push actually re-fires.
+            if pushedDM == id {
+                pushedDM = nil
+                DispatchQueue.main.async { pushedDM = id }
+            } else {
+                pushedDM = id
+            }
         }
         .sheet(isPresented: $showPicker, onDismiss: { if let id = newDM { newDM = nil; pushedDM = id } }) {
             DMContactPicker { id in newDM = id; showPicker = false }   // HavenMacSheet brings its own frame on macOS
@@ -447,7 +464,14 @@ struct DMThreadView: View {
     /// arrived yet. Pushing the normal view for it rendered an empty scroll area under an empty
     /// header: a screen that looks broken rather than one that explains itself. Desktop already
     /// said so out loud ("That conversation isn't on this device yet"); iOS did not.
-    private var threadKnown: Bool { store.circles.contains { $0.id == circleId } }
+    ///
+    /// An EMPTY circle list counts as "known": on a cold launch from a notification tap this view can
+    /// render before `circles` has been populated for the first time, and an empty list there means
+    /// "we haven't loaded yet", not "you don't have this". Answering "not on this device" during that
+    /// window flashed the not-here card at people opening a conversation they very much do have.
+    private var threadKnown: Bool {
+        store.circles.isEmpty || store.circles.contains { $0.id == circleId }
+    }
 
     var body: some View {
         ZStack {
@@ -469,10 +493,20 @@ struct DMThreadView: View {
                         ForEach(ordered, id: \.id) { m in
                             bubble(m).id(m.id)
                         }
-                        // Zero-height marker that exists only to report whether the BOTTOM of the
-                        // thread is on screen. Used to decide whether an arriving message should
-                        // scroll into view or be left alone — see onChange(of: ordered.count).
+                        // Zero-height marker that reports whether the BOTTOM of the thread is on
+                        // screen (so an arriving message can scroll into view or be left alone —
+                        // see onChange(of: ordered.count)) AND serves as the scroll target itself.
+                        //
+                        // Scrolling to the LAST BUBBLE with `anchor: .bottom` is what produced the
+                        // "not quite the bottom" resting position: the anchor aligns that bubble's
+                        // bottom edge with the scroll view's, but the composer-sized bottom content
+                        // margin means the true end of the thread is further down still — and for a
+                        // bubble taller than the viewport (a photo or video card) SwiftUI resolves
+                        // the anchor against a frame it can't fully show, landing somewhere
+                        // arbitrary. A zero-height marker has no height to resolve against, so
+                        // "scroll here" means the end of the thread, exactly, every time.
                         Color.clear.frame(height: 1)
+                            .id(Self.bottomAnchor)
                             .onAppear { atBottom = true }
                             .onDisappear { atBottom = false }
                     }
@@ -487,10 +521,11 @@ struct DMThreadView: View {
                 .contentMargins(.bottom, composerHeight + 10, for: .scrollContent)
                 .defaultScrollAnchor(.bottom)
                 .scrollDismissesKeyboard(.interactively)
+                // postTick moves for OUR OWN send/edit/delete. Sending is an explicit "I want to see
+                // this" — always ride to the bottom for it.
                 .onChange(of: store.postTick) { scrollToBottom(proxy); fetchMissingThreadMedia() }
-                // postTick only moves for OUR OWN send/edit/delete — nothing bumps it on receive — so
-                // watching it alone meant a picture arriving while you were looking at the thread was
-                // fetched by nothing. Watch the message count, which does move when one lands.
+                // postTick doesn't move on receive, so watch the message count, which does when one
+                // lands — that's also what keeps arriving media getting fetched.
                 .onChange(of: ordered.count) {
                     fetchMissingThreadMedia()
                     // A message arriving while you are reading should be READABLE without you having
@@ -498,11 +533,19 @@ struct DMThreadView: View {
                     // back down while they are reading history is worse than making them scroll.
                     if atBottom { scrollToBottom(proxy) }
                 }
-                .onChange(of: store.items.count) { scrollToBottom(proxy) }
+                // DELIBERATELY NOT watching `store.items`. That is the ACTIVE CIRCLE's feed — it has
+                // nothing to do with this thread, and it changes on every sync tick, every reaction,
+                // every comment, every story anywhere in that circle. Each of those re-ran a scroll
+                // against a lazily-measured list, which is what made an open conversation jerk itself
+                // to some arbitrary offset every few seconds and stay unreadable. A DM's scroll may
+                // only be moved by this DM.
                 // Ask for anything this thread references and we don't hold — on open, and again when
                 // a new message lands. Nothing else ever does this for DMs (see fetchMissingThreadMedia).
                 .task(id: circleId) { fetchMissingThreadMedia() }
-                .onChange(of: composerHeight) { scrollToBottom(proxy, animated: false) }
+                // The composer grew or shrank (attachment tray, edit banner, a wrapping draft) and the
+                // content inset moved with it — re-pin so the newest bubble stays put. Only when we
+                // were AT the bottom: attaching a photo while reading history must not yank you down.
+                .onChange(of: composerHeight) { if atBottom { scrollToBottom(proxy, animated: false) } }
                 // On open, `defaultScrollAnchor(.bottom)` gets short threads right, but a LONG (often group)
                 // thread's lazy content isn't measured yet, so it can rest too low behind the composer.
                 // Force the newest bubble into view once after the list settles — non-animated, twice, to
@@ -836,19 +879,24 @@ struct DMThreadView: View {
             if !attachedMedia.isEmpty || attachedTrack != nil {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
-                        ForEach(attachedMedia, id: \.self) { ref in
+                        // `displayRefs`, not the raw list: poster/original/thumb companions ride with
+                        // their playable ref and would otherwise each draw their own chip.
+                        ForEach(MediaVariants.displayRefs(attachedMedia), id: \.self) { ref in
                             if MediaKind(ref: ref) == .audio {
                                 HStack(spacing: 5) {
                                     Image(systemName: "mic.fill"); Text("Voice").font(.caption)
-                                    Button { attachedMedia.removeAll { $0 == ref } } label: { Image(systemName: "xmark.circle.fill") }
+                                    Button { removeAttachment(ref) } label: { Image(systemName: "xmark.circle.fill") }
                                         .buttonStyle(.plain)   // the glyph IS the button — no macOS bezel behind it
                                 }
                                 .padding(.horizontal, 8).padding(.vertical, 8)
                                 .background(HavenTheme.pink.opacity(0.18), in: Capsule())
-                            } else if let img = MediaStore.shared.item(ref)?.image {
+                            } else {
+                                // Unconditional: a video whose poster hasn't been cut yet, and a file,
+                                // both used to fall through this branch and draw NOTHING — so a DM
+                                // attachment could sit staged and invisible. See ComposerAttachmentTile.
                                 ZStack(alignment: .topTrailing) {
-                                    Image(platformImage: img).resizable().scaledToFill().frame(width: 52, height: 52).clipShape(RoundedRectangle(cornerRadius: 10))
-                                    Button { attachedMedia.removeAll { $0 == ref } } label: {
+                                    ComposerAttachmentTile(ref: ref, media: attachedMedia, size: 52)
+                                    Button { removeAttachment(ref) } label: {
                                         Image(systemName: "xmark.circle.fill").foregroundStyle(.white).background(Circle().fill(.black.opacity(0.5)))
                                     }
                                     .buttonStyle(.plain)
@@ -915,6 +963,18 @@ struct DMThreadView: View {
         .sheet(isPresented: $showAudio) { AudioRecorderView { ref in attachedMedia.append(ref) }.macSheetFrame() }
     }
 
+    /// Drop an attachment AND every companion tied to it — a poster or original left behind would
+    /// ride along on the next message with no playable ref to belong to.
+    private func removeAttachment(_ ref: String) {
+        attachedMedia.removeAll { r in
+            if r == ref { return true }
+            if let p = MediaVariants.parsePoster(r), p.video == ref || p.poster == ref { return true }
+            if let o = MediaVariants.parseOriginal(r), o.optimized == ref || o.original == ref { return true }
+            if let t = MediaVariants.parseThumb(r), t.content == ref || t.thumb == ref { return true }
+            return false
+        }
+    }
+
     private func send() {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if let id = editingId {   // saving an edit
@@ -971,13 +1031,17 @@ struct DMThreadView: View {
         }
     }
 
+    /// Identity of the zero-height end-of-thread marker. Everything that means "go to the bottom"
+    /// targets THIS, never the last bubble — see the marker's own comment for why.
+    fileprivate static let bottomAnchor = "haven.dm.bottom"
+
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
         // Keep the newest message pinned to the bottom on a new message / on open. The bottom content
-        // inset (above) keeps it clear of the composer; here we just ensure the latest bubble is in view.
-        // Non-animated on the initial settle so a long thread snaps into place without a visible jump.
-        guard let last = ordered.last else { return }
-        if animated { withAnimation { proxy.scrollTo(last.id, anchor: .bottom) } }
-        else { proxy.scrollTo(last.id, anchor: .bottom) }
+        // inset (above) keeps it clear of the composer; here we just ensure the end of the thread is in
+        // view. Non-animated on the initial settle so a long thread snaps into place without a jump.
+        guard !ordered.isEmpty else { return }
+        if animated { withAnimation { proxy.scrollTo(Self.bottomAnchor, anchor: .bottom) } }
+        else { proxy.scrollTo(Self.bottomAnchor, anchor: .bottom) }
     }
 }
 

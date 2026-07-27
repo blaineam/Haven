@@ -60,6 +60,7 @@ class MainActivity : FragmentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // (Foreground state itself is owned by RootScreen's lifecycle observer — `HavenNet.isForeground`.)
         // qa-cmd v2: the 1.5s drop-file poll runs only while the app is foregrounded (DEBUG only —
         // QaDriver no-ops in release).
         com.blaineam.haven.core.QaDriver.onResume()

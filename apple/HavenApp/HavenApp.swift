@@ -223,6 +223,9 @@ struct HavenApp: App {
             switch phase {
             case .active:
                 AudioCoordinator.shared.appBecameActive()   // allow playback again now we're foreground
+                // On screen → the mailbox poll stops using the aggressive idle stretch. Someone
+                // reading without tapping is not idle, they are waiting. See mailboxPollInterval.
+                FeedStore.shared.setForeground(true)
                 // Drain anything the NSE stashed while we were away. SharedInbox has always promised
                 // "next launch/foreground" and only ever delivered the launch half — so a message that
                 // arrived by push while backgrounded stayed invisible until the app was cold-started,
@@ -241,6 +244,7 @@ struct HavenApp: App {
                 let cid = FeedStore.shared.activeCircleId
                 if BiometricGate.shared.isLocked(cid) { BiometricGate.shared.unlock(cid) }
             case .background:
+                FeedStore.shared.setForeground(false)   // back to the full idle stretch — nobody is watching
                 #if os(iOS)
                 SilentSwitch.stopMonitoring()   // no reason to keep probing off-screen
                 #endif
@@ -389,7 +393,14 @@ struct RootView: View {
         // for the switch here. Only ever set for a locked circle, so the lock screen can take over.
         .onReceive(deepLinks.$requestedTab.compactMap { $0 }) { t in
             tab = t
-            deepLinks.requestedTab = nil
+            // Next tick, not inline: `@Published` publishes from `willSet`, so this closure runs
+            // BEFORE the router has written the value. An inline `= nil` is overwritten the moment
+            // the assignment that woke us completes, leaving a tab request stuck as "pending" — which
+            // then replays on every later subscription and drags the user off whatever tab they had
+            // chosen since.
+            DispatchQueue.main.async {
+                if deepLinks.requestedTab == t { deepLinks.requestedTab = nil }
+            }
         }
         // Profile / specific-post / story deep links open as a sheet. (DM and circle links don't
         // route here at all: the tab switch + DMDraftStore/setActiveCircle land IN the content —

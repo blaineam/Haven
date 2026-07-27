@@ -349,6 +349,11 @@ input:focus, textarea:focus, select:focus {
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); transition: all .3s; flex: 0 0 auto; }
 .dot.on { background: #34d399; }
 .dot.relay { background: var(--amber); }
+/* "Where this is stored" rows: a full set on a relay others can read, a partial/own-relay-only
+   copy, and nothing yet. Same three states Apple's BackupDetailView draws. */
+.dot.ok { background: #34d399; }
+.dot.warn { background: var(--amber); }
+.dot.muted { background: var(--muted); }
 .feed-banner .txt { font-size: 12px; color: var(--muted); }
 
 /* ---- Stories tray — TOP OF THE FEED (macOS `storiesTray`), never a tab ---- */
@@ -881,6 +886,9 @@ button.set-row:hover { background: var(--panel); }
 .call-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); flex: 1; }
 .call-tile { position: relative; background: #000; border-radius: var(--r-md); overflow: hidden; aspect-ratio: 16/10; }
 .call-tile video { width: 100%; height: 100%; object-fit: cover; background: #000; }
+/* Who is talking, in a group call. An inset ring rather than a border so the tile does not resize
+   as the highlight moves between people. Apple/Android parity. */
+.call-tile.speaking { box-shadow: inset 0 0 0 2px var(--pink, #ff2d95); }
 .call-name { position: absolute; left: 8px; bottom: 8px; background: rgba(0, 0, 0, 0.55); padding: 3px 9px; border-radius: 8px; font-size: 12px; }
 .call-controls { display: flex; gap: 12px; justify-content: center; margin-top: 16px; }
 

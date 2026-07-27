@@ -137,12 +137,42 @@ final class DeepLinkRouter: ObservableObject {
     /// NOT a sheet: floating a lone PostLinkView bubble over the conversation it's already in was
     /// pure clutter.
     private func openDM(circleId: String, messageId: String?, tab: inout String) {
+        let resolved = Self.resolveDMCircle(circleId)
         tab = "messages"
         requestedTab = "messages"
         if let messageId, !messageId.isEmpty {
-            DMDraftStore.shared.stageScroll(circleId: circleId, messageId: messageId)
+            DMDraftStore.shared.stageScroll(circleId: resolved, messageId: messageId)
         }
-        DMDraftStore.shared.openThread = circleId
+        DMDraftStore.shared.openThread = resolved
+    }
+
+    /// Map a `dm:` id from a notification onto the id this device actually stores the thread under.
+    ///
+    /// The id is derived — `dm:` plus the participants' node hexes, sorted and `-`-joined — so the two
+    /// ends normally agree exactly, and the exact match is the answer. But a notification can be built
+    /// by a different platform, a different app version, or (for a group) a device that knows a roster
+    /// this one has only partly synced, and any of those can produce an id whose TEXT differs from ours
+    /// while naming the same conversation: a different hex case, or full hexes where we hold the
+    /// short-prefix form from an older build. A thread opened under an id nothing is stored against
+    /// renders as a conversation with no name and no messages — the blank thread people report from
+    /// notification taps.
+    ///
+    /// So: exact match first, then the same PARTICIPANTS regardless of how the id spells them. Falls
+    /// back to the id as given, which is still correct — that's genuinely a thread we haven't synced,
+    /// and `DMThreadView` says so rather than pretending.
+    static func resolveDMCircle(_ circleId: String) -> String {
+        let known = FeedStore.shared.circles.map(\.id).filter { $0.hasPrefix("dm:") }
+        if known.contains(circleId) { return circleId }
+        let wanted = participantSet(circleId)
+        guard !wanted.isEmpty else { return circleId }
+        if let match = known.first(where: { participantSet($0) == wanted }) { return match }
+        return circleId
+    }
+
+    /// The participants a `dm:` id names, lowercased and order-independent.
+    private static func participantSet(_ circleId: String) -> Set<String> {
+        guard circleId.hasPrefix("dm:") else { return [] }
+        return Set(circleId.dropFirst(3).split(separator: "-").map { $0.lowercased() })
     }
 
     /// Open a feed circle (Circle tab). Used when a notification only carries the circle id.

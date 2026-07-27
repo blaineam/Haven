@@ -7,6 +7,101 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.1.5] — 2026-07-26
+
+Responsiveness and reliability pass on what 1.1.4 shipped. 1.1.4 was pulled from App Store
+Connect and the Microsoft Store before general release.
+
+### Fixed
+
+- **Answering a call could kill the app (iOS/macOS).** `WebRTCCall`'s constructor called
+  `fatalError` when `RTCPeerConnectionFactory` returned no peer connection — and the factory
+  returns nil when it REJECTS THE CONFIGURATION, which is not ours to control: `iceServers` is
+  built from `haven.fabric.turnUrls`, whatever the circle's relay advertises. One entry WebRTC
+  won't parse invalidated the list, and the accept path (`startMesh` → `connectPeerIfNeeded` →
+  the constructor) then terminated the process at the exact moment of picking up. A bad ICE
+  server should cost you server-reflexive candidates, never the process: construction now tries
+  the circle's config, then plain STUN, then no servers at all, and a genuine refusal surfaces
+  as a failed call instead of a crash.
+- **Desktop calls had no path across the internet.** Desktop's ICE policy still returned an
+  EMPTY server list whenever a fabric was configured — host candidates only, which works on a
+  LAN and cannot complete a single call between two home NATs. Apple and Android both corrected
+  this after the field report where a relay advertised a Docker-internal TURN host; desktop was
+  the last platform still doing it. It now derives STUN from the circle's own TURN host and
+  falls back to public STUN only when the circle offers no publicly-routable server itself.
+- **Posts took minutes to appear after a relay already had them (iOS, Android).** The mailbox
+  poll shared its idle back-off with the contact fan-out, and that back-off measures
+  INTERACTION, not attention — so reading the feed for 30 seconds without tapping put an iPhone
+  on a ×4 multiplier (45s → 3 minutes), then ×10 (7.5 minutes). The two have very different
+  costs: the fan-out is hello + roster sealed to every contact and is the thing that cooked
+  phones; the poll is one LIST of your own mailbox. The fan-out keeps stretching exactly as
+  hard as before. The poll is now capped at 2× base while the app is on screen, and its
+  heartbeat no longer quantises the due time up by half its own interval.
+- **A compressed video attached to nothing visible (iOS).** Both composer trays required a
+  decoded bitmap before drawing anything, with no final `else` — so an attachment with no
+  pixels vanished from the tray entirely. A just-encoded video hits that exactly: the poster
+  frame is cached as nil whenever `AVAssetImageGenerator` can't cut one, and the thumbnail
+  lookup then returns nil now and on every retry. The clip was attached and would have posted
+  fine; the composer just never said so. Every attachment now draws a tile — the picture when
+  there is one, a labelled glyph when there isn't. The DM tray additionally drew nothing at all
+  for files, and only ever showed the FIRST attachment on Android.
+- **"Media still loading…" over a photo you could already see.** A post whose bytes were simply
+  still syncing fell through to the spinner branch even when its thumbnail was on screen and
+  sharp. Progressive loading needs no narration: the thumb sits there and the full-resolution
+  image cross-dissolves over it. Android cross-fades now too, instead of cutting.
+- **DM threads scrolled themselves to an unusable position (iOS).** An open conversation
+  re-scrolled on every change to the ACTIVE CIRCLE's feed — every sync tick, reaction, comment
+  and story anywhere in that circle — which is the "it jumps somewhere random every few
+  seconds" report. A DM's scroll may now only be moved by that DM. Scrolling also targets a
+  zero-height end-of-thread marker rather than the last bubble, whose `.bottom` anchor resolved
+  against the composer-sized content inset (and, for a bubble taller than the screen, against a
+  frame it couldn't show) and landed short of the bottom.
+- **Notification taps could leave a request stuck (iOS).** `@Published` publishes from
+  `willSet`, so the handlers that cleared `openThread` / `requestedTab` inline ran before the
+  store had written the value and were immediately overwritten. The request stayed pending
+  forever: it replayed on every later subscription, and a second tap on the same conversation
+  published a value that was already there, so nothing pushed at all. A `dm:` id from a
+  notification is also now matched against known threads by PARTICIPANTS, not just by text, and
+  an unpopulated circle list no longer reads as "you don't have this conversation".
+
+### Added
+
+- **Android can relay call media when ICE fails.** Apple and desktop have fallen back to the
+  `/webrtc/hairpin` WebSocket for hard-NAT peers all along; Android's references to that fallback
+  were *comments describing code that was never written*, so an Android leg whose ICE could not
+  pair had no media path at all — the call rang, was accepted, and sat in "connecting" forever.
+  That is the report about calls to and from Android never connecting. Android now has the full
+  bridge: audio on its own `AudioRecord`/`AudioTrack` pair at 16 kHz mono with the platform
+  AEC/NS/AGC bound to the record session, video through `MediaCodec` H.264 with the frame's
+  rotation applied on the GPU by WebRTC's own renderer, a jitter buffer, and the same
+  `[type][seq][ptsMs]` framing Apple uses — byte-for-byte, since all three platforms relay through
+  the same proxy socket. It comes up alongside ICE rather than after it gives up, and tears itself
+  down the moment ICE recovers so a call never runs two media pipelines at once.
+- **Tapping a story's cloud badge opens "which relays hold this" (iOS/macOS).** The badge
+  already answered "did this reach a relay?" with one glyph, and looked like a button
+  everywhere else in the app. It now opens the same backup-detail sheet as posts and DMs.
+- **"Where this is stored" on Android and desktop.** The which-relays-hold-this sheet was
+  Apple-only, so on the other two platforms the only way to learn which relay actually had your
+  photo was to read logcat or the desktop log. Both now group by relay with a per-relay count
+  ("3 of 4") and call out the case where only this device's own in-process relay has a copy —
+  which looks backed up and is unreachable to everyone else.
+- **Disappearing messages on desktop.** The engine takes `retention_secs` and desktop passed a
+  hard-coded `None` for every post and DM, so the same account could set a disappearing message on
+  a phone and not on a laptop. Both composers now offer it (per-post in the feed, sticky per
+  conversation in a DM, matching Apple).
+- **Active-speaker highlight on Android and desktop.** Apple polled WebRTC's audio-level stats to
+  show who is talking in a group call; the other two just showed a grid. Same 0.02 threshold and
+  two-poll debounce everywhere, so all three highlight the same person at the same moment, and a
+  1:1 call skips the polling entirely.
+
+### Fixed (parity)
+
+- **Apple↔desktop hairpin media never worked.** Desktop sent and expected BARE PCM while Apple
+  frames every packet `[type u8][seq u16 BE][ptsMs u32 BE]`. Apple dropped every desktop frame as
+  malformed and desktop played Apple's header bytes as audio, so the fallback that exists to rescue
+  a call when ICE fails only ever worked between two desktops. Desktop now speaks the shared
+  format.
+
 ## [1.1.4] — 2026-07-26
 
 ### Added

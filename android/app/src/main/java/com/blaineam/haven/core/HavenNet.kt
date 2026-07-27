@@ -671,6 +671,23 @@ object HavenNet : InboundListener {
         }
         return base * mult.coerceAtLeast(1L)
     }
+    /**
+     * How long until the next MAILBOX poll — deliberately not [adaptiveInterval].
+     *
+     * Both buckets shared one stretch, and that conflates two very different costs. The SYNC bucket
+     * is a fan-out (hello + roster to every contact, relay re-announce, mesh dials) — the radio
+     * traffic that cooks phones, and it should keep stretching hard. The POLL bucket is one LIST of
+     * our own mailbox: cheap, and the only thing that makes a post a relay already holds actually
+     * appear on this device. Stretching it while the user is watching the screen buys almost no
+     * battery and costs exactly the latency people notice. Capped at 2× base while foregrounded;
+     * backgrounded, the full stretch stands, because then nobody is waiting and push wakes us.
+     * iOS parity (FeedStore.mailboxPollInterval).
+     */
+    private fun mailboxPollInterval(base: Long): Long {
+        val full = adaptiveInterval(base)
+        return if (isForeground) minOf(full, base * 2) else full
+    }
+
     /** Mark "something is happening" → snap both timers back to their tight base cadence immediately. */
     fun bumpActivity() {
         lastActivityMs = System.currentTimeMillis()
@@ -686,7 +703,7 @@ object HavenNet : InboundListener {
         lastActivityMs = System.currentTimeMillis()
         val now = lastActivityMs
         nextSyncDueMs = minOf(nextSyncDueMs, now + adaptiveInterval(20_000))
-        nextPollDueMs = minOf(nextPollDueMs, now + adaptiveInterval(30_000))
+        nextPollDueMs = minOf(nextPollDueMs, now + mailboxPollInterval(30_000))
     }
     /** Author-side nudge: run a mailbox poll NOW instead of at the next due heartbeat, so a
      *  just-authored burst uploads/fans out (mesh + multi-device self-sync ride pollMailbox)
@@ -697,7 +714,7 @@ object HavenNet : InboundListener {
         if (!ready) return
         if (pollNowJob?.isActive == true) return
         pollNowJob = scope.launch {
-            nextPollDueMs = System.currentTimeMillis() + adaptiveInterval(30_000)
+            nextPollDueMs = System.currentTimeMillis() + mailboxPollInterval(30_000)
             runCatching { pollMailbox() }
         }
     }
@@ -737,7 +754,7 @@ object HavenNet : InboundListener {
                 // Poll bucket (base 30s): pull the circle relay/mailbox so posts arrive even when peers
                 // aren't both online (pollMailbox also drives mesh + multi-device self-sync internally).
                 if (nowMs >= nextPollDueMs) {
-                    nextPollDueMs = nowMs + adaptiveInterval(30_000)
+                    nextPollDueMs = nowMs + mailboxPollInterval(30_000)
                     runCatching { pollMailbox() }
                 }
             }
@@ -4936,6 +4953,22 @@ object HavenNet : InboundListener {
 
     /** Whether a circle has any relay (or S3) to back media up to — the gate for showing the indicator. */
     fun circleHasRelay(circleId: String): Boolean = mediaRelaysFor(circleId).isNotEmpty()
+
+    /** Every destination confirmed to hold [ref]. iOS `MediaBackupLedger.destinations` parity. */
+    fun mediaBackupDestinations(ref: String): List<String> {
+        ensureLedger()
+        return backedUp.filter { it.substringAfterLast('|') == ref }
+            .map { it.substringBeforeLast('|') }
+            .distinct()
+    }
+
+    /** The relays this circle publishes to — the other half of the which-relays-hold-this answer.
+     *  A circle relay holding NOTHING is the case you most need to see, and a list of confirmations
+     *  alone can never show it. */
+    fun circleRelayHexes(circleId: String): List<String> = mediaRelaysFor(circleId)
+
+    /** A relay's friendly name, or "" when this device holds no entry for it. */
+    fun relayName(hex: String): String = relayEntries[hex]?.name.orEmpty()
 
     // ---- Media GC (purge-linked deletion + orphan sweep) -------------------------------------
     // `feed()` only HIDES expired posts; `purgeExpired` really drops the events and returns their

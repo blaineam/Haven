@@ -30,6 +30,8 @@ struct StoryViewer: View {
     @State private var endObserver: Any?   // the loop observer's token — MUST be removed or the player leaks
     @State private var slideDuration = 5.0   // photos 5s; videos last their clip (≤15s)
     @State private var profilePeer: StoryProfile?   // tapped a sharer → peek their profile
+    /// Set when the story's cloud badge is tapped — "which relays actually hold this?" (DM parity).
+    @State private var backupDetailRefs: BackupRefs?
     @State private var paused = false               // paused while the profile sheet is up
     @State private var dragOffset: CGFloat = 0      // swipe-down-to-dismiss
     @State private var replyText = ""
@@ -137,6 +139,17 @@ struct StoryViewer: View {
         .sheet(item: $profilePeer, onDismiss: { paused = false; player?.play() }) { peer in
             NavigationStack { UserProfileView(authorHex: peer.hex, name: peer.name) }
         }
+        // The cloud badge on your own story answers "did this reach a relay?" with one glyph. Tapping
+        // it opens the same which-relays-hold-this sheet the feed post and DM indicators open — the
+        // badge looked like a button everywhere else in the app and did nothing here.
+        .sheet(item: $backupDetailRefs, onDismiss: { paused = false; player?.play() }) { b in
+            BackupDetailView(refs: b.refs, circleId: FeedStore.shared.activeCircleId)
+                .macSheetFrame()
+                #if os(iOS)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+                #endif
+        }
     }
 
     @ViewBuilder private func content(_ s: FeedItemFfi) -> some View {
@@ -235,6 +248,19 @@ struct StoryViewer: View {
                                 .help(backed ? "Backed up to a relay others can read"
                                       : (!hasRelay ? "No relay known — story only on this device"
                                          : "Uploading to a relay…"))
+                                // Pad the hit area: a caption2 glyph is far below the 44pt target, and
+                                // this one sits inches from the Keep/delete row.
+                                .padding(6)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    // The viewer auto-advances on a timer — freeze it, or the sheet
+                                    // ends up describing a story you are no longer on.
+                                    paused = true
+                                    player?.pause()
+                                    backupDetailRefs = BackupRefs(refs: blobs)
+                                }
+                                .accessibilityAddTraits(.isButton)
+                                .accessibilityHint("Shows which relays hold a copy")
                         }
                     }
                 } else {

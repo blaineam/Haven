@@ -1781,11 +1781,14 @@ impl Engine {
                 duration_ms: m.duration_ms,
             });
             match it.kind {
+                // `None` retention: a scheduled item does not carry one — same as Apple, whose
+                // ScheduledStore has no retention field either. Send-later and disappear-after are
+                // independent features; combining them would need the schedule to store it.
                 crate::scheduled::SchedKind::Post => {
-                    self.post(it.circle_id, it.body, it.media, music, it.mute_video);
+                    self.post(it.circle_id, it.body, it.media, music, it.mute_video, None);
                 }
                 crate::scheduled::SchedKind::Dm => {
-                    self.send_dm(it.circle_id, it.body, it.media, music);
+                    self.send_dm(it.circle_id, it.body, it.media, music, None);
                 }
             }
         }
@@ -3486,7 +3489,11 @@ impl Engine {
         self.social.sensitive_refs(circle_id.to_string())
     }
 
-    pub fn post(self: &Arc<Self>, circle_id: String, body: String, media: Vec<String>, music: Option<TrackRefFfi>, mute_video: bool) {
+    /// `retention_secs` = disappearing messages. Desktop passed a hard-coded `None` here, so a
+    /// desktop user could not set one at all — the control simply did not exist on this platform,
+    /// while Apple and Android both had it. (A disappearing post authored elsewhere always expired
+    /// correctly here; it is only authoring that was missing.)
+    pub fn post(self: &Arc<Self>, circle_id: String, body: String, media: Vec<String>, music: Option<TrackRefFfi>, mute_video: bool, retention_secs: Option<u64>) {
         if body.trim().is_empty() && media.is_empty() && music.is_none() {
             return;
         }
@@ -3497,7 +3504,7 @@ impl Engine {
         // Hoist the timestamp so the engine-derived id of THIS post can be read back (ids are
         // content-addressed at author time) — the sealed banner's `p` tag. Apple FeedView parity.
         let ts = now_ms();
-        match self.social.post(circle_id.clone(), body, media.clone(), music, None, false, mute_video, ts) {
+        match self.social.post(circle_id.clone(), body, media.clone(), music, retention_secs, false, mute_video, ts) {
             Ok(env) => {
                 let post_id = self.social.last_authored_event_id(circle_id.clone(), ts);
                 self.after_author(&circle_id, &env, Some(banner), post_id);
@@ -3885,7 +3892,7 @@ impl Engine {
     /// A DM carries a song exactly like a post does — the core's `post` has always taken a track
     /// (see `Engine::post`), this wrapper just never passed one, so the DM composer had no Song
     /// row and a SCHEDULED DM silently dropped the track the scheduler had already built for it.
-    pub fn send_dm(self: &Arc<Self>, circle_id: String, body: String, media: Vec<String>, music: Option<TrackRefFfi>) {
+    pub fn send_dm(self: &Arc<Self>, circle_id: String, body: String, media: Vec<String>, music: Option<TrackRefFfi>, retention_secs: Option<u64>) {
         // A song alone is a valid message — mirrors `post`'s guard.
         if body.trim().is_empty() && media.is_empty() && music.is_none() {
             return;
@@ -3895,7 +3902,7 @@ impl Engine {
             haven_p2p::pushbanner::for_post(&circle_id, &self.circle_name(&circle_id), &body, &refs, false)
         };
         let ts = now_ms(); // hoisted for the `p` read-back (see `post`)
-        if let Ok(env) = self.social.post(circle_id.clone(), body, media.clone(), music, None, false, false, ts) {
+        if let Ok(env) = self.social.post(circle_id.clone(), body, media.clone(), music, retention_secs, false, false, ts) {
             let post_id = self.social.last_authored_event_id(circle_id.clone(), ts);
             self.after_author(&circle_id, &env, Some(banner), post_id);
             self.upload_authored_media(circle_id, media);
@@ -6876,6 +6883,42 @@ impl Engine {
     }
 
     /// Is `reference` confirmed present on `dest` (relay node hex, or "s3")? See DynState docs.
+    /// Which destinations are confirmed to hold each of `refs`, plus every relay this circle
+    /// publishes to (even ones holding nothing — that is the case you most need to see).
+    ///
+    /// Powers the "Where this is stored" sheet. Desktop had no way to answer this at all: the
+    /// ledger was private to the engine, so the only route to "which relay actually has my photo"
+    /// was reading the log. Apple has had `BackupDetailView` for this since the day the tick said
+    /// yes and nobody could fetch anything. Returns `(destination, how many of refs it holds)`.
+    pub fn media_backup_rows(&self, circle_id: String, refs: Vec<String>) -> Vec<(String, u32)> {
+        let ledger = self.dyn_state.lock().unwrap().media_backed_up.clone();
+        let mut dests: std::collections::BTreeSet<String> =
+            self.relays_for(&circle_id).into_iter().collect();
+        for entry in &ledger {
+            if let Some((dest, reference)) = entry.rsplit_once('|') {
+                if refs.iter().any(|r| r == reference) {
+                    dests.insert(dest.to_string());
+                }
+            }
+        }
+        dests
+            .into_iter()
+            .map(|dest| {
+                let have = refs
+                    .iter()
+                    .filter(|r| ledger.contains(&format!("{dest}|{r}")))
+                    .count() as u32;
+                (dest, have)
+            })
+            .collect()
+    }
+
+    /// The relay this app is hosting in-process, or "" when it hosts none. A copy that only ever
+    /// reached THIS is a local file write — it looks backed up and nobody else can fetch it.
+    pub fn own_hosted_relay_hex(&self) -> String {
+        self.relay_link().unwrap_or_default()
+    }
+
     fn media_backed_up_has(&self, dest: &str, reference: &str) -> bool {
         self.dyn_state.lock().unwrap().media_backed_up.contains(&format!("{dest}|{reference}"))
     }

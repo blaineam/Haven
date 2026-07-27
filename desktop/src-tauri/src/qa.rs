@@ -97,7 +97,7 @@ fn apply(engine: &Arc<Engine>, cmd: &Value) {
         "post" => {
             let circle = content_circle(engine, cmd);
             let refs = stage_media(engine, &circle, cmd);
-            engine.post(circle, field(cmd, "body"), refs, None, false);
+            engine.post(circle, field(cmd, "body"), refs, None, false, None);
         }
         "story" => {
             // UI stories live in the default circle; an explicit circle_id overrides (spec).
@@ -123,7 +123,7 @@ fn apply(engine: &Arc<Engine>, cmd: &Value) {
                 .unwrap_or_else(|| "Friend".into());
             let cid = engine.start_dm(to, name);
             let refs = stage_media(engine, &cid, cmd);
-            engine.send_dm(cid, field(cmd, "body"), refs, None);
+            engine.send_dm(cid, field(cmd, "body"), refs, None, None);
         }
         "react" => {
             let target = field(cmd, "target_id");
@@ -171,7 +171,7 @@ fn apply(engine: &Arc<Engine>, cmd: &Value) {
             match std::fs::read(&path) {
                 Ok(bytes) => {
                     let r = engine.add_local_file(&circle, &bytes);
-                    engine.post(circle, field(cmd, "body"), vec![r], None, false);
+                    engine.post(circle, field(cmd, "body"), vec![r], None, false, None);
                 }
                 Err(e) => log::warn!("qa-cmd file: {path}: {e}"),
             }
@@ -189,7 +189,7 @@ fn apply(engine: &Arc<Engine>, cmd: &Value) {
                 artwork_url: g("artwork_url"),
                 duration_ms: m.get("duration_ms").and_then(Value::as_u64).unwrap_or(0),
             };
-            engine.post(content_circle(engine, cmd), field(cmd, "body"), vec![], Some(track), false);
+            engine.post(content_circle(engine, cmd), field(cmd, "body"), vec![], Some(track), false, None);
         }
         "mark_read" => {
             let cid = field(cmd, "circle_id");

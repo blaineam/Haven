@@ -331,7 +331,14 @@ private fun CallTile(
     modifier: Modifier,
 ) {
     val name = com.blaineam.haven.core.HavenNet.displayName(hex.take(8))
-    val shaped = if (fill) modifier else modifier.clip(RoundedCornerShape(16.dp))
+    // Who is talking, so a group call doesn't make you guess. Only in the grid: with one remote
+    // there is nobody to disambiguate, and CallManager doesn't even poll for it. Apple parity.
+    val speaking = !fill && CallManager.activeSpeaker.value == hex
+    val shaped = (if (fill) modifier else modifier.clip(RoundedCornerShape(16.dp)))
+        .then(
+            if (speaking) Modifier.border(2.dp, HavenTheme.pink, RoundedCornerShape(16.dp))
+            else Modifier,
+        )
     Box(shaped) {
         if (CallManager.remoteCameraOff.contains(hex)) {
             Box(Modifier.fillMaxSize().background(HavenTheme.brand), contentAlignment = Alignment.Center) {

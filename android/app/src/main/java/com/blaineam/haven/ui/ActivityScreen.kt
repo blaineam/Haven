@@ -95,13 +95,22 @@ fun ActivityScreen(onDone: () -> Unit, onConnect: () -> Unit) {
                 LazyColumn(Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)) {
                     items(rows, key = { it.id + it.circleId }) { row ->
                         ActivityRow(row, unseen = row.createdAt > openedSeenAt) {
-                            when (row.kind) {
-                                // DMs open the Messages THREAD (RootScreen switches on this signal).
-                                "dm" -> DmDrafts.openThread.value = row.circleId
+                            when {
                                 // A connection row opens the Connect sheet (people live there).
-                                "connect" -> { onConnect(); return@ActivityRow }
+                                row.kind == "connect" -> { onConnect(); return@ActivityRow }
                                 // Being added to a circle → that circle's feed.
-                                "circle" -> CircleLinkInbox.offer(DeepLink.Circle(row.circleId))
+                                row.kind == "circle" -> CircleLinkInbox.offer(DeepLink.Circle(row.circleId))
+                                // ANYTHING in a `dm:` circle opens the THREAD — decided by the circle
+                                // id, not by `kind`, which is the rule iOS has always used
+                                // (`DeepLink.interactionLink` branches on the `dm:` prefix before it
+                                // looks at anything else).
+                                //
+                                // Branching on `kind` alone only caught kind == "dm", i.e. the message
+                                // itself. A REACTION or COMMENT on a message carries kind "react" /
+                                // "comment" with the dm: circle id, so it fell through to the post
+                                // branch and tried to open a DM message as a feed post — which is why
+                                // activity rows all behaved like posts.
+                                row.circleId.startsWith("dm:") -> DmDrafts.openThread.value = row.circleId
                                 // Posts/stories, and reactions/comments/votes on MY posts → the post
                                 // itself (targetId = the parent where the row is about my event).
                                 else -> PostLinkInbox.offer(

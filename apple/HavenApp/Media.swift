@@ -1647,9 +1647,30 @@ final class MediaStore: ObservableObject {
         let gen = AVAssetImageGenerator(asset: asset)
         gen.appliesPreferredTrackTransform = true
         gen.maximumSize = CGSize(width: 1080, height: 1080)
-        guard let cg = try? gen.copyCGImage(at: CMTime(seconds: 0.1, preferredTimescale: 600), actualTime: nil)
-        else { return nil }
-        return PlatformImage(cgImage: cg)
+        // Take ANY nearby frame. These are the defaults, but stated explicitly because tightening
+        // them turns "no frame exactly at this instant" into "no poster at all", and a video with no
+        // poster is a blank tile forever — the composer shows a glyph, the feed shows a grey card,
+        // and nothing ever regenerates it on its own.
+        gen.requestedTimeToleranceBefore = .positiveInfinity
+        gen.requestedTimeToleranceAfter = .positiveInfinity
+        // 0.1s first (past any black leader), then the very start, then further in. A single attempt
+        // at one instant is why a freshly compressed clip could end up with no still at all: some
+        // encoders produce a file whose first decodable frame isn't where we asked, and one `try?`
+        // turned that into a permanent nil.
+        var lastError: Error?
+        for seconds in [0.1, 0.0, 0.5, 1.0] {
+            do {
+                let cg = try gen.copyCGImage(at: CMTime(seconds: seconds, preferredTimescale: 600),
+                                             actualTime: nil)
+                return PlatformImage(cgImage: cg)
+            } catch {
+                lastError = error
+            }
+        }
+        // Say WHY. The old `try?` swallowed the reason, so a missing poster was unexplainable from
+        // the outside — which is exactly the state a field report leaves you in.
+        HavenLog.sync("poster generation FAILED for \(url.lastPathComponent): \(lastError?.localizedDescription ?? "unknown")")
+        return nil
     }
 
     /// Content-address a poster still for an **already stored** video without re-encoding the clip.

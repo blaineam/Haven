@@ -468,6 +468,7 @@ pub fn run() {
             commands::feed,
             commands::sensitive_refs,
             commands::post,
+            commands::media_backup_rows,
             commands::post_story,
             commands::comment,
             commands::react,

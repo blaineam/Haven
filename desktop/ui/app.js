@@ -992,7 +992,7 @@ async function renderFeed() {
   for (const it of items) list.append(postCard(it, state.activeCircle, reportsByTarget[it.id] || []));
 
   const composer = buildComposer(
-    (body, music, muteVideo) => invoke("post", { circleId: state.activeCircle, body, media: withThumbMarkers(state.attachments), music, muteVideo }),
+    (body, music, muteVideo, retentionSecs) => invoke("post", { circleId: state.activeCircle, body, media: withThumbMarkers(state.attachments), music, muteVideo, retentionSecs }),
     "Share something…",
     {
       circleId: state.activeCircle,
@@ -1158,12 +1158,29 @@ function buildComposer(onPost, placeholder = "Share something…", opts = {}) {
   const circleId = opts.circleId || state.activeCircle;
   let music = null;
   let muteVideo = false;
+  // Disappearing messages. Desktop had no way to SET one — the engine dropped a hard-coded `None`
+  // into every post/DM — while Apple and Android both offered it, so the same account could author a
+  // disappearing post on a phone and not on a laptop. Same durations as Apple's "Disappears after…".
+  let retentionSecs = null;
   const ta = el("textarea", { class: "composer-field glass", placeholder, rows: 1 });
   // Grow with the text up to the CSS max-height, then scroll — the macOS field is `axis: .vertical`.
   const autoGrow = () => { ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight, 132) + "px"; };
   ta.addEventListener("input", autoGrow);
   const previews = el("div", { class: "attach-preview" });
   const musicRow = el("div", {});
+  const retentionRow = el("div", {});
+  const retentionLabel = (secs) => secs < 3600 ? `${Math.round(secs / 60)}m`
+    : secs < 86400 ? `${Math.round(secs / 3600)}h`
+    : secs < 604800 ? `${Math.round(secs / 86400)}d` : `${Math.round(secs / 604800)}w`;
+  const drawRetention = () => {
+    retentionRow.replaceChildren(retentionSecs
+      ? el("div", { class: "song-chip", style: "margin-top:0" },
+          el("span", { class: "note" }, "\u23F1"),
+          el("div", { style: "flex:1;min-width:0" }, `Disappears: ${retentionLabel(retentionSecs)}`),
+          el("span", { class: "x", style: "position:static;cursor:pointer",
+                       onclick: () => { retentionSecs = null; drawRetention(); } }, "\u00D7"))
+      : null);
+  };
   const muteBtn = el("button", { class: "btn small ghost", style: "display:none", onclick: () => { muteVideo = !muteVideo; muteBtn.textContent = muteVideo ? "🔇 Video muted" : "🔊 Mute video"; muteBtn.classList.toggle("primary", muteVideo); } }, "🔊 Mute video");
   const drawPreviews = () => {
     previews.replaceChildren(...state.attachments.map((a, i) =>
@@ -1215,13 +1232,16 @@ function buildComposer(onPost, placeholder = "Share something…", opts = {}) {
   const send = async () => {
     const body = ta.value.trim();
     if (!body && !state.attachments.length && !music) return;
-    await onPost(body, music, muteVideo);
+    await onPost(body, music, muteVideo, retentionSecs);
     ta.value = ""; autoGrow();
     state.attachments = [];
     music = null;
     muteVideo = false;
+    // Retention is per-message here, matching Apple's composer (its DM sheet is the sticky one).
+    retentionSecs = null;
     drawPreviews();
     drawMusic();
+    drawRetention();
     toast("Posted");
   };
   // Enter sends, Shift+Enter is a newline — the desktop convention, and the field is a pill you
@@ -1237,6 +1257,13 @@ function buildComposer(onPost, placeholder = "Share something…", opts = {}) {
     { label: "Camera", icon: "camera.fill", on: async () => { const r = await cameraDialog(circleId); if (r) addAttachment(r.ref, r.isVideo, false); } },
     { label: "Voice", icon: "mic", on: async () => { const r = await recordVoice(circleId); if (r) addAttachment(r, false, true); } },
     { label: "Add a song", icon: "music.note", on: () => musicDialog((m) => { music = m; drawMusic(); }) },
+    { sep: true },
+    { label: "Disappears after\u2026", icon: "timer", on: () => popMenu(plus, [
+      { label: "Off", on: () => { retentionSecs = null; drawRetention(); } },
+      { label: "1 hour", on: () => { retentionSecs = 3600; drawRetention(); } },
+      { label: "1 day", on: () => { retentionSecs = 86400; drawRetention(); } },
+      { label: "1 week", on: () => { retentionSecs = 604800; drawRetention(); } },
+    ]) },
     opts.onSchedule ? { sep: true } : null,
     opts.onSchedule ? { label: "Send later…", icon: "clock", on: () => {
       const body = ta.value.trim();
@@ -1253,6 +1280,7 @@ function buildComposer(onPost, placeholder = "Share something…", opts = {}) {
     el("div", { class: "composer-meta" }, syncBadge),
     previews,
     musicRow,
+    retentionRow,
     el("div", { class: "row wrap", style: "gap:6px" }, muteBtn),
     el("div", { class: "composer-row" },
       plus,
@@ -2384,14 +2412,79 @@ function stillToJpegBase64FromSrc(src, maxDim = MEDIA_TARGETS.STILL_LONG_EDGE, q
   });
 }
 
+/**
+ * "Where is this post actually stored?" — which relays hold each attachment, and how many.
+ *
+ * Grouped by RELAY, not by attachment: the per-attachment shape repeats an identical block once per
+ * photo, and the one fact that matters — which relay is missing copies — has to be reassembled by
+ * eye. Desktop had no answer to this at all; the ledger lived in the engine and the only route to it
+ * was the log. Apple parity (`BackupDetailView`).
+ */
+async function backupDetailSheet(circleId, refs) {
+  const res = await invoke("media_backup_rows", { circleId, refs }).catch(() => null);
+  const rows = (res && res.rows) || [];
+  const ownRelay = (res && res.ownRelay) || "";
+  const total = refs.length;
+
+  const label = (dest) => {
+    const known = (state.relayNames || {})[dest];
+    if (known) return known;
+    if (dest.includes("/") || dest.includes(".")) return dest;   // s3-style destination
+    return "Relay · " + dest.slice(0, 8) + "…";
+  };
+  const status = (have, isOwn) => {
+    if (!have) return "No copy yet";
+    const count = have === total ? "All" : `${have} of ${total}`;
+    return isOwn ? `${count} · on this device` : count;
+  };
+
+  // Nothing but our own in-process relay holds a full set — it looks backed up and is in fact
+  // unreachable to everyone else.
+  const remoteComplete = rows.some((r) => r.dest !== ownRelay && r.have === total);
+  const ownHasAny = rows.some((r) => r.dest === ownRelay && r.have > 0);
+  const stranded = ownHasAny && !remoteComplete;
+
+  const list = rows.length
+    ? rows.map((r) => {
+        const isOwn = r.dest === ownRelay;
+        const tone = !r.have ? "muted" : (isOwn || r.have !== total) ? "warn" : "ok";
+        return el("div", { class: "row", style: "justify-content:space-between;padding:7px 0;gap:10px" },
+          el("div", { class: "row", style: "gap:8px;min-width:0" },
+            el("span", { class: "dot " + tone }),
+            el("span", { style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, label(r.dest))),
+          el("span", { class: "muted small" }, status(r.have, isOwn)));
+      })
+    : [el("div", { class: "muted" }, "Not on any relay yet")];
+
+  sheet("Where this is stored", [
+    el("div", { class: "muted small", style: "margin-bottom:6px" },
+      total === 1 ? "1 attachment" : `${total} attachments`),
+    ...list,
+    stranded
+      ? el("div", { class: "muted small", style: "margin-top:10px;color:var(--amber,#F59E0B)" },
+          "Only this device's own relay has a copy, so nobody else can fetch it yet.")
+      : null,
+  ]);
+}
+
 function postCard(it, circleId, reports = []) {
   // macOS `header`: avatar, name and relative time all on ONE line, `···` at the far right.
   const kebab = el("button", { class: "kebab", title: "More", "aria-label": "More" }, icon("ellipsis"));
   kebab.addEventListener("click", () => postMenu(kebab, it, circleId));
+  // "Where is this stored?" on your own posts with attachments — the same answer Apple's cloud
+  // badge opens. Desktop showed nothing at all, so a post whose media never left this device looked
+  // identical to one safely on a relay.
+  const ownBlobs = (it.media || []).filter((r) => !isSyntheticMedia(r));
+  const storedBtn = (it.is_me && !it.unsent && ownBlobs.length)
+    ? el("button", { class: "icon-btn ghost small", title: "Where this is stored",
+                     "aria-label": "Where this is stored",
+                     onclick: () => backupDetailSheet(circleId, ownBlobs) }, icon("icloud"))
+    : null;
   const head = el("div", { class: "post-head" },
     el("div", { class: "avatar", style: "width:34px;height:34px;font-size:14px" }, initials(it.author_name)),
     el("span", { class: "name" }, it.author_name),
     el("span", { class: "when" }, relTime(it.created_at) + (it.edited ? " · edited" : "")),
+    storedBtn,
     kebab,
   );
 
@@ -3597,6 +3690,24 @@ async function renderThread(root, dm) {
       : null);
   };
 
+  // Disappearing messages, STICKY for the conversation until turned Off — Apple's DM behaviour
+  // (its feed composer resets per post; the thread does not). Desktop had no control at all.
+  let dmRetentionSecs = null;
+  const dmRetentionRow = el("div", {});
+  const drawDmRetention = () => {
+    dmRetentionRow.replaceChildren(dmRetentionSecs
+      ? el("div", { class: "song-chip", style: "margin-top:0" },
+          el("span", { class: "note" }, "\u23F1"),
+          el("div", { style: "flex:1;min-width:0" },
+            `Disappears after ${dmRetentionSecs < 3600 ? Math.round(dmRetentionSecs / 60) + "m"
+              : dmRetentionSecs < 86400 ? Math.round(dmRetentionSecs / 3600) + "h"
+              : dmRetentionSecs < 604800 ? Math.round(dmRetentionSecs / 86400) + "d"
+              : Math.round(dmRetentionSecs / 604800) + "w"}`),
+          el("span", { class: "x", style: "position:static;cursor:pointer",
+                       onclick: () => { dmRetentionSecs = null; drawDmRetention(); } }, "\u00D7"))
+      : null);
+  };
+
   const sendText = async () => {
     const t = input.value.trim();
     // A song on its own is a valid message (the engine's guard allows it), so don't require text.
@@ -3606,7 +3717,7 @@ async function renderThread(root, dm) {
       await invoke("edit_post", { circleId: dm.id, target: editingId, body: t, media: editingMedia, music: editingMusic });
       editingId = null; editingMedia = []; editingMusic = null; editBar.style.display = "none";
     } else {
-      await invoke("send_dm", { circleId: dm.id, body: t ? (secretOn ? SECRET_MARKER + t : t) : "", media: [], music: pendingMusic });
+      await invoke("send_dm", { circleId: dm.id, body: t ? (secretOn ? SECRET_MARKER + t : t) : "", media: [], music: pendingMusic, retentionSecs: dmRetentionSecs });
       pendingMusic = null; drawDmMusic();
     }
     input.value = ""; autoGrow();
@@ -3620,12 +3731,19 @@ async function renderThread(root, dm) {
   };
   const plus = el("button", { class: "composer-plus", title: "Attach", "aria-label": "Attach" }, icon("plus"));
   plus.addEventListener("click", () => popMenu(plus, [
-    { label: "Photo or video", icon: "photo", on: async () => { const r = await cameraDialog(dm.id); if (r) await invoke("send_dm", { circleId: dm.id, body: "", media: [r.ref], music: null }); } },
-    { label: "Voice message", icon: "mic", on: async () => { const r = await recordVoice(dm.id); if (r) await invoke("send_dm", { circleId: dm.id, body: "", media: [r], music: null }); } },
+    { label: "Photo or video", icon: "photo", on: async () => { const r = await cameraDialog(dm.id); if (r) await invoke("send_dm", { circleId: dm.id, body: "", media: [r.ref], music: null, retentionSecs: dmRetentionSecs }); } },
+    { label: "Voice message", icon: "mic", on: async () => { const r = await recordVoice(dm.id); if (r) await invoke("send_dm", { circleId: dm.id, body: "", media: [r], music: null, retentionSecs: dmRetentionSecs }); } },
     // Attaches to the NEXT send rather than firing immediately — a song usually accompanies a
     // message, and the composer shows it as a removable chip until you hit send (same as the feed).
     { label: "Add a song", icon: "music.note", on: () => musicDialog((m) => { pendingMusic = m; drawDmMusic(); }) },
     { label: secretOn ? "Secret: on" : "Send secretly", icon: "lock.shield.fill", on: () => setSecret(!secretOn) },
+    { sep: true },
+    { label: "Disappears after\u2026", icon: "timer", on: () => popMenu(plus, [
+      { label: "Don't disappear", on: () => { dmRetentionSecs = null; drawDmRetention(); } },
+      { label: "After 1 hour", on: () => { dmRetentionSecs = 3600; drawDmRetention(); } },
+      { label: "After 1 day", on: () => { dmRetentionSecs = 86400; drawDmRetention(); } },
+      { label: "After 1 week", on: () => { dmRetentionSecs = 604800; drawDmRetention(); } },
+    ]) },
   ]));
 
   const partner = dm.id.replace("dm:", "").split("-").find((h) => h !== state.node) || "";
@@ -3653,7 +3771,7 @@ async function renderThread(root, dm) {
     chat,
     // Unlike the feed's composer, the DM composer DOES carry a glass band (macOS:
     // `.havenGlass(in: Rectangle())`) — it's the floor of the thread, not a pill over a gradient.
-    el("div", { class: "dm-composer glass" }, editBar, musicRow,
+    el("div", { class: "dm-composer glass" }, editBar, musicRow, dmRetentionRow,
       el("div", { class: "composer-row" }, plus, input,
         el("button", { class: "composer-send", title: "Send", "aria-label": "Send", onclick: sendText }, icon("paperplane.fill")))),
   )));
@@ -4771,7 +4889,8 @@ function openHairpinForPeer(peer) {
       } catch (_) {}
       return;
     }
-    // Binary: PCM s16le mono 16kHz packets from peer (media fallback).
+    // Binary: a framed media packet from the peer (media fallback) — see unpackHairpin. Audio is
+    // s16le mono 16 kHz once the header is off; video frames are dropped (no desktop decoder).
     if (slot.usingMedia && ev.data instanceof ArrayBuffer) {
       hairpinPlayPcm(slot, ev.data);
     }
@@ -4784,6 +4903,103 @@ function openHairpinForPeer(peer) {
 function ensureHairpins() {
   invitees().forEach(openHairpinForPeer);
 }
+// ---- Active-speaker detection ----------------------------------------------------------------
+// One `getStats()` walk per connection every second, then whoever is loudest wins — with the same
+// 0.02 threshold and 2-poll debounce Apple and Android use, so a group call highlights the same
+// person on every platform at the same moment. A 1:1 call skips entirely: with one remote peer
+// there is nothing to disambiguate, so the highlight is not worth any stats traffic.
+const SPEAKING_THRESHOLD = 0.02;
+const SPEAKER_DEBOUNCE = 2;
+
+function startSpeakerDetection() {
+  if (call.speakerTimer) return;
+  call.speakerTimer = setInterval(pollAudioLevels, 1000);
+}
+
+function stopSpeakerDetection() {
+  if (call.speakerTimer) clearInterval(call.speakerTimer);
+  call.speakerTimer = null;
+  call.speakerStreak = {};
+  call.activeSpeaker = null;
+}
+
+async function pollAudioLevels() {
+  const entries = [...call.pcs.entries()];
+  if (entries.length <= 1) {
+    if (call.activeSpeaker !== null) { call.activeSpeaker = null; renderCallOverlay(); }
+    call.speakerStreak = {};
+    return;
+  }
+  let bestPeer = "", bestRemote = 0, myLevel = 0;
+  await Promise.all(entries.map(async ([hex, pc]) => {
+    const report = await pc.getStats().catch(() => null);
+    if (!report) return;
+    report.forEach((s) => {
+      if (s.kind !== "audio" || typeof s.audioLevel !== "number") return;
+      if (s.type === "inbound-rtp" && s.audioLevel > bestRemote) { bestRemote = s.audioLevel; bestPeer = hex; }
+      if (s.type === "media-source" && s.audioLevel > myLevel) myLevel = s.audioLevel;
+    });
+  }));
+
+  let candidate = null;
+  if (myLevel >= SPEAKING_THRESHOLD && call.micOn && myLevel >= bestRemote) candidate = "";
+  else if (bestRemote >= SPEAKING_THRESHOLD) candidate = bestPeer;
+
+  if (candidate === null) {
+    call.speakerStreak = {};
+    if (call.activeSpeaker !== null) { call.activeSpeaker = null; renderCallOverlay(); }
+    return;
+  }
+  const streak = (call.speakerStreak[candidate] || 0) + 1;
+  call.speakerStreak = { [candidate]: streak };
+  if (streak >= SPEAKER_DEBOUNCE && call.activeSpeaker !== candidate) {
+    call.activeSpeaker = candidate;
+    renderCallOverlay();
+  }
+}
+
+// ---- Hairpin media frame format ------------------------------------------------------------
+// `[type u8][seq u16 BE][ptsMs u32 BE]` then the payload — byte-for-byte Apple `CallMediaBridge`
+// and Android `CallMediaBridge`, because all three relay through the SAME proxy socket and the
+// proxy bipipes bytes without interpreting them.
+//
+// Desktop used to send and expect BARE PCM with no header at all. Against another desktop that
+// happened to work; against Apple it failed in both directions and silently — Apple's `unpack`
+// requires ≥7 bytes with a valid type in byte 0, so it dropped every desktop frame as malformed,
+// while desktop played Apple's 7 header bytes as if they were audio samples. The hairpin is the
+// fallback that rescues a call when ICE cannot pair, so this was a fallback that only ever worked
+// between two desktops.
+const HAIRPIN_AUDIO = 1;
+const HAIRPIN_VIDEO_KEY = 2;
+const HAIRPIN_VIDEO_DELTA = 3;
+const HAIRPIN_HEADER_BYTES = 7;
+
+function packHairpin(type, seq, ptsMs, payload) {
+  const out = new Uint8Array(HAIRPIN_HEADER_BYTES + payload.byteLength);
+  out[0] = type & 0xff;
+  out[1] = (seq >> 8) & 0xff;
+  out[2] = seq & 0xff;
+  out[3] = (ptsMs >>> 24) & 0xff;
+  out[4] = (ptsMs >>> 16) & 0xff;
+  out[5] = (ptsMs >>> 8) & 0xff;
+  out[6] = ptsMs & 0xff;
+  out.set(payload, HAIRPIN_HEADER_BYTES);
+  return out.buffer;
+}
+
+/** Returns {type, seq, payload:Uint8Array}, or null when the frame is not one of ours. */
+function unpackHairpin(ab) {
+  const d = new Uint8Array(ab);
+  if (d.byteLength < HAIRPIN_HEADER_BYTES) return null;
+  const type = d[0];
+  if (type !== HAIRPIN_AUDIO && type !== HAIRPIN_VIDEO_KEY && type !== HAIRPIN_VIDEO_DELTA) return null;
+  return {
+    type,
+    seq: (d[1] << 8) | d[2],
+    payload: d.subarray(HAIRPIN_HEADER_BYTES),
+  };
+}
+
 /** Start PCM media over hairpin for a peer whose WebRTC ICE failed. */
 async function hairpinStartMedia(peer) {
   const slot = hairpin.byPeer.get(peer);
@@ -4804,7 +5020,9 @@ async function hairpinStartMedia(peer) {
         const s = Math.max(-1, Math.min(1, input[i]));
         pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
       }
-      try { slot.ws.send(pcm.buffer); } catch (_) {}
+      slot.audioSeq = ((slot.audioSeq || 0) + 1) & 0xffff;
+      try { slot.ws.send(packHairpin(HAIRPIN_AUDIO, slot.audioSeq, 0, new Uint8Array(pcm.buffer))); }
+      catch (_) {}
     };
     src.connect(proc);
     proc.connect(ctx.destination); // keep processor alive (output is near-silent if we zero? we don't mute)
@@ -4826,7 +5044,11 @@ async function hairpinStartMedia(peer) {
 function hairpinPlayPcm(slot, ab) {
   try {
     if (!slot.audioCtx || !slot.remoteGain) return;
-    const pcm = new Int16Array(ab);
+    const parsed = unpackHairpin(ab);
+    // Not one of ours (or a video frame this platform can't render) — drop it rather than playing
+    // the bytes as audio. Desktop has no hairpin video decoder; the audio still carries the call.
+    if (!parsed || parsed.type !== HAIRPIN_AUDIO) return;
+    const pcm = new Int16Array(parsed.payload.buffer, parsed.payload.byteOffset, parsed.payload.byteLength >> 1);
     if (!pcm.length) return;
     const f32 = new Float32Array(pcm.length);
     for (let i = 0; i < pcm.length; i++) f32[i] = pcm[i] / (pcm[i] < 0 ? 0x8000 : 0x7fff);
@@ -4846,6 +5068,9 @@ const call = {
   /// last frame their stopped track left behind. Cleared with the rest of the call state.
   camOff: {},
   ringing: false, connecting: false, inCall: false, video: true,
+  /// Loudest participant right now (a peer hex, "" for me, null for nobody) plus the debounce
+  /// counter behind it — see pollAudioLevels. Apple/Android parity.
+  activeSpeaker: null, speakerStreak: {}, speakerTimer: null,
   screenOn: false, screenStream: null, camTrack: null,
   ringTimer: null, ended: new Map(),
 };
@@ -5008,6 +5233,7 @@ async function startMesh() {
   call.connecting = call.connecting && !call.inCall;
   ensureHairpins(); // TCP/WSS media path through free CF path proxy (pairs while ICE runs)
   invitees().forEach(connectPeerIfNeeded);
+  startSpeakerDetection();
   renderCallOverlay();
 }
 
@@ -5146,6 +5372,7 @@ function authorContact(authorShort) {
 }
 
 function teardownCall() {
+  stopSpeakerDetection();
   // Remember the session so the caller's still-in-flight invite retransmits can't re-ring it.
   if (call.session) {
     call.ended.set(call.session, Date.now());
@@ -5248,7 +5475,9 @@ function renderCallOverlay() {
   localTile.append(lv, el("span", { class: "call-name" }, "You" + (call.camOn ? "" : " (camera off)")));
   grid.append(localTile);
   for (const peer of invitees()) {
-    const tile = el("div", { class: "call-tile" });
+    // Who is talking, so a group call doesn't make you guess. Apple/Android parity.
+    const speaking = call.activeSpeaker === peer;
+    const tile = el("div", { class: "call-tile" + (speaking ? " speaking" : "") });
     const camOff = !!(call.camOff && call.camOff[peer]);
     // Camera off (told to us by frame 22) → show their avatar, NOT the frozen last frame their
     // stopped track left behind.

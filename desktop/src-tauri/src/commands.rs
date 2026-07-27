@@ -349,9 +349,23 @@ pub fn sensitive_refs(engine: Eng, circle_id: String) -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn post(engine: Eng, circle_id: String, body: String, media: Vec<String>, music: Option<TrackInput>, mute_video: Option<bool>) {
+pub fn post(engine: Eng, circle_id: String, body: String, media: Vec<String>, music: Option<TrackInput>, mute_video: Option<bool>, retention_secs: Option<u64>) {
     let cid = if circle_id.is_empty() { DEFAULT_CIRCLE.to_string() } else { circle_id };
-    engine.post(cid, body, media, music.map(|m| m.into_ffi()), mute_video.unwrap_or(false));
+    engine.post(cid, body, media, music.map(|m| m.into_ffi()), mute_video.unwrap_or(false), retention_secs);
+}
+
+/// "Where this is stored" — which relays hold each attachment of a post, and how many of them.
+/// Returns `[{ dest, have }]` plus the hex of the relay THIS app hosts (a copy that only reached
+/// that one is a local file write nobody else can fetch). Apple parity (`BackupDetailView`).
+#[tauri::command]
+pub fn media_backup_rows(engine: Eng, circle_id: String, refs: Vec<String>) -> serde_json::Value {
+    let cid = if circle_id.is_empty() { DEFAULT_CIRCLE.to_string() } else { circle_id };
+    let rows: Vec<serde_json::Value> = engine
+        .media_backup_rows(cid, refs)
+        .into_iter()
+        .map(|(dest, have)| serde_json::json!({ "dest": dest, "have": have }))
+        .collect();
+    serde_json::json!({ "rows": rows, "ownRelay": engine.own_hosted_relay_hex() })
 }
 
 #[tauri::command]
@@ -961,8 +975,8 @@ pub fn set_media_limits(engine: Eng, days: u32, gb: u32) {
 }
 
 #[tauri::command]
-pub fn send_dm(engine: Eng, circle_id: String, body: String, media: Vec<String>, music: Option<TrackInput>) {
-    engine.send_dm(circle_id, body, media, music.map(|m| m.into_ffi()));
+pub fn send_dm(engine: Eng, circle_id: String, body: String, media: Vec<String>, music: Option<TrackInput>, retention_secs: Option<u64>) {
+    engine.send_dm(circle_id, body, media, music.map(|m| m.into_ffi()), retention_secs);
 }
 
 // ---- connect / contacts ------------------------------------------------------------------

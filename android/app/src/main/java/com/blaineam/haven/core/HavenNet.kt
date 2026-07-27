@@ -4954,6 +4954,22 @@ object HavenNet : InboundListener {
     /** Whether a circle has any relay (or S3) to back media up to — the gate for showing the indicator. */
     fun circleHasRelay(circleId: String): Boolean = mediaRelaysFor(circleId).isNotEmpty()
 
+    /** Every destination confirmed to hold [ref]. iOS `MediaBackupLedger.destinations` parity. */
+    fun mediaBackupDestinations(ref: String): List<String> {
+        ensureLedger()
+        return backedUp.filter { it.substringAfterLast('|') == ref }
+            .map { it.substringBeforeLast('|') }
+            .distinct()
+    }
+
+    /** The relays this circle publishes to — the other half of the which-relays-hold-this answer.
+     *  A circle relay holding NOTHING is the case you most need to see, and a list of confirmations
+     *  alone can never show it. */
+    fun circleRelayHexes(circleId: String): List<String> = mediaRelaysFor(circleId)
+
+    /** A relay's friendly name, or "" when this device holds no entry for it. */
+    fun relayName(hex: String): String = relayEntries[hex]?.name.orEmpty()
+
     // ---- Media GC (purge-linked deletion + orphan sweep) -------------------------------------
     // `feed()` only HIDES expired posts; `purgeExpired` really drops the events and returns their
     // media refs so the blobs (sealed store + decrypted playback caches) finally leave disk too.

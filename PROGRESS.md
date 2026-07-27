@@ -6,6 +6,20 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest wave (built, batched for next upload)
+- **The call fallback only ever worked Apple↔Apple (2026-07-26, 1.1.5 b366, Android + desktop)** —
+  auditing what Apple had that the others didn't turned up the real reason cross-platform calls
+  ring, get accepted and never connect. `/webrtc/hairpin` is the media path when ICE cannot pair
+  two hard NATs, which on mobile carriers is the ordinary case. Android's hairpin was a COMMENT:
+  `FabricIcePolicy` and `CallManager` both promised "path-proxy WebSocket hairpin for media" and no
+  such code existed, so an Android leg with failed ICE had nothing. Desktop's existed but sent and
+  expected BARE PCM while Apple frames every packet `[type][seq][ptsMs]` — Apple dropped desktop's
+  frames as malformed, desktop played Apple's headers as audio. Both fixed: Android gets the full
+  bridge (AudioRecord/AudioTrack 16 kHz mono with platform AEC, MediaCodec H.264 with GPU rotation
+  through WebRTC's own EglRenderer, jitter buffer, ICE-failure trigger that comes up alongside ICE
+  and tears down when it recovers), desktop gets the shared framing. Also from the same audit:
+  "where this is stored" ported to Android and desktop, disappearing messages finally settable on
+  desktop (the engine always took `retention_secs`; the UI passed a hard-coded `None`), and the
+  active-speaker highlight ported with Apple's exact threshold and debounce.
 - **Answering a call could kill the app; posts took minutes to show (2026-07-26, 1.1.5
   b366, all clients)** — 1.1.4 was pulled from App Store Connect and the Microsoft Store
   before general release; this is the pass that makes it shippable. The crash: `WebRTCCall`'s

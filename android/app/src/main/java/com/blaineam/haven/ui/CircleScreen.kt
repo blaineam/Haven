@@ -2077,6 +2077,10 @@ fun PostCard(
                         localOnly -> "Only on this device's own relay — nobody else can fetch it yet"
                         else -> "Uploading to a relay…"
                     }
+                    // Tap for the full answer — WHICH relays hold it, and how many attachments each
+                    // has. The glyph alone says yes/no, which is exactly what was not enough the day
+                    // it said yes and nobody could fetch anything. Apple parity (BackupDetailView).
+                    var showBackupDetail by remember(item.id) { mutableStateOf(false) }
                     Icon(
                         icon, label,
                         tint = when {
@@ -2084,8 +2088,13 @@ fun PostCard(
                             localOnly -> HavenTheme.amber
                             else -> HavenTheme.textSecondary
                         },
-                        modifier = Modifier.padding(start = 6.dp).size(16.dp),
+                        // Padded well past the 16dp glyph: this sits inches from the ⋯ menu.
+                        modifier = Modifier.padding(start = 6.dp).size(16.dp)
+                            .clickable { showBackupDetail = true },
                     )
+                    if (showBackupDetail) {
+                        BackupDetailSheet(blobs, circleId) { showBackupDetail = false }
+                    }
                 }
             }
             Box {

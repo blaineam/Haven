@@ -99,14 +99,36 @@ object CallManager {
      *  those may re-ring a session we've already left. */
     private val endedSessions = HashMap<String, Long>()
 
+    /** Peers whose media is currently relayed over the /webrtc/hairpin WebSocket (ICE failed). */
+    private val hairpinPeers = HashSet<String>()
+
+    // Active-speaker detection (Apple parity). Same threshold and debounce, so a group call
+    // highlights the same person on every platform at the same moment.
+    /** Loudest participant right now — a peer hex, "" for me, or null for nobody. */
+    val activeSpeaker = mutableStateOf<String?>(null)
+    /** How many consecutive polls each candidate has led, for debounce (key "" = me). */
+    private val speakerStreak = HashMap<String, Int>()
+    private const val SPEAKING_THRESHOLD = 0.02
+    private const val SPEAKER_DEBOUNCE = 2
+    private var speakerPolling = false
+    private val speakerRunnable = object : Runnable {
+        override fun run() {
+            pollAudioLevels()
+            if (speakerPolling) mainHandler.postDelayed(this, 1_000)
+        }
+    }
+    /** How long a RELAYED peer may go completely silent before we treat it as gone. ICE cannot tell
+     *  us — it is failed by definition on this path — so the relay's own inbound clock has to. */
+    private const val RELAY_SILENCE_DROP_SECS = 20L
+
     /**
      * Haven-first ICE — parity with Apple [HavenFabric].
      * Prefs `haven.fabric.derpUrls` + `turnUrls`/`turnUser`/`turnPass`.
      *
      * Fabric + TURN → circle TURN.
      * Fabric without TURN → host only, per [FabricIcePolicy] — but see below: this function
-     * deliberately adds STUN anyway, because Android has NO WebSocket media hairpin to fall back
-     * on when ICE fails (Apple and desktop do; Android's was only ever a comment).
+     * deliberately adds STUN anyway. A direct path is always better than a relayed one, and
+     * [CallMediaBridge] (the hairpin) is the *fallback*, not the plan.
      * No fabric → Google STUN as fallback only.
      * Call *signaling* rides sealed iroh over fabric DERP / direct QUIC.
      */
@@ -157,6 +179,7 @@ object CallManager {
         if (this::appContext.isInitialized) { myHex = myNodeHex; return }
         appContext = context.applicationContext
         myHex = myNodeHex
+        CallMediaBridge.init(appContext)
         eglBase = EglBase.create()
         PeerConnectionFactory.initialize(
             PeerConnectionFactory.InitializationOptions.builder(appContext)
@@ -531,8 +554,15 @@ object CallManager {
         audioTrack = f.createAudioTrack("haven-audio", audioSource).apply { setEnabled(micOn.value) }
         // Video (front camera).
         startCamera(f)
+        // Open the hairpin sockets NOW, alongside ICE, rather than at the moment ICE gives up. The
+        // WebSocket handshake plus the relay's pairing round-trip is dead time on top of ICE's own
+        // ~30s failure timeout, and a call that only starts negotiating its fallback after that has
+        // already lost the user. Pairing is idle until CallMediaBridge actually pushes frames.
+        // Apple parity (startMesh → CallHairpin.openForRoster).
+        runCatching { CallHairpin.openForRoster(appContext, sessionId, myHex, invitees()) }
         // Dial everyone we already know (callee dials too, glare rule prevents double offers).
         invitees().forEach { connectPeerIfNeeded(it) }
+        startSpeakerDetection()
     }
 
     private fun startCamera(f: PeerConnectionFactory) {
@@ -573,10 +603,169 @@ object CallManager {
             onRemoteVideo = { track -> remoteVideo[peer] = track },
             onRemoteScreen = { track -> remoteScreen[peer] = track },
             onRemoteScreenEnded = { remoteScreen[peer] = null },
+            onIceState = { s -> onPeerIceState(peer, s) },
         )
     }
 
+    /**
+     * ICE lifecycle for one peer — and, on FAILED, the hairpin relay.
+     *
+     * Nothing watched ICE state on Android before this: `onIceConnectionChange` logged and returned.
+     * So when ICE could not pair (two hard NATs, no reachable TURN — the ordinary case on mobile
+     * carriers) the call simply stayed in "connecting" forever, which is the field report about
+     * calls to and from Android ringing, being accepted, and never connecting. Apple has relayed
+     * media over `/webrtc/hairpin` for this exact case all along.
+     */
+    private fun onPeerIceState(peer: String, s: PeerConnection.IceConnectionState) {
+        when (s) {
+            PeerConnection.IceConnectionState.CONNECTED,
+            PeerConnection.IceConnectionState.COMPLETED -> {
+                connecting.value = false
+                inCall.value = true
+                // ICE RECOVERED while we were relaying — drop back to WebRTC's own (better) path.
+                // Leaving both running is two full media pipelines for one call, which is heat and
+                // bandwidth for no gain. Apple parity.
+                if (CallMediaBridge.isRelaying(peer)) {
+                    CallMediaBridge.deactivate(peer)
+                    hairpinPeers.remove(peer)
+                    Log.i(TAG, "ice recovered ${peer.take(8)} — hairpin relay stopped")
+                }
+            }
+            PeerConnection.IceConnectionState.FAILED -> startHairpin(peer)
+            PeerConnection.IceConnectionState.CLOSED -> {
+                dropPeer(peer)
+                if ((roster - myHex).isEmpty()) teardown()
+            }
+            PeerConnection.IceConnectionState.DISCONNECTED -> {
+                // A transient blip, OR the peer left and their fire-and-forget hangup never arrived.
+                // Give it a grace period, then drop — but NEVER drop a peer whose media is riding the
+                // hairpin: when the relay carries the call, ICE legitimately sits failed. That is the
+                // whole reason we relayed. The relay's own inbound clock is the liveness signal.
+                mainHandler.postDelayed({
+                    if (peers[peer] == null) return@postDelayed
+                    if (CallMediaBridge.isRelaying(peer)) {
+                        val quiet = CallMediaBridge.silenceSecs(peer)
+                        if (quiet != null && quiet > RELAY_SILENCE_DROP_SECS) {
+                            Log.i(TAG, "relay silent ${quiet}s for ${peer.take(8)} — peer gone, ending")
+                            dropPeer(peer)
+                            if ((roster - myHex).isEmpty()) teardown()
+                        }
+                        return@postDelayed
+                    }
+                    dropPeer(peer)
+                    if ((roster - myHex).isEmpty()) teardown()
+                }, 6_000)
+            }
+            else -> Unit
+        }
+    }
+
+    // ---- Active-speaker detection (Apple parity) ----
+
+    private fun startSpeakerDetection() {
+        if (speakerPolling) return
+        speakerPolling = true
+        mainHandler.postDelayed(speakerRunnable, 1_000)
+    }
+
+    private fun stopSpeakerDetection() {
+        speakerPolling = false
+        mainHandler.removeCallbacks(speakerRunnable)
+        speakerStreak.clear()
+        activeSpeaker.value = null
+    }
+
+    /**
+     * One stats read per connection, then pick the loudest. 1 s, not faster: each poll walks a FULL
+     * stats report per connection, and a highlight only needs about that much responsiveness.
+     * A 1:1 call skips entirely — with one remote peer there is nothing to disambiguate, so the
+     * highlight is not worth any stats traffic at all.
+     */
+    private fun pollAudioLevels() {
+        val conns = peers.entries.toList()
+        if (conns.size <= 1) {
+            if (activeSpeaker.value != null) activeSpeaker.value = null
+            speakerStreak.clear()
+            return
+        }
+        var remaining = conns.size
+        var bestPeer = ""
+        var bestRemote = 0.0
+        var myLevel = 0.0
+        for ((hex, peer) in conns) {
+            peer.audioLevels { inbound, outbound ->
+                mainHandler.post {
+                    if (inbound > bestRemote) { bestRemote = inbound; bestPeer = hex }
+                    if (outbound > myLevel) myLevel = outbound
+                    remaining -= 1
+                    if (remaining == 0) resolveActiveSpeaker(bestPeer, bestRemote, myLevel)
+                }
+            }
+        }
+    }
+
+    /** Decide the active speaker, with a short debounce so a blip doesn't steal the highlight. */
+    private fun resolveActiveSpeaker(bestPeer: String, bestRemote: Double, myLevel: Double) {
+        val candidate: String? = when {
+            myLevel >= SPEAKING_THRESHOLD && micOn.value && myLevel >= bestRemote -> ""
+            bestRemote >= SPEAKING_THRESHOLD -> bestPeer
+            else -> null
+        }
+        if (candidate == null) {
+            speakerStreak.clear()
+            if (activeSpeaker.value != null) activeSpeaker.value = null
+            return
+        }
+        val streak = (speakerStreak[candidate] ?: 0) + 1
+        speakerStreak.clear(); speakerStreak[candidate] = streak
+        if (streak >= SPEAKER_DEBOUNCE && activeSpeaker.value != candidate) {
+            activeSpeaker.value = candidate
+        }
+    }
+
+    /** Bring the hairpin relay up for a peer whose ICE cannot pair. Idempotent. */
+    private fun startHairpin(peer: String) {
+        if (!hairpinPeers.add(peer)) return
+        Log.i(TAG, "ice failed ${peer.take(8)} — relaying media over /webrtc/hairpin")
+        // The relay IS the media path now, so the call is CONNECTED. Without saying so the UI sits on
+        // "connecting" while audio is already flowing, and the dialing tone keeps looping.
+        connecting.value = false
+        inCall.value = true
+        CallMediaBridge.activate(
+            remote = peer,
+            sessionId = sessionId,
+            me = myHex,
+            localVideoTrack = localVideo,
+            eglBase = eglBase,
+            factory = ensureFactory(),
+        )
+    }
+
+    /**
+     * Hand the microphone between WebRTC's audio device and the hairpin bridge's own recorder. Two
+     * capture clients conflict, so when the relay takes over audio (ICE failed) WebRTC's dead audio
+     * path is silenced; restored if ICE recovers. Only ever reached on the failed path, so it cannot
+     * disturb a working direct call. Apple parity (`setNativeAudioSuspendedForHairpin`).
+     */
+    fun setNativeAudioSuspendedForHairpin(suspended: Boolean) {
+        audioTrack?.setEnabled(!suspended && micOn.value)
+    }
+
+    /**
+     * The relay produced a decoded remote video track — publish it into the same map the call UI
+     * renders, so relayed video appears with no view changes.
+     */
+    fun adoptHairpinRemoteVideo(peer: String, track: VideoTrack) {
+        mainHandler.post { remoteVideo[peer] = track }
+    }
+
+    fun dropHairpinRemoteVideo(peer: String) {
+        mainHandler.post { if (remoteVideo[peer]?.id()?.startsWith("hairpin-") == true) remoteVideo.remove(peer) }
+    }
+
     private fun dropPeer(peer: String) {
+        if (hairpinPeers.remove(peer)) CallMediaBridge.deactivate(peer)
+        CallHairpin.close(peer)
         peers.remove(peer)?.close()
         roster.remove(peer)
         remoteVideo.remove(peer)
@@ -670,6 +859,12 @@ object CallManager {
             }
         }
         mainHandler.removeCallbacks(ringTimeoutRunnable)
+        stopSpeakerDetection()
+        // Tear the relay down BEFORE the peers: it holds a microphone, two codecs and a WebSocket
+        // per remote, none of which any other path releases.
+        runCatching { CallMediaBridge.stopAll() }
+        runCatching { CallHairpin.closeAll() }
+        hairpinPeers.clear()
         peers.values.forEach { it.close() }; peers.clear()
         runCatching { screenCapturer?.stopCapture() }
         runCatching { screenCapturer?.dispose() }; screenCapturer = null

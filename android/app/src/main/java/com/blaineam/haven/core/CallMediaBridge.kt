@@ -72,7 +72,8 @@ object CallMediaBridge {
     private var videoSeq: Int = 0
 
     // Audio
-    private var recorder: AudioRecord? = null
+    /** @Volatile: the mic thread reads this to tell whether IT is still the live recorder. */
+    @Volatile private var recorder: AudioRecord? = null
     private var player: AudioTrack? = null
     private var aec: AcousticEchoCanceler? = null
     private var ns: NoiseSuppressor? = null
@@ -276,7 +277,12 @@ object CallMediaBridge {
         thread(name = "haven-hairpin-mic", isDaemon = true) {
             val buf = ByteArray(FRAME_BYTES)
             try {
-                while (capturing.get()) {
+                // `capturing` alone is not enough. ICE can fail, recover and fail again, which is
+                // deactivate → activate → a SECOND mic thread with a second recorder. That restart
+                // sets `capturing` back to true, and this older loop — whose own recorder has
+                // already been released in the finally below — would see it and resume reading a
+                // dead object. Identity is the real question: am I still the live recorder?
+                while (capturing.get() && recorder === rec) {
                     val n = runCatching { rec.read(buf, 0, FRAME_BYTES) }.getOrDefault(-1)
                     if (n <= 0) { if (n < 0) break else continue }
                     val payload = if (n == FRAME_BYTES) buf.copyOf() else buf.copyOf(n)

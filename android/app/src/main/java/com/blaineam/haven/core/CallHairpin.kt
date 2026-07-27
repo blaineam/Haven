@@ -27,6 +27,47 @@ import java.util.concurrent.TimeUnit
  * Wire-compatible with Apple `CallHairpin` by construction: same URL derivation, same join object,
  * same pairing predicate. [CallMediaBridge] owns the binary frame format.
  */
+/**
+ * The hairpin's binary frame format — a CROSS-PLATFORM CONTRACT, not an implementation detail.
+ *
+ * `[type u8][seq u16 BE][ptsMs u32 BE]` then the payload. All three platforms relay through the same
+ * proxy socket and the proxy bipipes bytes without interpreting them, so Apple, Android and desktop
+ * must agree byte-for-byte or media silently fails to decode. Desktop shipped bare PCM here for its
+ * whole life: Apple dropped every desktop frame as malformed and desktop played Apple's 7 header
+ * bytes as audio samples, so the fallback that exists to rescue a call worked only desktop↔desktop.
+ *
+ * Kept in its own object (rather than private to [CallMediaBridge]) precisely so a test can pin it.
+ */
+object HairpinFrame {
+    const val TYPE_AUDIO: Byte = 1
+    const val TYPE_VIDEO_KEY: Byte = 2
+    const val TYPE_VIDEO_DELTA: Byte = 3
+    const val HEADER_BYTES = 7
+
+    fun pack(type: Byte, seq: Int, ptsMs: Int, payload: ByteArray): ByteArray {
+        val out = ByteArray(HEADER_BYTES + payload.size)
+        out[0] = type
+        out[1] = ((seq shr 8) and 0xFF).toByte()
+        out[2] = (seq and 0xFF).toByte()
+        out[3] = ((ptsMs shr 24) and 0xFF).toByte()
+        out[4] = ((ptsMs shr 16) and 0xFF).toByte()
+        out[5] = ((ptsMs shr 8) and 0xFF).toByte()
+        out[6] = (ptsMs and 0xFF).toByte()
+        System.arraycopy(payload, 0, out, HEADER_BYTES, payload.size)
+        return out
+    }
+
+    /** (type, seq, payload), or null when the frame is not one of ours — a short read, or a first
+     *  byte that is not a known type (which is exactly what bare PCM looks like). */
+    fun unpack(d: ByteArray): Triple<Byte, Int, ByteArray>? {
+        if (d.size < HEADER_BYTES) return null
+        val type = d[0]
+        if (type != TYPE_AUDIO && type != TYPE_VIDEO_KEY && type != TYPE_VIDEO_DELTA) return null
+        val seq = ((d[1].toInt() and 0xFF) shl 8) or (d[2].toInt() and 0xFF)
+        return Triple(type, seq, d.copyOfRange(HEADER_BYTES, d.size))
+    }
+}
+
 object CallHairpin {
     private const val TAG = "HavenHairpin"
 

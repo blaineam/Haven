@@ -5,14 +5,16 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Documents Haven-first ICE policy for Android (mirrors [CallManager] private iceServers):
+ * Documents the Haven-first ICE policy TABLE:
  * - No fabric → Google STUN allowed (fallback).
- * - Fabric without TURN → no Google (host + hairpin).
+ * - Fabric without TURN → `hostOnly` (host candidates + the [CallMediaBridge] hairpin for media).
  * - Fabric + TURN → circle TURN only.
  *
- * CallManager.iceServers() is private; this locks the policy table so a regression
- * that re-introduces Google under fabric is caught when CallManager is next refactored
- * to share [FabricIcePolicy].
+ * ⚠️ `hostOnly` here is ADVISORY. `CallManager.iceServers()` deliberately does not honour it and
+ * adds STUN anyway — host-candidates-only cannot complete a call between two NATs, which is what
+ * the field report about a relay advertising a Docker-internal TURN host turned out to be. This
+ * test pins the POLICY OBJECT, not the caller's behaviour; don't read a passing run here as proof
+ * that Android goes host-only in that case, because it does not.
  */
 class FabricIcePolicyTest {
 

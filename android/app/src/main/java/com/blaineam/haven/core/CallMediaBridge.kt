@@ -54,11 +54,10 @@ import kotlin.concurrent.thread
 object CallMediaBridge {
     private const val TAG = "HavenHairpinMedia"
 
-    // Frame types — must match Apple `CallMediaBridge.FrameType`.
-    private const val TYPE_AUDIO: Byte = 1
-    private const val TYPE_VIDEO_KEY: Byte = 2
-    private const val TYPE_VIDEO_DELTA: Byte = 3
-    private const val HEADER_BYTES = 7
+    // Frame types — the wire contract lives in [HairpinFrame] so a test can pin it.
+    private const val TYPE_AUDIO: Byte = HairpinFrame.TYPE_AUDIO
+    private const val TYPE_VIDEO_KEY: Byte = HairpinFrame.TYPE_VIDEO_KEY
+    private const val TYPE_VIDEO_DELTA: Byte = HairpinFrame.TYPE_VIDEO_DELTA
 
     // Audio wire format — must match Apple's `wireFormat` (16 kHz mono Int16).
     private const val SAMPLE_RATE = 16_000
@@ -542,28 +541,10 @@ object CallMediaBridge {
 
     // ---- Wire format --------------------------------------------------------------------------
 
-    /** `[type u8][seq u16 BE][ptsMs u32 BE][payload]` — Apple `CallMediaBridge.pack`. */
-    private fun pack(type: Byte, seq: Int, ptsMs: Int, payload: ByteArray): ByteArray {
-        val out = ByteArray(HEADER_BYTES + payload.size)
-        out[0] = type
-        out[1] = ((seq shr 8) and 0xFF).toByte()
-        out[2] = (seq and 0xFF).toByte()
-        out[3] = ((ptsMs shr 24) and 0xFF).toByte()
-        out[4] = ((ptsMs shr 16) and 0xFF).toByte()
-        out[5] = ((ptsMs shr 8) and 0xFF).toByte()
-        out[6] = (ptsMs and 0xFF).toByte()
-        System.arraycopy(payload, 0, out, HEADER_BYTES, payload.size)
-        return out
-    }
+    private fun pack(type: Byte, seq: Int, ptsMs: Int, payload: ByteArray): ByteArray =
+        HairpinFrame.pack(type, seq, ptsMs, payload)
 
-    /** Returns (type, seq, payload), or null when the frame is not one of ours. */
-    private fun unpack(d: ByteArray): Triple<Byte, Int, ByteArray>? {
-        if (d.size < HEADER_BYTES) return null
-        val type = d[0]
-        if (type != TYPE_AUDIO && type != TYPE_VIDEO_KEY && type != TYPE_VIDEO_DELTA) return null
-        val seq = ((d[1].toInt() and 0xFF) shl 8) or (d[2].toInt() and 0xFF)
-        return Triple(type, seq, d.copyOfRange(HEADER_BYTES, d.size))
-    }
+    private fun unpack(d: ByteArray): Triple<Byte, Int, ByteArray>? = HairpinFrame.unpack(d)
 
     /**
      * Reorders audio frames within a small window and paces them out, so brief loss/jitter on the

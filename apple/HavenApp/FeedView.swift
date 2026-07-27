@@ -269,7 +269,14 @@ final class FeedStore: ObservableObject {
     func setForeground(_ on: Bool) {
         guard appIsForeground != on else { return }
         appIsForeground = on
-        if on { bumpActivity() } else { nextPollDueMs = now() &+ adaptiveInterval(base: 45_000) }
+        // Foregrounding is activity — you came back to look at something.
+        //
+        // Backgrounding deliberately does NOTHING to the schedule. The next heartbeat recomputes the
+        // interval with `appIsForeground` false, so the full stretch applies from then on its own;
+        // pushing the due time out here would only duplicate `pollBaseMs` (which is a DIFFERENT
+        // value on macOS) into a second place to drift. It also lets one already-due poll finish
+        // before we go quiet, which is the right last act on the way out.
+        if on { bumpActivity() }
     }
 
     /// How long until the next MAILBOX poll — deliberately not `adaptiveInterval`.

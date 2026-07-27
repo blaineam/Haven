@@ -1905,6 +1905,11 @@ struct CallOverlay: View {
     }
 
     private var statusText: String {
+        // WebRTC refused a peer connection outright, so there is no media path on this attempt and
+        // there will not be one. This used to be a `fatalError` — the app simply died on answering —
+        // so the whole point of making it survivable is that it now has something to SAY. Checked
+        // before `connecting`, because a call that can't start must not sit on "Calling…" forever.
+        if call.mediaFailed { return "Couldn't start audio" }
         if call.connecting { return "Calling…" }
         // Answered but no ICE path yet: say so — "Connected" with silence erodes trust in the
         // label (and hides real media-path failures from the person staring at the screen).

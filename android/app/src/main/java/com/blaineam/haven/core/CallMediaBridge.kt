@@ -79,6 +79,10 @@ object CallMediaBridge {
     private var agc: AutomaticGainControl? = null
     private val capturing = AtomicBoolean(false)
     private val jitter = JitterBuffer()
+    /** Guards the AudioTrack. Playback is driven from the WebSocket thread (ingest → playAudio)
+     *  while hangup releases the track from another — writing to a released AudioTrack is the same
+     *  use-after-release shape the video codecs had. */
+    private val audioLock = Any()
 
     // Video encode (MediaCodec H.264) fed by an EGL renderer on the local WebRTC track.
     //
@@ -266,38 +270,59 @@ object CallMediaBridge {
         runCatching { rec.startRecording() }
         capturing.set(true)
 
+        // The effects are owned by this thread too, so the whole capture chain is torn down in one
+        // place by the one thread that touches it.
+        val ownedAec = aec; val ownedNs = ns; val ownedAgc = agc
         thread(name = "haven-hairpin-mic", isDaemon = true) {
             val buf = ByteArray(FRAME_BYTES)
-            while (capturing.get()) {
-                val n = runCatching { rec.read(buf, 0, FRAME_BYTES) }.getOrDefault(-1)
-                if (n <= 0) { if (n < 0) break else continue }
-                val payload = if (n == FRAME_BYTES) buf.copyOf() else buf.copyOf(n)
-                synchronized(CallMediaBridge) {
-                    if (activePeers.isNotEmpty()) {
-                        audioSeq = (audioSeq + 1) and 0xFFFF
-                        val frame = pack(TYPE_AUDIO, audioSeq, 0, payload)
-                        activePeers.forEach { CallHairpin.send(it, frame) }
+            try {
+                while (capturing.get()) {
+                    val n = runCatching { rec.read(buf, 0, FRAME_BYTES) }.getOrDefault(-1)
+                    if (n <= 0) { if (n < 0) break else continue }
+                    val payload = if (n == FRAME_BYTES) buf.copyOf() else buf.copyOf(n)
+                    synchronized(CallMediaBridge) {
+                        if (activePeers.isNotEmpty()) {
+                            audioSeq = (audioSeq + 1) and 0xFFFF
+                            val frame = pack(TYPE_AUDIO, audioSeq, 0, payload)
+                            activePeers.forEach { CallHairpin.send(it, frame) }
+                        }
                     }
                 }
+            } finally {
+                // Released HERE, on the thread that reads it. Android forbids releasing an
+                // AudioRecord while another thread is inside read(), and stopAudio() has no way to
+                // know whether this loop is blocked in one — it usually is, since read() blocks
+                // until a full 20 ms frame arrives. Releasing from there was a use-after-release on
+                // every hangup of a relayed call; it survived only because the framework happens to
+                // throw a Java exception that runCatching swallowed.
+                runCatching { rec.stop() }
+                runCatching { ownedAec?.release() }
+                runCatching { ownedNs?.release() }
+                runCatching { ownedAgc?.release() }
+                runCatching { rec.release() }
             }
         }
     }
 
     private fun stopAudio() {
+        // Signal only: the mic thread stops, releases the recorder and the effects, and exits. See
+        // its `finally`. Dropping the references here just makes sure nothing else reaches them.
         capturing.set(false)
-        runCatching { recorder?.stop() }; runCatching { recorder?.release() }; recorder = null
-        runCatching { player?.stop() }; runCatching { player?.release() }; player = null
-        runCatching { aec?.release() }; aec = null
-        runCatching { ns?.release() }; ns = null
-        runCatching { agc?.release() }; agc = null
+        recorder = null; aec = null; ns = null; agc = null
+        synchronized(audioLock) {
+            runCatching { player?.stop() }; runCatching { player?.release() }; player = null
+        }
         jitter.reset()
     }
 
     private fun playAudio(seq: Int, payload: ByteArray) {
-        val trk = player ?: return
-        // Reorder within a small window so brief loss/jitter doesn't turn into stutter.
-        for (ordered in jitter.push(seq, payload)) {
-            runCatching { trk.write(ordered, 0, ordered.size) }
+        // Reorder within a small window so brief loss/jitter doesn't turn into stutter. Under
+        // [audioLock] so hangup cannot release the track between the null-check and the write.
+        val ordered = jitter.push(seq, payload)
+        if (ordered.isEmpty()) return
+        synchronized(audioLock) {
+            val trk = player ?: return
+            for (chunk in ordered) runCatching { trk.write(chunk, 0, chunk.size) }
         }
     }
 

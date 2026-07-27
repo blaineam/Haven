@@ -617,6 +617,15 @@ object CallManager {
      * media over `/webrtc/hairpin` for this exact case all along.
      */
     private fun onPeerIceState(peer: String, s: PeerConnection.IceConnectionState) {
+        // Hop to the main thread before touching ANY call state. This callback arrives on WebRTC's
+        // signalling thread, while `peers`, `roster` and `hairpinPeers` are plain unsynchronised
+        // collections that the frame handler mutates from its own thread — every other entry point
+        // in this file (handleAccept, handleHangup, the ring timeout) is already main-thread-driven.
+        // Racing a HashMap from two threads corrupts it, and the corruption surfaces far from here.
+        mainHandler.post { onPeerIceStateOnMain(peer, s) }
+    }
+
+    private fun onPeerIceStateOnMain(peer: String, s: PeerConnection.IceConnectionState) {
         when (s) {
             PeerConnection.IceConnectionState.CONNECTED,
             PeerConnection.IceConnectionState.COMPLETED -> {

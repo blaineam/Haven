@@ -20,8 +20,6 @@ final class ConnectionsStore: ObservableObject {
 
     @Published private(set) var pending: [ConnectionRequest] = []
     @Published private(set) var blocked: Set<String> = []
-    /// People we deliberately did NOT share past history with — they see new posts only.
-    @Published private(set) var noHistory: Set<String> = []
 
     /// Circle-member removal state as LAST-WRITER-WINS: `removedAt[key]` is when the member was removed
     /// from a circle, `readdedAt[key]` when they were deliberately re-added; a member is currently
@@ -36,7 +34,6 @@ final class ConnectionsStore: ObservableObject {
 
     private let d = UserDefaults.standard
     private let blockedKey = "haven.blocked"
-    private let noHistoryKey = "haven.noHistory"
     private let removedAtKey = "haven.circleRemovedAt.v2"
     private let readdedAtKey = "haven.circleReaddedAt.v2"
     // Legacy (pre-LWW) sets, read once to migrate.
@@ -47,7 +44,6 @@ final class ConnectionsStore: ObservableObject {
 
     private init() {
         if let arr = d.array(forKey: blockedKey) as? [String] { blocked = Set(arr) }
-        if let arr = d.array(forKey: noHistoryKey) as? [String] { noHistory = Set(arr) }
         removedAt = (d.dictionary(forKey: removedAtKey) as? [String: NSNumber])?.mapValues { $0.uint64Value } ?? [:]
         readdedAt = (d.dictionary(forKey: readdedAtKey) as? [String: NSNumber])?.mapValues { $0.uint64Value } ?? [:]
         // One-time migration from the legacy bare sets → LWW timestamps. Old removals/clears carry no
@@ -72,8 +68,8 @@ final class ConnectionsStore: ObservableObject {
 
     /// Factory-reset this store — clear in-memory + persisted state.
     func wipe() {
-        pending = []; blocked = []; noHistory = []; circleRemovals = []; removedAt = [:]; readdedAt = [:]
-        [blockedKey, noHistoryKey, removedAtKey, readdedAtKey, legacyRemovalsKey, legacyClearedKey].forEach { d.removeObject(forKey: $0) }
+        pending = []; blocked = []; circleRemovals = []; removedAt = [:]; readdedAt = [:]
+        [blockedKey, removedAtKey, readdedAtKey, legacyRemovalsKey, legacyClearedKey].forEach { d.removeObject(forKey: $0) }
     }
 
     /// Mark a member as removed from a circle NOW (LWW — supersedes any older re-add).
@@ -109,10 +105,10 @@ final class ConnectionsStore: ObservableObject {
         return (removedAt[key] ?? 0) > (readdedAt[key] ?? 0)
     }
 
-    func setNoHistory(_ idHex: String) {
-        noHistory.insert(idHex); d.set(Array(noHistory), forKey: noHistoryKey)
-    }
-    func sharesHistory(_ idHex: String) -> Bool { !noHistory.contains(idHex) }
+    /// Circle membership grants circle history — always. Kept as a constant rather than deleted so
+    /// any straggling call site reads true instead of silently reintroducing a gate we no longer
+    /// honour anywhere. See `approveConnection` for why the choice was withdrawn.
+    func sharesHistory(_ idHex: String) -> Bool { true }
 
     func isBlocked(_ idHex: String) -> Bool { blocked.contains(idHex) }
 
@@ -194,14 +190,17 @@ struct ConnectionRequestsView: View {
             iosBody
             #endif
         }
-        .confirmationDialog("Share your past posts with \(approveTarget?.name ?? "them")?",
+        // No "new posts only" option — see `approveConnection`. A circle is keyed by a SHARED epoch,
+        // so joining one grants the key that opens its content; the choice could be honoured in the
+        // UI and never in the cryptography. Say what actually happens instead of offering a boundary
+        // that does not exist.
+        .confirmationDialog("Add \(approveTarget?.name ?? "them") to your circle?",
                             isPresented: Binding(get: { approveTarget != nil }, set: { if !$0 { approveTarget = nil } }),
                             titleVisibility: .visible) {
-            Button("Add & share history") { if let r = approveTarget { store.approveConnection(r, shareHistory: true) } }
-            Button("Add — new posts only") { if let r = approveTarget { store.approveConnection(r, shareHistory: false) } }
+            Button("Add to circle") { if let r = approveTarget { store.approveConnection(r) } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Choose whether they can see what you've already shared, or only what you post from now on.")
+            Text("They'll be able to see what you've shared with this circle, including past posts.")
         }.havenPausesPostAudio()
     }
 

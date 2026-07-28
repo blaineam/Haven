@@ -982,6 +982,11 @@ enum SharedStore {
                         RelayMailboxStore.shared.markSeen(node)
                         rosterPublished[node] = (wireHash, Date())
                         HavenLog.sync("devroster http-put OK relay=\(node.prefix(8))")
+                        // A 200 here does NOT mean the relay STORED it — see the note on the blob
+                        // path below. This is the rung the phone actually uses, so the self-adopt
+                        // has to hang off THIS success or a device whose roster version regressed
+                        // never climbs back above the fleet's copy.
+                        await adoptOwnRosterIfOutranked(social: social)
                         done = true
                     case .failure(is RelayForbidden):
                         // The devroster key is permission-FREE, so a refusal here is the relay rejecting
@@ -1006,6 +1011,20 @@ enum SharedStore {
                 RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
                 rosterPublished[node] = (wireHash, Date())
                 HavenLog.sync("devroster blob-put OK relay=\(node.prefix(8)) — relay should now authorize our device")
+                // A 200 does NOT mean the relay STORED it. `verify_devroster_put` answers an
+                // out-of-date version with AuthOnly: it takes our signed device ids into the auth
+                // union, KEEPS the newer blob on disk, and still replies 200 OK. So the rollback
+                // remedy below never ran — it hangs off the `catch`, and there is no error.
+                //
+                // That is not cosmetic. If this device's roster version regressed (a reset or a
+                // reinstall restarts it low while the account id stays the same), every peer rejects
+                // our current roster as a replay — `verify_and_store_roster` refuses any contact
+                // roster whose version is <= the one it holds. They then never learn THIS device id,
+                // so anything we seal under it is unopenable to them and our device-signed call
+                // frames fail their declared-vs-signer check. Pulling our own roster back fixes it at
+                // the source: the `acct_id == my_id` branch UNION-merges and re-signs, so the version
+                // climbs past whatever the fleet holds instead of racing it from underneath.
+                await adoptOwnRosterIfOutranked(social: social)
             } catch {
                 HavenLog.sync("devroster blob-put FAIL relay=\(node.prefix(8)): \(error.localizedDescription)")
                 // Record it, like every OTHER failure path does. Without this a relay that never
@@ -1020,6 +1039,26 @@ enum SharedStore {
         }
         if skipped > 0 {
             HavenLog.sync("devroster: \(skipped) relay(s) already hold this exact roster — not re-sending \(wire.count) B each")
+        }
+    }
+
+    /// When we last pulled our own roster back to union-merge it (see the call site above).
+    private static var lastOwnRosterAdopt = Date.distantPast
+
+    /// Pull our OWN account's roster from the relays and let the engine union-merge it.
+    ///
+    /// Safe by construction: `ingestRosterWire` verifies the ACCOUNT signature, and only our account
+    /// key could have produced it — a relay can serve these bytes, never forge them. For our own
+    /// account the engine unions devices and revocations (both grow-only) and re-signs, so this can
+    /// only ever move the version FORWARD and can never drop a device another of our devices
+    /// registered. Throttled: the wire is tens of KB and the answer changes rarely.
+    private static func adoptOwnRosterIfOutranked(social: HavenSocial) async {
+        guard Date().timeIntervalSince(lastOwnRosterAdopt) > 600 else { return }
+        lastOwnRosterAdopt = Date()
+        let mine = social.myNodeHex()
+        guard mine.count == 64 else { return }
+        if await fetchContactRoster(accountHex: mine, social: social) {
+            HavenLog.sync("devroster: adopted + union-merged our OWN roster — version now moves ahead of the fleet's copy")
         }
     }
 

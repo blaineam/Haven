@@ -63,7 +63,14 @@ object CallWire {
         return out.toByteArray()
     }
 
-    fun hangup(myHex: String): ByteArray = myHex.toByteArray(Charsets.UTF_8)
+    /** Frame 12 — NAMES ITS SESSION, same shape as [accept].
+     *
+     *  It used to be the bare sender hex, which made a hangup impossible to attribute: hangups are
+     *  retransmitted and the relay can deliver one late, so a BYE from a call that ended minutes ago
+     *  still arrives and the receiver had no way to tell it apart from a live one. It would end
+     *  whatever call was running. Appending the session is backward compatible — a reader that only
+     *  takes the leading 64 bytes is unaffected. */
+    fun hangup(myHex: String, sessionId: String): ByteArray = accept(myHex, sessionId)
 
     /** Frame 30 — same shape as [accept], so the receiver reads the session it names. */
     fun handledElsewhere(myHex: String, sessionId: String): ByteArray = accept(myHex, sessionId)

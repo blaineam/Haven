@@ -614,6 +614,21 @@ impl RelayClient {
         self.inner.enroll_relays(&circle_id, &relays).await.is_ok()
     }
 
+    /// Tell this relay who the MEMBERS of `circleId` are, so a peer the operator never typed into
+    /// the relay link can still be served. Best-effort and silent on failure, like `teach_relays`.
+    ///
+    /// The relay half of this (`RelayAuth::learn`) was already written, with its authorization rules
+    /// spelled out: a caller the relay already serves may enroll a circle additively, must include
+    /// ITSELF in the member list, and may only extend an existing circle from the inside. What was
+    /// missing is this — the client half was never exported through the FFI, so no app on any
+    /// platform could reach the verb. The result was that circle membership only ever reached a
+    /// relay through the operator pasting a link: invite a new person and the relay refuses them
+    /// forever, which reads as "media never loads and DMs never send" rather than as a permissions
+    /// gap. `members` must include our own id or the relay declines by rule (2).
+    pub async fn enroll_members(&self, circle_id: String, members: Vec<String>) -> bool {
+        self.inner.enroll(&circle_id, &members).await.is_ok()
+    }
+
     /// Connect to a relay by its node id (from the relay link). `seed` is this device's
     /// 32-byte identity (its own transport key).
     #[uniffi::constructor]

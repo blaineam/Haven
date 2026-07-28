@@ -7,12 +7,60 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [1.1.5] — 2026-07-26
+## [1.1.5] — 2026-07-27
 
-Responsiveness and reliability pass on what 1.1.4 shipped. 1.1.4 was pulled from App Store
-Connect and the Microsoft Store before general release.
+Responsiveness and reliability pass on what 1.1.4 shipped, plus a night of live testing on a
+real iPhone, a real Android phone and the NAS relay. 1.1.4 was pulled from App Store Connect
+and the Microsoft Store before general release.
 
 ### Fixed
+
+- **The call-media hairpin has never worked, on any platform.** Three faults stacked. The free
+  quick tunnel pointed at the media server (`:8674`) instead of the path proxy (`:8675`), so
+  `/webrtc/hairpin` AND the iroh DERP fabric were 404 from the internet — the path proxy exists
+  precisely to fan one hostname out to all three. The proxy then relayed backend responses
+  verbatim, advertising HTTP/1.1 keep-alive while closing after a single request, so cloudflared
+  pooled the socket and the next request died with "broken pipe" (this was quietly costing media
+  fetches too). And `Sec-WebSocket-Key` was matched against two hand-picked spellings, while Go
+  canonicalises to `Sec-Websocket-Key` — capital W, lowercase s in "socket" — so every upgrade
+  through cloudflared fell through to `None` and the handler bailed *before writing a response*.
+  That last one hid the longest because `curl` and `nc` send the conventional spelling: direct to
+  the origin it always returned 101. It worked on the LAN and failed over the tunnel, every time.
+- **Five CallKit transactions assumed they would succeed (iOS/macOS).** Mute, answer, decline,
+  end and start each requested a transaction and trusted a provider callback that may never
+  arrive — no error to catch, no callback to act in, so the tap did nothing. The worst was start:
+  no invite was sent at all, leaving "Calling…" forever while the callee's phone stayed silent,
+  which is indistinguishable from being ignored. Mute additionally was never a logic bug at all —
+  `callButton` is an `Image`, and SwiftUI hit-tests an image against its rendered glyph, so only
+  taps landing on the mic strokes counted.
+- **A stale hangup could end any call, on every platform.** The handler never checked the session
+  id, and Android and desktop did not even send one. Hangups are retransmitted and relays deliver
+  them late, so a BYE from a call that ended minutes ago tore down whatever was running.
+- **Incoming calls never rang an Android phone.** The call existed only as in-app UI, so it was
+  seen only if Haven happened to be open. Adds a call notification channel with a full-screen
+  intent and Answer/Decline. Answering also had to bring the app forward first — Android 10+
+  blocks background activity starts from a receiver, so accepting there connected a call with no
+  UI and no way to end it.
+- **"Start over" kept the device identity (Android).** Every store wiped by the reset committed
+  asynchronously and raced `Runtime.exit(0)`. Losing the device seed produced a device whose id
+  was unchanged while its account was new, so every peer still mapped it to the old account and
+  dropped its call frames as forgeries — calls hung up the instant they were answered, and media
+  sealed under it could never be opened.
+- **Media that could never arrive starved media that could.** The restore queue is serialized and
+  insertion-ordered, so one circle's permanently-unopenable backlog owned it and a DM's media was
+  never requested at all. Posters also queued behind full-size video, so tiles fell back to
+  generating a poster locally — exhausting VideoToolbox decode sessions to redo work the sender
+  had already done and shipped.
+
+### Changed
+
+- **"Add — new posts only" is gone.** A circle is keyed by a shared epoch: joining it hands over
+  the key that opens the circle's content, and the relay serves that content to any current
+  member. The choice could be honoured in the UI and nowhere else. Adding someone to a circle
+  shares that circle, and the dialog now says so rather than implying a boundary the design does
+  not have.
+
+### Fixed (from the earlier 1.1.5 pass)
 
 - **Answering a call could kill the app (iOS/macOS).** `WebRTCCall`'s constructor called
   `fatalError` when `RTCPeerConnectionFactory` returned no peer connection — and the factory

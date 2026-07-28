@@ -74,7 +74,19 @@ final class CallHairpin {
         task.send(.string(text)) { [weak self] err in
             if let err {
                 HavenLog.relay("hairpin join send failed \(remote.prefix(8)): \(err.localizedDescription)")
-                Task { @MainActor in self?.close(remote: remote) }
+                Task { @MainActor in
+                    self?.close(remote: remote)
+                    // A failed join usually means the FRONT DOOR moved, not that the hairpin is
+                    // broken: free tunnels rotate their hostname on every relay restart, and we go
+                    // on dialing the old one because it still looks like a valid URL. Force the
+                    // interface re-read so the next attempt uses the hostname the relay is actually
+                    // serving — otherwise the fallback path stays dead until something else happens
+                    // to notice, which in practice was never.
+                    for hex in RelayMailboxStore.shared.relays(forCircle: FeedStore.shared.activeCircleId)
+                    where hex.count == 64 {
+                        FeedStore.shared.refreshRelayInterfaceIfNeeded(hex, force: true)
+                    }
+                }
             }
         }
         receiveLoop(remote: remote, task: task)

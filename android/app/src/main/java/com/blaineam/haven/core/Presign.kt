@@ -90,7 +90,7 @@ object Presign {
     }
 
     fun reset() {
-        if (this::prefs.isInitialized) prefs.edit().clear().apply()
+        if (this::prefs.isInitialized) prefs.edit().clear().commit()
         pools.clear()
     }
 

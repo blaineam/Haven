@@ -173,10 +173,16 @@ fun ConnectScreen(onDone: () -> Unit) {
             }
 
             Spacer(Modifier.height(24.dp))
-            if (!added) {
-                Text("Done", color = HavenTheme.textSecondary, fontSize = 14.sp,
-                    modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { onDone() }.padding(8.dp))
-            }
+            // Always offer the way out. This used to be `if (!added)`, which hid Done in the ONE
+            // state that has no other action: after "Invite sent" the card is terminal — no cancel,
+            // no back — so the only way off this screen was to force-quit the app.
+            Text(
+                "Done",
+                color = if (added) HavenTheme.textPrimary else HavenTheme.textSecondary,
+                fontSize = if (added) 16.sp else 14.sp,
+                fontWeight = if (added) FontWeight.SemiBold else FontWeight.Normal,
+                modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { onDone() }.padding(8.dp),
+            )
         }
     }
 }

@@ -147,7 +147,14 @@ jobs:
       # the repo variable PLAY_TRACK overrides it; a manual workflow_dispatch may pick any track via
       # the play_track input. Precedence: dispatch input > PLAY_TRACK variable > "internal".
       #   • Routine tag, no variable set        → internal            (never accidentally prod)
-      #   • workflow_dispatch play_track=beta    → beta (closed test)
+      #   • workflow_dispatch play_track=alpha   → alpha  (CLOSED testing — this is the closed track)
+      #   • workflow_dispatch play_track=beta     → beta   (OPEN testing — public opt-in link)
+      #
+      # `alpha` is Play's CLOSED track and `beta` is its OPEN one — the reverse of how the words are
+      # usually used, and this comment had them backwards. Publishing a "closed test" to `beta`
+      # targets a track that was never configured, and the Publishing API answers
+      # `Precondition check failed` — which reads like a broken credential rather than the wrong
+      # destination. Closed testers live on ALPHA.
       #   • workflow_dispatch play_track=production (+ play_rollout)  → staged/full production
       #   • PLAY_TRACK=production variable set    → every tag then targets production (deliberate,
       #                                             persistent — the Console-free "always ship prod")

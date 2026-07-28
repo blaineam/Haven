@@ -218,6 +218,15 @@ class MainActivity : FragmentActivity() {
 
     /** Text / links / photos / videos shared into Haven → prefill the composer + attach media. */
     private fun handleShare(intent: Intent?) {
+        // Answered from the incoming-call notification. Handled HERE, in the activity, because the
+        // OS blocks a background receiver from starting one — so the notification action launches
+        // us with this extra and we accept once we are actually on screen. That ordering is what
+        // makes the call and its UI arrive together instead of a call connecting invisibly.
+        if (intent?.getBooleanExtra(com.blaineam.haven.core.Notifications.EXTRA_ANSWER_CALL, false) == true) {
+            intent.removeExtra(com.blaineam.haven.core.Notifications.EXTRA_ANSWER_CALL)
+            runCatching { com.blaineam.haven.core.Notifications.clearIncomingCall(this) }
+            runCatching { com.blaineam.haven.core.CallManager.accept() }
+        }
         when (intent?.action) {
             // A haven:// or https link the app was opened with (tap in a browser/DM, or one of our
             // own notifications). Invites and post links share a domain AND both ride the

@@ -135,6 +135,6 @@ object CircleRemovals {
 
     @Synchronized fun clear() {
         removedAt.clear(); readdedAt.clear(); loaded = true
-        runCatching { prefs.edit().clear().apply() }
+        runCatching { prefs.edit().clear().commit() }
     }
 }

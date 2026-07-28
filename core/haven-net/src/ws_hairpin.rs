@@ -203,11 +203,17 @@ fn sec_websocket_key(head: &[u8]) -> Option<String> {
     let s = std::str::from_utf8(head).ok()?;
     for line in s.lines() {
         let line = line.trim();
-        if let Some(rest) = line
-            .strip_prefix("Sec-WebSocket-Key:")
-            .or_else(|| line.strip_prefix("sec-websocket-key:"))
-        {
-            return Some(rest.trim().to_string());
+        // CASE-INSENSITIVE. HTTP header names are case-insensitive (RFC 9110 §5.1), and matching two
+        // hand-picked spellings — "Sec-WebSocket-Key" and "sec-websocket-key" — missed the one that
+        // matters: Go canonicalises to `Sec-Websocket-Key` (capital W, LOWERCASE s in "socket"), and
+        // cloudflared is Go. So every upgrade arriving through the tunnel fell through to `None`,
+        // `handle_hairpin` bailed on the `?` BEFORE writing any response, and cloudflared reported
+        // `EOF` → 502 to the client. Direct-to-origin tests passed because curl and nc send the
+        // conventional spelling, which is exactly why this survived: it worked on the LAN and failed
+        // over the tunnel, every time.
+        let Some(colon) = line.find(':') else { continue };
+        if line[..colon].eq_ignore_ascii_case("sec-websocket-key") {
+            return Some(line[colon + 1..].trim().to_string());
         }
     }
     None

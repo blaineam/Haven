@@ -1467,8 +1467,8 @@ pub fn call_accept(engine: Eng, session_id: String, to: Vec<String>) {
 }
 
 #[tauri::command]
-pub fn call_hangup(engine: Eng, to: Vec<String>) {
-    engine.call_hangup(to);
+pub fn call_hangup(engine: Eng, to: Vec<String>, session_id: String) {
+    engine.call_hangup(to, session_id);
 }
 
 /// Answered or declined a ringing call here → tell my other devices to stop ringing.

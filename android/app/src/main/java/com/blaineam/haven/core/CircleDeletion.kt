@@ -83,6 +83,6 @@ object CircleDeletion {
 
     @Synchronized fun clear() {
         deletedAt.clear(); recreatedAt.clear(); loaded = true
-        runCatching { prefs.edit().clear().apply() }
+        runCatching { prefs.edit().clear().commit() }
     }
 }

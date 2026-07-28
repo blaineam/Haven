@@ -222,7 +222,7 @@ class ProfileStore private constructor(context: Context) {
         bio = ""
         emoji = "🌅"
         fieldTs.clear(); settingTs.clear()
-        prefs.edit().clear().apply()
+        prefs.edit().clear().commit()
     }
 
     companion object {

@@ -44,7 +44,7 @@ object RelayNudge {
 
     /** Factory reset (mirrors [CircleLock.reset], wired into [startOver]). */
     fun reset() {
-        prefs?.edit()?.clear()?.apply()
+        prefs?.edit()?.clear()?.commit()
         version.value++
     }
 

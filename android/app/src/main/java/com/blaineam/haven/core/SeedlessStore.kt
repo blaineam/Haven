@@ -103,5 +103,5 @@ object SeedlessStore {
     }
 
     /** Wipe seedless state (Start over / adopting a different identity). Explicit writer only. */
-    fun clear() { if (::prefs.isInitialized) runCatching { prefs.edit().clear().apply() } }
+    fun clear() { if (::prefs.isInitialized) runCatching { prefs.edit().clear().commit() } }
 }

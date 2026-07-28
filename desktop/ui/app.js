@@ -5078,7 +5078,10 @@ function hairpinPlayPcm(slot, ab) {
 
 const call = {
   session: "", me: "", name: "", roster: new Set(), pcs: new Map(),
-  localStream: null, micOn: true, camOn: true,
+  // camOn starts FALSE: calls are audio-only until the user turns the camera on (Apple/Android
+  // parity). hasCamera is set once the stream is acquired — null until then, false only when the
+  // device genuinely has no usable camera, which is the one case the control is hidden.
+  localStream: null, micOn: true, camOn: false, hasCamera: null,
   /// Peers whose camera is OFF, per frame 22 — their tile shows an avatar instead of the frozen
   /// last frame their stopped track left behind. Cleared with the rest of the call state.
   camOff: {},
@@ -5098,7 +5101,13 @@ const RING_TIMEOUT_MS = 60_000;
 // How long an ended session's tombstone suppresses re-ringing. Just outlasts the caller's ~30s
 // invite retransmit burst: declining mustn't re-ring when our hangup frame is lost, but a
 // deliberate redial — or being re-added to a group call we left — rings normally afterwards.
-const ENDED_TOMBSTONE_MS = 45_000;
+// MUST outlive the window in which an invite is still accepted (180s on iOS/Android — desktop has
+// no age check at all, so it accepts any invite that arrives). At 45s the tombstone expired long
+// before retransmits stopped, leaving ~135s in which a replayed invite for a call the user had
+// already dismissed found nothing suppressing it and re-opened the call screen, repeatedly. A
+// tombstone that does not outlive the thing it suppresses suppresses nothing.
+const INVITE_MAX_AGE_MS = 180_000;
+const ENDED_TOMBSTONE_MS = INVITE_MAX_AGE_MS + 30_000;
 
 /** Arm the bounded ring. Cleared by accept and by teardown (decline, hangup, end). */
 function startRingTimeout() {
@@ -5185,7 +5194,9 @@ async function callStart(others, name, video) {
   call.me = state.node;
   call.session = `win-${call.me.slice(0, 8)}-${Date.now()}`;
   call.roster = new Set([...others, call.me]);
-  call.name = name; call.video = video; call.connecting = true; call.camOn = video;
+  // Calls START audio-only on every platform. `call.video` still records that this was raised as a
+  // video call (it drives whether the camera control is offered), but the camera itself begins off.
+  call.name = name; call.video = video; call.connecting = true; call.camOn = false;
   syncFeedVideoSound();   // call audio owns the stage from the first dial
   await invoke("call_group_invite", { sessionId: call.session, groupName: name, roster: [...call.roster], to: invitees() });
   await startMesh();
@@ -5233,21 +5244,45 @@ async function callHangup() {
   // Declining counts as handling it: silence my other devices too, or they keep ringing after I have
   // dismissed the call here.
   if (call.ringing && !call.inCall) invoke("call_handled_elsewhere", { sessionId: call.session });
-  await invoke("call_hangup", { to: invitees() });
+  await invoke("call_hangup", { to: invitees(), sessionId: call.session });
   teardownCall();
 }
 
 async function startMesh() {
   if (call.localStream) return;
+  // Acquire audio AND video up front, then start the camera track DISABLED — a call begins
+  // audio-only, matching Apple and Android.
+  //
+  // Two reasons it must be acquired rather than skipped. A track added later adds an m-line later,
+  // and the re-offer carrying it can present its m-lines in a different order than was negotiated —
+  // WebRTC rejects that outright and the peer connection dies (the "order of m-lines in subsequent
+  // offer doesn't match" failure that was ending iOS↔Android calls). And the camera button here only
+  // ever rendered when `call.video` was true, so simply defaulting to audio removed any way to turn
+  // video on at all. Publishing the track disabled fixes both: the session shape is fixed for the
+  // call's lifetime and enabling video is instant, with no renegotiation.
   try {
-    call.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: call.video });
+    call.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
   } catch (e) {
-    toast("Mic/camera unavailable: " + e);
+    // No camera (or refused) — audio still works; the camera button stays disabled.
     call.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false }).catch(() => null);
+    if (!call.localStream) toast("Mic unavailable: " + e);
+  }
+  if (call.localStream) {
+    const vids = call.localStream.getVideoTracks();
+    vids.forEach((t) => (t.enabled = !!call.camOn));
+    call.hasCamera = vids.length > 0;
   }
   call.connecting = call.connecting && !call.inCall;
   ensureHairpins(); // TCP/WSS media path through free CF path proxy (pairs while ICE runs)
   invitees().forEach(connectPeerIfNeeded);
+  // Announce the STARTING camera state. A disabled track does not stop sending — it sends black
+  // frames — so a peer that is never told renders a black rectangle and assumes video is broken.
+  {
+    const peers = invitees();
+    if (peers.length) {
+      invoke("call_camera_state", { sessionId: call.session, on: !!call.camOn, to: peers }).catch(() => {});
+    }
+  }
   startSpeakerDetection();
   renderCallOverlay();
 }
@@ -5311,7 +5346,10 @@ async function onCallEvent(payload) {
       }
       if (recentlyEnded(c.sessionId)) return;   // we already left this session — retransmits can't re-ring
       call.session = c.sessionId; call.roster = members; call.name = c.groupName || c.name || displayNameFor(c.from);
-      call.ringing = true; call.video = true; startRingTimeout(); syncFeedVideoSound(); renderCallOverlay();
+      // Answering must not switch our own camera on — audio-only, like Apple. `video` only means
+      // the call supports video, which is now always true because the track is always published.
+      call.ringing = true; call.video = true; call.camOn = false;
+      startRingTimeout(); syncFeedVideoSound(); renderCallOverlay();
       break;
     }
     case "accept": {
@@ -5339,6 +5377,15 @@ async function onCallEvent(payload) {
       break;
     }
     case "hangup": {
+      // Gate on the session, like every other signal here already does. A retransmitted or
+      // late-relayed BYE from an EARLIER call used to tear down whichever call was live when it
+      // landed — an outgoing call whose screen appears and vanishes, or a connected call that hangs
+      // itself up for no visible reason. Frames from older builds carry no session id; those still
+      // apply, so this only ever tightens behaviour. iOS/Android parity.
+      if (c.sessionId && !validSession(c.sessionId)) {
+        console.warn("hangup ignored — session", c.sessionId, "is not ours", call.session);
+        return;
+      }
       const pc = call.pcs.get(c.from); if (pc) pc.close();
       call.pcs.delete(c.from); call.roster.delete(c.from);
       if (call.remote) delete call.remote[c.from];
@@ -5512,7 +5559,10 @@ function renderCallOverlay() {
     grid,
     el("div", { class: "call-controls" },
       el("button", { class: "btn " + (call.micOn ? "" : "danger"), onclick: toggleMic }, call.micOn ? "🎤 Mute" : "🔇 Unmute"),
-      call.video ? el("button", { class: "btn " + (call.camOn ? "" : "danger"), onclick: toggleCam }, call.camOn ? "📹 Camera off" : "📷 Camera on") : null,
+      // Always offered — the track is published for every call, so video is always available. It was
+      // gated on `call.video`, which meant an audio call could never become a video one.
+      call.hasCamera === false ? null
+        : el("button", { class: "btn " + (call.camOn ? "" : "danger"), onclick: toggleCam }, call.camOn ? "📹 Camera off" : "📷 Camera on"),
       el("button", { class: "btn " + (call.screenOn ? "primary" : ""), onclick: toggleScreen }, call.screenOn ? "🛑 Stop sharing" : "🖥️ Share screen"),
       el("button", { class: "btn", onclick: addToCallDialog }, "➕ Add"),
       el("button", { class: "btn danger", onclick: () => callHangup() }, "📞 Hang up"),

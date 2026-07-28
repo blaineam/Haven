@@ -147,6 +147,28 @@ final class WebRTCCall: NSObject {
         super.init()
         pc.delegate = self
         pc.add(audioTrack, streamIds: ["stream0"])
+        // Establish the VIDEO m-line NOW, disabled — do not wait for the camera to be switched on.
+        //
+        // Adding a track mid-call adds an m-line mid-call, and the re-offer that carries it can
+        // present its m-lines in a different order than the one already negotiated. WebRTC refuses
+        // that outright — "The order of m-lines in subsequent offer doesn't match order from
+        // previous offer/answer" — and the peer connection dies: ICE goes DISCONNECTED → CLOSED, the
+        // far end hangs up, and the call ends itself a minute in with no explanation. Android now
+        // publishes its video track up front for the same reason, so an asymmetric setup here is
+        // exactly what produced the mismatch.
+        //
+        // Creating both m-lines at construction makes the session shape FIXED for the call's
+        // lifetime: turning the camera on or off flips `isEnabled` on an existing sender, which
+        // needs no renegotiation at all. It also makes enabling video instant rather than a round
+        // trip. `startVideo()` still creates the capturer on demand — only the track and its m-line
+        // are pre-established.
+        let vSource = WebRTCCall.factory.videoSource()
+        let vTrack = WebRTCCall.factory.videoTrack(with: vSource, trackId: "video0")
+        vTrack.isEnabled = false
+        videoSource = vSource
+        videoTrack = vTrack
+        pc.add(vTrack, streamIds: ["stream0"])
+        tuneVideoSender(trackId: vTrack.trackId, maxBitrateBps: 1_200_000)
     }
 
     // MARK: Offer / answer
@@ -271,10 +293,29 @@ final class WebRTCCall: NSObject {
 
     // MARK: Video (toggled mid-call)
 
+    /// Build the camera capturer for an existing video source. Split out of [startVideo] so the
+    /// pre-established track (created in init, before any camera exists) can bring capture up later
+    /// without re-adding a track — adding one mid-call is what reorders m-lines and kills the call.
+    private func buildCapturer(for source: RTCVideoSource?) {
+        guard let source else { return }
+        #if targetEnvironment(macCatalyst) || os(macOS)
+        let proxy = RotatingVideoProxy(source: source)
+        captureProxy = proxy
+        capturer = RTCCameraVideoCapturer(delegate: proxy)
+        #else
+        capturer = RTCCameraVideoCapturer(delegate: source)
+        #endif
+    }
+
     func startVideo() {
-        // Re-enabling after a stop: the track still exists but stopVideo() tore down the capture
-        // session, so just flipping isEnabled gives a live track with no frames. Restart capture.
-        guard videoTrack == nil else { videoTrack?.isEnabled = true; startCapture(); return }
+        // The track and its m-line are created at construction (see init), so the common path is
+        // simply: enable it and start the camera. No track add, no renegotiation, no m-line change.
+        if let existing = videoTrack {
+            existing.isEnabled = true
+            if capturer == nil { buildCapturer(for: videoSource) }
+            startCapture()
+            return
+        }
         let source = WebRTCCall.factory.videoSource()
         let track = WebRTCCall.factory.videoTrack(with: source, trackId: "video0")
         #if targetEnvironment(macCatalyst) || os(macOS)

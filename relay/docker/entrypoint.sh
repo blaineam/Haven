@@ -49,10 +49,17 @@ if [ -z "${HAVEN_RELAY_HTTP_URL:-}" ] \
   && [ -z "${HAVEN_RELAY_TUNNEL_TOKEN:-}" ] \
   && [ "${HAVEN_RELAY_NO_TUNNEL:-0}" != "1" ] \
   && command -v cloudflared >/dev/null 2>&1; then
-  echo "▸ starting free Cloudflare Quick Tunnel → http://127.0.0.1:8674 …"
+  echo "▸ starting free Cloudflare Quick Tunnel → http://127.0.0.1:8675 (path proxy) …"
   : >"$CF_LOG"
-  # Media only on free origin (one hostname per quick tunnel). DERP can use path proxy later.
-  cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8674 \
+  # Point at the PATH PROXY (8675), not the media server (8674).
+  #
+  # A quick tunnel gives exactly one hostname, which is why this used to expose media alone — but
+  # the path proxy is what solves that: it fans one origin out to media (/k/ /l/ /t/), the iroh DERP
+  # fabric (/relay /derp /ping) and the call-media hairpin (/webrtc/hairpin). Tunnelling straight to
+  # 8674 published media and NOTHING else, so every client saw /webrtc/hairpin 404 and had no
+  # reachable fabric — the call fallback path could never work on any platform, and it looked like a
+  # client bug on whichever platform happened to be under test.
+  cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8675 \
     >>"$CF_LOG" 2>&1 &
   CF_PID=$!
   # Scrape https://….trycloudflare.com (up to ~45s)

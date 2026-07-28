@@ -45,7 +45,7 @@ object DeviceKeyStore {
     /** A friendly label for this device (shown in "Authorized devices"). */
     val deviceName: String get() = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
 
-    fun clear() { runCatching { prefs.edit().clear().apply() } }
+    fun clear() { runCatching { prefs.edit().clear().commit() } }
 }
 
 /** This device's account-signed credential (proof it's authorized), stored once enrollment grants it. */
@@ -65,7 +65,7 @@ object DeviceCredentialStore {
         authorized.value = true
     }
     fun isAuthorized(): Boolean = prefs.contains(KEY)
-    fun clear() { prefs.edit().remove(KEY).apply(); authorized.value = false }
+    fun clear() { prefs.edit().remove(KEY).commit(); authorized.value = false }
     fun refresh() { authorized.value = isAuthorized() }
 }
 
@@ -221,5 +221,5 @@ object DeviceRosterManager {
         }
     }
 
-    fun clear() { runCatching { prefs.edit().clear().apply() }; version = 0u; primaryHex = ""; entries.clear(); revoked.clear(); rebuild() }
+    fun clear() { runCatching { prefs.edit().clear().commit() }; version = 0u; primaryHex = ""; entries.clear(); revoked.clear(); rebuild() }
 }

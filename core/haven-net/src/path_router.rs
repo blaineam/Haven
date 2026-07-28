@@ -410,20 +410,91 @@ async fn proxy_to(client: &mut TcpStream, head: &[u8], backend: &str) -> Result<
         Ok::<(), std::io::Error>(())
     };
     let u2c = async {
+        // Force `Connection: close` onto the RESPONSE before it reaches cloudflared.
+        //
+        // This hop serves exactly one request per TCP connection and then closes. The existing
+        // `Connection: close` is on the head we send UPSTREAM, which only tells the backend not to
+        // keep alive — cloudflared never sees it. What cloudflared sees is the backend's own
+        // response, which under HTTP/1.1 means keep-alive by default, so it pools the socket and
+        // sends the next request down a connection we have already hung up:
+        //
+        //   ERR ... write tcp ...->127.0.0.1:8675: write: broken pipe
+        //   ERR ... read tcp ...->127.0.0.1:8675: use of closed network connection
+        //   ERR ... dest=.../webrtc/hairpin type=ws error="...: EOF"
+        //
+        // Media requests retried and mostly survived it, which is why this looked like flaky
+        // fetching rather than a protocol bug. A WebSocket upgrade cannot retry — it just fails,
+        // and the hairpin never opened from outside the LAN even once the route existed.
+        let mut head = Vec::with_capacity(1024);
         let mut buf = [0u8; 16 * 1024];
+        let mut head_done = false;
         loop {
             let n = ur.read(&mut buf).await?;
             if n == 0 {
+                if !head_done && !head.is_empty() {
+                    cw.write_all(&head).await?;   // headerless/partial response — pass it through
+                }
                 let _ = cw.shutdown().await;
                 break;
             }
-            cw.write_all(&buf[..n]).await?;
+            if head_done {
+                cw.write_all(&buf[..n]).await?;
+                continue;
+            }
+            head.extend_from_slice(&buf[..n]);
+            let Some(end) = head.windows(4).position(|w| w == b"\r\n\r\n") else {
+                // Cap the head we will buffer; beyond that, stream it as-is rather than grow.
+                if head.len() > 64 * 1024 {
+                    cw.write_all(&head).await?;
+                    head_done = true;
+                    head.clear();
+                }
+                continue;
+            };
+            let body_at = end + 4;
+            let rewritten = force_close_on_response(&head[..body_at]);
+            cw.write_all(&rewritten).await?;
+            if body_at < head.len() {
+                cw.write_all(&head[body_at..]).await?;
+            }
+            head_done = true;
+            head.clear();
         }
         Ok::<(), std::io::Error>(())
     };
     // Finish both directions; Connection: close on the rewritten head limits keep-alive reuse.
     let _ = tokio::join!(c2u, u2c);
     Ok(())
+}
+
+/// Strip hop-by-hop keep-alive from a RESPONSE head and state `Connection: close`.
+///
+/// A 101 Switching Protocols response is left ALONE: its `Connection: Upgrade` is what makes the
+/// WebSocket handshake valid, and rewriting it to `close` would break the very path this fix exists
+/// to enable.
+fn force_close_on_response(head: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8_lossy(head);
+    let mut lines = text.split("\r\n");
+    let Some(status) = lines.next() else { return head.to_vec() };
+    if status.contains(" 101") {
+        return head.to_vec();
+    }
+    let mut out = String::with_capacity(text.len() + 24);
+    out.push_str(status);
+    out.push_str("\r\n");
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("connection:") || lower.starts_with("keep-alive:") {
+            continue;
+        }
+        out.push_str(line);
+        out.push_str("\r\n");
+    }
+    out.push_str("Connection: close\r\n\r\n");
+    out.into_bytes()
 }
 
 /// Adjust request head for a single-origin reverse proxy hop.

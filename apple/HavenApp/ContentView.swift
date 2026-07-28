@@ -272,6 +272,32 @@ struct AdvancedView: View {
     @State private var report: SelfTestReport?
     @State private var runCount = 0
     @State private var showResetConfirm = false
+    @State private var forceHairpin = CallManager.forceHairpin
+
+    /// Force every call onto the WebSocket media relay, even when ICE connects fine. Shown ONLY when
+    /// the app was launched with `DEBUG=1` in its environment (see `CallManager.debugEnabled`).
+    ///
+    /// The hairpin only engages on networks where a direct path is impossible, so on any network
+    /// that works it never runs — which means the join, the framing, the audio bridge and the video
+    /// decode all ship untested. This makes it reachable on a healthy network. It is a genuine
+    /// downgrade (media takes a longer path through the relay), so it says so and defaults off.
+    private var forceHairpinCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(isOn: $forceHairpin) {
+                Label("Force call relay (testing)", systemImage: "arrow.triangle.branch")
+                    .font(.subheadline.weight(.medium))
+            }
+            .onChange(of: forceHairpin) { _, v in
+                CallManager.forceHairpin = v
+                HavenLog.call("forceHairpin set to \(v)")
+            }
+            Text("Sends call audio and video through the relay instead of peer-to-peer, even when a "
+                 + "direct connection works. For testing the fallback path — leave this off.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .havenGlass(in: RoundedRectangle(cornerRadius: 16))
+    }
 
     var body: some View {
         ZStack {
@@ -280,6 +306,7 @@ struct AdvancedView: View {
                 VStack(spacing: 20) {
                     detailsCard
                     privacyCheckCard
+                    if CallManager.debugEnabled { forceHairpinCard }
                     NavigationLink { ConnectionView() } label: {
                         HStack {
                             Label("Connection", systemImage: "antenna.radiowaves.left.and.right")

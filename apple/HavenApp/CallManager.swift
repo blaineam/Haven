@@ -155,6 +155,11 @@ final class CallManager: NSObject, ObservableObject {
     /// Invites older than this (per the sender's frame-21 timestamp) never start a ring — the
     /// caller stopped dialing long ago. Generous enough to absorb ordinary clock skew.
     private static let inviteMaxAgeSecs: TimeInterval = 180
+    /// How long "this session already ended" is remembered. MUST outlive [inviteMaxAgeSecs]: a
+    /// caller retransmits its invite and the relay can deliver one late, so the same session id
+    /// keeps arriving. At 45s the tombstone expired ~135s before an invite stopped being accepted,
+    /// so a retransmit found nothing suppressing it and re-rang a call the user had already ended.
+    private static let endedTombstoneSecs: TimeInterval = inviteMaxAgeSecs + 30
     /// Sessions that already ended locally (declined / hung up / timed out / completed), with when.
     /// A caller retransmits the invite every 2.5s and relay hops can replay copies late — none of
     /// those may re-ring a session we've already left.
@@ -194,7 +199,32 @@ final class CallManager: NSObject, ObservableObject {
     private var useCallKit: Bool { false }   // native macOS: in-app flow drives everything
     #endif
 
+    /// DEBUG/TEST ONLY: relay call media over the hairpin even when ICE is perfectly healthy.
+    ///
+    /// The hairpin is the fallback for networks where ICE cannot connect at all — double-CGNAT,
+    /// locked-down corporate wifi. If every network you own works, the fallback never engages, so
+    /// the whole path (join, framing, audio bridge, video decode, teardown) is untestable in
+    /// practice and ships unproven. This forces it: the race below fires immediately instead of
+    /// after a grace period, and ICE recovery does not stand it down. Settings → toggle; off by
+    /// default and never persisted anywhere a normal user would meet it.
+    /// Gated on launching with `DEBUG=1` in the environment, so it is invisible — and INERT —
+    /// during normal use.
+    ///
+    /// The gate is on the GETTER, not just the UI. Hiding only the toggle would leave a stored
+    /// `true` from a previous test session quietly relaying every call through the WebSocket path
+    /// forever, with no control anywhere to turn it back off. Reading the flag through the same
+    /// condition that shows it means a forgotten switch cannot outlive the debug launch that set it.
+    static var debugEnabled: Bool { ProcessInfo.processInfo.environment["DEBUG"] == "1" }
+
+    static var forceHairpin: Bool {
+        get { debugEnabled && UserDefaults.standard.bool(forKey: "haven.debug.forceHairpin") }
+        set { UserDefaults.standard.set(newValue, forKey: "haven.debug.forceHairpin") }
+    }
+
     private var myHex: String { FeedStore.shared.myNodeHex }
+    /// This DEVICE's node id — distinct from the account id above, and the id a device-transport peer
+    /// is dialed by. Needed wherever we must not treat ourselves as a callable participant.
+    private var myDeviceHex: String { FeedStore.shared.myDeviceNodeHex }
     private var myName: String {
         let n = ProfileStore.shared.displayName
         return n.isEmpty ? "Someone" : n
@@ -246,7 +276,17 @@ final class CallManager: NSObject, ObservableObject {
             return
         }
         // Never dial blocked people (defense in depth — circle calls also pre-filter removed members).
-        let invitees = others.filter { !$0.isEmpty && $0 != myHex && !ConnectionsStore.shared.isBlocked($0) }
+        // Exclude BOTH of our own ids, case-insensitively. `myHex` is the ACCOUNT id, but a
+        // participant list can name a DEVICE id — that is the id a device-transport peer is actually
+        // dialed by — and filtering only the account meant we invited ourselves: the call bounced
+        // straight back and this phone rang for its own outgoing call. `dialTargets` has always
+        // excluded both (`mineAcct`/`mineDev`); this filter never did. Case matters too, for the same
+        // reason it did in the history opt-out: hex arrives here from sources that disagree on case,
+        // so an exact `!=` silently fails to match.
+        let mineIds: Set<String> = [myHex.lowercased(), myDeviceHex.lowercased()].filter { !$0.isEmpty }.reduce(into: Set()) { $0.insert($1) }
+        let invitees = others.filter {
+            !$0.isEmpty && !mineIds.contains($0.lowercased()) && !ConnectionsStore.shared.isBlocked($0)
+        }
         guard !invitees.isEmpty else {
             HavenLog.call("startCall IGNORED — no dialable invitees from \(others.count) participant(s)")
             return
@@ -262,7 +302,21 @@ final class CallManager: NSObject, ObservableObject {
         let action = CXStartCallAction(call: uuid, handle: CXHandle(type: .generic, value: name))
         action.isVideo = false
         controller.request(CXTransaction(action: action)) { [weak self] err in
-            if err != nil { Task { @MainActor in self?.teardown() } }
+            if err != nil { Task { @MainActor in self?.teardown("CXStartCall failed") } }
+        }
+        // Watchdog — the last of the swallowed-CallKit failures, and the most damaging.
+        //
+        // An outgoing call sends its invites from `beginOutgoing`, and the ONLY caller of that is
+        // `provider(_:perform: CXStartCallAction)`. A transaction reported as successful whose
+        // provider callback never arrives therefore rings nobody at all: no error to catch, no
+        // teardown, just "Calling…" forever while the callee's phone stays silent. Mute and Answer
+        // failed the same way and read as dead buttons; here it reads as the other person ignoring
+        // you. `beginOutgoing` is idempotent, so the provider firing late is harmless.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard let self, self.active, self.connecting, !self.outgoingBegun else { return }
+            HavenLog.call("CallKit never started the call 1.5s after the tap — dialing directly")
+            self.beginOutgoing()
         }
         #endif
     }
@@ -274,7 +328,33 @@ final class CallManager: NSObject, ObservableObject {
 
     /// Fired by CXStartCallAction: send the group invite to everyone + ONE push each, then keep
     /// retransmitting the iroh invite until somebody answers.
+    /// Hold the screen awake ONLY while a call is genuinely up — derived from state, never latched.
+    ///
+    /// This used to be a bare `isIdleTimerDisabled = true` in `startMesh` paired with a `= false` in
+    /// `teardown`. That is a latch, and it survives every way a call can end WITHOUT a clean
+    /// teardown — a crash mid-call, a wedged `inCall`, a stale hangup that tore down some other
+    /// session. Miss the release once and the phone never sleeps again for the rest of the app's
+    /// life, which reads as "my screen won't turn off" long after the call is forgotten.
+    ///
+    /// Deriving it from `active` means the worst case is one stale assertion until the next state
+    /// change, instead of a permanent one.
+    func syncIdleTimer() {
+        #if !os(macOS)
+        let shouldHold = active
+        if UIApplication.shared.isIdleTimerDisabled != shouldHold {
+            UIApplication.shared.isIdleTimerDisabled = shouldHold
+            HavenLog.call("idle timer \(shouldHold ? "DISABLED (call up)" : "restored (no call)")")
+        }
+        #endif
+    }
+
+    /// True once [beginOutgoing] has actually run for the current call — so the CallKit provider and
+    /// the watchdog below cannot both send the invites.
+    private var outgoingBegun = false
+
     private func beginOutgoing() {
+        guard !outgoingBegun else { HavenLog.call("beginOutgoing ignored — already dialing"); return }
+        outgoingBegun = true
         // The ONLY place a call push is sent. If this never logs, the callee was never rung — no
         // amount of looking at the worker or APNs will explain it, because nothing was ever sent.
         HavenLog.call("beginOutgoing — \(invitees().count) invitee(s), callKit=\(useCallKit) session=\(sessionId.prefix(8))")
@@ -469,7 +549,7 @@ final class CallManager: NSObject, ObservableObject {
         provider.reportNewIncomingCall(with: uuid, update: update) { [weak self] err in
             Task { @MainActor in
                 guard let self else { return }
-                if err != nil { self.teardown() } else { self.ringing = true }
+                if err != nil { self.teardown("reportIncoming failed") } else { self.ringing = true }
             }
         }
         #endif
@@ -495,7 +575,7 @@ final class CallManager: NSObject, ObservableObject {
             provider.reportCall(with: uuid, endedAt: nil, reason: .unanswered)
         }
         #endif
-        teardown()
+        teardown("ring timeout — unanswered")
         NotificationManager.shared.notify(
             title: "Missed call",
             body: who.isEmpty ? "You missed a call" : "You missed a call from \(who)",
@@ -508,7 +588,8 @@ final class CallManager: NSObject, ObservableObject {
     /// (addToCall reuses the session id) — rings normally once the burst is over.
     private func recentlyEnded(_ sid: String) -> Bool {
         guard let endedAt = endedSessions[sid] else { return false }
-        return Date().timeIntervalSince(endedAt) < 45
+        // Must OUTLIVE `inviteMaxAgeSecs` — see the note on the prune below.
+        return Date().timeIntervalSince(endedAt) < Self.endedTombstoneSecs
     }
 
     // MARK: - Mac in-app ringing (no CallKit)
@@ -569,7 +650,40 @@ final class CallManager: NSObject, ObservableObject {
         reallyAccept(); return
         #else
         guard useCallKit, let uuid = callUUID else { reallyAccept(); return }
-        controller.request(CXTransaction(action: CXAnswerCallAction(call: uuid))) { _ in }
+        // Ask CallKit FIRST, and fall back on a watchdog — do NOT pick up locally straight away.
+        //
+        // Mute could be applied locally with no ceremony, but answering cannot: CallKit owns the
+        // audio session, and `reallyAccept` → `startMesh` brings audio up expecting that session to
+        // be active. Jumping the gun there takes the call down. So keep CallKit's ordering on the
+        // normal path, and only act ourselves if it goes silent — which is the failure that left
+        // this button dead: the transaction reports success, `provider(_:perform:)` is never
+        // invoked, so there is neither an error to catch nor a callback to answer in.
+        HavenLog.call("answer tapped → asking CallKit")
+        controller.request(CXTransaction(action: CXAnswerCallAction(call: uuid))) { [weak self] err in
+            guard let err else { return }
+            HavenLog.call("CallKit refused answer: \(err.localizedDescription) — accepting directly")
+            Task { @MainActor in self?.reallyAccept() }
+        }
+        // Watchdog: if CallKit neither refused nor picked up, the tap must still mean something.
+        //
+        // Taking over means TAKING OVER. Answering locally while CallKit still holds the call in a
+        // ringing state leaves the system ringtone going for a call we have already answered, and —
+        // worse — CallKit never activates the audio session, so the call reports itself connected
+        // and carries no media at all. Retire its copy of the call first (`answeredElsewhere` is
+        // precisely this situation: the call was picked up somewhere other than CallKit's UI), then
+        // bring our own audio up, which `CallMediaBridge` now does by activating the session itself.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard let self, self.ringing, !self.inCall else { return }
+            HavenLog.call("CallKit never answered 1.5s after the tap — retiring its call and accepting directly")
+            #if !targetEnvironment(macCatalyst) && !os(macOS)
+            if let provider = self.provider, let uuid = self.callUUID {
+                provider.reportCall(with: uuid, endedAt: Date(), reason: .answeredElsewhere)
+            }
+            self.callUUID = nil   // CallKit no longer owns this call — later mute/end act locally
+            #endif
+            self.reallyAccept()
+        }
         #endif
     }
     func decline() {
@@ -577,13 +691,23 @@ final class CallManager: NSObject, ObservableObject {
         reallyEnd(); return
         #else
         guard useCallKit, let uuid = callUUID else { reallyEnd(); return }
-        controller.request(CXTransaction(action: CXEndCallAction(call: uuid))) { _ in }
+        // Same reasoning as `accept()`: a swallowed refusal leaves Decline dead, which is worse —
+        // the phone keeps ringing at someone who is actively trying to stop it.
+        controller.request(CXTransaction(action: CXEndCallAction(call: uuid))) { [weak self] err in
+            guard let err else { return }
+            HavenLog.call("CallKit refused end: \(err.localizedDescription) — ending directly")
+            Task { @MainActor in self?.reallyEnd() }
+        }
         #endif
     }
 
     /// Fired by CXAnswerCallAction (system UI or our button): really pick up. Accept-frame goes to
     /// EVERY other participant so they know to start dialing us; then we bring up media + mesh.
     private func reallyAccept() {
+        // Idempotent: `accept()` now picks up IMMEDIATELY and CallKit's provider echo lands here
+        // again a moment later. Without this guard that echo would re-send every ACCEPT frame and
+        // restart the mesh mid-setup.
+        guard !inCall else { HavenLog.call("reallyAccept ignored — already in the call"); return }
         ringTimeoutTimer?.invalidate(); ringTimeoutTimer = nil
         ringing = false; stopInAppRinging(); inCall = true
         notifyOwnDevicesHandled()   // stop my OTHER devices ringing before they can join and take the audio
@@ -637,7 +761,7 @@ final class CallManager: NSObject, ObservableObject {
         }
         HavenLog.call("call \(sid.prefix(8)) was handled on another of my devices — standing down")
         endedSessions[sid] = Date()   // a retransmitted invite must not re-ring us
-        teardown()
+        teardown("handled on another of my devices")
     }
 
     /// Caller side: a callee accepted → stop re-inviting, bring up media + dial that peer.
@@ -666,6 +790,24 @@ final class CallManager: NSObject, ObservableObject {
         guard active, payload.count >= 64 else { return }
         let from = String(data: payload.prefix(64), encoding: .utf8) ?? ""
         guard from.count == 64 else { return }
+        // GATE ON THE SESSION. The hangup frame has always carried its session id (`sendCallFrame(12,
+        // myHex + lp(sessionId))`) and this handler threw it away, acting on nothing but the sender.
+        //
+        // Hangups are retransmitted and the relay can deliver one late, so a BYE from a call that
+        // ended minutes ago still arrives — and killed whatever call happened to be running when it
+        // did. That is an outgoing call whose screen appears and vanishes at once, and a connected
+        // call that hangs itself up seemingly at random: `teardown(remote hung up)` with the far end
+        // having done nothing at all. Every other signal handler already gates on `validSession`;
+        // this one is the reason a stale frame could reach across sessions and end a live call.
+        let body = payload.subdata(in: (payload.startIndex + 64)..<payload.endIndex)
+        var off = 0
+        if let sidData = CallManager.lpRead(body, &off) {
+            let sid = String(data: sidData, encoding: .utf8) ?? ""
+            guard validSession(sid) else {
+                HavenLog.call("HANGUP IGNORED from \(from.prefix(8)) for session \(sid.prefix(8)) — ours is \(sessionId.prefix(8)) (stale/replayed frame)")
+                return
+            }
+        }
         // One peer leaving does NOT end the call for the rest — only drop that connection. The call
         // ends only when nobody else is left.
         dropPeer(from)
@@ -676,7 +818,7 @@ final class CallManager: NSObject, ObservableObject {
             #if !os(macOS)
             if let provider, let uuid = callUUID { provider.reportCall(with: uuid, endedAt: nil, reason: .remoteEnded) }
             #endif
-            teardown()
+            teardown("remote hung up")
             if missed {
                 NotificationManager.shared.notify(
                     title: "Missed call",
@@ -750,12 +892,16 @@ final class CallManager: NSObject, ObservableObject {
         guard !mediaStarted else { return }
         mediaStarted = true
         CallTones.shared.startRingback()   // keep ringing until the FIRST peer connects
-        #if !os(macOS)
-        UIApplication.shared.isIdleTimerDisabled = true
-        #endif
+        syncIdleTimer()
         configureAudioSession()
         // TCP/WSS media hairpin via path proxy (works over free Cloudflare) — pairs while ICE runs.
         CallHairpin.shared.openForRoster(sessionId: sessionId, me: myHex, others: invitees())
+        // Tell peers the camera state a call STARTS in. `broadcastCameraState` only ever fired on
+        // TOGGLE, so the opening state — camera off, because calls start audio-only — was the one
+        // state never sent. A peer that is never told renders a black tile instead of the avatar
+        // until the camera is toggled twice. Android and desktop announce on connect; this side did
+        // not, which is why an iPhone caller looked broken to everyone else.
+        broadcastCameraState(videoOn)
         for p in invitees() { connectPeerIfNeeded(p) }
         startSpeakerDetection()
     }
@@ -921,10 +1067,12 @@ final class CallManager: NSObject, ObservableObject {
                     // hairpin engaged it relayed FOREVER, encoding + decoding + pushing WebSocket
                     // frames alongside the WebRTC media that had come back. That is two full media
                     // pipelines for one call — the "iPhone got noticeably hot after a few minutes".
-                    if self.hairpinPeers.contains(peer) {
+                    if self.hairpinPeers.contains(peer), !Self.forceHairpin {
                         CallMediaBridge.shared.deactivate(remote: peer)
                         self.hairpinPeers.remove(peer)
                         HavenLog.relay("ice recovered \(peer.prefix(8)) — hairpin relay stopped")
+                    } else if self.hairpinPeers.contains(peer) {
+                        HavenLog.relay("ice recovered \(peer.prefix(8)) — STAYING on the hairpin (forceHairpin)")
                     }
                     // ICE/media path is up — audio session must be live or UI says Connected with silence.
                     #if os(iOS)
@@ -1002,11 +1150,17 @@ final class CallManager: NSObject, ObservableObject {
         // enough that a normal pairing (sub-second once candidates land) never relays at all, and
         // short enough that a failing one is talking almost immediately instead of after 30s.
         let racePeer = peer
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.directMediaGraceSecs) { [weak self] in
+        let forced = Self.forceHairpin
+        DispatchQueue.main.asyncAfter(deadline: .now() + (forced ? 0.2 : Self.directMediaGraceSecs)) { [weak self] in
             guard let self, self.peers[racePeer] != nil else { return }
+            guard !self.hairpinPeers.contains(racePeer) else { return }      // already relaying
+            if forced {
+                HavenLog.relay("forceHairpin — relaying \(racePeer.prefix(8)) over the hairpin regardless of ICE")
+                self.startHairpin(for: racePeer)
+                return
+            }
             let st = self.lastPeerState[racePeer]
             guard st != .connected, st != .completed else { return }        // direct path won
-            guard !self.hairpinPeers.contains(racePeer) else { return }      // already relaying
             HavenLog.relay("direct media not up in \(Self.directMediaGraceSecs)s — racing hairpin for \(racePeer.prefix(8))")
             self.startHairpin(for: racePeer)
         }
@@ -1173,11 +1327,23 @@ final class CallManager: NSObject, ObservableObject {
     }
 
     func toggleMute() {
-        // Route through CallKit when it's driving the call so the system mute button and ours stay
-        // in sync (otherwise the two toggles fight). CallKit echoes the change back to our
-        // CXSetMutedCallAction handler, which applies it. No CallKit on Catalyst/macOS → apply now.
-        if useCallKit { requestCallKitMuted(!muted) }
-        else { applyMuted(!muted) }
+        // APPLY FIRST, then tell CallKit — never the other way round.
+        //
+        // Routing the tap THROUGH CallKit and waiting for its echo meant the button did nothing at
+        // all whenever that echo never came. The error path was already handled; the silent case is
+        // the one that bit: `controller.request` reports success, CallKit simply never invokes
+        // `provider(_:perform: CXSetMutedCallAction)`, and `applyMuted` is therefore never reached.
+        // The mic stays live, `muted` never changes, the icon never flips, and tapping harder does
+        // nothing forever — mute is the only control that round-trips through CallKit, which is
+        // exactly why it was the only one that felt dead.
+        //
+        // Applying locally first makes the tap authoritative. The CallKit request still goes out so
+        // the system UI agrees, and its echo lands on `applyMuted` with the value we already set,
+        // which is idempotent.
+        let next = !muted
+        applyMuted(next)
+        HavenLog.call("mute tapped → \(next ? "MUTED" : "unmuted") (applied locally; syncing CallKit)")
+        if useCallKit { requestCallKitMuted(next) }
     }
 
     /// Apply a muted state to the local audio tracks. Does NOT re-notify CallKit (avoids a loop) —
@@ -1192,7 +1358,7 @@ final class CallManager: NSObject, ObservableObject {
         #if !targetEnvironment(macCatalyst) && !os(macOS)
         guard useCallKit, let uuid = callUUID else { applyMuted(m); return }
         controller.request(CXTransaction(action: CXSetMutedCallAction(call: uuid, muted: m))) { [weak self] err in
-            guard let err else { return }   // fulfilled → the provider handler applies it
+            guard let err else { return }   // fulfilled → provider handler re-applies the same value
             // CallKit REFUSED the transaction — most often because it doesn't consider this UUID an
             // active call (answered through our own UI without CallKit ever reporting it, or already
             // reported ended). Swallowing that error left the mute button doing NOTHING while every
@@ -1452,12 +1618,26 @@ final class CallManager: NSObject, ObservableObject {
         reallyEnd(); return
         #else
         guard useCallKit, let uuid = callUUID else { reallyEnd(); return }
-        controller.request(CXTransaction(action: CXEndCallAction(call: uuid))) { _ in }
+        // END LOCALLY FIRST, then tell CallKit.
+        //
+        // This had the same swallowed-error shape that made Answer and Mute feel dead — `{ _ in }`
+        // threw away the refusal — but hanging up is worse when it fails, because the user is
+        // actively trying to get OUT and the screen simply will not go away. Unlike answering, this
+        // needs nothing from CallKit first: no audio session, no ordering. So act on the tap, then
+        // let CallKit retire its copy; `reallyEnd` is guarded, so its echo is a no-op.
+        HavenLog.call("hang up tapped → ending locally, syncing CallKit")
+        reallyEnd()
+        controller.request(CXTransaction(action: CXEndCallAction(call: uuid))) { err in
+            guard let err else { return }
+            HavenLog.call("CallKit refused end: \(err.localizedDescription) — already ended locally")
+        }
         #endif
     }
 
     /// Fired by CXEndCallAction (system UI or our button): send hangup to ALL participants + tear down.
     private func reallyEnd() {
+        // Idempotent: the tap ends the call and CallKit's echo arrives here again a moment later.
+        guard active else { HavenLog.call("reallyEnd ignored — no active call"); return }
         // Declining counts as handling it: silence my other devices too, or they keep ringing after
         // I've dismissed the call here.
         if ringing && !inCall { notifyOwnDevicesHandled() }
@@ -1466,15 +1646,21 @@ final class CallManager: NSObject, ObservableObject {
             CallManager.lpAppend(&f, Data(sessionId.utf8))
             FeedStore.shared.sendCallFrame(12, f, to: p)
         }
-        teardown()
+        teardown("local hang up")
     }
 
-    private func teardown() {
+    /// Every path that ends a call funnels here. It used to do so ANONYMOUSLY, which is why a call
+    /// that "ended on its own" left nothing in the log to explain it — nine call sites, no way to
+    /// tell which one fired. The reason is required now.
+    private func teardown(_ reason: String = "unspecified") {
+        outgoingBegun = false
+        defer { syncIdleTimer() }   // after `active` is cleared, so it always restores
+        HavenLog.call("teardown(\(reason)) — active=\(active) inCall=\(inCall) ringing=\(ringing) connecting=\(connecting) peers=\(peers.count) session=\(sessionId.prefix(8))")
         // Remember the session so the caller's still-in-flight invite retransmits can't re-ring it.
         if !sessionId.isEmpty {
             endedSessions[sessionId] = Date()
             if endedSessions.count > 50 {   // prune long-expired tombstones
-                endedSessions = endedSessions.filter { Date().timeIntervalSince($0.value) < 45 }
+                endedSessions = endedSessions.filter { Date().timeIntervalSince($0.value) < Self.endedTombstoneSecs }
             }
         }
         ringTimeoutTimer?.invalidate(); ringTimeoutTimer = nil
@@ -1485,9 +1671,6 @@ final class CallManager: NSObject, ObservableObject {
         CallMediaBridge.shared.stopAll()
         hairpinPeers.removeAll()
         CallHairpin.shared.closeAll()
-        #if !os(macOS)
-        UIApplication.shared.isIdleTimerDisabled = false
-        #endif
         inviteTimer?.invalidate(); inviteTimer = nil
         if screenShareOn { ScreenShareManager.shared.stop() }
         ScreenShareManager.shared.onFrame = nil
@@ -1553,7 +1736,7 @@ final class CallManager: NSObject, ObservableObject {
 #if !os(macOS)
 extension CallManager: CXProviderDelegate {
     nonisolated func providerDidReset(_ provider: CXProvider) {
-        Task { @MainActor in self.teardown() }
+        Task { @MainActor in self.teardown("CXEndCallAction from CallKit") }
     }
     nonisolated func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
         Task { @MainActor in self.beginOutgoing(); action.fulfill() }
@@ -2177,6 +2360,15 @@ struct CallOverlay: View {
     private func callButton(_ symbol: String, on: Bool) -> some View {
         Image(systemName: symbol).font(.title3).foregroundStyle(.white).frame(width: 52, height: 52)
             .havenGlass(in: Circle(), tint: on ? Color.white.opacity(0.3) : nil)
+            // Make the WHOLE 52pt circle tappable.
+            //
+            // Without this SwiftUI hit-tests an Image against its rendered GLYPH, not its frame, so
+            // a tap only counted when it landed on the mic strokes themselves — everything else in
+            // the button, including the visible glass disc, was a dead zone. That is the "mute needs
+            // four or five taps" report: the taps were not being lost or debounced, they were
+            // missing a target far smaller than the control looks. It never reached `toggleMute()`
+            // at all — the log recorded zero taps while the user was hammering it.
+            .contentShape(Circle())
     }
 }
 

@@ -222,6 +222,7 @@ struct HavenApp: App {
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:
+                CallManager.shared.syncIdleTimer()   // never inherit a stale assertion across a resume
                 AudioCoordinator.shared.appBecameActive()   // allow playback again now we're foreground
                 // On screen → the mailbox poll stops using the aggressive idle stretch. Someone
                 // reading without tapping is not idle, they are waiting. See mailboxPollInterval.
@@ -254,6 +255,10 @@ struct HavenApp: App {
                 AudioCoordinator.shared.pauseForBackground()
                 NotificationManager.shared.scheduleRefresh()
                 BiometricGate.shared.relockAll()   // re-lock biometric circles on the way out
+                // Re-derive the screen-awake assertion. A latched `isIdleTimerDisabled` from a call
+                // that never tore down cleanly would otherwise keep the phone from sleeping for the
+                // rest of the app's life; foregrounding again re-asserts it if a call really is up.
+                CallManager.shared.syncIdleTimer()
                 SharedStore.flushSeenMailbox()     // persist the ingestion cursor NOW (survive a kill)
                 Task { await BackgroundUploader.shared.flush() }   // finish pending mailbox uploads
             default: break

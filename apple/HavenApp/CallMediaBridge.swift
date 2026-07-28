@@ -117,9 +117,30 @@ final class CallMediaBridge {
 
     // MARK: - Audio
 
+    /// How many times [startAudio] has deferred waiting for a usable input format.
+    private var audioStartAttempts = 0
+
     private func startAudio() {
         let engine = AVAudioEngine()
         let input = engine.inputNode
+
+        // The audio session must be LIVE before we ask the input node anything.
+        //
+        // `outputFormat(forBus:)` answers 0 Hz / 0 channels while the session is inactive, and
+        // `installTap(onBus:format:)` reacts to that by raising an Objective-C exception —
+        // "required condition is false: IsFormatSampleRateAndChannelCountValid(format)" — which no
+        // Swift `try?` can catch, so it terminates the app outright. That is the crash on answering
+        // a call: the hairpin activates its audio the moment media is needed, which is BEFORE
+        // CallKit has activated the session, so the format it reads is empty.
+        //
+        // Ask for the session, then verify the format is real, and defer rather than proceed with a
+        // format we already know is invalid.
+        #if !os(macOS)
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playAndRecord, mode: .voiceChat,
+                                 options: [.allowBluetooth, .defaultToSpeaker])
+        try? session.setActive(true, options: [])
+        #endif
         // Hardware echo cancellation / noise suppression / AGC — the same processing WebRTC uses.
         // Enabling it on the input also enables it on the output, so the player node below becomes
         // the echo reference. Without this a speaker call echoes badly.
@@ -129,6 +150,22 @@ final class CallMediaBridge {
         engine.connect(player, to: engine.mainMixerNode, format: wireFormat)
 
         let hwFormat = input.outputFormat(forBus: 0)
+        guard hwFormat.sampleRate > 0, hwFormat.channelCount > 0 else {
+            // Still not ready. Retry on a short bounded schedule instead of crashing or giving up:
+            // CallKit usually activates the session within a few hundred ms of the answer.
+            audioStartAttempts += 1
+            guard audioStartAttempts <= 20 else {
+                HavenLog.call("hairpin audio: input format never became valid — relaying video only")
+                return
+            }
+            HavenLog.call("hairpin audio: input format not ready (\(hwFormat.sampleRate) Hz, \(hwFormat.channelCount) ch) — retry \(audioStartAttempts)/20")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                guard let self, !self.activePeers.isEmpty, self.audioEngine == nil else { return }
+                self.startAudio()
+            }
+            return
+        }
+        audioStartAttempts = 0
         captureConverter = AVAudioConverter(from: hwFormat, to: wireFormat)
         input.installTap(onBus: 0, bufferSize: 1024, format: hwFormat) { [weak self] buf, _ in
             self?.onCapturedAudio(buf)

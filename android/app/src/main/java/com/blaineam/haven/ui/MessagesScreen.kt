@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DoneAll
@@ -386,6 +387,22 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
     var pendingMusic by remember { mutableStateOf<uniffi.haven_ffi.TrackRefFfi?>(null) }
     var showMusicDialog by remember { mutableStateOf(false) }
     var showVoice by remember { mutableStateOf(false) }
+    // In-app camera for a DM. Posts have had this since day one (CircleScreen `openCamera(true)`);
+    // a DM could only ever attach from the gallery, so capturing something to send meant leaving
+    // Haven, shooting in the system camera, coming back and picking it out of the roll.
+    var showDmCamera by remember { mutableStateOf(false) }
+    val dmCamPermission = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) { grants -> if (grants[android.Manifest.permission.CAMERA] == true) showDmCamera = true }
+    fun openDmCamera() {
+        if (androidx.core.content.ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.CAMERA
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) showDmCamera = true
+        else dmCamPermission.launch(
+            arrayOf(android.Manifest.permission.CAMERA, android.Manifest.permission.RECORD_AUDIO)
+        )
+    }
     var secretMode by remember { mutableStateOf(false) }
     var disappearSecs by remember { mutableStateOf<ULong?>(null) }
     var editingId by remember { mutableStateOf<String?>(null) }
@@ -451,8 +468,32 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
                 }
             }
 
+            // A chat opens at the NEWEST message. The list had no state at all, so it opened at the
+            // top — the oldest thing ever said — and every conversation began with a scroll down
+            // past history to find out what had just arrived.
+            val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+            // `feedVersion` also bumps when MEDIA lands, which matters here: a photo bubble is a
+            // placeholder until its bytes arrive, then grows to full height. Scrolling once on open
+            // lands correctly against the placeholder and is then pushed off the bottom as every
+            // image resolves — the thread drifts up by exactly the height the media gained. Re-anchor
+            // on the same signal that changed the heights.
+            val mediaTick by HavenNet.feedVersion
+            androidx.compose.runtime.LaunchedEffect(circleId, msgs.size, mediaTick) {
+                if (msgs.isEmpty()) return@LaunchedEffect
+                // Follow new messages only when the reader is ALREADY at the bottom. Yanking someone
+                // back down while they are reading history is worse than making them scroll.
+                val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index
+                val atBottom = last == null || last >= msgs.lastIndex - 1
+                if (!atBottom) return@LaunchedEffect
+                listState.scrollToItem(msgs.lastIndex)
+                // One more pass after layout settles: an image that finishes decoding during this
+                // frame changes its bubble's height after the scroll has already been resolved.
+                kotlinx.coroutines.delay(120)
+                listState.scrollToItem(msgs.lastIndex)
+            }
             LazyColumn(
                 Modifier.fillMaxWidth().weight(1f),
+                state = listState,
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -505,6 +546,10 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
             }
 
             Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(40.dp).clip(CircleShape).clickable { openDmCamera() },
+                    contentAlignment = Alignment.Center) {
+                    Icon(Icons.Filled.PhotoCamera, "Camera", tint = HavenTheme.pink)
+                }
                 Box(Modifier.size(40.dp).clip(CircleShape).clickable {
                     picker.launch(androidx.activity.result.PickVisualMediaRequest(
                         androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageAndVideo))
@@ -571,6 +616,18 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
         if (showMusicDialog) {
             MusicSearchSheet(onPick = { pendingMusic = it; showMusicDialog = false }, onDismiss = { showMusicDialog = false })
         }
+        if (showDmCamera) {
+            // Same capture surface as a post; the ref is stored under THIS dm: circle so the
+            // attachment seals to the conversation, then staged in the composer for review rather
+            // than sent immediately.
+            FullScreenOverlay(onDismiss = { showDmCamera = false }) {
+                StoryCameraScreen(
+                    onClose = { showDmCamera = false },
+                    storeCircle = circleId,
+                    onCaptured = { ref, _ -> pendingMedia = pendingMedia + ref; showDmCamera = false },
+                )
+            }
+        }
         if (showVoice) {
             VoiceRecorderDialog(circleId,
                 onDone = { ref -> HavenNet.sendDm(circleId, "", listOf(ref)); showVoice = false },
@@ -608,7 +665,13 @@ private fun Bubble(
                 .combinedClickable(onClick = {}, onLongClick = { showReact = true })
                 .padding(horizontal = 14.dp, vertical = 10.dp),
         ) {
-            m.media.forEach { ref ->
+            // `displayRefs`, not the raw list (iOS Messages.swift `dmMedia`). A shared image travels
+            // with companions — `thumb:<ref>:<thumb>`, `orig:`, `poster:` — which are MARKERS, not
+            // blobs. Iterating the raw list drew one tile per entry, so a single sent photo showed
+            // two stacked tiles, and the marker one span forever: there is no blob at that ref to
+            // fetch, so its spinner could never resolve. The composer path already collapsed these
+            // (line ~476); only the received bubble was left rendering them.
+            com.blaineam.haven.core.MediaVariants.displayRefs(m.media).forEach { ref ->
                 when {
                     com.blaineam.haven.core.LocalMedia.isAudio(ref) -> AudioPlayerPill(circleId, ref, contentColor = bubbleContent)
                     // Honors a flag federated by a member whose platform has an analyzer (iOS

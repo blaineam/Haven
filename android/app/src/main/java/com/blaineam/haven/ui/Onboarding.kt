@@ -6,8 +6,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -108,6 +111,14 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
         Column(
             Modifier
                 .fillMaxSize()
+                // The keyboard covered the name field completely on a 5.5" screen, so first-run
+                // typing was blind. Every OTHER text surface in the app already lifts itself
+                // (CircleScreen, MessagesScreen, Stories, StoryEditor all use imePadding) — the one
+                // screen a new user cannot avoid was the one that didn't. The scroll matters too:
+                // once the keyboard takes half the display, centred content taller than what's left
+                // has no way to be reached without it.
+                .imePadding()
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 28.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,

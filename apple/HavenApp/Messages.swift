@@ -435,6 +435,19 @@ struct DMThreadView: View {
     /// attachment row) and whichever thread. A fixed guess (76) was close enough for short 1:1 threads but
     /// left the last message sitting too low behind the composer on longer group threads.
     @State private var composerHeight: CGFloat = 76
+    /// How much of the ScrollView's bottom the floating composer actually covers, measured in GLOBAL
+    /// coordinates as (scroll view's bottom edge − composer's top edge).
+    ///
+    /// Deriving this from the composer's own height does not work, and neither does adding its
+    /// `safeAreaInsets`: a GeometryReader INSIDE the composer sits in an already-inset context and
+    /// reports a bottom inset of 0, so the correction was silently zero. Meanwhile the real overlap
+    /// is composer + home indicator + tab bar — everything between the composer's top and the bottom
+    /// of the scrollable area. Measuring both edges globally asks the layout what it actually did
+    /// instead of trying to reconstruct it, so it stays right when the tab bar, the keyboard, or a
+    /// growing composer changes any of the pieces.
+    @State private var composerCover: CGFloat = 86
+    @State private var composerTopY: CGFloat = 0
+    @State private var scrollBottomY: CGFloat = 0
     /// Is the newest message currently on screen? Drives whether an arriving message scrolls into
     /// view. Starts true because a thread opens pinned to the bottom.
     @State private var atBottom = true
@@ -507,8 +520,8 @@ struct DMThreadView: View {
                         // "scroll here" means the end of the thread, exactly, every time.
                         Color.clear.frame(height: 1)
                             .id(Self.bottomAnchor)
-                            .onAppear { atBottom = true }
-                            .onDisappear { atBottom = false }
+                            .onAppear { atBottom = true; HavenLog.sync("dm.scroll marker APPEAR → atBottom=true") }
+                            .onDisappear { atBottom = false; HavenLog.sync("dm.scroll marker DISAPPEAR → atBottom=false") }
                     }
                     .padding(16)
                 }
@@ -518,12 +531,23 @@ struct DMThreadView: View {
                 // regardless of how much history is loaded (unlike a scroll-to-anchor, which fails on a long
                 // LazyVStack because the anchor isn't rendered yet). The inset tracks the composer's MEASURED
                 // height (+ a small gap) so it's correct for every composer state and thread length.
-                .contentMargins(.bottom, composerHeight + 10, for: .scrollContent)
+                // `safeAreaInset` — NOT a hand-computed `contentMargins`.
+                //
+                // Four attempts died reconstructing this number: the composer's own height misses
+                // the home indicator; a GeometryReader inside the composer reports a zero safe-area
+                // inset because it is already inset; and measuring the two global edges samples them
+                // at different moments during the push transition, so the difference is whatever the
+                // animation happened to be doing. SwiftUI already knows the answer exactly — it did
+                // the layout — so hand it the composer and let it reserve the space, including the
+                // tab bar and home indicator beneath it. The resting position is then correct by
+                // construction rather than by arithmetic that has to be re-derived every time the
+                // chrome changes.
+                .safeAreaInset(edge: .bottom, spacing: 0) { composer }
                 .defaultScrollAnchor(.bottom)
                 .scrollDismissesKeyboard(.interactively)
                 // postTick moves for OUR OWN send/edit/delete. Sending is an explicit "I want to see
                 // this" — always ride to the bottom for it.
-                .onChange(of: store.postTick) { scrollToBottom(proxy); fetchMissingThreadMedia() }
+                .onChange(of: store.postTick) { scrollToBottom(proxy, why: "postTick"); fetchMissingThreadMedia() }
                 // postTick doesn't move on receive, so watch the message count, which does when one
                 // lands — that's also what keeps arriving media getting fetched.
                 .onChange(of: ordered.count) {
@@ -531,7 +555,8 @@ struct DMThreadView: View {
                     // A message arriving while you are reading should be READABLE without you having
                     // to scroll for it — but only if you were at the bottom already. Yanking someone
                     // back down while they are reading history is worse than making them scroll.
-                    if atBottom { scrollToBottom(proxy) }
+                    if atBottom { scrollToBottom(proxy, why: "count->\(ordered.count)") }
+                    else { HavenLog.sync("dm.scroll count->\(ordered.count) SKIPPED (atBottom=false)") }
                 }
                 // DELIBERATELY NOT watching `store.items`. That is the ACTIVE CIRCLE's feed — it has
                 // nothing to do with this thread, and it changes on every sync tick, every reaction,
@@ -545,7 +570,7 @@ struct DMThreadView: View {
                 // The composer grew or shrank (attachment tray, edit banner, a wrapping draft) and the
                 // content inset moved with it — re-pin so the newest bubble stays put. Only when we
                 // were AT the bottom: attaching a photo while reading history must not yank you down.
-                .onChange(of: composerHeight) { if atBottom { scrollToBottom(proxy, animated: false) } }
+                .onChange(of: composerHeight) { if atBottom { scrollToBottom(proxy, animated: false, why: "composerH=\(Int(composerHeight))") } else { HavenLog.sync("dm.scroll composerH changed SKIPPED (atBottom=false)") } }
                 // On open, `defaultScrollAnchor(.bottom)` gets short threads right, but a LONG (often group)
                 // thread's lazy content isn't measured yet, so it can rest too low behind the composer.
                 // Force the newest bubble into view once after the list settles — non-animated, twice, to
@@ -562,27 +587,40 @@ struct DMThreadView: View {
                     // The bottom is only the right default when nothing specific was asked for.
                     if let target = DMDraftStore.shared.takeScrollTarget(circleId),
                        ordered.contains(where: { $0.id == target }) {
+                        // ...unless the named message is the NEWEST one, which is the common case
+                        // for a notification tap. Centering the last bubble parks it mid-screen with
+                        // half a view of dead space beneath it — it reads as the thread having
+                        // scrolled up and left the latest message stranded low. Centering is only
+                        // right when there is genuinely more conversation below to show.
+                        if ordered.last?.id == target {
+                            scrollToBottom(proxy, animated: false, why: "open.target-is-last")
+                            DispatchQueue.main.async { scrollToBottom(proxy, animated: false, why: "open.target-is-last.async") }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                                scrollToBottom(proxy, animated: false, why: "open.target-is-last.late")
+                            }
+                            return
+                        }
                         proxy.scrollTo(target, anchor: .center)
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                             proxy.scrollTo(target, anchor: .center)
                         }
                         return
                     }
-                    scrollToBottom(proxy, animated: false)
-                    DispatchQueue.main.async { scrollToBottom(proxy, animated: false) }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { scrollToBottom(proxy, animated: false) }
+                    // NOTHING on open. `defaultScrollAnchor(.bottom)` already opens at the end of
+                    // the thread, and now that `safeAreaInset` owns the composer's space it lands in
+                    // the right place on its own.
+                    //
+                    // The three manual scrolls here are what made it "open correctly and then shift
+                    // up": the last of them fired 0.25s later, after the inset had settled, and
+                    // re-resolved `scrollTo(anchor: .bottom)` against a layout that had already
+                    // moved — dragging the thread off the resting position SwiftUI had just put it
+                    // in. They existed to paper over the hand-computed inset being wrong at open;
+                    // with the inset correct they have nothing left to fix and only cause the jump.
+                    HavenLog.sync("dm.scroll open — leaving the resting position to defaultScrollAnchor(.bottom)")
                 }
             }
-            // Floating input — no background slab; content scrolls beneath it (matches the feed).
-            // Measure its height so the ScrollView's bottom inset can track it exactly.
-            VStack { Spacer(); composer
-                .background(GeometryReader { geo in
-                    Color.clear.preference(key: DMComposerHeightKey.self, value: geo.size.height)
-                })
-            }
-            .onPreferenceChange(DMComposerHeightKey.self) { h in
-                if h > 0, abs(h - composerHeight) > 1 { composerHeight = h }
-            }
+            // (The composer lives in the ScrollView's `safeAreaInset` above — it must NOT also be
+            // overlaid here, or it would be drawn twice and reserve space twice.)
             }   // threadKnown
         }
         .havenInlineNavTitle()
@@ -916,7 +954,16 @@ struct DMThreadView: View {
                         }
                     }
                     .padding(.horizontal, 4)
+                    // Claim the full width and pin the tiles to the LEADING edge. The ScrollView
+                    // sizes itself to its content, so with one or two attachments it was narrower
+                    // than the composer and its parent centred it — a single photo floated in the
+                    // middle of the tray, and adding more made them drift outward from the centre
+                    // instead of filling from the left and scrolling. Chips read as a queue; a queue
+                    // starts at the beginning.
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .defaultScrollAnchor(.leading)
             }
             HStack(spacing: 10) {
                 Menu {
@@ -1035,11 +1082,41 @@ struct DMThreadView: View {
     /// targets THIS, never the last bubble — see the marker's own comment for why.
     fileprivate static let bottomAnchor = "haven.dm.bottom"
 
-    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
+    /// Both edges are reported independently and in either order, so fold them here.
+    private func recomputeCover() {
+        guard composerTopY > 0, scrollBottomY > 0 else {
+            HavenLog.sync("dm.scroll cover NOT READY composerTop=\(Int(composerTopY)) scrollBottom=\(Int(scrollBottomY))")
+            return
+        }
+        let cover = scrollBottomY - composerTopY
+        // Sanity-bound it: a mid-transition layout can briefly report nonsense, and a wild inset is
+        // far more visible than a slightly stale one.
+        guard cover > 0, cover < 400, abs(cover - composerCover) > 1 else { return }
+        composerCover = cover
+        HavenLog.sync("dm.scroll composerCover=\(Int(cover)) (scrollBottom=\(Int(scrollBottomY)) composerTop=\(Int(composerTopY)))")
+    }
+
+    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true, why: String = "?") {
+        HavenLog.sync("dm.scroll scrollToBottom(\(why)) animated=\(animated) count=\(ordered.count) composerH=\(Int(composerHeight)) atBottom=\(atBottom)")
+        scrollToBottomImpl(proxy, animated: animated)
+    }
+
+    private func scrollToBottomImpl(_ proxy: ScrollViewProxy, animated: Bool = true) {
         // Keep the newest message pinned to the bottom on a new message / on open. The bottom content
         // inset (above) keeps it clear of the composer; here we just ensure the end of the thread is in
         // view. Non-animated on the initial settle so a long thread snaps into place without a jump.
         guard !ordered.isEmpty else { return }
+        // We are, by construction, at the bottom after this — say so rather than waiting for the
+        // marker's `onAppear` to say it for us.
+        //
+        // `atBottom` was driven ONLY by a 1pt marker at the end of a lazy stack: `onDisappear` set
+        // it false, `onAppear` set it true. Lazy re-layout — media landing and changing a bubble's
+        // height, the composer growing — can tear that marker down without ever bringing it back,
+        // and then `atBottom` is stuck false forever: arriving messages stop scrolling into view and
+        // the thread appears to abandon the bottom. Scrolling by hand re-instantiates the marker,
+        // which is why nudging it "fixed" itself. A programmatic scroll to the end is the one moment
+        // we know the answer without asking the view.
+        atBottom = true
         if animated { withAnimation { proxy.scrollTo(Self.bottomAnchor, anchor: .bottom) } }
         else { proxy.scrollTo(Self.bottomAnchor, anchor: .bottom) }
     }
@@ -1047,6 +1124,19 @@ struct DMThreadView: View {
 
 /// Reports the floating DM composer's measured height up to the thread view (drives the ScrollView's
 /// bottom inset so the newest bubble always rests just above the input).
+private struct DMComposerTopKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    /// `max`, NOT "last wins". Every view in the subtree contributes the default (0), so a
+    /// last-wins reduce let those zeros clobber the composer's real y — the cover was never
+    /// computed and the inset silently stayed at its default.
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+private struct DMScrollBottomKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
 private struct DMComposerHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }

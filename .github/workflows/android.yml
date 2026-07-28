@@ -147,6 +147,7 @@ jobs:
       # the repo variable PLAY_TRACK overrides it; a manual workflow_dispatch may pick any track via
       # the play_track input. Precedence: dispatch input > PLAY_TRACK variable > "internal".
       #   • Routine tag, no variable set        → internal            (never accidentally prod)
+      #   • Routine tag (no dispatch input, no PLAY_TRACK) → internal AND alpha, both, every time
       #   • workflow_dispatch play_track=alpha   → alpha  (CLOSED testing — this is the closed track)
       #   • workflow_dispatch play_track=beta     → beta   (OPEN testing — public opt-in link)
       #
@@ -212,13 +213,32 @@ jobs:
           else
             STATUS="completed"; USERFRACTION=""
           fi
+          # COMPANION TRACK: a routine release goes to internal AND closed testing, not one or the
+          # other. `internal` is the fast lane for our own devices; `alpha` is Play's CLOSED track,
+          # where the actual testers are. Shipping to only one meant testers either got nothing or
+          # had to be served by a second, manual dispatch — and two runs racing the same versionCode
+          # is exactly how v1.1.4-rc.23's AAB failed to land (run 30019665798). Doing both in ONE
+          # run, sequentially, removes that race.
+          #
+          # An EXPLICIT dispatch choice stays single-track: asking for production means production,
+          # not production plus a surprise. Same for an explicit PLAY_TRACK variable.
+          EXTRA=""
+          if [ "$EVENT" != "workflow_dispatch" ] || [ -z "${IN_TRACK:-}" ]; then
+            if [ -z "${VAR_TRACK:-}" ]; then
+              case "$TRACK" in
+                internal) EXTRA="alpha" ;;
+                alpha)    EXTRA="internal" ;;
+              esac
+            fi
+          fi
           {
             echo "version_name=$VN"
             echo "track=$TRACK"
+            echo "extra_track=$EXTRA"
             echo "status=$STATUS"
             echo "user_fraction=$USERFRACTION"
           } >> "$GITHUB_OUTPUT"
-          echo "::notice::Play target → track=$TRACK status=$STATUS userFraction=${USERFRACTION:-<none>} version=$VN"
+          echo "::notice::Play target → track=$TRACK${EXTRA:+ (+$EXTRA)} status=$STATUS userFraction=${USERFRACTION:-<none>} version=$VN"
 
       - name: Build signed release APK
         if: steps.keystore.outputs.have_keystore == 'true'
@@ -368,6 +388,27 @@ jobs:
           track: ${{ steps.cfg.outputs.track }}
           status: ${{ steps.cfg.outputs.status }}
           # Empty string is falsy to the action, so a non-staged release simply omits it.
+          userFraction: ${{ steps.cfg.outputs.user_fraction }}
+          whatsNewDirectory: ${{ env.whatsnew }}
+
+      # ── The companion track (internal ⇄ alpha) ───────────────────────────────────────────────
+      # Same AAB, same versionCode, assigned to the second track. Play recognises a versionCode it
+      # already holds and creates a release in the new track pointing at it, so this is an
+      # assignment rather than a re-upload. Runs AFTER the first so the two never race.
+      #
+      # Non-fatal for the same reason as above, and one more: the first track has already succeeded
+      # by this point, so a failure here costs the companion track — never the release.
+      - name: Publish AAB to Google Play (${{ steps.cfg.outputs.extra_track }} track)
+        if: steps.play.outputs.submit == 'true' && steps.cfg.outputs.extra_track != ''
+        continue-on-error: true
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.blaineam.haven
+          releaseFiles: out/*.aab
+          releaseName: ${{ steps.cfg.outputs.version_name }}
+          track: ${{ steps.cfg.outputs.extra_track }}
+          status: ${{ steps.cfg.outputs.status }}
           userFraction: ${{ steps.cfg.outputs.user_fraction }}
           whatsNewDirectory: ${{ env.whatsnew }}
 

@@ -313,6 +313,20 @@ jobs:
           find app/build/outputs/bundle -name '*.aab' -exec cp {} ../out/ \;
           ls -la ../out
 
+      # KEEP THE AAB. It used to be built, handed to the Play API, and thrown away — so when the API
+      # refused it (a Console-side gate like an undeclared permission), the only artifact that could
+      # get past that gate by hand did not exist anywhere. Rebuilding it locally is not an option
+      # either: it must be signed with the upload key, which lives in CI secrets. That is a
+      # chicken-and-egg the retained bundle breaks.
+      - name: Keep the signed AAB (manual Console upload when the API refuses)
+        if: (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && steps.keystore.outputs.have_keystore == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: haven-android-aab
+          path: out/*.aab
+          if-no-files-found: error
+          retention-days: 7
+
       # CHANNEL POLICY (see file header): the AAB rides the Release only as a stopgap so it's
       # downloadable for a manual Play upload while the listing isn't automated/public yet. Once
       # Play is public + auto-publishing, set PUBLISH_ANDROID_TO_GH=false to keep it off GH.

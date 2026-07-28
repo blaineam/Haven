@@ -744,6 +744,9 @@ object HavenNet : InboundListener {
                 delay(2_000)
                 if (!ready) continue
                 runCatching { pollLiveCallFrames() }
+                // Same cadence as the call lane: notice a call whose peers are all gone and end it,
+                // or a lost hangup leaves the device permanently "in a call" and unable to ring.
+                runCatching { CallManager.noticeStuckCall() }
             }
         }
         scope.launch {
@@ -2414,6 +2417,14 @@ object HavenNet : InboundListener {
                 for (r in relaysFor(c.id)) if (!r.startsWith("s3:") && r != myNode) relayTargets.add(r)
             for (r in relayTargets) sendFrame(Wire.DEVICE_ROSTER, rosterWire, r)
         }
+        // Teach each relay this circle's MEMBERS, not just OUR devices. The roster above says "these
+        // are my device ids"; it cannot say "this new person belongs here", so a contact invited
+        // after the operator pasted the relay link was refused by that relay permanently — every
+        // media fetch, mailbox put and devroster read forbidden, which looks like broken sync rather
+        // than a membership gap. `RelayAuth::learn` has always accepted this from a member the relay
+        // already serves; the verb simply had no caller on any platform. iOS FeedStore.enrollMembers
+        // parity. Refused harmlessly when we are the unauthorized one.
+        enrollCircleMembers()
         // PULL the rosters we're MISSING. Announcing ours (frame 27, above) only works when the contact
         // is DIRECTLY reachable; between two CGNAT networks it never lands in either direction, so
         // neither side can resolve the other's devices — and a device-signed call frame, the ACCEPT
@@ -2429,16 +2440,32 @@ object HavenNet : InboundListener {
         // It took a Mac to 28 GB before it was caught. One pass at a time, a few per pass, long
         // per-contact backoff.
         if (!rosterPullInFlight) {
-            val due = contacts.map { it.idHex }
-                .filter { hex ->
-                    runCatching { social.deviceNodeIdsFor(hex) }.getOrDefault(emptyList())
-                        .all { it.equals(hex, ignoreCase = true) }
-                }
-                .filter { rosterPullDue(it) }
+            // UNRESOLVABLE contacts first — we know nothing but their account id, so nothing works
+            // for them at all. But do NOT stop there, which is what this used to do:
+            //
+            //     .filter { deviceNodeIdsFor(hex).all { it == hex } }   // "know nothing about them"
+            //
+            // Holding SOME device for a contact was treated as knowing their CURRENT devices, so a
+            // roster could never be refreshed — only discovered. A contact who starts a new identity,
+            // adds a device, or re-installs then has a device id we will never learn, and anything
+            // sealed under it is unopenable forever: `open_circle_media` resolves a device sender
+            // through the verified roster and returns None when it can't. Media from that contact
+            // fails 100% while their TEXT still arrives (events don't need the device roster) —
+            // which reads as "decryption is broken" rather than "our roster is stale".
+            //
+            // The dial-storm guards that matter are unchanged and must stay: one pass in flight,
+            // ROSTER_PULL_PER_PASS per pass, and a 10-minute per-contact backoff. Stale contacts ride
+            // the same budget, behind the unresolvable ones.
+            val resolvable = { hex: String ->
+                runCatching { social.deviceNodeIdsFor(hex) }.getOrDefault(emptyList())
+                    .any { !it.equals(hex, ignoreCase = true) }
+            }
+            val candidates = contacts.map { it.idHex }.filter { rosterPullDue(it) }
+            val due = (candidates.filterNot(resolvable) + candidates.filter(resolvable))
                 .take(ROSTER_PULL_PER_PASS)
             if (due.isNotEmpty()) {
                 rosterPullInFlight = true
-                Log.i(TAG, "devroster: pulling ${due.size} contact roster(s) from relays")
+                Log.i(TAG, "devroster: pulling ${due.size} contact roster(s) from relays: ${due.map { it.take(8) }}")
                 scope.launch {
                     try {
                         for (hex in due) {
@@ -2563,6 +2590,22 @@ object HavenNet : InboundListener {
                     val r = relayHttpPut(base, entry.httpToken, key, wire)
                     if (r.isSuccess) {
                         markRelaySeen(nodeHex); rosterPublished[nodeHex] = wireHash to System.currentTimeMillis()
+                        // A 200 does NOT prove the relay STORED this roster. `verify_devroster_put`
+                        // answers an out-of-date version with AuthOnly: it takes our signed device
+                        // ids into the auth union, keeps the NEWER blob on disk, and still replies
+                        // 200 OK ("the PUT was legitimate; the relay just had a newer blob").
+                        //
+                        // So the R6 rollback remedy below never fired — it keys off a REFUSAL, and
+                        // there isn't one. We recorded success, never adopted the newer roster, and
+                        // re-published the same stale bytes on the next pass, forever. That is the
+                        // relay's endless "devroster PUT lost version race" line, and the device
+                        // stayed unauthorized the whole time.
+                        //
+                        // Only pay for this when there IS a problem: if the relay is still refusing
+                        // us elsewhere, a 200 here is suspect, so pull back what it actually holds.
+                        if (refusedStreak.containsKey(nodeHex)) {
+                            adoptNewerOwnRosterAndRetry(nodeHex, key, wire, RelayForbidden())
+                        }
                         done = true; break
                     }
                     // The devroster key is permission-FREE, so a refusal here is the relay rejecting our
@@ -2616,6 +2659,40 @@ object HavenNet : InboundListener {
      * have produced it — a relay can serve it, never forge it. iOS
      * SharedStore.adoptNewerOwnRosterAndRetry parity.
      */
+    /** Last member-enroll per circle — the member set changes rarely, so once per 10 min is plenty. */
+    private val lastEnrollMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /**
+     * Tell every relay serving a circle who its members are, so a peer the operator never listed in
+     * the relay link is still served. Best-effort: a relay that refuses (because WE are the one it
+     * doesn't serve) or that predates the verb just keeps its existing set.
+     */
+    private fun enrollCircleMembers() {
+        val nowMs = System.currentTimeMillis()
+        val myAcct = runCatching { social.myNodeHex() }.getOrNull()?.lowercase() ?: return
+        val myNode = runCatching { node?.nodeIdHex() }.getOrNull()?.lowercase()
+        for (c in runCatching { social.circles() }.getOrDefault(emptyList())) {
+            val relays = relaysFor(c.id).filter { !it.startsWith("s3:") && it.length == 64 }
+            if (relays.isEmpty()) continue
+            if (nowMs - (lastEnrollMs[c.id] ?: 0L) < 600_000) continue
+            // Rule (2) of `learn`: name OURSELVES or the relay declines the whole request.
+            val members = LinkedHashSet<String>()
+            members.add(myAcct)
+            myNode?.let { members.add(it) }
+            for (t in dialTargets(c.id)) members.add(t.lowercase())
+            if (members.size <= 1) continue
+            lastEnrollMs[c.id] = nowMs
+            val list = members.toList()
+            scope.launch {
+                for (hex in relays) {
+                    val client = relayClientFor(hex) ?: continue
+                    val ok = runCatching { client.enrollMembers(c.id, list) }.getOrDefault(false)
+                    if (ok) Log.i(TAG, "enrolled ${list.size} members of ${c.id} at ${hex.take(8)}")
+                }
+            }
+        }
+    }
+
     private suspend fun adoptNewerOwnRosterAndRetry(nodeHex: String, key: String, sent: ByteArray, error: Throwable) {
         // RelayForbidden is the HTTP rung's refusal (its message says "refused", not "forbidden").
         if (error !is RelayForbidden && error.message?.lowercase()?.contains("forbidden") != true) return
@@ -2675,6 +2752,24 @@ object HavenNet : InboundListener {
     /** When each contact's roster was last ASKED for, so an unresolvable contact costs ~nothing. */
     private val rosterPullAt = mutableMapOf<String, Long>()
 
+    /**
+     * A roster just landed, so senders we could not resolve a moment ago may be resolvable now.
+     *
+     * Blobs that failed to open were parked in [unopenableMedia] and deliberately not re-fetched
+     * this session — correct when the BYTES are bad, wrong when the bytes were fine and we simply
+     * could not resolve who sealed them. Learning a device roster is exactly the event that changes
+     * that answer, so clear the parking lot and let the next sweep try again; anything genuinely
+     * corrupt just fails once more and parks itself right back.
+     */
+    private fun onRosterLearned() {
+        val n = synchronized(unopenableMedia) {
+            val c = unopenableMedia.size
+            if (c > 0) unopenableMedia.clear()
+            c
+        }
+        if (n > 0) Log.i(TAG, "roster learned — retrying $n media ref(s) that could not be opened")
+    }
+
     private fun rosterPullDue(accountHex: String): Boolean {
         val last = synchronized(rosterPullAt) { rosterPullAt[accountHex.lowercase()] } ?: return true
         return System.currentTimeMillis() - last > ROSTER_PULL_BACKOFF_MS
@@ -2698,6 +2793,7 @@ object HavenNet : InboundListener {
             if (wire != null && wire.isNotEmpty() && runCatching { social.ingestRosterWire(wire) }.getOrDefault(false)) {
                 Log.i(TAG, "devroster PULLED ${acct.take(8)} from own store — their devices are now resolvable")
                 authorizeMembership()
+                onRosterLearned()
                 return true
             }
         }
@@ -2713,10 +2809,19 @@ object HavenNet : InboundListener {
                     if (r.exceptionOrNull() is RelayForbidden) { noteRefused(nodeHex, "devroster read for ${acct.take(8)}"); continue }
                     if (r.isFailure) { markHttpUrlBad(base); continue }
                     val wire = r.getOrNull()
+                    // Say WHICH of the two failures happened. "no PULLED line" covered both "the
+                    // relay doesn't have it" and "we fetched it and could not ingest it", which need
+                    // completely different fixes.
+                    if (wire == null || wire.isEmpty()) {
+                        Log.i(TAG, "devroster MISS ${acct.take(8)} at ${nodeHex.take(8)} — relay has no roster for them")
+                    } else if (!runCatching { social.ingestRosterWire(wire) }.getOrDefault(false)) {
+                        Log.w(TAG, "devroster INGEST REJECTED ${acct.take(8)} from ${nodeHex.take(8)} (${wire.size} B) — bytes arrived but the engine refused them")
+                    }
                     if (wire != null && wire.isNotEmpty() && runCatching { social.ingestRosterWire(wire) }.getOrDefault(false)) {
                         markRelaySeen(nodeHex)
                         Log.i(TAG, "devroster PULLED ${acct.take(8)} from relay ${nodeHex.take(8)}")
                         authorizeMembership()
+                        onRosterLearned()
                         return true
                     }
                 }
@@ -3479,13 +3584,23 @@ object HavenNet : InboundListener {
      * reach — including builds older than this one — learn the URL from the mailbox. iOS
      * `refreshRelayInterfaceIfNeeded` parity.
      */
-    private fun refreshRelayInterfaceIfNeeded(nodeHex: String) {
+    private fun refreshRelayInterfaceIfNeeded(nodeHex: String, force: Boolean = false) {
         val lower = nodeHex.trim().lowercase()
         if (lower.length != 64) return   // s3: pseudo-relays have no iroh side to ask
         // Only when we hold no HTTP interface, or every URL we hold is unusable from here
-        // (bad window / LAN-implausible — httpUrlsFor is the one "usable" judge).
+        // (bad window / LAN-implausible — httpUrlsFor is the one "usable" judge) — OR when a caller
+        // has just WATCHED the front door fail (`force`).
+        //
+        // Holding a URL is not evidence it works, and this guard used to treat it as if it were.
+        // A rotated free-tunnel hostname stays a well-formed public https URL forever, so
+        // `httpUrlsFor` keeps calling it usable; meanwhile neither failure mode marks it bad — a
+        // 404 is read as "the relay lacks this blob" and a 403 as "the relay is healthy, we're not
+        // authorized". Nothing could ever make the held set empty, so the one mechanism that can
+        // learn the new hostname over iroh was permanently unreachable. The relay self-heals on
+        // restart exactly as designed; the client just refused to ask. The 5-minute throttle below
+        // is what keeps `force` cheap.
         val held = relayEntries[lower]
-        if (held != null && httpUrlsFor(held).isNotEmpty()) return
+        if (!force && held != null && httpUrlsFor(held).isNotEmpty()) return
         val nowMs = System.currentTimeMillis()
         synchronized(relayInterfaceRefreshMs) {
             if (nowMs - (relayInterfaceRefreshMs[lower] ?: 0L) < 300_000) return
@@ -3917,8 +4032,13 @@ object HavenNet : InboundListener {
     /** The redundant ACTIVE relay set for a circle: its own list plus the all-circles default (deduped).
      *  Deactivated relays are filtered out so they aren't dialed/served, but their config survives. */
     private fun relaysFor(circleId: String): List<String> {
-        val out = (relayNodes[circleId] ?: emptyList()).filter { isRelayActive(it) }.toMutableList()
-        if (defaultRelayHex.isNotEmpty() && isRelayActive(defaultRelayHex) && !out.contains(defaultRelayHex))
+        // `relayStoodDown` matters far more here than in [allRelays]: this is the hot path (mailbox
+        // list/put, selfsync, hello, live-call, media fetch). Gating only [allRelays] meant the
+        // stand-down was computed, logged, and then ignored by nearly every request that mattered.
+        val out = (relayNodes[circleId] ?: emptyList())
+            .filter { isRelayActive(it) && !relayStoodDown(it) }.toMutableList()
+        if (defaultRelayHex.isNotEmpty() && isRelayActive(defaultRelayHex) &&
+            !relayStoodDown(defaultRelayHex) && !out.contains(defaultRelayHex))
             out.add(defaultRelayHex)
         return out
     }
@@ -5343,11 +5463,34 @@ object HavenNet : InboundListener {
                         thumbOfContent[content] = thumb
                         if (!LocalMedia.has(thumb) && !unopenableMedia.contains(thumb)) thumbs[thumb] = c.id
                     }
+                    // POSTERS ride the same lane as thumbs — a poster is a small still, not a video.
+                    // Left in the general `missing` map it queues behind full-size clips, so a video
+                    // tile has no poster for as long as the backlog takes and falls back to
+                    // generating one locally: expensive (a decode session per attempt) and pointless,
+                    // because the sender already cut one and shipped it. iOS parity.
+                    for (m in item.media) {
+                        MediaVariants.parsePoster(m)?.let { (_, poster) ->
+                            if (!LocalMedia.has(poster) && !unopenableMedia.contains(poster)) {
+                                thumbs[poster] = c.id
+                            }
+                        }
+                    }
                 }
                 item.comments.forEach { cm -> cm.media.forEach { consider(it) } }
             }
         }
         SyncMetrics.setPending(missing.size)   // media refs still missing locally (iOS nbMediaPending)
+        // Per-circle breakdown. A whole-set count hid the thing that mattered: every ref in flight
+        // belonged to `default` and not one came from a dm: circle, so DM media was never being
+        // ASKED for — which looks identical to "DM media won't decrypt" from the outside.
+        run {
+            val byCircle = missing.values.groupingBy { it.first }.eachCount()
+            val items = runCatching { social.circles() }.getOrDefault(emptyList()).associate { c ->
+                c.id.take(24) to runCatching { social.feed(c.id, now, null) }.getOrDefault(emptyList())
+                    .sumOf { it.media.size + it.comments.sumOf { cm -> cm.media.size } }
+            }
+            android.util.Log.i("MediaSync", "missing by circle=${byCircle.mapKeys { it.key.take(24) }} | mediaRefsInFeed=$items")
+        }
         android.util.Log.i("MediaSync", "requestMissing missing=${missing.size} firstFew=${missing.keys.take(3)} defaultRelay=${defaultRelayHex.take(12)} relayNodes=${relayNodes.mapValues { it.value.map { n -> n.take(10) } }}")
         // THROTTLE: a missing ref used to be direct-requested from EVERY contact on every sweep, so a
         // backlog of missing media flooded the network with hundreds of thousands of frames per cycle
@@ -5357,7 +5500,28 @@ object HavenNet : InboundListener {
         // their own bounded schedule (FAST_STEPS) — that is what makes media drop in WITH the post.
         var directBudget = 8
         var fastActive = false
-        for ((ref, info) in missing) {
+        // ROUND-ROBIN ACROSS CIRCLES. `missing` is insertion-ordered, and the restore queue below is
+        // SERIALIZED — one blob at a time — so whichever circle is enumerated first owns the queue.
+        // In practice that was `default` with 45 refs, every one of them old media this device can
+        // never open (it was not a recipient when they were sealed). They fail, get dropped, and are
+        // re-added by the very next scan, so a DM's 2 refs sat behind a permanently doomed backlog
+        // and were never requested at all. That is indistinguishable, from the outside, from "DM
+        // media won't decrypt" — but nothing was ever fetched to decrypt.
+        //
+        // Interleaving by circle bounds the damage a stuck circle can do to the others: a backlog
+        // still drains slowly, but it can no longer starve a conversation that is working fine.
+        val byCircleQueues = missing.entries.groupBy { it.value.first }.values.map { it.toMutableList() }
+        val ordered = ArrayList<Map.Entry<String, Pair<String, Boolean>>>(missing.size)
+        var idx = 0
+        while (ordered.size < missing.size) {
+            var moved = false
+            for (q in byCircleQueues) {
+                if (idx < q.size) { ordered.add(q[idx]); moved = true }
+            }
+            if (!moved) break
+            idx++
+        }
+        for ((ref, info) in ordered.map { it.key to it.value }) {
             val (circleId, fresh) = info
             if (fresh) {
                 val st = synchronized(fastReq) { fastReq[ref] } ?: (0 to 0L)
@@ -5471,7 +5635,12 @@ object HavenNet : InboundListener {
      *  unit-tested); this only supplies where "here" currently is. */
     private fun urlPlausiblyReachable(url: String): Boolean =
         RelayUrls.plausiblyReachable(url, RelayUrls.prefixes(lanIPv4s()))
-    private fun markHttpUrlBad(url: String) { httpUrlBad[url] = System.currentTimeMillis() + 120_000 }
+    private fun markHttpUrlBad(url: String) {
+        httpUrlBad[url] = System.currentTimeMillis() + 120_000
+        // The fabric filters on this same signal, so re-apply it now rather than waiting for the
+        // next unrelated relay edit — this is the moment rendezvous should stop using a dead host.
+        refreshHavenFabric()
+    }
 
     private fun httpKeyUrl(base: String, key: String) = "${base.trimEnd('/')}/k/${android.net.Uri.encode(key, "/")}"
 
@@ -5629,14 +5798,21 @@ object HavenNet : InboundListener {
     private suspend fun healForbiddenRelays(): Boolean {
         val nodes = synchronized(rosterNeeded) {
             if (rosterNeeded.isEmpty() || System.currentTimeMillis() - lastHealMs < 30_000) return false
+            // Only relays whose stand-down has EXPIRED are due for another attempt.
+            //
+            // This used to take every refusing relay and then clear its `refusedUntilMs` outright, on
+            // the reasoning that the stand-down must not block its own remedy. But this runs every
+            // 30s, so it deleted the backoff it had just armed — a 600s stand-down lasted about
+            // fifteen seconds, and the device went right back to hammering a relay that will never
+            // say yes. That is the phone getting hot. The remedy still gets through; it just waits
+            // its turn like everything else, and each refusal makes the next wait longer.
+            val due = rosterNeeded.filter { !relayStoodDown(it) }
+            if (due.isEmpty()) return false
             lastHealMs = System.currentTimeMillis()
-            rosterNeeded.toList().also { rosterNeeded.clear() }
+            rosterNeeded.removeAll(due.toSet())
+            due
         }
         Log.i(TAG, "re-publishing device roster after refusal from [${nodes.joinToString(",") { it.take(8) }}]")
-        // Lift the backoff for exactly these relays so the publish that might FIX the refusal can
-        // still reach them — the stand-down is meant to stop the spin, not to prevent the remedy.
-        // If they refuse the publish too, noteRefused re-arms it, longer each time.
-        for (n in nodes) refusedUntilMs.remove(n)
         // force: a refusal means the relay does NOT have a usable roster from us, so the
         // "already holds these bytes" skip must not suppress the very publish that fixes it.
         runCatching { publishDeviceRoster(force = true) }
@@ -6082,14 +6258,35 @@ object HavenNet : InboundListener {
                 // permissions failure is laundered into "nobody has it").
                 if (r.exceptionOrNull() is RelayForbidden) {
                     noteRefused(nodeHex, "media fetch ${ref.take(10)}")
+                    // A 403 proves something IS answering as a relay behind this hostname, so the
+                    // base is alive even though this request was refused.
+                    noteFabricBaseAlive(base)
+                    // ...but we hold a bearer token that should not be refused, so also re-read the
+                    // interface doc over iroh in case the token/URL pair moved on.
+                    refreshRelayInterfaceIfNeeded(nodeHex, force = true)
                     continue
                 }
                 if (r.isFailure) {
                     android.util.Log.i("MediaSync", "  http $base unreachable (${r.exceptionOrNull()?.message})")
-                    markHttpUrlBad(base); continue
+                    markHttpUrlBad(base)
+                    // Unreachable front door == unreachable DERP: it is the same hostname. Let the
+                    // fabric fall back to n0 rather than staying pinned to a host that is gone.
+                    noteFabricBaseDead(base)
+                    continue
                 }
                 val head = r.getOrNull()
-                if (head == null) { httpMiss = true; break }
+                if (head == null) {
+                    // A 404 is ambiguous: either this relay genuinely lacks the blob, or the
+                    // hostname was rotated away and the tunnel provider is 404ing EVERYTHING at a
+                    // name that no longer routes anywhere. Distinguish by asking for a key the
+                    // relay always serves — if its own interface doc is missing too, we are not
+                    // talking to the relay at all.
+                    val iface = relayHttpGet(base, entry.httpToken, "haven/relay/__interface__")
+                    if (iface.isSuccess && iface.getOrNull() != null) noteFabricBaseAlive(base)
+                    else if (iface.exceptionOrNull() !is RelayForbidden) noteFabricBaseDead(base)
+                    refreshRelayInterfaceIfNeeded(nodeHex, force = true)
+                    httpMiss = true; break
+                }
                 val ok = reassembleInto(ref, head) { i -> relayHttpGet(base, entry.httpToken, mediaChunkKey(ref, i)).getOrNull() }
                 if (!ok) continue
                 markRelaySeen(nodeHex)
@@ -6715,9 +6912,53 @@ object HavenNet : InboundListener {
         scheduleFabricRebindIfNeeded(urls)
     }
 
+    /**
+     * DERP bases we have WATCHED fail. Excluded from the fabric until the cool-down expires.
+     *
+     * A custom DERP that is merely *configured* was treated as a working one, and that is how a
+     * single stale hostname took the whole device offline: a free-tunnel URL rotates, iroh stays
+     * pinned to the dead one, peers never rendezvous, and everything downstream of p2p — contact
+     * announces (which carry the NEW hostname), DMs, media — stops. Every recovery path needed the
+     * fabric that the dead URL had just broken, so nothing could climb out.
+     *
+     * Dropping a dead base is safe in the direction that matters: [refreshHavenFabric] falls back
+     * to n0 when the list is empty, so the worst case of a false positive is public rendezvous
+     * instead of the NAS's — which is exactly how the device re-learns the new hostname and gets
+     * its own fabric back.
+     */
+    private val derpDeadUntilMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val DERP_DEAD_MS = 300_000L
+
+    /** The front door answered — it is a relay, not a rotated hostname. */
+    fun noteFabricBaseAlive(url: String) { derpDeadUntilMs.remove(url.trimEnd('/')) }
+
+    /** The front door did not answer as a relay. Stand it down so the fabric can fall back to n0. */
+    private fun noteFabricBaseDead(url: String) {
+        val u = url.trimEnd('/')
+        if (u.isEmpty()) return
+        val prev = derpDeadUntilMs.put(u, System.currentTimeMillis() + DERP_DEAD_MS)
+        if (prev == null || prev < System.currentTimeMillis()) {
+            Log.i(TAG, "fabric base $u looks gone — falling back to n0 rendezvous so peers can " +
+                "reach us again (and so an announce can teach us the current hostname)")
+            refreshHavenFabric()
+        }
+    }
+
+    private fun fabricBaseAlive(url: String): Boolean {
+        val u = url.trimEnd('/')
+        if ((derpDeadUntilMs[u] ?: 0L) > System.currentTimeMillis()) return false
+        // Reuse what the HTTP layer already learned. DERP and the front door are the SAME hostname,
+        // so a base sitting in the http bad-window is a base we have just failed to reach — and
+        // that is precisely when rendezvous must not stay pinned to it. Without this the evidence
+        // existed and went unused: once the URL was marked bad, `httpUrlsFor` returned empty, the
+        // HTTP branch stopped running altogether, and nothing was left to notice the host was gone.
+        val bad = httpUrlBad[u] ?: httpUrlBad[url] ?: 0L
+        return bad <= System.currentTimeMillis()
+    }
+
     private fun activeFabricUrls(): List<String> =
         relayEntries.values
-            .filter { it.active && it.derpUrl.isNotEmpty() }
+            .filter { it.active && it.derpUrl.isNotEmpty() && fabricBaseAlive(it.derpUrl) }
             .map { it.derpUrl }
             .toSortedSet()
             .toList()

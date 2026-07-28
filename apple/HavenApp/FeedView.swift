@@ -1148,7 +1148,20 @@ final class FeedStore: ObservableObject {
 
     /// Approve a pending request: add them as a contact, complete the handshake (add
     /// their bundle, Hello back, back-fill posts), then clear the request.
-    func approveConnection(_ req: ConnectionRequest, shareHistory: Bool) {
+    /// Approve a connection request. Adding someone to a circle SHARES THAT CIRCLE'S HISTORY —
+    /// there is no longer a "new posts only" option, because there never really was one.
+    ///
+    /// A circle is keyed by a shared epoch. Joining it hands over the key that opens the circle's
+    /// content, and the relay serves that content to any current member. The old prompt could
+    /// therefore be honoured in the UI and nowhere else: we withheld our own uploads while the
+    /// relay kept serving everything already published, and any other member — or our own earlier
+    /// backfills — filled the rest in. Every attempt to close that gap ran into the same wall, that
+    /// one epoch key cannot be readable by some members and not others.
+    ///
+    /// So the honest options were "make it cryptographically real by denying entitled members their
+    /// history too" or "stop offering it". This is the second. Membership means access; the dialog
+    /// now says so plainly rather than implying a boundary the design does not have.
+    func approveConnection(_ req: ConnectionRequest) {
         guard let social else { return }
         // Approving IS a deliberate re-add: clear any old removal tombstone for them, or their
         // hellos stay silently dropped (isRemovedFromCircle guard) and self-sync re-severs them
@@ -1162,23 +1175,21 @@ final class FeedStore: ObservableObject {
         dialTargetsCache.removeAll()   // the new friend must be dialable now, not when the 10s cache expires
         ContactsStore.shared.setAuthoritativeName(idHex: req.idHex, req.name)
         recordHeard(req.idHex)
-        if !shareHistory { ConnectionsStore.shared.setNoHistory(req.idHex) }
         persist(); refreshCircles()
         if let hello = helloPayload(circleId: "default", circleName: "Your circle") {
             sendIroh(0, hello, to: req.idHex); nearbyBroadcast(0, hello)
             let meHex = social.myNodeHex()
             Task { await SharedStore.putHello(circleId: "default", toHex: req.idHex, fromHex: meHex, hello: hello, force: true) }
         }
-        if shareHistory {
-            // Back-fill your past posts to them (and ensure the shared store has them).
-            for env in social.syncEnvelopes(circleId: "default") {
-                sendIroh(1, eventPayload("default", env), to: req.idHex)
-                Task { await SharedStore.uploadEvent(circleId: "default", env: env) }
-            }
-            // Make sure the relay also holds the MEDIA for that history ASAP, so the new member can
-            // pull it from the relay if the direct transfer doesn't reach them — no fragmented posts.
-            backfillMailboxMedia(circleIds: ["default"])
+        // Back-fill your past posts to them (and ensure the shared store has them).
+        for env in social.syncEnvelopes(circleId: "default") {
+            sendIroh(1, eventPayload("default", env), to: req.idHex)
+            Task { await SharedStore.uploadEvent(circleId: "default", env: env) }
         }
+        // Make sure the relay also holds the MEDIA for that history, so the new member can pull it
+        // from the relay if the direct transfer doesn't reach them — no fragmented posts. This is
+        // what makes "all the history except the media" impossible rather than merely unlikely.
+        backfillMailboxMedia(circleIds: ["default"])
         ConnectionsStore.shared.removePending(req.idHex)
         refresh()
     }
@@ -1886,6 +1897,9 @@ final class FeedStore: ObservableObject {
     // Diagnostics accessors.
     var myNodeIdShort: String { social.map { String($0.myNodeHex().prefix(16)) } ?? "—" }
     var myNodeHex: String { social?.myNodeHex() ?? "" }
+    /// This DEVICE's node id (distinct from the ACCOUNT id above). Anything deciding "is this me?"
+    /// against a participant list needs both — a device-transport peer is named by this one.
+    var myDeviceNodeHex: String { social?.myDeviceNodeHex() ?? "" }
     var contactCount: Int { ContactsStore.shared.contacts.count }
     var handshakedCount: Int { social?.contactNodeIds(circleId: activeCircleId).count ?? 0 }
     /// True once we hold this contact's verified public bundle (handshake complete) —
@@ -3020,8 +3034,6 @@ final class FeedStore: ObservableObject {
         if resendHistory {
             lastHistoryResendMs = nowMs
             let circleSnap = circles.map { ($0.id, $0.name) }
-            let shareMap = Dictionary(uniqueKeysWithValues:
-                ContactsStore.shared.contacts.map { ($0.idHex.lowercased(), ConnectionsStore.shared.sharesHistory($0.idHex)) })
             // Re-seal ONLY circles whose change generation moved since their last seal; the rest
             // re-send their cached bundle bytes (siblings dedupe, so identical bytes are fine).
             var cachedBundles: [(String, [Data])] = []
@@ -3057,43 +3069,20 @@ final class FeedStore: ObservableObject {
                         if cid == "default" {
                             for c in ContactsStore.shared.contacts { targets.insert(c.idHex) }
                         }
-                        // Does EVERY recipient of this circle's history consent to receiving it?
-                        //
-                        // This gate is why "Don't share history" was a lie. The per-target blast
-                        // below has always skipped a no-history contact — but the mailbox upload
-                        // underneath it was target-INDEPENDENT, one copy per circle, and
-                        // `syncEnvelopes` re-seals every event to the CURRENT epoch key. So the
-                        // moment a new contact joined the circle they could read the whole backfill
-                        // straight out of the relay, exactly as if the choice had never been made.
-                        // We asked, we stored the answer, and then we published anyway.
-                        //
-                        // A shared mailbox cannot express a per-contact choice: there is one copy
-                        // and every current member holds the key. So the conservative reading wins —
-                        // if anyone here opted out, this circle's history does not go to the relay
-                        // at all, and history reaches the people who SHOULD have it only over the
-                        // direct path below.
-                        //
-                        // What this deliberately does NOT change: new posts. Those upload on their
-                        // own authoring path, so a no-history contact still receives everything from
-                        // the moment they joined — which is what they were promised. The cost is
-                        // offline BACKFILL for entitled members of a circle that also contains
-                        // someone who opted out; they get history when the author is reachable
-                        // directly, rather than from the relay.
-                        let mayBackfillMailbox = targets.allSatisfy {
-                            shareMap[$0.lowercased()] ?? ConnectionsStore.shared.sharesHistory($0)
-                        }
-                        if mayBackfillMailbox, self.historyUploadGen[cid] != gen {
+                        // Circle history goes to the circle's mailbox, unconditionally. The
+                        // per-recipient consent gate that used to stand here is gone with the
+                        // choice that fed it (see `approveConnection`): one shared mailbox holds a
+                        // single copy that every current member's epoch key opens, so it could
+                        // never express a per-contact decision — it only ever withheld backfill
+                        // from members who were entitled to it, while the relay went on serving
+                        // everything already published to everyone.
+                        if self.historyUploadGen[cid] != gen {
                             self.historyUploadGen[cid] = gen
                             for env in envs {
                                 Task { await SharedStore.uploadEvent(circleId: cid, env: env) }
                             }
-                        } else if !mayBackfillMailbox {
-                            HavenLog.sync("history backfill withheld from \(cid) mailbox — a member opted out of history")
                         }
                         for nodeHex in targets {
-                            let shares = shareMap[nodeHex.lowercased()]
-                                ?? ConnectionsStore.shared.sharesHistory(nodeHex)
-                            guard shares else { continue }
                             // Unchanged since this target's last blast → nothing to teach them.
                             let blastKey = cid + "|" + nodeHex.lowercased()
                             guard self.historyBlastGen[blastKey] != gen else { continue }
@@ -3167,6 +3156,17 @@ final class FeedStore: ObservableObject {
                     if h == myDev || h == myAcct || h.hasPrefix("s3:") { continue }
                     sendIroh(27, rosterWire, to: relayHex)
                 }
+                // Teach the relay this circle's MEMBERS while we're here. Publishing our own roster
+                // (above) only says "these are MY devices" — it cannot say "this new person is one
+                // of us", so a contact invited after the operator pasted the relay link was refused
+                // by that relay forever. Every op they tried (media GET/PUT, mailbox put, devroster
+                // read) came back forbidden, which reads as "media never loads and my DMs don't
+                // send" rather than as a membership gap.
+                //
+                // The relay has always been able to accept this (`RelayAuth::learn`, additive, and
+                // it re-checks that we are already served and that we name ourselves); the verb just
+                // had no caller on any platform until now.
+                enrollMembers(circleId: circle.id)
             }
             // Only the OPEN default circle broadcasts its handshake to nearby. Custom + DM
             // circles must NOT — a broadcast Hello let any nearby contact handshake their way
@@ -5021,6 +5021,35 @@ final class FeedStore: ObservableObject {
         }
     }
 
+    /// Last member-enroll per circle — the set changes rarely, so once per 10 min is plenty.
+    private var lastEnrollMs: [String: UInt64] = [:]
+
+    /// Tell every relay serving `circleId` who its members are, so a peer the operator never listed
+    /// in the relay link is still served. Best-effort: a relay that refuses (we aren't served there
+    /// ourselves) or predates the verb simply keeps its existing set.
+    func enrollMembers(circleId: String) {
+        guard let social else { return }
+        let nowMs = now()
+        if let last = lastEnrollMs[circleId], nowMs &- last < 600_000 { return }
+        let relays = RelayMailboxStore.shared.relays(forCircle: circleId)
+            .filter { !$0.hasPrefix("s3:") && $0.count == 64 }
+        guard !relays.isEmpty else { return }
+        // Rule (2) of `learn`: we must name OURSELVES or the relay declines outright.
+        var members = Set(dialTargets(circleId).map { $0.lowercased() })
+        members.insert(social.myNodeHex().lowercased())
+        members.insert(social.myDeviceNodeHex().lowercased())
+        guard members.count > 1 else { return }
+        lastEnrollMs[circleId] = nowMs
+        let list = Array(members)
+        Task.detached {
+            for hex in relays {
+                guard let c = await RelayClients.client(hex) else { continue }
+                let ok = await c.enrollMembers(circleId: circleId, members: list)
+                if ok { HavenLog.relay("enrolled \(list.count) members of \(circleId) at \(hex.prefix(8))") }
+            }
+        }
+    }
+
     /// Push every media blob I hold for a circle to its relay/mailbox, so a member pulling EVENTS
     /// from the relay can also pull the MEDIA (instead of receiving fragmented posts). No-op without
     /// a mailbox. Used when sharing history with a new member and when a new relay is adopted.
@@ -5204,10 +5233,18 @@ final class FeedStore: ObservableObject {
     /// fetching media over a front door that no longer exists (dead) — and the paste-wire flow
     /// only ever ran once at adopt time. After adopting we re-announce, so members with no iroh
     /// reach — including builds older than this one — learn the URL from the mailbox.
-    func refreshRelayInterfaceIfNeeded(_ nodeHex: String) {
+    func refreshRelayInterfaceIfNeeded(_ nodeHex: String, force: Bool = false) {
         let lower = nodeHex.lowercased()
-        // Only when we hold no HTTP interface, or every URL we hold is in its bad window.
-        if let http = RelayMailboxStore.shared.httpInterface(lower),
+        // Only when we hold no HTTP interface, or every URL we hold is in its bad window — OR a
+        // caller has just WATCHED the front door fail (`force`).
+        //
+        // Holding a URL is not evidence it works. A rotated free-tunnel hostname stays a perfectly
+        // well-formed https URL forever, and `httpUrlBad` only marks it during a short cooldown
+        // after a request fails — so this guard almost always early-returned and the device stayed
+        // pinned to a front door that no longer exists. The one mechanism that can learn the new
+        // hostname over iroh was therefore unreachable exactly when it was needed. Android had the
+        // identical bug and the identical fix; this side was missed.
+        if !force, let http = RelayMailboxStore.shared.httpInterface(lower),
            http.urls.contains(where: { !SharedStore.httpUrlBad($0) }) { return }
         let nowMs = now()
         if let last = relayInterfaceRefreshMs[lower], nowMs &- last < 300_000 { return }
@@ -5759,11 +5796,27 @@ final class FeedStore: ObservableObject {
                 where !MediaStore.shared.has(t) && !unopenableMedia.contains(t) {
                 thumbs[t] = circleId
             }
+            // POSTERS ride the same priority lane, for the same reason: a poster is a small still,
+            // not a video. It used to queue in `missing` behind the full-size clips — so the tile
+            // had no poster for as long as the video backlog took, and fell back to generating one
+            // locally from the received file. That is the wrong fix twice over: it is expensive
+            // (every attempt costs a VideoToolbox decode session, and exhausting them is what
+            // produces `-11800 / -12433 … not retrying this file`), and it is unnecessary, because
+            // the sender already cut a poster and shipped it — we simply had not fetched it yet.
+            // Prefetching it means the tile is right on arrival and no decode session is spent.
+            for p in MediaVariants.allPosters(in: item.media)
+                where !MediaStore.shared.has(p) && !unopenableMedia.contains(p) {
+                thumbs[p] = circleId
+            }
             for c in item.comments {
                 let cands: [String] = dataSaver ? MediaVariants.dataSaverPrefetchRefs(c.media) : c.media
                 for ref in cands where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref)
                     && !EvictedMediaStore.shared.contains(ref) && !unopenableMedia.contains(ref) {
                     if missing[ref] == nil || fresh { missing[ref] = (circleId, fresh) }
+                }
+                for t in MediaVariants.allThumbs(in: c.media) + MediaVariants.allPosters(in: c.media)
+                    where !MediaStore.shared.has(t) && !unopenableMedia.contains(t) {
+                    thumbs[t] = circleId
                 }
             }
         }

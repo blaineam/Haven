@@ -1641,6 +1641,9 @@ impl Engine {
                         // Re-publish our signed device roster to every relay so a headless relay
                         // (which only knows account ids) keeps authorizing this account's device ids.
                         me.publish_device_roster().await;
+                        // Same cadence: a relay that does not know a circle's members refuses them
+                        // for everything, and only a member it already serves can teach it.
+                        me.enroll_circle_members().await;
                     }
                     // Daily (first sync tick after launch, then every 24h of uptime): re-assert my event
                     // envelopes in every circle mailbox — upload what a relay never saw, TOUCH what it
@@ -6126,6 +6129,43 @@ impl Engine {
     /// forever, which is what produced `relay put timed out` / ConnectionLost in the field logs and
     /// starved the rest of sync. Content is what matters, so key on the wire's hash: an unchanged
     /// roster is re-sent only after ROSTER_REPUBLISH_MS as liveness, and any CHANGE publishes at once.
+    /// Tell every relay serving a circle who its MEMBERS are.
+    ///
+    /// Publishing our own roster says "these are MY devices"; it cannot say "this new person belongs
+    /// here". So a contact invited AFTER the operator pasted the relay link was refused by that relay
+    /// forever — every media fetch, mailbox put and devroster read forbidden — which presents as
+    /// broken sync rather than a permissions gap. `RelayAuth::learn` has always accepted this from a
+    /// caller the relay already serves; the verb simply had no caller here. We must name ourselves or
+    /// the relay declines by rule (2). iOS `enrollMembers` / Android `enrollCircleMembers` parity.
+    async fn enroll_circle_members(self: &Arc<Self>) {
+        let me = self.social.my_node_hex();
+        let my_dev = self.node_id_hex();
+        for c in self.social.circles() {
+            let relays: Vec<String> = self
+                .relays_for(&c.id)
+                .into_iter()
+                .filter(|h| !h.starts_with("s3:") && h.len() == 64)
+                .collect();
+            if relays.is_empty() {
+                continue;
+            }
+            let mut members: std::collections::BTreeSet<String> =
+                self.social.contact_node_ids(c.id.clone()).into_iter().map(|m| m.to_lowercase()).collect();
+            members.insert(me.to_lowercase());
+            members.insert(my_dev.to_lowercase());
+            if members.len() <= 1 {
+                continue;
+            }
+            let list: Vec<String> = members.into_iter().collect();
+            for hex in relays {
+                let Some(client) = self.relay_client_for(&hex).await else { continue };
+                if client.enroll_members(c.id.clone(), list.clone()).await {
+                    log::info!("enrolled {} members of {} at {}", list.len(), c.id, &hex[..8.min(hex.len())]);
+                }
+            }
+        }
+    }
+
     async fn publish_device_roster_inner(self: &Arc<Self>, force: bool) {
         const ROSTER_REPUBLISH_MS: u64 = 1_800_000; // 30 min
         let Some(r) = self.social.export_own_roster().into_iter().next() else { return };
@@ -9356,8 +9396,9 @@ impl Engine {
             wire::CALL_ACCEPT => callwire::parse_accept(body).map(|a| {
                 serde_json::json!({ "kind": "accept", "from": a.from, "sessionId": a.session_id })
             }),
-            wire::CALL_HANGUP => callwire::parse_hangup(body).map(|from| {
-                serde_json::json!({ "kind": "hangup", "from": from })
+            wire::CALL_HANGUP => callwire::parse_hangup(body).map(|(from, sid)| {
+                // Carry the session up to the UI so it can ignore a BYE for a call it is not in.
+                serde_json::json!({ "kind": "hangup", "from": from, "sessionId": sid })
             }),
             wire::CALL_HANDLED => callwire::parse_accept(body).map(|a| {
                 serde_json::json!({ "kind": "handledElsewhere", "from": a.from, "sessionId": a.session_id })
@@ -9897,8 +9938,8 @@ impl Engine {
         }
     }
 
-    pub fn call_hangup(self: &Arc<Self>, to: Vec<String>) {
-        let frame = callwire::hangup(&self.node_id_hex());
+    pub fn call_hangup(self: &Arc<Self>, to: Vec<String>, session_id: String) {
+        let frame = callwire::hangup(&self.node_id_hex(), &session_id);
         for t in to {
             self.send_call_frame(wire::CALL_HANGUP, &frame, &t);
         }

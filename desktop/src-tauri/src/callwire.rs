@@ -52,8 +52,16 @@ pub fn accept(my_hex: &str, session_id: &str) -> Vec<u8> {
     out
 }
 
-pub fn hangup(my_hex: &str) -> Vec<u8> {
-    my_hex.as_bytes().to_vec()
+/// Frame 12 — NAMES ITS SESSION, same shape as [`accept`].
+///
+/// It used to be the bare sender hex, which makes a hangup impossible to attribute: hangups are
+/// retransmitted and a relay can deliver one late, so a BYE from a call that ended minutes ago still
+/// arrives and the receiver cannot tell it from a live one. It would end whatever call was running —
+/// an outgoing call whose screen appears and vanishes, or a connected call that hangs itself up.
+/// Appending the session is backward compatible: a reader that only takes the leading 64 bytes is
+/// unaffected. iOS/Android parity.
+pub fn hangup(my_hex: &str, session_id: &str) -> Vec<u8> {
+    accept(my_hex, session_id)
 }
 
 /// Frame 30 — same shape as `accept`, so the receiver reads the session it names (and `parse_accept`
@@ -136,8 +144,14 @@ pub fn parse_accept(payload: &[u8]) -> Option<Accept> {
     Some(Accept { from, session_id: sid })
 }
 
-pub fn parse_hangup(payload: &[u8]) -> Option<String> {
-    hex_head(payload)
+/// The sender hex, plus the session it names when the sender is new enough to include one.
+/// Older senders omit it — those still apply, so gating on it only ever tightens behaviour.
+pub fn parse_hangup(payload: &[u8]) -> Option<(String, String)> {
+    let from = hex_head(payload)?;
+    let mut r = wire::Reader::new(payload);
+    r.off = 64;
+    let sid = r.lp().map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+    Some((from, sid))
 }
 
 pub fn parse_invite_name(payload: &[u8]) -> Option<(String, String)> {

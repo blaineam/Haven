@@ -63,7 +63,7 @@ object AvatarStore {
     }
 
     fun clear() {
-        if (ready) { avatars.edit().clear().apply(); emojis.edit().clear().apply() }
+        if (ready) { avatars.edit().clear().commit(); emojis.edit().clear().commit() }
         decoded.clear(); version.value++
     }
 }

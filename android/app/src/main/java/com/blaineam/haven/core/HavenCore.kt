@@ -68,7 +68,7 @@ class HavenCore private constructor(
     /** Wipe the identity and start over (parity with iOS "Start over"). Clears BOTH the seeded master
      *  seed and any seedless grant, so the next launch onboards fresh. */
     fun reset() {
-        prefs.edit().remove(KEY_SEED).apply()
+        prefs.edit().remove(KEY_SEED).commit()
         SeedlessStore.clear()
     }
 

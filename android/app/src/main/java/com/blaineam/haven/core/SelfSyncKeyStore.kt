@@ -135,5 +135,5 @@ object SelfSyncKeyStore {
     }
 
     /** Wipe on factory reset / identity change (parity with SelfSyncCoordinator.reset). */
-    fun clear() { if (initialized) runCatching { prefs.edit().clear().apply() } }
+    fun clear() { if (initialized) runCatching { prefs.edit().clear().commit() } }
 }

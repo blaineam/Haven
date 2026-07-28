@@ -63,7 +63,7 @@ object CircleLock {
 
     fun reset() {
         unlocked.clear()
-        if (this::prefs.isInitialized) prefs.edit().clear().apply()
+        if (this::prefs.isInitialized) prefs.edit().clear().commit()
         version.value++
     }
 }

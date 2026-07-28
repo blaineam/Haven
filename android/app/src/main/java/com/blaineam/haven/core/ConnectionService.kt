@@ -104,14 +104,35 @@ class ConnectionService : Service() {
         }
 
         fun start(ctx: Context) {
-            ContextCompat.startForegroundService(ctx, Intent(ctx, ConnectionService::class.java))
+            // NEVER let this kill the app.
+            //
+            // Android refuses `startForegroundService` while the process is background-restricted
+            // and signals it by THROWING `ForegroundServiceStartNotAllowedException`. Uncaught, that
+            // takes the whole process down — and the moment it is most likely is exactly the moment
+            // it hurts most: coming to the foreground to answer a call. The app died mid-call, so
+            // the far end never got a hangup and sat there believing the call was still up, while
+            // the user saw the call vanish having touched nothing.
+            //
+            // "Stay connected" failing to start is a degraded state, not a fatal one: the periodic
+            // sync still runs and the next foreground pass retries. Log it and carry on.
+            runCatching {
+                ContextCompat.startForegroundService(ctx, Intent(ctx, ConnectionService::class.java))
+            }.onFailure {
+                android.util.Log.w("ConnectionService",
+                    "foreground service start refused (${it.javaClass.simpleName}) — staying on periodic sync")
+            }
         }
 
         /** (Re)start the foreground service with the mediaProjection type added — call right before
          *  starting a screen-share capture so Android 14+ permits MediaProjection. */
         fun startForProjection(ctx: Context) {
-            ContextCompat.startForegroundService(
-                ctx, Intent(ctx, ConnectionService::class.java).putExtra(EXTRA_PROJECTION, true))
+            // Same guard as [start]: a refused promotion must not crash a live call.
+            runCatching {
+                ContextCompat.startForegroundService(
+                    ctx, Intent(ctx, ConnectionService::class.java).putExtra(EXTRA_PROJECTION, true))
+            }.onFailure {
+                android.util.Log.w("ConnectionService", "projection service start refused: ${it.message}")
+            }
         }
 
         fun stop(ctx: Context) {

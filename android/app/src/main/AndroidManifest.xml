@@ -13,6 +13,12 @@
     <!-- Optional: attach your current location to a post (geo: ref, iOS parity). -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <!-- Wave 3+: camera, mic, media. Declared early so the manifest is stable. -->
+    <!-- Ring over the lock screen like a phone call. Without it the incoming-call notification
+         degrades to a heads-up banner, which is still actionable but easy to miss. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- Keep the CPU running for the duration of a call: a suspended CPU stops shipping audio, so a
+         pocketed phone goes silent or trips the far end's silence timer. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- Route call audio to the loudspeaker/earpiece (the in-call speaker toggle). -->
@@ -100,5 +106,15 @@
             android:name=".core.ConnectionService"
             android:exported="false"
             android:foregroundServiceType="dataSync|mediaProjection" />
+        <!-- Answer / Decline from the incoming-call notification. Not exported: only Haven's own
+             notification actions may drive a call. -->
+        <receiver
+            android:name=".core.CallActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.blaineam.haven.ANSWER_CALL" />
+                <action android:name="com.blaineam.haven.DECLINE_CALL" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

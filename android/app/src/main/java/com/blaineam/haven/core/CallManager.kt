@@ -41,7 +41,10 @@ object CallManager {
     val callInProgress: Boolean get() = ringing.value || connecting.value || inCall.value
     val peerName = mutableStateOf("")
     val micOn = mutableStateOf(true)
-    val cameraOn = mutableStateOf(true)
+    /** Calls START AUDIO-ONLY, matching Apple. The video TRACK is still created and published up
+     *  front (see [startCamera]) — only disabled — so turning the camera on later is instant and
+     *  needs no renegotiation. */
+    val cameraOn = mutableStateOf(false)
     /** Speakerphone (loudspeaker) vs earpiece. Defaults ON for a video call, OFF for voice-only —
      *  set when audio starts; the user can flip it any time (iOS parity). */
     val speakerOn = mutableStateOf(true)
@@ -91,7 +94,14 @@ object CallManager {
      *  ~30s invite retransmit burst: declining mustn't re-ring when our hangup frame is lost, but
      *  a deliberate redial — or being re-added to a group call we left (addToCall reuses the
      *  session id) — rings normally once the burst is over. */
-    private const val ENDED_TOMBSTONE_MS = 45_000L
+    /** Must OUTLIVE [INVITE_MAX_AGE_SECS], or an ended call rings again.
+     *
+     *  A caller retransmits its invite, and the relay can hand one over late, so the same session id
+     *  keeps arriving. `endedSessions` is what says "we already dealt with that" — but at 45s it
+     *  expired long before the 180s window in which an invite is still considered fresh, leaving
+     *  ~135s where a retransmit found no tombstone and re-opened the call screen on its own, over
+     *  and over. A tombstone that does not outlive the thing it suppresses suppresses nothing. */
+    private const val ENDED_TOMBSTONE_MS = (INVITE_MAX_AGE_SECS + 30L) * 1000L
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val ringTimeoutRunnable = Runnable { ringTimedOut() }
     /** Sessions that already ended locally (declined / hung up / timed out / completed), with when.
@@ -272,6 +282,7 @@ object CallManager {
         HavenNet.contacts.filter { !roster.contains(it.idHex) && !HavenNet.blocked.contains(it.idHex) }
 
     fun accept() {
+        runCatching { Notifications.clearIncomingCall(appContext) }
         mainHandler.removeCallbacks(ringTimeoutRunnable)
         ringing.value = false
         inCall.value = true
@@ -336,7 +347,8 @@ object CallManager {
         val targets = invitees().toList()
         val h = android.os.Handler(android.os.Looper.getMainLooper())
         repeat(3) { i ->
-            h.postDelayed({ targets.forEach { send(CallWire.HANGUP, CallWire.hangup(myHex), it) } }, 90L * i)
+            val sid = sessionId
+            h.postDelayed({ targets.forEach { send(CallWire.HANGUP, CallWire.hangup(myHex, sid), it) } }, 90L * i)
         }
         teardown()
     }
@@ -416,8 +428,15 @@ object CallManager {
     }
 
     private fun handleGroupInvite(body: ByteArray) {
-        val g = CallWire.parseGroupInvite(body) ?: return
-        if (!knownContact(g.from)) return   // only contacts can invite you (F3)
+        // Every rejection here says WHY. Invites were arriving and vanishing — 52 of them ingested
+        // from the relay with no ring and no line explaining it — because four of the five ways out
+        // of this function were silent `return`s.
+        val g = CallWire.parseGroupInvite(body)
+        if (g == null) { Log.i(TAG, "invite DROPPED — unparseable (${body.size} B)"); return }
+        if (!knownContact(g.from)) {
+            Log.i(TAG, "invite DROPPED from ${g.from.take(8)} — not a known contact (F3); known=${HavenNet.contacts.size}")
+            return
+        }
         // Optional 4th field (newer senders): the invite's send time. A copy older than the
         // caller's entire dialing window is a replay — a relay hop or reconnect delivering it
         // long after the caller gave up. It must not ring (or resurrect a session's roster).
@@ -428,6 +447,8 @@ object CallManager {
         }
         val members = (g.roster + g.from + myHex).toSet()
         if (inCall.value || ringing.value || connecting.value) {
+            Log.i(TAG, "invite from ${g.from.take(8)} session=${g.sessionId.take(12)} — busy " +
+                "(inCall=${inCall.value} ringing=${ringing.value} connecting=${connecting.value} mine=${sessionId.take(12)})")
             if (sessionId == g.sessionId) {
                 val added = members - roster
                 roster.addAll(members); refreshParticipants()
@@ -439,13 +460,21 @@ object CallManager {
     }
 
     private fun incoming(from: String, name: String, session: String, members: Set<String>) {
-        if (recentlyEnded(session)) return   // we already left this session — retransmits can't re-ring
+        if (recentlyEnded(session)) {
+            Log.i(TAG, "invite DROPPED session=${session.take(12)} — tombstoned (we already left it)")
+            return
+        }
+        Log.i(TAG, "INCOMING call from ${from.take(8)} session=${session.take(12)} — ringing + notifying")
         sessionId = session
         roster.clear(); roster.addAll(members)
         peerName.value = name
         isCaller = false
         ringing.value = true
+        acquireCallWakeLock()
         startRingTimeout()
+        // Ring the PHONE, not just the app. Without this the call existed only inside a screen the
+        // callee had to already be looking at — the process knew, and said nothing.
+        runCatching { Notifications.showIncomingCall(appContext, name) }
         com.blaineam.haven.ui.MusicPlayer.stop()   // stop the song preview before the ring
         refreshParticipants()
     }
@@ -490,6 +519,16 @@ object CallManager {
 
     private fun handleHangup(body: ByteArray) {
         val from = CallWire.parseHangup(body) ?: return
+        // Gate on the session, like every other signal handler. A retransmitted or late-relayed BYE
+        // from an EARLIER call used to tear down whichever call was live when it landed — an
+        // outgoing call whose screen appears and vanishes, or a connected call that hangs itself up
+        // for no visible reason. Frames from older builds carry no session id; those still apply, so
+        // this only ever tightens behaviour.
+        val s = runCatching { CallWire.parseSignal(body, sessionId) }.getOrNull()
+        if (s != null && s.sessionId.isNotEmpty() && !validSession(s.sessionId)) {
+            Log.i(TAG, "HANGUP IGNORED from ${from.take(8)} for session ${s.sessionId.take(8)} — ours is ${sessionId.take(8)} (stale/replayed)")
+            return
+        }
         dropPeer(from)
         if ((roster - myHex).isEmpty()) teardown()
     }
@@ -527,6 +566,7 @@ object CallManager {
     // ---- Media + mesh ----
 
     private fun startMesh() {
+        acquireCallWakeLock()   // outgoing calls never pass through `incoming`, so claim it here too
         if (mediaStarted) return
         mediaStarted = true
         connecting.value = connecting.value && !inCall.value
@@ -565,23 +605,78 @@ object CallManager {
         startSpeakerDetection()
     }
 
+    /**
+     * Bring the camera up and publish the track — ALWAYS, even for a call that starts audio-only.
+     *
+     * The track is created and then disabled, rather than not created at all, because a track added
+     * after the peer connections exist needs a full renegotiation round trip; an existing-but-
+     * disabled track flips on instantly with [toggleCamera]. That is also what makes "start audio,
+     * turn the camera on later" work at all.
+     *
+     * Every failure path here says WHY. The three `?: return`s used to be silent — `onFailure` never
+     * sees them, because returning early is not throwing — so a device that enumerated no camera
+     * left `localVideo` null, and the camera button then did nothing forever with not one line
+     * logged to explain it.
+     */
+    /** CPU wake lock held for the lifetime of a call. */
+    private var callWakeLock: android.os.PowerManager.WakeLock? = null
+
+    /**
+     * Keep the CPU running for the duration of a call.
+     *
+     * The foreground service keeps the PROCESS alive, but it does not stop the device suspending
+     * when the screen goes off — and a suspended CPU stops encoding and shipping audio, so the call
+     * goes silent (or drops on the far side's silence timer) the moment the phone is pocketed or the
+     * display times out. A partial wake lock is the narrow fix: CPU only, no screen, released the
+     * instant the call ends. Bounded by a generous timeout so a leaked lock can never outlive a call
+     * and quietly drain the battery.
+     */
+    private fun acquireCallWakeLock() {
+        if (callWakeLock?.isHeld == true) return
+        runCatching {
+            val pm = appContext.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
+            val wl = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "haven:call")
+            wl.setReferenceCounted(false)
+            wl.acquire(4 * 60 * 60 * 1000L)   // hard ceiling; teardown releases far sooner
+            callWakeLock = wl
+            Log.i(TAG, "call wake lock acquired — CPU stays up while the screen may sleep")
+        }.onFailure { Log.w(TAG, "call wake lock failed", it) }
+    }
+
+    private fun releaseCallWakeLock() {
+        runCatching { callWakeLock?.takeIf { it.isHeld }?.release() }
+        callWakeLock = null
+    }
+
     private fun startCamera(f: PeerConnectionFactory) {
         runCatching {
             val enumerator = Camera2Enumerator(appContext)
-            val front = enumerator.deviceNames.firstOrNull { enumerator.isFrontFacing(it) }
-                ?: enumerator.deviceNames.firstOrNull() ?: return
-            val cap = enumerator.createCapturer(front, null) ?: return
+            val names = enumerator.deviceNames
+            if (names.isEmpty()) { Log.w(TAG, "camera: Camera2Enumerator found NO devices — video cannot be enabled"); return }
+            val front = names.firstOrNull { enumerator.isFrontFacing(it) } ?: names.first()
+            val cap = enumerator.createCapturer(front, null)
+            if (cap == null) { Log.w(TAG, "camera: createCapturer returned null for '$front' (${names.size} device(s) seen)"); return }
             capturer = cap
             val src = f.createVideoSource(false); videoSource = src
             surfaceHelper = SurfaceTextureHelper.create("CaptureThread", eglBase.eglBaseContext)
             cap.initialize(surfaceHelper, appContext, src.capturerObserver)
             cap.startCapture(1280, 720, 30)
             localVideo = f.createVideoTrack("haven-video", src).apply { setEnabled(cameraOn.value) }
+            Log.i(TAG, "camera: track published on '$front' (enabled=${cameraOn.value}) — toggling is instant from here")
         }.onFailure { Log.w(TAG, "camera start failed", it) }
     }
 
     private fun connectPeerIfNeeded(peer: String): WebRTCPeer {
         val conn = peerFor(peer)
+        // Tell them the camera state UP FRONT. The video track is published from the start (so the
+        // m-line never changes mid-call) but starts DISABLED — and a disabled WebRTC track does not
+        // stop sending, it sends BLACK FRAMES. Without this the far end renders a black rectangle
+        // and reasonably concludes the video is broken, when the camera is simply off. Peers that
+        // know show the avatar instead. Only the toggle announced this before, so the state every
+        // call actually STARTS in was the one never sent.
+        runCatching {
+            send(CallWire.CAMERA, CallWire.cameraState(myHex, sessionId, cameraOn.value), peer)
+        }
         if (myHex < peer && mediaStarted) conn.makeOffer()   // smaller hex offers
         return conn
     }
@@ -772,6 +867,35 @@ object CallManager {
         mainHandler.post { if (remoteVideo[peer]?.id()?.startsWith("hairpin-") == true) remoteVideo.remove(peer) }
     }
 
+    /** When the current call last had at least one live peer. Drives [checkStuckCall]. */
+    private var lastPeerSeenMs = 0L
+
+    /**
+     * A call with no peers is not a call. End it.
+     *
+     * Teardown normally arrives with a hangup — but a hangup is one fire-and-forget frame, and if it
+     * is lost (or gated, or the far end dies) nothing else ever clears `inCall`. The state then
+     * sticks FOREVER: every later invite takes the "already in a call, they must be joining" branch,
+     * so the phone stops ringing altogether and no notification is raised. That is a call that
+     * worked once and then silently made the device unreachable — far worse than a dropped call,
+     * because nothing on screen says anything is wrong.
+     *
+     * 45s with zero peers is well beyond any legitimate reconnect (ICE gives up sooner, and the
+     * hairpin's own silence drop is 20s), so this only ever fires on a call that is already dead.
+     */
+    /** Called from the 2s live-call lane. Main-thread hop: call state is main-only. */
+    fun noticeStuckCall() { mainHandler.post { checkStuckCall() } }
+
+    private fun checkStuckCall() {
+        if (!inCall.value) { lastPeerSeenMs = 0L; return }
+        val now = System.currentTimeMillis()
+        if (peers.isNotEmpty()) { lastPeerSeenMs = now; return }
+        if (lastPeerSeenMs == 0L) { lastPeerSeenMs = now; return }
+        if (now - lastPeerSeenMs < 45_000) return
+        Log.i(TAG, "call ${sessionId.take(12)} has had NO peers for 45s — ending a call that is already gone")
+        hangup()
+    }
+
     private fun dropPeer(peer: String) {
         if (hairpinPeers.remove(peer)) CallMediaBridge.deactivate(peer)
         CallHairpin.close(peer)
@@ -802,7 +926,18 @@ object CallManager {
     }
     fun toggleCamera() {
         cameraOn.value = !cameraOn.value
+        // If the track is missing the camera never came up — say so instead of no-opping in silence,
+        // and try once more now (permission may have been granted since, or the camera may have been
+        // held by another app when the call started).
+        if (localVideo == null) {
+            Log.w(TAG, "camera: no local video track — retrying capture now")
+            // NOTE: peers created before this point have no video sender, so a track recovered here
+            // reaches them only after the next renegotiation. The real guarantee is that
+            // `startCamera` now publishes the track up front (disabled) so this path stays rare.
+            runCatching { startCamera(ensureFactory()) }
+        }
         localVideo?.setEnabled(cameraOn.value)
+            ?: Log.w(TAG, "camera: still no track after retry — this device cannot publish video")
         // Tell every peer so they swap to my avatar instead of freezing on my last camera frame.
         val on = cameraOn.value
         invitees().forEach { send(CallWire.CAMERA, CallWire.cameraState(myHex, sessionId, on), it) }
@@ -859,6 +994,9 @@ object CallManager {
     }
 
     private fun teardown() {
+        // Answered, declined, missed, or the caller gave up — in every case stop ringing the phone.
+        runCatching { Notifications.clearIncomingCall(appContext) }
+        releaseCallWakeLock()
         // Remember the session so the caller's still-in-flight invite retransmits can't re-ring it.
         if (sessionId.isNotEmpty()) {
             endedSessions[sessionId] = System.currentTimeMillis()

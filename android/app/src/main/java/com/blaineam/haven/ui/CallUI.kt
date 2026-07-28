@@ -117,6 +117,21 @@ fun CallOverlay() {
     val connecting by CallManager.connecting
     val minimized by CallManager.minimized
 
+    // Hold the screen on for as long as a call is up. The wake lock in CallManager keeps the CPU
+    // alive so audio keeps flowing, but the display still times out mid-call and the user is left
+    // tapping the phone awake to reach Mute or Hang up — every other calling app on the platform
+    // keeps the screen lit, and the proximity sensor handles the ear case for us.
+    val active = ringing || inCall || connecting
+    val view = androidx.compose.ui.platform.LocalView.current
+    androidx.compose.runtime.DisposableEffect(active) {
+        val window = (view.context as? android.app.Activity)?.window
+        if (active) window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose {
+            window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
     when {
         ringing && !inCall -> IncomingCall()
         (inCall || connecting) && minimized -> Unit   // shown as a nav-bar "Call" tab (see RootScreen)

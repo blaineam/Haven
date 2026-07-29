@@ -1,5 +1,5 @@
-1.1.7 — video that actually sends, and taps that land:
-• Turning your camera on mid-call now sends real video instead of a black square.
-• Audio-only calls no longer hold the camera open, so the privacy dot stays off and the battery lasts longer.
-• Tapping an older post notification no longer claims the post is unavailable when it's sitting right there in your feed.
-• Story links opened from a notification behave the same way.
+1.1.8 — adding a friend sticks, and calls keep your mic:
+• Adding a friend now keeps trying until they answer instead of getting one attempt. Requests sent over mobile data reach people who never got them.
+• If you and someone had removed each other, neither could reconnect. Now either of you can ask again.
+• Switching apps during a call no longer silently mutes you.
+• Turning your camera on mid-call sends real video, not a black square.

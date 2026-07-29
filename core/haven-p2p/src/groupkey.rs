@@ -268,6 +268,64 @@ pub fn seal_event_ratcheted(
     Ok(env)
 }
 
+/// Seal raw BYTES (media) under the circle epoch key — the same key a post is sealed with.
+///
+/// Media used to be sealed to an explicit RECIPIENT LIST, which made it behave unlike every other
+/// thing in a circle: a member who joined after the blob was posted was not on that list, and a
+/// content-addressed blob is never re-sealed, so their tiles stayed permanently broken while the
+/// post's TEXT rendered fine. "I shared it with my circle" has to mean the circle, not whoever
+/// happened to be in it at that instant — and the epoch key is exactly the thing every member holds,
+/// including ones who joined later and were handed the epoch.
+///
+/// Distinct salt domain from [`seal_event_in_epoch`] so a media blob and an event can never derive
+/// the same key, and deterministic for the same reason: identical bytes re-seal identically, so the
+/// content-addressed mailbox key stays stable across retries.
+pub fn seal_media_in_epoch(
+    sender: &Identity,
+    circle_id: &str,
+    epoch: u64,
+    epoch_key: &[u8; 32],
+    data: &[u8],
+) -> Result<EpochEnvelope> {
+    let salt: [u8; 16] = {
+        let mut h = blake3::Hasher::new_keyed(epoch_key);
+        h.update(b"haven-media-salt-v1");
+        h.update(circle_id.as_bytes());
+        h.update(&epoch.to_le_bytes());
+        h.update(data);
+        h.finalize().as_bytes()[..16].try_into().expect("16 bytes")
+    };
+    let media_key = derive_event_key(epoch_key, &salt, circle_id, epoch);
+    let ciphertext = seal_reproducible(&media_key, data);
+    let mut env = EpochEnvelope {
+        circle_id: circle_id.to_string(),
+        epoch,
+        salt: salt.to_vec(),
+        sender: sender.public().node_id_bytes().to_vec(),
+        ciphertext,
+        signature: Vec::new(),
+        ratchet: None,
+    };
+    env.signature = sender.sign(&env.transcript());
+    Ok(env)
+}
+
+/// Open epoch-sealed media. The signature is verified when `sender_pub` is known; an unknown sealer
+/// is NOT fatal here the way it is for an event, because media carries no author field to
+/// re-attribute — the bytes are held to their content address by the caller, which is a stronger
+/// check than the signature and does not depend on holding anyone's device roster.
+pub fn open_media_in_epoch(
+    sender_pub: Option<&HavenId>,
+    epoch_key: &[u8; 32],
+    env: &EpochEnvelope,
+) -> Result<Vec<u8>> {
+    if let Some(pk) = sender_pub {
+        pk.verify(&env.transcript(), &env.signature)?;
+    }
+    let media_key = derive_event_key(epoch_key, &env.salt, &env.circle_id, env.epoch);
+    open(&media_key, &env.ciphertext)
+}
+
 /// Open an epoch-sealed event, verifying the sender's hybrid signature and the author/sender bind.
 /// Recipient side. Fails if `epoch_key` is the wrong epoch (e.g. you were removed before it).
 pub fn open_event_in_epoch(
@@ -538,5 +596,58 @@ mod tests {
         assert_eq!(back.epoch, 7);
         assert_eq!(back.circle_id, "circle-xyz");
         assert_eq!(open_event_in_epoch(&alice.public(), &key, &back, false).unwrap(), ev);
+    }
+}
+
+#[cfg(test)]
+mod epoch_media_tests {
+    use super::*;
+
+    /// Media sealed to the epoch opens with that epoch key — the property that lets a member who
+    /// joined LATER read older media, which the recipient-list seal could never do.
+    #[test]
+    fn epoch_media_roundtrips() {
+        let a = Identity::from_seed(&[3u8; 32]);
+        let key = [9u8; 32];
+        let env = seal_media_in_epoch(&a, "default", 4, &key, b"a photo").expect("seals");
+        let out = open_media_in_epoch(Some(&a.public()), &key, &env).expect("opens");
+        assert_eq!(out, b"a photo");
+    }
+
+    /// THE isolation property. Every user's own circle is called "default", so the circle id is NOT
+    /// a secret and collides across unrelated people by design. What separates them is the epoch
+    /// key. A different circle's key must never open this blob, even with an identical circle id
+    /// and epoch number.
+    #[test]
+    fn another_circles_key_cannot_open_it() {
+        let a = Identity::from_seed(&[3u8; 32]);
+        let mine = [9u8; 32];
+        let theirs = [10u8; 32];
+        let env = seal_media_in_epoch(&a, "default", 4, &mine, b"private photo").expect("seals");
+        assert!(open_media_in_epoch(Some(&a.public()), &theirs, &env).is_err(),
+                "a stranger's 'default' circle must never open my media");
+    }
+
+    /// A key from a DIFFERENT epoch of the same circle must not open it either — that is what makes
+    /// rotation-on-removal actually cut a removed member off from new media.
+    #[test]
+    fn a_rotated_epoch_key_cannot_open_older_media() {
+        let a = Identity::from_seed(&[3u8; 32]);
+        let old = [9u8; 32];
+        let new = [11u8; 32];
+        let env = seal_media_in_epoch(&a, "default", 4, &old, b"pre-rotation").expect("seals");
+        assert!(open_media_in_epoch(Some(&a.public()), &new, &env).is_err());
+    }
+
+    /// Tampered ciphertext must not open, and a forged sender must not verify.
+    #[test]
+    fn tampering_and_forgery_are_rejected() {
+        let a = Identity::from_seed(&[3u8; 32]);
+        let b = Identity::from_seed(&[4u8; 32]);
+        let key = [9u8; 32];
+        let mut env = seal_media_in_epoch(&a, "default", 4, &key, b"a photo").expect("seals");
+        assert!(open_media_in_epoch(Some(&b.public()), &key, &env).is_err(), "wrong signer rejected");
+        env.ciphertext[0] ^= 0xFF;
+        assert!(open_media_in_epoch(Some(&a.public()), &key, &env).is_err(), "tampering rejected");
     }
 }

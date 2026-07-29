@@ -369,7 +369,50 @@ object HavenNet : InboundListener {
     private val relayHealth = HashMap<String, RelayHealth>()
 
     // node ids we initiated a connect to (scanned their QR) → expected verify hash.
+    //
+    // PERSISTED, and re-sent on the sync cadence until they answer. Both matter, and neither used
+    // to be true: this was an in-memory map written once by connectByLink and never touched again,
+    // so adding a friend sent exactly ONE hello. If the reply didn't make it back on that single
+    // attempt the handshake was simply dead — no retry, ever — and Android kills backgrounded
+    // processes readily, which dropped the map entirely and cost a late hello-back its auto-accept.
+    //
+    // A one-shot dial is worst exactly where friendships start: the other side has to TAP APPROVE,
+    // which takes seconds to minutes, and a peer on cellular sits behind CGNAT with no inbound
+    // reachability — the NAT binding our single hello opened is long gone by the time they answer,
+    // and a new friendship has no relay mailbox to fall back on. iOS never hit this because adding
+    // by link records a CONTACT immediately, which enrols it in the every-tick hello sweep; Android
+    // deliberately waits for the hello-back before creating one, so it fell out of every retry path.
+    // Re-sending keeps punching an outbound hole so their delayed answer has somewhere to land.
     private val initiated = HashMap<String, String>()
+    private val initiatedAt = HashMap<String, Long>()
+    /** Stop re-dialling a handshake nobody ever answered (they declined, or the link went stale). */
+    private val initiatedTtlMs = 48L * 60 * 60 * 1000
+
+    private fun loadInitiated() {
+        val raw = prefs.getString("initiated", null) ?: return
+        runCatching {
+            val o = org.json.JSONObject(raw)
+            for (k in o.keys()) {
+                val e = o.getJSONObject(k)
+                initiated[k] = e.optString("v", "")
+                initiatedAt[k] = e.optLong("t", System.currentTimeMillis())
+            }
+        }
+    }
+    private fun saveInitiated() {
+        val o = org.json.JSONObject()
+        for ((k, v) in initiated) {
+            o.put(k, org.json.JSONObject().put("v", v).put("t", initiatedAt[k] ?: System.currentTimeMillis()))
+        }
+        prefs.edit().putString("initiated", o.toString()).apply()
+    }
+    private fun forgetInitiated(idHex: String) {
+        // Both removes must run — `or` here would bind tighter than `!=` and reparse the whole
+        // thing as `remove(idHex) != (null or ...)`.
+        val hadKey = initiated.remove(idHex) != null
+        val hadStamp = initiatedAt.remove(idHex) != null
+        if (hadKey || hadStamp) saveInitiated()
+    }
 
     // Keyed by node id so a NEW identity never inherits a previous identity's events (the social
     // store isn't tied to the seed otherwise — that let an old friendship's posts leak in).
@@ -445,6 +488,7 @@ object HavenNet : InboundListener {
         }
         loadContacts()
         loadDeviceHints()
+        loadInitiated()   // an unanswered handshake must outlive the process that started it
         loadBlocked()
         loadRelayNodes()
         purgeStaleRelays()   // erase relays inactive AND unseen > 7 days (config else survives)
@@ -1437,7 +1481,22 @@ object HavenNet : InboundListener {
         // and without this guard the "already a contact" branch below silently re-added them to the very
         // circle you removed them from, so the removal never stuck. A deliberate re-add clears the
         // tombstone (addToCircle), so this only blocks the unsolicited rejoin.
-        if (isRemovedFromCircle(hello.circleId, idHex)) return HelloOutcome(true, "removed-from-circle")
+        // ...but silently DROPPING it made a removal permanent AND mutual. Clearing the tombstone
+        // only ever happens on YOUR side when YOU re-add them, so once two people had removed each
+        // other neither could reconnect by any route: their deliberate request died on your
+        // tombstone, yours died on theirs, and both sides just saw "waiting" forever. Ask instead
+        // of dropping — consent is still required, nothing auto-rejoins, and approving clears the
+        // tombstone. Proximity and DM hellos keep dropping: neither is a deliberate request.
+        if (isRemovedFromCircle(hello.circleId, idHex)) {
+            if (viaNearby || hello.circleId.startsWith("dm:")) return HelloOutcome(true, "removed-from-circle")
+            scope.launch(Dispatchers.Main) {
+                if (pending.none { it.idHex == idHex }) {
+                    pending.add(PendingRequest(idHex, name, actualVerify, hello.bundle, hello.circleId, hello.circleName))
+                }
+            }
+            // NOT consumed — the circle grant must survive until the user decides (stranger parity).
+            return HelloOutcome(false, "removed-needs-approval")
+        }
         // A verified Hello forms the circle on our side if we don't have it yet (matches iOS).
         val isNewCircle = hello.circleId != DEFAULT_CIRCLE && !hello.circleId.startsWith("dm:") &&
             runCatching { social.circles() }.getOrDefault(emptyList()).none { it.id == hello.circleId }
@@ -1455,7 +1514,7 @@ object HavenNet : InboundListener {
                 return HelloOutcome(true, "verify-mismatch")   // deliberate drop — the QR promise is firm
             }
             acceptContact(hello.circleId, hello.bundle, idHex, name, actualVerify, helloBack = true)
-            initiated.remove(idHex)
+            forgetInitiated(idHex)
             return HelloOutcome(true, "applied")
         }
         if (contacts.any { it.idHex == idHex }) {
@@ -1855,6 +1914,8 @@ object HavenNet : InboundListener {
         // their device (their account id resolves to no node post-device-seed).
         recordDeviceHints(info.idHex, InviteHints.extract(trimmed))
         initiated[info.idHex] = info.verificationHex
+        initiatedAt[info.idHex] = System.currentTimeMillis()
+        saveInitiated()   // survive the process death Android hands out freely
         sendHello(DEFAULT_CIRCLE, info.idHex)
         return true
     }
@@ -2405,6 +2466,22 @@ object HavenNet : InboundListener {
         for (idHex in snapshot) {
             sendHello(DEFAULT_CIRCLE, idHex, resendHistory = resendHistory)
             if (rosterWire.isNotEmpty()) sendFrame(Wire.DEVICE_ROSTER, rosterWire, idHex)
+        }
+        // Re-greet anyone we've asked to connect who hasn't answered yet. They are NOT contacts —
+        // Android waits for the hello-back before creating one — so `snapshot` above skips them
+        // entirely, which left the initial hello as a single unrepeated shot. Their approval is a
+        // human tapping a button minutes later, and on cellular they're behind CGNAT with no
+        // inbound reachability and no relay mailbox yet, so that one hole we punched has closed by
+        // the time they answer. Re-punching each cycle is what gives their reply a path home.
+        if (initiated.isNotEmpty()) {
+            val expired = ArrayList<String>()
+            for ((hex, _) in initiated) {
+                if (nowMs - (initiatedAt[hex] ?: nowMs) > initiatedTtlMs) { expired.add(hex); continue }
+                if (contacts.any { it.idHex.equals(hex, ignoreCase = true) }) { expired.add(hex); continue }
+                sendHello(DEFAULT_CIRCLE, hex)
+                if (rosterWire.isNotEmpty()) sendFrame(Wire.DEVICE_ROSTER, rosterWire, hex)
+            }
+            for (hex in expired) forgetInitiated(hex)
         }
         // Bootstrap device-id exchange over the RELAY: a friend who flipped to the per-device transport no
         // longer resolves by account id, but their relay node (== their device messaging endpoint, one-endpoint
@@ -7107,7 +7184,8 @@ object HavenNet : InboundListener {
     fun hasRelay(): Boolean = relayNodes.values.any { it.isNotEmpty() } || Presign.anyBootstrap()
 
     fun reset() {
-        contacts.clear(); pending.clear(); blocked.clear(); initiated.clear()
+        contacts.clear(); pending.clear(); blocked.clear()
+        initiated.clear(); initiatedAt.clear(); saveInitiated()
         relayNodes.clear(); relayClients.clear(); relayHealth.clear(); seenMailbox.clear()
         runCatching { seenMailboxFile.delete() }   // a new identity must not inherit the seen-set
         invalidateListDigests()   // a fresh seen-set must re-list everything (no 204 short-circuit)

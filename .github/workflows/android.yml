@@ -34,6 +34,16 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # Compile-only verification before a change can reach main. The Play steps are all gated on
+  # `steps.play.outputs.submit`, which is only computed for tags and workflow_dispatch, so a PR
+  # run builds and publishes NOTHING. Added because Android has no local build on every machine
+  # that edits it (a Mac without a JDK can edit Kotlin it cannot compile), and "it builds" was
+  # being asserted from a grep exit code rather than a compiler.
+  pull_request:
+    paths:
+      - "android/**"
+      - "core/**"
+      - ".github/workflows/android.yml"
   workflow_dispatch:
     inputs:
       # ── Deliberate Play-track promotion (see docs/STORE-AUTOPUBLISH.md "Promoting to production").

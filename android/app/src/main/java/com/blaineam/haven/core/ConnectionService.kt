@@ -33,6 +33,12 @@ class ConnectionService : Service() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
                 if (projection) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                // Read the FLAG, not just this intent's extra: the service gets (re)started for
+                // several unrelated reasons during a call, and any plain restart that dropped the
+                // microphone type would cut capture mid-call exactly as if it were never declared.
+                if (micWanted && Build.VERSION.SDK_INT >= 34) {
+                    type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                }
                 startForeground(NOTIF_ID, notification(), type)
             } else {
                 startForeground(NOTIF_ID, notification())
@@ -121,6 +127,31 @@ class ConnectionService : Service() {
                 android.util.Log.w("ConnectionService",
                     "foreground service start refused (${it.javaClass.simpleName}) — staying on periodic sync")
             }
+        }
+
+        /** True while a call holds the mic. Sticky across service restarts — see onStartCommand. */
+        @Volatile private var micWanted = false
+
+        /** (Re)start the service carrying the `microphone` type, so capture survives the user
+         *  switching apps. Android 14+ cuts a backgrounded app's mic unless a foreground service
+         *  declares it; the symptom is one-way audio — they hear you fine, you hear nothing back. */
+        fun startForCall(ctx: Context) {
+            micWanted = true
+            runCatching {
+                ContextCompat.startForegroundService(ctx, Intent(ctx, ConnectionService::class.java))
+            }.onFailure {
+                android.util.Log.w("ConnectionService", "call service start refused: ${it.message}")
+            }
+        }
+
+        /** Drop the mic type when the call ends — holding it idle is a standing privacy indicator. */
+        fun endCall(ctx: Context) {
+            if (!micWanted) return
+            micWanted = false
+            // Only re-assert the plain service if the user actually wants it running; otherwise a
+            // call would silently switch "Stay connected" on for them.
+            if (ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE).getBoolean(KEY, false)) start(ctx)
+            else stop(ctx)
         }
 
         /** (Re)start the foreground service with the mediaProjection type added — call right before

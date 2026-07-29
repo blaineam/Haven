@@ -249,6 +249,10 @@ object CallManager {
             others.forEach { roster.add(it) }
             refreshParticipants(); return
         }
+        // Claim the mic under a typed foreground service BEFORE capture starts, so switching apps
+        // mid-call doesn't have Android silently cut it (one-way audio: they hear you, you hear them,
+        // but nothing of yours reaches them).
+        ConnectionService.startForCall(appContext)
         sessionId = session ?: "and-${myHex.take(8)}-${System.nanoTime()}"
         roster.clear(); roster.addAll(others); roster.add(myHex)
         peerName.value = name
@@ -286,6 +290,7 @@ object CallManager {
         mainHandler.removeCallbacks(ringTimeoutRunnable)
         ringing.value = false
         inCall.value = true
+        ConnectionService.startForCall(appContext)   // same mic claim as the outbound path
         notifyOwnDevicesHandled()   // stop my OTHER devices ringing before they can join and take the audio
         invitees().forEach { send(CallWire.ACCEPT, CallWire.accept(myHex, sessionId), it) }
         startMesh()
@@ -1032,6 +1037,9 @@ object CallManager {
         // Answered, declined, missed, or the caller gave up — in every case stop ringing the phone.
         runCatching { Notifications.clearIncomingCall(appContext) }
         releaseCallWakeLock()
+        // Give the mic back. Holding a microphone-typed service after the call is a standing
+        // privacy indicator for a mic nobody is using.
+        runCatching { ConnectionService.endCall(appContext) }
         // Remember the session so the caller's still-in-flight invite retransmits can't re-ring it.
         if (sessionId.isNotEmpty()) {
             endedSessions[sessionId] = System.currentTimeMillis()

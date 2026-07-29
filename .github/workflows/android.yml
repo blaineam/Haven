@@ -406,24 +406,46 @@ jobs:
           whatsNewDirectory: ${{ env.whatsnew }}
 
       # ── The companion track (internal ⇄ alpha) ───────────────────────────────────────────────
-      # Same AAB, same versionCode, assigned to the second track. Play recognises a versionCode it
-      # already holds and creates a release in the new track pointing at it, so this is an
-      # assignment rather than a re-upload. Runs AFTER the first so the two never race.
+      # PROMOTE the release we just made — do NOT upload the AAB a second time. The previous version
+      # of this step re-uploaded the same file on the belief that "Play recognises a versionCode it
+      # already holds and assigns it to the new track". It does not: the first upload consumes the
+      # versionCode, and the second is rejected with "Version code NNN has already been used." The
+      # dual-track publish therefore never once worked — v1.1.5 predated the step, so v1.1.6 was the
+      # first tag to exercise it, and it failed silently (see the guard below).
       #
-      # Non-fatal for the same reason as above, and one more: the first track has already succeeded
-      # by this point, so a failure here costs the companion track — never the release.
-      - name: Publish AAB to Google Play (${{ steps.cfg.outputs.extra_track }} track)
+      # `supply --track_promote_to` assigns the EXISTING release to the second track, which is what
+      # the comment always claimed was happening. Nothing is uploaded, so there is no code to collide.
+      #
+      # Still non-fatal: the first track has already landed by this point, so a failure here costs the
+      # companion track, never the release.
+      - name: Promote to the ${{ steps.cfg.outputs.extra_track }} track
+        id: playpromote
         if: steps.play.outputs.submit == 'true' && steps.cfg.outputs.extra_track != ''
         continue-on-error: true
-        uses: r0adkll/upload-google-play@v1
-        with:
-          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
-          packageName: com.blaineam.haven
-          releaseFiles: out/*.aab
-          releaseName: ${{ steps.cfg.outputs.version_name }}
-          track: ${{ steps.cfg.outputs.extra_track }}
-          status: ${{ steps.cfg.outputs.status }}
-          userFraction: ${{ steps.cfg.outputs.user_fraction }}
+        env:
+          SUPPLY_JSON_KEY_DATA: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          FROM_TRACK: ${{ steps.cfg.outputs.track }}
+          TO_TRACK: ${{ steps.cfg.outputs.extra_track }}
+          VERSION_CODE: ${{ github.run_number }}
+          STATUS: ${{ steps.cfg.outputs.status }}
+        run: |
+          set -euo pipefail
+          command -v fastlane >/dev/null || sudo gem install fastlane --no-document
+          fastlane supply \
+            --json_key_data "$SUPPLY_JSON_KEY_DATA" \
+            --package_name com.blaineam.haven \
+            --track "$FROM_TRACK" \
+            --track_promote_to "$TO_TRACK" \
+            --version_code "$VERSION_CODE" \
+            --release_status "$STATUS" \
+            --skip_upload_apk true \
+            --skip_upload_aab true \
+            --skip_upload_metadata true \
+            --skip_upload_images true \
+            --skip_upload_screenshots true \
+            --skip_upload_changelogs true \
+            --changes_not_sent_for_review false
+
           whatsNewDirectory: ${{ env.whatsnew }}
 
       # `continue-on-error` above deliberately keeps a Play-side gate from red-X'ing the release — but a
@@ -431,9 +453,14 @@ jobs:
       # chars) silently rolled the whole edit back, so nothing reached Play while the step still read as
       # green. Keep the policy, but say so loudly.
       - name: Flag a Play publish that did not land
-        if: steps.play.outputs.submit == 'true' && steps.playpublish.outcome == 'failure'
+        if: steps.play.outputs.submit == 'true' && (steps.playpublish.outcome == 'failure' || steps.playpromote.outcome == 'failure')
         run: |
-          echo "::warning title=Play publish did not land::The AAB was NOT published to Play. Check the publish step's log — a common cause is release notes over Play's 500-character limit, which rolls the edit back."
+          if [ "${{ steps.playpublish.outcome }}" = "failure" ]; then
+            echo "::warning title=Play publish did not land::The AAB was NOT published to ${{ steps.cfg.outputs.track }}. Check the publish step's log — a common cause is release notes over Play's 500-character limit, which rolls the edit back."
+          fi
+          if [ "${{ steps.playpromote.outcome }}" = "failure" ]; then
+            echo "::warning title=Companion track did not land::The release reached ${{ steps.cfg.outputs.track }} but was NOT promoted to ${{ steps.cfg.outputs.extra_track }}, so closed testers are still on the previous build. Promote it in the Console or re-run this step."
+          fi
 
       # ── Sync the FULL store listing (title, short/long description, feature graphic, screenshots)
       #    from android/fastlane/metadata via `fastlane supply`. r0adkll can't do this; supply reads

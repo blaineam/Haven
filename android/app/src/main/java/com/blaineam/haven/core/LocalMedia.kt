@@ -267,8 +267,18 @@ object LocalMedia {
         if (!f.exists()) return null
         if (f.length() > maxInMemoryBytes()) return null   // too big to decrypt in RAM here → skip
         val stored = f.readBytes()
-        val opened = runCatching { HavenNet.engine.openCircleMedia(circleId, stored) }.getOrNull() ?: stored
-        return checked(ref, opened)
+        // The `?: stored` fallback exists for LEGACY UNSEALED blobs, which are already plaintext.
+        // But it also swallows a failed DECRYPT: the sealed bytes fall through to the hash check,
+        // fail it, and get reported as "do not match its content address" — which reads as
+        // substitution or tampering when the truth is simply "this did not open". That one mislabel
+        // sent this investigation chasing corrupt bytes and missing keys for hours. Say which it is.
+        val opened = runCatching { HavenNet.engine.openCircleMedia(circleId, stored) }.getOrNull()
+        if (opened == null && isSealedEnvelope(stored)) {
+            android.util.Log.w("LocalMedia",
+                "media DID NOT OPEN ${ref.take(12)}: ${stored.size}B sealed (${if (stored.size > 0 && stored[0] == '{'.code.toByte()) "legacy JSON" else "binary"}) — decrypt failed, bytes are not corrupt-by-hash")
+            return null
+        }
+        return checked(ref, opened ?: stored)
     }
 
     /** Decrypt a video ref to a cache file VideoView/MediaPlayer can read; null if missing/undecodable.
@@ -950,6 +960,13 @@ object LocalMedia {
         val id = bareId(ref)
         return id.length == 64 && id.all { it in '0'..'9' || it in 'a'..'f' }
     }
+
+    /** Is this blob SEALED (either container), as opposed to a legacy plaintext one? A JSON envelope
+     *  starts with `{`; a binary one carries the `HVE1` tag. */
+    private fun isSealedEnvelope(b: ByteArray): Boolean =
+        b.size >= 4 && (b[0] == '{'.code.toByte() ||
+            (b[0] == 'H'.code.toByte() && b[1] == 'V'.code.toByte() &&
+             b[2] == 'E'.code.toByte() && b[3] == '1'.code.toByte()))
 
     /** Do these plaintext bytes account for [ref]? True for legacy refs (nothing to check). */
     private fun verifiesRef(ref: String, plaintext: ByteArray): Boolean =

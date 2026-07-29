@@ -1275,6 +1275,14 @@ object HavenNet : InboundListener {
             Log.i(TAG, "media-wanted ${f.ref.take(10)} from ${f.from.take(8)} — I don't hold it either")
             return
         }
+        // Holding the SEALED blob is not enough to repair it — see the iOS handler. The asker almost
+        // certainly is not one of its recipients, and only a FRESH seal from the PLAINTEXT can add
+        // them. If we cannot open our own copy we cannot re-seal it, and answering would put back
+        // byte-identical bytes and report success. Stay quiet so the ask reaches a device that can.
+        if (LocalMedia.load(f.circleId, f.ref) == null) {
+            Log.i(TAG, "media-wanted ${f.ref.take(10)} from ${f.from.take(8)} — cannot open our own copy; cannot re-seal, not answering")
+            return
+        }
         // Already put this one back a moment ago (or two people asked at once): don't pay for the
         // upload again, just answer. The blob is on the relay either way, which is all 32 claims.
         val now = System.currentTimeMillis()
@@ -1296,7 +1304,7 @@ object HavenNet : InboundListener {
         // a relay that has SWEPT the blob is exactly the case where both can say "held" and skip the
         // upload the asker is waiting for.
         val ok = try {
-            uploadMedia(f.circleId, f.ref, force = true)
+            uploadMedia(f.circleId, f.ref, force = true, reseal = true)
         } finally {
             synchronized(mediaServing) { mediaServing.remove(f.ref) }
         }
@@ -5509,6 +5517,7 @@ object HavenNet : InboundListener {
     /** Fetch missing feed media: try the circle relay (haven/media/<ref>) first, then ask contacts. */
     fun requestMissingMedia() {
         if (!ready) return
+        runCatching { verifyHeldMedia() }   // held != readable; see verifyHeldMedia
         val myHex = nodeIdHex
         val nowMs = System.currentTimeMillis()
         val now = nowMs()
@@ -6000,17 +6009,43 @@ object HavenNet : InboundListener {
      * write-once, so a 1.0.7 build that device-signed it froze it forever; the only cure is to
      * re-seal (now account-signed, done by the core fix) and overwrite the stored copy.
      */
-    suspend fun uploadMedia(circleId: String, ref: String, force: Boolean = false): Boolean {
-        if (uploadMediaOnce(circleId, ref, force)) return true
+    /** `reseal` seals afresh from the plaintext instead of re-sending the stored seal. `force` only
+     *  bypasses the "already uploaded" ledger — it re-PUTs the SAME bytes, which repairs nothing when
+     *  the thing that changed is the RECIPIENT SET. Media is sealed once and never re-sealed, so a
+     *  member who joined after a blob was posted is not one of its recipients and can never open it;
+     *  answering their ask with the old seal reports success while fixing nothing. */
+    suspend fun uploadMedia(circleId: String, ref: String, force: Boolean = false,
+                            reseal: Boolean = false): Boolean {
+        if (uploadMediaOnce(circleId, ref, force, reseal)) return true
         // Nothing took the blob and at least one relay REFUSED it rather than being down: publish our
         // roster to the refusers and try once more, exactly as the Restore job does for the read side. A
         // device that has never been authorized anywhere otherwise never gets its FIRST blob up — and
         // because that upload failure is invisible, the damage surfaces much later as a fetch that
         // genuinely 404s, an absence manufactured entirely by a permissions problem.
-        return healForbiddenRelays() && uploadMediaOnce(circleId, ref, force)
+        return healForbiddenRelays() && uploadMediaOnce(circleId, ref, force, reseal)
     }
 
-    private suspend fun uploadMediaOnce(circleId: String, ref: String, force: Boolean = false): Boolean {
+    /** Re-seal a blob we authored from its plaintext, and replace our at-rest copy with the new
+     *  envelope. Null when we cannot (no plaintext, or too large to open in RAM on this device) —
+     *  the caller then falls back to the stored seal, which is no worse than before. */
+    private fun resealFromPlaintext(circleId: String, ref: String): ByteArray? {
+        val plain = LocalMedia.load(circleId, ref)
+        if (plain == null) {
+            Log.i(TAG, "reseal ${ref.take(10)}: cannot open our own copy (missing, or too big for RAM) — sending the stored seal")
+            return null
+        }
+        val fresh = runCatching { social.sealCircleMedia(circleId, plain) }.getOrNull()
+        if (fresh == null) {
+            Log.w(TAG, "reseal ${ref.take(10)}: re-seal failed — sending the stored seal")
+            return null
+        }
+        LocalMedia.writeRawSealed(ref, fresh)   // keep our copy consistent with what peers now hold
+        Log.i(TAG, "reseal ${ref.take(10)}: sealed afresh to the circle's current members (${plain.size}B plain → ${fresh.size}B)")
+        return fresh
+    }
+
+    private suspend fun uploadMediaOnce(circleId: String, ref: String, force: Boolean = false,
+                                        reseal: Boolean = false): Boolean {
         // Skip entirely if every destination already has this blob (before the expensive rawSealed read).
         val dests = mediaRelaysFor(circleId)
         if (!force && dests.isNotEmpty() && dests.all { isBackedUp(it, ref) }) return true
@@ -6081,7 +6116,11 @@ object HavenNet : InboundListener {
         if (uploadS3.isEmpty() && uploadLocal.isEmpty() && uploadHttp.isEmpty() && uploadDial.isEmpty()) return landed
 
         // ---- Read the sealed blob, now known to be needed by at least one reachable destination.
-        val blob = LocalMedia.rawSealed(ref) ?: return landed
+        // A repair must produce NEW bytes: open our own copy and seal it again, so the fresh envelope
+        // addresses the circle's CURRENT members. Re-sending rawSealed() would hand back the very
+        // recipient list that already excluded the asker.
+        val blob = (if (reseal) resealFromPlaintext(circleId, ref) else null)
+            ?: LocalMedia.rawSealed(ref) ?: return landed
         val chunked = blob.size > mediaChunkBytes
         val ranges = chunkOffsets(blob.size)
         val sizes = ranges.map { it.second - it.first }
@@ -6322,6 +6361,7 @@ object HavenNet : InboundListener {
     /** One re-seal ask per ref per hour: the sweep revisits a broken ref constantly, and the author
      *  should not be asked to spend an upload every time it does. */
     private val RESEAL_ASK_COOLDOWN_MS = 60L * 60 * 1000
+    private val VERIFY_PER_SWEEP = 3
     private val resealAskedAt = HashMap<String, Long>()
 
     private fun askAuthorToReseal(ref: String, circleId: String?) {
@@ -6341,7 +6381,7 @@ object HavenNet : InboundListener {
                     // My own post: I hold the only plaintext, so there is nobody to ask — a forced
                     // re-upload from here is the repair, not a request.
                     if (item.isMe) {
-                        scope.launch { runCatching { uploadMedia(cid, ref, force = true) } }
+                        scope.launch { runCatching { uploadMedia(cid, ref, force = true, reseal = true) } }
                         Log.i(TAG, "quarantine ${ref.take(10)}: my own post — re-sealing it myself")
                     } else {
                         requestMediaWhenAvailable(ref, cid, item.id, item.authorShort)
@@ -6350,7 +6390,7 @@ object HavenNet : InboundListener {
                 }
                 val cm = item.comments.firstOrNull { it.media.contains(ref) } ?: continue
                 if (cm.isMe) {
-                    scope.launch { runCatching { uploadMedia(cid, ref, force = true) } }
+                    scope.launch { runCatching { uploadMedia(cid, ref, force = true, reseal = true) } }
                 } else {
                     requestMediaWhenAvailable(ref, cid, item.id, cm.authorShort)
                 }
@@ -6362,7 +6402,21 @@ object HavenNet : InboundListener {
 
     /** Persisted across restarts: re-downloading a blob that will fail to open again is pure waste,
      *  and the in-memory set meant every launch paid for all of them a second time. */
+    /** Bump when a release changes what a parked ref is worth retrying. Persisting the quarantine
+     *  stopped the pointless re-downloads, but it also means a ref parked by an OLDER build is never
+     *  reconsidered — including after a release that can finally repair it. A repair the user can
+     *  never reach is not a repair, so an upgrade empties the lot once and lets them prove
+     *  themselves again; anything still broken re-parks on its next sweep at no extra cost. */
+    private val quarantineEpoch = 2
+
     private fun loadUnopenable() {
+        val seen = prefs.getInt("unopenableEpoch", 0)
+        if (seen != quarantineEpoch) {
+            val n = prefs.getStringSet("unopenableMedia", emptySet())?.size ?: 0
+            prefs.edit().remove("unopenableMedia").putInt("unopenableEpoch", quarantineEpoch).apply()
+            if (n > 0) Log.i(TAG, "quarantine: cleared $n parked ref(s) for the new repair path — they get one more try")
+            return
+        }
         val saved = prefs.getStringSet("unopenableMedia", emptySet()) ?: return
         if (saved.isNotEmpty()) unopenableMedia.addAll(saved)
     }
@@ -6376,6 +6430,55 @@ object HavenNet : InboundListener {
      * no network at all. A ref whose bytes have gone missing is un-parked so the normal sweep can
      * fetch it again; genuinely corrupt bytes just fail and stay parked.
      */
+    /** Refs already verified openable — never re-tested. */
+    private val verifiedOpen = java.util.Collections.synchronizedSet(HashSet<String>())
+    private var verifyCursor = 0
+
+    /**
+     * HELD is not the same as READABLE, and only one of those is what a user sees.
+     *
+     * `LocalMedia.has(ref)` answers "the bytes are on disk", so a blob we hold but cannot open is
+     * excluded from the missing sweep AND from every repair path — which is exactly how a device
+     * sat at `missing=0` while showing 23 broken tiles. Media is sealed once to a fixed recipient
+     * list and never re-sealed, so a member who joined after a post can never open its media: the
+     * bytes arrive perfectly and decrypt to nothing, forever, with nothing reporting it.
+     *
+     * So: actually TEST a few held refs each sweep, and ask the author to re-seal the ones that fail.
+     * Bounded to [VERIFY_PER_SWEEP] because an open attempt is real crypto over real bytes; a pass
+     * costs a few refs and the whole library converges over a handful of sweeps.
+     */
+    private fun verifyHeldMedia() {
+        val refs = ArrayList<Pair<String, String>>()   // ref → circleId
+        for (c in runCatching { social.circles() }.getOrDefault(emptyList())) {
+            for (item in runCatching { social.feed(c.id, nowMs(), null) }.getOrDefault(emptyList())) {
+                for (r in item.media) {
+                    if (LocalMedia.isSynthetic(r) || verifiedOpen.contains(r) || !LocalMedia.has(r)) continue
+                    refs.add(r to c.id)
+                }
+            }
+        }
+        if (refs.isEmpty()) return
+        if (verifyCursor >= refs.size) verifyCursor = 0
+        var tested = 0
+        while (tested < VERIFY_PER_SWEEP && verifyCursor < refs.size) {
+            val (ref, cid) = refs[verifyCursor]; verifyCursor++; tested++
+            when (LocalMedia.opensForAnyCircle(ref)) {
+                true -> verifiedOpen.add(ref)
+                false -> {
+                    // Say WHICH stage refuses it. A bare "did not open" is what made this take all night.
+                    val why = runCatching {
+                        val sealed = LocalMedia.rawSealed(ref)
+                        if (sealed == null) "too-big-to-read-in-ram"
+                        else social.mediaOpenDiagnosis(cid, sealed)
+                    }.getOrElse { "diag-failed: ${it.message}" }
+                    Log.w(TAG, "held-but-unreadable ${ref.take(10)} — $why")
+                    askAuthorToReseal(ref, cid)
+                }
+                null -> {}   // cannot judge yet (no circles loaded / bytes vanished) — try again later
+            }
+        }
+    }
+
     private fun retryParkedOpens() {
         val parked = synchronized(unopenableMedia) { unopenableMedia.toList() }
         if (parked.isEmpty()) return

@@ -6103,6 +6103,41 @@ impl HavenSocial {
 
     /// Open a circle-sealed media blob fetched from the shared store. Verifies the
     /// sender (read from the envelope) against the circle roster.
+    /// Why did [`Self::open_circle_media`] refuse this blob? It returns a bare `None` for three very
+    /// different failures — unknown circle, unresolvable sealer, or no key that opens it — and that
+    /// single answer sent a whole debugging session chasing corrupt bytes, missing epoch keys and
+    /// roster skew in turn. Report the stage, and whether we are even in the recipient list.
+    pub fn media_open_diagnosis(&self, circle_id: String, sealed: Vec<u8>) -> String {
+        let st = self.state.lock().unwrap();
+        let Ok(env) = SealedEnvelope::from_bytes(&sealed) else {
+            return format!("PARSE-FAIL bytes={} head={:?}", sealed.len(),
+                           String::from_utf8_lossy(&sealed[..sealed.len().min(8)]));
+        };
+        let sender_hex = env.sender_hex();
+        let me_hex = hex(&st.me().node_id_bytes());
+        let dev_hex = st.device.as_ref().map(|d| hex(&d.public().node_id_bytes()));
+        let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else {
+            return format!("NO-SUCH-CIRCLE circle={circle_id} sender={}", &sender_hex[..16]);
+        };
+        let recips = env.recipient_ids_hex();
+        let me_listed = recips.iter().any(|r| *r == me_hex);
+        let dev_listed = dev_hex.as_ref().map_or(false, |d| recips.iter().any(|r| r == d));
+        let sender_kind = if sender_hex == me_hex {
+            "self"
+        } else if st.circles[idx].members.iter().any(|m| hex(&m.node_id_bytes()) == sender_hex) {
+            "member"
+        } else if authorized_device_and_account(&st, idx, &sender_hex).is_some() {
+            "authorized-device"
+        } else {
+            "UNRESOLVABLE"
+        };
+        format!(
+            "sender={} kind={sender_kind} recipients={} me_listed={me_listed} dev_listed={dev_listed} \
+have_seed={} have_device={} members={}",
+            &sender_hex[..16], recips.len(), st.me_secret.is_some(), st.device.is_some(),
+            st.circles[idx].members.len())
+    }
+
     pub fn open_circle_media(&self, circle_id: String, sealed: Vec<u8>) -> Option<Vec<u8>> {
         let st = self.state.lock().unwrap();
         let env = SealedEnvelope::from_bytes(&sealed).ok()?;

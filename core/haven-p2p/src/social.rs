@@ -131,6 +131,9 @@ struct RecipientKey {
     wrapped: Vec<u8>, // AEAD(kek, content_key)
 }
 
+/// Tags a binary envelope. Absent on the legacy JSON form, which always starts with `{`.
+const ENVELOPE_MAGIC: &[u8; 4] = b"HVE1";
+
 /// The opaque, on-wire form of a sealed event. Reveals nothing to a relay.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SealedEnvelope {
@@ -147,13 +150,42 @@ impl SealedEnvelope {
     }
 
     /// Serialize for transport / storage.
+    ///
+    /// COMPACT BINARY, tagged. `serde_json` renders every `Vec<u8>` as an array of decimal numbers,
+    /// so the ciphertext cost ~3.6 bytes of ASCII per byte of data: a 48 MB video was a 167 MB blob
+    /// on disk, and opening it meant parsing 167 MB of text into a fresh 48 MB buffer. On a phone
+    /// with a 192 MB heap cap and ~180 MB free that cannot succeed at any layer — the native
+    /// file-to-file path could not save it either, because the bloat is in the container, not the
+    /// caller. Photos and videos simply never rendered, and the failure looked like a decrypt error.
+    ///
+    /// The signature is computed over [`Self::transcript`], which hashes the FIELDS, not their
+    /// serialized form — so changing the container does not touch signing or verification.
     pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("envelope serializes")
+        let mut out = Vec::with_capacity(64 + self.ciphertext.len());
+        out.extend_from_slice(ENVELOPE_MAGIC);
+        out.extend_from_slice(&postcard::to_allocvec(self).expect("envelope serializes"));
+        out
     }
 
-    /// Parse from transport / storage.
+    /// Parse from transport / storage — binary if tagged, else legacy JSON.
+    ///
+    /// Every blob already written is JSON and stays readable forever: content-addressed media is
+    /// never re-sealed, so a device that drops JSON support would permanently lose media it already
+    /// holds. A JSON envelope always begins with `{`, which no postcard encoding can start with,
+    /// because the tag is checked first.
     pub fn from_bytes(b: &[u8]) -> Result<Self> {
+        if let Some(rest) = b.strip_prefix(ENVELOPE_MAGIC) {
+            return postcard::from_bytes(rest).map_err(|_| CoreError::Encoding("malformed envelope"));
+        }
         serde_json::from_slice(b).map_err(|_| CoreError::Encoding("malformed envelope"))
+    }
+
+    /// Node ids (hex) this envelope was wrapped to. DIAGNOSIS ONLY — reveals nothing a holder of
+    /// the blob cannot already read, and answers the one question a failed open cannot: "was I even
+    /// a recipient?" A member who joined after a blob was sealed never is, and media is never
+    /// re-sealed, so that case is invisible without this.
+    pub fn recipient_ids_hex(&self) -> Vec<String> {
+        self.recipients.iter().map(|r| hex(&r.member)).collect()
     }
 
     /// Transcript that the signature covers (binds ciphertext + all recipient entries).
@@ -997,5 +1029,63 @@ mod poll_tests {
         assert!(p2.closed);
         assert_eq!(p2.options[0].votes, 0);
         assert_eq!(p2.options[1].votes, 2);
+    }
+}
+
+#[cfg(test)]
+mod envelope_container_tests {
+    use super::*;
+
+    fn sealed() -> SealedEnvelope {
+        let a = Identity::from_seed(&[7u8; 32]);
+        let b = Identity::from_seed(&[9u8; 32]);
+        let group = Group::new("default".to_string(), vec![a.public(), b.public()]);
+        seal_bytes(&a, &group, b"a video's worth of bytes").expect("seals")
+    }
+
+    /// The new container is binary and TAGGED, and round-trips.
+    #[test]
+    fn binary_envelope_roundtrips_and_is_tagged() {
+        let env = sealed();
+        let bytes = env.to_bytes();
+        assert!(bytes.starts_with(ENVELOPE_MAGIC), "new envelopes carry the tag");
+        assert_ne!(bytes[0], b'{', "no longer JSON");
+        let back = SealedEnvelope::from_bytes(&bytes).expect("parses");
+        assert_eq!(back.sender_hex(), env.sender_hex());
+        assert_eq!(back.ciphertext, env.ciphertext);
+    }
+
+    /// EVERY blob already on disk is JSON, and content-addressed media is never re-sealed — so
+    /// dropping JSON support would permanently destroy media people already hold. This is the test
+    /// that must never be deleted.
+    #[test]
+    fn legacy_json_envelopes_still_open() {
+        let env = sealed();
+        let legacy = serde_json::to_vec(&env).expect("legacy form");
+        assert_eq!(legacy[0], b'{', "legacy really is JSON");
+        let back = SealedEnvelope::from_bytes(&legacy).expect("legacy still parses");
+        assert_eq!(back.sender_hex(), env.sender_hex());
+        assert_eq!(back.ciphertext, env.ciphertext);
+    }
+
+    /// The whole point: JSON renders each ciphertext byte as ~3.6 bytes of ASCII, which is what made
+    /// a 48 MB video a 167 MB blob no mid-range phone could parse.
+    #[test]
+    fn binary_container_is_dramatically_smaller_than_json() {
+        let a = Identity::from_seed(&[7u8; 32]);
+        let b = Identity::from_seed(&[9u8; 32]);
+        let group = Group::new("default".to_string(), vec![a.public(), b.public()]);
+        let payload = vec![0xABu8; 256 * 1024];
+        let env = seal_bytes(&a, &group, &payload).expect("seals");
+        let bin = env.to_bytes().len();
+        let json = serde_json::to_vec(&env).expect("json").len();
+        println!("payload={} binary={bin} json={json} ratio={:.2}x",
+                 payload.len(), json as f64 / bin as f64);
+        assert!(bin < json / 3, "binary {bin} should be far under a third of json {json}");
+        // Fixed overhead is post-quantum key material — an ML-KEM ciphertext per recipient plus an
+        // ML-DSA signature — so it is several KB before any payload, but it does NOT scale with the
+        // payload. That is the property that matters: constant overhead, not a multiplier.
+        assert!(bin < payload.len() + 32 * 1024,
+                "binary {bin} should be payload {} plus constant crypto overhead", payload.len());
     }
 }

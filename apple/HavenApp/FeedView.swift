@@ -5407,6 +5407,17 @@ final class FeedStore: ObservableObject {
             HavenLog.sync("media-wanted \(ref.prefix(10)) from \(from.prefix(8)) — I don't hold it either")
             return
         }
+        // Holding the SEALED blob is not enough to repair it. An asker who cannot open a blob is,
+        // almost always, not one of its recipients — media is sealed once to a fixed list and never
+        // re-sealed, so anyone who joined later is permanently excluded. Fixing that needs a FRESH
+        // seal, which needs the PLAINTEXT. Re-uploading a sealed copy someone else produced puts the
+        // very same recipient list back and then answers "it's back" — true, and useless: the asker
+        // re-fetches identical bytes, fails identically, and asks again forever. Only the device that
+        // still holds the original can repair this; stay quiet so the ask reaches one that can.
+        guard MediaStore.shared.hasLocalFile(ref) else {
+            HavenLog.sync("media-wanted \(ref.prefix(10)) from \(from.prefix(8)) — I hold only a SEALED copy, not the plaintext; cannot re-seal, not answering")
+            return
+        }
         // BOUNDED. Re-uploading a whole blob is expensive and TRIGGERED BY SOMEONE ELSE, so an
         // unbounded version lets any circle member spend my upload bandwidth by asking repeatedly,
         // and lets concurrent asks for one ref each start their own upload. Not the sync-tick shape
@@ -5427,7 +5438,9 @@ final class FeedStore: ObservableObject {
         mediaWantedInFlight.insert(ref)
         Task { @MainActor in
             defer { self.mediaWantedInFlight.remove(ref) }
-            let ok = await SharedStore.backup(ref: ref, circleId: circleId, social: social, force: true)
+            // reseal: a peer asking means THEY cannot open it. Re-uploading the cached seal would
+            // put back bytes addressed to the same recipients that already excluded them.
+            let ok = await SharedStore.backup(ref: ref, circleId: circleId, social: social, force: true, reseal: true)
             guard ok else {
                 HavenLog.sync("media-wanted \(ref.prefix(10)): re-upload failed — they'll re-ask")
                 return

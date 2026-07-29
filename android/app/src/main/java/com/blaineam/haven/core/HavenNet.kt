@@ -407,8 +407,11 @@ object HavenNet : InboundListener {
         prefs.edit().putString("initiated", o.toString()).apply()
     }
     private fun forgetInitiated(idHex: String) {
-        val had = initiated.remove(idHex) != null or (initiatedAt.remove(idHex) != null)
-        if (had) saveInitiated()
+        // Both removes must run — `or` here would bind tighter than `!=` and reparse the whole
+        // thing as `remove(idHex) != (null or ...)`.
+        val hadKey = initiated.remove(idHex) != null
+        val hadStamp = initiatedAt.remove(idHex) != null
+        if (hadKey || hadStamp) saveInitiated()
     }
 
     // Keyed by node id so a NEW identity never inherits a previous identity's events (the social

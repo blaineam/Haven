@@ -1,4 +1,4 @@
-1.1.6 — video that actually sends, and taps that land:
+1.1.7 — video that actually sends, and taps that land:
 • Turning your camera on mid-call now sends real video instead of a black square.
 • Audio-only calls no longer hold the camera open, so the privacy dot stays off and the battery lasts longer.
 • Tapping an older post notification no longer claims the post is unavailable when it's sitting right there in your feed.

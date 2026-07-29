@@ -489,6 +489,7 @@ object HavenNet : InboundListener {
         loadContacts()
         loadDeviceHints()
         loadInitiated()   // an unanswered handshake must outlive the process that started it
+        loadUnopenable()  // don't re-download blobs that already failed to open once
         loadBlocked()
         loadRelayNodes()
         purgeStaleRelays()   // erase relays inactive AND unseen > 7 days (config else survives)
@@ -2839,12 +2840,13 @@ object HavenNet : InboundListener {
      * corrupt just fails once more and parks itself right back.
      */
     private fun onRosterLearned() {
-        val n = synchronized(unopenableMedia) {
-            val c = unopenableMedia.size
-            if (c > 0) unopenableMedia.clear()
-            c
-        }
-        if (n > 0) Log.i(TAG, "roster learned — retrying $n media ref(s) that could not be opened")
+        val n = unopenableMedia.size
+        if (n == 0) return
+        // Re-OPEN the bytes we kept rather than clearing the parking lot. Clearing only un-skipped
+        // the refs so the next sweep re-downloaded them — which never helped, because the reason
+        // they failed was the key, not the bytes.
+        Log.i(TAG, "roster learned — re-opening $n quarantined media ref(s)")
+        retryParkedOpens()
     }
 
     private fun rosterPullDue(accountHex: String): Boolean {
@@ -5029,7 +5031,7 @@ object HavenNet : InboundListener {
                             // (author still around) looked fine.
                             val got = (fetchMediaFromRelay(job.circleId, job.ref) ||
                                 (healForbiddenRelays() && fetchMediaFromRelay(job.circleId, job.ref))) &&
-                                acceptFetchedBlob(job.ref)
+                                acceptFetchedBlob(job.ref, job.circleId)
                             if (got) {
                                 mediaArrived(job.ref)
                                 withContext(Dispatchers.Main) { feedVersion.value++ }
@@ -6290,15 +6292,104 @@ object HavenNet : InboundListener {
      * A blob we cannot JUDGE (no circles loaded yet) is kept and reported as fetched: under-claiming
      * corruption is the safe direction. iOS `SharedStore.restore`'s "found … but OPEN FAILED" branch.
      */
-    private fun acceptFetchedBlob(ref: String): Boolean {
+    private fun acceptFetchedBlob(ref: String, circleId: String? = null): Boolean {
         val opens = LocalMedia.opensForAnyCircle(ref) ?: return true
-        if (opens) return true
+        if (opens) { if (unopenableMedia.remove(ref)) saveUnopenable(); return true }
         android.util.Log.w("MediaSync",
-            "media restore ${ref.take(12)}: found on a relay but OPEN FAILED for every circle — " +
-            "the stored copy is bad, not missing; dropping it and not re-fetching this session")
-        LocalMedia.delete(ref)
+            "media restore ${ref.take(12)}: fetched but OPEN FAILED for every circle — " +
+            "QUARANTINED (bytes kept; will re-open, not re-download, once a key/roster lands)")
+        // KEEP THE BYTES. "Opens for no circle I currently hold" is NOT proof the bytes are bad —
+        // it is equally "I do not have that key yet", and deleting on that reading destroyed data
+        // that would have opened minutes later. [onRosterLearned] already existed to retry exactly
+        // this case and could never work, because the bytes it wanted to re-read were gone: all a
+        // retry could do was re-download the same blob from the same relay.
+        //
+        // Quarantining instead makes recovery FREE (a local decrypt attempt, no network) and makes
+        // the failure survivable: 46 refs on one device had each been re-downloaded on every launch,
+        // failed, and re-parked, with the sweep reporting `missing=0` the whole time.
         unopenableMedia.add(ref)
+        saveUnopenable()
+        // ON DEMAND, and only on demand: ask the AUTHOR to re-seal this one ref. Frame 31 already
+        // carries exactly this request (sealed + signed, and it rides the circle mailbox so an
+        // author offline for a week gets it on their next sync), and the author side answers with
+        // uploadMedia(force = true) — a FRESH seal, which is precisely what repairs a blob stitched
+        // from two different seals. Nothing is re-uploaded unless a reader actually found a broken
+        // copy, so a healthy fleet pays nothing.
+        askAuthorToReseal(ref, circleId)
         return false
+    }
+
+    /** One re-seal ask per ref per hour: the sweep revisits a broken ref constantly, and the author
+     *  should not be asked to spend an upload every time it does. */
+    private val RESEAL_ASK_COOLDOWN_MS = 60L * 60 * 1000
+    private val resealAskedAt = HashMap<String, Long>()
+
+    private fun askAuthorToReseal(ref: String, circleId: String?) {
+        val now = System.currentTimeMillis()
+        synchronized(resealAskedAt) {
+            val last = resealAskedAt[ref]
+            if (last != null && now - last < RESEAL_ASK_COOLDOWN_MS) return
+            resealAskedAt[ref] = now
+            while (resealAskedAt.size > 500) resealAskedAt.remove(resealAskedAt.keys.first())
+        }
+        val circleIds = if (circleId != null) listOf(circleId)
+            else runCatching { social.circles().map { it.id } }.getOrDefault(emptyList())
+        for (cid in circleIds) {
+            val feed = runCatching { social.feed(cid, nowMs(), null) }.getOrDefault(emptyList())
+            for (item in feed) {
+                if (item.media.contains(ref)) {
+                    // My own post: I hold the only plaintext, so there is nobody to ask — a forced
+                    // re-upload from here is the repair, not a request.
+                    if (item.isMe) {
+                        scope.launch { runCatching { uploadMedia(cid, ref, force = true) } }
+                        Log.i(TAG, "quarantine ${ref.take(10)}: my own post — re-sealing it myself")
+                    } else {
+                        requestMediaWhenAvailable(ref, cid, item.id, item.authorShort)
+                    }
+                    return
+                }
+                val cm = item.comments.firstOrNull { it.media.contains(ref) } ?: continue
+                if (cm.isMe) {
+                    scope.launch { runCatching { uploadMedia(cid, ref, force = true) } }
+                } else {
+                    requestMediaWhenAvailable(ref, cid, item.id, cm.authorShort)
+                }
+                return
+            }
+        }
+        Log.i(TAG, "quarantine ${ref.take(10)}: no post references it — cannot identify an author to ask")
+    }
+
+    /** Persisted across restarts: re-downloading a blob that will fail to open again is pure waste,
+     *  and the in-memory set meant every launch paid for all of them a second time. */
+    private fun loadUnopenable() {
+        val saved = prefs.getStringSet("unopenableMedia", emptySet()) ?: return
+        if (saved.isNotEmpty()) unopenableMedia.addAll(saved)
+    }
+    private fun saveUnopenable() {
+        prefs.edit().putStringSet("unopenableMedia", HashSet(unopenableMedia)).apply()
+    }
+
+    /**
+     * Re-attempt the OPEN (never the download) for every quarantined ref. Cheap and local: the bytes
+     * are already here, so a key we have since learned turns a broken tile into a working one with
+     * no network at all. A ref whose bytes have gone missing is un-parked so the normal sweep can
+     * fetch it again; genuinely corrupt bytes just fail and stay parked.
+     */
+    private fun retryParkedOpens() {
+        val parked = synchronized(unopenableMedia) { unopenableMedia.toList() }
+        if (parked.isEmpty()) return
+        var opened = 0
+        var regone = 0
+        for (r in parked) {
+            val verdict = LocalMedia.opensForAnyCircle(r)
+            if (verdict == true) { unopenableMedia.remove(r); opened++ }
+            else if (verdict == null && !LocalMedia.has(r)) { unopenableMedia.remove(r); regone++ }
+        }
+        if (opened > 0 || regone > 0) {
+            saveUnopenable()
+            Log.i(TAG, "quarantine retry: $opened now open, $regone lost their bytes (will re-fetch), ${unopenableMedia.size} still parked")
+        }
     }
 
     private suspend fun fetchMediaFromRelay(circleId: String, ref: String): Boolean {

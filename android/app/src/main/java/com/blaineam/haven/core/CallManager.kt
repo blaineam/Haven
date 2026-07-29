@@ -660,9 +660,13 @@ object CallManager {
             val src = f.createVideoSource(false); videoSource = src
             surfaceHelper = SurfaceTextureHelper.create("CaptureThread", eglBase.eglBaseContext)
             cap.initialize(surfaceHelper, appContext, src.capturerObserver)
-            cap.startCapture(1280, 720, 30)
             localVideo = f.createVideoTrack("haven-video", src).apply { setEnabled(cameraOn.value) }
-            Log.i(TAG, "camera: track published on '$front' (enabled=${cameraOn.value}) — toggling is instant from here")
+            // Publish the TRACK unconditionally (fixed m-lines, see the call site) but only open the
+            // CAMERA when it is actually wanted. Starting capture here regardless meant every audio
+            // call held the camera open for its whole duration — privacy indicator lit, battery
+            // burning, for a camera nobody had switched on.
+            if (cameraOn.value) startCapture(cap)
+            Log.i(TAG, "camera: track published on '$front' (enabled=${cameraOn.value}, capturing=${cameraOn.value})")
         }.onFailure { Log.w(TAG, "camera start failed", it) }
     }
 
@@ -924,6 +928,32 @@ object CallManager {
     private fun applySpeaker() {
         runCatching { audioManager().isSpeakerphoneOn = speakerOn.value }
     }
+    /** Open the camera at the best resolution it will accept. */
+    private fun startCapture(cap: org.webrtc.VideoCapturer) {
+        if (capturing) return
+        // Fall back down the ladder: a 1280x720@30 request is fine on modern hardware and simply
+        // FAILS on older sensors — and a failed startCapture leaves an enabled track publishing
+        // nothing, which the far end renders as a permanently black tile rather than an error.
+        for ((w, h, fps) in listOf(Triple(1280, 720, 30), Triple(960, 540, 30), Triple(640, 480, 30), Triple(640, 480, 15))) {
+            val ok = runCatching { cap.startCapture(w, h, fps); true }.getOrElse {
+                Log.w(TAG, "camera: startCapture ${w}x$h@$fps failed (${it.message})"); false
+            }
+            if (ok) { capturing = true; Log.i(TAG, "camera: capturing at ${w}x$h@$fps"); return }
+        }
+        Log.w(TAG, "camera: every capture format was refused — this device cannot publish video")
+    }
+
+    private fun stopCapture() {
+        val cap = capturer ?: return
+        if (!capturing) return
+        runCatching { cap.stopCapture() }.onFailure { Log.w(TAG, "camera: stopCapture failed", it) }
+        capturing = false
+        Log.i(TAG, "camera: released")
+    }
+
+    /** True while the camera hardware is actually open. */
+    private var capturing = false
+
     fun toggleCamera() {
         cameraOn.value = !cameraOn.value
         // If the track is missing the camera never came up — say so instead of no-opping in silence,
@@ -936,6 +966,11 @@ object CallManager {
             // `startCamera` now publishes the track up front (disabled) so this path stays rare.
             runCatching { startCamera(ensureFactory()) }
         }
+        // Drive the CAPTURER, not just the track. Enabling a track whose capture session never
+        // delivered a frame publishes black forever — the far end sees a dead tile and there is
+        // nothing on screen to say why. Turning the camera on now always opens a fresh session.
+        val cap = capturer
+        if (cameraOn.value) { if (cap != null) startCapture(cap) } else stopCapture()
         localVideo?.setEnabled(cameraOn.value)
             ?: Log.w(TAG, "camera: still no track after retry — this device cannot publish video")
         // Tell every peer so they swap to my avatar instead of freezing on my last camera frame.
@@ -1020,6 +1055,7 @@ object CallManager {
         runCatching { screenVideoSource?.dispose() }; screenVideoSource = null
         screenShare.value = false
         runCatching { capturer?.stopCapture() }
+        capturing = false   // teardown releases the camera; the next call opens a fresh session
         runCatching { capturer?.dispose() }; capturer = null
         runCatching { surfaceHelper?.dispose() }; surfaceHelper = null
         localVideo = null

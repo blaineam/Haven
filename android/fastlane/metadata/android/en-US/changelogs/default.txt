@@ -1,6 +1,5 @@
-1.1.5 — calls connect, and posts show up:
-• Calls between Android and iPhone now connect on networks where they used to ring, get answered, and then sit there forever.
-• Answering a call could close the app. Fixed.
-• Posts and messages arrive in about a minute instead of several, while you're watching.
-• Attached photos and videos always show a tile in the composer.
-• New: disappearing messages, and see which relays hold a post.
+1.1.6 — video that actually sends, and taps that land:
+• Turning your camera on mid-call now sends real video instead of a black square.
+• Audio-only calls no longer hold the camera open, so the privacy dot stays off and the battery lasts longer.
+• Tapping an older post notification no longer claims the post is unavailable when it's sitting right there in your feed.
+• Story links opened from a notification behave the same way.

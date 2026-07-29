@@ -257,7 +257,10 @@ struct PostLinkView: View {
     @State private var settled = false
 
     private var post: FeedItemFfi? {
-        store.messages(in: circleId).first { $0.id == postId }
+        // Retention-free lookup — see FeedStore.post(_:in:). Tapping a notification is an explicit
+        // request for THIS post; a "hide older than N days" display preference must not turn it
+        // into "unavailable" for something the feed is still showing.
+        store.post(postId, in: circleId)
     }
 
     var body: some View {
@@ -284,7 +287,20 @@ struct PostLinkView: View {
                 }
             }
             .task {
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                // Poll, don't guess. A notification tapped after the app was killed races the engine:
+                // every lookup answers "no such post" for a second or two purely because the engine
+                // hasn't opened yet, and the old blind 1.5s timer routinely expired inside that
+                // window — hence "Post unavailable" for a post that was sitting in the feed the
+                // moment you dismissed the sheet. The grace budget only burns down once the engine
+                // is actually up, so a slow cold launch spends startup time instead of the budget.
+                var graceLeft = 6.0            // seconds of "engine is up but the post hasn't landed"
+                var ticks = 0                  // absolute cap, so a dead engine can't spin forever
+                while graceLeft > 0, ticks < 160 {
+                    if post != nil { return }  // found it — never show the failure state
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    ticks += 1
+                    if store.engineReady { graceLeft -= 0.25 }
+                }
                 settled = true
             }
             .navigationTitle("Post")
@@ -328,7 +344,16 @@ struct StoryLinkView: View {
                 }
             }
             .task {
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                // Same engine race as PostLinkView — a tap from a cold launch must not be told the
+                // story is gone just because the engine hasn't finished coming up.
+                var graceLeft = 6.0
+                var ticks = 0
+                while graceLeft > 0, ticks < 160 {
+                    if stories.contains(where: { $0.id == postId }) { return }
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    ticks += 1
+                    if store.engineReady { graceLeft -= 0.25 }
+                }
                 settled = true
             }
         }

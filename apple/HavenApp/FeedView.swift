@@ -1228,6 +1228,23 @@ final class FeedStore: ObservableObject {
         else { messagesCache.removeAll(keepingCapacity: true) }
     }
     /// Messages of a circle (for a DM thread) without disturbing the main feed.
+    /// Is the social engine up? Lookups answer "no such post" indistinguishably from "engine still
+    /// booting", so anything that reports absence to the user has to wait for this first.
+    var engineReady: Bool { social != nil }
+
+    /// One post by id, WITHOUT applying viewer retention.
+    ///
+    /// `messages(in:)` filters by the circle's viewer-retention setting, which is a DISPLAY
+    /// preference — "don't show me things older than N days" — not a statement that the post is
+    /// gone. The deep-link target used that same lookup, so tapping an old notification reported
+    /// "Post unavailable" for a post sitting right there in the feed the moment you dismissed the
+    /// sheet. The feed itself reads with `viewerRetentionSecs: nil`; a tap is an explicit request
+    /// for one specific post, so it must too.
+    func post(_ postId: String, in circleId: String) -> FeedItemFfi? {
+        social?.feed(circleId: circleId, nowMs: now(), viewerRetentionSecs: nil)
+            .first { $0.id == postId }
+    }
+
     func messages(in circleId: String) -> [FeedItemFfi] {
         maybePurgeExpiredMedia(circleId, retention: CircleSettingsStore.shared.retentionSecs(circleId))
         let nowMs = now()

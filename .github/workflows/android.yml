@@ -446,8 +446,6 @@ jobs:
             --skip_upload_changelogs true \
             --changes_not_sent_for_review false
 
-          whatsNewDirectory: ${{ env.whatsnew }}
-
       # `continue-on-error` above deliberately keeps a Play-side gate from red-X'ing the release — but a
       # failure there was also INVISIBLE in the job list. A release-notes overflow (Play caps them at 500
       # chars) silently rolled the whole edit back, so nothing reached Play while the step still read as

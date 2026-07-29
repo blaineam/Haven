@@ -29,6 +29,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- Screen sharing in a call (MediaProjection) — Android 14+ requires this FGS type. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- Capturing the mic while Haven is BACKGROUNDED needs a foreground service typed
+         `microphone` (Android 14+). Without it the OS silently cuts capture the moment you
+         switch apps mid-call: you keep hearing them (playback is unrestricted) and they hear
+         nothing at all from you. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <!-- Nearby Connections (offline mesh). Location is required for BLE scanning on API <= 30. -->
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
@@ -105,7 +110,7 @@
         <service
             android:name=".core.ConnectionService"
             android:exported="false"
-            android:foregroundServiceType="dataSync|mediaProjection" />
+            android:foregroundServiceType="dataSync|mediaProjection|microphone" />
         <!-- Answer / Decline from the incoming-call notification. Not exported: only Haven's own
              notification actions may drive a call. -->
         <receiver

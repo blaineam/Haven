@@ -6454,8 +6454,30 @@ final class FeedStore: ObservableObject {
         // A DM circle is strictly its two encoded parties — never let a third party (e.g. a
         // contact who picked up a broadcast Hello) handshake their way into someone else's DM.
         if circleId.hasPrefix("dm:") && !dmCircleAllows(circleId, idHex) { return (true, "dm-third-party") }
-        // A member you explicitly removed from this circle must NOT auto-rejoin on their handshake.
-        if ConnectionsStore.shared.isRemovedFromCircle(idHex, circleId: circleId) { return (true, "removed-from-circle") }
+        // A member you explicitly removed from this circle must NOT auto-rejoin on their handshake —
+        // but silently DROPPING it made a removal permanent AND mutual. The tombstone only ever
+        // clears on YOUR side when YOU re-add them, so once two people had removed each other
+        // neither could reconnect by any route: their deliberate request died on your tombstone,
+        // yours died on theirs, and both sides just saw "waiting" forever. Ask instead of dropping —
+        // consent is still required, nothing auto-rejoins, and approving clears the tombstone.
+        // Proximity and DM hellos keep dropping: neither is a deliberate request.
+        if ConnectionsStore.shared.isRemovedFromCircle(idHex, circleId: circleId) {
+            if viaNearby || circleId.hasPrefix("dm:") { return (true, "removed-from-circle") }
+            let name = social.verifyProfile(bundle: bundle, blob: profileBlob) ?? "Someone"
+            let vhex = (try? social.bundleVerificationHex(bundle: bundle)) ?? ""
+            let display = name.isEmpty ? "Someone" : name
+            ConnectionsStore.shared.addPending(ConnectionRequest(
+                idHex: idHex, name: display, bundle: bundle,
+                safetyWords: SafetyWords.words(fromHex: vhex)))
+            NotificationManager.shared.notify(title: "New connection",
+                                              body: "\(display) wants to connect",
+                                              dedupeKey: "req-\(idHex)")
+            ActivityStore.shared.note(id: "req-\(idHex)", kind: "connect",
+                                      actorHex: idHex, actorShort: String(idHex.prefix(8)),
+                                      snippet: "\(display) wants to connect")
+            // NOT consumed — the grant must survive until the user decides (stranger parity).
+            return (false, "removed-needs-approval")
+        }
         // A circle/DM the user DELETED must not be re-created by a bare handshake (LWW) — respect the
         // deletion. The user re-opens it explicitly (startDM/createCircle) if they want it back.
         if circleId != "default", CircleDeletionStore.isDeleted(circleId) { return (true, "circle-deleted") }

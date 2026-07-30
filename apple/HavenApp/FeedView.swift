@@ -5367,6 +5367,46 @@ final class FeedStore: ObservableObject {
     /// The request rides the sealed frame path, which means the circle mailbox carries it: an author
     /// who is offline for a week gets it the moment they next sync. That is the whole mechanism —
     /// nothing is parked on a relay by hand, and no relay change was needed.
+    /// Refs already proven openable, and refs already asked about — so a probe runs once per ref
+    /// per launch and an author is asked at most once per ref per launch.
+    private static var mediaProbed = Set<String>()
+    private static var mediaAskedForReseal = Set<String>()
+
+    /// HELD is not the same as READABLE, and only one of those is what a user sees.
+    ///
+    /// A blob we hold but cannot open is excluded from the missing sweep — the bytes ARE on disk —
+    /// so nothing notices and nothing repairs it. Media is sealed once to a fixed recipient list and
+    /// never re-sealed, so a member who joined after a post can never open its media: the bytes
+    /// arrive perfectly and decrypt to nothing, forever, while the post's text renders fine. Android
+    /// hit exactly this and sat at "0 missing" with 23 broken tiles.
+    ///
+    /// So actually TEST a few held refs per pass and ask the author to re-seal the failures. Bounded
+    /// per pass (an open attempt is real crypto over real bytes) and once per ref per launch, so the
+    /// total cost is the size of the library rather than a rate.
+    func verifyHeldMedia(limit: Int = 6) {
+        guard let social else { return }
+        var tested = 0
+        for c in circles {
+            if tested >= limit { break }
+            for item in social.feed(circleId: c.id, nowMs: now(), viewerRetentionSecs: nil) {
+                if tested >= limit { break }
+                for ref in item.media {
+                    if tested >= limit { break }
+                    if MediaStore.isSynthetic(ref) || Self.mediaProbed.contains(ref) { continue }
+                    guard MediaStore.shared.has(ref), let sealed = MediaStore.shared.rawBytes(ref) else { continue }
+                    Self.mediaProbed.insert(ref)
+                    tested += 1
+                    if social.openCircleMedia(circleId: c.id, sealed: sealed) != nil { continue }
+                    guard !Self.mediaAskedForReseal.contains(ref) else { continue }
+                    Self.mediaAskedForReseal.insert(ref)
+                    HavenLog.sync("held-but-unreadable \(ref.prefix(10)) — asking \(item.authorShort.prefix(8)) to re-seal")
+                    requestMediaWhenAvailable(ref: ref, circleId: c.id, postId: item.id,
+                                              authorShort: item.authorShort)
+                }
+            }
+        }
+    }
+
     func requestMediaWhenAvailable(ref: String, circleId: String, postId: String, authorShort: String) {
         guard let authorHex = ContactsStore.shared.idHex(forNodePrefix: authorShort) else {
             HavenLog.sync("media-wanted \(ref.prefix(10)): author not resolvable — cannot ask")
@@ -5407,6 +5447,17 @@ final class FeedStore: ObservableObject {
             HavenLog.sync("media-wanted \(ref.prefix(10)) from \(from.prefix(8)) — I don't hold it either")
             return
         }
+        // Holding the SEALED blob is not enough to repair it. An asker who cannot open a blob is,
+        // almost always, not one of its recipients — media is sealed once to a fixed list and never
+        // re-sealed, so anyone who joined later is permanently excluded. Fixing that needs a FRESH
+        // seal, which needs the PLAINTEXT. Re-uploading a sealed copy someone else produced puts the
+        // very same recipient list back and then answers "it's back" — true, and useless: the asker
+        // re-fetches identical bytes, fails identically, and asks again forever. Only the device that
+        // still holds the original can repair this; stay quiet so the ask reaches one that can.
+        guard MediaStore.shared.hasLocalFile(ref) else {
+            HavenLog.sync("media-wanted \(ref.prefix(10)) from \(from.prefix(8)) — I hold only a SEALED copy, not the plaintext; cannot re-seal, not answering")
+            return
+        }
         // BOUNDED. Re-uploading a whole blob is expensive and TRIGGERED BY SOMEONE ELSE, so an
         // unbounded version lets any circle member spend my upload bandwidth by asking repeatedly,
         // and lets concurrent asks for one ref each start their own upload. Not the sync-tick shape
@@ -5418,7 +5469,17 @@ final class FeedStore: ObservableObject {
             HavenLog.sync("media-wanted \(ref.prefix(10)): already uploading — \(from.prefix(8)) will get the reply")
             return
         }
-        if let at = mediaWantedServedAt[ref], Date().timeIntervalSince(at) < 600 {
+        // A repeat ask is answered from the earlier upload — but ONLY once this ref has actually
+        // been RE-SEALED at least once in this session. The 10-minute timer alone could swallow the
+        // very first repair: a peer that could not open a blob asked, we had served that ref minutes
+        // earlier for an unrelated reason, and we replied "it's back" without re-sealing. Nothing
+        // changed, they re-fetched identical bytes, failed identically, and asked again — so whether
+        // a photo ever got repaired depended on where its ask landed in the window, which reads as
+        // "some media loads, some doesn't, at random". A ref we HAVE re-sealed is genuinely as good
+        // as it will get until the circle changes, so caching that answer is honest and bounded.
+        if !mediaResealedThisSession.contains(ref) {
+            HavenLog.sync("media-wanted \(ref.prefix(10)): never re-sealed this session — repairing rather than answering from cache")
+        } else if let at = mediaWantedServedAt[ref], Date().timeIntervalSince(at) < 600 {
             HavenLog.sync("media-wanted \(ref.prefix(10)): served recently — answering \(from.prefix(8)) without re-uploading")
             sendMediaAvailable(ref: ref, circleId: circleId, postId: postId, to: from)
             return
@@ -5427,17 +5488,26 @@ final class FeedStore: ObservableObject {
         mediaWantedInFlight.insert(ref)
         Task { @MainActor in
             defer { self.mediaWantedInFlight.remove(ref) }
-            let ok = await SharedStore.backup(ref: ref, circleId: circleId, social: social, force: true)
+            // reseal: a peer asking means THEY cannot open it. Re-uploading the cached seal would
+            // put back bytes addressed to the same recipients that already excluded them.
+            let ok = await SharedStore.backup(ref: ref, circleId: circleId, social: social, force: true, reseal: true)
             guard ok else {
                 HavenLog.sync("media-wanted \(ref.prefix(10)): re-upload failed — they'll re-ask")
                 return
             }
             self.mediaWantedServedAt[ref] = Date()
+            self.mediaResealedThisSession.insert(ref)
             if self.mediaWantedServedAt.count > 500 { self.mediaWantedServedAt.removeAll() }
+            if self.mediaResealedThisSession.count > 1000 { self.mediaResealedThisSession.removeAll() }
             self.sendMediaAvailable(ref: ref, circleId: circleId, postId: postId, to: from)
             HavenLog.sync("media-wanted \(ref.prefix(10)): back on a relay, told \(from.prefix(8))")
         }
     }
+
+    /// Refs genuinely RE-SEALED since launch. The serve cache may only answer for these: a ref we
+    /// have never re-sealed has nothing to answer WITH, and saying "it's back" about bytes we did
+    /// not touch is what let a broken photo stay broken while both sides reported success.
+    private var mediaResealedThisSession = Set<String>()
 
     /// Refs currently being re-uploaded, and when each was last served — see the bounding note above.
     private func sendMediaAvailable(ref: String, circleId: String, postId: String, to peer: String) {
@@ -5779,6 +5849,7 @@ final class FeedStore: ObservableObject {
     }
 
     private func requestMissingMedia() {
+        verifyHeldMedia()   // held != readable — a blob we hold but cannot open is invisible here
         guard let social, node != nil || nearby != nil else { return }
         // The scan below is O(items × media) with a stat() per ref (MediaStore.has) — cap it to
         // once per 2s on the main actor; per-ref request throttles below stay unchanged.

@@ -1,5 +1,5 @@
-1.1.8 — adding a friend sticks, and calls keep your mic:
-• Adding a friend now keeps trying until they answer instead of getting one attempt. Requests sent over mobile data reach people who never got them.
-• If you and someone had removed each other, neither could reconnect. Now either of you can ask again.
-• Switching apps during a call no longer silently mutes you.
+1.2.0 — your photos and videos show up:
+• Photos and videos from friends now load reliably. If one can't be opened, your device asks for a fresh copy automatically instead of showing a grey tile forever.
+• Media takes about a third of the space and data it used to.
+• Switching apps during a call no longer mutes you to everyone else.
 • Turning your camera on mid-call sends real video, not a black square.

@@ -131,6 +131,9 @@ struct RecipientKey {
     wrapped: Vec<u8>, // AEAD(kek, content_key)
 }
 
+/// Tags a binary envelope. Absent on the legacy JSON form, which always starts with `{`.
+const ENVELOPE_MAGIC: &[u8; 4] = b"HVE1";
+
 /// The opaque, on-wire form of a sealed event. Reveals nothing to a relay.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SealedEnvelope {
@@ -147,13 +150,42 @@ impl SealedEnvelope {
     }
 
     /// Serialize for transport / storage.
+    ///
+    /// COMPACT BINARY, tagged. `serde_json` renders every `Vec<u8>` as an array of decimal numbers,
+    /// so the ciphertext cost ~3.6 bytes of ASCII per byte of data: a 48 MB video was a 167 MB blob
+    /// on disk, and opening it meant parsing 167 MB of text into a fresh 48 MB buffer. On a phone
+    /// with a 192 MB heap cap and ~180 MB free that cannot succeed at any layer — the native
+    /// file-to-file path could not save it either, because the bloat is in the container, not the
+    /// caller. Photos and videos simply never rendered, and the failure looked like a decrypt error.
+    ///
+    /// The signature is computed over [`Self::transcript`], which hashes the FIELDS, not their
+    /// serialized form — so changing the container does not touch signing or verification.
     pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("envelope serializes")
+        let mut out = Vec::with_capacity(64 + self.ciphertext.len());
+        out.extend_from_slice(ENVELOPE_MAGIC);
+        out.extend_from_slice(&postcard::to_allocvec(self).expect("envelope serializes"));
+        out
     }
 
-    /// Parse from transport / storage.
+    /// Parse from transport / storage — binary if tagged, else legacy JSON.
+    ///
+    /// Every blob already written is JSON and stays readable forever: content-addressed media is
+    /// never re-sealed, so a device that drops JSON support would permanently lose media it already
+    /// holds. A JSON envelope always begins with `{`, which no postcard encoding can start with,
+    /// because the tag is checked first.
     pub fn from_bytes(b: &[u8]) -> Result<Self> {
+        if let Some(rest) = b.strip_prefix(ENVELOPE_MAGIC) {
+            return postcard::from_bytes(rest).map_err(|_| CoreError::Encoding("malformed envelope"));
+        }
         serde_json::from_slice(b).map_err(|_| CoreError::Encoding("malformed envelope"))
+    }
+
+    /// Node ids (hex) this envelope was wrapped to. DIAGNOSIS ONLY — reveals nothing a holder of
+    /// the blob cannot already read, and answers the one question a failed open cannot: "was I even
+    /// a recipient?" A member who joined after a blob was sealed never is, and media is never
+    /// re-sealed, so that case is invisible without this.
+    pub fn recipient_ids_hex(&self) -> Vec<String> {
+        self.recipients.iter().map(|r| hex(&r.member)).collect()
     }
 
     /// Transcript that the signature covers (binds ciphertext + all recipient entries).
@@ -200,6 +232,75 @@ pub fn seal_event(sender: &Identity, group: &Group, event: &Event) -> Result<Sea
     };
     env.signature = sender.sign(&env.transcript());
     Ok(env)
+}
+
+/// A reserved pseudo-member standing for "the circle EPOCH itself".
+///
+/// Media used to be readable ONLY by whoever was on its recipient list when it was sealed, and a
+/// content-addressed blob is never re-sealed — so a member who joined later could read a post's
+/// text (they hold the epoch) but never its photos, permanently. Adding the epoch as one more
+/// recipient fixes that without giving up the property the recipient list provides: a friend whose
+/// epoch keys have not converged still opens the blob by their own account key, exactly as before.
+///
+/// It is a normal entry in the existing list, so an older build simply doesn't match it against its
+/// own node id and is unaffected — no format break, no second envelope type.
+pub const EPOCH_RECIPIENT: [u8; 32] = *b"haven!epoch!recipient!marker!v1\0";
+
+/// KEK for the epoch pseudo-recipient. Domain-separated so it can never collide with an event key
+/// derived from the same epoch secret.
+fn epoch_wrap_kek(epoch_key: &[u8; 32]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new_keyed(epoch_key);
+    h.update(b"haven-media-epoch-wrap-v1");
+    *h.finalize().as_bytes()
+}
+
+/// [`seal_bytes`] plus an epoch-wrapped copy of the content key, so ANY holder of the circle epoch
+/// opens it — including members who joined after this blob was sealed.
+pub fn seal_bytes_with_epoch(
+    sender: &Identity,
+    group: &Group,
+    epoch_key: &[u8; 32],
+    bytes: &[u8],
+) -> Result<SealedEnvelope> {
+    let mut content_key = [0u8; 32];
+    OsRng.fill_bytes(&mut content_key);
+    let ciphertext = seal(&content_key, bytes);
+
+    let mut recipients = Vec::with_capacity(group.members.len() + 1);
+    for member in &group.members {
+        let (enc, kek) = encapsulate_to(member)?;
+        recipients.push(RecipientKey {
+            member: member.node_id_bytes().to_vec(),
+            enc: EncWire { eph_x_pub: enc.eph_x_pub.to_vec(), pq_ct: enc.pq_ct },
+            wrapped: seal(&kek, &content_key),
+        });
+    }
+    // The epoch entry. No KEM material: the "key agreement" already happened when the circle
+    // distributed its epoch key, which is precisely why a later joiner can use it.
+    recipients.push(RecipientKey {
+        member: EPOCH_RECIPIENT.to_vec(),
+        enc: EncWire { eph_x_pub: Vec::new(), pq_ct: Vec::new() },
+        wrapped: seal(&epoch_wrap_kek(epoch_key), &content_key),
+    });
+
+    let mut env = SealedEnvelope {
+        sender: sender.public().node_id_bytes().to_vec(),
+        ciphertext,
+        recipients,
+        signature: Vec::new(),
+    };
+    env.signature = sender.sign(&env.transcript());
+    Ok(env)
+}
+
+/// Open a blob via its EPOCH entry — the path a member who joined after it was sealed must use.
+/// Returns None when this envelope carries no epoch entry (every blob sealed before this shipped)
+/// or when `epoch_key` is not the epoch it was sealed under.
+pub fn open_bytes_with_epoch(epoch_key: &[u8; 32], env: &SealedEnvelope) -> Option<Vec<u8>> {
+    let entry = env.recipients.iter().find(|r| r.member == EPOCH_RECIPIENT)?;
+    let content_key = open(&epoch_wrap_kek(epoch_key), &entry.wrapped).ok()?;
+    let ck: [u8; 32] = content_key.try_into().ok()?;
+    open(&ck, &env.ciphertext).ok()
 }
 
 /// Seal arbitrary bytes (e.g. a media blob) to every member of a group — any member
@@ -997,5 +1098,116 @@ mod poll_tests {
         assert!(p2.closed);
         assert_eq!(p2.options[0].votes, 0);
         assert_eq!(p2.options[1].votes, 2);
+    }
+}
+
+#[cfg(test)]
+mod envelope_container_tests {
+    use super::*;
+
+    fn sealed() -> SealedEnvelope {
+        let a = Identity::from_seed(&[7u8; 32]);
+        let b = Identity::from_seed(&[9u8; 32]);
+        let group = Group::new("default".to_string(), vec![a.public(), b.public()]);
+        seal_bytes(&a, &group, b"a video's worth of bytes").expect("seals")
+    }
+
+    /// The new container is binary and TAGGED, and round-trips.
+    #[test]
+    fn binary_envelope_roundtrips_and_is_tagged() {
+        let env = sealed();
+        let bytes = env.to_bytes();
+        assert!(bytes.starts_with(ENVELOPE_MAGIC), "new envelopes carry the tag");
+        assert_ne!(bytes[0], b'{', "no longer JSON");
+        let back = SealedEnvelope::from_bytes(&bytes).expect("parses");
+        assert_eq!(back.sender_hex(), env.sender_hex());
+        assert_eq!(back.ciphertext, env.ciphertext);
+    }
+
+    /// EVERY blob already on disk is JSON, and content-addressed media is never re-sealed — so
+    /// dropping JSON support would permanently destroy media people already hold. This is the test
+    /// that must never be deleted.
+    #[test]
+    fn legacy_json_envelopes_still_open() {
+        let env = sealed();
+        let legacy = serde_json::to_vec(&env).expect("legacy form");
+        assert_eq!(legacy[0], b'{', "legacy really is JSON");
+        let back = SealedEnvelope::from_bytes(&legacy).expect("legacy still parses");
+        assert_eq!(back.sender_hex(), env.sender_hex());
+        assert_eq!(back.ciphertext, env.ciphertext);
+    }
+
+    /// The whole point: JSON renders each ciphertext byte as ~3.6 bytes of ASCII, which is what made
+    /// a 48 MB video a 167 MB blob no mid-range phone could parse.
+    #[test]
+    fn binary_container_is_dramatically_smaller_than_json() {
+        let a = Identity::from_seed(&[7u8; 32]);
+        let b = Identity::from_seed(&[9u8; 32]);
+        let group = Group::new("default".to_string(), vec![a.public(), b.public()]);
+        let payload = vec![0xABu8; 256 * 1024];
+        let env = seal_bytes(&a, &group, &payload).expect("seals");
+        let bin = env.to_bytes().len();
+        let json = serde_json::to_vec(&env).expect("json").len();
+        println!("payload={} binary={bin} json={json} ratio={:.2}x",
+                 payload.len(), json as f64 / bin as f64);
+        assert!(bin < json / 3, "binary {bin} should be far under a third of json {json}");
+        // Fixed overhead is post-quantum key material — an ML-KEM ciphertext per recipient plus an
+        // ML-DSA signature — so it is several KB before any payload, but it does NOT scale with the
+        // payload. That is the property that matters: constant overhead, not a multiplier.
+        assert!(bin < payload.len() + 32 * 1024,
+                "binary {bin} should be payload {} plus constant crypto overhead", payload.len());
+    }
+}
+
+#[cfg(test)]
+mod epoch_recipient_tests {
+    use super::*;
+
+    /// THE bug this exists for: someone who was NOT on the recipient list — a member who joined
+    /// after the blob was sealed — opens it with the circle epoch key.
+    #[test]
+    fn a_later_joiner_opens_it_by_epoch() {
+        let author = Identity::from_seed(&[1u8; 32]);
+        let original = Identity::from_seed(&[2u8; 32]);
+        let joiner = Identity::from_seed(&[3u8; 32]);
+        let epoch = [42u8; 32];
+        // The joiner is deliberately absent from the recipient list.
+        let group = Group::new("default".to_string(), vec![author.public(), original.public()]);
+        let env = seal_bytes_with_epoch(&author, &group, &epoch, b"a photo").expect("seals");
+        assert!(!env.recipient_ids_hex().contains(&hex(&joiner.public().node_id_bytes())));
+        assert_eq!(open_bytes_with_epoch(&epoch, &env).as_deref(), Some(&b"a photo"[..]));
+    }
+
+    /// Isolation: every user's own circle is called "default", so the id collides by design. A
+    /// different circle's epoch key must never open this blob.
+    #[test]
+    fn another_circles_epoch_cannot_open_it() {
+        let author = Identity::from_seed(&[1u8; 32]);
+        let group = Group::new("default".to_string(), vec![author.public()]);
+        let env = seal_bytes_with_epoch(&author, &group, &[42u8; 32], b"private").expect("seals");
+        assert!(open_bytes_with_epoch(&[43u8; 32], &env).is_none(),
+                "a stranger's circle must never open my media");
+    }
+
+    /// The property the epoch entry must NOT cost us: a listed recipient still opens it by their own
+    /// key, with no epoch key at all — the friend whose epoch has not converged.
+    #[test]
+    fn a_listed_recipient_still_opens_it_without_any_epoch_key() {
+        let author = Identity::from_seed(&[1u8; 32]);
+        let friend = Identity::from_seed(&[2u8; 32]);
+        let group = Group::new("default".to_string(), vec![author.public(), friend.public()]);
+        let env = seal_bytes_with_epoch(&author, &group, &[42u8; 32], b"a photo").expect("seals");
+        let out = open_bytes(&friend, &author.public(), &env).expect("opens by account key");
+        assert_eq!(out, b"a photo");
+    }
+
+    /// A blob sealed WITHOUT an epoch (a circle that has not keyed) has no epoch entry, and asking
+    /// for one must fail cleanly rather than mis-open.
+    #[test]
+    fn a_blob_with_no_epoch_entry_reports_none() {
+        let author = Identity::from_seed(&[1u8; 32]);
+        let group = Group::new("default".to_string(), vec![author.public()]);
+        let env = seal_bytes(&author, &group, b"a photo").expect("seals");
+        assert!(open_bytes_with_epoch(&[42u8; 32], &env).is_none());
     }
 }

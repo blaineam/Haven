@@ -297,7 +297,7 @@ enum MediaRecovery {
             var done = Set(UserDefaults.standard.stringArray(forKey: refsKey) ?? [])
             let todo = held.filter { !done.contains($0.ref) }
             for m in todo {
-                if await SharedStore.backup(ref: m.ref, circleId: m.cid, social: social, force: true) {
+                if await SharedStore.backup(ref: m.ref, circleId: m.cid, social: social, force: true, reseal: true) {
                     done.insert(m.ref)   // a destination accepted the fresh blob → this ref is repaired
                 }
             }
@@ -540,15 +540,22 @@ enum SharedStore {
     /// Returns whether some destination now holds the blob (a probe hit, or — under `force` — accepted
     /// the freshly re-sealed overwrite). The recovery migration uses this to know a ref is repaired.
     @discardableResult
-    static func backup(ref: String, circleId: String, social: HavenSocial, force: Bool = false) async -> Bool {
-        if await backupOnce(ref: ref, circleId: circleId, social: social, force: force) { return true }
+    /// `reseal` discards any cached seal and seals afresh from the plaintext. Distinct from `force`,
+    /// which only re-PUTs bytes we may already have uploaded: a REPAIR needs new bytes, because the
+    /// thing that changed is the RECIPIENT SET, and re-uploading the old seal repairs nothing while
+    /// truthfully reporting success. Media is sealed once and never re-sealed, so a member who joins
+    /// after a blob was posted is not one of its recipients and can never open it — the roster-skew
+    /// case the seal-reuse guard below silently made permanent.
+    static func backup(ref: String, circleId: String, social: HavenSocial, force: Bool = false,
+                       reseal: Bool = false) async -> Bool {
+        if await backupOnce(ref: ref, circleId: circleId, social: social, force: force, reseal: reseal) { return true }
         // Nothing took the blob and at least one relay REFUSED it rather than being down: publish our
         // roster to the refusers and try once more, exactly as `restore` does for the read side. A
         // device that has never been authorized anywhere otherwise never gets its FIRST blob up — and
         // because that upload failure is invisible, the damage surfaces much later as a fetch that
         // genuinely 404s, an absence manufactured entirely by a permissions problem.
         guard await healForbiddenRelays(social: social) else { return false }
-        return await backupOnce(ref: ref, circleId: circleId, social: social, force: force)
+        return await backupOnce(ref: ref, circleId: circleId, social: social, force: force, reseal: reseal)
     }
 
     /// Copy a sealed blob from a relay that HOLDS it to the circle's relays that don't, for a ref this
@@ -659,7 +666,8 @@ enum SharedStore {
         return true   // the blob is safe on at least one relay either way
     }
 
-    private static func backupOnce(ref: String, circleId: String, social: HavenSocial, force: Bool = false) async -> Bool {
+    private static func backupOnce(ref: String, circleId: String, social: HavenSocial, force: Bool = false,
+                                   reseal: Bool = false) async -> Bool {
         // Skip entirely if this blob is already confirmed on EVERY destination — before the expensive
         // file read + seal. Content-addressed keys never change, so a confirmed upload is permanent.
         // This is what stops the periodic backfill from re-sending media the relay already has.
@@ -815,12 +823,13 @@ enum SharedStore {
         // COMPLETE seal — never a half-written one. Stale seals are bounded below.
         let existing = (try? sealedURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]))
         var sealedOK = false
-        if let existing, (existing.fileSize ?? 0) > 0,
+        if !reseal, let existing, (existing.fileSize ?? 0) > 0,
            let made = existing.contentModificationDate,
            Date().timeIntervalSince(made) < 24 * 3600 {
             HavenLog.sync("backup ref=\(ref): reusing the existing seal (stable bytes → resume is safe)")
             sealedOK = true
         } else {
+            if reseal { HavenLog.sync("backup ref=\(ref): RE-SEALING (repair — the recipient set may have changed)") }
             if existing != nil { try? FileManager.default.removeItem(at: sealedURL) }   // stale → re-seal
             sealedOK = await Task.detached(priority: .utility) { () -> Bool in
                 social.sealCircleMediaFile(circleId: circleId, inPath: url.path, outPath: sealedURL.path)
@@ -1694,7 +1703,7 @@ enum SharedStore {
         // the only one that can fix it.
         if MediaStore.shared.hasLocalFile(ref), let cid = circleIds.first {
             HavenLog.relay("media restore \(ref.prefix(12)): we hold the plaintext — re-sealing and overwriting the bad copy")
-            Task { @MainActor in _ = await SharedStore.backup(ref: ref, circleId: cid, social: social, force: true) }
+            Task { @MainActor in _ = await SharedStore.backup(ref: ref, circleId: cid, social: social, force: true, reseal: true) }
         }
         return nil
     }

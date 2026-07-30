@@ -123,6 +123,9 @@ struct DynState {
     /// never re-sealed has nothing to answer WITH, and claiming "it's back" about bytes we did not
     /// touch is what let a broken photo stay broken while both sides reported success.
     media_resealed_session: std::collections::HashSet<String>,
+    /// Refs probed for readability at least once since launch — a second probe answers the same
+    /// question at the same cost, so each ref is tested once and the library converges in minutes.
+    media_probed_session: std::collections::HashSet<String>,
     media_serving: HashSet<String>,
     /// Last-seen LIST digest per `"<relay>|<circle>"` (delta-LIST, `X-Haven-List-Digest`):
     /// echoing it turns an unchanged mailbox LIST into a bodiless 204 — the idle radio saver.
@@ -8119,7 +8122,45 @@ impl Engine {
         okm
     }
 
+    /// HELD is not the same as READABLE, and only one of those is what a user sees.
+    ///
+    /// A blob we hold but cannot open is excluded from [`Self::request_missing_media`] — the bytes
+    /// ARE on disk — so nothing notices it and nothing repairs it. Media is sealed once to a fixed
+    /// recipient list and never re-sealed, so a member who joined after a post can never open its
+    /// media: the bytes arrive perfectly and decrypt to nothing, forever, while the post's TEXT
+    /// renders fine. Observed on a real device sitting at "0 missing" with 23 broken tiles.
+    ///
+    /// So actually TEST a few held refs per pass and ask the author to re-seal the failures. Bounded
+    /// per pass (an open is real crypto over real bytes) and once per ref per launch, so the cost is
+    /// the size of the library rather than a rate. Apple/Android parity.
+    fn verify_held_media(self: &Arc<Self>, limit: usize) {
+        let mut tested = 0usize;
+        for c in self.social.circles() {
+            if tested >= limit { return; }
+            for item in self.social.feed(c.id.clone(), now_ms(), None) {
+                if tested >= limit { return; }
+                for reference in item.media.iter() {
+                    if tested >= limit { return; }
+                    if LocalMedia::is_synthetic(reference) { continue; }
+                    {
+                        let st = self.dyn_state.lock().unwrap();
+                        if st.media_probed_session.contains(reference) { continue; }
+                    }
+                    if !self.media.has(reference) { continue; }
+                    self.dyn_state.lock().unwrap().media_probed_session.insert(reference.clone());
+                    tested += 1;
+                    if self.media.load_any_circle(&self.social, reference).is_some() { continue; }
+                    log::warn!("held-but-unreadable {} — asking {} to re-seal",
+                               short(reference), short(&item.author_short));
+                    self.clone().request_media_when_available(
+                        reference.clone(), c.id.clone(), item.id.clone(), item.author_short.clone());
+                }
+            }
+        }
+    }
+
     pub fn request_missing_media(self: &Arc<Self>) {
+        self.clone().verify_held_media(6);   // held != readable; see verify_held_media
         let my_hex = self.node_id_hex();
         // Refs whose relay copy was found and could not be opened (see `accept_fetched_blob`). Fetching
         // them again this session just re-downloads the same unopenable bytes; only the author's

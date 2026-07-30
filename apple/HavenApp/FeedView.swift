@@ -5367,6 +5367,46 @@ final class FeedStore: ObservableObject {
     /// The request rides the sealed frame path, which means the circle mailbox carries it: an author
     /// who is offline for a week gets it the moment they next sync. That is the whole mechanism —
     /// nothing is parked on a relay by hand, and no relay change was needed.
+    /// Refs already proven openable, and refs already asked about — so a probe runs once per ref
+    /// per launch and an author is asked at most once per ref per launch.
+    private static var mediaProbed = Set<String>()
+    private static var mediaAskedForReseal = Set<String>()
+
+    /// HELD is not the same as READABLE, and only one of those is what a user sees.
+    ///
+    /// A blob we hold but cannot open is excluded from the missing sweep — the bytes ARE on disk —
+    /// so nothing notices and nothing repairs it. Media is sealed once to a fixed recipient list and
+    /// never re-sealed, so a member who joined after a post can never open its media: the bytes
+    /// arrive perfectly and decrypt to nothing, forever, while the post's text renders fine. Android
+    /// hit exactly this and sat at "0 missing" with 23 broken tiles.
+    ///
+    /// So actually TEST a few held refs per pass and ask the author to re-seal the failures. Bounded
+    /// per pass (an open attempt is real crypto over real bytes) and once per ref per launch, so the
+    /// total cost is the size of the library rather than a rate.
+    func verifyHeldMedia(limit: Int = 6) {
+        guard let social else { return }
+        var tested = 0
+        for c in circles {
+            if tested >= limit { break }
+            for item in social.feed(circleId: c.id, nowMs: now(), viewerRetentionSecs: nil) {
+                if tested >= limit { break }
+                for ref in item.media {
+                    if tested >= limit { break }
+                    if MediaStore.isSynthetic(ref) || Self.mediaProbed.contains(ref) { continue }
+                    guard MediaStore.shared.has(ref), let sealed = MediaStore.shared.rawBytes(ref) else { continue }
+                    Self.mediaProbed.insert(ref)
+                    tested += 1
+                    if social.openCircleMedia(circleId: c.id, sealed: sealed) != nil { continue }
+                    guard !Self.mediaAskedForReseal.contains(ref) else { continue }
+                    Self.mediaAskedForReseal.insert(ref)
+                    HavenLog.sync("held-but-unreadable \(ref.prefix(10)) — asking \(item.authorShort.prefix(8)) to re-seal")
+                    requestMediaWhenAvailable(ref: ref, circleId: c.id, postId: item.id,
+                                              authorShort: item.authorShort)
+                }
+            }
+        }
+    }
+
     func requestMediaWhenAvailable(ref: String, circleId: String, postId: String, authorShort: String) {
         guard let authorHex = ContactsStore.shared.idHex(forNodePrefix: authorShort) else {
             HavenLog.sync("media-wanted \(ref.prefix(10)): author not resolvable — cannot ask")
@@ -5809,6 +5849,7 @@ final class FeedStore: ObservableObject {
     }
 
     private func requestMissingMedia() {
+        verifyHeldMedia()   // held != readable — a blob we hold but cannot open is invisible here
         guard let social, node != nil || nearby != nil else { return }
         // The scan below is O(items × media) with a stat() per ref (MediaStore.has) — cap it to
         // once per 2s on the main actor; per-ref request throttles below stay unchanged.

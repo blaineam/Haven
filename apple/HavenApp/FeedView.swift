@@ -5429,7 +5429,17 @@ final class FeedStore: ObservableObject {
             HavenLog.sync("media-wanted \(ref.prefix(10)): already uploading — \(from.prefix(8)) will get the reply")
             return
         }
-        if let at = mediaWantedServedAt[ref], Date().timeIntervalSince(at) < 600 {
+        // A repeat ask is answered from the earlier upload — but ONLY once this ref has actually
+        // been RE-SEALED at least once in this session. The 10-minute timer alone could swallow the
+        // very first repair: a peer that could not open a blob asked, we had served that ref minutes
+        // earlier for an unrelated reason, and we replied "it's back" without re-sealing. Nothing
+        // changed, they re-fetched identical bytes, failed identically, and asked again — so whether
+        // a photo ever got repaired depended on where its ask landed in the window, which reads as
+        // "some media loads, some doesn't, at random". A ref we HAVE re-sealed is genuinely as good
+        // as it will get until the circle changes, so caching that answer is honest and bounded.
+        if !mediaResealedThisSession.contains(ref) {
+            HavenLog.sync("media-wanted \(ref.prefix(10)): never re-sealed this session — repairing rather than answering from cache")
+        } else if let at = mediaWantedServedAt[ref], Date().timeIntervalSince(at) < 600 {
             HavenLog.sync("media-wanted \(ref.prefix(10)): served recently — answering \(from.prefix(8)) without re-uploading")
             sendMediaAvailable(ref: ref, circleId: circleId, postId: postId, to: from)
             return
@@ -5446,11 +5456,18 @@ final class FeedStore: ObservableObject {
                 return
             }
             self.mediaWantedServedAt[ref] = Date()
+            self.mediaResealedThisSession.insert(ref)
             if self.mediaWantedServedAt.count > 500 { self.mediaWantedServedAt.removeAll() }
+            if self.mediaResealedThisSession.count > 1000 { self.mediaResealedThisSession.removeAll() }
             self.sendMediaAvailable(ref: ref, circleId: circleId, postId: postId, to: from)
             HavenLog.sync("media-wanted \(ref.prefix(10)): back on a relay, told \(from.prefix(8))")
         }
     }
+
+    /// Refs genuinely RE-SEALED since launch. The serve cache may only answer for these: a ref we
+    /// have never re-sealed has nothing to answer WITH, and saying "it's back" about bytes we did
+    /// not touch is what let a broken photo stay broken while both sides reported success.
+    private var mediaResealedThisSession = Set<String>()
 
     /// Refs currently being re-uploaded, and when each was last served — see the bounding note above.
     private func sendMediaAvailable(ref: String, circleId: String, postId: String, to peer: String) {

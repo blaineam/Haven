@@ -1385,7 +1385,11 @@ object HavenNet : InboundListener {
         // downloadEvicted returns early on `LocalMedia.has(ref)`, so the reader kept its broken
         // copy and ignored the very re-seal it just asked for. The author only re-uploads because
         // we said we could not read it, so the local bytes are exactly the ones to discard.
-        if (LocalMedia.has(f.ref) && LocalMedia.opensForAnyCircle(f.ref) == false) {
+        // `false` (opened for no circle) AND `null` (could not even be judged — a legacy JSON
+        // envelope too large to parse) both mean "the copy we hold is no use to us". Only the
+        // false case was handled, so a blob that failed to PARSE kept its broken bytes forever and
+        // ignored the very re-seal it asked for — the last stuck video on a real device.
+        if (LocalMedia.has(f.ref) && LocalMedia.opensForAnyCircle(f.ref) != true) {
             Log.i(TAG, "media-available ${f.ref.take(10)}: dropping our unreadable copy so the re-seal can land")
             LocalMedia.delete(f.ref)
             unopenableMedia.remove(f.ref)
@@ -6374,20 +6378,25 @@ object HavenNet : InboundListener {
 
     /** One re-seal ask per ref per hour: the sweep revisits a broken ref constantly, and the author
      *  should not be asked to spend an upload every time it does. */
-    /** Just above the author's own 10-minute "served recently" window.
+    /** The author now REPAIRS on the first ask for a ref it has not re-sealed, rather than answering
+     *  from a timer, so this no longer has to dodge their window — it only paces retries for a blob
+     *  whose first repair genuinely did not help. Kept modest, and capped by RESEAL_MAX_TRIES, so a
+     *  blob that will never converge cannot bill its author a full re-seal on a loop.
      *
-     *  An hour was far too long once the repair actually worked: the author answers a re-ask inside
-     *  that window from cache WITHOUT re-uploading, so an ask that lands early is spent for nothing
-     *  and the ref then waits a full hour for its next chance. Whether a given blob got repaired
-     *  therefore depended on where its ask fell relative to someone else's — which presents as
-     *  "some media loads, some doesn't, seemingly at random". Asking just outside the author's
-     *  window means every ask does real work, and the library converges in minutes. */
-    private val RESEAL_ASK_COOLDOWN_MS = 11L * 60 * 1000
-    private val VERIFY_MAX_PROBE_BYTES = 24L * 1024 * 1024
-    private val VERIFY_PER_SWEEP = 2
+     *  (Was 11 min to sit just outside the author's 10-minute cache: a workaround for the bug that
+     *  is now fixed at the source.)
+     */
+    private val RESEAL_ASK_COOLDOWN_MS = 15L * 60 * 1000
+    /** Probed at least once since launch — a second probe answers the same question. */
+    private val probedThisSession = java.util.Collections.synchronizedSet(HashSet<String>())
+    /** Probing is ONCE per ref per session, so the total cost is the size of the library, not a
+     *  rate — spreading it thinner does not save work, it just delays every repair behind it. At 2
+     *  per 2 minutes a 57-item library took an hour to notice its broken items; this covers it in a
+     *  few minutes and then goes quiet for the rest of the session. */
+    private val VERIFY_PER_SWEEP = 8
     /** Probing costs a decrypt each, so it runs on a slow cadence rather than every sweep — the
      *  library still converges, just without competing with the UI for CPU and disk. */
-    private val VERIFY_SWEEP_INTERVAL_MS = 120_000L
+    private val VERIFY_SWEEP_INTERVAL_MS = 30_000L
     private var lastVerifySweepAt = 0L
     private fun verifySweepDue(): Boolean {
         val now = System.currentTimeMillis()
@@ -6503,19 +6512,23 @@ object HavenNet : InboundListener {
             for (item in runCatching { social.feed(c.id, nowMs(), null) }.getOrDefault(emptyList())) {
                 for (r in item.media) {
                     if (LocalMedia.isSynthetic(r) || verifiedOpen.contains(r) || !LocalMedia.has(r)) continue
-                    // A giant blob's probe is a whole file→file decrypt for one bit of information.
-                    // Those are the ones a user notices as jank, and they are already covered when
-                    // the tile itself tries to open them.
-                    if (LocalMedia.sizeOf(r) > VERIFY_MAX_PROBE_BYTES) continue
+                    // Big blobs are probed too — skipping them by size switched off repair for
+                    // precisely the files still broken (the videos), which is the opposite of the
+                    // goal. The cost is controlled by probing each ref at most ONCE per session
+                    // instead: one decrypt answers the question, and re-asking it every sweep is
+                    // what made this expensive, not the file size.
+                    if (probedThisSession.contains(r)) continue
                     refs.add(r to c.id)
                 }
             }
         }
         if (refs.isEmpty()) return
+        Log.i(TAG, "verify sweep: ${refs.size} held ref(s) not yet probed this session")
         if (verifyCursor >= refs.size) verifyCursor = 0
         var tested = 0
         while (tested < VERIFY_PER_SWEEP && verifyCursor < refs.size) {
             val (ref, cid) = refs[verifyCursor]; verifyCursor++; tested++
+            probedThisSession.add(ref)
             when (LocalMedia.opensForAnyCircle(ref)) {
                 true -> verifiedOpen.add(ref)
                 false -> {

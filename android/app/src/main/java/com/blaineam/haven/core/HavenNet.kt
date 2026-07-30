@@ -1381,6 +1381,16 @@ object HavenNet : InboundListener {
         waitingForSenderMedia.remove(f.ref)
         synchronized(fastReq) { fastReq.remove(f.ref) }
         EvictedMediaStore.clear(f.ref)
+        // A blob we HOLD but cannot open must be dropped before the pull, or nothing happens:
+        // downloadEvicted returns early on `LocalMedia.has(ref)`, so the reader kept its broken
+        // copy and ignored the very re-seal it just asked for. The author only re-uploads because
+        // we said we could not read it, so the local bytes are exactly the ones to discard.
+        if (LocalMedia.has(f.ref) && LocalMedia.opensForAnyCircle(f.ref) == false) {
+            Log.i(TAG, "media-available ${f.ref.take(10)}: dropping our unreadable copy so the re-seal can land")
+            LocalMedia.delete(f.ref)
+            unopenableMedia.remove(f.ref)
+            saveUnopenable()
+        }
         downloadEvicted(f.ref)   // pull it now, while we know it's there
         val who = displayName(f.from.take(8))
         Notifications.notify(
@@ -5517,7 +5527,11 @@ object HavenNet : InboundListener {
     /** Fetch missing feed media: try the circle relay (haven/media/<ref>) first, then ask contacts. */
     fun requestMissingMedia() {
         if (!ready) return
-        runCatching { verifyHeldMedia() }   // held != readable; see verifyHeldMedia
+        // OFF-THREAD, always. requestMissingMedia is called from the main thread (foreground
+        // resume, feed refresh), and an open-probe is real crypto over real bytes — on a mid-range
+        // phone with a 167 MB blob that is a visible UI freeze. It also decrypts file→file for a
+        // large blob, which is disk-bound on top. Nothing here needs to be synchronous.
+        if (verifySweepDue()) scope.launch(Dispatchers.IO) { runCatching { verifyHeldMedia() } }
         val myHex = nodeIdHex
         val nowMs = System.currentTimeMillis()
         val now = nowMs()
@@ -6360,17 +6374,53 @@ object HavenNet : InboundListener {
 
     /** One re-seal ask per ref per hour: the sweep revisits a broken ref constantly, and the author
      *  should not be asked to spend an upload every time it does. */
-    private val RESEAL_ASK_COOLDOWN_MS = 60L * 60 * 1000
-    private val VERIFY_PER_SWEEP = 3
+    /** Just above the author's own 10-minute "served recently" window.
+     *
+     *  An hour was far too long once the repair actually worked: the author answers a re-ask inside
+     *  that window from cache WITHOUT re-uploading, so an ask that lands early is spent for nothing
+     *  and the ref then waits a full hour for its next chance. Whether a given blob got repaired
+     *  therefore depended on where its ask fell relative to someone else's — which presents as
+     *  "some media loads, some doesn't, seemingly at random". Asking just outside the author's
+     *  window means every ask does real work, and the library converges in minutes. */
+    private val RESEAL_ASK_COOLDOWN_MS = 11L * 60 * 1000
+    private val VERIFY_MAX_PROBE_BYTES = 24L * 1024 * 1024
+    private val VERIFY_PER_SWEEP = 2
+    /** Probing costs a decrypt each, so it runs on a slow cadence rather than every sweep — the
+     *  library still converges, just without competing with the UI for CPU and disk. */
+    private val VERIFY_SWEEP_INTERVAL_MS = 120_000L
+    private var lastVerifySweepAt = 0L
+    private fun verifySweepDue(): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - lastVerifySweepAt < VERIFY_SWEEP_INTERVAL_MS) return false
+        lastVerifySweepAt = now
+        return true
+    }
     private val resealAskedAt = HashMap<String, Long>()
+    private val resealTries = HashMap<String, Int>()
+    private val RESEAL_MAX_TRIES = 3
 
     private fun askAuthorToReseal(ref: String, circleId: String?) {
         val now = System.currentTimeMillis()
         synchronized(resealAskedAt) {
             val last = resealAskedAt[ref]
             if (last != null && now - last < RESEAL_ASK_COOLDOWN_MS) return
+            // BOUNDED. Every ask makes the AUTHOR re-read, re-seal and re-upload the whole file —
+            // hundreds of MB for a video. A blob that will never converge (its author no longer
+            // holds the plaintext, say) would otherwise bill them that cost every cooldown, forever,
+            // on battery and data. After a few honest attempts, stop and wait for something to
+            // actually change: a restart, or a new epoch/roster, both of which clear this.
+            val tries = (resealTries[ref] ?: 0) + 1
+            if (tries > RESEAL_MAX_TRIES) {
+                if (tries == RESEAL_MAX_TRIES + 1) {
+                    Log.i(TAG, "reseal ${ref.take(10)}: $RESEAL_MAX_TRIES attempts made no difference — parking it rather than re-billing the author")
+                }
+                resealTries[ref] = tries
+                return
+            }
+            resealTries[ref] = tries
             resealAskedAt[ref] = now
             while (resealAskedAt.size > 500) resealAskedAt.remove(resealAskedAt.keys.first())
+            while (resealTries.size > 500) resealTries.remove(resealTries.keys.first())
         }
         val circleIds = if (circleId != null) listOf(circleId)
             else runCatching { social.circles().map { it.id } }.getOrDefault(emptyList())
@@ -6453,6 +6503,10 @@ object HavenNet : InboundListener {
             for (item in runCatching { social.feed(c.id, nowMs(), null) }.getOrDefault(emptyList())) {
                 for (r in item.media) {
                     if (LocalMedia.isSynthetic(r) || verifiedOpen.contains(r) || !LocalMedia.has(r)) continue
+                    // A giant blob's probe is a whole file→file decrypt for one bit of information.
+                    // Those are the ones a user notices as jank, and they are already covered when
+                    // the tile itself tries to open them.
+                    if (LocalMedia.sizeOf(r) > VERIFY_MAX_PROBE_BYTES) continue
                     refs.add(r to c.id)
                 }
             }

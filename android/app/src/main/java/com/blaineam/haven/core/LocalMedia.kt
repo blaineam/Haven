@@ -535,6 +535,9 @@ object LocalMedia {
      *  Null when the blob is too big to hold in RAM on this device: a low-heap phone skips mirroring
      *  media it can't even load (the source device + relay already hold it) instead of OOM-crashing
      *  during background backfill. */
+    /** Sealed size on disk, or 0 when absent. Lets a caller skip work whose cost scales with it. */
+    fun sizeOf(ref: String): Long = mediaFile(ref).let { if (it.exists()) it.length() else 0L }
+
     fun rawSealed(ref: String): ByteArray? {
         val f = mediaFile(ref)
         if (!f.exists() || f.length() > maxInMemoryBytes()) return null

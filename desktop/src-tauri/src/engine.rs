@@ -119,6 +119,10 @@ struct DynState {
     /// circle member could aim at us; these bound it. In-memory on purpose — the cooldown is about
     /// the current session's bandwidth, and a restart re-serving once is fine.
     media_served_at: HashMap<String, u64>,
+    /// Refs genuinely RE-SEALED since launch. The serve cache may only answer for these — a ref we
+    /// never re-sealed has nothing to answer WITH, and claiming "it's back" about bytes we did not
+    /// touch is what let a broken photo stay broken while both sides reported success.
+    media_resealed_session: std::collections::HashSet<String>,
     media_serving: HashSet<String>,
     /// Last-seen LIST digest per `"<relay>|<circle>"` (delta-LIST, `X-Haven-List-Digest`):
     /// echoing it turns an unchanged mailbox LIST into a bodiless 204 — the idle radio saver.
@@ -8526,6 +8530,21 @@ impl Engine {
     /// Returns whether some destination now holds the blob (a probe hit, or — under `force` — accepted
     /// the freshly re-sealed overwrite). The recovery migration uses this to know a ref is repaired.
     async fn upload_media_inner(self: &Arc<Self>, circle_id: &str, reference: &str, force: bool) -> bool {
+        self.upload_media_inner_reseal(circle_id, reference, force, false).await
+    }
+
+    /// `reseal` seals afresh from the plaintext rather than re-sending the stored seal. `force` only
+    /// bypasses the "already uploaded" ledger — it re-PUTs the SAME bytes, which repairs nothing
+    /// when what changed is the RECIPIENT SET. Media is sealed once and never re-sealed, so a member
+    /// who joined after a blob was posted is not one of its recipients and can never open it;
+    /// answering their ask with the old seal reports success while fixing nothing.
+    async fn upload_media_inner_reseal(
+        self: &Arc<Self>,
+        circle_id: &str,
+        reference: &str,
+        force: bool,
+        reseal: bool,
+    ) -> bool {
         let key = Self::media_key(reference);
         let mut landed = false; // a destination holds it (probe hit) or accepted it (upload)
 
@@ -8624,7 +8643,24 @@ impl Engine {
         }
 
         // ---- Read the sealed blob, now known to be needed by at least one reachable destination.
-        let Some(blob) = self.media.raw_sealed(reference) else { return landed };
+        // A repair must produce NEW bytes: open our own copy and seal it again so the fresh envelope
+        // addresses the circle's CURRENT members (and carries the epoch entry). Re-sending
+        // raw_sealed() hands back the very recipient list that already excluded the asker.
+        let resealed: Option<Vec<u8>> = if reseal {
+            match self.media.load_any_circle(&self.social, reference) {
+                Some(plain) => match self.social.seal_circle_media(circle_id.to_string(), plain) {
+                    Ok(fresh) => {
+                        self.media.write_raw_sealed(reference, &fresh);
+                        log::info!("reseal {}: sealed afresh for the circle's current members ({} B)",
+                                   short(reference), fresh.len());
+                        Some(fresh)
+                    }
+                    Err(e) => { log::warn!("reseal {} failed: {e} — sending the stored seal", short(reference)); None }
+                },
+                None => { log::info!("reseal {}: cannot open our own copy — sending the stored seal", short(reference)); None }
+            }
+        } else { None };
+        let Some(blob) = resealed.or_else(|| self.media.raw_sealed(reference)) else { return landed };
         let chunked = blob.len() > MEDIA_CHUNK_BYTES;
         // Identity of the exact bytes being uploaded. A destination's stored windows may only be
         // skipped if WE put them there from THESE bytes: the at-rest blob for a ref is not immutable
@@ -9505,6 +9541,19 @@ impl Engine {
             log::info!("media-wanted {} from {} — we don't hold it either", short(&reference), short(&from));
             return;
         }
+        // Holding the SEALED blob is not enough to REPAIR it. An asker who cannot open a blob is
+        // almost always not one of its recipients — media is sealed once to a fixed list and never
+        // re-sealed, so anyone who joined later is excluded permanently. Fixing that needs a FRESH
+        // seal, which needs the PLAINTEXT. Re-uploading a sealed copy someone else produced puts the
+        // same recipient list back and then answers "it's back": true, and useless. Stay quiet so
+        // the ask reaches a device that can actually repair it. (Apple/Android parity.)
+        if self.media.load_any_circle(&self.social, &reference).is_none() {
+            log::info!(
+                "media-wanted {} from {} — cannot open our own copy; cannot re-seal, not answering",
+                short(&reference), short(&from)
+            );
+            return;
+        }
         // A frame 31 costs the RECIPIENT a full blob upload, so serving one per inbound frame with no
         // bound is a bandwidth amplifier any circle member could aim at us. Inside the cooldown we
         // answer from what we already did: the blob really is on the relay, which is all 32 claims,
@@ -9512,7 +9561,17 @@ impl Engine {
         // for the same ref into one upload.
         const RESERVE_COOLDOWN_MS: u64 = 10 * 60 * 1000;
         let now = now_ms();
-        let served_recently = {
+        // The cache may only answer for a ref we have actually RE-SEALED this session. A timer alone
+        // swallows the very first repair: a peer that could not open a blob asks, we served that ref
+        // minutes ago for an unrelated reason, and we reply "it's back" without re-sealing. Nothing
+        // changed, they re-fetch identical bytes and fail identically — so whether a photo is ever
+        // repaired depends on where its ask lands in the window, which reads as "some media loads,
+        // some doesn't, at random". Observed on a real pair of devices.
+        let resealed_before = {
+            let st = self.dyn_state.lock().unwrap();
+            st.media_resealed_session.contains(&reference)
+        };
+        let served_recently = resealed_before && {
             let st = self.dyn_state.lock().unwrap();
             st.media_served_at.get(&reference).is_some_and(|at| now.saturating_sub(*at) < RESERVE_COOLDOWN_MS)
         };
@@ -9533,7 +9592,11 @@ impl Engine {
         // force: true — the "already has it" probe consults a ledger and the relay's own answer, and a
         // relay that has SWEPT the blob is exactly the case where both can say "held" and skip the
         // upload the asker is waiting for.
-        let ok = self.upload_media_inner(&circle_id, &reference, true).await;
+        let ok = self.upload_media_inner_reseal(&circle_id, &reference, true, true).await;
+        if ok {
+            let mut st = self.dyn_state.lock().unwrap();
+            st.media_resealed_session.insert(reference.clone());
+        }
         {
             let mut st = self.dyn_state.lock().unwrap();
             st.media_serving.remove(&reference);

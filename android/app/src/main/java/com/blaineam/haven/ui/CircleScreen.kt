@@ -1820,6 +1820,13 @@ fun VideoTile(
         android.util.Log.i("VideoTile", "FILE ref=$ref file=${file?.absolutePath ?: "NULL"} exists=${file?.exists() == true} size=${file?.length() ?: -1}")
         // Super data saver / missing bytes: the feed poster tap may open the viewer before the
         // download finishes. Kick the fetch and wait for feedVersion so we decrypt once it lands.
+        // We HOLD the bytes and still could not resolve a file: the copy is undecryptable, not
+        // missing. Nothing downstream noticed this — the sweep's probe can miss a large legacy
+        // envelope, and the branch below only covers ABSENT bytes — so the tile stayed a grey
+        // rectangle forever while every layer reported success. Ask the author to re-seal it.
+        if (file == null && LocalMedia.has(ref)) {
+            com.blaineam.haven.core.HavenNet.noteMediaUnreadable(ref, circleId)
+        }
         if (file == null && !LocalMedia.has(ref)) {
             com.blaineam.haven.core.HavenNet.downloadEvicted(ref)
         }

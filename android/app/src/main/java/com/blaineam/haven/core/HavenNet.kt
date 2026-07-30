@@ -6408,6 +6408,18 @@ object HavenNet : InboundListener {
     private val resealTries = HashMap<String, Int>()
     private val RESEAL_MAX_TRIES = 3
 
+    /**
+     * The point of USE reporting a failure, which no sweep can match for accuracy: the tile tried to
+     * resolve this ref and got nothing back. A blob can slip past [verifyHeldMedia] — the probe is
+     * bounded, and a large legacy envelope can fail in ways the probe reports as "cannot judge" —
+     * but a tile that came up empty for media we HOLD is unambiguous. Ask the author to re-seal it.
+     */
+    fun noteMediaUnreadable(ref: String, circleId: String) {
+        if (!ready || LocalMedia.isSynthetic(ref) || !LocalMedia.has(ref)) return
+        Log.w(TAG, "tile could not resolve ${ref.take(10)} though we hold it — asking the author to re-seal")
+        scope.launch(Dispatchers.IO) { runCatching { askAuthorToReseal(ref, circleId) } }
+    }
+
     private fun askAuthorToReseal(ref: String, circleId: String?) {
         val now = System.currentTimeMillis()
         synchronized(resealAskedAt) {

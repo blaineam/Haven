@@ -1234,7 +1234,14 @@ object HavenNet : InboundListener {
      * who is offline for a week gets it the moment they next sync. That is the whole mechanism —
      * nothing is parked on a relay by hand, and no relay change was needed.
      */
-    fun requestMediaWhenAvailable(ref: String, circleId: String, postId: String, authorShort: String) {
+    /** Refs a PERSON asked for by tapping "Ask for it back". Only these earn a notification when the
+     *  author answers: automatic repair is plumbing, and plumbing that announces itself 30 times in
+     *  a sweep is spam. The media simply appears — which is the whole point of repairing it. */
+    private val manuallyWanted = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    fun requestMediaWhenAvailable(ref: String, circleId: String, postId: String, authorShort: String,
+                                  manual: Boolean = false) {
+        if (manual) manuallyWanted.add(ref)
         val authorHex = idHexFor(authorShort)
         if (authorHex == null) {
             Log.i(TAG, "media-wanted ${ref.take(10)}: author not resolvable — cannot ask")
@@ -1396,6 +1403,12 @@ object HavenNet : InboundListener {
             saveUnopenable()
         }
         downloadEvicted(f.ref)   // pull it now, while we know it's there
+        // Silent unless the user personally asked. The automatic sweep repairs media constantly and
+        // nobody needs to be told; they need the picture to appear, which it now does.
+        if (!manuallyWanted.remove(f.ref)) {
+            Log.i(TAG, "media-wanted ${f.ref.take(10)}: author says it's back — fetching (automatic, no notification)")
+            return
+        }
         val who = displayName(f.from.take(8))
         Notifications.notify(
             appContext,

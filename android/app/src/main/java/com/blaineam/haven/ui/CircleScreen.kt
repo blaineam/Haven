@@ -1121,7 +1121,7 @@ private fun MissingMediaPlaceholder(circleId: String, ref: String, isVideo: Bool
                             modifier = Modifier.clip(RoundedCornerShape(8.dp))
                                 .clickable {
                                     com.blaineam.haven.core.HavenNet.requestMediaWhenAvailable(
-                                        ref, post.circleId, post.postId, post.authorShort)
+                                        ref, post.circleId, post.postId, post.authorShort, manual = true)
                                 }
                                 .padding(horizontal = 10.dp, vertical = 4.dp))
                     }

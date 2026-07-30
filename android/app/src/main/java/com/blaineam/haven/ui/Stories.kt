@@ -281,7 +281,7 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
     // it. Without this the story's music outlives the story.
     androidx.compose.runtime.DisposableEffect(Unit) { onDispose { MusicPlayer.stop() } }
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    Box(Modifier.fillMaxSize().consumesTaps().background(Color.Black)) {
         // The navigation gestures live on THIS layer — the media, drawn beneath the controls — not on
         // the root Box that is an ancestor of every control.
         //

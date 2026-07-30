@@ -172,7 +172,7 @@ private fun IncomingCall() {
     val name by CallManager.peerName
     // Opaque: this overlays the live feed, and the 5% that used to show through leaked post
     // content behind the ring screen (iOS had the same bug, far worse over its light gradient).
-    Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+    Box(Modifier.fillMaxSize().consumesTaps().background(Color.Black), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             ConstellationMark(Modifier.size(72.dp), color = Color.White)   // fixed-black ring surface
             Spacer(Modifier.height(20.dp))
@@ -211,7 +211,7 @@ private fun InCall() {
 
     // A peer sharing their screen takes over the main view (aspect-fit, whole screen visible).
     val screenShareEntry = CallManager.remoteScreen.entries.firstOrNull { it.value != null }
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    Box(Modifier.fillMaxSize().consumesTaps().background(Color.Black)) {
         when {
             screenShareEntry != null -> {
                 CallVideoTile(screenShareEntry.value, Modifier.fillMaxSize(), fit = true)

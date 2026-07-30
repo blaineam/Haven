@@ -21,13 +21,13 @@ use haven_p2p::treekem;
 use haven_p2p::identity::{Identity, HavenId};
 use haven_p2p::link::HavenLink;
 use haven_p2p::social::{
+    open_bytes_with_epoch, seal_bytes_with_epoch,
     build_activity, build_feed, is_expired, open_bytes, open_event, seal_bytes, seal_event, Event,
     EventKind, FeedPoll, Group, SealedEnvelope, TrackRef,
 };
 use haven_p2p::groupkey::{
     mailbox_prefix, new_circle_secret, new_epoch_key, open_event_in_epoch_authored, open_key_commit,
-    open_media_in_epoch, seal_event_in_epoch, seal_event_ratcheted, seal_key_commit,
-    seal_media_in_epoch, EpochEnvelope,
+    seal_event_in_epoch, seal_event_ratcheted, seal_key_commit, EpochEnvelope,
 };
 
 /// The seed-drop protocol version this build advertises (S0). A build with the S1 receive-side verifier
@@ -56,7 +56,6 @@ const TAG_DEVICE_ROSTER: u8 = 0x04; // an account's signed device roster (Device
 // SHADOW handlers below, which never touch content state (the tree is compared, never consumed).
 const TAG_MLS_COMMIT: u8 = 0x05; // a treekem::Commit (a ratchet-tree commit; genesis carries the Adds)
 const TAG_MLS_WELCOME: u8 = 0x06; // a SealedEnvelope delivering a joiner's shadow secrets to its device
-const TAG_EPOCH_MEDIA: u8 = 0x08; // media sealed under the circle epoch key (same key as a post)
 const TAG_MLS_PROPOSAL: u8 = 0x07; // a treekem::Proposal (reserved; unbundled proposals — M4 roster path)
 // MLS M3 wire tags (docs/TREEKEM-DESIGN.md §7.2 join gate, §4.3 authority). Same additive contract:
 // any non-`{` tag a legacy peer fetches fails its raw-JSON parse and errors per-envelope harmlessly.
@@ -6059,26 +6058,19 @@ impl HavenSocial {
         // authorized reader (the 1.0.6 robustness). Only a SEEDLESS device (no account key) signs under
         // its device, as it must — its media still needs peers to hold its roster, which is inherent.
         let under_device = st.me_secret.is_none();
-        // EPOCH-SEALED, like every post in this circle. The old recipient-list seal made media the
-        // one thing in a circle that a later joiner could never read: they are handed the epoch (so
-        // the post's text renders) but they were not on the blob's recipient list, and a
-        // content-addressed blob is never re-sealed, so the tile stayed broken forever. Sealing to
-        // the epoch makes "shared with my circle" mean the circle.
-        if let Some(key) = st.circles[idx].current_key() {
-            let epoch = st.circles[idx].my_epoch;
-            if let Ok(env) =
-                seal_media_in_epoch(signer_of(&st, under_device), &circle_id, epoch, &key, &data)
-            {
-                return Ok(tagged(TAG_EPOCH_MEDIA, &env.to_bytes()));
-            }
-        }
-        // No epoch key yet (a circle that has not keyed): fall back to the recipient-list seal so a
-        // blob is never left unsealed.
         let mut accounts = vec![st.me().clone()];
         accounts.extend(st.circles[idx].members.iter().cloned());
         let recipients = recipients_with_devices(&accounts, &st.device_lists);
         let group = Group::new(circle_id, recipients);
-        seal_bytes(signer_of(&st, under_device), &group, &data)
+        // Wrap the content key to the recipient list AND to the circle EPOCH. The list keeps a
+        // friend whose epoch keys have not converged working exactly as before; the epoch entry is
+        // what finally lets a member who joined AFTER this blob was sealed open it, which the list
+        // alone can never do because content-addressed media is never re-sealed.
+        let sealed = match st.circles[idx].current_key() {
+            Some(key) => seal_bytes_with_epoch(signer_of(&st, under_device), &group, &key, &data),
+            None => seal_bytes(signer_of(&st, under_device), &group, &data),
+        };
+        sealed
             .map(|env| env.to_bytes())
             .map_err(|e| HavenError::Invalid { msg: format!("{e}") })
     }
@@ -6099,12 +6091,19 @@ impl HavenSocial {
             let idx = st.circles.iter().position(|c| c.id == circle_id)?;
             // Account-signed + dual-sealed, mirroring `seal_circle_media` (see the rationale there):
             // media must stay openable by any authorized reader, not gated on holding a device roster.
+            let under_device = st.me_secret.is_none();
             let mut accounts = vec![st.me().clone()];
             accounts.extend(st.circles[idx].members.iter().cloned());
             let recipients = recipients_with_devices(&accounts, &st.device_lists);
-            let under_device = st.me_secret.is_none();
             let group = Group::new(circle_id.clone(), recipients);
-            seal_bytes(signer_of(&st, under_device), &group, &data).ok().map(|env| env.to_bytes())
+            // Dual-wrapped, as in `seal_circle_media` — this is the variant used for large media and
+            // for every repair re-seal.
+            match st.circles[idx].current_key() {
+                Some(key) => seal_bytes_with_epoch(signer_of(&st, under_device), &group, &key, &data),
+                None => seal_bytes(signer_of(&st, under_device), &group, &data),
+            }
+            .ok()
+            .map(|env| env.to_bytes())
         })();
         drop(data); // free the plaintext before allocating no further large buffers
         let Some(sealed) = sealed else { return false };
@@ -6157,37 +6156,19 @@ have_seed={} have_device={} members={}",
 
     pub fn open_circle_media(&self, circle_id: String, sealed: Vec<u8>) -> Option<Vec<u8>> {
         let st = self.state.lock().unwrap();
-        // Epoch-sealed media: try EVERY epoch key we hold for this circle, newest first, so a blob
-        // sealed before the last rotation still opens. No roster lookup and no recipient list — if
-        // we can read the circle's posts we can read its media, which is the whole point.
-        if sealed.first() == Some(&TAG_EPOCH_MEDIA) {
-            let env = EpochEnvelope::from_bytes(&sealed[1..]).ok()?;
-            let idx = st.circles.iter().position(|c| c.id == circle_id)?;
-            let sender_hex = env.sender_hex();
-            let sender_pub = st.circles[idx]
-                .members
-                .iter()
-                .find(|m| hex(&m.node_id_bytes()) == sender_hex)
-                .cloned()
-                .or_else(|| (hex(&st.me().node_id_bytes()) == sender_hex).then(|| st.me().clone()))
-                .or_else(|| {
-                    authorized_device_and_account(&st, idx, &sender_hex).map(|(b, _)| b)
-                });
-            let mut keys: Vec<[u8; 32]> = Vec::new();
-            if let Some(k) = st.circles[idx].my_epoch_keys.get(&env.epoch).copied() { keys.push(k); }
-            if let Some(k) = st.circles[idx].current_key() { keys.push(k); }
-            keys.extend(st.circles[idx].my_epoch_keys.values().copied());
-            for k in keys {
-                if let Ok(plain) = open_media_in_epoch(sender_pub.as_ref(), &k, &env) {
-                    return Some(plain);
-                }
-            }
-            return None;
-        }
         let env = SealedEnvelope::from_bytes(&sealed).ok()?;
         let sender_hex = env.sender_hex();
         let me_hex = hex(&st.me().node_id_bytes());
         let idx = st.circles.iter().position(|c| c.id == circle_id)?;
+        // EPOCH entry first. It needs no sender resolution and no place on the recipient list, so it
+        // is the path that works for a member who joined after this blob was sealed — and for one
+        // whose device roster cannot resolve the sealer, which otherwise fails below at the `?`.
+        let mut epoch_keys: Vec<[u8; 32]> = Vec::new();
+        if let Some(k) = st.circles[idx].current_key() { epoch_keys.push(k); }
+        epoch_keys.extend(st.circles[idx].my_epoch_keys.values().copied());
+        for k in &epoch_keys {
+            if let Some(p) = open_bytes_with_epoch(k, &env) { return Some(p); }
+        }
         // C6: the sender may be a member's ACCOUNT, mine, or an authorized DEVICE (seed-drop signs media
         // under the device in a fully-capable circle). Resolve a device sender via the verified roster.
         let sender_pub = if sender_hex == me_hex {
@@ -6226,6 +6207,15 @@ have_seed={} have_device={} members={}",
         let plaintext: Option<Vec<u8>> = (|| {
             let st = self.state.lock().unwrap();
             let env = SealedEnvelope::from_bytes(&sealed).ok()?;
+            // EPOCH entry first, across every circle's keys — see `open_circle_media`.
+            for c in st.circles.iter() {
+                let mut ks: Vec<[u8; 32]> = Vec::new();
+                if let Some(k) = c.current_key() { ks.push(k); }
+                ks.extend(c.my_epoch_keys.values().copied());
+                for k in &ks {
+                    if let Some(p) = open_bytes_with_epoch(k, &env) { return Some(p); }
+                }
+            }
             let sender_hex = env.sender_hex();
             let me_hex = hex(&st.me().node_id_bytes());
             // The circle the media is tagged to (passed) first, then any other circle we're in.

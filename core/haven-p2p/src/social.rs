@@ -234,6 +234,75 @@ pub fn seal_event(sender: &Identity, group: &Group, event: &Event) -> Result<Sea
     Ok(env)
 }
 
+/// A reserved pseudo-member standing for "the circle EPOCH itself".
+///
+/// Media used to be readable ONLY by whoever was on its recipient list when it was sealed, and a
+/// content-addressed blob is never re-sealed — so a member who joined later could read a post's
+/// text (they hold the epoch) but never its photos, permanently. Adding the epoch as one more
+/// recipient fixes that without giving up the property the recipient list provides: a friend whose
+/// epoch keys have not converged still opens the blob by their own account key, exactly as before.
+///
+/// It is a normal entry in the existing list, so an older build simply doesn't match it against its
+/// own node id and is unaffected — no format break, no second envelope type.
+pub const EPOCH_RECIPIENT: [u8; 32] = *b"haven!epoch!recipient!marker!v1\0";
+
+/// KEK for the epoch pseudo-recipient. Domain-separated so it can never collide with an event key
+/// derived from the same epoch secret.
+fn epoch_wrap_kek(epoch_key: &[u8; 32]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new_keyed(epoch_key);
+    h.update(b"haven-media-epoch-wrap-v1");
+    *h.finalize().as_bytes()
+}
+
+/// [`seal_bytes`] plus an epoch-wrapped copy of the content key, so ANY holder of the circle epoch
+/// opens it — including members who joined after this blob was sealed.
+pub fn seal_bytes_with_epoch(
+    sender: &Identity,
+    group: &Group,
+    epoch_key: &[u8; 32],
+    bytes: &[u8],
+) -> Result<SealedEnvelope> {
+    let mut content_key = [0u8; 32];
+    OsRng.fill_bytes(&mut content_key);
+    let ciphertext = seal(&content_key, bytes);
+
+    let mut recipients = Vec::with_capacity(group.members.len() + 1);
+    for member in &group.members {
+        let (enc, kek) = encapsulate_to(member)?;
+        recipients.push(RecipientKey {
+            member: member.node_id_bytes().to_vec(),
+            enc: EncWire { eph_x_pub: enc.eph_x_pub.to_vec(), pq_ct: enc.pq_ct },
+            wrapped: seal(&kek, &content_key),
+        });
+    }
+    // The epoch entry. No KEM material: the "key agreement" already happened when the circle
+    // distributed its epoch key, which is precisely why a later joiner can use it.
+    recipients.push(RecipientKey {
+        member: EPOCH_RECIPIENT.to_vec(),
+        enc: EncWire { eph_x_pub: Vec::new(), pq_ct: Vec::new() },
+        wrapped: seal(&epoch_wrap_kek(epoch_key), &content_key),
+    });
+
+    let mut env = SealedEnvelope {
+        sender: sender.public().node_id_bytes().to_vec(),
+        ciphertext,
+        recipients,
+        signature: Vec::new(),
+    };
+    env.signature = sender.sign(&env.transcript());
+    Ok(env)
+}
+
+/// Open a blob via its EPOCH entry — the path a member who joined after it was sealed must use.
+/// Returns None when this envelope carries no epoch entry (every blob sealed before this shipped)
+/// or when `epoch_key` is not the epoch it was sealed under.
+pub fn open_bytes_with_epoch(epoch_key: &[u8; 32], env: &SealedEnvelope) -> Option<Vec<u8>> {
+    let entry = env.recipients.iter().find(|r| r.member == EPOCH_RECIPIENT)?;
+    let content_key = open(&epoch_wrap_kek(epoch_key), &entry.wrapped).ok()?;
+    let ck: [u8; 32] = content_key.try_into().ok()?;
+    open(&ck, &env.ciphertext).ok()
+}
+
 /// Seal arbitrary bytes (e.g. a media blob) to every member of a group — any member
 /// can open it. Used by the shared circle store so a volunteered bucket holds blobs
 /// that are opaque to its host yet readable by the whole circle.
@@ -1087,5 +1156,58 @@ mod envelope_container_tests {
         // payload. That is the property that matters: constant overhead, not a multiplier.
         assert!(bin < payload.len() + 32 * 1024,
                 "binary {bin} should be payload {} plus constant crypto overhead", payload.len());
+    }
+}
+
+#[cfg(test)]
+mod epoch_recipient_tests {
+    use super::*;
+
+    /// THE bug this exists for: someone who was NOT on the recipient list — a member who joined
+    /// after the blob was sealed — opens it with the circle epoch key.
+    #[test]
+    fn a_later_joiner_opens_it_by_epoch() {
+        let author = Identity::from_seed(&[1u8; 32]);
+        let original = Identity::from_seed(&[2u8; 32]);
+        let joiner = Identity::from_seed(&[3u8; 32]);
+        let epoch = [42u8; 32];
+        // The joiner is deliberately absent from the recipient list.
+        let group = Group::new("default".to_string(), vec![author.public(), original.public()]);
+        let env = seal_bytes_with_epoch(&author, &group, &epoch, b"a photo").expect("seals");
+        assert!(!env.recipient_ids_hex().contains(&hex(&joiner.public().node_id_bytes())));
+        assert_eq!(open_bytes_with_epoch(&epoch, &env).as_deref(), Some(&b"a photo"[..]));
+    }
+
+    /// Isolation: every user's own circle is called "default", so the id collides by design. A
+    /// different circle's epoch key must never open this blob.
+    #[test]
+    fn another_circles_epoch_cannot_open_it() {
+        let author = Identity::from_seed(&[1u8; 32]);
+        let group = Group::new("default".to_string(), vec![author.public()]);
+        let env = seal_bytes_with_epoch(&author, &group, &[42u8; 32], b"private").expect("seals");
+        assert!(open_bytes_with_epoch(&[43u8; 32], &env).is_none(),
+                "a stranger's circle must never open my media");
+    }
+
+    /// The property the epoch entry must NOT cost us: a listed recipient still opens it by their own
+    /// key, with no epoch key at all — the friend whose epoch has not converged.
+    #[test]
+    fn a_listed_recipient_still_opens_it_without_any_epoch_key() {
+        let author = Identity::from_seed(&[1u8; 32]);
+        let friend = Identity::from_seed(&[2u8; 32]);
+        let group = Group::new("default".to_string(), vec![author.public(), friend.public()]);
+        let env = seal_bytes_with_epoch(&author, &group, &[42u8; 32], b"a photo").expect("seals");
+        let out = open_bytes(&friend, &author.public(), &env).expect("opens by account key");
+        assert_eq!(out, b"a photo");
+    }
+
+    /// A blob sealed WITHOUT an epoch (a circle that has not keyed) has no epoch entry, and asking
+    /// for one must fail cleanly rather than mis-open.
+    #[test]
+    fn a_blob_with_no_epoch_entry_reports_none() {
+        let author = Identity::from_seed(&[1u8; 32]);
+        let group = Group::new("default".to_string(), vec![author.public()]);
+        let env = seal_bytes(&author, &group, b"a photo").expect("seals");
+        assert!(open_bytes_with_epoch(&[42u8; 32], &env).is_none());
     }
 }

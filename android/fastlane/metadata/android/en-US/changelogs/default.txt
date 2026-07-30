@@ -1,5 +1,4 @@
-1.2.0 — your photos and videos show up:
-• Photos and videos from friends now load reliably. If one can't be opened, your device asks for a fresh copy automatically instead of showing a grey tile forever.
-• Media takes about a third of the space and data it used to.
-• Switching apps during a call no longer mutes you to everyone else.
-• Turning your camera on mid-call sends real video, not a black square.
+1.2.1 — three fixes from testers:
+• Media that repairs itself no longer sends you a notification about it. The photo just appears, which is what you wanted.
+• Taps on the call screen no longer pass through to whatever is behind it. The same fix covers stories and other full-screen views.
+• Fixed the keyboard covering part of what you were typing on the profile and add-friend screens.

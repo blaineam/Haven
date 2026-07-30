@@ -1,5 +1,8 @@
 package com.blaineam.haven.ui
 
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.ui.composed
+import androidx.compose.runtime.remember
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -79,4 +82,20 @@ fun BrandText(text: String, modifier: Modifier = Modifier, fontSize: Int = 34) {
         fontSize = fontSize.sp,
         textAlign = TextAlign.Center,
     )
+}
+
+/**
+ * Swallow taps so they cannot reach whatever is layered BENEATH a full-screen overlay.
+ *
+ * Compose does not do this for you: a Box with `fillMaxSize()` and a background still lets pointer
+ * events fall through to the content underneath it. So a call screen, a story viewer or a sheet
+ * drawn over the feed looked opaque while every tap ALSO hit the post behind it — users reported
+ * tapping call controls and interacting with their circle at the same time.
+ *
+ * Children keep handling their own clicks; only what they don't take is absorbed here. No ripple,
+ * because this is not a button — it is a floor.
+ */
+fun Modifier.consumesTaps(): Modifier = composed {
+    val interaction = remember { MutableInteractionSource() }
+    this.clickable(interactionSource = interaction, indication = null) { /* absorb */ }
 }

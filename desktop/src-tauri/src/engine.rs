@@ -8153,7 +8153,8 @@ impl Engine {
                     log::warn!("held-but-unreadable {} — asking {} to re-seal",
                                short(reference), short(&item.author_short));
                     self.clone().request_media_when_available(
-                        reference.clone(), c.id.clone(), item.id.clone(), item.author_short.clone());
+                        reference.clone(), c.id.clone(), item.id.clone(), item.author_short.clone(),
+                        false);   // automatic repair — never notifies
                 }
             }
         }
@@ -9518,9 +9519,13 @@ impl Engine {
         wire::media_frame(&self.social.my_node_hex(), reference, circle_id, post_id)
     }
 
-    /// Whether we're waiting to hear that `reference` is back.
+    /// Whether a PERSON is waiting to hear that `reference` is back.
+    ///
+    /// The manual list, not `media_wanted`: the automatic sweep writes to the latter, and telling
+    /// someone "we'll tell you when it's back" about a repair that deliberately never notifies both
+    /// promises something that won't happen and hides the button that would earn it.
     pub fn media_is_wanted(&self, reference: &str) -> bool {
-        self.prefs.lock().unwrap().media_wanted.iter().any(|r| r == reference)
+        self.prefs.lock().unwrap().media_wanted_manual.iter().any(|r| r == reference)
     }
 
     /// Ask a post's AUTHOR to re-upload media a relay has swept, and remember that we asked.
@@ -9528,12 +9533,15 @@ impl Engine {
     /// The request rides the sealed frame path, which means the circle mailbox carries it: an author
     /// offline for a week gets it the moment they next sync. That is the whole mechanism — nothing is
     /// parked on a relay by hand, and no relay-side change was needed.
+    /// `manual` = a PERSON asked ("Notify me when it's back"). The held-but-unreadable sweep calls
+    /// this too, on its own, and those asks must stay silent — see `Prefs::media_wanted_manual`.
     pub fn request_media_when_available(
         self: &Arc<Self>,
         reference: String,
         circle_id: String,
         post_id: String,
         author_short: String,
+        manual: bool,
     ) {
         let Some(author_hex) = self.id_hex_for(&author_short) else {
             log::info!("media-wanted {}: author not resolvable — cannot ask", short(&reference));
@@ -9541,6 +9549,13 @@ impl Engine {
         };
         {
             let mut p = self.prefs.lock().unwrap();
+            if manual && !p.media_wanted_manual.iter().any(|r| *r == reference) {
+                p.media_wanted_manual.push(reference.clone());
+                while p.media_wanted_manual.len() > 500 {
+                    p.media_wanted_manual.remove(0);
+                }
+                let _ = p.save(&self.paths);
+            }
             if !p.media_wanted.iter().any(|r| *r == reference) {
                 p.media_wanted.push(reference.clone());
                 // Bounded: someone who taps this on everything shouldn't grow an unbounded list, and
@@ -9685,6 +9700,22 @@ impl Engine {
         }
         self.clear_evicted(&reference);
         self.media_download(reference.clone()); // pull it now, while we know it's there
+        // Silent unless the user personally asked. The sweep asks on its own for media nobody has
+        // heard of; the fetch above still runs, which is the part that matters — the picture
+        // appears either way.
+        let person_asked = {
+            let mut p = self.prefs.lock().unwrap();
+            match p.media_wanted_manual.iter().position(|r| *r == reference) {
+                Some(i) => { p.media_wanted_manual.remove(i); let _ = p.save(&self.paths); true }
+                None => false,
+            }
+        };
+        if !person_asked {
+            log::info!("media-wanted {}: author says it's back — fetching (automatic, no notification)",
+                       short(&reference));
+            self.emit_changed();
+            return;
+        }
         let who = self.display_name(&from[..from.len().min(8)]);
         // The on-device link form: it never leaves this machine, so routing it through the web
         // landing page would be a pointless round trip.

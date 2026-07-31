@@ -2001,14 +2001,39 @@ final class PinnedMediaStore: ObservableObject {
 final class MediaWantedStore: ObservableObject {
     static let shared = MediaWantedStore()
     @Published private(set) var wanted: Set<String>
+    /// The subset a PERSON asked for by tapping "Notify me when it's back".
+    ///
+    /// Only these earn a notification. `wanted` alone cannot answer "did the user ask for this?",
+    /// because the held-but-unreadable sweep asks automatically — it repairs media constantly and
+    /// nobody needs to be told, they need the picture to appear. Sharing one set is why a night of
+    /// automatic repair arrived as a stack of "X put back the media you asked for" for media the
+    /// user had never heard of. (Android split these in 1.2.1; Apple and desktop were left behind.)
+    ///
+    /// PERSISTED, unlike Android's in-memory equivalent: an author can be offline for a week, and a
+    /// manual ask that stops earning its notification because the app restarted is the same bug
+    /// from the other side.
+    @Published private(set) var manuallyWanted: Set<String>
     private let d = UserDefaults.standard
     private let key = "haven.media.wanted"
+    private let manualKey = "haven.media.wanted.manual"
 
-    private init() { wanted = Set(d.stringArray(forKey: key) ?? []) }
+    private init() {
+        wanted = Set(d.stringArray(forKey: key) ?? [])
+        manuallyWanted = Set(d.stringArray(forKey: manualKey) ?? [])
+    }
 
     func isWanted(_ ref: String) -> Bool { wanted.contains(ref) }
 
-    func add(_ ref: String) {
+    /// Did a person ask for this one? Drives both the notification and the "we'll tell you when
+    /// it's back" promise in the UI — neither should appear for an automatic repair.
+    func isManuallyWanted(_ ref: String) -> Bool { manuallyWanted.contains(ref) }
+
+    func add(_ ref: String, manual: Bool = false) {
+        if manual, !manuallyWanted.contains(ref) {
+            manuallyWanted.insert(ref)
+            if manuallyWanted.count > 500 { manuallyWanted.removeFirst() }
+            d.set(Array(manuallyWanted), forKey: manualKey)
+        }
         guard !wanted.contains(ref) else { return }
         wanted.insert(ref)
         // Bounded: a user who taps this on everything shouldn't grow an unbounded list, and the
@@ -2017,8 +2042,21 @@ final class MediaWantedStore: ObservableObject {
         d.set(Array(wanted), forKey: key)
     }
 
+    /// Consume the manual flag: true only if a PERSON asked for this ref. Clears it either way, so
+    /// one ask earns at most one notification.
+    func takeManual(_ ref: String) -> Bool {
+        guard manuallyWanted.contains(ref) else { return false }
+        manuallyWanted.remove(ref)
+        d.set(Array(manuallyWanted), forKey: manualKey)
+        return true
+    }
+
     /// It arrived (or the ask is moot) — stop tracking it.
     func clear(_ ref: String) {
+        if manuallyWanted.contains(ref) {
+            manuallyWanted.remove(ref)
+            d.set(Array(manuallyWanted), forKey: manualKey)
+        }
         guard wanted.contains(ref) else { return }
         wanted.remove(ref)
         d.set(Array(wanted), forKey: key)
@@ -2165,13 +2203,17 @@ struct MissingMediaPlaceholder: View {
                     .font(.caption.weight(.semibold)).buttonStyle(.borderless).tint(HavenTheme.pink)
                 // A relay's retention swept this, but the AUTHOR probably still has the original.
                 // Asking them is the difference between "gone" and "gone from the relay".
-                if wanted.isWanted(ref) {
+                // isManuallyWanted, not isWanted: the automatic sweep marks refs wanted too, and
+                // showing "we'll tell you when it's back" for one of those promises a notification
+                // that deliberately never comes — and hides the button that would earn it.
+                if wanted.isManuallyWanted(ref) {
                     Label("We'll tell you when it's back", systemImage: "bell.fill")
                         .font(.caption2).foregroundStyle(.secondary)
                 } else if let ctx = postContext {
                     Button {
                         feed.requestMediaWhenAvailable(ref: ref, circleId: ctx.circleId,
-                                                       postId: ctx.postId, authorShort: ctx.authorShort)
+                                                       postId: ctx.postId, authorShort: ctx.authorShort,
+                                                       manual: true)
                     } label: {
                         Label("Notify me when it's back", systemImage: "bell")
                     }

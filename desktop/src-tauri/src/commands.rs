@@ -933,7 +933,8 @@ pub fn media_request_when_available(
     post_id: String,
     author_short: String,
 ) {
-    engine.request_media_when_available(reference, circle_id, post_id, author_short);
+    // Reached only from the UI's "Notify me when it's back" — a person asking, so `manual`.
+    engine.request_media_when_available(reference, circle_id, post_id, author_short, true);
 }
 
 /// Whether we're already waiting to hear that this ref is back, so the placeholder can say

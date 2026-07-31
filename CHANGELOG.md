@@ -12,6 +12,28 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 Tester reports across Android and Apple. Nothing in `core/` moved — these are client fixes, so
 1.2.1 is re-cut rather than bumped.
 
+### Fixed — every platform
+
+- **Automatic media repair announced itself on Apple and desktop.** 1.2.1 silenced this on Android
+  and nowhere else — the commit is `fix(android): …`, and its only Apple change was the version
+  number — so an iPhone or a Mac still woke people with "X put back the media you asked for" for
+  media they had never asked about. A night of repair, a stack of notifications.
+
+  One set was doing two jobs. The held-but-unreadable sweep asks a post's author to re-seal media it
+  cannot decrypt — automatically, constantly, with no user involved — and that ask wrote to the same
+  `MediaWantedStore` the "Notify me when it's back" button uses. When the author answered, the gate
+  (`isWanted`) could not tell a person's request from the plumbing's, so both notified. The manual
+  asks are now a separate, persisted subset, and only they are announced; everything else still
+  fetches silently, which is the part that matters — the picture appears either way.
+
+  Two more, found on the way:
+  - The **"We'll tell you when it's back"** label read the shared set on ALL THREE platforms, so an
+    automatically-asked ref promised a notification that deliberately never comes — and hid the
+    button that would have earned one.
+  - Android's manual set was **in memory**, so a genuine ask quietly stopped earning its
+    notification if the app restarted before the author came back online. Authors are offline for
+    days; that is the normal case, not the edge one. Persisted now, like Apple's and desktop's.
+
 ### Fixed — Apple
 
 - **The Mac froze for ten seconds at a time while hosting a relay.** Every local-store accessor on

@@ -5407,12 +5407,15 @@ final class FeedStore: ObservableObject {
         }
     }
 
-    func requestMediaWhenAvailable(ref: String, circleId: String, postId: String, authorShort: String) {
+    /// `manual` = a PERSON tapped "Notify me when it's back". The held-but-unreadable sweep calls
+    /// this too, constantly and on its own, and those asks must stay silent — see MediaWantedStore.
+    func requestMediaWhenAvailable(ref: String, circleId: String, postId: String, authorShort: String,
+                                   manual: Bool = false) {
         guard let authorHex = ContactsStore.shared.idHex(forNodePrefix: authorShort) else {
             HavenLog.sync("media-wanted \(ref.prefix(10)): author not resolvable — cannot ask")
             return
         }
-        MediaWantedStore.shared.add(ref)
+        MediaWantedStore.shared.add(ref, manual: manual)
         var f = Data(myNodeHex.utf8)
         lpAppend(&f, Data(ref.utf8))
         lpAppend(&f, Data(circleId.utf8))
@@ -5573,12 +5576,22 @@ final class FeedStore: ObservableObject {
             HavenLog.sync("media-available \(ref.prefix(10)): announced by \(from.prefix(8)) — prefetching")
             return
         }
+        // Take the manual flag BEFORE clear() drops it.
+        let personAsked = MediaWantedStore.shared.takeManual(ref)
         MediaWantedStore.shared.clear(ref)
         unavailableMedia.remove(ref)
         waitingForSenderMedia.remove(ref)
         MediaFetchBackoff.clear(ref)
         EvictedMediaStore.shared.clear(ref)
         requestMedia(ref)   // pull it now, while we know it's there
+        // Silent unless the user personally asked. The held-but-unreadable sweep asks on its own,
+        // for media the user has never heard of — a night of automatic repair arriving as a stack of
+        // "X put back the media you asked for" is the report this fixes. The fetch above still runs;
+        // what a user wants is the picture to appear, which it does either way.
+        guard personAsked else {
+            HavenLog.sync("media-wanted \(ref.prefix(10)): author says it's back — fetching (automatic, no notification)")
+            return
+        }
         let who = ContactsStore.shared.name(forNodePrefix: from) ?? "Someone"
         NotificationManager.shared.notify(
             title: "Media is available again",

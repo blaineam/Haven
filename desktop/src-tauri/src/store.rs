@@ -431,6 +431,14 @@ pub struct Prefs {
     /// Insertion-ordered by convention and bounded on write. Mirrors iOS `MediaWantedStore`.
     #[serde(default)]
     pub media_wanted: Vec<String>,
+    /// The subset of [`media_wanted`] a PERSON asked for. Only these earn the "it's back"
+    /// notification: the held-but-unreadable sweep asks automatically, constantly, for media the
+    /// user has never heard of, and announcing each repair turned a quiet night into a stack of
+    /// "X put back the media you asked for". `media_wanted` alone cannot tell the two apart because
+    /// both write to it. (Android split these in 1.2.1; Apple and desktop were left behind — the
+    /// parity gap this closes.)
+    #[serde(default)]
+    pub media_wanted_manual: Vec<String>,
     /// How much of your circles' media THIS host is willing to keep, and for how long — the in-app
     /// equivalent of the headless relay's `--media-max-age-days` / `--media-max-bytes`. Volunteering
     /// a machine shouldn't mean volunteering the whole disk, and until these existed the in-app relay

@@ -1122,7 +1122,10 @@ private fun MissingMediaPlaceholder(circleId: String, ref: String, isVideo: Bool
                 com.blaineam.haven.core.MediaWantedStore.version.intValue
                 val post = LocalPostMediaContext.current
                 when {
-                    com.blaineam.haven.core.MediaWantedStore.isWanted(ref) -> {
+                    // isManuallyWanted: the automatic sweep marks refs wanted too, and promising
+                    // "we'll tell you" for one of those is a notification that never comes — and it
+                    // hides the button that would earn one.
+                    com.blaineam.haven.core.MediaWantedStore.isManuallyWanted(ref) -> {
                         Spacer(Modifier.height(6.dp))
                         Text("We'll tell you when it's back", color = HavenTheme.textSecondary, fontSize = 11.sp)
                     }

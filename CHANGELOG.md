@@ -46,6 +46,18 @@ takes this fix as 1.2.3, desktop's authoring half is called out as still open.
   companion step (`LocalMedia.ensurePosterImage`, which already existed), and its viewer resolves
   through `MediaVariants.displayRefs` for the same reason Apple's had to.
 
+- **An Android camera story uploaded the raw recording.** `StoryCameraScreen` read the finished
+  capture's bytes and handed them to `LocalMedia.store`, which only hashes, seals and writes — no
+  transcode, no companions. The post, DM and share-sheet gallery paths have always gone through
+  `prepareVideo`, and iOS's camera optimizes too (`addVideo` → `prepareVideo`), so this was the one
+  capture path on either platform shipping video at whatever bitrate the encoder happened to pick.
+  It now runs `prepareVideo`, which also mints the poster still from the OPTIMIZED bytes — the still
+  a receiver draws while the clip transfers.
+
+  Worth stating plainly since it bounds the fix above: **Android stories are camera-only.** A story
+  can only be captured, never picked from the gallery, so the library-selection flow this release
+  fixes on iOS has no Android counterpart yet. That is a feature gap, not a bug.
+
 ### Known gap — desktop
 
 - **A desktop-authored video story still publishes no poster.** Same bug, but the fix is not the same

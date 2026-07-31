@@ -185,10 +185,24 @@ fun StoryCameraScreen(
                 if (ev.hasError()) Log.e(TAG, "record finalize error ${ev.error}", ev.cause)
                 if (!ev.hasError() && file.exists() && file.length() > 0) {
                     scope.launch {
+                        // Through the OPTIMIZE path, not a raw store.
+                        //
+                        // This used to read the recording's bytes and hand them straight to
+                        // LocalMedia.store, which only hashes, seals and writes — so a camera story
+                        // uploaded the raw capture at whatever bitrate the encoder happened to pick,
+                        // while the post, DM and share-sheet gallery paths have always gone through
+                        // prepareVideo. iOS's camera optimizes too (addVideo → prepareVideo), so this
+                        // was the one capture path on either platform shipping un-optimized video.
+                        //
+                        // prepareVideo also mints the poster still from the OPTIMIZED bytes, which is
+                        // the still a receiver draws while the clip transfers.
                         val ref = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                             runCatching {
-                                val bytes = file.readBytes(); file.delete()
-                                LocalMedia.store(storeCircle, bytes, isVideo = true)
+                                val prepared = LocalMedia.prepareVideo(
+                                    context, android.net.Uri.fromFile(file), storeCircle,
+                                )
+                                file.delete()
+                                prepared.videoRef.ifEmpty { null }
                             }.getOrNull()
                         }
                         if (ref != null) {

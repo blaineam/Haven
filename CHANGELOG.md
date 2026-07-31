@@ -7,10 +7,10 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [1.2.1] — 2026-07-30
+## [1.2.2] — 2026-07-31
 
-Tester reports across Android and Apple. Nothing in `core/` moved — these are client fixes, so
-1.2.1 is re-cut rather than bumped.
+macOS 1.2.1 is live and iOS 1.2.1 is in review, so this fix rides its own version rather than
+waiting for them.
 
 ### Fixed — every platform
 
@@ -33,6 +33,11 @@ Tester reports across Android and Apple. Nothing in `core/` moved — these are 
   - Android's manual set was **in memory**, so a genuine ask quietly stopped earning its
     notification if the app restarted before the author came back online. Authors are offline for
     days; that is the normal case, not the edge one. Persisted now, like Apple's and desktop's.
+
+## [1.2.1] — 2026-07-30
+
+Tester reports across Android and Apple. Nothing in `core/` moved — these are client fixes, so
+1.2.1 is re-cut rather than bumped.
 
 ### Fixed — Apple
 

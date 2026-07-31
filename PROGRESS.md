@@ -6,6 +6,19 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest wave (built, batched for next upload)
+- **"Media was put back" woke people who never asked (2026-07-31, 1.2.2, all platforms)** — reported
+  as a couple of overnight notifications for media the user had not requested, with the fair question
+  "is that actually fixed already, or a stale one from a broken build?" Neither: 1.2.1 silenced this
+  on ANDROID ONLY (the commit is `fix(android): …`; its sole Apple change was the version number), so
+  iPhone, Mac and desktop had been announcing automatic repair the whole time. The held-but-unreadable
+  sweep asks a post's author to re-seal media it cannot decrypt — automatically, no user involved —
+  and wrote that ask to the same store the "Notify me when it's back" button uses, so the answering
+  frame could not tell plumbing from a person and notified for both. Manual asks are a separate,
+  persisted subset now, and only they are announced; the fetch stays silent, which is the part that
+  matters. Two more fell out of it: the "We'll tell you when it's back" label read the shared set on
+  all three platforms (promising a notification that by design never comes, and hiding the button
+  that would earn one), and Android's manual set was in-memory, so a real ask lost its notification
+  across a restart — with authors routinely offline for days, that is the ordinary case.
 - **The hosting Mac froze every twenty seconds, and it was one missing keyword (2026-07-30, 1.2.1
   re-cut, Apple)** — reported as "beachballs every 20ish seconds in a DM, recovers after 10–15s".
   Sampling the shipping build put 56% of a 15-second window on the main thread inside one

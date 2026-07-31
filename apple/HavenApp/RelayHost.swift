@@ -892,9 +892,17 @@ final class RelayHost: ObservableObject {
     /// Refresh the liveness of `keys` in our OWN hosted mailbox (the daily refresh can't TOUCH
     /// itself over iroh — self-dial guard). Returns the keys the store lacks (re-PUT via localPut);
     /// empty when not hosting so a stopped relay never triggers a local re-upload storm.
-    func localTouch(_ keys: [String]) -> [String] {
-        guard let handle, serving else { return [] }
-        return handle.localTouch(keys: keys)
+    ///
+    /// `nonisolated`, like every other local-store accessor above — this one was missed when they
+    /// moved, and it is the most expensive of the set. A TOUCH is one `open` + `set_modified` +
+    /// `close` PER KEY, and `touchHeldKeys` hands it every mailbox key we have ever ingested for a
+    /// circle: on a hosting Mac with a real store that is ~12,000 files of synchronous I/O on the
+    /// thread drawing the UI, in one call. Measured as a ~13-second main-thread stall repeating on
+    /// the poll cadence — the "beachballs every 20 seconds and comes back" report. Nothing about
+    /// the work needs the main actor; the Rust side is internally locked and `currentHandle()` is
+    /// the same not-serving guard `serving` was (stop() nils it), so callers can run it off-main.
+    nonisolated func localTouch(_ keys: [String]) -> [String] {
+        Self.currentHandle()?.localTouch(keys: keys) ?? []
     }
 
     private func stop() {

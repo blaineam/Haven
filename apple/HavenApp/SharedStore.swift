@@ -2180,10 +2180,16 @@ enum SharedStore {
         let prefix = "haven/mailbox/\(circleId)/"
         for node in relayNodes(circleId) where !node.hasPrefix("s3:") {
             // Our OWN hosted relay: touch the local store directly (no iroh self-connection).
+            // OFF-MAIN — a TOUCH is a file open + mtime write per key, and the re-PUT of each miss
+            // is another file write. SharedStore is @MainActor, so both loops ran on the thread
+            // drawing the UI, once per key, for as many keys as the circle has.
             if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
-                for k in RelayHost.shared.localTouch(keys) {
-                    if let env = byKey[k] { _ = RelayHost.shared.localPut(k, env) }
-                }
+                let host = RelayHost.shared
+                await Task.detached(priority: .utility) {
+                    for k in host.localTouch(keys) {
+                        if let env = byKey[k] { _ = host.localPut(k, env) }
+                    }
+                }.value
                 continue
             }
             guard let c = await RelayClients.client(node) else { continue }
@@ -2220,7 +2226,10 @@ enum SharedStore {
         let prefix = "haven/mailbox/\(circleId)/"
         for node in relayNodes(circleId) where !node.hasPrefix("s3:") {
             if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
-                _ = RelayHost.shared.localTouch(keys)   // own store: bump liveness, ignore misses
+                // OFF-MAIN. `keys` here is EVERY mailbox key this device has ever ingested for the
+                // circle — the largest batch anything hands localTouch, and the one that stalled.
+                let host = RelayHost.shared
+                await Task.detached(priority: .utility) { _ = host.localTouch(keys) }.value
                 continue
             }
             guard let c = await RelayClients.client(node) else { continue }

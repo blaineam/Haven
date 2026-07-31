@@ -6,6 +6,19 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest wave (built, batched for next upload)
+- **The hosting Mac froze every twenty seconds, and it was one missing keyword (2026-07-30, 1.2.1
+  re-cut, Apple)** — reported as "beachballs every 20ish seconds in a DM, recovers after 10–15s".
+  Sampling the shipping build put 56% of a 15-second window on the main thread inside one
+  main-actor task, in a loop of `open` / `fsetattrlist` / `clock_gettime` / `close` — which is
+  `touch_now` in `blobstore.rs`, the mailbox liveness stamp, one file per key. `RelayHost`'s local
+  store accessors were all made `nonisolated` in an earlier pass for exactly this reason;
+  `localTouch` was missed, and it is the one handed the biggest batch (`touchHeldKeys` passes every
+  mailbox key the device has ever ingested for a circle — ~12,000 on this machine). The caller
+  looked innocent: `backfillMailbox` wraps the sweep in `Task.detached`, but `SharedStore` is
+  `@MainActor`, so awaiting it hops right back to main and runs the loop there. Now `nonisolated`
+  like its siblings, with both call sites doing the batch off-main. The app's own log named the
+  scale: `poll OWN relay default: 12032 keys, 200 new (+4748 next poll)`. Also added the missing
+  speaker chip to the DM video viewer.
 - **Android felt like a port, not an Android app (2026-07-30, 1.2.1 re-cut, Android only)** — five
   tester reports that were all the same kind of problem: the client not respecting the platform it
   runs on. The **Circle title bar** measured the circle name before anything else, so a long name

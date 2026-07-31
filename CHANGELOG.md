@@ -9,10 +9,33 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [1.2.1] — 2026-07-30
 
-Tester reports against the Android client. Nothing in `core/` moved, so this is an Android-only
-re-cut of 1.2.1 — same product version, a new Play build.
+Tester reports across Android and Apple. Nothing in `core/` moved — these are client fixes, so
+1.2.1 is re-cut rather than bumped.
 
-### Fixed
+### Fixed — Apple
+
+- **The Mac froze for ten seconds at a time while hosting a relay.** Every local-store accessor on
+  `RelayHost` had been made `nonisolated` so its file I/O could not land on the thread drawing the
+  UI — every one except `localTouch`, which is the most expensive of the set. A TOUCH is the
+  mailbox liveness stamp: one `open` + `set_modified` + `close` **per key**, and `touchHeldKeys`
+  hands it every mailbox key the device has ever ingested for a circle. On a real hosting Mac that
+  is ~12,000 files of synchronous I/O in a single call, on the main thread.
+
+  What hid it is that the caller looks correct: `backfillMailbox` already wraps the whole sweep in
+  `Task.detached`. But `SharedStore` is `@MainActor`, so `await SharedStore.touchHeldKeys(…)` from
+  a detached task hops straight back onto the main actor and runs the loop there. Sampling the
+  shipping build showed the main thread spending 56% of a 15-second window inside it — `open`,
+  `fsetattrlist`, `clock_gettime`, `close`, in a tight loop, which is `touch_now` in
+  `core/haven-net/src/blobstore.rs` exactly. `localTouch` is `nonisolated` now like its siblings,
+  and both call sites run the batch (and the re-PUT of any misses) off-main.
+- **A video in a DM had no sound control.** The full-screen viewer is where a DM's video plays and
+  it carried no speaker chip — the clip opened at whatever the global choice happened to be, with
+  no way to change your mind without backing out. Adds the same glass chip in the same
+  bottom-right position the feed's videos have always had, writing the same persisted preference
+  (not a second, viewer-local one), and the running player now follows a mid-video toggle instead
+  of reading the volume once at open.
+
+### Fixed — Android
 
 - **The Circle title bar grew to five lines tall.** The circle name was measured first with the
   whole bar to spend, so a long one ("Android Supremacy") took the width and left the connection

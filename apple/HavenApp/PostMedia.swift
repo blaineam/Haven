@@ -20,6 +20,16 @@ struct MediaZoomViewer: View {
     @Environment(\.dismiss) private var dismiss
     @State private var dismissOffset: CGFloat = 0
     @State private var zoomed = false
+    /// Drives the speaker chip below: this viewer is where a DM's video plays, and it had no sound
+    /// control at all — the video opened at whatever the global choice was and there was no way to
+    /// change your mind without leaving. The feed's video tiles have carried this chip all along.
+    @ObservedObject private var settings = SettingsStore.shared
+
+    /// Is the page currently on screen a video? The chip is meaningless over a photo.
+    private var currentIsVideo: Bool {
+        guard refs.indices.contains(index) else { return false }
+        return MediaStore.shared.item(refs[index])?.kind == .video
+    }
 
     var body: some View {
         ZStack {
@@ -62,9 +72,45 @@ struct MediaZoomViewer: View {
                     .padding()
                 }
                 Spacer()
+                // Bottom-right speaker, same chip and same placement as a video in the feed, so the
+                // control is where muscle memory already looks for it.
+                if currentIsVideo {
+                    HStack {
+                        Spacer()
+                        Button { HavenVideoSound.toggle() } label: {
+                            Image(systemName: HavenVideoSound.on ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                                .foregroundStyle(.white)
+                        }
+                        .buttonStyle(GlassIconButtonStyle(tint: .white))
+                        .padding()
+                    }
+                }
             }
         }
         .havenStatusBarHidden()
+    }
+}
+
+/// The viewer's video-sound switch, in one place so the chip and the player can never disagree.
+///
+/// Deliberately the SAME persisted choice the feed's speaker writes (`videoSoundOn`) rather than a
+/// viewer-local flag: "video sound is on" is one preference about this app, and having a DM's viewer
+/// keep a second opinion is how you end up unmuting the same video twice.
+enum HavenVideoSound {
+    /// Sound is actually audible only if the app isn't silenced and no call owns the stage — the
+    /// same conditions `AudioCoordinator.start` applies inline.
+    @MainActor static var on: Bool {
+        !SettingsStore.shared.silent && SettingsStore.shared.videoSoundOn && !CallManager.shared.callInProgress
+    }
+
+    @MainActor static func toggle() {
+        guard !CallManager.shared.callInProgress else { return }   // a call owns audio
+        let want = !on
+        // Tapping the speaker IS the intent to hear it, so lift the app-wide mute rather than
+        // no-op'ing — macOS launches silent by default, which would otherwise make this a dead
+        // button on the platform that just grew the control. (Mirrors AudioCoordinator.toggleVideoAudio.)
+        if want, SettingsStore.shared.silent { SettingsStore.shared.silent = false }
+        SettingsStore.shared.videoSoundOn = want
     }
 }
 
@@ -137,12 +183,14 @@ private struct CarouselVideo: View {
     var inCarousel: Bool = false   // multi-item viewer: confine scrub to the strip so swipes page
     @State private var player: AVPlayer?
     @State private var looper: Any?
+    /// So a flip of the viewer's speaker chip re-renders this view and the `onChange` below is
+    /// actually reached. Without it the volume was read once, at `onAppear`, and a toggle mid-video
+    /// changed the icon and nothing else.
+    @ObservedObject private var settings = SettingsStore.shared
 
     /// The viewer's global video-sound choice, gated by the app-wide mute and by call audio
     /// (a call owns the stage) — the same conditions AudioCoordinator.start applies inline.
-    private var soundOn: Bool {
-        !SettingsStore.shared.silent && SettingsStore.shared.videoSoundOn && !CallManager.shared.callInProgress
-    }
+    private var soundOn: Bool { HavenVideoSound.on }
 
     var body: some View {
         // The SAME custom gesture player as the inline feed (hold-to-pause, drag-to-scrub, clean chrome)
@@ -164,6 +212,9 @@ private struct CarouselVideo: View {
                 player = p
                 p.play()
             }
+            // Live, not just at open: the speaker chip over this page writes the shared choice and
+            // the running player follows it.
+            .onChange(of: soundOn) { _, on in player?.volume = on ? 1 : 0 }
             .onDisappear {
                 player?.pause()
                 player?.replaceCurrentItem(with: nil)

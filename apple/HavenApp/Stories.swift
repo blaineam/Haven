@@ -15,8 +15,8 @@ struct StoryViewer: View {
     /// The clip's video track with its audio DROPPED, so a story playing under a song owns no audio
     /// track at all. See the call site for why muting is not sufficient. Returns nil if the asset
     /// can't be rebuilt, in which case the caller falls back to a plain muted player.
-    private static func videoOnlyAsset(_ url: URL) -> AVAsset? {
-        HavenAVComposition.videoOnly(from: AVURLAsset(url: url))
+    private static func videoOnlyAsset(_ url: URL) async -> AVAsset? {
+        await HavenAVComposition.videoOnly(from: AVURLAsset(url: url))
     }
 
     let stories: [FeedItemFfi]
@@ -539,11 +539,10 @@ struct StoryViewer: View {
             // playing. With no audio track the clip can neither interrupt the song nor be
             // interrupted by it, and both simply run.
             let silentUnderSong = s.music != nil
-            let p: AVPlayer = {
-                guard silentUnderSong,
-                      let stripped = Self.videoOnlyAsset(url) else { return AVPlayer(url: url) }
-                return AVPlayer(playerItem: AVPlayerItem(asset: stripped))
-            }()
+            // Start playing IMMEDIATELY with the plain asset — stripping the audio track needs the
+            // async track loaders, and making the viewer wait on them would put a blank frame at the
+            // start of every story. Under a song the strip then swaps in below, preserving position.
+            let p = AVPlayer(url: url)
             // Belt and braces: a call still takes priority, and a clip we couldn't strip stays muted.
             p.isMuted = silentUnderSong || CallManager.shared.callInProgress
             // Weak capture + keep the token so loadCurrent/teardown can remove it. A strong capture +
@@ -554,6 +553,23 @@ struct StoryViewer: View {
             }
             player = p
             p.play()
+            // Swap to the audio-free composition once it resolves. Muting alone is not enough (an
+            // owned audio track still joins the session and ping-pongs with the music player), but it
+            // holds the line until the composition is ready — and if it never resolves, muted IS the
+            // fallback, exactly as before.
+            if silentUnderSong {
+                Task { @MainActor in
+                    guard let stripped = await Self.videoOnlyAsset(url),
+                          player === p else { return }   // slide moved on; this player is gone
+                    let at = p.currentTime()
+                    p.replaceCurrentItem(with: AVPlayerItem(asset: stripped))
+                    // await, not fire-and-forget: in an async context this resolves to the async
+                    // overload, and letting the seek finish before play() is what keeps the swap from
+                    // being visible as a jump back to the start.
+                    await p.seek(to: at)
+                    p.play()
+                }
+            }
             // Let the slide last the clip's length, capped at the per-slide max.
             slideDuration = MediaStore.storySlideMax
             Task {

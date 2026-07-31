@@ -1894,6 +1894,10 @@ struct LoopingVideo: UIViewRepresentable {
         private var looper: Any?
         private var queue: AVQueuePlayer?
         private var asset: AVURLAsset?
+        /// The audio-free composition for `asset`, resolved once by `load` (the modern track loaders
+        /// are async, and `AVPlayerLooper` / the mute toggle below cannot await). nil until it
+        /// lands — every reader falls back to the muted original.
+        private var videoOnlyAsset: AVAsset?
         private var current: HavenFilter = .original
         /// Whether the loop is currently built video-only. Flipping this rebuilds the item (see makeItem).
         private var currentMuted = true
@@ -1942,9 +1946,19 @@ struct LoopingVideo: UIViewRepresentable {
         func load(_ url: URL, fill: Bool, filter: HavenFilter, muted: Bool) {
             let asset = AVURLAsset(url: url)
             self.asset = asset
+            // Resolve the audio-free composition ONCE, off the sync path. Until it lands the preview
+            // runs muted on the original — the same state the old sync helper left behind whenever it
+            // failed — and `update(muted:)` picks it up on the next rebuild.
+            videoOnlyAsset = nil
+            Task { @MainActor [weak self] in
+                let stripped = await HavenAVComposition.videoOnly(from: asset)
+                guard let self, self.asset === asset else { return }   // a newer clip loaded
+                self.videoOnlyAsset = stripped
+                if self.currentMuted { self.update(muted: true, force: true) }
+            }
             current = filter
             currentMuted = muted
-            let item = Self.makeItem(asset: asset, filter: filter, muted: muted)
+            let item = Self.makeItem(asset: asset, videoOnly: videoOnlyAsset, filter: filter, muted: muted)
             // The queue MUST start empty: AVPlayerLooper enqueues copies of the templateItem itself.
             // Passing the same item to AVQueuePlayer(playerItem:) AND as the template makes the looper
             // re-insert an item already owned by the player → -[AVPlayer _insertItem:afterItem:] throws
@@ -1963,12 +1977,15 @@ struct LoopingVideo: UIViewRepresentable {
         /// Change the clip's audio. This REBUILDS the item, because muting here means handing the player a
         /// video-only composition (see makeItem) rather than just silencing it — a player that still owns an
         /// audio track keeps fighting the music player for the session even at zero volume.
-        func update(muted: Bool) {
-            guard let queue, let asset, currentMuted != muted else { return }
+        /// `force` rebuilds even when `muted` is unchanged — used once the video-only composition
+        /// finishes resolving, where the mute state is already correct but the item still points at
+        /// the original asset (and so still owns an audio track).
+        func update(muted: Bool, force: Bool = false) {
+            guard let queue, let asset, force || currentMuted != muted else { return }
             currentMuted = muted
             queue.isMuted = muted
             queue.removeAllItems()
-            looper = AVPlayerLooper(player: queue, templateItem: Self.makeItem(asset: asset, filter: current, muted: muted))
+            looper = AVPlayerLooper(player: queue, templateItem: Self.makeItem(asset: asset, videoOnly: videoOnlyAsset, filter: current, muted: muted))
             queue.play()
         }
 
@@ -2006,7 +2023,7 @@ struct LoopingVideo: UIViewRepresentable {
         func update(filter: HavenFilter) {
             guard filter != current, let asset, let queue else { return }
             current = filter
-            let item = Self.makeItem(asset: asset, filter: filter, muted: currentMuted)
+            let item = Self.makeItem(asset: asset, videoOnly: videoOnlyAsset, filter: filter, muted: currentMuted)
             queue.removeAllItems()   // clear the previous looper's enqueued items before re-looping
             looper = AVPlayerLooper(player: queue, templateItem: item)
             queue.play()
@@ -2018,8 +2035,12 @@ struct LoopingVideo: UIViewRepresentable {
         /// resumes it, and resuming interrupts the song right back — the two ping-ponged about half a second
         /// apart, which is exactly the "plays for a moment then self-pauses" behaviour. With no audio track
         /// the preview can neither be interrupted by the song nor interrupt it, so both simply run.
-        private static func makeItem(asset: AVURLAsset, filter: HavenFilter, muted: Bool) -> AVPlayerItem {
-            let source: AVAsset = muted ? (videoOnly(asset) ?? asset) : asset
+        /// `videoOnly` is resolved ONCE at load (see `load`), not here: this runs from
+        /// `AVPlayerLooper(player:templateItem:)` and from a synchronous mute toggle, neither of
+        /// which can await. nil — not resolved yet, or not resolvable — falls back to the muted
+        /// original, which is exactly what the old sync path did when it returned nil.
+        private static func makeItem(asset: AVURLAsset, videoOnly: AVAsset?, filter: HavenFilter, muted: Bool) -> AVPlayerItem {
+            let source: AVAsset = muted ? (videoOnly ?? asset) : asset
             let item = AVPlayerItem(asset: source)
             guard filter != .original else { return item }
             let spec = filter.spec
@@ -2033,10 +2054,7 @@ struct LoopingVideo: UIViewRepresentable {
             return item
         }
 
-        /// A copy of the asset carrying ONLY its video track, so the resulting player never touches audio.
-        private static func videoOnly(_ asset: AVURLAsset) -> AVAsset? {
-            HavenAVComposition.videoOnly(from: asset)
-        }
+
     }
 }
 #else
@@ -2072,6 +2090,10 @@ struct LoopingVideo: NSViewRepresentable {
         private var queue: AVQueuePlayer?
         private var playerLayer: AVPlayerLayer?
         private var asset: AVURLAsset?
+        /// The audio-free composition for `asset`, resolved once by `load` (the modern track loaders
+        /// are async, and `AVPlayerLooper` / the mute toggle below cannot await). nil until it
+        /// lands — every reader falls back to the muted original.
+        private var videoOnlyAsset: AVAsset?
         private var current: HavenFilter = .original
         /// Whether the loop is currently built video-only. Flipping this rebuilds the item (see makeItem).
         private var currentMuted = true
@@ -2084,9 +2106,19 @@ struct LoopingVideo: NSViewRepresentable {
         func load(_ url: URL, fill: Bool, filter: HavenFilter, muted: Bool) {
             let asset = AVURLAsset(url: url)
             self.asset = asset
+            // Resolve the audio-free composition ONCE, off the sync path. Until it lands the preview
+            // runs muted on the original — the same state the old sync helper left behind whenever it
+            // failed — and `update(muted:)` picks it up on the next rebuild.
+            videoOnlyAsset = nil
+            Task { @MainActor [weak self] in
+                let stripped = await HavenAVComposition.videoOnly(from: asset)
+                guard let self, self.asset === asset else { return }   // a newer clip loaded
+                self.videoOnlyAsset = stripped
+                if self.currentMuted { self.update(muted: true, force: true) }
+            }
             current = filter
             currentMuted = muted
-            let item = Self.makeItem(asset: asset, filter: filter, muted: muted)
+            let item = Self.makeItem(asset: asset, videoOnly: videoOnlyAsset, filter: filter, muted: muted)
             // Empty queue — the looper enqueues copies of templateItem (see the iOS load() above).
             let q = AVQueuePlayer()
             q.isMuted = muted
@@ -2104,18 +2136,21 @@ struct LoopingVideo: NSViewRepresentable {
             current = filter
             queue.removeAllItems()   // clear the previous looper's enqueued items before re-looping
             looper = AVPlayerLooper(player: queue,
-                                    templateItem: Self.makeItem(asset: asset, filter: filter, muted: currentMuted))
+                                    templateItem: Self.makeItem(asset: asset, videoOnly: videoOnlyAsset, filter: filter, muted: currentMuted))
             queue.play()
         }
         /// Change the clip's audio. This REBUILDS the item, because muting here means handing the player a
         /// video-only composition (see makeItem) rather than just silencing it — a player that still owns an
         /// audio track keeps fighting the music player for the session even at zero volume.
-        func update(muted: Bool) {
-            guard let queue, let asset, currentMuted != muted else { return }
+        /// `force` rebuilds even when `muted` is unchanged — used once the video-only composition
+        /// finishes resolving, where the mute state is already correct but the item still points at
+        /// the original asset (and so still owns an audio track).
+        func update(muted: Bool, force: Bool = false) {
+            guard let queue, let asset, force || currentMuted != muted else { return }
             currentMuted = muted
             queue.isMuted = muted
             queue.removeAllItems()
-            looper = AVPlayerLooper(player: queue, templateItem: Self.makeItem(asset: asset, filter: current, muted: muted))
+            looper = AVPlayerLooper(player: queue, templateItem: Self.makeItem(asset: asset, videoOnly: videoOnlyAsset, filter: current, muted: muted))
             queue.play()
         }
         /// Nudge the loop back into playing after an interruption paused the queue (see the iOS twin).
@@ -2129,8 +2164,12 @@ struct LoopingVideo: NSViewRepresentable {
         /// resumes it, and resuming interrupts the song right back — the two ping-ponged about half a second
         /// apart, which is exactly the "plays for a moment then self-pauses" behaviour. With no audio track
         /// the preview can neither be interrupted by the song nor interrupt it, so both simply run.
-        private static func makeItem(asset: AVURLAsset, filter: HavenFilter, muted: Bool) -> AVPlayerItem {
-            let source: AVAsset = muted ? (videoOnly(asset) ?? asset) : asset
+        /// `videoOnly` is resolved ONCE at load (see `load`), not here: this runs from
+        /// `AVPlayerLooper(player:templateItem:)` and from a synchronous mute toggle, neither of
+        /// which can await. nil — not resolved yet, or not resolvable — falls back to the muted
+        /// original, which is exactly what the old sync path did when it returned nil.
+        private static func makeItem(asset: AVURLAsset, videoOnly: AVAsset?, filter: HavenFilter, muted: Bool) -> AVPlayerItem {
+            let source: AVAsset = muted ? (videoOnly ?? asset) : asset
             let item = AVPlayerItem(asset: source)
             guard filter != .original else { return item }
             let spec = filter.spec
@@ -2144,10 +2183,7 @@ struct LoopingVideo: NSViewRepresentable {
             return item
         }
 
-        /// A copy of the asset carrying ONLY its video track, so the resulting player never touches audio.
-        private static func videoOnly(_ asset: AVURLAsset) -> AVAsset? {
-            HavenAVComposition.videoOnly(from: asset)
-        }
+
         func stop() {
             queue?.pause()
             queue = nil

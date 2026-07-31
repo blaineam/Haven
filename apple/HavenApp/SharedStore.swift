@@ -146,11 +146,30 @@ final class MediaBackupQueue {
             // its blob clobbered out of the queue, and the post's media never uploaded until the
             // 2-min backfill stumbled on it. The disk copy keeps the full pre-pass set until the
             // end-of-pass save, so a kill mid-pass still restores the in-flight jobs on relaunch.
+            // HONOUR THE BACKOFF. backup() records a stall for every ref that reached no
+            // destination and grows the retry gap 2min → 1hr, but nothing here ever read it: the
+            // pass took the head of each lane regardless, failed the same refs against the same
+            // unreachable relays, and re-armed 2 seconds later — forever, holding a background
+            // assertion each time so iOS could never suspend us. That is a phone that is warm after
+            // a minute of use and shows 4h45m of background activity for 1m on screen.
+            //
+            // Filter rather than take the head, or a few permanently-stalled refs at the front
+            // starve everything behind them (head-of-line blocking).
             let budget = 5
-            let hiWork = Array(priorityPending.prefix(budget))
-            let loWork = Array(pending.prefix(budget - hiWork.count))
-            priorityPending.removeFirst(hiWork.count)
-            pending.removeFirst(loWork.count)
+            let hiWork = Array(priorityPending.filter { !MediaBackupBackoff.shouldSkip($0.ref) }.prefix(budget))
+            let loWork = Array(pending.filter { !MediaBackupBackoff.shouldSkip($0.ref) }.prefix(budget - hiWork.count))
+            guard !hiWork.isEmpty || !loWork.isEmpty else {
+                // Everything queued is inside its backoff window. Do NOT re-arm on a timer: the
+                // 2-minute backfill sweep already re-enqueues refs whose window has elapsed (it is
+                // the one caller that checked shouldSkip), so it is the natural retry driver. Going
+                // quiet here is what lets the process actually suspend.
+                draining = false
+                return
+            }
+            let hiTaken = Set(hiWork.map { "\($0.ref)|\($0.cid)" })
+            let loTaken = Set(loWork.map { "\($0.ref)|\($0.cid)" })
+            priorityPending.removeAll { hiTaken.contains("\($0.ref)|\($0.cid)") }
+            pending.removeAll { loTaken.contains("\($0.ref)|\($0.cid)") }
             inFlightHi = hiWork
             inFlightLo = loWork
             var failedHi: [Job] = []
@@ -183,12 +202,19 @@ final class MediaBackupQueue {
             })
             save()
             draining = false
-            if !pending.isEmpty || !priorityPending.isEmpty {
+            // Re-arm ONLY for work that is actually retryable now. Re-arming whenever the lanes
+            // are non-empty is what turned a permanently-unreachable relay into a 2-second forever
+            // loop: the queue is never empty in that state, so the timer never stopped.
+            let queuedRefs = (pending + priorityPending).map(\.ref)
+            let anyDueNow = !queuedRefs.isEmpty && MediaBackupBackoff.earliestDue(queuedRefs) == nil
+            if anyDueNow {
                 // Continue later without stacking concurrent drains.
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     MediaBackupQueue.shared.drainPersisted(social: social)
                 }
+            } else if !queuedRefs.isEmpty {
+                HavenLog.sync("media-backup idle — \(queuedRefs.count) ref(s) all in backoff; the 2-min sweep will re-drive them")
             }
         }
     }
@@ -331,6 +357,16 @@ enum MediaBackupBackoff {
     private static var fails: [String: Int] = [:]            // ref → consecutive stall count
 
     private static func nowMs() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
+
+    /// The soonest moment any of `refs` becomes retryable, or nil if one is due NOW.
+    static func earliestDue(_ refs: [String]) -> UInt64? {
+        var soonest: UInt64?
+        for r in refs {
+            guard let due = nextTry[r], due > nowMs() else { return nil }   // something is due now
+            soonest = min(soonest ?? due, due)
+        }
+        return soonest
+    }
 
     /// True if `ref` stalled recently and its backoff window hasn't elapsed — skip re-enqueueing it.
     static func shouldSkip(_ ref: String) -> Bool {

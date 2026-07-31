@@ -112,4 +112,29 @@ final class MediaVariantsTests: XCTestCase {
         XCTAssertFalse(out.contains("img_oldp"))
         XCTAssertFalse(out.contains("vid_a"))
     }
+
+    /// Picking a VIDEO for a story must attach the clip, not a still of its first frame.
+    ///
+    /// composeVideoMedia deliberately puts the poster FIRST so a feed tile can paint something
+    /// immediately — which made `refs.first` look like the natural way to take "the" ref. It isn't:
+    /// it is the poster, and the story picker used it, so choosing a video published a photo of
+    /// frame 0 with no clip attached. displayRefs is the selector that survives the layout.
+    func testDisplayRefsPicksThePlayableClipNotThePoster() {
+        let media = MediaVariants.composeVideoMedia(
+            poster: "img_poster", optimized: "vid_play", original: "vid_orig")
+        // The layout that caused the bug: poster first, playable third.
+        XCTAssertEqual(media.first, "img_poster")
+        XCTAssertTrue(media.contains("vid_play"))
+
+        let display = MediaVariants.displayRefs(media)
+        XCTAssertEqual(display.first, "vid_play",
+                       "a picked video must resolve to its playable ref, not its poster")
+        XCTAssertFalse(display.contains("img_poster"), "the poster is a companion, never the story")
+        XCTAssertFalse(display.contains("vid_orig"), "the original is a companion too")
+    }
+
+    /// A picked PHOTO has no companions, so the same selector must still return the image itself.
+    func testDisplayRefsLeavesAPlainPhotoAlone() {
+        XCTAssertEqual(MediaVariants.displayRefs(["img_solo"]).first, "img_solo")
+    }
 }

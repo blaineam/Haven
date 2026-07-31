@@ -772,7 +772,18 @@ struct StoryCameraView: View {
         }
         .sheet(isPresented: $showLibrary) {
             MediaPicker { refs in
-                if let ref = refs.first { draft = StoryDraft(mediaRef: ref) }
+                // NOT refs.first. A picked VIDEO expands to its companion group, and
+                // composeVideoMedia puts the POSTER at the front:
+                //     [poster, posterMarker, playable, original?, originalMarker?]
+                // so taking the first ref handed the composer a still of frame 0 — which is exactly
+                // what the story then shared: a photo of the video's first frame, no clip attached.
+                // displayRefs drops posters/thumbs/originals/markers and leaves the playable ref.
+                //
+                // Deliberately one ref, not the whole group: StoryDraft's `refs` are separate CLIPS
+                // (each posted as its own story), so passing the companions would publish the poster
+                // as a second, silent photo story next to the real one.
+                guard let playable = MediaVariants.displayRefs(refs).first ?? refs.first else { return }
+                draft = StoryDraft(mediaRef: playable)
             }
         }
         // Fully STOP capture while the review/editor is up, and restart it on "capture more". A running

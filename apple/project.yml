@@ -345,10 +345,12 @@ targets:
       - path: HavenApp/MediaVariants.swift
       - path: HavenApp/FileArchive.swift
       - path: HavenApp/PushBanner.swift
-      # HavenFabricTests covers the Haven-first ICE policy + hairpin URL derivation. These three
-      # are Foundation/os-only (CallHairpin pulls HavenLog), so the target stays host-LESS.
+      # HavenFabricTests covers the Haven-first ICE policy + hairpin URL derivation. Foundation/os
+      # only, so the target stays host-LESS. CallHairpin is deliberately NOT here: it grew a
+      # FeedStore/RelayMailboxStore dependency in its reconnect path, which broke this target's
+      # build entirely (silently — nothing runs this scheme in CI). The pure URL derivation moved to
+      # HavenFabric.swift as HavenHairpin; the socket code stays in the app where its deps live.
       - path: HavenApp/HavenFabric.swift
-      - path: HavenApp/CallHairpin.swift
       - path: HavenApp/HavenLog.swift
       - path: Shared/SharedNotificationPrivacy.swift
       - path: HavenLogicTests

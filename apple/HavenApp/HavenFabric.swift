@@ -122,3 +122,26 @@ final class HavenFabric: ObservableObject {
             || (host.hasPrefix("172.") && (16...31).contains(Int(host.split(separator: ".").dropFirst().first ?? "") ?? -1))
     }
 }
+
+/// Where a relay's public origin exposes the WebRTC hairpin.
+///
+/// Lives here, not on CallHairpin, so it stays reachable from the host-LESS HavenLogicTests target.
+/// CallHairpin grew a FeedStore/RelayMailboxStore dependency in its failure path, which quietly
+/// broke that target's "Foundation-only" promise and stopped it compiling at all — this derivation
+/// is pure Foundation and belongs with the rest of the fabric address logic.
+enum HavenHairpin {
+
+    /// Public fabric/media HTTPS base → `wss://…/webrtc/hairpin`. Pure string→URL math, so it is
+    /// nonisolated — callable from the host-less logic tests without the MainActor.
+    nonisolated static func hairpinURL(fromPublicBase base: String) -> URL? {
+        let t = base.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !t.isEmpty, let u = URL(string: t), let host = u.host else { return nil }
+        var c = URLComponents()
+        c.scheme = (u.scheme?.lowercased() == "http") ? "ws" : "wss"
+        c.host = host
+        c.port = u.port
+        c.path = "/webrtc/hairpin"
+        return c.url
+    }
+}

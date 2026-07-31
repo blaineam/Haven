@@ -27,20 +27,6 @@ final class CallHairpin {
         return URLSession(configuration: c)
     }()
 
-    /// Public fabric/media HTTPS base → `wss://…/webrtc/hairpin`. Pure string→URL math, so it is
-    /// nonisolated — callable from the host-less logic tests without the MainActor.
-    nonisolated static func hairpinURL(fromPublicBase base: String) -> URL? {
-        let t = base.trimmingCharacters(in: .whitespacesAndNewlines)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard !t.isEmpty, let u = URL(string: t), let host = u.host else { return nil }
-        var c = URLComponents()
-        c.scheme = (u.scheme?.lowercased() == "http") ? "ws" : "wss"
-        c.host = host
-        c.port = u.port
-        c.path = "/webrtc/hairpin"
-        return c.url
-    }
-
     /// Best fabric public base (DERP URL when path-proxied equals media origin).
     static func fabricBase() -> String? {
         let derp = UserDefaults.standard.stringArray(forKey: "haven.fabric.derpUrls") ?? []
@@ -55,7 +41,7 @@ final class CallHairpin {
         guard !sessionId.isEmpty, !me.isEmpty, !remote.isEmpty, me != remote else { return }
         if tasks[remote] != nil { return }
         guard let base = Self.fabricBase(),
-              let url = Self.hairpinURL(fromPublicBase: base) else { return }
+              let url = HavenHairpin.hairpinURL(fromPublicBase: base) else { return }
 
         var req = URLRequest(url: url)
         req.timeoutInterval = 90

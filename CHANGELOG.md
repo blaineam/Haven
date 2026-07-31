@@ -9,8 +9,73 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [1.2.2] — 2026-07-31
 
-macOS 1.2.1 is live and iOS 1.2.1 is in review, so this fix rides its own version rather than
-waiting for them.
+macOS 1.2.1 is live and iOS 1.2.1 was in review, so this began as one fix riding its own version
+rather than waiting for them. It grew: build 412 is what shipped, and it carries everything below.
+
+### Fixed — Apple
+
+- **The phone ran hot, and never slept.** Reported as "why is my iPhone warm from using Haven for
+  1 minute" — and the battery screen said what the minute could not: On Screen 1m, **Background
+  4h 45m**, 15% of the day's battery.
+
+  The media-backup drain took a `UIApplication` background-task assertion, ran five jobs, requeued
+  whatever failed, and re-armed two seconds later whenever the lanes were non-empty. On a phone
+  whose relays are unreachable that condition is *always* true, so it dialled dead destinations
+  every two seconds forever, holding an assertion each pass — iOS was never permitted to suspend
+  the app. The log is a wall of `relay dial in cooldown` → `backup NO-DEST` → `RETRY … requeued`.
+
+  The brakes already existed and were correct: `MediaBackupBackoff` grows the retry gap from two
+  minutes to an hour, and `backup()` records every stall faithfully. But `shouldSkip` had exactly
+  one caller — the enqueue sweep in `FeedView` — and the drain that actually runs the work never
+  consulted it. Written, and wired to nothing. The drain now filters both lanes through it, and
+  re-arms only when something is genuinely due.
+
+- **A video picked for a story published as a photo.** Reported as "it only loads the first frame".
+  That was literal. Picking a video does not yield one ref — it expands to its companion group, and
+  `composeVideoMedia` builds that group **poster-first** so a feed tile has something to paint
+  immediately: `[poster, posterMarker, playable, original?, originalMarker?]`. The story picker took
+  `refs.first`, which is the poster: a still of frame 0. The composer was handed an image, and the
+  story faithfully published an image. The clip processed correctly and was then thrown away.
+
+  Selection now runs through `MediaVariants.displayRefs`, which drops posters, thumbs, originals and
+  markers. Deliberately still ONE ref: `StoryDraft`'s `refs` are separate *clips*, each posted as its
+  own story, so passing the whole group would publish the poster as a second silent photo story
+  beside the real one.
+
+### Changed — every platform
+
+- **Public STUN is now a last resort, not a default companion.** Requested rule: reach for ICE/Google
+  STUN only when no Haven relay is available to the parties on the call.
+
+  | Fabric | TURN                | ICE                                                    |
+  |--------|---------------------|--------------------------------------------------------|
+  | no     | none / private only | Google STUN (nothing else can pair two home NATs)      |
+  | no     | public              | circle TURN + STUN on the same host                    |
+  | yes    | any (incl. none)    | circle TURN/STUN if present — never Google             |
+
+  Before, Google was appended whenever no *publicly reachable* TURN was configured — including when
+  a perfectly healthy fabric was present. A circle running its own relay still disclosed its callers'
+  addresses to a third party during ICE, purely because that relay had no TURN of its own. A fabric
+  counts as an available relay even with no TURN, because the relay's path proxy serves the WebRTC
+  hairpin: media has a route that never touches anyone else.
+
+  **The risk, stated plainly, because this re-opens a documented field failure.** The Google fallback
+  was added after a relay advertised a Docker-internal `turn:172.20.0.2:3478`, leaving both phones
+  with one dead server, no STUN, and host candidates only — calls that "connected" carrying zero
+  media. The no-fabric half of that case still applies (an unreachable private TURN is not an
+  available relay) and is now pinned by a test on every platform so the last resort cannot be deleted
+  by accident. The fabric half is a deliberate trade of a limp-through path for not talking to Google
+  — sound now in a way it was not when that fallback was written, because the hairpin did not then
+  exist.
+
+  Landed on Apple, **Android and desktop in the same wave.** On Android this meant repairing a split
+  brain: `FabricIcePolicy` already encoded the rule, but `CallManager.iceServers()` deliberately
+  overrode it and added STUN anyway — and `FabricIcePolicyTest` carried a warning saying it pinned
+  "the POLICY OBJECT, not the caller's behaviour". A green run proved nothing about any device. The
+  policy object now returns the final server plan, the caller only translates it into WebRTC's types,
+  and the tests assert what actually ships. Two stale comments went with it: both claimed Android had
+  no media hairpin, which stopped being true when `CallHairpin`/`CallMediaBridge` were written — and
+  that claim was the stated reason for overriding the policy in the first place.
 
 ### Fixed — every platform
 

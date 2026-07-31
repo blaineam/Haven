@@ -135,54 +135,36 @@ object CallManager {
      * Haven-first ICE — parity with Apple [HavenFabric].
      * Prefs `haven.fabric.derpUrls` + `turnUrls`/`turnUser`/`turnPass`.
      *
-     * Fabric + TURN → circle TURN.
-     * Fabric without TURN → host only, per [FabricIcePolicy] — but see below: this function
-     * deliberately adds STUN anyway. A direct path is always better than a relayed one, and
-     * [CallMediaBridge] (the hairpin) is the *fallback*, not the plan.
-     * No fabric → Google STUN as fallback only.
-     * Call *signaling* rides sealed iroh over fabric DERP / direct QUIC.
+     * The decision lives in [FabricIcePolicy.plan] so the unit tests pin what actually ships; this
+     * function only translates that plan into WebRTC's types. It used to make its own call and
+     * override the policy object, which meant [FabricIcePolicyTest] passed while describing
+     * behaviour no device had.
+     *
+     * Call *signaling* rides sealed iroh over fabric DERP / direct QUIC regardless.
      */
     private fun iceServers(): List<PeerConnection.IceServer> {
         val prefs = appContext.getSharedPreferences("haven.fabric", android.content.Context.MODE_PRIVATE)
-        val derp = prefs.getStringSet("derpUrls", emptySet()).orEmpty()
-        val turn = prefs.getStringSet("turnUrls", emptySet()).orEmpty()
-        val user = prefs.getString("turnUser", "") ?: ""
-        val pass = prefs.getString("turnPass", "") ?: ""
-        val policy = FabricIcePolicy.resolve(derp, turn, user, pass)
-        // iOS parity (field fix): a TURN-only list turned one dead/unroutable TURN entry (the
-        // dockerized relay advertised its container IP) into ZERO usable ICE servers — host
-        // candidates only, calls "connected" with no media. Circle infra stays first; STUN is
-        // derived from the circle TURN host (same socket, no credentials), and Google STUN is
-        // added only when the circle offers no publicly-routable server of its own.
+        val plan = FabricIcePolicy.plan(
+            derp = prefs.getStringSet("derpUrls", emptySet()).orEmpty(),
+            turn = prefs.getStringSet("turnUrls", emptySet()).orEmpty(),
+            user = prefs.getString("turnUser", "") ?: "",
+            pass = prefs.getString("turnPass", "") ?: "",
+        )
         val servers = mutableListOf<PeerConnection.IceServer>()
-        var havePublicTurn = false
-        if (policy.turnUrls.isNotEmpty()) {
+        if (plan.turnUrls.isNotEmpty()) {
             servers.add(
-                PeerConnection.IceServer.builder(policy.turnUrls)
-                    .setUsername(policy.turnUser)
-                    .setPassword(policy.turnPass)
+                PeerConnection.IceServer.builder(plan.turnUrls)
+                    .setUsername(plan.turnUser)
+                    .setPassword(plan.turnPass)
                     .createIceServer(),
             )
-            val stun = policy.turnUrls.mapNotNull { url ->
-                url.substringAfter(":", "").ifEmpty { null }?.let { "stun:$it" }
-            }
-            if (stun.isNotEmpty()) servers.add(PeerConnection.IceServer.builder(stun).createIceServer())
-            havePublicTurn = policy.turnUrls.any { !hostLooksPrivate(it) }
         }
-        if (!havePublicTurn) {
-            servers.addAll(FabricIcePolicy.googleStunUrls.map {
-                PeerConnection.IceServer.builder(it).createIceServer()
-            })
+        if (plan.stunUrls.isNotEmpty()) {
+            servers.add(PeerConnection.IceServer.builder(plan.stunUrls).createIceServer())
         }
+        servers.addAll(plan.google.map { PeerConnection.IceServer.builder(it).createIceServer() })
+        if (plan.usesGoogleStun) Log.i(TAG, "ice: no Haven relay for this call — falling back to public STUN")
         return servers
-    }
-
-    /** Best-effort "is this turn:/stun: URL's host a private/unroutable address" check. */
-    private fun hostLooksPrivate(url: String): Boolean {
-        val host = url.substringAfter(":", "").substringBefore(":")
-        val second = host.split(".").getOrNull(1)?.toIntOrNull() ?: -1
-        return host.startsWith("10.") || host.startsWith("192.168.") || host.startsWith("127.") ||
-            host.startsWith("169.254.") || (host.startsWith("172.") && second in 16..31)
     }
 
     fun init(context: Context, myNodeHex: String) {

@@ -46,17 +46,31 @@ self-hosted DERP relay.
 
 ### 1.2 Google's public STUN servers — WebRTC calls
 
-Hardcoded, no configuration surface, identical on all three platforms:
+**Largely resolved as of 1.2.2.** This section described the original state: `stun.l.google.com` /
+`stun1.l.google.com` hardcoded with no configuration surface, contacted on every call, with no TURN
+server, so Google learned the IP of every Haven caller and a symmetric-NAT pair failed outright.
 
-| File:line |
-|---|
-| `apple/HavenApp/WebRTCCall.swift:71-72` |
-| `android/…/core/CallManager.kt:103-104` |
-| `desktop/ui/app.js:3370` |
+Today public STUN is a **last resort**, reached for only when no Haven relay is available to the
+parties on the call:
 
-`stun.l.google.com` / `stun1.l.google.com`. Google learns the IP of every Haven caller, and if it
-ever stops answering, calls stop traversing NAT. There is no TURN server, so a symmetric-NAT pair
-already fails today.
+| Fabric | TURN                | ICE                                                    |
+|--------|---------------------|--------------------------------------------------------|
+| no     | none / private only | Google STUN (nothing else can pair two home NATs)      |
+| no     | public              | circle TURN + STUN on the same host                    |
+| yes    | any (incl. none)    | circle TURN/STUN if present — never Google             |
+
+| Platform | Policy |
+|---|---|
+| Apple | `apple/HavenApp/HavenFabric.swift` (`iceServers`) |
+| Android | `android/…/core/FabricIcePolicy.kt` (`plan`), translated by `CallManager.iceServers()` |
+| Desktop | `desktop/ui/app.js` (`iceServers`) |
+
+A circle running its own relay never contacts Google, even when that relay announces no TURN, because
+the relay's path proxy serves the WebRTC hairpin — media has a route that touches no third party.
+What remains is the genuinely unavoidable case: **no fabric and no publicly reachable TURN**, where
+the alternative to public STUN is a call that cannot connect at all. That fallback is deliberate and
+pinned by tests on all three platforms (see the 1.2.2 entry in `CHANGELOG.md` for the field failure
+that makes deleting it a mistake).
 
 ### 1.3 The push relay — a single Cloudflare Worker at a personal account
 

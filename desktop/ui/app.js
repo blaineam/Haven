@@ -4776,9 +4776,10 @@ const line = (label, ok) => el("div", { class: "row" }, el("span", { style: "fle
 // participant opens one RTCPeerConnection to every other (full mesh, no SFU). 1:1 is a
 // 2-person group. The lexicographically smaller hex offers (glare-free). SDP/ICE ride the
 // sealed iroh channel via the call_signal command; media is DTLS-SRTP in the WebView.
-// Haven-first ICE — parity with Apple HavenFabric / Android CallManager.
-// Fabric + circle TURN → TURN only. Fabric without TURN → empty ICE (host + WSS hairpin;
-// no Google STUN). No fabric → Google STUN as fallback only. Signaling uses iroh/fabric DERP.
+// Haven-first ICE — parity with Apple HavenFabric / Android FabricIcePolicy.
+// Fabric (with or without TURN) → circle TURN/STUN if present, never Google; the WSS hairpin
+// carries media when ICE cannot pair. No fabric → circle TURN + same-host STUN if publicly
+// reachable, else Google STUN as the last resort. Signaling uses iroh/fabric DERP throughout.
 const GOOGLE_STUN = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"];
 
 // Best-effort "is this turn:/stun: URL's host a private/unroutable address" check.
@@ -4806,15 +4807,23 @@ function iceServers() {
     if (stun.length > 0) servers.push({ urls: stun });
     havePublicTurn = turnUrls.some((u) => !hostLooksPrivate(u));
   }
-  if (!havePublicTurn) {
-    // No circle server the open internet can reach — without STUN, two home NATs can never find
-    // each other. This branch used to return an EMPTY list whenever a fabric was configured, which
-    // is host-candidates-only: fine on a LAN, and unable to complete a single call across the
-    // internet. Apple and Android both corrected this after the field report where the relay
-    // advertised a Docker-internal TURN host; desktop was the last platform still doing it, so a
-    // desktop↔phone call over the internet had no server-reflexive path at all.
-    // Connectivity beats purity here.
+  // PUBLIC STUN IS A LAST RESORT, not a default companion — parity with Apple HavenFabric and
+  // Android FabricIcePolicy. Google is reached for only when NO Haven relay is available to carry
+  // this call. A configured fabric counts as available even with no TURN of its own, because the
+  // relay's path proxy serves the WSS hairpin below (opened alongside ICE, taking over media on
+  // `failed`) — so media has a route that never touches a third party.
+  //
+  // This narrows the previous rule, which appended Google whenever no PUBLICLY reachable TURN was
+  // configured, including alongside a perfectly healthy fabric — disclosing every caller's address
+  // to Google during ICE purely because the circle's relay had no TURN.
+  //
+  // The field failure that motivated the old rule is still covered: a relay advertising a
+  // Docker-internal TURN host, with no fabric, is not an available relay, so the fallback still
+  // applies. What is gone is the case where a working fabric was present all along.
+  const haveFabric = Array.isArray(window.__havenFabricDerp) && window.__havenFabricDerp.length > 0;
+  if (!haveFabric && !havePublicTurn) {
     servers.push({ urls: GOOGLE_STUN });
+    console.info("ice: no Haven relay for this call — falling back to public STUN");
   }
   return servers;
 }

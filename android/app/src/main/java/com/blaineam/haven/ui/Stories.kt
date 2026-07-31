@@ -320,7 +320,12 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
         ) {
         // Decoded once: the spec carries the caption style AND the author's media framing.
         val decoded = StoryCaptions.decode(item.body)
-        val mediaId = item.media.firstOrNull()
+        // NOT media.first. A video story ships its poster still, published FIRST
+        // ([poster, posterMarker, clip]), so the raw head is the poster — rendering it would show a
+        // video story as a frozen frame. displayRefs drops posters/thumbs/originals/markers and
+        // leaves the playable ref. Parity with Apple StoryViewer.displayRef.
+        val mediaId = com.blaineam.haven.core.MediaVariants.displayRefs(item.media).firstOrNull()
+            ?: item.media.firstOrNull()
         if (mediaId != null) {
             // The author's framing (zoom + pan) rides the caption spec — same application as iOS
             // (Stories.swift:120-121): scale about center, THEN translate by offX/offY fractions of

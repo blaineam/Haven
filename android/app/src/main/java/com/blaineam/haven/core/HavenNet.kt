@@ -3095,10 +3095,35 @@ object HavenNet : InboundListener {
 
     /** Post a story (a post with the story flag + 24h retention; auto-expires). [circleId] lets a
      *  caller aim it at a specific circle (qa-cmd `circle_id`); the UI's story path stays default. */
+    /**
+     * Give a VIDEO story its poster still — parity with Apple `CameraView.withPosterCompanions`.
+     *
+     * A story carries ONE media ref (each clip is its own story), so a video story published as a
+     * bare `vid_` ref leaves three things with nothing to work with:
+     *  - the viewer has no still to draw and spins for as long as the whole clip takes to transfer;
+     *  - [enqueueAuthoredMedia] uploads posters/thumbs AHEAD of big blobs so the placeholder bytes
+     *    land first — with no poster there are none;
+     *  - data-saver prefetch skips full videos by contract and falls back to the declared poster.
+     *
+     * Idempotent: a ref that already declares a poster passes through, non-video refs are untouched.
+     */
+    private fun withPosterCompanions(circleId: String, refs: List<String>): List<String> {
+        val out = ArrayList<String>()
+        for (ref in refs) {
+            if (!LocalMedia.isVideo(ref) || MediaVariants.posterFor(ref, refs) != null) { out.add(ref); continue }
+            LocalMedia.ensurePosterImage(circleId, ref)?.let { poster ->
+                out.add(poster)
+                out.add(MediaVariants.posterMarker(ref, poster))
+            }
+            out.add(ref)
+        }
+        return out
+    }
+
     fun postStory(body: String, mediaId: String?, music: uniffi.haven_ffi.TrackRefFfi? = null,
                   circleId: String = DEFAULT_CIRCLE) {
         if (body.isBlank() && mediaId == null && music == null) return
-        val media = withThumbMarkers(listOfNotNull(mediaId))
+        val media = withPosterCompanions(circleId, withThumbMarkers(listOfNotNull(mediaId)))
         val ts = nowMs()
         val env = runCatching {
             social.post(circleId, body, media, music, 86_400UL, true, false, ts)

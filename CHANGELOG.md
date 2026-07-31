@@ -7,6 +7,54 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.3] — 2026-07-31
+
+Apple's 1.2.2 never shipped — it was still in review when this was found, so it is re-cut as 1.2.3
+carrying everything 1.2.2 had plus the fix below. Android and desktop 1.2.2 ARE published; Android
+takes this fix as 1.2.3, desktop's authoring half is called out as still open.
+
+### Fixed — Apple and Android
+
+- **A video story arrived as a spinner that never finished.** Reported straight after the fix above
+  shipped: "my friends got my video story right away but theirs have not loaded yet" — ring present,
+  "Downloading story…" forever. Caused by that same fix.
+
+  Selecting the playable ref was right; publishing **only** the playable ref was not. Every video in
+  Haven travels with its poster still, and three separate things depend on that companion existing:
+
+  - the receiver has something to draw *immediately* — otherwise the viewer shows a spinner for as
+    long as the whole clip takes to transfer, which is what "never loaded" was;
+  - `enqueueAuthoredMedia` uploads thumbs and posters **ahead of** big blobs, specifically so the
+    placeholder-feeding bytes land first — with no poster there are none to send;
+  - `dataSaverPrefetchRefs` skips full videos by contract and falls back to the declared poster, so
+    under super data saver a poster-less story prefetches **nothing at all**.
+
+  `CameraView.withPosterCompanions` already existed for exactly this — its own doc records the
+  camera path having had the identical bug ("no poster was ever published, so recipients and super
+  data saver had nothing either"). The library path now goes through it too, in `postStory`, so the
+  companions are re-attached after the picker deliberately narrows to one clip.
+
+  The viewer had to change with it. Companions are published poster-FIRST, so `media.first` is the
+  poster — the very trap the picker fell into — and reading it would have rendered every video story
+  as a frozen frame again. The viewer now resolves through `displayRefs`, requests the poster
+  alongside the clip, and draws that still under the progress ring while the video transfers. A
+  still with a spinner reads as loading; a black screen reads as broken.
+
+  **Android had the same bug independently, and older.** Its `postStory` publishes a single ref
+  through `withThumbMarkers` and never attached a poster either, so an Android video story has always
+  arrived poster-less — same spinner, same dead data-saver prefetch. It now routes through the same
+  companion step (`LocalMedia.ensurePosterImage`, which already existed), and its viewer resolves
+  through `MediaVariants.displayRefs` for the same reason Apple's had to.
+
+### Known gap — desktop
+
+- **A desktop-authored video story still publishes no poster.** Same bug, but the fix is not the same
+  size: desktop has no video-poster generation (its `posterFor`/`stillFrom` stills are a client-side
+  render cache, never stored as a media ref) and `post_story` takes a single `Option<String>` rather
+  than a companion list. Deliberately not rushed into a release cut. Desktop as a VIEWER is already
+  correct — `storyContentNode` resolves through `displayMediaRefs`, so poster-first stories from
+  phones render as video, not as a still.
+
 ## [1.2.2] — 2026-07-31
 
 macOS 1.2.1 is live and iOS 1.2.1 was in review, so this began as one fix riding its own version
@@ -41,31 +89,6 @@ rather than waiting for them. It grew: build 412 is what shipped, and it carries
   markers. Deliberately still ONE ref: `StoryDraft`'s `refs` are separate *clips*, each posted as its
   own story, so passing the whole group would publish the poster as a second silent photo story
   beside the real one.
-
-- **A video story arrived as a spinner that never finished.** Reported straight after the fix above
-  shipped: "my friends got my video story right away but theirs have not loaded yet" — ring present,
-  "Downloading story…" forever. Caused by that same fix.
-
-  Selecting the playable ref was right; publishing **only** the playable ref was not. Every video in
-  Haven travels with its poster still, and three separate things depend on that companion existing:
-
-  - the receiver has something to draw *immediately* — otherwise the viewer shows a spinner for as
-    long as the whole clip takes to transfer, which is what "never loaded" was;
-  - `enqueueAuthoredMedia` uploads thumbs and posters **ahead of** big blobs, specifically so the
-    placeholder-feeding bytes land first — with no poster there are none to send;
-  - `dataSaverPrefetchRefs` skips full videos by contract and falls back to the declared poster, so
-    under super data saver a poster-less story prefetches **nothing at all**.
-
-  `CameraView.withPosterCompanions` already existed for exactly this — its own doc records the
-  camera path having had the identical bug ("no poster was ever published, so recipients and super
-  data saver had nothing either"). The library path now goes through it too, in `postStory`, so the
-  companions are re-attached after the picker deliberately narrows to one clip.
-
-  The viewer had to change with it. Companions are published poster-FIRST, so `media.first` is the
-  poster — the very trap the picker fell into — and reading it would have rendered every video story
-  as a frozen frame again. The viewer now resolves through `displayRefs`, requests the poster
-  alongside the clip, and draws that still under the progress ring while the video transfers. A
-  still with a spinner reads as loading; a black screen reads as broken.
 
 ### Changed — every platform
 

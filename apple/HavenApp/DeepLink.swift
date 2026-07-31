@@ -143,7 +143,17 @@ final class DeepLinkRouter: ObservableObject {
         if let messageId, !messageId.isEmpty {
             DMDraftStore.shared.stageScroll(circleId: resolved, messageId: messageId)
         }
-        DMDraftStore.shared.openThread = resolved
+        // The push waits until the tab switch above has actually been applied.
+        //
+        // Asking for the tab and the thread in ONE turn makes the Messages tab receive a push while
+        // it is still becoming the visible tab, and SwiftUI drops it: instrumented runs show the
+        // destination getting BUILT (three times) with the correct circle, its body evaluated once
+        // against a healthy thread — and an empty page with a lone navigation bar on screen. Every
+        // path that works (a list row, a pinned tile) pushes while Messages is already current;
+        // this was the only one that didn't. The thread id was never the problem.
+        DispatchQueue.main.async {
+            DMDraftStore.shared.openThread = resolved
+        }
     }
 
     /// Map a `dm:` id from a notification onto the id this device actually stores the thread under.

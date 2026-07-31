@@ -28,16 +28,25 @@ Tester reports across Android and Apple. Nothing in `core/` moved — these are 
   `fsetattrlist`, `clock_gettime`, `close`, in a tight loop, which is `touch_now` in
   `core/haven-net/src/blobstore.rs` exactly. `localTouch` is `nonisolated` now like its siblings,
   and both call sites run the batch (and the re-PUT of any misses) off-main.
-- **An Activity row for a PINNED conversation opened a blank page (iOS).** Tapping the row switches
-  to the Messages tab and hands `MessagesView` the thread to push — but the assignment happened in
-  the same frame the tab's `NavigationStack` was being built, so the push arrived before the stack
-  could take it and you landed on an empty page instead of the conversation. Pinning is what tipped
-  it over: a pinned conversation is drawn as a tile in the grid rather than a `NavigationLink` row,
-  so the list no longer had a link of its own to force the stack's destination into place. Which is
-  also why it worked on macOS, where tab content is built eagerly rather than on first view.
-  Reproduced on a simulator and confirmed fixed against the same steps: unpinned → opened, pinned →
-  blank, pinned after the fix → opens. The push now waits one runloop turn, and a request that
-  arrived before the view existed is picked up in `onAppear` instead of being missed.
+- **An Activity row opened a blank page instead of the conversation (iOS).** Tapping the row asked
+  for the Messages TAB and published the thread to push in the same turn, so the tab received a
+  push while it was still becoming visible — and SwiftUI dropped it. Instrumented runs show the
+  destination being built three times with the correct circle and its body evaluated once against a
+  perfectly healthy thread (`known=true msgs=4`), with an empty page and a lone navigation bar on
+  screen. Every path that worked — a list row, a pinned tile — pushed while Messages was already the
+  current tab; this was the only one that did not. The tab switch now lands before the thread is
+  published, and the push itself still waits a runloop turn (both are needed; neither fixes it
+  alone).
+
+  Two plausible-looking explanations were wrong and are recorded so they don't get re-derived: the
+  thread id was never bad (one run showed `known=false`, which turned out to be stale demo-seed
+  data — on a clean container it is `known=true` and still blank), and pinning was not causal, it
+  only shifted the timing by changing what the list draws. A first attempt shipped in build 404 on
+  the pinning theory and fixed half of it, which is why the report came back.
+
+  `HavenUITests.testActivityRowOpensDMAfterItWasOpenedAndPopped` now encodes the full sequence —
+  open the thread, back out, Circle, Activity, tap the row — because the trigger is the *pop*, and
+  two manual checks that skipped it both reported a fix that wasn't one.
 - **A video in a DM had no sound control.** The full-screen viewer is where a DM's video plays and
   it carried no speaker chip — the clip opened at whatever the global choice happened to be, with
   no way to change your mind without backing out. Adds the same glass chip in the same

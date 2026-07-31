@@ -88,4 +88,44 @@ final class HavenUITests: XCTestCase {
         minimize.tap()
         XCTAssertTrue(minimize.waitForNonExistence(timeout: 5), "minimize should take you back to the app")
     }
+
+    /// An Activity row must open its DM — including a conversation you have ALREADY opened and
+    /// backed out of once in this session.
+    ///
+    /// That last clause is the whole test. Opening the thread, popping it, and then routing to it
+    /// again from Activity pushed a blank page: back chevron, empty title, no composer, no
+    /// messages. Tapping the row without the earlier open/pop worked, which is exactly why a first
+    /// attempt at this shipped "fixed" in 1.2.1 build 404 and was still broken on a real phone —
+    /// the verification skipped the pop.
+    func testActivityRowOpensDMAfterItWasOpenedAndPopped() {
+        let app = app(tab: "messages")
+        app.launchEnvironment["HAVEN_DEMO"] = "1"
+        app.launch()
+
+        // 1. open a conversation from the list, and 2. back out of it.
+        let maya = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Maya")).firstMatch
+        XCTAssertTrue(maya.waitForExistence(timeout: 40), "the demo DM list should have a conversation")
+        maya.tap()
+        let kiln = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "kiln")).firstMatch
+        XCTAssertTrue(kiln.waitForExistence(timeout: 20), "the thread should open the first time")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(kiln.waitForNonExistence(timeout: 10), "back should pop the thread")
+
+        // 3. Circle ▸ Activity ▸ the DM row for that same conversation.
+        app.buttons["Circle"].firstMatch.tap()
+        let bell = app.buttons["Activity"].firstMatch
+        XCTAssertTrue(bell.waitForExistence(timeout: 20), "the Circle tab should offer Activity")
+        bell.tap()
+
+        // DM rows sit below the circle activity, so scroll until one is on screen.
+        let dmRow = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "coffee after")).firstMatch
+        var scrolls = 0
+        while !dmRow.exists && scrolls < 10 { app.swipeUp(); scrolls += 1 }
+        XCTAssertTrue(dmRow.waitForExistence(timeout: 10), "Activity should list the DM")
+        dmRow.tap()
+
+        // The conversation itself — not an empty page wearing its navigation bar.
+        XCTAssertTrue(kiln.waitForExistence(timeout: 20),
+                      "the Activity row must open the conversation, not a blank page")
+    }
 }

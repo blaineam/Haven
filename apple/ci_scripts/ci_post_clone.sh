@@ -245,9 +245,16 @@ mkdir -p "$HELPERS_DIR"
 # ALWAYS re-fetch (force): a CLOUDFLARED_VERSION bump must never reuse a stale binary.
 # Signing is automatic later — HavenMac post-build codesigns with EXPANDED_CODE_SIGN_IDENTITY.
 # You never hand-sign after a version update.
-if ! bash "$REPO_DIR/tools/fetch-cloudflared.sh" --apple-helpers --force; then
-  echo "⚠️  fetch-cloudflared --apple-helpers failed"
-fi
+# Retried here too, on top of the per-download retries inside the script: this one file is the
+# difference between a green run and a macOS archive that fails at the embed phase with a message
+# that names the missing FILE rather than the failed DOWNLOAD (Xcode Cloud #407).
+cfd_ok=0
+for attempt in 1 2 3; do
+  if bash "$REPO_DIR/tools/fetch-cloudflared.sh" --apple-helpers --force; then cfd_ok=1; break; fi
+  echo "⚠️  fetch-cloudflared --apple-helpers failed (attempt $attempt)"
+  sleep $((attempt * 10))
+done
+[ "$cfd_ok" = 1 ] || echo "❌ fetch-cloudflared --apple-helpers failed after 3 attempts"
 if [ -x "$HELPERS_DIR/cloudflared" ]; then
   xattr -d com.apple.quarantine "$HELPERS_DIR/cloudflared" 2>/dev/null || true
   echo "  Helpers/cloudflared ✅ ($(du -h "$HELPERS_DIR/cloudflared" | awk '{print $1}')) — unsigned download; post-build will codesign"
@@ -259,4 +266,7 @@ echo "=== ci_post_clone: done ==="
 ls -d "$XCFW" >/dev/null 2>&1 && echo "  HavenFFI.xcframework ✅" || { echo "  HavenFFI.xcframework MISSING ❌"; exit 1; }
 ls -d "$APPLE_DIR/Generated" >/dev/null 2>&1 && echo "  Generated/ ✅" || { echo "  Generated/ MISSING ❌"; exit 1; }
 ls -d "$APPLE_DIR/Haven.xcodeproj" >/dev/null 2>&1 && echo "  Haven.xcodeproj ✅" || { echo "  Haven.xcodeproj MISSING ❌"; exit 1; }
-[ -x "$HELPERS_DIR/cloudflared" ] && echo "  Helpers/cloudflared ✅" || echo "  Helpers/cloudflared (optional until Mac archive) ⚠️"
+# NOT "optional": the iOS archive doesn't need it, the macOS one cannot finish without it. Say so
+# here, where the cause is, instead of leaving the reader to connect this to a later embed failure.
+[ -x "$HELPERS_DIR/cloudflared" ] && echo "  Helpers/cloudflared ✅" \
+  || echo "  ❌ Helpers/cloudflared MISSING — the macOS archive WILL fail at 'Embed and sign cloudflared' (iOS is unaffected)"

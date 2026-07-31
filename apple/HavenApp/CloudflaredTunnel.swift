@@ -383,7 +383,10 @@ final class CloudflaredTunnel: ObservableObject {
         proc.standardOutput = out
         proc.standardError = err
         proc.standardInput = FileHandle.nullDevice
-        let onData: (FileHandle) -> Void = { handle in
+        // @Sendable: `readabilityHandler` is @Sendable, and assigning a plain closure to it converts
+        // a non-Sendable function value — a data-race warning today, an error under Swift 6.
+        // Declaring the intent here is honest: this closure IS called from the reader's own thread.
+        let onData: @Sendable (FileHandle) -> Void = { handle in
             let data = handle.availableData
             guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
             // Append — cloudflared often splits the trycloudflare line across pipe reads.
@@ -772,7 +775,10 @@ final class CloudflaredTunnel: ObservableObject {
         proc.standardOutput = out
         proc.standardError = err
         proc.standardInput = FileHandle.nullDevice
-        let onData: (FileHandle) -> Void = { handle in
+        // @Sendable: `readabilityHandler` is @Sendable, and assigning a plain closure to it converts
+        // a non-Sendable function value — a data-race warning today, an error under Swift 6.
+        // Declaring the intent here is honest: this closure IS called from the reader's own thread.
+        let onData: @Sendable (FileHandle) -> Void = { handle in
             let data = handle.availableData
             guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
             // Buffer chunks — trycloudflare URL often arrives split across pipe reads.
@@ -989,7 +995,11 @@ final class CloudflaredTunnel: ObservableObject {
         return nil
     }
 
-    static func extractTrycloudflareURL(_ text: String) -> String? {
+    /// nonisolated: a pure string scan over its argument, touching no instance or actor state — and
+    /// it is called from the process's stdout/stderr reader closures, which are @Sendable and run on
+    /// the reader's own thread. Inheriting @MainActor from the enclosing type was never meaningful
+    /// here; it just made those call sites illegal once the closures were typed honestly.
+    nonisolated static func extractTrycloudflareURL(_ text: String) -> String? {
         // Prefer an explicit trycloudflare host; scan every https:// occurrence (log lines
         // often include other URLs first).
         var search = text.startIndex..<text.endIndex

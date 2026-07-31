@@ -74,7 +74,23 @@ fetch() {
     return 0
   fi
   echo "▸ ${asset} → ${dest_name} (${VERSION})"
-  curl -fsSL -o "$tmp" "$url"
+  # RETRY. A single un-retried curl is why Xcode Cloud run #407's macOS archive died: the download
+  # blipped, ci_post_clone warned and carried on, and the failure resurfaced twenty minutes later as
+  # "apple/Helpers/cloudflared missing" during the embed phase — a symptom two stages away from its
+  # cause. --retry-all-errors covers the connection resets and 5xx that a plain --retry ignores.
+  attempt=1
+  until curl -fsSL --connect-timeout 20 --max-time 300 \
+              --retry 5 --retry-delay 3 --retry-all-errors \
+              -o "$tmp" "$url"; do
+    if [ "$attempt" -ge 3 ]; then
+      echo "error: download failed after $attempt attempts: $url" >&2
+      rm -f "$tmp"
+      return 1
+    fi
+    attempt=$((attempt + 1))
+    echo "  ↻ retry $attempt for ${asset}"
+    sleep $((attempt * 5))
+  done
   if [ "$is_tgz" = "tgz" ]; then
     # Extract to a private dir so a pre-existing plain `cloudflared` in OUT isn't clobbered mid-run.
     ext="$(mktemp -d "${TMPDIR:-/tmp}/cfd-XXXXXX")"

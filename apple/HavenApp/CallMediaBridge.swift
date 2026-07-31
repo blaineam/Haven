@@ -198,9 +198,15 @@ final class CallMediaBridge {
         guard let out = AVAudioPCMBuffer(pcmFormat: wireFormat, frameCapacity: outCap) else { return }
         var fed = false
         var err: NSError?
+        // AVAudioPCMBuffer isn't Sendable and AVFAudio now marks this callback @Sendable, but the
+        // callback is synchronous — AVAudioConverter invokes it inline, on this thread, before
+        // `convert` returns — so `buf` never actually crosses a concurrency domain. Targeted here
+        // rather than `@preconcurrency import AVFoundation`, which would silence every Sendable
+        // diagnostic from the whole module including ones worth hearing.
+        nonisolated(unsafe) let inputBuf = buf
         conv.convert(to: out, error: &err) { _, status in
             if fed { status.pointee = .noDataNow; return nil }
-            fed = true; status.pointee = .haveData; return buf
+            fed = true; status.pointee = .haveData; return inputBuf
         }
         if let err { HavenLog.call("hairpin audio convert: \(err.localizedDescription)"); return }
         guard out.frameLength > 0, let ch = out.int16ChannelData else { return }

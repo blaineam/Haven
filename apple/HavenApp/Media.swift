@@ -1658,8 +1658,12 @@ final class MediaStore: ObservableObject {
     // doing it.
     //
     // So: one generation at a time, on our own serial queue, and a failure is remembered.
-    private static let posterQueue = DispatchQueue(label: "haven.poster", qos: .userInitiated)
-    private static let posterFailLock = NSLock()
+    // nonisolated: both are Sendable and thread-safe by construction (a serial queue and an
+    // NSLock), but they live in a @MainActor type, so they inherit its isolation and every
+    // `nonisolated static func` below trips a Swift 6 error on touching them. Same spelling already
+    // used for `posterFailedPaths` two lines down — the point of these is to be reachable off-main.
+    nonisolated private static let posterQueue = DispatchQueue(label: "haven.poster", qos: .userInitiated)
+    nonisolated private static let posterFailLock = NSLock()
     nonisolated(unsafe) private static var posterFailedPaths: Set<String> = []
 
     /// A video we have already failed to get a frame out of. Asking again costs another decode
@@ -1728,10 +1732,13 @@ final class MediaStore: ObservableObject {
             }
             let sem = DispatchSemaphore(value: 0)
             let box = PosterBox()
+            // Capture the COUNT, not the [NSValue] array: NSValue isn't Sendable, and the closure
+            // only ever needed how many timestamps were asked for.
+            let timeCount = times.count
             gen.generateCGImagesAsynchronously(forTimes: times) { _, image, _, result, error in
                 if result == .succeeded, let image, box.take(image) { sem.signal() }
                 else if let error { box.note(error) }
-                if box.finish(of: times.count) { sem.signal() }
+                if box.finish(of: timeCount) { sem.signal() }
             }
             if sem.wait(timeout: .now() + 15) == .timedOut { gen.cancelAllCGImageGeneration() }
             if let img = box.image {

@@ -513,7 +513,7 @@ enum SharedStore {
     /// is already active-only (deleted/forgotten relays excluded); s3: pseudo-nodes are handled by S3.
     private static func mediaDests(_ circleId: String) -> [String] {
         // relayNodes already preferLiveRelays; append other known relays the same way.
-        var nodes = relayNodes(circleId).filter { !$0.hasPrefix("s3:") }
+        let nodes = relayNodes(circleId).filter { !$0.hasPrefix("s3:") }
         var extra: [String] = []
         for r in RelayMailboxStore.shared.allRelays() where !r.hasPrefix("s3:") && !nodes.contains(r) {
             extra.append(r)
@@ -1873,7 +1873,10 @@ enum SharedStore {
     // (fresh 0 / deferred 0 from ITS side) overwrite the own-relay record that still had
     // thousands deferred — readyForReopen went true and the wipe fired mid-drain anyway.
     nonisolated(unsafe) private static var drainByRelayCircle: [String: (keys: Int, fresh: Int, deferred: Int)] = [:]
-    private static let backlogLock = NSLock()
+    // nonisolated: an NSLock is thread-safe by construction, but SharedStore is @MainActor
+    // so the property inherits that isolation and the nonisolated readers below cannot touch it
+    // under Swift 6. Being reachable off-main is the entire reason it exists.
+    nonisolated private static let backlogLock = NSLock()
     nonisolated private static func noteBacklog(_ node: String, _ cid: String, keys: Int, fresh: Int, deferred: Int) {
         // An EMPTY listing carries no gating information: it's either a truly-empty mailbox
         // (then other relays' records decide) or a transient store flip ("0 keys, 0 new" during

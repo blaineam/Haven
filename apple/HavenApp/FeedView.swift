@@ -966,7 +966,10 @@ final class FeedStore: ObservableObject {
             for a in ask {
                 guard let ids = try? await node.resolveAccountDevices(accountHex: a), !ids.isEmpty else { continue }
                 learned = true
-                await MainActor.run {
+                // [weak self] on the INNER closure too: referencing the outer task's captured
+                // `self` var from inside another concurrent closure is a Swift 6 error. Re-capturing
+                // makes each hop own its reference instead of reaching across.
+                await MainActor.run { [weak self] in
                     HavenLog.net("discovery resolved \(a.prefix(8)) devices=\(ids.count)")
                     self?.recordDeviceHints(accountHex: a, deviceIds: ids)
                 }
@@ -976,7 +979,7 @@ final class FeedStore: ObservableObject {
             // our relays immediately, which is the exact thing a peer with no relay in common is
             // missing ("his app refuses to find any of the relays I have enabled").
             if learned {
-                await MainActor.run {
+                await MainActor.run { [weak self] in
                     self?.bumpActivity()
                     self?.reannounceOwnRelay()
                     self?.syncWithContacts()

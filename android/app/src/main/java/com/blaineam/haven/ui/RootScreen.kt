@@ -94,11 +94,19 @@ private fun MainScaffold() {
     var showConnect by remember { mutableStateOf(false) }
     var showActivity by remember { mutableStateOf(false) }
     var openPost by remember { mutableStateOf<com.blaineam.haven.core.DeepLink.Post?>(null) }
+    var pendingInvite by remember { mutableStateOf<String?>(null) }
 
-    // Deep-linked invite (haven:// or the invite web page) → surface the Connect screen, which
-    // consumes the pending link and connects (parity with iOS's incomingLink flow).
+    // Deep-linked invite (haven:// or the invite web page) → surface the Connect screen with the
+    // link already resolved to its safety-word confirmation (parity with iOS's incomingLink flow).
+    //
+    // The link is taken from the inbox HERE and handed to ConnectScreen as an argument, rather than
+    // ConnectScreen reaching into the global inbox itself. A single-consume global read from inside
+    // a screen is only correct while exactly one copy of that screen can ever exist — the thing that
+    // stopped being true whenever a second composition was alive, and the reason a tapped invite
+    // opened Connect on the wrong tab. Now whoever gets the link owns it, and it lives in state until
+    // the sheet is closed.
     LaunchedEffect(com.blaineam.haven.core.InviteInbox.pending) {
-        if (com.blaineam.haven.core.InviteInbox.pending != null) showConnect = true
+        com.blaineam.haven.core.InviteInbox.consume()?.let { pendingInvite = it; showConnect = true }
     }
 
     // Deep-linked post (https #p/<c>.<p> or legacy haven://p/<c>/<p>) → present that post.
@@ -171,6 +179,22 @@ private fun MainScaffold() {
         lifecycleOwner.lifecycle.addObserver(obs)
         onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
     }
+
+    // ---- System back ---------------------------------------------------------------------------
+    //
+    // Haven navigates by STATE, not by a fragment/activity stack, so the platform had nothing to pop
+    // and every back press fell through to the activity: back closed the app from anywhere — a DM,
+    // Settings, the Activity list, a tab that wasn't Circle. That is not how an Android app behaves.
+    //
+    // These handlers put the state back on the stack. Compose dispatches back to the MOST RECENTLY
+    // composed enabled handler, so declaration order here IS priority order, innermost last: the tab
+    // fallback is registered before the tab content (which adds its own, e.g. an open DM thread),
+    // which is registered before the sheets below. Anything hosted in a FullScreenOverlay is a
+    // Dialog and already handles back for itself.
+    //
+    // Circle is the root: back from there still leaves the app, which is the one case where exiting
+    // is right.
+    androidx.activity.compose.BackHandler(enabled = tab != Tab.Circle) { tab = Tab.Circle }
 
     Scaffold(
         containerColor = HavenTheme.background,
@@ -261,13 +285,19 @@ private fun MainScaffold() {
         }
     }
 
+    // The three slide-up sheets are plain composables in this tree (not Dialogs), so each needs its
+    // own back handler. Registered after the tab content, so an open sheet wins over it.
+    androidx.activity.compose.BackHandler(enabled = showConnect) { showConnect = false }
+    androidx.activity.compose.BackHandler(enabled = showActivity) { showActivity = false }
+    androidx.activity.compose.BackHandler(enabled = openPost != null) { openPost = null }
+
     // Connect sheet (full-screen slide-up).
     AnimatedVisibility(
         visible = showConnect,
         enter = slideInVertically { it },
         exit = slideOutVertically { it },
     ) {
-        ConnectScreen(onDone = { showConnect = false })
+        ConnectScreen(initialLink = pendingInvite, onDone = { showConnect = false; pendingInvite = null })
     }
 
     // Activity sheet (same slide-up). Rows jump via the EXISTING routes: PostLinkInbox /

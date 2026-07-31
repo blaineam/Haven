@@ -19,6 +19,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.min
@@ -73,14 +74,23 @@ fun BrandButton(
 /** Gradient title text helper (approximated with the brand pink — Compose can't fill text
  *  with a Brush before API differences, so we use the dominant brand hue). */
 @Composable
-fun BrandText(text: String, modifier: Modifier = Modifier, fontSize: Int = 34) {
+fun BrandText(
+    text: String,
+    modifier: Modifier = Modifier,
+    fontSize: Int = 34,
+    maxLines: Int = Int.MAX_VALUE,
+    overflow: TextOverflow = TextOverflow.Clip,
+    textAlign: TextAlign = TextAlign.Center,
+) {
     Text(
         text,
         modifier = modifier,
         color = HavenTheme.pink,
         fontWeight = FontWeight.Bold,
         fontSize = fontSize.sp,
-        textAlign = TextAlign.Center,
+        textAlign = textAlign,
+        maxLines = maxLines,
+        overflow = overflow,
     )
 }
 

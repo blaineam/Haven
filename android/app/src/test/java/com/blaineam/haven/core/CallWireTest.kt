@@ -59,8 +59,14 @@ class CallWireTest {
         assertEquals(hexA, a.from); assertEquals("sid", a.sessionId)
     }
 
-    @Test fun hangup_is_just_hex() {
-        assertEquals(hexB, CallWire.parseHangup(CallWire.hangup(hexB)))
+    // A hangup NAMES its session now (frame 12 took the shape of accept), because a retransmitted or
+    // relay-delayed BYE from a call that already ended used to tear down whatever call was running.
+    // parseHangup still reads only the leading hex, so an old reader is unaffected — assert both:
+    // the sender survives the round-trip, and the session really is on the wire.
+    @Test fun hangup_carries_sender_and_session() {
+        val frame = CallWire.hangup(hexB, "sid")
+        assertEquals(hexB, CallWire.parseHangup(frame))
+        assertEquals("sid", CallWire.parseAccept(frame)!!.sessionId)
     }
 
     @Test fun signal_with_session_roundtrip() {

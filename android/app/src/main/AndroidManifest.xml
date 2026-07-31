@@ -56,9 +56,17 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Haven">
 
+        <!-- singleTask: Haven is a single-activity app whose routing inboxes (InviteInbox,
+             PostLinkInbox, ShareInbox…) are process-wide singletons. Under the default `standard`
+             mode a tapped link launched a SECOND MainActivity while the first was still alive and
+             composed, so two RootScreens raced to consume the one pending link — the backgrounded
+             one usually won, and the freshly-launched one found the inbox already empty and opened
+             Connect on its default tab (your own invite QR). Hence "it takes two taps". One instance
+             means one composition and one consumer: a link arrives at onNewIntent instead. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.Haven">

@@ -516,6 +516,16 @@ object HavenNet : InboundListener {
         // the own-device fleet is fully capable.
         applyCryptoSwitches()
         ready = true
+        // Tell the UI the engine exists now.
+        //
+        // init() is driven from a LaunchedEffect, so it necessarily runs AFTER the first composition:
+        // CircleScreen has already called engine.feed() once, caught the lateinit failure, and cached
+        // the empty result in a remember() keyed on feedVersion/circlesVersion. Nothing here moved
+        // either key, so that empty feed was final — the circle stayed blank until some unrelated
+        // event bumped the version, or until the user left the tab and came back and the remember
+        // was rebuilt from scratch. (Which is exactly the "tap Messages, tap Circle, now it loads"
+        // workaround testers found.) One bump at the end of boot re-reads everything.
+        scope.launch(Dispatchers.Main) { feedVersion.value++; circlesVersion.value++ }
     }
 
     /**

@@ -92,6 +92,13 @@ fun SettingsScreen(onBack: () -> Unit) {
 
     val options = listOf(0 to "Keep forever", 7 to "After 1 week", 30 to "After 1 month", 90 to "After 3 months", 365 to "After 1 year")
 
+    // Settings is hosted in a Dialog, whose own back press closes the whole screen — which skipped
+    // a level whenever a sub-section was open. Pop the section first, exactly like the ← does; with
+    // no section open the Dialog's handling takes over and back leaves Settings.
+    androidx.activity.compose.BackHandler(enabled = section != null) {
+        section = if (section == "managemedia") "connection" else null
+    }
+
     HavenBackground {
         // "Manage media" owns its own LazyColumn scroll, so it must NOT sit inside this verticalScroll
         // (nesting a lazy list in a scrollable column throws on the infinite-height constraint).

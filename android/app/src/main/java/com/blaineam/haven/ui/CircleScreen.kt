@@ -83,6 +83,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -237,12 +238,20 @@ fun CircleScreen(onAddFriend: () -> Unit) {
     HavenBackground {
         Column(Modifier.fillMaxSize().imePadding()) {
             // Title bar (compact — every vertical pixel counts on phones).
+            //
+            // The circle NAME is the only elastic thing here, and it must be the thing that gives.
+            // It used to be measured first with the whole bar to spend, so a long name ("Android
+            // Supremacy") took the width and left the status chip a few dp: "Connected" wrapped one
+            // letter-pair per line and the bar grew to five text lines tall, with the add-friend
+            // button pushed clean off the right edge. Weighting the switcher measures the status and
+            // the button FIRST — they always get their intrinsic size — and hands the name whatever
+            // is left, where it ellipsizes instead of pushing. The bar is then exactly as tall as its
+            // tallest fixed child (the 40dp button), on any density or font scale.
             Row(
                 Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 10.dp, bottom = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                CircleSwitcher(active, circlesVersion)
-                Spacer(Modifier.weight(1f))
+                CircleSwitcher(active, circlesVersion, Modifier.weight(1f))
                 ConnectionDot()
                 Box(
                     Modifier.size(40.dp).clip(CircleShape).clickable { onAddFriend() },
@@ -686,7 +695,11 @@ private fun disappearLabel(secs: ULong): String = when (secs) {
     3_600uL -> "1h"; 86_400uL -> "1d"; 604_800uL -> "1w"; else -> "${secs / 3_600uL}h"
 }
 
-/** Hosts content in a borderless full-screen dialog window so it covers the bottom tab bar too. */
+/** Hosts content in a borderless full-screen dialog window so it covers the bottom tab bar too.
+ *
+ *  A Dialog window routes the system back gesture to [onDismiss] itself, so everything hosted here
+ *  (settings, the story viewer, the media viewer, the camera, the people list…) gets Android's back
+ *  behaviour for free — back closes the cover and returns you to what was underneath it. */
 @Composable
 fun FullScreenOverlay(onDismiss: () -> Unit, content: @Composable () -> Unit) {
     androidx.compose.ui.window.Dialog(
@@ -1560,16 +1573,19 @@ fun MediaViewer(circleId: String, refs: List<String>, startIndex: Int, onClose: 
 
 /** Feed-circle switcher: tap the title for a dropdown of your circles + "New circle". */
 @Composable
-private fun CircleSwitcher(activeId: String, circlesVersion: Int) {
+private fun CircleSwitcher(activeId: String, circlesVersion: Int, modifier: Modifier = Modifier) {
     var menu by remember { mutableStateOf(false) }
     var showCreate by remember { mutableStateOf(false) }
     var showManage by remember { mutableStateOf(false) }
     val circles = remember(circlesVersion) { HavenNet.feedCircles() }
     val name = remember(activeId, circlesVersion) { HavenNet.circleName(activeId) }
-    Box {
+    Box(modifier) {
         Row(verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable { menu = true }) {
-            BrandText(name, fontSize = 24)
+            // weight(fill = false) so a SHORT name still hugs its text (the caret sits right after
+            // it) while a long one is capped at the space the bar can spare and ellipsizes there.
+            BrandText(name, Modifier.weight(1f, fill = false), fontSize = 24,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Start)
             Icon(androidx.compose.material.icons.Icons.Filled.ArrowDropDown, "Switch circle", tint = HavenTheme.pink)
         }
         androidx.compose.material3.DropdownMenu(
@@ -1646,16 +1662,20 @@ private fun ConnectionDot() {
         // The node being up == connected to the iroh network; "Connecting" only during startup.
         val color = if (started) Color(0xFF34D399) else Color(0xFFF59E0B)
         Box(Modifier.size(8.dp).clip(CircleShape).background(color))
+        // Every label here is softWrap=false. This chip shares a Row with the circle name, and a
+        // squeezed Text wraps by CHARACTER — "Connected" became "Co / nn / ec / te / d" and dragged
+        // the whole title bar to five lines tall. It must be able to run out of room without ever
+        // growing downward; the name beside it is what yields (it ellipsizes).
         Text(if (started) (if (online || relay || nearby > 0) "Connected" else "Online") else "Connecting",
-            color = HavenTheme.textSecondary, fontSize = 11.sp)
-        if (relay) Text("· Relay", color = Color(0xFF34D399), fontSize = 11.sp)
-        if (nearby > 0) Text("· Nearby", color = Color(0xFF34D399), fontSize = 11.sp)
+            color = HavenTheme.textSecondary, fontSize = 11.sp, maxLines = 1, softWrap = false)
+        if (relay) Text("· Relay", color = Color(0xFF34D399), fontSize = 11.sp, maxLines = 1, softWrap = false)
+        if (nearby > 0) Text("· Nearby", color = Color(0xFF34D399), fontSize = 11.sp, maxLines = 1, softWrap = false)
         // LIVE active-sync indicator — a small spinner + count whenever media is still transferring.
         if (pending > 0) {
             androidx.compose.material3.CircularProgressIndicator(
                 color = Color(0xFFF59E0B), strokeWidth = 1.5.dp,
                 modifier = Modifier.size(11.dp))
-            Text("Syncing $pending", color = Color(0xFFF59E0B), fontSize = 11.sp)
+            Text("Syncing $pending", color = Color(0xFFF59E0B), fontSize = 11.sp, maxLines = 1, softWrap = false)
         }
     }
     if (showDetail) {

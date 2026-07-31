@@ -7,6 +7,51 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.1] — 2026-07-30
+
+Tester reports against the Android client. Nothing in `core/` moved, so this is an Android-only
+re-cut of 1.2.1 — same product version, a new Play build.
+
+### Fixed
+
+- **The Circle title bar grew to five lines tall.** The circle name was measured first with the
+  whole bar to spend, so a long one ("Android Supremacy") took the width and left the connection
+  chip a few dp. A squeezed `Text` wraps by CHARACTER: "Connected" came out as `Co / nn / ec / te
+  / d`, the bar grew to match, and the add-friend button was pushed clean off the right edge. The
+  name is now the elastic element — the status and the button are measured first and always get
+  their intrinsic size, the name takes what is left and ellipsizes — and every status label is
+  `softWrap = false`, so the bar can run out of room without ever growing downward. Reproduced at
+  a raised display size, where it was five lines; now one row on any density.
+- **The DM composer left ~80dp for the message you were typing.** Camera, photo, song, voice and
+  a ⋮ menu each held a fixed 40dp slot, so most of a phone's bar was spent before the text field
+  was measured. They collapse into a single `+` menu (iOS Messages parity), which also carries
+  secret and disappearing; disappearing keeps a chip outside the menu because it is the one choice
+  with no other trace on screen.
+- **System back always closed the app.** Haven navigates by state, not by a fragment stack, so
+  every back press fell through to the activity — from a DM, from Settings, from any tab that
+  wasn't Circle. Back now walks back: it leaves a conversation, pops a Settings sub-section,
+  closes the Connect / Activity / post sheets, minimizes a call (and is swallowed entirely while
+  one is ringing), and returns a non-Circle tab to Circle. Circle is the root, so back from there
+  still leaves the app — the one case where exiting is right.
+- **An invite link needed two taps to open the right screen.** `MainActivity` ran in the default
+  `standard` launch mode, so a tapped link started a SECOND activity while the first was still
+  alive and composed. Two `RootScreen`s then raced to consume the one pending link from a
+  process-wide inbox; the backgrounded one usually won, and the freshly-launched one found the
+  inbox empty and opened Connect on its own invite QR. The activity is `singleTask` now (one
+  instance, one composition, links arrive at `onNewIntent`), and the link is taken from the inbox
+  by `RootScreen` and passed to `ConnectScreen` as an argument rather than read out of a global
+  from inside the screen.
+- **The Circle feed could come up empty until you left the tab and came back.** `HavenNet.init()`
+  runs from a `LaunchedEffect`, so it necessarily lands after the first composition: `CircleScreen`
+  had already called `engine.feed()`, caught the not-yet-initialized failure and cached the empty
+  result in a `remember` keyed on `feedVersion`/`circlesVersion` — neither of which init moved. The
+  empty feed was then final until some unrelated event bumped a version, which is exactly why
+  tapping Messages and back again "fixed" it. Boot now bumps both keys on the way out of `init`.
+
+Also: `CallWireTest` had not compiled since hangup frames started naming their session in 1.1.5,
+so the Android unit suite was failing to build rather than failing a test. Updated to the current
+wire shape (123 tests, green).
+
 ## [1.1.5] — 2026-07-27
 
 Responsiveness and reliability pass on what 1.1.4 shipped, plus a night of live testing on a

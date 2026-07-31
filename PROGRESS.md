@@ -6,6 +6,23 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest wave (built, batched for next upload)
+- **Android felt like a port, not an Android app (2026-07-30, 1.2.1 re-cut, Android only)** — five
+  tester reports that were all the same kind of problem: the client not respecting the platform it
+  runs on. The **Circle title bar** measured the circle name before anything else, so a long name
+  squeezed the connection chip until "Connected" wrapped one letter-pair per line and the bar grew
+  to five lines with the add-friend button off-screen (reproduced on an emulator at a raised
+  display size). The **DM composer** spent five fixed 40dp icon slots before measuring the text
+  field, leaving about 80dp to type in; they're one `+` menu now, matching iOS. **System back**
+  closed the app from anywhere, because Haven navigates by state and the platform had nothing to
+  pop — it now leaves a conversation, a Settings sub-section, a sheet, a call, or a non-Circle tab,
+  and only exits from Circle. An **invite link** took two taps to reach the right screen: the
+  activity was `standard` launch mode, so a link spawned a second one alongside the first and two
+  live compositions raced to consume the single pending link from a process-wide inbox — the app is
+  `singleTask` now and the link is passed down as an argument instead of read from a global. And
+  the **Circle feed could come up empty** until you switched tabs and back, because `init()` runs
+  after the first composition and never invalidated the `remember` that had already cached the
+  empty pre-init read. Nothing in `core/` moved. Also fixed the Android unit suite, which had not
+  compiled since hangup frames started naming their session in 1.1.5.
 - **The call fallback only ever worked Apple↔Apple (2026-07-26, 1.1.5 b366, Android + desktop)** —
   auditing what Apple had that the others didn't turned up the real reason cross-platform calls
   ring, get accepted and never connect. `/webrtc/hairpin` is the media path when ICE cannot pair

@@ -132,6 +132,14 @@ fun CallOverlay() {
         }
     }
 
+    // Back during a call minimizes it (the same thing the ⌄ control does) rather than dropping out
+    // of Haven with the call still up. A RINGING call swallows back entirely: neither answering nor
+    // declining should be something you do by accident on the way out of the app.
+    androidx.activity.compose.BackHandler(enabled = (inCall || connecting) && !minimized) {
+        CallManager.minimized.value = true
+    }
+    androidx.activity.compose.BackHandler(enabled = ringing && !inCall) { /* absorb */ }
+
     when {
         ringing && !inCall -> IncomingCall()
         (inCall || connecting) && minimized -> Unit   // shown as a nav-bar "Call" tab (see RootScreen)

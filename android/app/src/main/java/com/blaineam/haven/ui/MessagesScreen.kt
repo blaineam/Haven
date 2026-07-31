@@ -33,7 +33,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
-import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.AddCircle
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PushPin
@@ -107,6 +107,9 @@ fun MessagesScreen() {
     }
 
     val thread = openThread
+    // System back leaves the conversation the same way the ← in its header does, instead of leaving
+    // the app (see the back-navigation note in RootScreen).
+    androidx.activity.compose.BackHandler(enabled = thread != null) { openThread = null }
     if (thread == null) {
         ThreadList(onOpen = { cid, partner -> openThread = cid to partner })
     } else {
@@ -545,32 +548,39 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
                 }
             }
 
+            // ONE attachment button, not five (iOS Messages parity — a single `plus.circle.fill`
+            // menu). Camera / photo / song / voice / secret / disappearing each owned a fixed 40dp
+            // slot, so 200dp of a phone's ~360dp bar was spent before the field was measured: the
+            // composer was a ~80dp stub you could not read your own sentence in, and it got worse on
+            // any device with a larger display size. Everything they did now lives in this menu.
             Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(40.dp).clip(CircleShape).clickable { openDmCamera() },
-                    contentAlignment = Alignment.Center) {
-                    Icon(Icons.Filled.PhotoCamera, "Camera", tint = HavenTheme.pink)
-                }
-                Box(Modifier.size(40.dp).clip(CircleShape).clickable {
-                    picker.launch(androidx.activity.result.PickVisualMediaRequest(
-                        androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageAndVideo))
-                }, contentAlignment = Alignment.Center) {
-                    Icon(Icons.Filled.AddPhotoAlternate, "Photo", tint = HavenTheme.pink)
-                }
-                Box(Modifier.size(40.dp).clip(CircleShape).clickable { showMusicDialog = true },
-                    contentAlignment = Alignment.Center) {
-                    Icon(Icons.Filled.MusicNote, "Add a song", tint = HavenTheme.pink)
-                }
-                Box(Modifier.size(40.dp).clip(CircleShape).clickable { showVoice = true },
-                    contentAlignment = Alignment.Center) {
-                    Icon(Icons.Filled.Mic, "Voice message", tint = HavenTheme.pink)
-                }
                 Box(contentAlignment = Alignment.Center) {
                     Box(Modifier.size(40.dp).clip(CircleShape).clickable { showOptions = true },
                         contentAlignment = Alignment.Center) {
-                        Icon(Icons.Filled.MoreVert, "More options",
-                            tint = if (secretMode || disappearSecs != null) HavenTheme.pink else HavenTheme.textSecondary)
+                        Icon(Icons.Filled.AddCircle, "Attach", tint = HavenTheme.pink)
                     }
                     DropdownMenu(expanded = showOptions, onDismissRequest = { showOptions = false }) {
+                        DropdownMenuItem(
+                            leadingIcon = { Icon(Icons.Filled.AddPhotoAlternate, null, tint = HavenTheme.pink) },
+                            text = { Text("Photo or video") },
+                            onClick = {
+                                showOptions = false
+                                picker.launch(androidx.activity.result.PickVisualMediaRequest(
+                                    androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                            })
+                        DropdownMenuItem(
+                            leadingIcon = { Icon(Icons.Filled.PhotoCamera, null, tint = HavenTheme.pink) },
+                            text = { Text("Camera") },
+                            onClick = { showOptions = false; openDmCamera() })
+                        DropdownMenuItem(
+                            leadingIcon = { Icon(Icons.Filled.Mic, null, tint = HavenTheme.pink) },
+                            text = { Text("Voice message") },
+                            onClick = { showOptions = false; showVoice = true })
+                        DropdownMenuItem(
+                            leadingIcon = { Icon(Icons.Filled.MusicNote, null, tint = HavenTheme.pink) },
+                            text = { Text("Song") },
+                            onClick = { showOptions = false; showMusicDialog = true })
+                        androidx.compose.material3.HorizontalDivider(color = HavenTheme.cardBorder)
                         DropdownMenuItem(
                             text = { Text(if (secretMode) "✓ Secret message" else "Secret message") },
                             onClick = { secretMode = !secretMode; showOptions = false })
@@ -588,9 +598,17 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
                             onClick = { disappearSecs = 604_800UL; showOptions = false })
                     }
                 }
+                // Disappearing is the one menu choice with no other trace on screen — a sent message
+                // looks identical either way — so it keeps a chip out here.
+                disappearSecs?.let { secs ->
+                    Text(dmDisappearLabel(secs), color = HavenTheme.pink, fontSize = 11.sp,
+                        maxLines = 1, softWrap = false,
+                        modifier = Modifier.padding(end = 2.dp))
+                }
+                Spacer(Modifier.size(4.dp))
                 OutlinedTextField(
                     value = draft, onValueChange = { draft = it },
-                    placeholder = { Text("Message…") },
+                    placeholder = { Text(if (secretMode) "Secret message…" else "Message…") },
                     modifier = Modifier.weight(1f), shape = RoundedCornerShape(22.dp), maxLines = 4,
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink),
@@ -775,4 +793,10 @@ private fun msgTime(createdAtMs: kotlin.ULong): String {
         s < 2_592_000 -> "${s / 604_800}w"
         else -> "${s / 2_592_000}mo"
     }
+}
+
+/** Compact label for the DM composer's disappearing chip ("1h" / "1d" / "1w"). */
+private fun dmDisappearLabel(secs: kotlin.ULong): String = when (secs) {
+    3_600UL -> "⏱ 1h"; 86_400UL -> "⏱ 1d"; 604_800UL -> "⏱ 1w"
+    else -> "⏱ ${secs / 3_600UL}h"
 }

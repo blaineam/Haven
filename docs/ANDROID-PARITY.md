@@ -39,6 +39,22 @@ script). Verified on a physical **Nokia 6.1 (Android 15)**.
   - **No active-speaker highlight** in calls — needs audio-level plumbing on `CallManager`
     (`ui/CallUI.kt:322-323`). Cosmetic.
   - Broader cross-platform field testing and on-device polish.
+- ✅ **Platform conventions** (2026-07-30, 1.2.1): the app navigates by STATE rather than a
+  fragment/activity stack, which for a long time meant the platform had nothing to pop and system
+  back simply closed Haven from anywhere. `BackHandler`s now cover the state that IS the stack —
+  DM thread, Settings sub-section, the Connect / Activity / post sheets, a call (back minimizes;
+  a ringing call swallows it), and a non-Circle tab. Circle is the root and still exits.
+  Everything hosted in `FullScreenOverlay` is a Compose `Dialog` and already handled back. In the
+  same wave `MainActivity` became `singleTask`, because the routing inboxes (`InviteInbox`,
+  `PostLinkInbox`, `ShareInbox`) are process-wide singletons and a second activity instance meant
+  two compositions racing to consume one link.
+
+> **Layout gotcha:** in a Compose `Row`, an unweighted `Text` is measured with the whole remaining
+> width before anything after it, and a `Text` squeezed to a few dp wraps by CHARACTER rather than
+> clipping. That combination is what made the Circle title bar five lines tall for a long circle
+> name (1.2.1). Whatever should yield in a bar gets the `weight`; the fixed chrome beside it is
+> measured first, and any label that shares a row with elastic content wants
+> `maxLines = 1, softWrap = false`.
 
 > **Build gotcha (do not skip):** the Android Rust `.so` + UniFFI bindings are gitignored and are
 > **not** rebuilt by `assembleDebug`. Run `android/build-rust.sh` after **any** `core/` change or

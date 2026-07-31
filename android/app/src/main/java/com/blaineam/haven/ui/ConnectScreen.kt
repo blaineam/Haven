@@ -71,7 +71,7 @@ import uniffi.haven_ffi.parseLink
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ConnectScreen(onDone: () -> Unit) {
+fun ConnectScreen(initialLink: String? = null, onDone: () -> Unit) {
     val context = LocalContext.current
     val core = remember { HavenCore.get(context) }
     val uri = remember { HavenNet.inviteUri() }
@@ -98,12 +98,14 @@ fun ConnectScreen(onDone: () -> Unit) {
         }
     }
 
-    // A haven:// / invite-page link the app was OPENED with (deep link) — prefill and resolve,
-    // parity with iOS's incomingLink flow (which also stops at the safety-word check).
-    LaunchedEffect(Unit) {
-        com.blaineam.haven.core.InviteInbox.consume()?.let { link ->
+    // A haven:// / invite-page link the app was OPENED with (deep link), handed down by RootScreen —
+    // prefill and resolve, parity with iOS's incomingLink flow (which also stops at the safety-word
+    // check). Keyed on the link itself, so a second invite arriving while this sheet is already up
+    // re-resolves to the new one instead of leaving the previous card on screen.
+    LaunchedEffect(initialLink) {
+        if (!initialLink.isNullOrBlank()) {
             mode = 1
-            lookup(link)
+            lookup(initialLink)
         }
     }
 

@@ -1,0 +1,65 @@
+name: apple-tests
+
+# The Apple LOGIC tests, on every push and PR that touches them.
+#
+# Why this exists: until now `xcodebuild test` appeared in NO workflow, so HavenLogicTests and
+# HavenUITests never ran automatically. That is not a theoretical gap — it let the HavenLogicTests
+# TARGET stop compiling entirely (CallHairpin grew a FeedStore dependency, breaking the target's
+# host-less promise) and nobody found out until someone tried to add a test months later. In the
+# meantime a test written specifically to keep call traffic off Google STUN sat inert while the ICE
+# policy changed past it. A guard nothing runs is not a guard.
+#
+# Deliberately the LOGIC suite only:
+#   * it is host-LESS and FFI-less by design — VERIFIED by running it with HavenFFI.xcframework
+#     physically absent: 61 tests, 0 failures, 2.5s. So this job needs no Rust cross-compile, no
+#     simulator, no signing, and no secrets.
+#   * HavenUITests are deliberately NOT here. They need a SIGNED simulator build (an unsigned one has
+#     no keychain entitlement, so there is no engine to drive) and minutes per run. Those are driven
+#     by hand through Soren instead.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apple/**"
+      - ".github/workflows/apple-tests.yml"
+  pull_request:
+    paths:
+      - "apple/**"
+      - ".github/workflows/apple-tests.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: apple-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  logic:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # The .xcodeproj is generated, not committed — same as every other Apple build path.
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate the project
+        working-directory: apple
+        run: xcodegen generate --project .
+
+      # No -derivedDataPath override: the default keeps the run self-contained. CODE_SIGNING_ALLOWED
+      # =NO is safe HERE (and only here) because the logic bundle links no entitlement-bearing code —
+      # the UI tests are the ones that genuinely need signing.
+      - name: Run HavenLogicTests
+        working-directory: apple
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project Haven.xcodeproj \
+            -scheme HavenLogicTests \
+            -destination 'platform=macOS,arch=arm64' \
+            CODE_SIGNING_ALLOWED=NO \
+            | tee /tmp/logic-tests.log
+      - name: Summarise
+        if: always()
+        run: grep -E "Executed .* tests?" /tmp/logic-tests.log | tail -2 >> "$GITHUB_STEP_SUMMARY" || true

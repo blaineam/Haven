@@ -95,7 +95,8 @@ jobs:
     # push → internal, plus a workflow_dispatch play_track=beta on the same ref) each open their
     # own Edit; the slower one commits into "This edit has expired, please create a new Edit" and
     # the AAB never lands (observed on v1.1.4-rc.23 beta, run 30019665798 — and because the publish
-    # step is continue-on-error, only the "Flag a Play publish that did not land" warning shows).
+    # step is continue-on-error; the "Flag a Play publish that did not land" step is what turns that
+    # into a failed run).
     # So: serialize publish-capable runs (tag pushes + all workflow_dispatch) in one static group —
     # the second run QUEUES instead of racing. Plain main pushes never publish, so each gets a
     # unique throwaway group (run_id) and keeps running fully parallel.
@@ -463,12 +464,21 @@ jobs:
       - name: Flag a Play publish that did not land
         if: steps.play.outputs.submit == 'true' && (steps.playpublish.outcome == 'failure' || steps.playpromote.outcome == 'failure')
         run: |
+          # FAIL, don't warn. These steps are continue-on-error so a Play hiccup can't block the
+          # GitHub Release — but the run reporting SUCCESS while the AAB never reached Play is how
+          # Android silently stays on the previous build with a green tick next to it. The artifacts
+          # are already published by the time this runs, so failing here costs nothing and is the
+          # only signal that the thing the tag was cut FOR did not happen.
+          failed=0
           if [ "${{ steps.playpublish.outcome }}" = "failure" ]; then
-            echo "::warning title=Play publish did not land::The AAB was NOT published to ${{ steps.cfg.outputs.track }}. Check the publish step's log — a common cause is release notes over Play's 500-character limit, which rolls the edit back."
+            echo "::error title=Play publish did not land::The AAB was NOT published to ${{ steps.cfg.outputs.track }}. Check the publish step's log — a common cause is release notes over Play's 500-character limit, which rolls the edit back."
+            failed=1
           fi
           if [ "${{ steps.playpromote.outcome }}" = "failure" ]; then
-            echo "::warning title=Companion track did not land::The release reached ${{ steps.cfg.outputs.track }} but was NOT promoted to ${{ steps.cfg.outputs.extra_track }}, so closed testers are still on the previous build. Promote it in the Console or re-run this step."
+            echo "::error title=Companion track did not land::The release reached ${{ steps.cfg.outputs.track }} but was NOT promoted to ${{ steps.cfg.outputs.extra_track }}, so closed testers are still on the previous build. Promote it in the Console or re-run this step."
+            failed=1
           fi
+          exit $failed
 
       # ── Sync the FULL store listing (title, short/long description, feature graphic, screenshots)
       #    from android/fastlane/metadata via `fastlane supply`. r0adkll can't do this; supply reads

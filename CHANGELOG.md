@@ -42,6 +42,31 @@ rather than waiting for them. It grew: build 412 is what shipped, and it carries
   own story, so passing the whole group would publish the poster as a second silent photo story
   beside the real one.
 
+- **A video story arrived as a spinner that never finished.** Reported straight after the fix above
+  shipped: "my friends got my video story right away but theirs have not loaded yet" — ring present,
+  "Downloading story…" forever. Caused by that same fix.
+
+  Selecting the playable ref was right; publishing **only** the playable ref was not. Every video in
+  Haven travels with its poster still, and three separate things depend on that companion existing:
+
+  - the receiver has something to draw *immediately* — otherwise the viewer shows a spinner for as
+    long as the whole clip takes to transfer, which is what "never loaded" was;
+  - `enqueueAuthoredMedia` uploads thumbs and posters **ahead of** big blobs, specifically so the
+    placeholder-feeding bytes land first — with no poster there are none to send;
+  - `dataSaverPrefetchRefs` skips full videos by contract and falls back to the declared poster, so
+    under super data saver a poster-less story prefetches **nothing at all**.
+
+  `CameraView.withPosterCompanions` already existed for exactly this — its own doc records the
+  camera path having had the identical bug ("no poster was ever published, so recipients and super
+  data saver had nothing either"). The library path now goes through it too, in `postStory`, so the
+  companions are re-attached after the picker deliberately narrows to one clip.
+
+  The viewer had to change with it. Companions are published poster-FIRST, so `media.first` is the
+  poster — the very trap the picker fell into — and reading it would have rendered every video story
+  as a frozen frame again. The viewer now resolves through `displayRefs`, requests the poster
+  alongside the clip, and draws that still under the progress ring while the video transfers. A
+  still with a spinner reads as loading; a black screen reads as broken.
+
 ### Changed — every platform
 
 - **Public STUN is now a last resort, not a default companion.** Requested rule: reach for ICE/Google

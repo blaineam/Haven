@@ -2903,8 +2903,23 @@ final class FeedStore: ObservableObject {
 
     /// Post a full-screen story to the active circle — auto-expires after 24h (retention).
     /// Stories can carry a caption (the post body) and a song (played in the viewer).
+    ///
+    /// A VIDEO story must ship its poster still, exactly like video anywhere else. The story picker
+    /// hands us one playable ref (StoryDraft's refs are separate CLIPS, each its own story), so the
+    /// companions have to be re-attached HERE or the published event is a bare video ref:
+    ///
+    ///   * the receiver has nothing to draw until the ENTIRE clip lands — a "Downloading story…"
+    ///     spinner where a still should be, for as long as the transfer takes;
+    ///   * `enqueueAuthoredMedia` uploads thumbs and posters ahead of big blobs precisely so the
+    ///     placeholder-feeding bytes arrive first, and with no poster there are none;
+    ///   * `dataSaverPrefetchRefs` skips full videos by contract and falls back to the declared
+    ///     poster — with neither, super data saver prefetches NOTHING for that story.
+    ///
+    /// `withPosterCompanions` is the same helper the camera path uses, and it is idempotent: a ref
+    /// that already declares a poster passes through untouched, and non-video refs are left alone.
     func postStory(media: [String], caption: String = "", music: TrackRefFfi? = nil) {
-        post(caption, media: media, music: music, retentionSecs: 86_400, story: true)
+        post(caption, media: CameraView.withPosterCompanions(media), music: music,
+             retentionSecs: 86_400, story: true)
     }
 
     /// Stories in the active circle (full-screen, ephemeral), newest first.

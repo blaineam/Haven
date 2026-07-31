@@ -38,6 +38,24 @@ struct StoryViewer: View {
     @State private var replySent = false
     @State private var waitingMedia: String?   // a story whose bytes are still downloading
     @State private var retryCounter = 0
+
+    /// The ref a story actually RENDERS.
+    ///
+    /// NOT `media.first`. A video story travels with its poster still and that still is published
+    /// FIRST (`[poster, posterMarker, clip]`, the order `composeVideoMedia`/`withPosterCompanions`
+    /// build), so `media.first` is the poster — taking it renders a video story as a frozen frame,
+    /// which is the "it shared my video as a photo" report. `displayRefs` drops posters, thumbs,
+    /// originals and markers and leaves the playable ref.
+    private func displayRef(_ s: FeedItemFfi) -> String? {
+        MediaVariants.displayRefs(s.media).first ?? s.media.first
+    }
+
+    /// The poster still declared for this story's clip, if any — what we can draw IMMEDIATELY while
+    /// the video itself is still transferring.
+    private func posterRef(_ s: FeedItemFfi) -> String? {
+        guard let ref = displayRef(s) else { return nil }
+        return MediaVariants.poster(for: ref, in: s.media)
+    }
     @State private var confirmDeleteStory = false   // confirm unsending your own story
     @State private var heldPaused = false            // press-and-hold pauses the timer + video
     @FocusState private var replyFocused: Bool
@@ -154,7 +172,19 @@ struct StoryViewer: View {
 
     @ViewBuilder private func content(_ s: FeedItemFfi) -> some View {
         if waitingMedia != nil {
-            downloading
+            // Draw the poster under the spinner when we have it. A story's clip can take a while to
+            // arrive — the poster is a fraction of the size and lands first — and a still with a
+            // progress ring reads as "this is loading", where a black screen reads as "this is
+            // broken". That was the report: stories stuck on a spinner that never finished.
+            ZStack {
+                if let p = posterRef(s), let img = MediaStore.shared.item(p)?.image {
+                    Image(platformImage: img).resizable().scaledToFill()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
+                        .overlay(Color.black.opacity(0.35))
+                }
+                downloading
+            }
         } else {
             GeometryReader { geo in
                 // The author's framing (zoom + reposition) travels in the caption spec.
@@ -162,7 +192,8 @@ struct StoryViewer: View {
                 ZStack {
                     // Blurred fill backdrop so off-ratio media (landscape, etc.) sits in the standard
                     // story frame instead of leaving plain black bands. The still covers photo + video.
-                    if let ref = s.media.first, let img = MediaStore.shared.item(ref)?.image {
+                    if let ref = displayRef(s) ?? posterRef(s),
+                       let img = MediaStore.shared.item(ref)?.image ?? posterRef(s).flatMap({ MediaStore.shared.item($0)?.image }) {
                         Image(platformImage: img).resizable().scaledToFill()
                             .frame(width: geo.size.width, height: geo.size.height)
                             .blur(radius: 28).overlay(Color.black.opacity(0.28))
@@ -170,7 +201,9 @@ struct StoryViewer: View {
                     Group {
                         if let player {
                             VideoSurface(player: player, fill: true)   // full-bleed, matching the editor
-                        } else if let ref = s.media.first, let img = MediaStore.shared.item(ref)?.image {
+                        } else if let ref = displayRef(s),
+                                  let img = MediaStore.shared.item(ref)?.image
+                                      ?? posterRef(s).flatMap({ MediaStore.shared.item($0)?.image }) {
                             Image(platformImage: img).resizable().scaledToFill()
                         } else {
                             missing
@@ -184,7 +217,9 @@ struct StoryViewer: View {
                     .rotationEffect(.radians(tf.mediaRotation))
                     .offset(x: tf.mediaOffX * geo.size.width, y: tf.mediaOffY * geo.size.height)
                     // Blur a sensitive received story (local SCA or a circle member's federated flag).
-                    .sensitiveContentGuard(ref: s.media.first ?? "", circleId: FeedStore.shared.activeCircleId,
+                    // The ref being RENDERED, not media.first — on a video story that is the poster,
+                    // so the guard would scan and blur a different blob than the one on screen.
+                    .sensitiveContentGuard(ref: displayRef(s) ?? "", circleId: FeedStore.shared.activeCircleId,
                                            scan: !s.isMe, cornerRadius: 0)
                 }
                 .frame(width: geo.size.width, height: geo.size.height)
@@ -520,15 +555,20 @@ struct StoryViewer: View {
         #endif
         // If the bytes haven't arrived yet (a dropped chunk on a big video), wait and
         // actively re-request instead of hanging forever on a stale "Loading…".
-        if let ref = s.media.first, !MediaStore.shared.has(ref) {
+        if let ref = displayRef(s), !MediaStore.shared.has(ref) {
             waitingMedia = ref
             retryCounter = 0
             FeedStore.shared.requestMedia(ref)
+            // Pull the poster too. It is orders of magnitude smaller than the clip, so it lands
+            // almost immediately and gives the viewer something real to show meanwhile — the
+            // difference between a still with a spinner and a black "Downloading story…" screen
+            // for the length of a video transfer.
+            if let p = posterRef(s), !MediaStore.shared.has(p) { FeedStore.shared.requestMedia(p) }
             player = nil
             return
         }
         waitingMedia = nil
-        if let ref = s.media.first, let item = MediaStore.shared.item(ref),
+        if let ref = displayRef(s), let item = MediaStore.shared.item(ref),
            item.kind == .video, let url = item.videoURL {
             // Under a song, hand the player a VIDEO-ONLY composition rather than muting it.
             //

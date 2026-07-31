@@ -180,33 +180,23 @@ struct MessagesView: View {
         // the tab bar stays visible — you can hop straight back to Circle, and Back lands
         // on the Messages list, not the picker.
         .navigationDestination(item: $pushedDM) { id in DMThreadView(circleId: id) }
-        // Somewhere else in the app staged a draft (e.g. "Message the author" on a post) — open that
-        // thread in this tab's stack, exactly as picking it from the list would.
-        .onReceive(DMDraftStore.shared.$openThread.compactMap { $0 }) { id in
-            // Clear on the NEXT tick, not inline. `@Published` publishes from `willSet`, so this
-            // closure runs BEFORE the store has written the new value — an inline `= nil` is
-            // immediately overwritten by the assignment that woke us, and `openThread` stays pinned
-            // to this id forever. That left the request permanently "pending": every later
-            // subscription replayed it (re-pushing a thread the user had already backed out of), and
-            // a second tap on the SAME conversation published a value that was already there, so
-            // `pushedDM` never changed and nothing pushed at all.
-            DispatchQueue.main.async {
-                if DMDraftStore.shared.openThread == id { DMDraftStore.shared.openThread = nil }
-            }
-            // `navigationDestination(item:)` normally nils this out when the user backs out, but if
-            // anything left it set, assigning the same value again is a no-op and the tap does
-            // nothing. Bounce through nil on a separate tick so the push actually re-fires.
-            if pushedDM == id {
-                pushedDM = nil
-                DispatchQueue.main.async { pushedDM = id }
-            } else {
-                pushedDM = id
-            }
-        }
+        // Somewhere else in the app staged a draft (e.g. "Message the author" on a post, or an
+        // Activity row) — open that thread in this tab's stack, exactly as picking it from the list
+        // would.
+        .onReceive(DMDraftStore.shared.$openThread.compactMap { $0 }) { id in openStaged(id) }
         .sheet(isPresented: $showPicker, onDismiss: { if let id = newDM { newDM = nil; pushedDM = id } }) {
             DMContactPicker { id in newDM = id; showPicker = false }   // HavenMacSheet brings its own frame on macOS
         }
         .onAppear {
+            // A tab request that arrived BEFORE this view existed.
+            //
+            // On iOS a TabView builds a tab's content the first time that tab is shown, so an
+            // Activity row tapped from the Circle tab publishes `openThread` and switches tabs
+            // while MessagesView still does not exist — there is nobody subscribed to receive it.
+            // macOS builds the tab eagerly, which is the whole reason this worked there and not
+            // here. The request is durable (nothing clears it but a consumer), so the fix is simply
+            // to also look for one on the way in.
+            if let staged = DMDraftStore.shared.openThread { openStaged(staged) }
             // Screenshot harness: open the first DM thread for its hero shot.
             if DemoEnv.scene == .thread {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
@@ -214,6 +204,30 @@ struct MessagesView: View {
                 }
             }
         }
+    }
+
+    /// Push a thread that some other surface asked us to open, from either the live subscription or
+    /// the on-appear catch-up.
+    private func openStaged(_ id: String) {
+        // Clear on the NEXT tick, not inline. `@Published` publishes from `willSet`, so the
+        // subscription path runs BEFORE the store has written the new value — an inline `= nil` is
+        // immediately overwritten by the assignment that woke us, and `openThread` stays pinned to
+        // this id forever. That left the request permanently "pending": every later subscription
+        // replayed it (re-pushing a thread the user had already backed out of), and a second tap on
+        // the SAME conversation published a value that was already there, so `pushedDM` never
+        // changed and nothing pushed at all.
+        DispatchQueue.main.async {
+            if DMDraftStore.shared.openThread == id { DMDraftStore.shared.openThread = nil }
+        }
+        // Always a tick later, never in this render pass. Two reasons, and the second is why an
+        // Activity row landed on a blank screen: `navigationDestination(item:)` normally nils
+        // `pushedDM` when the user backs out, but if anything left it set then assigning the same
+        // value is a no-op and the tap does nothing — so the bounce through nil. And when this
+        // arrives from `onAppear`, the NavigationStack is being built in this very frame; handing
+        // it a destination value before its `navigationDestination` is registered pushes a view
+        // with nothing declared for it, which renders as an empty page.
+        if pushedDM == id { pushedDM = nil }
+        DispatchQueue.main.async { pushedDM = id }
     }
 
     private func rowLabel(_ circleId: String) -> some View {

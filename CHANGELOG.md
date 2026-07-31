@@ -28,6 +28,16 @@ Tester reports across Android and Apple. Nothing in `core/` moved — these are 
   `fsetattrlist`, `clock_gettime`, `close`, in a tight loop, which is `touch_now` in
   `core/haven-net/src/blobstore.rs` exactly. `localTouch` is `nonisolated` now like its siblings,
   and both call sites run the batch (and the re-PUT of any misses) off-main.
+- **An Activity row for a PINNED conversation opened a blank page (iOS).** Tapping the row switches
+  to the Messages tab and hands `MessagesView` the thread to push — but the assignment happened in
+  the same frame the tab's `NavigationStack` was being built, so the push arrived before the stack
+  could take it and you landed on an empty page instead of the conversation. Pinning is what tipped
+  it over: a pinned conversation is drawn as a tile in the grid rather than a `NavigationLink` row,
+  so the list no longer had a link of its own to force the stack's destination into place. Which is
+  also why it worked on macOS, where tab content is built eagerly rather than on first view.
+  Reproduced on a simulator and confirmed fixed against the same steps: unpinned → opened, pinned →
+  blank, pinned after the fix → opens. The push now waits one runloop turn, and a request that
+  arrived before the view existed is picked up in `onAppear` instead of being missed.
 - **A video in a DM had no sound control.** The full-screen viewer is where a DM's video plays and
   it carried no speaker chip — the clip opened at whatever the global choice happened to be, with
   no way to change your mind without backing out. Adds the same glass chip in the same

@@ -43,6 +43,23 @@ jobs:
       - name: Install xcodegen
         run: brew install xcodegen
 
+      # xcodegen validates EVERY target in the spec, not just the one we intend to build, and
+      # Haven/HavenMac/HavenNotificationService list `Generated/haven_ffi.swift` — the UniFFI
+      # bindings, which are gitignored and produced by build-rust-xcframework.sh. Without a file
+      # there, generation fails outright and this job can never reach the tests.
+      #
+      # A placeholder is enough: it satisfies spec validation and is NEVER COMPILED here, because
+      # HavenLogicTests lists its sources explicitly and none of them are under Generated/. Building
+      # the real bindings would mean a full Rust cross-compile — the whole point of this job is that
+      # it does not need one (verified: the suite passes with HavenFFI.xcframework absent).
+      - name: Placeholder for the generated FFI bindings (never compiled by this target)
+        working-directory: apple
+        run: |
+          mkdir -p Generated
+          [ -f Generated/haven_ffi.swift ] || \
+            echo "// Placeholder for xcodegen spec validation — see .github/workflows/apple-tests.yml" \
+              > Generated/haven_ffi.swift
+
       - name: Generate the project
         working-directory: apple
         run: xcodegen generate --project .

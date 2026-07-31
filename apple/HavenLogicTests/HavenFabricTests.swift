@@ -33,41 +33,45 @@ final class HavenFabricTests: XCTestCase {
         XCTAssertTrue(urls.contains(where: { $0.contains("stun.l.google.com") }))
     }
 
-    /// A DERP fabric with NO circle TURN still falls back to public STUN.
+    /// A DERP fabric with NO circle TURN must NOT reach for Google.
     ///
-    /// This test used to assert the opposite ("fabric on without TURN must not use Google STUN").
-    /// The implementation deliberately changed — see iceServersFromDefaults: without STUN two home
-    /// NATs can never pair, so connectivity was chosen over purity — and this test could not report
-    /// the change because the target had stopped compiling. Asserting the behaviour that actually
-    /// ships means the next change to it is visible.
-    ///
-    /// The tradeoff is real and worth re-deciding deliberately, not by drift: the fallback discloses
-    /// the caller's IP to a third party during ICE. A publicly-reachable circle TURN avoids it
-    /// entirely (see testCircleTurnThatIsPubliclyReachableAvoidsGoogle).
-    func testFabricWithoutTurnFallsBackToPublicStun() {
+    /// The relay's path proxy serves the WebRTC hairpin, so media has a route that never touches a
+    /// third party — a fabric counts as "a Haven relay is available", which is the whole rule.
+    func testFabricWithoutTurnDoesNotUseGoogle() {
         UserDefaults.standard.set(["https://relay.example.com"], forKey: derpKey)
         let servers = HavenFabric.iceServersFromDefaults()
-        XCTAssertEqual(servers.count, 1, "no circle TURN → the public STUN fallback is the only entry")
-        let urls = servers[0]["urls"] as? [String] ?? []
-        XCTAssertTrue(urls.contains(where: { $0.contains("stun.l.google.com") }))
+        let all = servers.flatMap { ($0["urls"] as? [String]) ?? [] }
+        XCTAssertFalse(all.contains(where: { $0.contains("google") }),
+                       "a fabric is an available relay — ICE must stay off third-party servers")
+        XCTAssertTrue(HavenFabric.iceServerUrlsFromDefaults().isEmpty)
     }
 
-    /// A PRIVATE circle TURN (10.x) is used, and its host doubles as STUN — but because the open
-    /// internet cannot reach it, the public STUN fallback is still added. Three entries: TURN,
-    /// derived circle STUN, fallback. The old expectation of exactly one predates that rule.
-    func testPrivateCircleTurnStillGetsThePublicStunFallback() {
+    /// A PRIVATE circle TURN alongside a fabric: the TURN is used, its host doubles as STUN, and
+    /// Google is still not added — the fabric makes a relay available regardless of the TURN's
+    /// reachability. Two entries, not three.
+    func testPrivateCircleTurnWithFabricStaysOffGoogle() {
         UserDefaults.standard.set(["https://relay.example.com"], forKey: derpKey)
         UserDefaults.standard.set(["turn:10.0.0.1:3478"], forKey: turnKey)
         UserDefaults.standard.set("haven", forKey: userKey)
         UserDefaults.standard.set("secret", forKey: passKey)
         let servers = HavenFabric.iceServersFromDefaults()
-        XCTAssertEqual(servers.count, 3, "TURN + derived circle STUN + public fallback")
-        let turnUrls = servers[0]["urls"] as? [String] ?? []
-        XCTAssertTrue(turnUrls.contains("turn:10.0.0.1:3478"))
-        XCTAssertEqual(servers[0]["username"] as? String, "haven")
-        // The circle's own host serves STUN on the same socket — no credentials, no third party.
-        let circleStun = servers[1]["urls"] as? [String] ?? []
-        XCTAssertTrue(circleStun.contains("stun:10.0.0.1:3478"))
+        XCTAssertEqual(servers.count, 2, "circle TURN + derived circle STUN, no fallback")
+        XCTAssertTrue((servers[0]["urls"] as? [String] ?? []).contains("turn:10.0.0.1:3478"))
+        XCTAssertTrue((servers[1]["urls"] as? [String] ?? []).contains("stun:10.0.0.1:3478"))
+        let all = servers.flatMap { ($0["urls"] as? [String]) ?? [] }
+        XCTAssertFalse(all.contains(where: { $0.contains("google") }))
+    }
+
+    /// The failure this fallback was written for, still covered: NO fabric and only an unreachable
+    /// private TURN is not an available relay, so the last resort still applies. Without it both
+    /// ends get host candidates only and the call connects with no media.
+    func testPrivateTurnWithNoFabricStillFallsBack() {
+        UserDefaults.standard.set(["turn:172.20.0.2:3478"], forKey: turnKey)
+        UserDefaults.standard.set("haven", forKey: userKey)
+        UserDefaults.standard.set("secret", forKey: passKey)
+        let all = HavenFabric.iceServersFromDefaults().flatMap { ($0["urls"] as? [String]) ?? [] }
+        XCTAssertTrue(all.contains(where: { $0.contains("stun.l.google.com") }),
+                      "no fabric + unreachable TURN = no Haven relay; the fallback is the only path")
     }
 
     /// The case that keeps a call entirely on circle infrastructure: a PUBLICLY reachable circle

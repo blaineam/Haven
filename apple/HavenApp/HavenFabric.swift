@@ -78,9 +78,9 @@ final class HavenFabric: ObservableObject {
     ///
     /// | Fabric | TURN | ICE |
     /// |---|---|---|
-    /// | no | — | Google STUN |
-    /// | yes | public TURN | circle TURN + STUN on the same host |
-    /// | yes | private/no TURN | circle TURN (if any) + Google STUN fallback |
+    /// | no | none / private only | Google STUN (nothing else can pair two home NATs) |
+    /// | no | public TURN | circle TURN + STUN on the same host |
+    /// | yes | any (incl. none) | circle TURN/STUN if present — never Google; the hairpin carries media |
     ///
     /// The old policy returned the circle TURN as the ONLY server, and an EMPTY list when a
     /// fabric existed without TURN. In the field the relay advertised a Docker-internal TURN
@@ -106,9 +106,24 @@ final class HavenFabric: ObservableObject {
             if !stun.isEmpty { servers.append(["urls": stun]) }
             havePublicTurn = turn.contains { !Self.hostLooksPrivate($0) }
         }
-        if !havePublicTurn {
-            // No circle server that the open internet can reach — without STUN, two home NATs
-            // can never find each other. Connectivity beats purity here.
+        // PUBLIC STUN IS A LAST RESORT, not a default companion.
+        //
+        // The rule: Google is used only when NO Haven relay is available to carry this call. A
+        // configured fabric counts as available even with no TURN, because the relay's path proxy
+        // serves the WebRTC hairpin — media has a route that never touches a third party.
+        //
+        // This tightens the previous behaviour, which appended Google whenever no PUBLICLY
+        // reachable TURN was configured, including when a working fabric was present. That rule
+        // came from a real field failure (a relay advertising a Docker-internal
+        // `turn:172.20.0.2:3478`, leaving both phones with one dead server, no STUN and host
+        // candidates only — calls that "connected" with zero media). That case is still covered:
+        // an unreachable private TURN with no fabric is not an available relay, so the fallback
+        // still applies. What changes is that a healthy fabric no longer discloses the caller's IP
+        // to Google during ICE just because it has no TURN of its own — the hairpin, which did not
+        // exist when that fallback was written, is the path for exactly that situation.
+        let haveFabric = !(UserDefaults.standard.stringArray(forKey: "haven.fabric.derpUrls") ?? []).isEmpty
+        let havenRelayAvailable = haveFabric || havePublicTurn
+        if !havenRelayAvailable {
             servers.append(["urls": googleStunUrls])
         }
         return servers

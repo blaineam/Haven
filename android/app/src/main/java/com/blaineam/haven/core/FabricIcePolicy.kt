@@ -8,24 +8,21 @@ package com.blaineam.haven.core
  * serves during ICE, so it is used when the alternative is a call that cannot connect at all —
  * and not otherwise.
  *
- * | Fabric | TURN                | ICE                                                    |
- * |--------|---------------------|--------------------------------------------------------|
- * | no     | none / private only | Google STUN (nothing else can pair two home NATs)      |
- * | no     | public              | circle TURN + STUN on the same host                    |
- * | yes    | any (incl. none)    | circle TURN/STUN if present — never Google             |
+ * | TURN                | ICE                                                              |
+ * |---------------------|------------------------------------------------------------------|
+ * | none / private only | circle TURN if any + public STUN (nothing else pairs two NATs)   |
+ * | public              | circle TURN + STUN on the same host — never Google                |
  *
- * A fabric counts as an available relay even with no TURN of its own, because the relay's path
- * proxy serves the WebRTC hairpin ([CallHairpin] + [CallMediaBridge]): media has a route that
- * never touches a third party. That hairpin is opened alongside ICE and takes over on FAILED.
+ * ⚠️ A FABRIC IS NOT PROOF MEDIA HAS A ROUTE, and this rule has been wrong in both directions.
+ * It briefly treated a configured fabric as an available relay — no Google even with no usable TURN
+ * — on the reasoning that the relay's path proxy serves the WebRTC hairpin. That shipped, and a real
+ * call to a real person came up CONNECTED WITH NO AUDIO: host candidates alone cannot pair two NATs,
+ * and the hairpin taking over is likely rather than guaranteed (it did take over for a different
+ * peer in the same session, so it works — it is just not a guarantee you can bet a call on).
  *
- * ⚠️ THE DOCUMENTED RISK, because this rule re-opens a real field failure. Google was originally
- * added as an unconditional companion after a relay advertised a Docker-internal
- * `turn:172.20.0.2:3478`, leaving both phones with one dead server, no STUN and host candidates
- * only — calls that "connected" carrying zero media. The no-fabric half of that case is still
- * covered (an unreachable private TURN with no fabric is not an available relay, so the fallback
- * still applies, pinned by `noFabric_privateTurnStillFallsBack`). What changes is that a circle
- * with a working fabric no longer discloses its callers' IPs to Google merely because the relay
- * has no TURN — it leans on the hairpin, which did not exist when that fallback was written.
+ * That is the same failure the Google fallback was originally added for, after a relay advertised a
+ * Docker-internal `turn:172.20.0.2:3478` and left both phones with one dead server and no STUN.
+ * Narrowing this again needs PROOF the hairpin has established, not the assumption that it will.
  *
  * This object returns the FINAL server plan that [CallManager] hands to WebRTC — it is not
  * advisory. It used to return a `hostOnly` flag that the caller deliberately ignored, so the unit
@@ -65,8 +62,11 @@ object FabricIcePolicy {
             emptyList()
         }
         val havePublicTurn = usable && turnList.any { !hostLooksPrivate(it) }
-        val haveFabric = derp.isNotEmpty()
-        val havenRelayAvailable = haveFabric || havePublicTurn
+        // REVERTED (see Apple HavenFabric): a fabric alone is not proof media has a route. A real
+        // call showed CONNECTED WITH NO AUDIO under the narrower rule — host candidates only cannot
+        // pair two NATs, and the hairpin taking over is likely, not guaranteed. Public STUN is the
+        // fallback again whenever no PUBLICLY REACHABLE TURN exists.
+        val havenRelayAvailable = havePublicTurn
 
         return Plan(
             turnUrls = if (usable) turnList else emptyList(),

@@ -37,11 +37,11 @@ final class HavenFabricTests: XCTestCase {
     ///
     /// The relay's path proxy serves the WebRTC hairpin, so media has a route that never touches a
     /// third party — a fabric counts as "a Haven relay is available", which is the whole rule.
-    func testFabricWithoutTurnDoesNotUseGoogle() {
+    func testFabricWithoutTurnStillFallsBack() {
         UserDefaults.standard.set(["https://relay.example.com"], forKey: derpKey)
         let servers = HavenFabric.iceServersFromDefaults()
         let all = servers.flatMap { ($0["urls"] as? [String]) ?? [] }
-        XCTAssertFalse(all.contains(where: { $0.contains("google") }),
+        XCTAssertTrue(all.contains(where: { $0.contains("stun.l.google.com") }),
                        "a fabric is an available relay — ICE must stay off third-party servers")
         XCTAssertTrue(HavenFabric.iceServerUrlsFromDefaults().isEmpty)
     }
@@ -49,17 +49,19 @@ final class HavenFabricTests: XCTestCase {
     /// A PRIVATE circle TURN alongside a fabric: the TURN is used, its host doubles as STUN, and
     /// Google is still not added — the fabric makes a relay available regardless of the TURN's
     /// reachability. Two entries, not three.
-    func testPrivateCircleTurnWithFabricStaysOffGoogle() {
+    func testPrivateCircleTurnWithFabricStillFallsBack() {
         UserDefaults.standard.set(["https://relay.example.com"], forKey: derpKey)
         UserDefaults.standard.set(["turn:10.0.0.1:3478"], forKey: turnKey)
         UserDefaults.standard.set("haven", forKey: userKey)
         UserDefaults.standard.set("secret", forKey: passKey)
         let servers = HavenFabric.iceServersFromDefaults()
-        XCTAssertEqual(servers.count, 2, "circle TURN + derived circle STUN, no fallback")
+        XCTAssertEqual(servers.count, 3, "circle TURN + derived circle STUN + the public STUN fallback")
         XCTAssertTrue((servers[0]["urls"] as? [String] ?? []).contains("turn:10.0.0.1:3478"))
         XCTAssertTrue((servers[1]["urls"] as? [String] ?? []).contains("stun:10.0.0.1:3478"))
         let all = servers.flatMap { ($0["urls"] as? [String]) ?? [] }
-        XCTAssertFalse(all.contains(where: { $0.contains("google") }))
+        // An unroutable TURN is the Docker-internal-TURN field failure. The fallback must survive
+        // even with a fabric present, or the call connects and carries no audio.
+        XCTAssertTrue(all.contains(where: { $0.contains("stun.l.google.com") }))
     }
 
     /// The failure this fallback was written for, still covered: NO fabric and only an unreachable

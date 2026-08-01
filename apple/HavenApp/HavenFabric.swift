@@ -121,9 +121,22 @@ final class HavenFabric: ObservableObject {
         // still applies. What changes is that a healthy fabric no longer discloses the caller's IP
         // to Google during ICE just because it has no TURN of its own — the hairpin, which did not
         // exist when that fallback was written, is the path for exactly that situation.
-        let haveFabric = !(UserDefaults.standard.stringArray(forKey: "haven.fabric.derpUrls") ?? []).isEmpty
-        let havenRelayAvailable = haveFabric || havePublicTurn
-        if !havenRelayAvailable {
+        // REVERTED: a fabric alone is NOT proof media has a route.
+        //
+        // 07e7d0d treated a configured fabric as an available relay, on the reasoning that its path
+        // proxy serves the WebRTC hairpin. That commit stated the risk plainly and took it anyway.
+        // The risk arrived: a real call to a real person showed CONNECTED WITH NO AUDIO — the exact
+        // failure the Google fallback was added for, reproduced on device. Host candidates only
+        // cannot pair two NATs, and the hairpin did not take over in time (it did for a different
+        // peer in the same session, so it works — it is just not guaranteed).
+        //
+        // So the fallback is back to: no PUBLICLY REACHABLE TURN → public STUN, fabric or not. A
+        // circle running its own relay with a real TURN still never touches Google, which is most of
+        // the privacy win; the remaining case trades third-party IP exposure during ICE for a call
+        // that carries audio, and a call that cannot be heard is not a private call, it is a broken
+        // one. Re-narrowing this needs proof the hairpin has established, not the assumption that it
+        // will — see docs/DECENTRALIZED-DISCOVERY.md §1.2.
+        if !havePublicTurn {
             servers.append(["urls": googleStunUrls])
         }
         return servers

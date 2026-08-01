@@ -1239,7 +1239,10 @@ final class CallManager: NSObject, ObservableObject {
         #if os(iOS)
         let rtc = RTCAudioSession.sharedInstance()
         rtc.lockForConfiguration()
-        try? rtc.setCategory(.playAndRecord, with: [.allowBluetoothHFP, .defaultToSpeaker])
+        // Mirror the user's speaker choice — recovery used to reassert .defaultToSpeaker
+        // unconditionally, which put an earpiece call back on the speaker behind their back.
+        try? rtc.setCategory(.playAndRecord,
+                             with: speakerOn ? [.allowBluetoothHFP, .defaultToSpeaker] : [.allowBluetoothHFP])
         try? rtc.setMode(.voiceChat)
         try? rtc.setActive(true)
         // Default to speaker for in-app video-style calls so "connected but silent" isn't just
@@ -1321,6 +1324,18 @@ final class CallManager: NSObject, ObservableObject {
         #if os(iOS)
         let s = RTCAudioSession.sharedInstance()
         s.lockForConfiguration()
+        // THE CATEGORY HAS TO MOVE WITH THE OVERRIDE.
+        //
+        // The session is configured `.playAndRecord` with `.defaultToSpeaker`, and under that option
+        // `.none` does not mean "earpiece" — it means "the default", which IS the speaker. So
+        // overriding to `.none` left the route on the built-in speaker, syncSpeakerState then read
+        // `.builtInSpeaker` back off the route and snapped `speakerOn` to true again, and the button
+        // did nothing at all in either direction.
+        //
+        // Drop `.defaultToSpeaker` when going to the earpiece, restore it for speakerphone. The
+        // override still does the actual switching; the category just stops contradicting it.
+        try? s.setCategory(.playAndRecord,
+                           with: speakerOn ? [.allowBluetoothHFP, .defaultToSpeaker] : [.allowBluetoothHFP])
         try? s.overrideOutputAudioPort(speakerOn ? .speaker : .none)
         s.unlockForConfiguration()
         #endif

@@ -84,7 +84,18 @@ final class AudioCoordinator: ObservableObject {
     /// on teardown, so the map never outlives the players it points at.
     func registerVideo(_ player: AVPlayer?, for postId: String) {
         if let player { videoByPost[postId] = player } else { videoByPost.removeValue(forKey: postId) }
-        if activePostId == postId { videoPlayer = player }
+        guard activePostId == postId else { return }
+        videoPlayer = player
+        // APPLY THE CURRENT STATE TO THE NEW PLAYER.
+        //
+        // Registering it is not enough. A player built AFTER start() already ran for this post
+        // inherits volume 0 while videoUnmuted is true, so the speaker icon reads unmuted and nothing
+        // is audible until the user toggles twice — reported exactly that way. start() cannot fix it
+        // later either: it early-returns when the post is already active.
+        //
+        // The player and the indicator must agree the moment the player exists, so the same rule that
+        // decides audibility everywhere else decides it here too.
+        player?.volume = videoShouldBeAudible(forPost: postId) ? 1 : 0
     }
     private var activeTrack: TrackRefFfi?   // the active post's song, so unmute can (re)start it
     private var fadeTimer: Timer?

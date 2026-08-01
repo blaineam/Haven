@@ -5,7 +5,7 @@ import AVFoundation
 import UIKit
 #endif
 
-// MARK: - PostCard media
+// MARK: - PostMediaView
 //
 // The media half of PostCard: the carousel/grid, per-page rendering, and the video player
 // lifecycle. Roughly 460 lines, lifted out of a file that had grown past 9,700.
@@ -24,7 +24,54 @@ import UIKit
 // media page re-renders without the header, reactions and comments. That needs the shared @State to
 // move with it — which is now a contained problem, because it is all in one file.
 
-extension PostCard {
+struct PostMediaView: View {
+    let item: FeedItemFfi
+    let isActive: Bool
+    let onHeart: () -> Void
+    let onToggleMute: () -> Void
+    @Binding var zoomTarget: ZoomTarget?
+
+    @ObservedObject var audio = AudioCoordinator.shared
+    @Environment(\.havenFeedContainer) var feedContainer
+    var feed: FeedStore { FeedStore.shared }
+
+    // The media's own state, finally living with the media. On PostCard these forced the WHOLE card
+    // to re-evaluate: paging a carousel, a width measurement landing, a data-saver tap.
+    @State var bag = PlayerBag()
+    @State var currentPage = 0
+    @State var carouselScrubbing = false
+    @State var mediaWidth: CGFloat = lastKnownMediaWidth
+    @State var dataSaverPendingPlay: Set<String> = []
+
+    var body: some View {
+        mediaView
+            .onAppear { syncPlayback() }
+            .onDisappear { teardownPlayers() }
+            .onChange(of: audio.centeredPostId) { syncPlayback() }
+            .onChange(of: currentPage) { if isActive { playVisibleVideo() } }
+    }
+
+    // Small pieces that are already their own types — forwarded so the moved code reads unchanged.
+    func keepOnDeviceButton(_ ref: String) -> some View { KeepOnDeviceButton(ref: ref) }
+    func mediaLoadingPlaceholder(_ ref: String) -> some View { PostMediaPlaceholder(item: item, ref: ref) }
+    func carouselDots(_ count: Int) -> some View { PostCarouselDots(count: count, currentPage: currentPage) }
+    func fileAttachmentPage(_ ref: String) -> some View { PostFileAttachmentPage(ref: ref) }
+    func muteButton(_ ref: String) -> some View { PostMuteButton(item: item, ref: ref) }
+    func masonryTile(_ ref: String, height: CGFloat) -> some View {
+        PostMasonryTile(item: item, media: realMedia, ref: ref, height: height, zoomTarget: $zoomTarget)
+    }
+    func singleAspect(_ ref: String) -> CGFloat { postSingleAspect(ref, in: item.media) }
+    func letterboxes(_ r: String, in a: CGFloat) -> Bool { postLetterboxes(r, in: a) }
+    func shareURL(_ ref: String) -> URL? { postShareURL(ref) }
+    func heartIt() { onHeart() }
+    func togglePostMute() { onToggleMute() }
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var hSizeClass
+    var isPortraitPhone: Bool { hSizeClass == .compact }
+    #else
+    var isPortraitPhone: Bool { false }
+    #endif
+
 
     var singleMediaMaxHeight: CGFloat { isPortraitPhone ? 680 : 460 }
 
@@ -504,3 +551,168 @@ extension PostCard {
         }
     }
 }
+
+
+    /// The measured width of a post's media column, so a page can span the card rather than shrink to the
+/// media's own shape. `max` because the reducer sees one value per card.
+struct MediaWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+/// The blurred backdrop itself — SELF-LOADING, which is the whole reason it's a view and not a
+/// `@ViewBuilder` helper reading the thumbnail cache inline.
+///
+/// It used to be exactly that: a cache PEEK evaluated in `PostCard.body`. But nothing ever tells a
+/// card that its thumbnail has since landed — `FeedImage` decodes off-main and swaps the bitmap into
+/// JUST itself, deliberately WITHOUT nudging a feed refresh (that refresh is what used to flash
+/// already-shown media and chop the scroll). So a card whose body ran before its thumbnail was
+/// resident saw an empty cache, drew no backdrop, and was never re-evaluated to notice otherwise.
+/// It stayed flat for the life of the card.
+///
+/// That is the "top posts have no blur behind them" report. The cards you scroll DOWN to are built
+/// after their decode finishes, so they look right; the ones on screen at launch race it and lose.
+/// On a tall Mac window those top cards are also never recycled, so they never got a second chance —
+/// which is why it read as a macOS bug even though the race is the same everywhere.
+///
+/// Holding its own `@State` bitmap keeps the property that made the old design worth having: a
+/// finished decode re-renders this one backdrop, never the feed. Loading is awaited via
+/// `thumbnailAsync`, which decodes off the main thread (and generates a video's poster off-thread),
+/// so the backdrop still never decodes on the scroll hot path.
+struct BlurredMediaBackdrop: View {
+    let ref: String
+    @State private var img: PlatformImage?
+    /// Which ref `img` belongs to — a lazy cell reused for another post must not show the old blur.
+    @State private var loadedRef: String?
+
+    var body: some View {
+        Group {
+            if let img, loadedRef == ref {
+                // GeometryReader (not `Color.clear.overlay { … .scaledToFill() }`) so the fill size is
+                // COMPUTED and bounded — see `backdropFill`. `scaledToFill` let the layer size run away on a
+                // narrow source, and a runaway layer is exactly what made the backdrop vanish.
+                GeometryReader { g in
+                    let fill = Self.backdropFill(source: img.size, container: g.size)
+                    Image(platformImage: img)
+                        .resizable()
+                        .frame(width: fill.width, height: fill.height)
+                        .position(x: g.size.width / 2, y: g.size.height / 2)
+                        .blur(radius: 24, opaque: true)
+                }
+                .clipped()
+                // Rasterize the blur ONCE instead of re-running it every scroll frame — a 24pt blur
+                // re-composited per frame is what made scrolling past a post chop.
+                .drawingGroup()
+                .allowsHitTesting(false)
+            }
+        }
+        .task(id: ref) {
+            if let cached = Self.cachedSource(ref) { img = cached; loadedRef = ref; return }
+            img = nil; loadedRef = nil
+            // A 200px bucket, NOT the 1200px one. This is a 24pt-blurred wash stretched to fill —
+            // it cannot show detail, so decoding full-size for it buys nothing and costs plenty.
+            // The old code took 1200px to share the front tile's decode, but it also RETAINS that
+            // bitmap in @State for the life of the card: every visible post held a 1200px image
+            // alive purely to be blurred out of recognition. A feed of freshly-synced media is then
+            // tens of MB of retained bitmaps, which is memory pressure, which is cache churn and a
+            // warm phone — reported as the phone heating while pulling media from a peer's relay.
+            // 200px is ~36x fewer pixels and visually identical once blurred.
+            //
+            // KEEP the returned bitmap. The old code discarded it and re-peeked the NSCache —
+            // which iOS purges on every memory warning — so under pressure the peek came back nil,
+            // `img` stayed nil forever, and the letterbox rendered the card's pure-black dark-mode
+            // surface (the "background blur is just black on my iPhone" report). The front tile
+            // never broke because FeedImage keeps its decode's return value; now the backdrop is
+            // exactly as pressure-proof.
+            let decoded = await MediaStore.shared.thumbnailAsync(ref, maxDimension: 200)
+            guard !Task.isCancelled else { return }
+            img = Self.cachedSource(ref) ?? decoded
+            // Decode failed outright (e.g. a video poster not generated yet): leave loadedRef nil
+            // so a later .task re-run retries instead of pinning an empty backdrop.
+            loadedRef = img == nil ? nil : ref
+        }
+    }
+
+    /// The bitmap to blur. Falls back through sizes because the 64px thumb ALONE is not dependable: it
+    /// lives in an NSCache that evicts under pressure (the backdrop would vanish from a post that had
+    /// one a moment ago), and for a video it's nil until the poster finishes generating off-thread.
+    /// The 1200px thumb is already resident — it's what the page itself draws — so the fallback is
+    /// free in the case that matters. Blurring a bigger bitmap costs nothing extra once rasterized.
+    ///
+    /// Cache PEEK only — no decode happens here. The decode is awaited in `.task`, off the main thread.
+    ///
+    /// The 64px thumb is preferred ONLY while it still has pixels to blur. A narrow source collapses its
+    /// minor axis at that size (a 40×1600 sliver thumbs to 2×64), and a 2px-wide bitmap carries no color
+    /// detail a 24pt blur can show — it bands. The 1200px thumb is the page's own bitmap, already resident,
+    /// and holds its shape at any aspect, so it's the better source precisely in the narrow case.
+    private static func cachedSource(_ ref: String) -> PlatformImage? {
+        if let small = MediaStore.shared.cachedThumbnail(ref, maxDimension: 64),
+           min(small.size.width, small.size.height) >= 8 {
+            return small
+        }
+        // 200 is what the decode below now produces; 1200 stays only as an opportunistic hit for
+        // cards that already have the front tile's bitmap resident (free — we don't ASK for it).
+        return MediaStore.shared.cachedThumbnail(ref, maxDimension: 200)
+            ?? MediaStore.shared.cachedThumbnail(ref, maxDimension: 1200)
+            ?? MediaStore.shared.cachedThumbnail(ref, maxDimension: 64)
+    }
+
+    /// How far past the container a uniform crop-to-fill may spill before we stretch instead.
+    private static let maxBackdropOverflow: CGFloat = 4
+
+    /// The size to draw the backdrop bitmap at so it covers `container`.
+    ///
+    /// Normally that's a uniform crop-to-fill, exactly what `scaledToFill` did. The reason this is
+    /// computed by hand is the NARROW case, where `scaledToFill` silently produced no backdrop at all:
+    ///
+    /// A 64px thumbnail caps the LARGER axis (ImageIO's `kCGImageSourceThumbnailMaxPixelSize`), so a
+    /// narrow source comes back with its minor axis rounded down to a few pixels — a 40×1600 sliver
+    /// becomes 2×64. Covering a card-sized page from a 2px-wide bitmap means magnifying it ~200×, and
+    /// the filtered layer that produces runs to tens of thousands of points. Past the renderer's max
+    /// texture size `.drawingGroup()` rasterizes to NOTHING — the post draws with no backdrop, which is
+    /// the "too narrow → no blur" report. It's aspect-dependent, so it hit only some posts.
+    ///
+    /// So past `maxBackdropOverflow` we stretch to the container instead of cropping to it. Behind a
+    /// 24pt blur a stretched copy is indistinguishable from a cropped one, and the layer is then exactly
+    /// the container's size — it can never explode and never degenerate, for ANY aspect ratio.
+    static func backdropFill(source: CGSize, container: CGSize) -> CGSize {
+        // `> 0` also rejects NaN, which a zero-byte or malformed decode can hand back.
+        guard source.width > 0, source.height > 0, container.width > 0, container.height > 0 else {
+            return container
+        }
+        let scale = max(container.width / source.width, container.height / source.height)
+        let filled = CGSize(width: source.width * scale, height: source.height * scale)
+        // `scale` is the max of the two ratios, so one axis lands exactly on the container and the other
+        // spills. This is that spill.
+        let overflow = max(filled.width / container.width, filled.height / container.height)
+        return overflow <= maxBackdropOverflow ? filled : container
+    }
+}
+
+
+#if os(macOS)
+/// Reaches the enclosing NSScrollView and turns its horizontal scroller off for good.
+///
+/// SwiftUI can't do this on macOS: with "Show scroll bars: Always" in System Settings, AppKit forces
+/// LEGACY (non-overlay) scrollers and neither `showsIndicators: false` nor `.scrollIndicators(.never)`
+/// suppresses them — a grey bar draws across the bottom of the carousel. The dots already say which
+/// page you're on, so the scroller is pure noise.
+struct KillHorizontalScroller: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { NSView(frame: .zero) }
+    func updateNSView(_ v: NSView, context: Context) {
+        // async: the view isn't in the hierarchy yet at make time, so there's no scroll view to find.
+        DispatchQueue.main.async {
+            var node: NSView? = v
+            while let cur = node {
+                if let sv = cur as? NSScrollView {
+                    sv.hasHorizontalScroller = false
+                    sv.horizontalScroller = nil
+                    sv.scrollerStyle = .overlay
+                    return
+                }
+                node = cur.superview
+            }
+        }
+    }
+}
+#endif

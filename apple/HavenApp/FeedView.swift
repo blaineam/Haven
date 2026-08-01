@@ -7914,7 +7914,7 @@ nonisolated(unsafe) var lastKnownMediaWidth: CGFloat = 0
 /// trace after making rows Equatable showed generic-metadata instantiation down 36% but
 /// AG::Graph::UpdateStack::update FLAT — parent-driven rebuilds were being skipped while the card's
 /// own store subscriptions kept dirtying it directly. This is the first of those four moved down.
-private struct MyAvatar: View {
+struct MyAvatar: View {
     let size: CGFloat
     @ObservedObject private var profile = ProfileStore.shared
     var body: some View { HavenAvatar(image: profile.avatar, emoji: profile.emoji, size: size) }
@@ -7938,7 +7938,7 @@ extension PostCard: Equatable {
 ///
 /// It owns its own sheet state — `showPicker`/`showDetail` were @State on PostCard used nowhere but
 /// here, so presenting a picker re-evaluated the entire card.
-private struct PostReactionsRow: View {
+struct PostReactionsRow: View {
     let reactions: [ReactionFfi]
     let onReact: (String) -> Void
     let onUnreact: (String) -> Void
@@ -8006,7 +8006,7 @@ private struct PostReactionsRow: View {
 /// ~1,600-line view, TYPING A CHARACTER re-evaluated the whole card body; now it re-evaluates a text
 /// field. The keyboard-avoidance callback still reports upward, because the feed (not the card) owns
 /// the scroll proxy that lifts the post.
-private struct PostCommentField: View {
+struct PostCommentField: View {
     let onSubmit: (String, [String]) -> Void
     var onFocus: ((Bool) -> Void)?
 
@@ -8079,7 +8079,7 @@ private struct PostCommentField: View {
 /// itself, so a pin toggle invalidates a header rather than a whole card, and it owns
 /// showBackupDetail (nothing else read it). The sheets it OPENS stay on the card, because the card
 /// is what presents them, so those arrive as bindings.
-private struct PostHeader: View {
+struct PostHeader: View {
     let item: FeedItemFfi
     let friendName: String
     let authorName: String
@@ -8370,7 +8370,7 @@ private struct PostHeader: View {
 /// nothing outside the comment list read, so opening a reaction picker used to re-evaluate the whole
 /// card. Editing still belongs to the card (it presents the alert), so that arrives as a callback
 /// rather than three bindings.
-private struct PostCommentsList: View {
+struct PostCommentsList: View {
     let item: FeedItemFfi
     let friendName: String
     let expandAllComments: Bool
@@ -8538,7 +8538,7 @@ private struct PostCommentsList: View {
 /// Grid tile for a multi-image post — one slot of the masonry layout.
 ///
 /// A leaf renderer with three inputs, lifted out of PostCard so a tile redraws without the card.
-private struct PostMasonryTile: View {
+struct PostMasonryTile: View {
     let item: FeedItemFfi
     let media: [String]
     let ref: String
@@ -8602,7 +8602,7 @@ private struct PostMasonryTile: View {
 }
 
 /// Placeholder shown while a media ref has not landed yet (or cannot be fetched).
-private struct PostMediaPlaceholder: View {
+struct PostMediaPlaceholder: View {
     let item: FeedItemFfi
     let ref: String
 
@@ -8618,7 +8618,7 @@ private struct PostMediaPlaceholder: View {
 }
 
 /// The carousel's page dots.
-private struct PostCarouselDots: View {
+struct PostCarouselDots: View {
     let count: Int
     let currentPage: Int
 
@@ -8685,7 +8685,7 @@ private struct PostCarouselDots: View {
 /// media anywhere invalidated every visible card, re-evaluating a ~1,600-line body to redraw one
 /// menu label. The original comment ("through the OBSERVED store, so toggling re-renders the card")
 /// had the right instinct and the wrong scope: what must re-render is the BUTTON.
-private struct KeepOnDeviceButton: View {
+struct KeepOnDeviceButton: View {
     let ref: String
     @ObservedObject private var pinned = PinnedMediaStore.shared
 
@@ -8705,7 +8705,7 @@ private struct KeepOnDeviceButton: View {
 /// AudioCoordinator resolves a post's player from its own registry, the chip only needs the item and
 /// the ref — and it observes the coordinator itself, so toggling sound redraws a chip rather than a
 /// whole card.
-private struct PostMuteButton: View {
+struct PostMuteButton: View {
     let item: FeedItemFfi
     let ref: String
     @ObservedObject var audio = AudioCoordinator.shared
@@ -8745,7 +8745,7 @@ private struct PostMuteButton: View {
 /// Self-contained — it reads its ref and MediaStore and nothing else — so it had no reason to be a
 /// method on a 1,000-line view. Part of taking the media block out of PostCard one member at a time,
 /// after three attempts to move the whole cluster by script left the file's braces unbalanced.
-private struct PostFileAttachmentPage: View {
+struct PostFileAttachmentPage: View {
     let ref: String
 
     var body: some View {
@@ -8832,25 +8832,20 @@ struct PostCard: View {
     /// video in the feed — heat with no CPU hotspot, and heat that survives AIRPLANE MODE.
     ///
     /// Mutating a class's contents is not a @State write, so the cache now actually caches.
-    @State var bag = PlayerBag()
     @State private var editCommentId: String?
     @State private var editCommentText = ""
     @State private var editCommentMedia: [String] = []
 
     struct CommentReactTarget: Identifiable { let id: String }
-    @State var currentPage = 0
-    @State var carouselScrubbing = false   // hides the carousel dots while a video is being scrubbed
     /// The card's content width, measured. The media page spans it EDGE TO EDGE: sizing the page to the
     /// media's own aspect (the old `.aspectRatio(_, .fit)`) parked a tall clip in a narrow centre column
     /// with the card's grey either side on any wide window — the page must own the width, and the media
     /// letterboxes INSIDE it against its own blurred copy.
-    @State var mediaWidth: CGFloat = lastKnownMediaWidth
     @State private var showHeart = false
     /// A "share this post as a story" composer session (nil = not sharing).
     @State private var storyShare: StoryShareTarget?
     /// Super data saver: video refs the user explicitly tapped play for. We pull those bytes and
     /// auto-start once they land (normal data-saver mode never autoplays).
-    @State var dataSaverPendingPlay: Set<String> = []
 
     /// The centre must have been reported BY THIS CARD'S OWN FEED. Without the container check a
     /// post living in two live containers (your own video is in both the circle feed and your
@@ -8948,10 +8943,10 @@ struct PostCard: View {
                     // scrub itself (so its hold-to-pause and drag-to-scrub aren't stolen). For
                     // everything else the post-level tap gestures drive mute + heart.
                     if isSingleVideoPost {
-                        mediaView
+                        postMedia
                             .overlay { if showHeart { heartBurst } }
                     } else {
-                        mediaView
+                        postMedia
                             .overlay { if showHeart { heartBurst } }
                             .onTapGesture(count: 2) { heartIt() }       // double-tap to heart
                             .onTapGesture(count: 1) { togglePostMute() } // tap to mute/unmute
@@ -8974,10 +8969,6 @@ struct PostCard: View {
             }
         }
         .havenCard()
-        .onAppear { syncPlayback() }
-        .onDisappear { teardownPlayers() }
-        .onChange(of: audio.centeredPostId) { syncPlayback() }
-        .onChange(of: currentPage) { if isActive { playVisibleVideo() } }
         .sheet(isPresented: $showEdit) { EditPostSheet(item: item) }
         .sheet(isPresented: $showReport) { ReportSheet(item: item, authorName: authorName) }
         .havenFullScreenCover(item: $zoomTarget, wide: true) { t in MediaZoomViewer(refs: t.refs, index: t.index) }
@@ -9077,168 +9068,8 @@ struct PostCard: View {
     /// here. The cost is one 200px bitmap blurred once per visible page (`.drawingGroup` rasterizes
     /// it), and carousel pages are lazy — which is a much better trade than a flat grey letterbox.
 
-    /// The measured width of a post's media column, so a page can span the card rather than shrink to the
-/// media's own shape. `max` because the reducer sees one value per card.
-struct MediaWidthKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
-}
 
-/// The blurred backdrop itself — SELF-LOADING, which is the whole reason it's a view and not a
-/// `@ViewBuilder` helper reading the thumbnail cache inline.
-///
-/// It used to be exactly that: a cache PEEK evaluated in `PostCard.body`. But nothing ever tells a
-/// card that its thumbnail has since landed — `FeedImage` decodes off-main and swaps the bitmap into
-/// JUST itself, deliberately WITHOUT nudging a feed refresh (that refresh is what used to flash
-/// already-shown media and chop the scroll). So a card whose body ran before its thumbnail was
-/// resident saw an empty cache, drew no backdrop, and was never re-evaluated to notice otherwise.
-/// It stayed flat for the life of the card.
-///
-/// That is the "top posts have no blur behind them" report. The cards you scroll DOWN to are built
-/// after their decode finishes, so they look right; the ones on screen at launch race it and lose.
-/// On a tall Mac window those top cards are also never recycled, so they never got a second chance —
-/// which is why it read as a macOS bug even though the race is the same everywhere.
-///
-/// Holding its own `@State` bitmap keeps the property that made the old design worth having: a
-/// finished decode re-renders this one backdrop, never the feed. Loading is awaited via
-/// `thumbnailAsync`, which decodes off the main thread (and generates a video's poster off-thread),
-/// so the backdrop still never decodes on the scroll hot path.
-struct BlurredMediaBackdrop: View {
-    let ref: String
-    @State private var img: PlatformImage?
-    /// Which ref `img` belongs to — a lazy cell reused for another post must not show the old blur.
-    @State private var loadedRef: String?
 
-    var body: some View {
-        Group {
-            if let img, loadedRef == ref {
-                // GeometryReader (not `Color.clear.overlay { … .scaledToFill() }`) so the fill size is
-                // COMPUTED and bounded — see `backdropFill`. `scaledToFill` let the layer size run away on a
-                // narrow source, and a runaway layer is exactly what made the backdrop vanish.
-                GeometryReader { g in
-                    let fill = Self.backdropFill(source: img.size, container: g.size)
-                    Image(platformImage: img)
-                        .resizable()
-                        .frame(width: fill.width, height: fill.height)
-                        .position(x: g.size.width / 2, y: g.size.height / 2)
-                        .blur(radius: 24, opaque: true)
-                }
-                .clipped()
-                // Rasterize the blur ONCE instead of re-running it every scroll frame — a 24pt blur
-                // re-composited per frame is what made scrolling past a post chop.
-                .drawingGroup()
-                .allowsHitTesting(false)
-            }
-        }
-        .task(id: ref) {
-            if let cached = Self.cachedSource(ref) { img = cached; loadedRef = ref; return }
-            img = nil; loadedRef = nil
-            // A 200px bucket, NOT the 1200px one. This is a 24pt-blurred wash stretched to fill —
-            // it cannot show detail, so decoding full-size for it buys nothing and costs plenty.
-            // The old code took 1200px to share the front tile's decode, but it also RETAINS that
-            // bitmap in @State for the life of the card: every visible post held a 1200px image
-            // alive purely to be blurred out of recognition. A feed of freshly-synced media is then
-            // tens of MB of retained bitmaps, which is memory pressure, which is cache churn and a
-            // warm phone — reported as the phone heating while pulling media from a peer's relay.
-            // 200px is ~36x fewer pixels and visually identical once blurred.
-            //
-            // KEEP the returned bitmap. The old code discarded it and re-peeked the NSCache —
-            // which iOS purges on every memory warning — so under pressure the peek came back nil,
-            // `img` stayed nil forever, and the letterbox rendered the card's pure-black dark-mode
-            // surface (the "background blur is just black on my iPhone" report). The front tile
-            // never broke because FeedImage keeps its decode's return value; now the backdrop is
-            // exactly as pressure-proof.
-            let decoded = await MediaStore.shared.thumbnailAsync(ref, maxDimension: 200)
-            guard !Task.isCancelled else { return }
-            img = Self.cachedSource(ref) ?? decoded
-            // Decode failed outright (e.g. a video poster not generated yet): leave loadedRef nil
-            // so a later .task re-run retries instead of pinning an empty backdrop.
-            loadedRef = img == nil ? nil : ref
-        }
-    }
-
-    /// The bitmap to blur. Falls back through sizes because the 64px thumb ALONE is not dependable: it
-    /// lives in an NSCache that evicts under pressure (the backdrop would vanish from a post that had
-    /// one a moment ago), and for a video it's nil until the poster finishes generating off-thread.
-    /// The 1200px thumb is already resident — it's what the page itself draws — so the fallback is
-    /// free in the case that matters. Blurring a bigger bitmap costs nothing extra once rasterized.
-    ///
-    /// Cache PEEK only — no decode happens here. The decode is awaited in `.task`, off the main thread.
-    ///
-    /// The 64px thumb is preferred ONLY while it still has pixels to blur. A narrow source collapses its
-    /// minor axis at that size (a 40×1600 sliver thumbs to 2×64), and a 2px-wide bitmap carries no color
-    /// detail a 24pt blur can show — it bands. The 1200px thumb is the page's own bitmap, already resident,
-    /// and holds its shape at any aspect, so it's the better source precisely in the narrow case.
-    private static func cachedSource(_ ref: String) -> PlatformImage? {
-        if let small = MediaStore.shared.cachedThumbnail(ref, maxDimension: 64),
-           min(small.size.width, small.size.height) >= 8 {
-            return small
-        }
-        // 200 is what the decode below now produces; 1200 stays only as an opportunistic hit for
-        // cards that already have the front tile's bitmap resident (free — we don't ASK for it).
-        return MediaStore.shared.cachedThumbnail(ref, maxDimension: 200)
-            ?? MediaStore.shared.cachedThumbnail(ref, maxDimension: 1200)
-            ?? MediaStore.shared.cachedThumbnail(ref, maxDimension: 64)
-    }
-
-    /// How far past the container a uniform crop-to-fill may spill before we stretch instead.
-    private static let maxBackdropOverflow: CGFloat = 4
-
-    /// The size to draw the backdrop bitmap at so it covers `container`.
-    ///
-    /// Normally that's a uniform crop-to-fill, exactly what `scaledToFill` did. The reason this is
-    /// computed by hand is the NARROW case, where `scaledToFill` silently produced no backdrop at all:
-    ///
-    /// A 64px thumbnail caps the LARGER axis (ImageIO's `kCGImageSourceThumbnailMaxPixelSize`), so a
-    /// narrow source comes back with its minor axis rounded down to a few pixels — a 40×1600 sliver
-    /// becomes 2×64. Covering a card-sized page from a 2px-wide bitmap means magnifying it ~200×, and
-    /// the filtered layer that produces runs to tens of thousands of points. Past the renderer's max
-    /// texture size `.drawingGroup()` rasterizes to NOTHING — the post draws with no backdrop, which is
-    /// the "too narrow → no blur" report. It's aspect-dependent, so it hit only some posts.
-    ///
-    /// So past `maxBackdropOverflow` we stretch to the container instead of cropping to it. Behind a
-    /// 24pt blur a stretched copy is indistinguishable from a cropped one, and the layer is then exactly
-    /// the container's size — it can never explode and never degenerate, for ANY aspect ratio.
-    static func backdropFill(source: CGSize, container: CGSize) -> CGSize {
-        // `> 0` also rejects NaN, which a zero-byte or malformed decode can hand back.
-        guard source.width > 0, source.height > 0, container.width > 0, container.height > 0 else {
-            return container
-        }
-        let scale = max(container.width / source.width, container.height / source.height)
-        let filled = CGSize(width: source.width * scale, height: source.height * scale)
-        // `scale` is the max of the two ratios, so one axis lands exactly on the container and the other
-        // spills. This is that spill.
-        let overflow = max(filled.width / container.width, filled.height / container.height)
-        return overflow <= maxBackdropOverflow ? filled : container
-    }
-}
-
-#if os(macOS)
-/// Reaches the enclosing NSScrollView and turns its horizontal scroller off for good.
-///
-/// SwiftUI can't do this on macOS: with "Show scroll bars: Always" in System Settings, AppKit forces
-/// LEGACY (non-overlay) scrollers and neither `showsIndicators: false` nor `.scrollIndicators(.never)`
-/// suppresses them — a grey bar draws across the bottom of the carousel. The dots already say which
-/// page you're on, so the scroller is pure noise.
-struct KillHorizontalScroller: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { NSView(frame: .zero) }
-    func updateNSView(_ v: NSView, context: Context) {
-        // async: the view isn't in the hierarchy yet at make time, so there's no scroll view to find.
-        DispatchQueue.main.async {
-            var node: NSView? = v
-            while let cur = node {
-                if let sv = cur as? NSScrollView {
-                    sv.hasHorizontalScroller = false
-                    sv.horizontalScroller = nil
-                    sv.scrollerStyle = .overlay
-                    return
-                }
-                node = cur.superview
-            }
-        }
-    }
-}
-#endif
 
 /// Shown for a media reference whose bytes haven't arrived yet, so the post doesn't look
     /// broken while it's still downloading from the sender, a relay, or the shared mailbox.
@@ -9269,15 +9100,6 @@ struct KillHorizontalScroller: NSViewRepresentable {
         }
     }
 
-    func masonryTile(_ ref: String, height: CGFloat) -> some View {
-        PostMasonryTile(item: item, media: realMedia, ref: ref, height: height, zoomTarget: $zoomTarget)
-    }
-    func mediaLoadingPlaceholder(_ ref: String) -> some View {
-        PostMediaPlaceholder(item: item, ref: ref)
-    }
-    func carouselDots(_ count: Int) -> some View {
-        PostCarouselDots(count: count, currentPage: currentPage)
-    }
 
     func singleAspect(_ ref: String) -> CGFloat { postSingleAspect(ref, in: item.media) }
     func letterboxes(_ ref: String, in containerAspect: CGFloat) -> Bool {
@@ -9286,6 +9108,29 @@ struct KillHorizontalScroller: NSViewRepresentable {
     func shareURL(_ ref: String) -> URL? { postShareURL(ref) }
 
     func keepOnDeviceButton(_ ref: String) -> some View { KeepOnDeviceButton(ref: ref) }
+
+    /// Kept on the card: the single-video gesture branch and storyableMedia read them, and both are
+    /// pure functions of item.media — no player state involved.
+    var realMedia: [String] {
+        MediaVariants.displayRefs(item.media).filter { SharedLocation.parse($0) == nil }
+    }
+    func isVideo(_ r: String) -> Bool { MediaKind(ref: r) == .video }
+    var isSingleVideoPost: Bool {
+        let m = realMedia
+        return m.count == 1 && m.first.map(isVideo) == true
+    }
+
+    /// The media, as a CHILD VIEW.
+    ///
+    /// This is the last step of breaking PostCard up, and the one with a measurable point: the media
+    /// owns its own state now (player cache, carousel page, measured width, data-saver taps), so
+    /// paging a carousel or a width measurement landing re-renders the MEDIA — not the header,
+    /// reactions and comments along with it. The playback lifecycle hooks moved with it, because they
+    /// belong to the thing that owns the players.
+    private var postMedia: some View {
+        PostMediaView(item: item, isActive: isActive, onHeart: { heartIt() },
+                      onToggleMute: { togglePostMute() }, zoomTarget: $zoomTarget)
+    }
 
     private var header: some View {
         PostHeader(item: item, friendName: friendName, authorName: authorName,

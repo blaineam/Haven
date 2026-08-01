@@ -7886,7 +7886,7 @@ struct FeedView: View {
 /// once per card, is what made the feed jump up and down during a scroll (for photos as much as videos).
 /// Seeding a new card from the last measured width lets it compute the correct height on its FIRST pass.
 /// Written and read only from SwiftUI layout on the main thread.
-nonisolated(unsafe) private var lastKnownMediaWidth: CGFloat = 0
+nonisolated(unsafe) var lastKnownMediaWidth: CGFloat = 0
 
 /// EQUATABLE so SwiftUI can SKIP a row whose content did not change.
 ///
@@ -8708,7 +8708,7 @@ private struct KeepOnDeviceButton: View {
 private struct PostMuteButton: View {
     let item: FeedItemFfi
     let ref: String
-    @ObservedObject private var audio = AudioCoordinator.shared
+    @ObservedObject var audio = AudioCoordinator.shared
 
     var body: some View {
         Button {
@@ -8766,6 +8766,12 @@ private struct PostFileAttachmentPage: View {
 }
 
 struct PostCard: View {
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var hSizeClass
+    var isPortraitPhone: Bool { hSizeClass == .compact }
+    #else
+    var isPortraitPhone: Bool { false }
+    #endif
     let item: FeedItemFfi
     let friendName: String
     let onReact: (String) -> Void
@@ -8780,8 +8786,8 @@ struct PostCard: View {
     /// the ScrollViewReader proxy) can lift this post above the keyboard.
     var onCommentFocus: ((Bool) -> Void)? = nil
 
-    @Environment(\.havenFeedContainer) private var feedContainer
-    @ObservedObject private var audio = AudioCoordinator.shared
+    @Environment(\.havenFeedContainer) var feedContainer
+    @ObservedObject var audio = AudioCoordinator.shared
     /// NOT @ObservedObject — deliberately.
     ///
     /// FeedStore publishes up to 40 TIMES PER SECOND on device (measured: "FeedStore published 204x
@@ -8798,26 +8804,19 @@ struct PostCard: View {
     /// requestMedia, refresh, postStory, unsend) or reads of activeCircleId, which changes rarely.
     /// Post CONTENT arrives through `item`, handed down by the feed — which does observe the store —
     /// so a changed post still re-renders, now via the value rather than a global notification.
-    private var feed: FeedStore { FeedStore.shared }
+    var feed: FeedStore { FeedStore.shared }
     /// Observed so "Keep on this device" visibly changes state. Reading the store WITHOUT observing
     /// it meant the pin was recorded but nothing on screen moved — the menu closed and the post
     /// looked identical, so a working toggle read as a dead button.
-    #if os(iOS)
-    @Environment(\.horizontalSizeClass) private var hSizeClass
-    private var isPortraitPhone: Bool { hSizeClass == .compact }
-    #else
-    private var isPortraitPhone: Bool { false }
-    #endif
     /// A single photo/video sizes to fill the WIDTH on a portrait phone (a tall shot fills the column
     /// instead of shrinking to a narrow sliver), but fits the WHOLE image within a shorter cap on wider
     /// layouts (iPad / landscape / macOS) so you can see all of it at once.
-    private var singleMediaMaxHeight: CGFloat { isPortraitPhone ? 680 : 460 }
     @State private var showEdit = false
     @State private var showReport = false
     @State private var linkCopied = false
     /// Set when the backup indicator is tapped — "which relays actually hold this?"
     @State private var showBackupDetail = false
-    @State private var zoomTarget: ZoomTarget?
+    @State var zoomTarget: ZoomTarget?
     /// A REFERENCE-TYPE cache, deliberately — this is the fix for videos playing twice.
     ///
     /// These were `@State` dictionaries, and `playerFor` writes to them. But `playerFor` is called
@@ -8833,44 +8832,37 @@ struct PostCard: View {
     /// video in the feed — heat with no CPU hotspot, and heat that survives AIRPLANE MODE.
     ///
     /// Mutating a class's contents is not a @State write, so the cache now actually caches.
-    @MainActor final class PlayerBag {
-        /// Identity of this CARD INSTANCE's cache. Two creations for one clip with DIFFERENT bag ids
-        /// means two live PostCards; the same id would mean the cache itself is failing.
-        let id = UUID().uuidString.prefix(4)
-        var players: [String: AVPlayer] = [:]
-        var observers: [String: NSObjectProtocol] = [:]   // loop observers, removed on teardown
-    }
-    @State private var bag = PlayerBag()
+    @State var bag = PlayerBag()
     @State private var editCommentId: String?
     @State private var editCommentText = ""
     @State private var editCommentMedia: [String] = []
 
     struct CommentReactTarget: Identifiable { let id: String }
-    @State private var currentPage = 0
-    @State private var carouselScrubbing = false   // hides the carousel dots while a video is being scrubbed
+    @State var currentPage = 0
+    @State var carouselScrubbing = false   // hides the carousel dots while a video is being scrubbed
     /// The card's content width, measured. The media page spans it EDGE TO EDGE: sizing the page to the
     /// media's own aspect (the old `.aspectRatio(_, .fit)`) parked a tall clip in a narrow centre column
     /// with the card's grey either side on any wide window — the page must own the width, and the media
     /// letterboxes INSIDE it against its own blurred copy.
-    @State private var mediaWidth: CGFloat = lastKnownMediaWidth
+    @State var mediaWidth: CGFloat = lastKnownMediaWidth
     @State private var showHeart = false
     /// A "share this post as a story" composer session (nil = not sharing).
     @State private var storyShare: StoryShareTarget?
     /// Super data saver: video refs the user explicitly tapped play for. We pull those bytes and
     /// auto-start once they land (normal data-saver mode never autoplays).
-    @State private var dataSaverPendingPlay: Set<String> = []
+    @State var dataSaverPendingPlay: Set<String> = []
 
     /// The centre must have been reported BY THIS CARD'S OWN FEED. Without the container check a
     /// post living in two live containers (your own video is in both the circle feed and your
     /// profile) had both copies claim to be active, and both built an AVPlayer for the same clip —
     /// two decode sessions playing over each other, only one of them known to the coordinator.
-    private var isActive: Bool {
+    var isActive: Bool {
         audio.centeredPostId == item.id && audio.centeredContainer == feedContainer
     }
 
     /// The post's real media, minus synthetic refs (a `geo:` location pin has no bytes). A story needs
     /// something to show, so this is what gates the "Share as story" action.
-    private var storyableMedia: [String] { realMedia.filter { !MediaStore.isSynthetic($0) } }
+    var storyableMedia: [String] { realMedia.filter { !MediaStore.isSynthetic($0) } }
 
     /// Display name for the post's author — resolved from your contacts by node id.
     private var authorName: String {
@@ -8882,27 +8874,17 @@ struct PostCard: View {
         return ContactsStore.shared.name(forNodePrefix: c.authorShort) ?? friendName
     }
 
-    private var primaryVideoPlayer: AVPlayer? {
-        let media = realMedia
-        guard media.count == 1, let ref = media.first, isVideo(ref) else { return nil }
-        return bag.players[ref]
-    }
     /// A post that is exactly one video — the GestureVideoPlayer owns all of its gestures.
-    private var isSingleVideoPost: Bool {
-        let media = realMedia
-        return media.count == 1 && (media.first.map(isVideo) ?? false)
-    }
     /// Kind from the REF (a cheap string parse — refs encode img_/vid_/aud_), never `item(ref)`. `item(_:)`
     /// decodes the bitmap / generates the video poster on the main thread on a cache miss, and this is
     /// called per media ref all over layout and scrolling (mediaView, isSingleVideoPost, primaryVideoPlayer,
     /// playVisibleVideo). On a carousel or photo-grid post that was several decodes per layout pass — the
     /// same trap the masonry tile already documents.
-    private func isVideo(_ ref: String) -> Bool { MediaKind(ref: ref) == .video }
 
     private func react(_ e: String) { EmojiStore.shared.record(e); onReact(e) }
 
     /// Double-tap a post to ❤️ it (with an Instagram-style heart pop).
-    private func heartIt() {
+    func heartIt() {
         react("❤️")
         withAnimation(HavenTheme.bouncy) { showHeart = true }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
@@ -8911,7 +8893,7 @@ struct PostCard: View {
     }
 
     /// Single-tap a post's media to mute/unmute its sound (video audio or its song).
-    private func togglePostMute() {
+    func togglePostMute() {
         let hasVideo = item.media.contains(where: isVideo)
         // Make sure this post is the active audio source first, so the toggle acts on it.
         if (hasVideo || item.music != nil), audio.activePostId != item.id {
@@ -9029,331 +9011,39 @@ struct PostCard: View {
     /// degrades to a forever-spinner tile (MediaStore has no file for it).
     /// Media slides the card actually renders. Drops location pins, synthetic markers, and
     /// original companions (those only surface via "Show original").
-    private var realMedia: [String] {
-        MediaVariants.displayRefs(item.media).filter { SharedLocation.parse($0) == nil }
-    }
 
     /// A full-width media page's height: as tall as the media needs, capped. A page WIDER than the media's
     /// own shape is the point — the exposed strip either side is where the blurred backdrop shows.
-    private func pageHeight(_ aspect: CGFloat) -> CGFloat {
-        guard mediaWidth > 0 else { return singleMediaMaxHeight }
-        return min(singleMediaMaxHeight, mediaWidth / aspect)
-    }
 
     /// The page's ACTUAL aspect once it spans the card — what the letterbox test must compare against.
-    private func pageAspect(_ aspect: CGFloat) -> CGFloat {
-        guard mediaWidth > 0 else { return aspect }
-        return mediaWidth / pageHeight(aspect)
-    }
 
-    @ViewBuilder private var mediaView: some View {
-        VStack(spacing: 8) {
-            if let geo = item.media.first(where: { SharedLocation.parse($0) != nil }),
-               let loc = SharedLocation.parse(geo) {
-                LocationMapView(lat: loc.lat, lon: loc.lon, label: loc.label)
-            }
-            let media = realMedia
-            if media.count == 1, let ref = media.first {
-                let video = isVideo(ref)
-                ZStack(alignment: .bottomTrailing) {
-                    // containerAspect == the media's own aspect ⇒ the inner per-page gate stays off; the
-                    // outer backdrop below covers the whole page, so we don't blur the same thing twice.
-                    mediaPage(ref, containerAspect: singleAspect(ref))
-                    if video { muteButton(ref) }
-                }
-                .frame(maxWidth: .infinity)
-                .frame(height: pageHeight(singleAspect(ref)))
-                .background { blurredBackdrop(ref) }
-                .clipShape(RoundedRectangle(cornerRadius: 16))
-                // Tap-to-zoom only for images. For a video, the player owns the single tap
-                // (mute) / hold (pause) / drag (scrub); a zoom tap here would swallow them.
-                .modifier(ConditionalTap(enabled: !video) { zoomTarget = ZoomTarget(refs: media, index: 0) })
-            } else if (2...10).contains(media.count) {
-                // Mixed aspects no longer force the grid — each page fits inside a shared shape and
-                // its own blurred backdrop masks the difference, which beats a 2-photo masonry.
-                // (A location-only post has NO real media: it must fall through to nothing.)
-                mediaCarousel(media)
-            } else if !media.isEmpty {
-                masonry   // a big set → the staggered grid; tap any to zoom
-            }
-        }
-        // Measure the card's content width — pageHeight/pageAspect need it to span the card. maxWidth
-        // resolves from the PARENT's proposal, so reading it back here can't feed itself.
-        .frame(maxWidth: .infinity)
-        .background(GeometryReader { g in
-            Color.clear.preference(key: MediaWidthKey.self, value: g.size.width)
-        })
-        .onPreferenceChange(MediaWidthKey.self) { w in
-            // Remember it for the NEXT card to be created, so it never has to lay out at zero width first.
-            if w > 0 { mediaWidth = w; lastKnownMediaWidth = w }
-        }
-    }
 
     /// True when a media set all share (near-)equal aspect ratios — such a set keeps its exact shape
     /// in the carousel (no backdrop needed, since nothing letterboxes).
-    private func allSameAspect(_ media: [String]) -> Bool {
-        guard let a0 = media.first.map(singleAspect) else { return false }
-        return media.allSatisfy { abs(singleAspect($0) - a0) < 0.06 }
-    }
 
     /// The carousel's page shape. A uniform set keeps its exact aspect; a MIXED set takes the TALLEST
     /// item's, so no page is ever cropped — clamped so one 9:16 clip can't squeeze the whole card into
     /// a narrow column (the remaining pages letterbox against their own blurred backdrop instead).
-    private func carouselAspect(_ media: [String]) -> CGFloat {
-        guard let tallest = media.map(singleAspect).min() else { return 4.0 / 3.0 }
-        if allSameAspect(media) { return tallest }
-        return min(1.91, max(0.8, tallest))
-    }
 
     /// A full-width swipeable pager. The visible page's video autoplays as you swipe
     /// (playVisibleVideo keys off `currentPage`), matching the single-media behavior.
-    @ViewBuilder private func mediaCarousel(_ media: [String]) -> some View {
-        let aspect = carouselAspect(media)
-        // A ScrollView pager (NOT TabView) so it works on macOS too — a TabView renders its pages as
-        // tab-bar items on macOS, dumping the dots into the nav toolbar. Custom dots overlay the carousel.
-        // showsIndicators:false in the initializer (not just the .scrollIndicators modifier) — on macOS the
-        // modifier alone doesn't suppress AppKit's legacy scroller, which showed an ugly bar under the dots.
-        ScrollView(.horizontal, showsIndicators: false) {
-            LazyHStack(spacing: 0) {
-                ForEach(Array(media.enumerated()), id: \.offset) { i, ref in
-                    ZStack(alignment: .bottomTrailing) {
-                        // The player scrubs only from the bottom 1/3 (top 2/3 pages the carousel); a photo
-                        // page has no scrub strip so the whole page pages.
-                        mediaPage(ref, containerAspect: pageAspect(aspect), inCarousel: true,
-                                  onScrubbing: { carouselScrubbing = $0 })
-                        if isVideo(ref) { muteButton(ref) }
-                    }
-                    .containerRelativeFrame(.horizontal)   // each page == the carousel's width
-                    .modifier(ConditionalTap(enabled: !isVideo(ref)) { zoomTarget = ZoomTarget(refs: media, index: i) })
-                    .id(i)
-                }
-            }
-            .scrollTargetLayout()
-            #if os(macOS)
-            .background(KillHorizontalScroller().frame(width: 0, height: 0))
-            #endif
-        }
-        .scrollTargetBehavior(.paging)
-        .scrollPosition(id: Binding<Int?>(get: { currentPage }, set: { currentPage = $0 ?? currentPage }))
-        // .never, not .hidden: on macOS .hidden still leaves AppKit's legacy scroller drawing a bar
-        // across the bottom of the carousel.
-        .scrollIndicators(.never)
-        // Pages are containerRelativeFrame'd to this ScrollView — clip to it so a neighbouring page's
-        // backdrop can't bleed past the edge mid-swipe.
-        .clipped()
-        .scrollDisabled(carouselScrubbing)   // while scrubbing a video, don't let a swipe page the carousel
-        #if os(macOS)
-        // macOS: a horizontal ScrollView only pages on a trackpad two-finger swipe — a plain MOUSE has no
-        // horizontal scroll, so a click-drag paging gesture is the mouse equivalent. Simultaneous + onEnded
-        // + thresholds so it never steals a tap-to-zoom, a vertical scroll, or a video scrub.
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 20)
-                .onEnded { value in
-                    guard !carouselScrubbing,
-                          abs(value.translation.width) > abs(value.translation.height),
-                          abs(value.translation.width) > 40 else { return }
-                    if value.translation.width < 0, currentPage < media.count - 1 {
-                        withAnimation(.easeOut(duration: 0.22)) { currentPage += 1 }
-                    } else if value.translation.width > 0, currentPage > 0 {
-                        withAnimation(.easeOut(duration: 0.22)) { currentPage -= 1 }
-                    }
-                }
-        )
-        #endif
-        // Full-width pages (NOT .aspectRatio(_, .fit), which shrank the whole carousel to a centre column
-        // on a wide window) — each page letterboxes inside against its own blurred backdrop.
-        .frame(maxWidth: .infinity)
-        .frame(height: pageHeight(aspect))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
-        .overlay(alignment: .bottom) {
-            // Dots hide while scrubbing so the scrub bar doesn't collide with them.
-            if media.count > 1 && !carouselScrubbing { carouselDots(media.count) }
-        }
-    }
 
 
     /// Horizontally-scrolling staggered gallery: items flow across two fixed-height rows and
     /// you swipe sideways through them. Each tile keeps its natural aspect (width = row · aspect).
-    private var masonry: some View {
-        let rows = 2
-        let rowHeight: CGFloat = 150
-        let media = realMedia
-        let rowItems = (0..<rows).map { ri in
-            media.enumerated().filter { $0.offset % rows == ri }.map { $0.element }
-        }
-        return ScrollView(.horizontal, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(0..<rows, id: \.self) { ri in
-                    HStack(spacing: 6) {
-                        ForEach(rowItems[ri], id: \.self) { ref in masonryTile(ref, height: rowHeight) }
-                    }
-                }
-            }
-            .padding(.horizontal, 2)
-        }
-        .frame(height: rowHeight * CGFloat(rows) + 6)
-    }
 
 
-    @ViewBuilder private func mediaPage(_ ref: String, containerAspect: CGFloat,
-                                        inCarousel: Bool = false,
-                                        onScrubbing: @escaping (Bool) -> Void = { _ in }) -> some View {
-        if isVideo(ref) {
-            // No contextMenu for videos — the long-press is reserved for the player's
-            // hold-to-pause. Save/Share live in the mute control's menu instead.
-            mediaPageContent(ref, containerAspect: containerAspect, inCarousel: inCarousel, onScrubbing: onScrubbing)
-        } else {
-            mediaPageContent(ref, containerAspect: containerAspect)
-                .contextMenu {
-                    Button { MediaSaver.save(ref) } label: { Label("Save to Photos", systemImage: "square.and.arrow.down") }
-                    if let url = shareURL(ref) {
-                        ShareLink(item: url) { Label("Share…", systemImage: "square.and.arrow.up") }
-                    }
-                    keepOnDeviceButton(ref)
-                }
-        }
-    }
 
     /// The on-disk file to hand to the system share sheet (video file, else the image).
 
-    @ViewBuilder private func mediaPageContent(_ ref: String, containerAspect: CGFloat,
-                                               inCarousel: Bool = false,
-                                               onScrubbing: @escaping (Bool) -> Void = { _ in }) -> some View {
-        // Decide from the REF + a cheap file check, never `item(ref)`: that decodes the bitmap / generates
-        // the video poster ON THE MAIN THREAD on a cache miss, and this runs for every page of every media
-        // post — a 3-video carousel paid three decodes per layout pass, which is the carousel/grid jitter.
-        let dataSaver = SettingsStore.shared.superDataSaver
-        let hasVideo = MediaStore.shared.hasLocalFile(ref)
-        // Super data saver + video not yet downloaded: show the poster still (if we have one) with a
-        // play affordance. Tapping play requests the video bytes and only then builds an AVPlayer.
-        if dataSaver, MediaKind(ref: ref) == .video, !hasVideo {
-            let poster = MediaVariants.poster(for: ref, in: item.media)
-            let waiting = dataSaverPendingPlay.contains(ref)
-            ZStack {
-                if let poster, MediaStore.shared.hasLocalFile(poster) {
-                    FeedImage(ref: poster, maxDimension: 1200, contentMode: .fit) { mediaLoadingPlaceholder(ref) }
-                } else {
-                    mediaLoadingPlaceholder(ref)
-                }
-                if waiting {
-                    ProgressView()
-                        .progressViewStyle(.circular)
-                        .tint(.white)
-                        .scaleEffect(1.4)
-                        .padding(18)
-                        .background(Circle().fill(Color.black.opacity(0.4)))
-                } else {
-                    Image(systemName: "play.circle.fill").font(.system(size: 56))
-                        .foregroundStyle(.white.opacity(0.92)).shadow(radius: 6)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                // Explicit play → download the video (and only the video), then start once it lands.
-                dataSaverPendingPlay.insert(ref)
-                feed.requestMedia(ref, circleId: feed.activeCircleId)
-            }
-            .background { pageBackdrop(poster ?? ref, containerAspect: containerAspect) }
-        } else if hasVideo {
-            // NO AVPlayer FOR A CARD THAT IS NOT CENTERED.
-            //
-            // playVisibleVideo() already restricts PLAYBACK to the centered post, but creation was
-            // never gated the same way: this branch built an AVPlayer for every visible video tile,
-            // and a player holding an item holds a decode pipeline whether or not it is playing. A
-            // scroll through a run of video posts therefore kept several decode sessions alive at
-            // once — and teardownPlayers() only runs on .onDisappear, which a LazyVStack defers.
-            //
-            // Reported directly: "videos get warmer than just photo posts". That is what this
-            // predicts, and it is invisible to a Time Profiler because hardware decode is not CPU
-            // time — six CPU traces showed no hotspot and a Nominal thermal state throughout.
-            //
-            // An off-centre card shows its poster still instead, which is the same thing the super
-            // data-saver branch above renders. Becoming centered flips isActive, the body
-            // re-evaluates, and the player is built then — so playback is unchanged, it just stops
-            // paying for clips nobody is watching.
-            if MediaKind(ref: ref) == .video, !isActive {
-                let poster = MediaVariants.poster(for: ref, in: item.media)
-                ZStack {
-                    if let poster, MediaStore.shared.hasLocalFile(poster) {
-                        FeedImage(ref: poster, maxDimension: 1200, contentMode: .fit) { mediaLoadingPlaceholder(ref) }
-                    } else {
-                        mediaLoadingPlaceholder(ref)
-                    }
-                    Image(systemName: "play.circle.fill").font(.system(size: 44))
-                        .foregroundStyle(.white.opacity(0.85)).shadow(radius: 5)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background { pageBackdrop(poster ?? ref, containerAspect: containerAspect) }
-            } else if MediaKind(ref: ref) == .video, let url = MediaStore.shared.storagePath(for: ref) {
-                // Data saver with local video: don't autoplay until the user asked (pending play
-                // from a poster tap, or a first tap on an already-local clip). Tap then toggles mute.
-                let player = playerFor(ref, url)
-                GestureVideoPlayer(player: player,
-                                   onTap: { dataSaverVideoTap(ref, player) },
-                                   onDoubleTap: { heartIt() },
-                                   inCarousel: inCarousel,
-                                   onScrubbing: onScrubbing)
-                    .background { pageBackdrop(ref, containerAspect: containerAspect) }
-                    .onAppear {
-                        if dataSaver, dataSaverPendingPlay.contains(ref) {
-                            startDataSaverPlayback(ref, player)
-                        }
-                        // HAND THE COORDINATOR THIS PLAYER.
-                        //
-                        // Players are now built when a card reaches the centre, and centering can run
-                        // BEFORE the body builds one — playVisibleVideo passes `primaryVideoPlayer`,
-                        // which reads the players dict and is nil at that moment. The coordinator then
-                        // holds nil (or a torn-down player) and its fades act on nothing, so the
-                        // speaker toggled state while the clip stayed silent. This fires immediately
-                        // after creation, which is the first moment the real object exists.
-                        if audio.activePostId == item.id {
-                            audio.start(postId: item.id, track: item.music, video: player,
-                                        muteVideo: item.muteVideo)
-                        }
-                    }
-            } else if MediaKind(ref: ref) == .file {
-                fileAttachmentPage(ref)
-            } else {
-                // Non-video → a ~1200px thumbnail (not the 2560px original) via the self-loading `FeedImage`:
-                // it decodes OFF the main thread and swaps into only itself, so a fast flick never hitches on
-                // a main-thread decode AND a finished decode never triggers a feed-wide refresh (the flash of
-                // already-shown media + re-rasterized blurs). Zoom uses full-res. Shows the whole image (fit).
-                FeedImage(ref: ref, maxDimension: 1200, contentMode: .fit) { mediaLoadingPlaceholder(ref) }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background { pageBackdrop(ref, containerAspect: containerAspect) }
-            }
-        } else {
-            // Referenced but not here yet — it's still coming from the sender / mailbox.
-            mediaLoadingPlaceholder(ref)
-        }
-    }
 
     /// Super data saver (and normal) single-tap on an inline video.
     /// Under data saver a paused clip's first tap means "play" — mute alone left posters dead after
     /// download because `playVisibleVideo` never auto-starts in that mode.
-    private func dataSaverVideoTap(_ ref: String, _ player: AVPlayer) {
-        if SettingsStore.shared.superDataSaver, player.rate == 0 {
-            startDataSaverPlayback(ref, player)
-            return
-        }
-        togglePostMute()
-    }
 
-    private func startDataSaverPlayback(_ ref: String, _ player: AVPlayer) {
-        dataSaverPendingPlay.remove(ref)
-        if audio.activePostId != item.id {
-            audio.start(postId: item.id, track: nil, video: player, muteVideo: item.muteVideo, immediateMusic: false)
-        }
-        #if os(iOS)
-        ensureHavenPlaybackSession()
-        #endif
-        player.seek(to: .zero)
-        player.play()
-    }
 
     /// A `file_` zip attachment: document chip with share/save affordance.
-    private func fileAttachmentPage(_ ref: String) -> some View { PostFileAttachmentPage(ref: ref) }
+    func fileAttachmentPage(_ ref: String) -> some View { PostFileAttachmentPage(ref: ref) }
 
     /// True when this page's media can't fill a `containerAspect`-shaped page — it letterboxes, exposing
     /// the card's grey behind it. A video whose poster hasn't been generated yet has no known aspect
@@ -9367,9 +9057,6 @@ struct PostCard: View {
     /// second (fill-gravity) layer off the same player renders nothing — only the most recently associated
     /// layer draws. A blurred still is the honest trade: no second decode, and behind a 24pt blur the
     /// difference between a still and a moving copy isn't visible anyway.
-    @ViewBuilder private func blurredBackdrop(_ ref: String) -> some View {
-        BlurredMediaBackdrop(ref: ref)
-    }
 
     /// The carousel's per-page backdrop.
     ///
@@ -9389,13 +9076,10 @@ struct PostCard: View {
     /// Single media never had this problem because it draws its backdrop unconditionally. Do the same
     /// here. The cost is one 200px bitmap blurred once per visible page (`.drawingGroup` rasterizes
     /// it), and carousel pages are lazy — which is a much better trade than a flat grey letterbox.
-    @ViewBuilder private func pageBackdrop(_ ref: String, containerAspect: CGFloat) -> some View {
-        blurredBackdrop(ref)
-    }
 
     /// The measured width of a post's media column, so a page can span the card rather than shrink to the
 /// media's own shape. `max` because the reducer sees one value per card.
-private struct MediaWidthKey: PreferenceKey {
+struct MediaWidthKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
@@ -9419,7 +9103,7 @@ private struct MediaWidthKey: PreferenceKey {
 /// finished decode re-renders this one backdrop, never the feed. Loading is awaited via
 /// `thumbnailAsync`, which decodes off the main thread (and generates a video's poster off-thread),
 /// so the backdrop still never decodes on the scroll hot path.
-private struct BlurredMediaBackdrop: View {
+struct BlurredMediaBackdrop: View {
     let ref: String
     @State private var img: PlatformImage?
     /// Which ref `img` belongs to — a lazy cell reused for another post must not show the old blur.
@@ -9536,7 +9220,7 @@ private struct BlurredMediaBackdrop: View {
 /// LEGACY (non-overlay) scrollers and neither `showsIndicators: false` nor `.scrollIndicators(.never)`
 /// suppresses them — a grey bar draws across the bottom of the carousel. The dots already say which
 /// page you're on, so the scroller is pure noise.
-private struct KillHorizontalScroller: NSViewRepresentable {
+struct KillHorizontalScroller: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView { NSView(frame: .zero) }
     func updateNSView(_ v: NSView, context: Context) {
         // async: the view isn't in the hierarchy yet at make time, so there's no scroll view to find.
@@ -9562,158 +9246,20 @@ private struct KillHorizontalScroller: NSViewRepresentable {
     /// The single-media tile's aspect ratio, taken from the image (or a video's thumbnail).
 
     /// The speaker chip over a video page — plus that page's Save/Share menu.
-    private func muteButton(_ ref: String) -> some View { PostMuteButton(item: item, ref: ref) }
+    func muteButton(_ ref: String) -> some View { PostMuteButton(item: item, ref: ref) }
 
     /// "Keep on this device" toggle — pins/unpins this ref in the device-local retention set so no
     /// cleanup (orphan sweep, age/size limit, or the cleanup screen) ever removes its bytes.
 
-    private func playerFor(_ ref: String, _ url: URL) -> AVPlayer {
-        if let p = bag.players[ref] { return p }
-        let p = AVPlayer(url: url)
-        // VOLUME FROM THE SHARED STATE, not a hardcoded 0.
-        //
-        // This was `p.volume = 0`, which was survivable only while players were built early and
-        // lived: the coordinator's fade would bring the volume up later. Now that a player is built
-        // when its card reaches the centre, a hardcoded 0 means the viewer's existing sound choice is
-        // applied to a player that no longer exists — the speaker read "unmuted" while the clip
-        // played silent, and toggling wrote to state nothing was listening to. Exactly the report:
-        // "shows not muted but they are playing muted and unmuting them does nothing".
-        //
-        // AudioCoordinator.videoUnmuted is the same published value the indicator draws, so the
-        // player and the icon now start from one source of truth. The full-screen viewer already
-        // did this (`p.volume = soundOn ? 1 : 0`); the feed did not.
-        // START SILENT unless THIS post is the active audio source and may be heard right now.
-        //
-        // I changed this from a hardcoded 0 earlier tonight so a rebuilt player would not lose the
-        // viewer's sound choice — but I used the GLOBAL videoUnmuted flag, which belongs to whichever
-        // post is currently the audio source. Any other post's player could therefore be built at
-        // full volume, including one built while the app was in the BACKGROUND: reported as "the post
-        // video audio is playing from the background on its own".
-        //
-        // The coordinator owns this decision (one audible post at a time, never while backgrounded,
-        // silenced, or in a call), so ask it rather than reading one of its flags in isolation.
-        p.volume = AudioCoordinator.shared.videoShouldBeAudible(forPost: item.id) ? 1 : 0
-        p.actionAtItemEnd = .none
-        // DIAGNOSTIC: every player creation, with the post and ref it belongs to. Audio is doubling
-        // with only ONE visible video, so something builds a second AVPlayer for the same clip; this
-        // says exactly what and how many. Counting creations beats reasoning about the view tree.
-        PlayerCensus.note(ref: ref, postId: item.id, container: feedContainer, bag: String(bag.id))
-        // When the clip ends, loop it (muted) and — if we're still on this post —
-        // bring the song back, so the music never stays paused under an idle video.
-        let postId = item.id
-        // CRITICAL: capture the player WEAKLY. addObserver(forName:) returns a token whose closure is
-        // retained by NotificationCenter until removed — a strong `p` capture meant every AVPlayer (and
-        // its video decode buffers) lived forever even after the card scrolled away. That was the runaway
-        // leak (memory climbed into the tens of GB). We also store the token and remove it on teardown.
-        let token = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime,
-                                               object: p.currentItem, queue: .main) { [weak p] _ in
-            guard let p else { return }
-            MainActor.assumeIsolated {   // observer is delivered on .main, so this is genuinely isolated
-                p.seek(to: .zero)
-                if AudioCoordinator.shared.centeredPostId == postId {
-                    p.play()
-                    AudioCoordinator.shared.videoFinished()
-                }
-            }
-        }
-        // CACHE SYNCHRONOUSLY — this is the doubling bug.
-        //
-        // These two writes were inside `DispatchQueue.main.async`, so playerFor RETURNED BEFORE the
-        // cache was populated. Any further evaluation in the same pass hit `bag.players[ref] == nil`,
-        // missed, and built a SECOND AVPlayer for the same clip. Instrumented runs logged `player #1`
-        // and `player #2` for every video with an IDENTICAL bag id — one card, one cache, two
-        // players — which is the audio playing over itself slightly offset ("static sounding"), the
-        // mute toggle reaching only the player the coordinator knew about, and 2x hardware decode on
-        // every video in the feed. That last part is heat with no CPU hotspot, and heat that survives
-        // airplane mode.
-        //
-        // The deferral was needed when these were @State dictionaries: writing them mid-body is a
-        // "Modifying state during view update" violation. `bag` is a reference type now, so mutating
-        // its contents is not a state write and can happen immediately — which is the whole point of
-        // having moved it.
-        //
-        // playVisibleVideo() STAYS deferred: it touches AudioCoordinator and @State, so it must not
-        // run inside a view evaluation.
-        bag.players[ref] = p
-        bag.observers[ref] = token
-        // Tell the coordinator which player belongs to this post, so anything that activates the
-        // post's audio (tap-to-mute, the speaker chip) no longer has to carry a player reference.
-        AudioCoordinator.shared.registerVideo(p, for: item.id)
-        DispatchQueue.main.async {
-            if isActive { playVisibleVideo() }
-        }
-        return p
-    }
 
     /// Drive this card's media from whether it's the centered post: the active post
     /// plays its song + the visible carousel video; an inactive post pauses everything.
-    private func syncPlayback() {
-        if isActive {
-            // Super data saver: no autoplay of attached music either — only the poster still loads.
-            let track = SettingsStore.shared.superDataSaver ? nil : item.music
-            audio.start(postId: item.id, track: track, video: nil, muteVideo: item.muteVideo)
-            if !SettingsStore.shared.superDataSaver {
-                audio.ensureMusicPlaying()   // resume the song if a video had paused it
-            }
-            playVisibleVideo()
-        } else {
-            pauseVideos()
-        }
-    }
 
-    private func pauseVideos() { bag.players.values.forEach { $0.pause() } }
 
     /// Fully release this card's video players when it scrolls off-screen — pause, replace each item with
     /// nothing (frees the decode pipeline), remove the loop observers, and drop the dicts. Without this an
     /// off-screen card kept buffering video forever; combined with the leaked observers it ran to ~100 GB.
-    private func teardownPlayers() {
-        for (_, token) in bag.observers { NotificationCenter.default.removeObserver(token) }
-        for (_, p) in bag.players { p.pause(); p.replaceCurrentItem(with: nil) }
-        bag.observers.removeAll()
-        bag.players.removeAll()
-        AudioCoordinator.shared.registerVideo(nil, for: item.id)
-    }
 
-    private func playVisibleVideo() {
-        guard isActive else { return }
-        // Index against display refs (not raw item.media) so carousel page maps to the video slide.
-        let media = realMedia
-        let visibleRef: String? = media.isEmpty
-            ? nil
-            : media[min(max(currentPage, 0), media.count - 1)]
-        // Super data saver: never autoplay *unless* the user explicitly tapped play on this ref
-        // (poster → download → pending). Keep a clip they already started; pause everything else.
-        if SettingsStore.shared.superDataSaver {
-            for (ref, player) in bag.players {
-                let isVisible = ref == visibleRef
-                if isVisible, dataSaverPendingPlay.contains(ref) {
-                    startDataSaverPlayback(ref, player)
-                } else if isVisible, player.rate > 0 {
-                    // User-started — leave playing.
-                } else if !isVisible {
-                    player.pause()
-                }
-            }
-            return
-        }
-        #if os(iOS)
-        // A post's music plays on the system music player; without mixing, that music takes the audio
-        // session and INTERRUPTS the video's AVPlayer, so the (muted) video just froze. Mix so the video
-        // plays alongside the music. Safe when the video is unmuted too (it simply mixes its own audio).
-        // NB: setCategory/setActive are synchronous and can block the main thread for tens of ms — doing
-        // that every time a video scrolled to centre was the scroll "stick then continue". Configure the
-        // session once, off the main thread, and skip entirely when it's already set up.
-        if let visibleRef, isVideo(visibleRef) { ensureHavenPlaybackSession() }
-        #endif
-        for (ref, player) in bag.players {
-            if ref == visibleRef && isVideo(ref) {
-                player.seek(to: .zero)
-                player.play()
-            } else {
-                player.pause()
-            }
-        }
-    }
 
     @ViewBuilder private var avatar: some View {
         if item.isMe {
@@ -9723,23 +9269,23 @@ private struct KillHorizontalScroller: NSViewRepresentable {
         }
     }
 
-    private func masonryTile(_ ref: String, height: CGFloat) -> some View {
+    func masonryTile(_ ref: String, height: CGFloat) -> some View {
         PostMasonryTile(item: item, media: realMedia, ref: ref, height: height, zoomTarget: $zoomTarget)
     }
-    private func mediaLoadingPlaceholder(_ ref: String) -> some View {
+    func mediaLoadingPlaceholder(_ ref: String) -> some View {
         PostMediaPlaceholder(item: item, ref: ref)
     }
-    private func carouselDots(_ count: Int) -> some View {
+    func carouselDots(_ count: Int) -> some View {
         PostCarouselDots(count: count, currentPage: currentPage)
     }
 
-    private func singleAspect(_ ref: String) -> CGFloat { postSingleAspect(ref, in: item.media) }
-    private func letterboxes(_ ref: String, in containerAspect: CGFloat) -> Bool {
+    func singleAspect(_ ref: String) -> CGFloat { postSingleAspect(ref, in: item.media) }
+    func letterboxes(_ ref: String, in containerAspect: CGFloat) -> Bool {
         postLetterboxes(ref, in: containerAspect)
     }
-    private func shareURL(_ ref: String) -> URL? { postShareURL(ref) }
+    func shareURL(_ ref: String) -> URL? { postShareURL(ref) }
 
-    private func keepOnDeviceButton(_ ref: String) -> some View { KeepOnDeviceButton(ref: ref) }
+    func keepOnDeviceButton(_ ref: String) -> some View { KeepOnDeviceButton(ref: ref) }
 
     private var header: some View {
         PostHeader(item: item, friendName: friendName, authorName: authorName,

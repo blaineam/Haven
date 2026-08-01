@@ -5593,6 +5593,24 @@ final class FeedStore: ObservableObject {
     /// this too, constantly and on its own, and those asks must stay silent — see MediaWantedStore.
     func requestMediaWhenAvailable(ref: String, circleId: String, postId: String, authorShort: String,
                                    manual: Bool = false) {
+        // MY OWN MEDIA NEEDS NOBODY'S PERMISSION.
+        //
+        // A held-but-unreadable blob I authored used to end here: ContactsStore cannot resolve ME —
+        // I am not my own contact — so it logged "author not resolvable" and gave up, every launch,
+        // forever. Observed on device: four refs authored by this account, all bailing, while
+        // friend-authored refs in the same sweep sent their asks fine.
+        //
+        // There is nothing to ask for. If I still hold the plaintext I can re-seal it locally to the
+        // CURRENT recipient set, which is exactly what the request would have asked a peer to do.
+        if authorShort.isEmpty || myNodeHex.lowercased().hasPrefix(authorShort.lowercased()) {
+            guard let social, MediaStore.shared.has(ref) else {
+                HavenLog.sync("media-wanted \(ref.prefix(10)): mine but no plaintext — cannot re-seal")
+                return
+            }
+            HavenLog.sync("media-wanted \(ref.prefix(10)): MINE — re-sealing locally, no peer needed")
+            MediaBackupQueue.shared.enqueue(ref, circleId: circleId, social: social, priority: true)
+            return
+        }
         guard let authorHex = ContactsStore.shared.idHex(forNodePrefix: authorShort) else {
             HavenLog.sync("media-wanted \(ref.prefix(10)): author not resolvable — cannot ask")
             return

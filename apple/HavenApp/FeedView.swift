@@ -8691,6 +8691,73 @@ private struct KeepOnDeviceButton: View {
     }
 }
 
+/// The speaker chip over a video page, plus that page's Save/Share menu.
+///
+/// This could not leave PostCard until an hour ago: it activated the post's audio by handing
+/// `primaryVideoPlayer` to the coordinator, so it needed the card's player cache. Now that
+/// AudioCoordinator resolves a post's player from its own registry, the chip only needs the item and
+/// the ref — and it observes the coordinator itself, so toggling sound redraws a chip rather than a
+/// whole card.
+private struct PostMuteButton: View {
+    let item: FeedItemFfi
+    let ref: String
+    @ObservedObject private var audio = AudioCoordinator.shared
+
+    var body: some View {
+        Button {
+            if audio.activePostId != item.id {
+                audio.start(postId: item.id, track: item.music, video: nil,
+                            muteVideo: item.muteVideo, immediateMusic: true)
+            }
+            audio.toggleVideoAudio()
+        } label: {
+            Image(systemName: audio.activePostId == item.id && audio.videoUnmuted
+                  ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                .foregroundStyle(.white)
+        }
+        // A glass circle chip and nothing else — the default button style painted its own
+        // rounded-rect bezel BEHIND the circle on macOS (the doubled-background look).
+        .buttonStyle(GlassIconButtonStyle(tint: .white))
+        .padding(10)
+        // Save/Share lives here for videos (the player's long-press is hold-to-pause, so the video
+        // itself no longer carries a contextMenu). It acts on THIS page's video — it used to take
+        // item.media.first, which is the wrong item on any page but the first (and is the synthetic
+        // geo: ref on a post that also pins a location).
+        .contextMenu {
+            Button { MediaSaver.save(ref) } label: { Label("Save to Photos", systemImage: "square.and.arrow.down") }
+            if let url = postShareURL(ref) {
+                ShareLink(item: url) { Label("Share…", systemImage: "square.and.arrow.up") }
+            }
+            KeepOnDeviceButton(ref: ref)
+        }
+    }
+}
+
+/// A media page for a `file_` attachment: icon, size, and a share button.
+///
+/// Self-contained — it reads its ref and MediaStore and nothing else — so it had no reason to be a
+/// method on a 1,000-line view. Part of taking the media block out of PostCard one member at a time,
+/// after three attempts to move the whole cluster by script left the file's braces unbalanced.
+private struct PostFileAttachmentPage: View {
+    let ref: String
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "doc.zipper").font(.system(size: 44)).foregroundStyle(HavenTheme.pink)
+            Text("File attachment").font(.subheadline.weight(.semibold))
+            if let url = MediaStore.shared.storagePath(for: ref) {
+                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+                Text(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))
+                    .font(.caption).foregroundStyle(.secondary)
+                ShareLink(item: url) { Label("Share file", systemImage: "square.and.arrow.up") }
+                    .buttonStyle(GlassPillButtonStyle(tint: HavenTheme.pink))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+}
+
 struct PostCard: View {
     let item: FeedItemFfi
     let friendName: String
@@ -9279,21 +9346,7 @@ struct PostCard: View {
     }
 
     /// A `file_` zip attachment: document chip with share/save affordance.
-    @ViewBuilder private func fileAttachmentPage(_ ref: String) -> some View {
-        VStack(spacing: 12) {
-            Image(systemName: "doc.zipper").font(.system(size: 44)).foregroundStyle(HavenTheme.pink)
-            Text("File attachment").font(.subheadline.weight(.semibold))
-            if let url = MediaStore.shared.storagePath(for: ref) {
-                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-                Text(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))
-                    .font(.caption).foregroundStyle(.secondary)
-                ShareLink(item: url) { Label("Share file", systemImage: "square.and.arrow.up") }
-                    .buttonStyle(GlassPillButtonStyle(tint: HavenTheme.pink))
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding()
-    }
+    private func fileAttachmentPage(_ ref: String) -> some View { PostFileAttachmentPage(ref: ref) }
 
     /// True when this page's media can't fill a `containerAspect`-shaped page — it letterboxes, exposing
     /// the card's grey behind it. A video whose poster hasn't been generated yet has no known aspect
@@ -9502,30 +9555,7 @@ private struct KillHorizontalScroller: NSViewRepresentable {
     /// The single-media tile's aspect ratio, taken from the image (or a video's thumbnail).
 
     /// The speaker chip over a video page — plus that page's Save/Share menu.
-    @ViewBuilder private func muteButton(_ ref: String) -> some View {
-        Button {
-            if audio.activePostId != item.id { audio.start(postId: item.id, track: item.music, video: nil, muteVideo: item.muteVideo, immediateMusic: true) }
-            audio.toggleVideoAudio()
-        } label: {
-            Image(systemName: audio.activePostId == item.id && audio.videoUnmuted ? "speaker.wave.2.fill" : "speaker.slash.fill")
-                .foregroundStyle(.white)
-        }
-        // A glass circle chip and nothing else — the default button style painted its own
-        // rounded-rect bezel BEHIND the circle on macOS (the doubled-background look).
-        .buttonStyle(GlassIconButtonStyle(tint: .white))
-        .padding(10)
-        // Save/Share lives here for videos (the player's long-press is hold-to-pause, so the
-        // video itself no longer carries a contextMenu). It acts on THIS page's video — it used to
-        // take item.media.first, which is the wrong item on any page but the first (and is the
-        // synthetic geo: ref on a post that also pins a location).
-        .contextMenu {
-            Button { MediaSaver.save(ref) } label: { Label("Save to Photos", systemImage: "square.and.arrow.down") }
-            if let url = shareURL(ref) {
-                ShareLink(item: url) { Label("Share…", systemImage: "square.and.arrow.up") }
-            }
-            keepOnDeviceButton(ref)
-        }
-    }
+    private func muteButton(_ ref: String) -> some View { PostMuteButton(item: item, ref: ref) }
 
     /// "Keep on this device" toggle — pins/unpins this ref in the device-local retention set so no
     /// cleanup (orphan sweep, age/size limit, or the cleanup screen) ever removes its bytes.

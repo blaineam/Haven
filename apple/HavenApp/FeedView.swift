@@ -7154,6 +7154,11 @@ struct FeedView: View {
                                     }
                                 }
                             )
+                            // Skip the whole 1,507-line body when this row's item is unchanged.
+                            // FeedStore.items republishes on every feed rebuild (a mailbox pull, a
+                            // poster landing, a periodic tick) and re-initialises every visible card;
+                            // without this each republish re-evaluates all of them.
+                            .equatable()
                             .background(GeometryReader { geo in
                                 Color.clear.preference(key: PostCenterKey.self,
                                                        value: [item.id: geo.frame(in: .global).midY])
@@ -7741,6 +7746,32 @@ struct FeedView: View {
 /// Seeding a new card from the last measured width lets it compute the correct height on its FIRST pass.
 /// Written and read only from SwiftUI layout on the main thread.
 nonisolated(unsafe) private var lastKnownMediaWidth: CGFloat = 0
+
+/// EQUATABLE so SwiftUI can SKIP a row whose content did not change.
+///
+/// `FeedStore.items` republishes on every feed rebuild — a mailbox pull, a poster landing, a
+/// periodic tick — and each republish re-initialises every PostCard in the list, re-evaluating a
+/// 1,507-line body per visible row. A Time Profiler trace of a warm phone is 83% main thread with no
+/// single hot leaf: AG::Graph::propagate_dirty marking subtrees, swift_getGenericMetadata and
+/// LockingConcurrentMap re-instantiating deeply nested generic view types, ARC churn. That is rows
+/// rebuilding wholesale, and it is why deleting expensive calls from inside `body` (storageDir,
+/// shareURL) measurably helped and did not fix it.
+///
+/// With `.equatable()` at the call site, a republish carrying an IDENTICAL item skips the body
+/// entirely. The closures are deliberately NOT compared — they are recreated on every parent render
+/// and capture only the store plus `item.id`, so two cards with an equal `item` have behaviourally
+/// identical callbacks. Comparing them is impossible anyway (functions are not Equatable), and
+/// treating them as significant would defeat the whole optimisation.
+///
+/// This does NOT stop the card's own @ObservedObject stores from invalidating it — that is the next
+/// step, pushing `feed`/`audio`/`pinned`/`profile` down into the leaf views that read them.
+extension PostCard: Equatable {
+    static func == (a: PostCard, b: PostCard) -> Bool {
+        a.item == b.item
+            && a.friendName == b.friendName
+            && a.expandAllComments == b.expandAllComments
+    }
+}
 
 struct PostCard: View {
     let item: FeedItemFfi

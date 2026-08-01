@@ -13,6 +13,38 @@ Apple's 1.2.2 never shipped — it was still in review when this was found, so i
 carrying everything 1.2.2 had plus the fix below. Android and desktop 1.2.2 ARE published; Android
 takes this fix as 1.2.3, desktop's authoring half is called out as still open.
 
+### Fixed — Apple
+
+- **The phone was still heating up on build 414 — the battery fix had a door left open.** Reported
+  on two iPhones, one of them remote over the internet.
+
+  1.2.2 made the media-backup drain honour `MediaBackupBackoff` and stop re-arming every 2 seconds
+  while holding a `UIApplication` assertion. That was correct, and incomplete: it assumed `backup()`
+  records a stall on **every** failure. Three paths return `false` without recording one —
+
+  - `guard dests.count >= 2 else { return false }` in `mirrorSealedAcrossRelays`, reached whenever
+    the local plaintext is gone (an evicted blob, or a queue restored from disk in a later session).
+    **A device with one relay is the ordinary case**, so this returns false immediately, does no
+    network work at all, and records nothing;
+  - the same guard on the mirror path inside `backup()`;
+  - `guard await healForbiddenRelays(…) else { return false }`.
+
+  A ref that fails without a backoff entry is never skipped by `shouldSkip`, so the next pass takes
+  it again, and the re-arm check sees no window and fires 2 seconds later. Forever — and it is the
+  *fastest possible* spin, because the failing guard returns before doing any I/O at all. The
+  original battery bug, reaching the same end through a door the first fix did not close.
+
+  The stall is now recorded at the **one choke point**: the drain itself, where `ok == false` means
+  "reached no destination this pass" by definition. No path inside `backup()` can escape it.
+
+  Two short gaps (5s, 20s) now precede the long ones. Honouring the backoff everywhere would
+  otherwise mean a freshly posted story's media waited a full two minutes after one unlucky attempt,
+  and "my friends didn't get it for minutes" is what the priority lane exists to prevent. Two quick
+  retries cost 2 wakeups; the spin cost roughly 1,800 an hour.
+
+  Apple-only: Android drains through a coroutine `Channel` rather than a self-re-arming timer holding
+  a wake assertion, so it has no equivalent loop.
+
 ### Fixed — Apple and Android
 
 - **A video story arrived as a spinner that never finished.** Reported straight after the fix above

@@ -179,7 +179,28 @@ final class MediaBackupQueue {
                 // skip the expensive seal path for that dest (backup still mirrors to remote peers).
                 let ok = await SharedStore.backup(ref: job.ref, circleId: job.cid, social: social)
                 if !ok {
-                    HavenLog.sync("media-backup RETRY ref=\(job.ref.prefix(16)) circle=\(job.cid.prefix(12)) lane=\(isPriority ? "hi" : "lo") — pass failed, requeued")
+                    // RECORD THE STALL HERE, at the one choke point, instead of trusting every path
+                    // inside backup() to do it — three of them did not:
+                    //
+                    //   * `guard dests.count >= 2 else { return false }` in mirrorSealedAcrossRelays
+                    //     (reached whenever the local plaintext is gone — an evicted blob, or a queue
+                    //     restored from disk in a later session). A device with ONE relay is the
+                    //     ordinary case, so this returns false IMMEDIATELY, does no network work, and
+                    //     records nothing;
+                    //   * the same guard on the mirror path inside backup();
+                    //   * `guard await healForbiddenRelays(...) else { return false }`.
+                    //
+                    // A ref that fails without a backoff entry is never skipped by shouldSkip, so the
+                    // next pass takes it again, and `anyDueNow` sees no window and re-arms in 2s —
+                    // forever, holding a UIApplication assertion each time. That is the *original*
+                    // battery bug reaching the same end through a door the first fix did not close,
+                    // and the fastest possible spin, since the failing guard returns without any I/O.
+                    //
+                    // `ok == false` means "reached no destination this pass" by definition, so this
+                    // is the correct and complete place to decide it. Backing off cannot lose an
+                    // upload: the 2-minute sweep re-enqueues once the window elapses.
+                    MediaBackupBackoff.recordStalled(job.ref)
+                    HavenLog.sync("media-backup RETRY ref=\(job.ref.prefix(16)) circle=\(job.cid.prefix(12)) lane=\(isPriority ? "hi" : "lo") — pass failed, backing off")
                     if isPriority { failedHi.append(job) } else { failedLo.append(job) }
                 } else if isPriority, let at = job.at,
                           UInt64(Date().timeIntervalSince1970 * 1000) &- at < 600_000 {
@@ -380,12 +401,25 @@ enum MediaBackupBackoff {
         fails[ref] = nil
     }
 
+    /// Two short gaps before the long ones, so a BLIP (a relay mid-restart, a moment of no route)
+    /// still recovers in seconds. Without these, honouring the backoff everywhere — which is what
+    /// stops the 2-second forever-spin — would also mean a fresh post's media waited a full two
+    /// minutes after one unlucky attempt, and "my friends didn't get it for minutes" is the report
+    /// that the priority lane exists to prevent. Two quick tries cost 2 wakeups; the forever-spin
+    /// cost 1,800 an hour.
+    private static let quickGapsMs: [UInt64] = [5_000, 20_000]
+
     /// The blob reached NO destination this pass — grow the retry gap.
     static func recordStalled(_ ref: String) {
         let n = (fails[ref] ?? 0) + 1
         fails[ref] = n
-        let shift = min(n - 1, 5)                            // 2,4,8,16,32,64 min → capped
-        let gap = min(baseMs << UInt64(shift), capMs)
+        let gap: UInt64
+        if n <= quickGapsMs.count {
+            gap = quickGapsMs[n - 1]                         // 5s, 20s — transient blips
+        } else {
+            let shift = min(n - 1 - quickGapsMs.count, 5)    // then 2,4,8,16,32,64 min → capped
+            gap = min(baseMs << UInt64(shift), capMs)
+        }
         nextTry[ref] = nowMs() + gap
         if nextTry.count > 20_000 {                          // bound memory on huge feeds
             nextTry.removeAll(); fails.removeAll()

@@ -8510,6 +8510,108 @@ private struct PostCommentsList: View {
     }
 }
 
+/// Grid tile for a multi-image post — one slot of the masonry layout.
+///
+/// A leaf renderer with three inputs, lifted out of PostCard so a tile redraws without the card.
+private struct PostMasonryTile: View {
+    let item: FeedItemFfi
+    let media: [String]
+    let ref: String
+    let height: CGFloat
+    @Binding var zoomTarget: ZoomTarget?
+
+    var body: some View { tile(ref, height: height) }
+
+    @ViewBuilder private func tile(_ ref: String, height: CGFloat) -> some View {
+        // Use MediaKind(ref:) (a cheap string parse) for the play badge — NOT item(ref), which would
+        // generate the video poster on the main thread as each tile scrolls into view (the scroll lag).
+        //
+        // The tile's WIDTH comes from the persisted pixel size (a dictionary lookup, no decode) and the
+        // bitmap decodes off-main via FeedImage. This used to call the synchronous thumbnail(_:), which
+        // decoded EVERY tile on the main thread in a single layout pass — on a 10+ photo post that was
+        // the scroll jitter. The evicted/not-yet-downloaded cases are checked first so the common path
+        // never has to decode anything just to decide what to draw.
+        if EvictedMediaStore.shared.contains(ref) {
+            // Deliberately evicted — a compact tap-to-download tile (not an endless spinner).
+            Button { FeedStore.shared.downloadEvicted(ref) } label: {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemFill))
+                    Image(systemName: FeedStore.shared.downloadingMedia.contains(ref) ? "arrow.down.circle" : "arrow.down.circle.fill")
+                        .font(.title2).foregroundStyle(HavenTheme.pink)
+                }
+                .frame(width: height * 1.2, height: height)
+            }
+            .buttonStyle(.plain)
+        } else if MediaStore.shared.hasLocalFile(ref) {
+            // Non-blocking aspect: a grid tile's aspect only sets its WIDTH inside a horizontal scroller,
+            // so it can safely fill in late rather than stalling layout on a header read per tile.
+            let known = MediaStore.shared.pixelSize(ref, allowSyncRead: false)
+            let aspect = min(2.4, max(0.6, known.map { $0.width / max($0.height, 1) } ?? 4.0 / 3.0))
+            FeedImage(ref: ref, maxDimension: height * 3, contentMode: .fill) {
+                RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.12))
+            }
+                .frame(width: height * aspect, height: height)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .overlay(alignment: .center) {
+                    if MediaKind(ref: ref) == .video {
+                        Image(systemName: "play.circle.fill").font(.largeTitle)
+                            .foregroundStyle(.white.opacity(0.9)).shadow(radius: 4)
+                    }
+                }
+                // Blur media flagged sensitive — by this device's SCA or any circle member's
+                // federated flag (protects viewers whose platform has no SCA).
+                .sensitiveContentGuard(ref: ref, circleId: FeedStore.shared.activeCircleId, scan: !item.isMe)
+                .onTapGesture {
+                    let media = media
+                    if let idx = media.firstIndex(of: ref) { zoomTarget = ZoomTarget(refs: media, index: idx) }
+                }
+        } else {
+            // Not downloaded yet — a compact loading tile keeps the gallery layout intact.
+            ZStack {
+                RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemFill))
+                ProgressView()
+            }
+            .frame(width: height * 1.2, height: height)
+        }
+    }
+}
+
+/// Placeholder shown while a media ref has not landed yet (or cannot be fetched).
+private struct PostMediaPlaceholder: View {
+    let item: FeedItemFfi
+    let ref: String
+
+    var body: some View { placeholder(ref) }
+
+    @ViewBuilder func placeholder(_ ref: String) -> some View {
+        MissingMediaPlaceholder(ref: ref, isVideo: MediaKind(ref: ref) == .video,
+                                postContext: (circleId: FeedStore.shared.activeCircleId, postId: item.id,
+                                              authorShort: item.authorShort),
+                                mediaList: item.media)
+            .frame(maxWidth: .infinity, minHeight: 160)
+    }
+}
+
+/// The carousel's page dots.
+private struct PostCarouselDots: View {
+    let count: Int
+    let currentPage: Int
+
+    var body: some View { body(count) }
+
+    func body(_ count: Int) -> some View {
+        HStack(spacing: 6) {
+            ForEach(0..<count, id: \.self) { i in
+                Circle().fill(.white.opacity(i == currentPage ? 0.95 : 0.4)).frame(width: 6, height: 6)
+            }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .background(.black.opacity(0.35), in: Capsule())
+        .padding(.bottom, 8)
+        .allowsHitTesting(false)
+    }
+}
+
 struct PostCard: View {
     let item: FeedItemFfi
     let friendName: String
@@ -8917,17 +9019,6 @@ struct PostCard: View {
         }
     }
 
-    private func carouselDots(_ count: Int) -> some View {
-        HStack(spacing: 6) {
-            ForEach(0..<count, id: \.self) { i in
-                Circle().fill(.white.opacity(i == currentPage ? 0.95 : 0.4)).frame(width: 6, height: 6)
-            }
-        }
-        .padding(.horizontal, 10).padding(.vertical, 6)
-        .background(.black.opacity(0.35), in: Capsule())
-        .padding(.bottom, 8)
-        .allowsHitTesting(false)
-    }
 
     /// Horizontally-scrolling staggered gallery: items flow across two fixed-height rows and
     /// you swipe sideways through them. Each tile keeps its natural aspect (width = row · aspect).
@@ -8951,58 +9042,6 @@ struct PostCard: View {
         .frame(height: rowHeight * CGFloat(rows) + 6)
     }
 
-    @ViewBuilder private func masonryTile(_ ref: String, height: CGFloat) -> some View {
-        // Use MediaKind(ref:) (a cheap string parse) for the play badge — NOT item(ref), which would
-        // generate the video poster on the main thread as each tile scrolls into view (the scroll lag).
-        //
-        // The tile's WIDTH comes from the persisted pixel size (a dictionary lookup, no decode) and the
-        // bitmap decodes off-main via FeedImage. This used to call the synchronous thumbnail(_:), which
-        // decoded EVERY tile on the main thread in a single layout pass — on a 10+ photo post that was
-        // the scroll jitter. The evicted/not-yet-downloaded cases are checked first so the common path
-        // never has to decode anything just to decide what to draw.
-        if EvictedMediaStore.shared.contains(ref) {
-            // Deliberately evicted — a compact tap-to-download tile (not an endless spinner).
-            Button { FeedStore.shared.downloadEvicted(ref) } label: {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemFill))
-                    Image(systemName: FeedStore.shared.downloadingMedia.contains(ref) ? "arrow.down.circle" : "arrow.down.circle.fill")
-                        .font(.title2).foregroundStyle(HavenTheme.pink)
-                }
-                .frame(width: height * 1.2, height: height)
-            }
-            .buttonStyle(.plain)
-        } else if MediaStore.shared.hasLocalFile(ref) {
-            // Non-blocking aspect: a grid tile's aspect only sets its WIDTH inside a horizontal scroller,
-            // so it can safely fill in late rather than stalling layout on a header read per tile.
-            let known = MediaStore.shared.pixelSize(ref, allowSyncRead: false)
-            let aspect = min(2.4, max(0.6, known.map { $0.width / max($0.height, 1) } ?? 4.0 / 3.0))
-            FeedImage(ref: ref, maxDimension: height * 3, contentMode: .fill) {
-                RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.12))
-            }
-                .frame(width: height * aspect, height: height)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .overlay(alignment: .center) {
-                    if MediaKind(ref: ref) == .video {
-                        Image(systemName: "play.circle.fill").font(.largeTitle)
-                            .foregroundStyle(.white.opacity(0.9)).shadow(radius: 4)
-                    }
-                }
-                // Blur media flagged sensitive — by this device's SCA or any circle member's
-                // federated flag (protects viewers whose platform has no SCA).
-                .sensitiveContentGuard(ref: ref, circleId: FeedStore.shared.activeCircleId, scan: !item.isMe)
-                .onTapGesture {
-                    let media = realMedia
-                    if let idx = media.firstIndex(of: ref) { zoomTarget = ZoomTarget(refs: media, index: idx) }
-                }
-        } else {
-            // Not downloaded yet — a compact loading tile keeps the gallery layout intact.
-            ZStack {
-                RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemFill))
-                ProgressView()
-            }
-            .frame(width: height * 1.2, height: height)
-        }
-    }
 
     @ViewBuilder private func mediaPage(_ ref: String, containerAspect: CGFloat,
                                         inCarousel: Bool = false,
@@ -9398,13 +9437,6 @@ private struct KillHorizontalScroller: NSViewRepresentable {
 
 /// Shown for a media reference whose bytes haven't arrived yet, so the post doesn't look
     /// broken while it's still downloading from the sender, a relay, or the shared mailbox.
-    @ViewBuilder private func mediaLoadingPlaceholder(_ ref: String) -> some View {
-        MissingMediaPlaceholder(ref: ref, isVideo: MediaKind(ref: ref) == .video,
-                                postContext: (circleId: feed.activeCircleId, postId: item.id,
-                                              authorShort: item.authorShort),
-                                mediaList: item.media)
-            .frame(maxWidth: .infinity, minHeight: 160)
-    }
 
     /// The single-media tile's aspect ratio, taken from the image (or a video's thumbnail).
     private func singleAspect(_ ref: String) -> CGFloat {
@@ -9601,6 +9633,16 @@ private struct KillHorizontalScroller: NSViewRepresentable {
         } else {
             PeerAvatar(nodeHex: item.authorShort, name: authorName, size: 34)
         }
+    }
+
+    private func masonryTile(_ ref: String, height: CGFloat) -> some View {
+        PostMasonryTile(item: item, media: realMedia, ref: ref, height: height, zoomTarget: $zoomTarget)
+    }
+    private func mediaLoadingPlaceholder(_ ref: String) -> some View {
+        PostMediaPlaceholder(item: item, ref: ref)
+    }
+    private func carouselDots(_ count: Int) -> some View {
+        PostCarouselDots(count: count, currentPage: currentPage)
     }
 
     private var header: some View {

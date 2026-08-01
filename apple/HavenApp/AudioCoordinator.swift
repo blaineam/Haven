@@ -139,7 +139,14 @@ final class AudioCoordinator: ObservableObject {
         let playVideoAudio = (track == nil) && !muteVideo && !SettingsStore.shared.silent
             && SettingsStore.shared.videoSoundOn && !callActive
         videoUnmuted = playVideoAudio
-        video?.volume = playVideoAudio ? 1 : 0
+        // THE RESOLVED PLAYER, not the parameter.
+        //
+        // This was `video?.volume`, which was fine only while every caller handed one in. Callers now
+        // pass nil and let videoByPost resolve it (see registerVideo) — so this line was setting the
+        // volume on nothing at all, and the clip stayed silent while videoUnmuted said otherwise.
+        // Toggling twice appeared to "fix" it because toggleVideoAudio fades `videoPlayer`, which was
+        // the real object all along.
+        videoPlayer?.volume = playVideoAudio ? 1 : 0
         // Never auto-start the song while backgrounded (the system music player would play it audibly even
         // though the app isn't on screen). It resumes via ensureMusicPlaying when we're foreground again.
         guard let track, !backgrounded else { return }

@@ -8209,8 +8209,17 @@ struct PostCard: View {
 
     /// The on-disk file to hand to the system share sheet (video file, else the image).
     private func shareURL(_ ref: String) -> URL? {
-        guard let m = MediaStore.shared.item(ref) else { return nil }
-        return m.kind == .video ? m.videoURL : MediaStore.shared.storagePath(for: ref)
+        // NEVER `item(ref)` here — the rule mediaPageContent states two functions below, which this
+        // was quietly breaking: item() DECODES THE BITMAP / generates the video poster ON THE MAIN
+        // THREAD on a cache miss. shareURL is called from `body` for every media ref, so a scroll
+        // paid a decode per ref per layout pass. In a Time Profiler trace of a warm phone this shows
+        // as PostCard.shareURL at 957 samples with MediaStore.item at 964 and downsampled at 384,
+        // all under PostCard.body.getter — the choppy scrolling and the heat.
+        //
+        // The on-disk path is derivable from the ref alone: storagePath builds <dir>/<ref>.<ext>
+        // from MediaKind(ref:), which is pure string work and cannot decode anything. Video and
+        // image resolve to the same file either way — `videoURL` was the same path for a video.
+        MediaStore.shared.storagePath(for: ref)
     }
 
     @ViewBuilder private func mediaPageContent(_ ref: String, containerAspect: CGFloat,

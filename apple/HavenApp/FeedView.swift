@@ -8306,7 +8306,36 @@ struct PostCard: View {
             }
             .background { pageBackdrop(poster ?? ref, containerAspect: containerAspect) }
         } else if hasVideo {
-            if MediaKind(ref: ref) == .video, let url = MediaStore.shared.storagePath(for: ref) {
+            // NO AVPlayer FOR A CARD THAT IS NOT CENTERED.
+            //
+            // playVisibleVideo() already restricts PLAYBACK to the centered post, but creation was
+            // never gated the same way: this branch built an AVPlayer for every visible video tile,
+            // and a player holding an item holds a decode pipeline whether or not it is playing. A
+            // scroll through a run of video posts therefore kept several decode sessions alive at
+            // once — and teardownPlayers() only runs on .onDisappear, which a LazyVStack defers.
+            //
+            // Reported directly: "videos get warmer than just photo posts". That is what this
+            // predicts, and it is invisible to a Time Profiler because hardware decode is not CPU
+            // time — six CPU traces showed no hotspot and a Nominal thermal state throughout.
+            //
+            // An off-centre card shows its poster still instead, which is the same thing the super
+            // data-saver branch above renders. Becoming centered flips isActive, the body
+            // re-evaluates, and the player is built then — so playback is unchanged, it just stops
+            // paying for clips nobody is watching.
+            if MediaKind(ref: ref) == .video, !isActive {
+                let poster = MediaVariants.poster(for: ref, in: item.media)
+                ZStack {
+                    if let poster, MediaStore.shared.hasLocalFile(poster) {
+                        FeedImage(ref: poster, maxDimension: 1200, contentMode: .fit) { mediaLoadingPlaceholder(ref) }
+                    } else {
+                        mediaLoadingPlaceholder(ref)
+                    }
+                    Image(systemName: "play.circle.fill").font(.system(size: 44))
+                        .foregroundStyle(.white.opacity(0.85)).shadow(radius: 5)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background { pageBackdrop(poster ?? ref, containerAspect: containerAspect) }
+            } else if MediaKind(ref: ref) == .video, let url = MediaStore.shared.storagePath(for: ref) {
                 // Data saver with local video: don't autoplay until the user asked (pending play
                 // from a poster tap, or a first tap on an already-local clip). Tap then toggles mute.
                 let player = playerFor(ref, url)

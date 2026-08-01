@@ -8048,6 +8048,297 @@ private struct PostCommentField: View {
     }
 }
 
+/// A post's header: avatar, author, timestamp, backup state and the overflow menu.
+///
+/// 265 lines lifted out of PostCard — the single largest block in it. It observes PinnedMediaStore
+/// itself, so a pin toggle invalidates a header rather than a whole card, and it owns
+/// showBackupDetail (nothing else read it). The sheets it OPENS stay on the card, because the card
+/// is what presents them, so those arrive as bindings.
+private struct PostHeader: View {
+    let item: FeedItemFfi
+    let friendName: String
+    let authorName: String
+    let storyableMedia: [String]
+    let onUnsend: () -> Void
+    @Binding var showEdit: Bool
+    @Binding var showReport: Bool
+    @Binding var storyShare: StoryShareTarget?
+    @ObservedObject private var pinned = PinnedMediaStore.shared
+    @State private var showBackupDetail = false
+    @State private var linkCopied = false
+
+    @ViewBuilder private var avatar: some View {
+        if item.isMe { MyAvatar(size: 34) }
+        else { PeerAvatar(nodeHex: item.authorShort, name: authorName, size: 34) }
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            if item.isMe {
+                avatar
+                Text(authorName).font(.subheadline.weight(.semibold))
+            } else {
+                NavigationLink {
+                    UserProfileView(authorHex: item.authorShort, name: authorName)
+                } label: {
+                    HStack(spacing: 10) {
+                        avatar
+                        Text(authorName).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+            Text(relativeTimeShort(item.createdAt)).font(.caption2).foregroundStyle(.secondary)
+            if item.edited {
+                Text("edited").font(.caption2)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Color(.tertiarySystemFill), in: Capsule()).foregroundStyle(.secondary)
+            }
+            // Kept on THIS device. Without a mark on the card, "Keep on this device" recorded the pin
+            // and showed nothing — the menu closed and the post looked identical, so a working toggle
+            // read as a dead button. This is the state, visible where the decision applies.
+            if item.media.contains(where: { !MediaStore.isSynthetic($0) && pinned.isPinned($0) }) {
+                Image(systemName: "pin.fill")
+                    .font(.caption2)
+                    .foregroundStyle(HavenTheme.pink)
+                    .accessibilityLabel("Kept on this device")
+            }
+            // Upload state for YOUR OWN media posts — ALWAYS shown when there is media, even if this
+            // device knows zero relays. Gating on "has a relay" hid the indicator entirely when a
+            // friend never learned frame-19 (or only had LAN media URLs), so "not syncing" looked
+            // identical to "nothing to show" and previously shared content appeared fine while no
+            // relay ever got a copy. Driven PER-MEDIA off the backup ledger + queue.
+            if item.isMe && !item.unsent, !item.media.isEmpty {
+                // The whole cluster is one tap target: every state below is a partial answer to
+                // "where is this?", and the sheet is the full one — including which relays hold
+                // nothing, which no icon can express.
+                // TICK ONLY WHILE SOMETHING CAN CHANGE.
+                //
+                // This cluster re-rendered every second for every one of YOUR OWN media posts on
+                // screen — forever, including posts uploaded months ago where the answer is fixed.
+                // On the You feed every cell is yours, so the app never stopped recomputing upload
+                // state on the main thread: a warm phone sitting idle, and a feed that stutters
+                // while scrolling because each frame competes with this work.
+                //
+                // A post confirmed on a relay someone else can read is DONE — content-addressed
+                // blobs never change, so that verdict cannot be revoked. Those fall back to an
+                // hourly tick (a timer that effectively never fires) instead of a per-second one.
+                // Anything still in flight keeps the 1s cadence, which is the case the ring and the
+                // percentage were built for.
+                let settledOwnRelay = RelayHost.shared.serving ? RelayHost.shared.nodeId : ""
+                let settledBlobs = item.media.filter { !MediaStore.isSynthetic($0) }
+                let settled = !settledBlobs.isEmpty && settledBlobs.allSatisfy {
+                    MediaBackupLedger.hasAnyRemote($0, ownRelayHex: settledOwnRelay)
+                }
+                // TICK ONLY WHILE AN UPLOAD IS GENUINELY IN FLIGHT.
+                //
+                // A Time Profiler trace of a warm phone (47s, iPhone 17 Pro Max) is ~half
+                // AG::Graph::UpdateStack::update / update_attribute / input_value_ref_slow with
+                // CA::Layer::commit_if_needed and LayoutEngineBox.sizeThatFits behind them: SwiftUI's
+                // attribute graph being dirtied over and over and re-running layout. Not media
+                // decode, not networking — the earlier fixes in this release were all treating
+                // network symptoms of a RENDERING problem.
+                //
+                // Each of these timers dirties its subtree, and a subtree invalidation drags a layout
+                // pass across the list. Gating on `settled` alone was not enough: a post that is not
+                // backed up AND has nothing queued (no relay known, upload long since abandoned) also
+                // ticked every second while its answer was every bit as fixed.
+                //
+                // So the 1s cadence — which exists for the progress ring and percentage — now applies
+                // ONLY when the queue actually holds one of this post's blobs. hasPending is O(1)
+                // now, so asking is free. Everything else falls to an hourly tick that effectively
+                // never fires, and re-renders when its own state publishes instead.
+                let inFlight = !settled && settledBlobs.contains { MediaBackupQueue.shared.hasPending($0) }
+                TimelineView(.periodic(from: .now, by: inFlight ? 1.0 : 3600)) { _ in
+                    let blobs = item.media.filter { !MediaStore.isSynthetic($0) }
+                    let circleId = FeedStore.shared.activeCircleId
+                    let hasRelay = !RelayMailboxStore.shared.relays(forCircle: circleId).isEmpty
+                        || SharedStore.hasMailbox(circleId)
+                    // "Backed up" must mean a relay SOMEONE ELSE can read. Writing to our own
+                    // in-process relay is a local file copy that cannot fail, so counting it showed a
+                    // confident tick on every post while friends could fetch none of them.
+                    let ownRelay = RelayHost.shared.serving ? RelayHost.shared.nodeId : ""
+                    let backed = !blobs.isEmpty && blobs.allSatisfy {
+                        MediaBackupLedger.hasAnyRemote($0, ownRelayHex: ownRelay)
+                    }
+                    // Reached OUR relay and nowhere else: not an error, not safe either. Says so.
+                    let localOnly = !backed && !blobs.isEmpty && blobs.allSatisfy { MediaBackupLedger.hasAny($0) }
+                    let pending = blobs.contains { MediaBackupQueue.shared.hasPending($0) }
+                    let progress = MediaUploadProgress.shared.fraction(for: blobs)
+                    let stuck = MediaUploadProgress.shared.looksStuck(blobs)
+                        || (!backed && !hasRelay)
+                        || (!backed && !pending && !localOnly && !blobs.isEmpty)
+                    if backed {
+                        Image(systemName: "checkmark.icloud.fill")
+                            .font(.caption2).foregroundStyle(HavenTheme.pink)
+                            .help("Backed up to a relay others can read")
+                    } else if !hasRelay {
+                        // The invisible case: no known mailbox → never showed an icon before.
+                        Image(systemName: "exclamationmark.icloud")
+                            .font(.caption2).foregroundStyle(.orange)
+                            .help("No relay known for this circle — media stays on this device only. Open Relays or wait for a member who hosts one.")
+                    } else if localOnly {
+                        Image(systemName: "externaldrive.badge.exclamationmark")
+                            .font(.caption2).foregroundStyle(.orange)
+                            .help("Only on this device's own relay — nobody else can fetch it yet")
+                    } else if let progress {
+                        // A real fraction, because a big video genuinely takes minutes and a motionless
+                        // arrow made "slow" and "broken" look identical. Determinate ring + percentage.
+                        ZStack {
+                            Circle().stroke(Color.secondary.opacity(0.25), lineWidth: 2)
+                            Circle().trim(from: 0, to: max(0.02, progress))
+                                .stroke(stuck ? Color.orange : HavenTheme.pink,
+                                        style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                                .rotationEffect(.degrees(-90))
+                        }
+                        .frame(width: 12, height: 12)
+                        .help(stuck
+                              ? "Still trying to upload — it has restarted several times"
+                              : "Uploading to a relay… \(Int(progress * 100))%")
+                    } else {
+                        // Queued but no window has been written yet (or the blob is small enough to go
+                        // in one shot). Orange once it has restarted repeatedly: the queue never gives
+                        // up, so without this an upload that can never succeed looks like one about to.
+                        Image(systemName: stuck ? "exclamationmark.icloud" : "arrow.up.circle")
+                            .font(.caption2)
+                            .foregroundStyle(stuck ? AnyShapeStyle(Color.orange) : AnyShapeStyle(Color.secondary))
+                            .help(stuck
+                                  ? (hasRelay
+                                     ? "Upload not reaching a relay yet — tap for detail; keep Haven open"
+                                     : "No relay available — media only on this device")
+                                  : "Waiting to upload to a relay…")
+                    }
+                }
+                .contentShape(Rectangle())
+                .onTapGesture { showBackupDetail = true }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint("Shows which relays hold a copy")
+                .sheet(isPresented: $showBackupDetail) {
+                    BackupDetailView(refs: item.media.filter { !MediaStore.isSynthetic($0) },
+                                     circleId: FeedStore.shared.activeCircleId)
+                        .macSheetFrame()
+                        #if os(iOS)
+                        .presentationDetents([.medium, .large])
+                        .presentationDragIndicator(.visible)
+                        #endif
+                }
+            }
+            Spacer()
+            if !item.unsent {
+                Menu {
+                    // No link for a story (gone by the time anyone taps it) or a DM — a dm: circle
+                    // id is literally both members' node ids, so the link would leak the pair to
+                    // whoever you sent it to, and nobody outside the DM could ever open it anyway.
+                    if !item.story, !FeedStore.shared.activeCircleId.hasPrefix("dm:"),
+                       let url = DeepLink.postURL(circleId: FeedStore.shared.activeCircleId, postId: item.id) {
+                        ShareLink(item: url) { Label("Share post", systemImage: "square.and.arrow.up") }
+                        Button {
+                            PlatformPasteboard.string = url.absoluteString
+                            linkCopied = true
+                            // Unlike the app's other copy buttons this one has to un-stick: the menu
+                            // closes on tap, so a reopen a minute later must not still read "Copied".
+                            Task { try? await Task.sleep(nanoseconds: 2_000_000_000); linkCopied = false }
+                        } label: {
+                            Label(linkCopied ? "Copied" : "Copy link",
+                                  systemImage: linkCopied ? "checkmark" : "doc.on.doc")
+                        }
+                        // Reshare the post as a 24h story that links back to it. Deliberately inside the
+                        // same guard as the link actions: a story goes to the ACTIVE circle (see
+                        // FeedStore.post), and this post is IN the active circle, so everyone who can see
+                        // the story can already open the post. That is the whole access story — the embed
+                        // carries no key, and we never widen the audience beyond the circle.
+                        if !storyableMedia.isEmpty {
+                            Button {
+                                storyShare = StoryShareTarget(
+                                    draft: StoryDraft(refs: storyableMedia),
+                                    embed: StoryEmbed.Ref(circleId: FeedStore.shared.activeCircleId,
+                                                          postId: item.id, musicStartMs: 0))
+                            } label: { Label("Share as story", systemImage: "circle.dashed.inset.filled") }
+                        }
+                    }
+                    // Reply to the AUTHOR privately, the same move a story reply makes: open (or
+                    // reuse) the DM with them and carry the post's media so they know which post
+                    // you mean. Never available on your own post — that would DM yourself.
+                    if !item.isMe, let authorHex = ContactsStore.shared.idHex(forNodePrefix: item.authorShort) {
+                        Button {
+                            // Stage a draft; do NOT send. Referencing a post is the START of a
+                            // message, not one — the point is to ask them something about it, so
+                            // the link goes in the composer and the words stay yours. Opens the
+                            // real DM thread in Messages rather than switching the circle, which
+                            // would drop you into the feed layout instead of the conversation.
+                            let dm = FeedStore.shared.startDM(with: authorHex, name: authorName)
+                            let ref = DeepLink.postURL(circleId: FeedStore.shared.activeCircleId, postId: item.id)?
+                                .absoluteString ?? ""
+                            DMDraftStore.shared.stage(circleId: dm, text: ref)
+                            DeepLinkRouter.shared.requestedTab = "messages"
+                        } label: { Label("Message \(authorName)", systemImage: "bubble.left") }
+                    }
+                    if item.isMe {
+                        Button { showEdit = true } label: { Label("Edit", systemImage: "pencil") }
+                        Button(role: .destructive) { onUnsend() } label: { Label("Unsend", systemImage: "arrow.uturn.backward") }
+                    }
+                    // "Show original" only when the author actually sent an uncompressed companion.
+                    // Hidden otherwise so the menu never offers a dead download.
+                    let originalRefs = MediaVariants.allOriginals(in: item.media)
+                        .filter { !MediaStore.shared.has($0) }
+                    if !originalRefs.isEmpty {
+                        Button {
+                            for r in originalRefs {
+                                FeedStore.shared.requestMedia(r, circleId: FeedStore.shared.activeCircleId)
+                            }
+                        } label: {
+                            Label("Show original", systemImage: "arrow.down.circle")
+                        }
+                    } else if MediaVariants.allOriginals(in: item.media).contains(where: { MediaStore.shared.has($0) }) {
+                        // Original already on disk — nothing to download; still surface so the user
+                        // knows it's available (opens the zoom viewer on the original if present).
+                        Button {
+                            // Prefer opening the first available original in the media zoom path.
+                            if let first = MediaVariants.allOriginals(in: item.media).first(where: { MediaStore.shared.has($0) }) {
+                                // Nudge a refresh so any view observing the store re-reads the item.
+                                FeedStore.shared.scheduleRefresh()
+                                _ = first
+                            }
+                        } label: {
+                            Label("Original available", systemImage: "checkmark.circle")
+                        }
+                    }
+                    // Keep the post's photos/videos on THIS device so no cleanup (orphan sweep, age/size
+                    // limit, or the Manage-media screen) ever removes their bytes. Pins every real media
+                    // ref on the post at once — this is the discoverable home for the per-image long-press
+                    // "Keep on this device" the storage screen advertises.
+                    let keepRefs = item.media.filter { !MediaStore.isSynthetic($0) }
+                    if !keepRefs.isEmpty {
+                        // `pinned` (observed) rather than the singleton, so flipping this re-renders
+                        // the card and its badge — the toggle has to be visible to be believed.
+                        let anyPinned = keepRefs.contains { pinned.isPinned($0) }
+                        Button { pinned.togglePin(keepRefs) } label: {
+                            Label(anyPinned ? "Stop keeping on this device" : "Keep on this device",
+                                  systemImage: anyPinned ? "pin.slash.fill" : "pin")
+                        }
+                    }
+                    // Hide any post from my own feed (reversible). Local + per-device.
+                    let isHidden = HiddenStore.shared.isHidden(item.id)
+                    Button {
+                        if isHidden { HiddenStore.shared.unhide(item.id) } else { HiddenStore.shared.hide(item.id) }
+                        FeedStore.shared.refresh()
+                    } label: { Label(isHidden ? "Unhide" : "Hide", systemImage: isHidden ? "eye" : "eye.slash") }
+                    if !item.isMe {
+                        Button(role: .destructive) { showReport = true } label: {
+                            Label("Report", systemImage: "flag")
+                        }
+                    }
+                } label: { Image(systemName: "ellipsis").foregroundStyle(.secondary).padding(6) }
+                .menuIndicator(.hidden)
+                #if os(macOS)
+                .menuStyle(.borderlessButton)   // else macOS paints a rounded-rect bezel behind the glyph
+                .fixedSize()
+                #endif
+            }
+        }
+    }
+}
+
 struct PostCard: View {
     let item: FeedItemFfi
     let friendName: String
@@ -9134,269 +9425,9 @@ private struct KillHorizontalScroller: NSViewRepresentable {
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
-            if item.isMe {
-                avatar
-                Text(authorName).font(.subheadline.weight(.semibold))
-            } else {
-                NavigationLink {
-                    UserProfileView(authorHex: item.authorShort, name: authorName)
-                } label: {
-                    HStack(spacing: 10) {
-                        avatar
-                        Text(authorName).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
-                    }
-                }
-                .buttonStyle(.plain)
-            }
-            Text(relativeTimeShort(item.createdAt)).font(.caption2).foregroundStyle(.secondary)
-            if item.edited {
-                Text("edited").font(.caption2)
-                    .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background(Color(.tertiarySystemFill), in: Capsule()).foregroundStyle(.secondary)
-            }
-            // Kept on THIS device. Without a mark on the card, "Keep on this device" recorded the pin
-            // and showed nothing — the menu closed and the post looked identical, so a working toggle
-            // read as a dead button. This is the state, visible where the decision applies.
-            if item.media.contains(where: { !MediaStore.isSynthetic($0) && pinned.isPinned($0) }) {
-                Image(systemName: "pin.fill")
-                    .font(.caption2)
-                    .foregroundStyle(HavenTheme.pink)
-                    .accessibilityLabel("Kept on this device")
-            }
-            // Upload state for YOUR OWN media posts — ALWAYS shown when there is media, even if this
-            // device knows zero relays. Gating on "has a relay" hid the indicator entirely when a
-            // friend never learned frame-19 (or only had LAN media URLs), so "not syncing" looked
-            // identical to "nothing to show" and previously shared content appeared fine while no
-            // relay ever got a copy. Driven PER-MEDIA off the backup ledger + queue.
-            if item.isMe && !item.unsent, !item.media.isEmpty {
-                // The whole cluster is one tap target: every state below is a partial answer to
-                // "where is this?", and the sheet is the full one — including which relays hold
-                // nothing, which no icon can express.
-                // TICK ONLY WHILE SOMETHING CAN CHANGE.
-                //
-                // This cluster re-rendered every second for every one of YOUR OWN media posts on
-                // screen — forever, including posts uploaded months ago where the answer is fixed.
-                // On the You feed every cell is yours, so the app never stopped recomputing upload
-                // state on the main thread: a warm phone sitting idle, and a feed that stutters
-                // while scrolling because each frame competes with this work.
-                //
-                // A post confirmed on a relay someone else can read is DONE — content-addressed
-                // blobs never change, so that verdict cannot be revoked. Those fall back to an
-                // hourly tick (a timer that effectively never fires) instead of a per-second one.
-                // Anything still in flight keeps the 1s cadence, which is the case the ring and the
-                // percentage were built for.
-                let settledOwnRelay = RelayHost.shared.serving ? RelayHost.shared.nodeId : ""
-                let settledBlobs = item.media.filter { !MediaStore.isSynthetic($0) }
-                let settled = !settledBlobs.isEmpty && settledBlobs.allSatisfy {
-                    MediaBackupLedger.hasAnyRemote($0, ownRelayHex: settledOwnRelay)
-                }
-                // TICK ONLY WHILE AN UPLOAD IS GENUINELY IN FLIGHT.
-                //
-                // A Time Profiler trace of a warm phone (47s, iPhone 17 Pro Max) is ~half
-                // AG::Graph::UpdateStack::update / update_attribute / input_value_ref_slow with
-                // CA::Layer::commit_if_needed and LayoutEngineBox.sizeThatFits behind them: SwiftUI's
-                // attribute graph being dirtied over and over and re-running layout. Not media
-                // decode, not networking — the earlier fixes in this release were all treating
-                // network symptoms of a RENDERING problem.
-                //
-                // Each of these timers dirties its subtree, and a subtree invalidation drags a layout
-                // pass across the list. Gating on `settled` alone was not enough: a post that is not
-                // backed up AND has nothing queued (no relay known, upload long since abandoned) also
-                // ticked every second while its answer was every bit as fixed.
-                //
-                // So the 1s cadence — which exists for the progress ring and percentage — now applies
-                // ONLY when the queue actually holds one of this post's blobs. hasPending is O(1)
-                // now, so asking is free. Everything else falls to an hourly tick that effectively
-                // never fires, and re-renders when its own state publishes instead.
-                let inFlight = !settled && settledBlobs.contains { MediaBackupQueue.shared.hasPending($0) }
-                TimelineView(.periodic(from: .now, by: inFlight ? 1.0 : 3600)) { _ in
-                    let blobs = item.media.filter { !MediaStore.isSynthetic($0) }
-                    let circleId = feed.activeCircleId
-                    let hasRelay = !RelayMailboxStore.shared.relays(forCircle: circleId).isEmpty
-                        || SharedStore.hasMailbox(circleId)
-                    // "Backed up" must mean a relay SOMEONE ELSE can read. Writing to our own
-                    // in-process relay is a local file copy that cannot fail, so counting it showed a
-                    // confident tick on every post while friends could fetch none of them.
-                    let ownRelay = RelayHost.shared.serving ? RelayHost.shared.nodeId : ""
-                    let backed = !blobs.isEmpty && blobs.allSatisfy {
-                        MediaBackupLedger.hasAnyRemote($0, ownRelayHex: ownRelay)
-                    }
-                    // Reached OUR relay and nowhere else: not an error, not safe either. Says so.
-                    let localOnly = !backed && !blobs.isEmpty && blobs.allSatisfy { MediaBackupLedger.hasAny($0) }
-                    let pending = blobs.contains { MediaBackupQueue.shared.hasPending($0) }
-                    let progress = MediaUploadProgress.shared.fraction(for: blobs)
-                    let stuck = MediaUploadProgress.shared.looksStuck(blobs)
-                        || (!backed && !hasRelay)
-                        || (!backed && !pending && !localOnly && !blobs.isEmpty)
-                    if backed {
-                        Image(systemName: "checkmark.icloud.fill")
-                            .font(.caption2).foregroundStyle(HavenTheme.pink)
-                            .help("Backed up to a relay others can read")
-                    } else if !hasRelay {
-                        // The invisible case: no known mailbox → never showed an icon before.
-                        Image(systemName: "exclamationmark.icloud")
-                            .font(.caption2).foregroundStyle(.orange)
-                            .help("No relay known for this circle — media stays on this device only. Open Relays or wait for a member who hosts one.")
-                    } else if localOnly {
-                        Image(systemName: "externaldrive.badge.exclamationmark")
-                            .font(.caption2).foregroundStyle(.orange)
-                            .help("Only on this device's own relay — nobody else can fetch it yet")
-                    } else if let progress {
-                        // A real fraction, because a big video genuinely takes minutes and a motionless
-                        // arrow made "slow" and "broken" look identical. Determinate ring + percentage.
-                        ZStack {
-                            Circle().stroke(Color.secondary.opacity(0.25), lineWidth: 2)
-                            Circle().trim(from: 0, to: max(0.02, progress))
-                                .stroke(stuck ? Color.orange : HavenTheme.pink,
-                                        style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                                .rotationEffect(.degrees(-90))
-                        }
-                        .frame(width: 12, height: 12)
-                        .help(stuck
-                              ? "Still trying to upload — it has restarted several times"
-                              : "Uploading to a relay… \(Int(progress * 100))%")
-                    } else {
-                        // Queued but no window has been written yet (or the blob is small enough to go
-                        // in one shot). Orange once it has restarted repeatedly: the queue never gives
-                        // up, so without this an upload that can never succeed looks like one about to.
-                        Image(systemName: stuck ? "exclamationmark.icloud" : "arrow.up.circle")
-                            .font(.caption2)
-                            .foregroundStyle(stuck ? AnyShapeStyle(Color.orange) : AnyShapeStyle(Color.secondary))
-                            .help(stuck
-                                  ? (hasRelay
-                                     ? "Upload not reaching a relay yet — tap for detail; keep Haven open"
-                                     : "No relay available — media only on this device")
-                                  : "Waiting to upload to a relay…")
-                    }
-                }
-                .contentShape(Rectangle())
-                .onTapGesture { showBackupDetail = true }
-                .accessibilityAddTraits(.isButton)
-                .accessibilityHint("Shows which relays hold a copy")
-                .sheet(isPresented: $showBackupDetail) {
-                    BackupDetailView(refs: item.media.filter { !MediaStore.isSynthetic($0) },
-                                     circleId: feed.activeCircleId)
-                        .macSheetFrame()
-                        #if os(iOS)
-                        .presentationDetents([.medium, .large])
-                        .presentationDragIndicator(.visible)
-                        #endif
-                }
-            }
-            Spacer()
-            if !item.unsent {
-                Menu {
-                    // No link for a story (gone by the time anyone taps it) or a DM — a dm: circle
-                    // id is literally both members' node ids, so the link would leak the pair to
-                    // whoever you sent it to, and nobody outside the DM could ever open it anyway.
-                    if !item.story, !feed.activeCircleId.hasPrefix("dm:"),
-                       let url = DeepLink.postURL(circleId: feed.activeCircleId, postId: item.id) {
-                        ShareLink(item: url) { Label("Share post", systemImage: "square.and.arrow.up") }
-                        Button {
-                            PlatformPasteboard.string = url.absoluteString
-                            linkCopied = true
-                            // Unlike the app's other copy buttons this one has to un-stick: the menu
-                            // closes on tap, so a reopen a minute later must not still read "Copied".
-                            Task { try? await Task.sleep(nanoseconds: 2_000_000_000); linkCopied = false }
-                        } label: {
-                            Label(linkCopied ? "Copied" : "Copy link",
-                                  systemImage: linkCopied ? "checkmark" : "doc.on.doc")
-                        }
-                        // Reshare the post as a 24h story that links back to it. Deliberately inside the
-                        // same guard as the link actions: a story goes to the ACTIVE circle (see
-                        // FeedStore.post), and this post is IN the active circle, so everyone who can see
-                        // the story can already open the post. That is the whole access story — the embed
-                        // carries no key, and we never widen the audience beyond the circle.
-                        if !storyableMedia.isEmpty {
-                            Button {
-                                storyShare = StoryShareTarget(
-                                    draft: StoryDraft(refs: storyableMedia),
-                                    embed: StoryEmbed.Ref(circleId: feed.activeCircleId,
-                                                          postId: item.id, musicStartMs: 0))
-                            } label: { Label("Share as story", systemImage: "circle.dashed.inset.filled") }
-                        }
-                    }
-                    // Reply to the AUTHOR privately, the same move a story reply makes: open (or
-                    // reuse) the DM with them and carry the post's media so they know which post
-                    // you mean. Never available on your own post — that would DM yourself.
-                    if !item.isMe, let authorHex = ContactsStore.shared.idHex(forNodePrefix: item.authorShort) {
-                        Button {
-                            // Stage a draft; do NOT send. Referencing a post is the START of a
-                            // message, not one — the point is to ask them something about it, so
-                            // the link goes in the composer and the words stay yours. Opens the
-                            // real DM thread in Messages rather than switching the circle, which
-                            // would drop you into the feed layout instead of the conversation.
-                            let dm = feed.startDM(with: authorHex, name: authorName)
-                            let ref = DeepLink.postURL(circleId: feed.activeCircleId, postId: item.id)?
-                                .absoluteString ?? ""
-                            DMDraftStore.shared.stage(circleId: dm, text: ref)
-                            DeepLinkRouter.shared.requestedTab = "messages"
-                        } label: { Label("Message \(authorName)", systemImage: "bubble.left") }
-                    }
-                    if item.isMe {
-                        Button { showEdit = true } label: { Label("Edit", systemImage: "pencil") }
-                        Button(role: .destructive) { onUnsend() } label: { Label("Unsend", systemImage: "arrow.uturn.backward") }
-                    }
-                    // "Show original" only when the author actually sent an uncompressed companion.
-                    // Hidden otherwise so the menu never offers a dead download.
-                    let originalRefs = MediaVariants.allOriginals(in: item.media)
-                        .filter { !MediaStore.shared.has($0) }
-                    if !originalRefs.isEmpty {
-                        Button {
-                            for r in originalRefs {
-                                feed.requestMedia(r, circleId: feed.activeCircleId)
-                            }
-                        } label: {
-                            Label("Show original", systemImage: "arrow.down.circle")
-                        }
-                    } else if MediaVariants.allOriginals(in: item.media).contains(where: { MediaStore.shared.has($0) }) {
-                        // Original already on disk — nothing to download; still surface so the user
-                        // knows it's available (opens the zoom viewer on the original if present).
-                        Button {
-                            // Prefer opening the first available original in the media zoom path.
-                            if let first = MediaVariants.allOriginals(in: item.media).first(where: { MediaStore.shared.has($0) }) {
-                                // Nudge a refresh so any view observing the store re-reads the item.
-                                feed.scheduleRefresh()
-                                _ = first
-                            }
-                        } label: {
-                            Label("Original available", systemImage: "checkmark.circle")
-                        }
-                    }
-                    // Keep the post's photos/videos on THIS device so no cleanup (orphan sweep, age/size
-                    // limit, or the Manage-media screen) ever removes their bytes. Pins every real media
-                    // ref on the post at once — this is the discoverable home for the per-image long-press
-                    // "Keep on this device" the storage screen advertises.
-                    let keepRefs = item.media.filter { !MediaStore.isSynthetic($0) }
-                    if !keepRefs.isEmpty {
-                        // `pinned` (observed) rather than the singleton, so flipping this re-renders
-                        // the card and its badge — the toggle has to be visible to be believed.
-                        let anyPinned = keepRefs.contains { pinned.isPinned($0) }
-                        Button { pinned.togglePin(keepRefs) } label: {
-                            Label(anyPinned ? "Stop keeping on this device" : "Keep on this device",
-                                  systemImage: anyPinned ? "pin.slash.fill" : "pin")
-                        }
-                    }
-                    // Hide any post from my own feed (reversible). Local + per-device.
-                    let isHidden = HiddenStore.shared.isHidden(item.id)
-                    Button {
-                        if isHidden { HiddenStore.shared.unhide(item.id) } else { HiddenStore.shared.hide(item.id) }
-                        feed.refresh()
-                    } label: { Label(isHidden ? "Unhide" : "Hide", systemImage: isHidden ? "eye" : "eye.slash") }
-                    if !item.isMe {
-                        Button(role: .destructive) { showReport = true } label: {
-                            Label("Report", systemImage: "flag")
-                        }
-                    }
-                } label: { Image(systemName: "ellipsis").foregroundStyle(.secondary).padding(6) }
-                .menuIndicator(.hidden)
-                #if os(macOS)
-                .menuStyle(.borderlessButton)   // else macOS paints a rounded-rect bezel behind the glyph
-                .fixedSize()
-                #endif
-            }
-        }
+        PostHeader(item: item, friendName: friendName, authorName: authorName,
+                   storyableMedia: storyableMedia, onUnsend: onUnsend,
+                   showEdit: $showEdit, showReport: $showReport, storyShare: $storyShare)
     }
 
     // Show only the most-reacted few chips so a post with many distinct emoji can't flood the row and

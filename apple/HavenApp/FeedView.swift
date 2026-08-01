@@ -9545,7 +9545,17 @@ private struct KillHorizontalScroller: NSViewRepresentable {
         // AudioCoordinator.videoUnmuted is the same published value the indicator draws, so the
         // player and the icon now start from one source of truth. The full-screen viewer already
         // did this (`p.volume = soundOn ? 1 : 0`); the feed did not.
-        p.volume = AudioCoordinator.shared.videoUnmuted ? 1 : 0
+        // START SILENT unless THIS post is the active audio source and may be heard right now.
+        //
+        // I changed this from a hardcoded 0 earlier tonight so a rebuilt player would not lose the
+        // viewer's sound choice — but I used the GLOBAL videoUnmuted flag, which belongs to whichever
+        // post is currently the audio source. Any other post's player could therefore be built at
+        // full volume, including one built while the app was in the BACKGROUND: reported as "the post
+        // video audio is playing from the background on its own".
+        //
+        // The coordinator owns this decision (one audible post at a time, never while backgrounded,
+        // silenced, or in a call), so ask it rather than reading one of its flags in isolation.
+        p.volume = AudioCoordinator.shared.videoShouldBeAudible(forPost: item.id) ? 1 : 0
         p.actionAtItemEnd = .none
         // DIAGNOSTIC: every player creation, with the post and ref it belongs to. Audio is doubling
         // with only ONE visible video, so something builds a second AVPlayer for the same clip; this

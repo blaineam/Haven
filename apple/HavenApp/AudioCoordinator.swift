@@ -79,6 +79,15 @@ final class AudioCoordinator: ObservableObject {
     /// even when the app is in the background, so a background feed refresh re-running syncPlayback was
     /// kicking the post song on out of nowhere. Cleared when the app is active again.
     private var backgrounded = false
+    /// Is a NEW video player allowed to start audible for `postId`?
+    ///
+    /// `videoUnmuted` belongs to whichever post is the ACTIVE audio source — exactly one at a time.
+    /// A player built for any other post must start silent, and NO player may start audible while the
+    /// app is backgrounded, silenced, or a call owns the stage.
+    func videoShouldBeAudible(forPost postId: String) -> Bool {
+        activePostId == postId && videoUnmuted && !backgrounded
+            && !SettingsStore.shared.silent && !callActive
+    }
     /// A call is ringing/connecting/in progress — call audio owns the stage: no post music, no video
     /// audio (videos keep playing, muted). Computed live so scroll-driven start() can't race a flag.
     private var callActive: Bool { CallManager.shared.callInProgress }

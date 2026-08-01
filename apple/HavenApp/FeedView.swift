@@ -8612,6 +8612,48 @@ private struct PostCarouselDots: View {
     }
 }
 
+// MARK: - Post media geometry helpers
+//
+// Free functions, not view methods: they read MediaStore and their arguments and nothing else, so
+// living on PostCard only made a 1,600-line view longer. Pulling them out also makes it obvious that
+// shareURL must never call item(ref) — see its comment; that was a main-thread bitmap decode per ref
+// per layout pass, and it cost real scroll performance until this release.
+
+@MainActor func postShareURL(_ ref: String) -> URL? {
+    // NEVER `item(ref)` here — the rule mediaPageContent states two functions below, which this
+    // was quietly breaking: item() DECODES THE BITMAP / generates the video poster ON THE MAIN
+    // THREAD on a cache miss. shareURL is called from `body` for every media ref, so a scroll
+    // paid a decode per ref per layout pass. In a Time Profiler trace of a warm phone this shows
+    // as PostCard.shareURL at 957 samples with MediaStore.item at 964 and downsampled at 384,
+    // all under PostCard.body.getter — the choppy scrolling and the heat.
+    //
+    // The on-disk path is derivable from the ref alone: storagePath builds <dir>/<ref>.<ext>
+    // from MediaKind(ref:), which is pure string work and cannot decode anything. Video and
+    // image resolve to the same file either way — `videoURL` was the same path for a video.
+    MediaStore.shared.storagePath(for: ref)
+    }
+
+@MainActor func postLetterboxes(_ ref: String, in containerAspect: CGFloat) -> Bool {
+    guard let sz = MediaStore.shared.pixelSize(ref), sz.height > 0 else { return true }
+    return abs(sz.width / sz.height - containerAspect) > 0.02
+    }
+
+@MainActor func postSingleAspect(_ ref: String, in media: [String]) -> CGFloat {
+    // Read pixel dimensions from the file header (ImageIO) — NOT item()?.image.size, which decoded the
+    // whole bitmap on the main thread just to get an aspect ratio (a scroll hitch per single-media post).
+    if let sz = MediaStore.shared.pixelSize(ref), sz.width > 0, sz.height > 0 {
+        return sz.width / sz.height
+    }
+    // Full bytes not here yet, but the tiny thumb companion may be — same aspect as the
+    // original, so the placeholder reserves the REAL shape and the layout doesn't jump when
+    // the full-size media lands.
+    if let t = MediaVariants.thumb(for: ref, in: media),
+       let sz = MediaStore.shared.pixelSize(t), sz.width > 0, sz.height > 0 {
+        return sz.width / sz.height
+    }
+    return 4.0 / 3.0
+    }
+
 struct PostCard: View {
     let item: FeedItemFfi
     let friendName: String
@@ -9063,19 +9105,6 @@ struct PostCard: View {
     }
 
     /// The on-disk file to hand to the system share sheet (video file, else the image).
-    private func shareURL(_ ref: String) -> URL? {
-        // NEVER `item(ref)` here — the rule mediaPageContent states two functions below, which this
-        // was quietly breaking: item() DECODES THE BITMAP / generates the video poster ON THE MAIN
-        // THREAD on a cache miss. shareURL is called from `body` for every media ref, so a scroll
-        // paid a decode per ref per layout pass. In a Time Profiler trace of a warm phone this shows
-        // as PostCard.shareURL at 957 samples with MediaStore.item at 964 and downsampled at 384,
-        // all under PostCard.body.getter — the choppy scrolling and the heat.
-        //
-        // The on-disk path is derivable from the ref alone: storagePath builds <dir>/<ref>.<ext>
-        // from MediaKind(ref:), which is pure string work and cannot decode anything. Video and
-        // image resolve to the same file either way — `videoURL` was the same path for a video.
-        MediaStore.shared.storagePath(for: ref)
-    }
 
     @ViewBuilder private func mediaPageContent(_ ref: String, containerAspect: CGFloat,
                                                inCarousel: Bool = false,
@@ -9233,10 +9262,6 @@ struct PostCard: View {
     /// True when this page's media can't fill a `containerAspect`-shaped page — it letterboxes, exposing
     /// the card's grey behind it. A video whose poster hasn't been generated yet has no known aspect
     /// (singleAspect falls back to 4:3), so assume it letterboxes: that's the tall-clip case exactly.
-    private func letterboxes(_ ref: String, in containerAspect: CGFloat) -> Bool {
-        guard let sz = MediaStore.shared.pixelSize(ref), sz.height > 0 else { return true }
-        return abs(sz.width / sz.height - containerAspect) > 0.02
-    }
 
     /// A blurred, cropped-to-fill copy of the media behind the fitted one — the letterboxed area reads as
     /// the media's own colors instead of the card's grey. A 64px thumbnail is all a heavy blur can show;
@@ -9439,21 +9464,6 @@ private struct KillHorizontalScroller: NSViewRepresentable {
     /// broken while it's still downloading from the sender, a relay, or the shared mailbox.
 
     /// The single-media tile's aspect ratio, taken from the image (or a video's thumbnail).
-    private func singleAspect(_ ref: String) -> CGFloat {
-        // Read pixel dimensions from the file header (ImageIO) — NOT item()?.image.size, which decoded the
-        // whole bitmap on the main thread just to get an aspect ratio (a scroll hitch per single-media post).
-        if let sz = MediaStore.shared.pixelSize(ref), sz.width > 0, sz.height > 0 {
-            return sz.width / sz.height
-        }
-        // Full bytes not here yet, but the tiny thumb companion may be — same aspect as the
-        // original, so the placeholder reserves the REAL shape and the layout doesn't jump when
-        // the full-size media lands.
-        if let t = MediaVariants.thumb(for: ref, in: item.media),
-           let sz = MediaStore.shared.pixelSize(t), sz.width > 0, sz.height > 0 {
-            return sz.width / sz.height
-        }
-        return 4.0 / 3.0
-    }
 
     /// The speaker chip over a video page — plus that page's Save/Share menu.
     @ViewBuilder private func muteButton(_ ref: String) -> some View {
@@ -9644,6 +9654,12 @@ private struct KillHorizontalScroller: NSViewRepresentable {
     private func carouselDots(_ count: Int) -> some View {
         PostCarouselDots(count: count, currentPage: currentPage)
     }
+
+    private func singleAspect(_ ref: String) -> CGFloat { postSingleAspect(ref, in: item.media) }
+    private func letterboxes(_ ref: String, in containerAspect: CGFloat) -> Bool {
+        postLetterboxes(ref, in: containerAspect)
+    }
+    private func shareURL(_ ref: String) -> URL? { postShareURL(ref) }
 
     private var header: some View {
         PostHeader(item: item, friendName: friendName, authorName: authorName,

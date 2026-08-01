@@ -7956,10 +7956,17 @@ private struct PostReactionsRow: View {
                 HStack(spacing: 3) {
                     Text(r.emoji).font(.caption)
                     Text("\(r.count)").font(.caption2.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(r.mine ? AnyShapeStyle(HavenTheme.pink) : AnyShapeStyle(.secondary))
+                        // PINK COUNT ON A PINK CAPSULE IS INVISIBLE.
+                        //
+                        // Both the chip tint and the count read "this one is yours", so the count was
+                        // drawn in the same pink as the capsule behind it and the number disappeared
+                        // into its own background. The capsule already carries that meaning; the
+                        // number's job is to be READ. `.primary` keeps it legible over the tinted
+                        // glass in both light and dark, and the chip is still obviously yours.
+                        .foregroundStyle(r.mine ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                 }
                 .padding(.horizontal, 9).padding(.vertical, 4)
-                // One glass capsule, tinted pink when it's YOUR reaction (the count is pink too).
+                // One glass capsule, tinted pink when it's YOUR reaction.
                 .havenGlass(in: Capsule(), tint: r.mine ? HavenTheme.pink : nil)
                 .contentShape(Capsule())
                 .onTapGesture { if r.mine { onUnreact(r.emoji) } else { react(r.emoji) } }

@@ -7909,6 +7909,70 @@ extension PostCard: Equatable {
     }
 }
 
+/// A post's reaction chips + quick-react buttons.
+///
+/// Extracted from PostCard, which was a single ~1,600-line `body`. SwiftUI instantiates that whole
+/// generic tree every time a row appears, which is the cost that remains once invalidation churn is
+/// gone: measured at 21-34 body evaluations per second while scrolling. Smaller views are cheaper to
+/// build, are re-evaluated only when THEIR inputs change, and are far easier to read than a nested
+/// block four levels inside another view.
+///
+/// It owns its own sheet state — `showPicker`/`showDetail` were @State on PostCard used nowhere but
+/// here, so presenting a picker re-evaluated the entire card.
+private struct PostReactionsRow: View {
+    let reactions: [ReactionFfi]
+    let onReact: (String) -> Void
+    let onUnreact: (String) -> Void
+    @State private var showPicker = false
+    @State private var showDetail = false
+
+    private var visible: [ReactionFfi] { PostCard.cappedReactions(reactions, cap: 4) }
+    private var hiddenCount: Int { max(0, reactions.count - visible.count) }
+    private func react(_ e: String) { EmojiStore.shared.record(e); onReact(e) }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(visible, id: \.emoji) { r in
+                // Tap a chip to toggle your own reaction; press-and-hold to see who reacted.
+                HStack(spacing: 3) {
+                    Text(r.emoji).font(.caption)
+                    Text("\(r.count)").font(.caption2.weight(.semibold).monospacedDigit())
+                        .foregroundStyle(r.mine ? AnyShapeStyle(HavenTheme.pink) : AnyShapeStyle(.secondary))
+                }
+                .padding(.horizontal, 9).padding(.vertical, 4)
+                // One glass capsule, tinted pink when it's YOUR reaction (the count is pink too).
+                .havenGlass(in: Capsule(), tint: r.mine ? HavenTheme.pink : nil)
+                .contentShape(Capsule())
+                .onTapGesture { if r.mine { onUnreact(r.emoji) } else { react(r.emoji) } }
+                .onLongPressGesture(minimumDuration: 0.3) { showDetail = true }
+                .transition(.scale.combined(with: .opacity))
+            }
+            if hiddenCount > 0 {
+                Text("+\(hiddenCount)")
+                    .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 9).padding(.vertical, 4)
+                    .havenGlass(in: Capsule())
+                    .contentShape(Capsule())
+                    .onTapGesture { showDetail = true }
+                    .transition(.scale.combined(with: .opacity))
+            }
+            Spacer(minLength: 8)
+            ForEach(EmojiStore.shared.frequent(3), id: \.self) { e in
+                Button(e) { react(e) }.font(.body).buttonStyle(PressableStyle())
+            }
+            Button { showPicker = true } label: {
+                Image(systemName: "plus.circle").font(.body).foregroundStyle(.secondary)
+            }
+            .buttonStyle(PressableStyle())
+        }
+        .animation(HavenTheme.bouncy, value: reactions.count)
+        .sheet(isPresented: $showPicker) { ReactionPicker { e in onReact(e) } }
+        .sheet(isPresented: $showDetail) {
+            ReactionDetailView(reactions: reactions, onUnreact: { e in onUnreact(e) })
+        }
+    }
+}
+
 struct PostCard: View {
     let item: FeedItemFfi
     let friendName: String
@@ -7991,7 +8055,6 @@ struct PostCard: View {
         var observers: [String: NSObjectProtocol] = [:]   // loop observers, removed on teardown
     }
     @State private var bag = PlayerBag()
-    @State private var showReactionPicker = false
     @State private var editCommentId: String?
     @State private var editCommentText = ""
     @State private var editCommentMedia: [String] = []
@@ -8007,7 +8070,6 @@ struct PostCard: View {
     /// letterboxes INSIDE it against its own blurred copy.
     @State private var mediaWidth: CGFloat = lastKnownMediaWidth
     @State private var showHeart = false
-    @State private var showReactionDetail = false
     /// A "share this post as a story" composer session (nil = not sharing).
     @State private var storyShare: StoryShareTarget?
     /// Super data saver: video refs the user explicitly tapped play for. We pull those bytes and
@@ -9270,9 +9332,6 @@ private struct KillHorizontalScroller: NSViewRepresentable {
     // Show only the most-reacted few chips so a post with many distinct emoji can't flood the row and
     // break the layout; the rest collapse into a "+N" chip that opens the full who-reacted sheet. A chip
     // the user owns is always kept visible (so they can untap it), even if it's not in the top counts.
-    private static let maxReactionChips = 4
-    private var visibleReactions: [ReactionFfi] { Self.cappedReactions(item.reactions, cap: Self.maxReactionChips) }
-    private var hiddenReactionCount: Int { max(0, item.reactions.count - visibleReactions.count) }
 
     /// The most-reacted `cap` chips, always keeping the user's own (so they can untap it) — sorted by
     /// count descending. Used to bound both the post- and comment-level reaction rows.
@@ -9286,48 +9345,7 @@ private struct KillHorizontalScroller: NSViewRepresentable {
     }
 
     private var reactionsRow: some View {
-        HStack(spacing: 8) {
-            ForEach(visibleReactions, id: \.emoji) { r in
-                // Tap a chip to toggle your own reaction; press-and-hold to see who reacted.
-                HStack(spacing: 3) {
-                    Text(r.emoji).font(.caption)
-                    Text("\(r.count)").font(.caption2.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(r.mine ? AnyShapeStyle(HavenTheme.pink) : AnyShapeStyle(.secondary))
-                }
-                .padding(.horizontal, 9).padding(.vertical, 4)
-                // One glass capsule, tinted pink when it's YOUR reaction (the count is pink too) —
-                // was a material + hand-rolled ring, i.e. havenGlass's fallback, minus the real glass.
-                .havenGlass(in: Capsule(), tint: r.mine ? HavenTheme.pink : nil)
-                .contentShape(Capsule())
-                .onTapGesture { if r.mine { onUnreact(r.emoji) } else { react(r.emoji) } }
-                .onLongPressGesture(minimumDuration: 0.3) { showReactionDetail = true }
-                .transition(.scale.combined(with: .opacity))
-            }
-            if hiddenReactionCount > 0 {
-                Text("+\(hiddenReactionCount)")
-                    .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-                    .padding(.horizontal, 9).padding(.vertical, 4)
-                    .havenGlass(in: Capsule())
-                    .contentShape(Capsule())
-                    .onTapGesture { showReactionDetail = true }
-                    .transition(.scale.combined(with: .opacity))
-            }
-            Spacer(minLength: 8)
-            ForEach(EmojiStore.shared.frequent(3), id: \.self) { e in
-                Button(e) { react(e) }.font(.body).buttonStyle(PressableStyle())
-            }
-            Button { showReactionPicker = true } label: {
-                Image(systemName: "plus.circle").font(.body).foregroundStyle(.secondary)
-            }
-            .buttonStyle(PressableStyle())
-        }
-        .animation(HavenTheme.bouncy, value: item.reactions.count)
-        .sheet(isPresented: $showReactionPicker) {
-            ReactionPicker { e in onReact(e) }
-        }
-        .sheet(isPresented: $showReactionDetail) {
-            ReactionDetailView(reactions: item.reactions, onUnreact: { e in onUnreact(e) })
-        }
+        PostReactionsRow(reactions: item.reactions, onReact: onReact, onUnreact: onUnreact)
     }
 
     private var commentsList: some View {

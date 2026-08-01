@@ -130,13 +130,6 @@ enum PlayerCensus {
     }
 }
 
-/// Temporary switches for isolating where the remaining heat comes from, flipped by rebuilding
-/// rather than at runtime so the compiler strips the disabled path entirely.
-enum HavenPerfExperiment {
-    /// Blurred backdrop behind every media page — pure GPU compositing, invisible to a CPU profile.
-    static let disableBackdropBlur = true
-}
-
 struct PostCenterKey: PreferenceKey {
     static var defaultValue: [String: CGFloat] = [:]
     static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
@@ -8613,11 +8606,7 @@ struct PostCard: View {
     /// layer draws. A blurred still is the honest trade: no second decode, and behind a 24pt blur the
     /// difference between a still and a moving copy isn't visible anyway.
     @ViewBuilder private func blurredBackdrop(_ ref: String) -> some View {
-        // EXPERIMENT (not for release as-is): skip the blurred backdrop to isolate GPU cost.
-        // A continuous 24pt blur behind every media page is one of the most expensive things you can
-        // ask the GPU to composite while scrolling, and GPU work is invisible to a Time Profiler —
-        // which is what six CPU traces with no hotspot and a Nominal thermal state were telling us.
-        if !HavenPerfExperiment.disableBackdropBlur { BlurredMediaBackdrop(ref: ref) }
+        BlurredMediaBackdrop(ref: ref)
     }
 
     /// The carousel's per-page backdrop.

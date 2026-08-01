@@ -784,7 +784,7 @@ final class FeedStore: ObservableObject {
         persist(); refreshCircles()
         activeCircleId = id
         refresh()
-        if !memberIds.isEmpty { syncWithContacts() }   // greet + back-fill to the new members
+        if !memberIds.isEmpty { syncWithContacts(force: true) }   // new members: greet now
         nudgeSelfSyncSoon()   // the new circle reaches my other devices in seconds, not minutes
     }
 
@@ -3039,7 +3039,38 @@ final class FeedStore: ObservableObject {
     /// Circles owed a re-open seen-wipe once their mailbox backlog finishes draining (a wipe
     /// mid-drain resets the drain — see the guard in pullMailbox's unlockedCircles block).
     private var pendingReopenCircles: Set<String> = []
-    func syncWithContacts() {
+    /// Coalesce window for the contact fan-out. The 30s heartbeat + 60s due-gate in startSyncTimer
+    /// were the "primary device-heat fix", but they only govern the TIMER — and syncWithContacts has
+    /// a dozen event-driven callers (a relay learned, a fabric rebind, a member change) that call it
+    /// directly and bypass the gate entirely.
+    ///
+    /// Measured on a real iPhone, steady state, 60s window: 36 fan-outs for a single DM circle (one
+    /// every 1.7s), ~180 putHello calls that dropped as "no due relays", and 289 of 300 log lines
+    /// were this one subsystem. Each run walks EVERY circle and every account in it, so one trigger
+    /// costs a burst — and the phone was warm doing nothing else. Whatever re-arms the callers, the
+    /// fan-out itself must not run at that rate.
+    ///
+    /// A floor here fixes it wherever the trigger lives. User-visible work still passes force: an
+    /// invite, an accepted request, or a new member greets immediately; the forced hello also rides
+    /// `pendingForcedHellos`, which survives a coalesced call and ships on the next run.
+    #if os(iOS)
+    private static let syncContactsFloorMs: UInt64 = 20_000
+    #else
+    private static let syncContactsFloorMs: UInt64 = 10_000
+    #endif
+    private var lastSyncContactsMs: UInt64 = 0
+
+    func syncWithContacts(force: Bool = false) {
+        let nowMsFloor = now()
+        if !force, lastSyncContactsMs != 0,
+           nowMsFloor &- lastSyncContactsMs < Self.syncContactsFloorMs {
+            return   // coalesced — a caller fired again inside the floor
+        }
+        lastSyncContactsMs = nowMsFloor
+        syncWithContactsNow()
+    }
+
+    private func syncWithContactsNow() {
         guard let social else { return }
         // Re-blasting our ENTIRE history (every post → every contact) on every 20s tick flooded the
         // network with hundreds of thousands of frames (drowning real delivery). The hello goes out every

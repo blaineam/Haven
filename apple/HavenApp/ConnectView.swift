@@ -244,7 +244,7 @@ struct ConnectView: View {
                 // Store the invite's device-id hints BEFORE the hello, so the very first dial
                 // can reach their device (their account id resolves to no node post-device-seed).
                 FeedStore.shared.recordDeviceHints(accountHex: f.idHex, deviceIds: foundHints)
-                FeedStore.shared.syncWithContacts()   // say hello over the network
+                FeedStore.shared.syncWithContacts(force: true)   // user action: greet now, never coalesced
                 withAnimation(HavenTheme.bouncy) { addedName = name }
             }
             .buttonStyle(BrandButtonStyle())

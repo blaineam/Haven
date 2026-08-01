@@ -8761,7 +8761,26 @@ private struct KillHorizontalScroller: NSViewRepresentable {
                 let settled = !settledBlobs.isEmpty && settledBlobs.allSatisfy {
                     MediaBackupLedger.hasAnyRemote($0, ownRelayHex: settledOwnRelay)
                 }
-                TimelineView(.periodic(from: .now, by: settled ? 3600 : 1.0)) { _ in
+                // TICK ONLY WHILE AN UPLOAD IS GENUINELY IN FLIGHT.
+                //
+                // A Time Profiler trace of a warm phone (47s, iPhone 17 Pro Max) is ~half
+                // AG::Graph::UpdateStack::update / update_attribute / input_value_ref_slow with
+                // CA::Layer::commit_if_needed and LayoutEngineBox.sizeThatFits behind them: SwiftUI's
+                // attribute graph being dirtied over and over and re-running layout. Not media
+                // decode, not networking — the earlier fixes in this release were all treating
+                // network symptoms of a RENDERING problem.
+                //
+                // Each of these timers dirties its subtree, and a subtree invalidation drags a layout
+                // pass across the list. Gating on `settled` alone was not enough: a post that is not
+                // backed up AND has nothing queued (no relay known, upload long since abandoned) also
+                // ticked every second while its answer was every bit as fixed.
+                //
+                // So the 1s cadence — which exists for the progress ring and percentage — now applies
+                // ONLY when the queue actually holds one of this post's blobs. hasPending is O(1)
+                // now, so asking is free. Everything else falls to an hourly tick that effectively
+                // never fires, and re-renders when its own state publishes instead.
+                let inFlight = !settled && settledBlobs.contains { MediaBackupQueue.shared.hasPending($0) }
+                TimelineView(.periodic(from: .now, by: inFlight ? 1.0 : 3600)) { _ in
                     let blobs = item.media.filter { !MediaStore.isSynthetic($0) }
                     let circleId = feed.activeCircleId
                     let hasRelay = !RelayMailboxStore.shared.relays(forCircle: circleId).isEmpty

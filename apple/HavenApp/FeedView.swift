@@ -666,7 +666,17 @@ final class FeedStore: ObservableObject {
         let all = social?.circles() ?? []
         // Belt-and-suspenders: also filter any tombstoned circle that a sync race re-materialized before
         // its own `circle-deleted:` record applied.
-        circles = all.filter { !CircleDeletionStore.isDeleted($0.id) }
+        // Dedupe by id — DEFENSIVE, not a fix for an observed bug. Nothing downstream tolerates the
+        // same circle twice (`for circle in circles` would fan out, poll and backfill once per copy),
+        // and the cost of guaranteeing it here is one Set.
+        //
+        // Honest note, because the first version of this comment claimed a measured 2-4x duplication:
+        // that reading was WRONG. The fan-out log truncates ids with `.prefix(20)`, and a DM id is
+        // `dm:<a>-<b>`, so several distinct DM circles sharing a first party printed identically. The
+        // log has been widened; the duplicates were never real. Keeps first occurrence, so ordering
+        // and the active circle are unchanged.
+        var seenCircleIds = Set<String>()
+        circles = all.filter { !CircleDeletionStore.isDeleted($0.id) && seenCircleIds.insert($0.id).inserted }
         // If I'm still sitting on a superseded/deleted circle (persisted active id, or a sibling's upgrade
         // synced in), move to its successor, else fall back to the default circle rather than a blank feed.
         if CircleDeletionStore.isDeleted(activeCircleId) {
@@ -3189,7 +3199,9 @@ final class FeedStore: ObservableObject {
             }
             helloAccounts.remove(meHex.lowercased())
             if !helloAccounts.isEmpty {
-                HavenLog.net("hello fan-out circle=\(circle.id.prefix(20)) accounts=\(helloAccounts.count) forced=\(pendingForcedHellos.count)")
+                // Full id: `prefix(20)` truncated DM ids (`dm:<a>-<b>`) to exactly the shared first party,
+                // so distinct circles printed identically and a log read as duplicated work that was not.
+                HavenLog.net("hello fan-out circle=\(circle.id) accounts=\(helloAccounts.count) forced=\(pendingForcedHellos.count)")
             }
             for acct in helloAccounts {
                 // A just-invited member must get the hello NOW — it carries the circle grant,

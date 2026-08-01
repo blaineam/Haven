@@ -7765,6 +7765,20 @@ nonisolated(unsafe) private var lastKnownMediaWidth: CGFloat = 0
 ///
 /// This does NOT stop the card's own @ObservedObject stores from invalidating it — that is the next
 /// step, pushing `feed`/`audio`/`pinned`/`profile` down into the leaf views that read them.
+/// My own avatar, as its OWN view so it — and not its 1,507-line host — is what a ProfileStore
+/// publish invalidates.
+///
+/// PostCard observed ProfileStore for exactly these two call sites. Because @ObservedObject
+/// subscribes the WHOLE view, changing an avatar re-evaluated every visible card's entire body. A
+/// trace after making rows Equatable showed generic-metadata instantiation down 36% but
+/// AG::Graph::UpdateStack::update FLAT — parent-driven rebuilds were being skipped while the card's
+/// own store subscriptions kept dirtying it directly. This is the first of those four moved down.
+private struct MyAvatar: View {
+    let size: CGFloat
+    @ObservedObject private var profile = ProfileStore.shared
+    var body: some View { HavenAvatar(image: profile.avatar, emoji: profile.emoji, size: size) }
+}
+
 extension PostCard: Equatable {
     static func == (a: PostCard, b: PostCard) -> Bool {
         a.item == b.item
@@ -7789,7 +7803,6 @@ struct PostCard: View {
     var onCommentFocus: ((Bool) -> Void)? = nil
 
     @ObservedObject private var audio = AudioCoordinator.shared
-    @ObservedObject private var profile = ProfileStore.shared
     @ObservedObject private var feed = FeedStore.shared
     /// Observed so "Keep on this device" visibly changes state. Reading the store WITHOUT observing
     /// it meant the pin was recorded but nothing on screen moved — the menu closed and the post
@@ -8737,7 +8750,7 @@ private struct KillHorizontalScroller: NSViewRepresentable {
 
     @ViewBuilder private var avatar: some View {
         if item.isMe {
-            HavenAvatar(image: profile.avatar, emoji: profile.emoji, size: 34)
+            MyAvatar(size: 34)
         } else {
             PeerAvatar(nodeHex: item.authorShort, name: authorName, size: 34)
         }
@@ -9176,7 +9189,7 @@ private struct KillHorizontalScroller: NSViewRepresentable {
     /// A commenter's avatar — mine is my real photo/emoji; others use their synced photo/emoji.
     @ViewBuilder private func commentAvatar(_ c: FeedCommentFfi) -> some View {
         if c.isMe {
-            HavenAvatar(image: profile.avatar, emoji: profile.emoji, size: 24)
+            MyAvatar(size: 24)
         } else {
             PeerAvatar(nodeHex: c.authorShort, name: commentAuthorName(c), size: 24)
         }
@@ -9544,8 +9557,8 @@ struct NewCircleView: View {
 }
 
 struct ProfileView: View {
-    @ObservedObject private var store = FeedStore.shared
     @ObservedObject private var profile = ProfileStore.shared
+    @ObservedObject private var store = FeedStore.shared
     let friendName: String
     @State private var showStories = false
     @State private var storyIndex = 0

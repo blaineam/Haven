@@ -8339,6 +8339,177 @@ private struct PostHeader: View {
     }
 }
 
+/// A post's inline comments: rows, per-comment reactions, attachments and the "show all" sheet.
+///
+/// The last big block out of PostCard. It owns showAllComments and commentReactTarget — @State that
+/// nothing outside the comment list read, so opening a reaction picker used to re-evaluate the whole
+/// card. Editing still belongs to the card (it presents the alert), so that arrives as a callback
+/// rather than three bindings.
+private struct PostCommentsList: View {
+    let item: FeedItemFfi
+    let friendName: String
+    let expandAllComments: Bool
+    let onReact: (String) -> Void
+    let onUnreact: (String) -> Void
+    let onComment: (String, [String]) -> Void
+    let onEdit: (String) -> Void
+    let onUnsend: () -> Void
+    let onEditComment: (FeedCommentFfi) -> Void
+
+    @State private var showAllComments = false
+    @State private var commentReactTarget: PostCard.CommentReactTarget?
+
+
+    private func commentAuthorName(_ c: FeedCommentFfi) -> String {
+        if c.isMe { return "You" }
+        return ContactsStore.shared.name(forNodePrefix: c.authorShort) ?? friendName
+    }
+
+    var body: some View {
+        // Inline we show at most 3; the "show all" sheet shows every comment.
+        let shown = expandAllComments ? item.comments : Array(item.comments.prefix(3))
+        return VStack(alignment: .leading, spacing: 10) {
+            ForEach(shown, id: \.id) { c in commentRow(c) }
+            if !expandAllComments && item.comments.count > 3 {
+                Button { showAllComments = true } label: {
+                    Text("Show all \(item.comments.count) comments")
+                        .font(.caption.weight(.semibold)).foregroundStyle(HavenTheme.pink)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(10)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .sheet(isPresented: $showAllComments) {
+            PostCommentsSheet(item: item, friendName: friendName,
+                              onReact: onReact, onUnreact: onUnreact, onComment: onComment, onEdit: onEdit, onUnsend: onUnsend)
+                .macSheetFrame()
+        }
+        .sheet(item: $commentReactTarget) { t in
+            ReactionPicker { e in FeedStore.shared.react(t.id, e) }
+        }
+    }
+
+    @ViewBuilder private func commentRow(_ c: FeedCommentFfi) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            commentAuthorLink(c) { commentAvatar(c) }
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    commentAuthorLink(c) {
+                        Text(commentAuthorName(c)).font(.caption.weight(.semibold))
+                            .foregroundStyle(c.isMe ? HavenTheme.pink : .primary)
+                    }
+                    Text(relativeTimeShort(c.createdAt)).font(.caption2).foregroundStyle(.tertiary)
+                    if c.edited && !c.unsent { Text("(edited)").font(.caption2).foregroundStyle(.secondary) }
+                    Spacer()
+                }
+                if c.unsent {
+                    Text("unsent").font(.caption).italic().foregroundStyle(.secondary)
+                } else if !c.body.isEmpty {
+                    LinkedText(text: c.body, font: .caption)
+                    if let url = LinkScanner.urls(in: c.body).first { LinkPreviewCard(url: url).padding(.top, 6) }
+                }
+                if !c.unsent && !c.media.isEmpty { commentMediaRow(c.media) }
+                if !c.unsent { commentReactionsRow(c) }
+            }
+        }
+        .contextMenu {
+            if !c.unsent {
+                // Flat rows, each reacting on TAP. A ControlGroup here collapsed into a
+                // "❤️ 😎 👍 ›" SUBMENU on macOS: it showed the emoji, then made you open a
+                // second menu to actually pick one.
+                ForEach(EmojiStore.shared.frequent(3), id: \.self) { e in
+                    Button("React \(e)") { EmojiStore.shared.record(e); FeedStore.shared.react(c.id, e) }
+                }
+                Button { commentReactTarget = PostCard.CommentReactTarget(id: c.id) } label: { Label("More reactions…", systemImage: "face.smiling") }
+                if c.isMe {
+                    if !c.body.isEmpty {
+                        Button { onEditComment(c) } label: {
+                            Label("Edit", systemImage: "pencil")
+                        }
+                    }
+                    Button(role: .destructive) { FeedStore.shared.unsend(c.id) } label: { Label("Delete", systemImage: "trash") }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func commentReactionsRow(_ c: FeedCommentFfi) -> some View {
+        // Cap the chips (most-reacted first, always keep mine) so a comment can't flood its row.
+        let visible = PostCard.cappedReactions(c.reactions, cap: 5)
+        let hidden = max(0, c.reactions.count - visible.count)
+        HStack(spacing: 4) {
+            ForEach(visible, id: \.emoji) { r in
+                Text("\(r.emoji)\(r.count > 1 ? " \(r.count)" : "")")
+                    .font(.caption2).padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(r.mine ? AnyShapeStyle(HavenTheme.brandHorizontal.opacity(0.22)) : AnyShapeStyle(Color(.tertiarySystemFill)), in: Capsule())
+                    .overlay(Capsule().strokeBorder(r.mine ? HavenTheme.pink.opacity(0.5) : .clear))
+                    .contentShape(Capsule())
+                    .onTapGesture {
+                        if r.mine { FeedStore.shared.unreact(c.id, r.emoji) }
+                        else { EmojiStore.shared.record(r.emoji); FeedStore.shared.react(c.id, r.emoji) }
+                    }
+            }
+            if hidden > 0 {
+                Text("+\(hidden)").font(.caption2).padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Color(.tertiarySystemFill), in: Capsule()).foregroundStyle(.secondary)
+            }
+            Button { commentReactTarget = PostCard.CommentReactTarget(id: c.id) } label: {
+                Image(systemName: "face.smiling").font(.caption2).foregroundStyle(.secondary)
+            }
+            .buttonStyle(PressableStyle())
+        }
+        .animation(HavenTheme.bouncy, value: c.reactions.count)
+    }
+
+    @ViewBuilder private func commentAvatar(_ c: FeedCommentFfi) -> some View {
+        if c.isMe {
+            MyAvatar(size: 24)
+        } else {
+            PeerAvatar(nodeHex: c.authorShort, name: commentAuthorName(c), size: 24)
+        }
+    }
+
+    @ViewBuilder private func commentAuthorLink<Content: View>(_ c: FeedCommentFfi, @ViewBuilder _ content: () -> Content) -> some View {
+        if c.isMe {
+            content()
+        } else {
+            NavigationLink {
+                UserProfileView(authorHex: c.authorShort, name: commentAuthorName(c))
+            } label: { content() }
+            .buttonStyle(.plain)
+        }
+    }
+
+    @ViewBuilder private func commentMediaRow(_ refs: [String]) -> some View {
+        HStack(spacing: 6) {
+            ForEach(refs, id: \.self) { ref in
+                if let m = MediaStore.shared.item(ref) {
+                    switch m.kind {
+                    case .audio:
+                        if let u = m.videoURL { AudioPlayerPill(url: u) }
+                    case .video:
+                        if let img = m.image {
+                            thumb(img).overlay(Image(systemName: "play.circle.fill").foregroundStyle(.white).font(.title3))
+                        }
+                    case .image:
+                        if let img = m.image { thumb(img) }
+                    case .file:
+                        Image(systemName: "doc.zipper")
+                            .frame(width: 56, height: 56)
+                            .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+            }
+        }
+    }
+
+    private func thumb(_ img: PlatformImage) -> some View {
+        Image(platformImage: img).resizable().scaledToFill()
+            .frame(width: 56, height: 56).clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
 struct PostCard: View {
     let item: FeedItemFfi
     let friendName: String
@@ -8387,7 +8558,6 @@ struct PostCard: View {
     /// instead of shrinking to a narrow sliver), but fits the WHOLE image within a shorter cap on wider
     /// layouts (iPad / landscape / macOS) so you can see all of it at once.
     private var singleMediaMaxHeight: CGFloat { isPortraitPhone ? 680 : 460 }
-    @State private var showAllComments = false
     @State private var showEdit = false
     @State private var showReport = false
     @State private var linkCopied = false
@@ -8420,7 +8590,6 @@ struct PostCard: View {
     @State private var editCommentId: String?
     @State private var editCommentText = ""
     @State private var editCommentMedia: [String] = []
-    @State private var commentReactTarget: CommentReactTarget?
 
     struct CommentReactTarget: Identifiable { let id: String }
     @State private var currentPage = 0
@@ -8554,7 +8723,17 @@ struct PostCard: View {
                 }
                 if let track = item.music { NowPlayingPill(track: track, animating: true) }
                 reactionsRow
-                if !item.comments.isEmpty { commentsList }
+                if !item.comments.isEmpty {
+                    PostCommentsList(item: item, friendName: friendName,
+                                     expandAllComments: expandAllComments,
+                                     onReact: onReact, onUnreact: onUnreact, onComment: onComment,
+                                     onEdit: onEdit, onUnsend: onUnsend,
+                                     onEditComment: { c in
+                                         editCommentId = c.id
+                                         editCommentText = c.body
+                                         editCommentMedia = c.media
+                                     })
+                }
                 commentField
             }
         }
@@ -9449,154 +9628,17 @@ private struct KillHorizontalScroller: NSViewRepresentable {
         PostReactionsRow(reactions: item.reactions, onReact: onReact, onUnreact: onUnreact)
     }
 
-    private var commentsList: some View {
-        // Inline we show at most 3; the "show all" sheet shows every comment.
-        let shown = expandAllComments ? item.comments : Array(item.comments.prefix(3))
-        return VStack(alignment: .leading, spacing: 10) {
-            ForEach(shown, id: \.id) { c in commentRow(c) }
-            if !expandAllComments && item.comments.count > 3 {
-                Button { showAllComments = true } label: {
-                    Text("Show all \(item.comments.count) comments")
-                        .font(.caption.weight(.semibold)).foregroundStyle(HavenTheme.pink)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(10)
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .sheet(isPresented: $showAllComments) {
-            PostCommentsSheet(item: item, friendName: friendName,
-                              onReact: onReact, onUnreact: onUnreact, onComment: onComment, onEdit: onEdit, onUnsend: onUnsend)
-                .macSheetFrame()
-        }
-        .sheet(item: $commentReactTarget) { t in
-            ReactionPicker { e in feed.react(t.id, e) }
-        }
-    }
 
     /// One comment: tappable avatar + name (→ profile), time, body, media, reactions.
-    @ViewBuilder private func commentRow(_ c: FeedCommentFfi) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            commentAuthorLink(c) { commentAvatar(c) }
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    commentAuthorLink(c) {
-                        Text(commentAuthorName(c)).font(.caption.weight(.semibold))
-                            .foregroundStyle(c.isMe ? HavenTheme.pink : .primary)
-                    }
-                    Text(relativeTimeShort(c.createdAt)).font(.caption2).foregroundStyle(.tertiary)
-                    if c.edited && !c.unsent { Text("(edited)").font(.caption2).foregroundStyle(.secondary) }
-                    Spacer()
-                }
-                if c.unsent {
-                    Text("unsent").font(.caption).italic().foregroundStyle(.secondary)
-                } else if !c.body.isEmpty {
-                    LinkedText(text: c.body, font: .caption)
-                    if let url = LinkScanner.urls(in: c.body).first { LinkPreviewCard(url: url).padding(.top, 6) }
-                }
-                if !c.unsent && !c.media.isEmpty { commentMediaRow(c.media) }
-                if !c.unsent { commentReactionsRow(c) }
-            }
-        }
-        .contextMenu {
-            if !c.unsent {
-                // Flat rows, each reacting on TAP. A ControlGroup here collapsed into a
-                // "❤️ 😎 👍 ›" SUBMENU on macOS: it showed the emoji, then made you open a
-                // second menu to actually pick one.
-                ForEach(EmojiStore.shared.frequent(3), id: \.self) { e in
-                    Button("React \(e)") { EmojiStore.shared.record(e); feed.react(c.id, e) }
-                }
-                Button { commentReactTarget = CommentReactTarget(id: c.id) } label: { Label("More reactions…", systemImage: "face.smiling") }
-                if c.isMe {
-                    if !c.body.isEmpty {
-                        Button { editCommentId = c.id; editCommentText = c.body; editCommentMedia = c.media } label: {
-                            Label("Edit", systemImage: "pencil")
-                        }
-                    }
-                    Button(role: .destructive) { feed.unsend(c.id) } label: { Label("Delete", systemImage: "trash") }
-                }
-            }
-        }
-    }
 
     /// Reactions under a comment: existing reaction chips (tap to toggle your own, like the
     /// post-level row) plus a small react button that opens the emoji picker. The core
     /// `react`/`unreact` work on ANY event id, so a comment id is targeted exactly like a post.
-    @ViewBuilder private func commentReactionsRow(_ c: FeedCommentFfi) -> some View {
-        // Cap the chips (most-reacted first, always keep mine) so a comment can't flood its row.
-        let visible = Self.cappedReactions(c.reactions, cap: 5)
-        let hidden = max(0, c.reactions.count - visible.count)
-        HStack(spacing: 4) {
-            ForEach(visible, id: \.emoji) { r in
-                Text("\(r.emoji)\(r.count > 1 ? " \(r.count)" : "")")
-                    .font(.caption2).padding(.horizontal, 6).padding(.vertical, 2)
-                    .background(r.mine ? AnyShapeStyle(HavenTheme.brandHorizontal.opacity(0.22)) : AnyShapeStyle(Color(.tertiarySystemFill)), in: Capsule())
-                    .overlay(Capsule().strokeBorder(r.mine ? HavenTheme.pink.opacity(0.5) : .clear))
-                    .contentShape(Capsule())
-                    .onTapGesture {
-                        if r.mine { feed.unreact(c.id, r.emoji) }
-                        else { EmojiStore.shared.record(r.emoji); feed.react(c.id, r.emoji) }
-                    }
-            }
-            if hidden > 0 {
-                Text("+\(hidden)").font(.caption2).padding(.horizontal, 6).padding(.vertical, 2)
-                    .background(Color(.tertiarySystemFill), in: Capsule()).foregroundStyle(.secondary)
-            }
-            Button { commentReactTarget = CommentReactTarget(id: c.id) } label: {
-                Image(systemName: "face.smiling").font(.caption2).foregroundStyle(.secondary)
-            }
-            .buttonStyle(PressableStyle())
-        }
-        .animation(HavenTheme.bouncy, value: c.reactions.count)
-    }
 
     /// A commenter's avatar — mine is my real photo/emoji; others use their synced photo/emoji.
-    @ViewBuilder private func commentAvatar(_ c: FeedCommentFfi) -> some View {
-        if c.isMe {
-            MyAvatar(size: 24)
-        } else {
-            PeerAvatar(nodeHex: c.authorShort, name: commentAuthorName(c), size: 24)
-        }
-    }
 
     /// Wrap a commenter's avatar/name so tapping opens their profile (no link for yourself).
-    @ViewBuilder private func commentAuthorLink<Content: View>(_ c: FeedCommentFfi, @ViewBuilder _ content: () -> Content) -> some View {
-        if c.isMe {
-            content()
-        } else {
-            NavigationLink {
-                UserProfileView(authorHex: c.authorShort, name: commentAuthorName(c))
-            } label: { content() }
-            .buttonStyle(.plain)
-        }
-    }
 
-    @ViewBuilder private func commentMediaRow(_ refs: [String]) -> some View {
-        HStack(spacing: 6) {
-            ForEach(refs, id: \.self) { ref in
-                if let m = MediaStore.shared.item(ref) {
-                    switch m.kind {
-                    case .audio:
-                        if let u = m.videoURL { AudioPlayerPill(url: u) }
-                    case .video:
-                        if let img = m.image {
-                            thumb(img).overlay(Image(systemName: "play.circle.fill").foregroundStyle(.white).font(.title3))
-                        }
-                    case .image:
-                        if let img = m.image { thumb(img) }
-                    case .file:
-                        Image(systemName: "doc.zipper")
-                            .frame(width: 56, height: 56)
-                            .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 8))
-                    }
-                }
-            }
-        }
-    }
-    private func thumb(_ img: PlatformImage) -> some View {
-        Image(platformImage: img).resizable().scaledToFill()
-            .frame(width: 56, height: 56).clipShape(RoundedRectangle(cornerRadius: 8))
-    }
 
     private var commentField: some View {
         PostCommentField(onSubmit: onComment, onFocus: onCommentFocus)

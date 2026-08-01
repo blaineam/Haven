@@ -178,8 +178,9 @@ struct YouView: View {
                 // Same nearest-to-center logic the Circle feed uses, so the You page drives audio too.
                 let target = PlatformScreen.contentCenterY
                 let nearest = centers.min { abs($0.value - target) < abs($1.value - target) }
-                AudioCoordinator.shared.center(nearest?.key)
+                AudioCoordinator.shared.center(nearest?.key, container: "content")
             }
+                .environment(\.havenFeedContainer, "content")
         }
     }
 

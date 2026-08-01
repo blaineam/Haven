@@ -87,6 +87,20 @@ func ensureHavenPlaybackSession(force: Bool = false, then: (() -> Void)? = nil) 
 
 /// Reports each post card's on-screen vertical center so the feed can pick the one
 /// nearest the middle of the screen as the "active" (playing) post.
+/// Which scroll container a PostCard is rendered inside.
+///
+/// Three feeds report a centered post into the one AudioCoordinator, and a TabView keeps its tabs
+/// alive off screen — so the same post can exist as two live cards that BOTH matched
+/// `centeredPostId == item.id`. Both then built a player for the same clip. Pairing the centered id
+/// with its container lets a card tell "the centre is mine" from "some other feed reported it".
+private struct HavenFeedContainerKey: EnvironmentKey { static let defaultValue = "" }
+extension EnvironmentValues {
+    var havenFeedContainer: String {
+        get { self[HavenFeedContainerKey.self] }
+        set { self[HavenFeedContainerKey.self] = newValue }
+    }
+}
+
 struct PostCenterKey: PreferenceKey {
     static var defaultValue: [String: CGFloat] = [:]
     static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
@@ -7177,8 +7191,9 @@ struct FeedView: View {
                     // The post nearest the vertical center of the screen becomes active.
                     let target = PlatformScreen.contentCenterY
                     let nearest = centers.min { abs($0.value - target) < abs($1.value - target) }
-                    AudioCoordinator.shared.center(nearest?.key)
+                    AudioCoordinator.shared.center(nearest?.key, container: "circle")
                 }
+                .environment(\.havenFeedContainer, "circle")
                 }   // ScrollViewReader
                 // Hide the "Share something" composer while a comment field is focused so it
                 // doesn't float over the comment you're writing.
@@ -7802,6 +7817,7 @@ struct PostCard: View {
     /// the ScrollViewReader proxy) can lift this post above the keyboard.
     var onCommentFocus: ((Bool) -> Void)? = nil
 
+    @Environment(\.havenFeedContainer) private var feedContainer
     @ObservedObject private var audio = AudioCoordinator.shared
     @ObservedObject private var feed = FeedStore.shared
     /// Observed so "Keep on this device" visibly changes state. Reading the store WITHOUT observing
@@ -7854,7 +7870,13 @@ struct PostCard: View {
     /// auto-start once they land (normal data-saver mode never autoplays).
     @State private var dataSaverPendingPlay: Set<String> = []
 
-    private var isActive: Bool { audio.centeredPostId == item.id }
+    /// The centre must have been reported BY THIS CARD'S OWN FEED. Without the container check a
+    /// post living in two live containers (your own video is in both the circle feed and your
+    /// profile) had both copies claim to be active, and both built an AVPlayer for the same clip —
+    /// two decode sessions playing over each other, only one of them known to the coordinator.
+    private var isActive: Bool {
+        audio.centeredPostId == item.id && audio.centeredContainer == feedContainer
+    }
 
     /// The post's real media, minus synthetic refs (a `geo:` location pin has no bytes). A story needs
     /// something to show, so this is what gates the "Share as story" action.
@@ -8349,6 +8371,18 @@ struct PostCard: View {
                         if dataSaver, dataSaverPendingPlay.contains(ref) {
                             startDataSaverPlayback(ref, player)
                         }
+                        // HAND THE COORDINATOR THIS PLAYER.
+                        //
+                        // Players are now built when a card reaches the centre, and centering can run
+                        // BEFORE the body builds one — playVisibleVideo passes `primaryVideoPlayer`,
+                        // which reads the players dict and is nil at that moment. The coordinator then
+                        // holds nil (or a torn-down player) and its fades act on nothing, so the
+                        // speaker toggled state while the clip stayed silent. This fires immediately
+                        // after creation, which is the first moment the real object exists.
+                        if audio.activePostId == item.id {
+                            audio.start(postId: item.id, track: item.music, video: player,
+                                        muteVideo: item.muteVideo)
+                        }
                     }
             } else if MediaKind(ref: ref) == .file {
                 fileAttachmentPage(ref)
@@ -8680,7 +8714,19 @@ private struct KillHorizontalScroller: NSViewRepresentable {
     private func playerFor(_ ref: String, _ url: URL) -> AVPlayer {
         if let p = players[ref] { return p }
         let p = AVPlayer(url: url)
-        p.volume = 0
+        // VOLUME FROM THE SHARED STATE, not a hardcoded 0.
+        //
+        // This was `p.volume = 0`, which was survivable only while players were built early and
+        // lived: the coordinator's fade would bring the volume up later. Now that a player is built
+        // when its card reaches the centre, a hardcoded 0 means the viewer's existing sound choice is
+        // applied to a player that no longer exists — the speaker read "unmuted" while the clip
+        // played silent, and toggling wrote to state nothing was listening to. Exactly the report:
+        // "shows not muted but they are playing muted and unmuting them does nothing".
+        //
+        // AudioCoordinator.videoUnmuted is the same published value the indicator draws, so the
+        // player and the icon now start from one source of truth. The full-screen viewer already
+        // did this (`p.volume = soundOn ? 1 : 0`); the feed did not.
+        p.volume = AudioCoordinator.shared.videoUnmuted ? 1 : 0
         p.actionAtItemEnd = .none
         // When the clip ends, loop it (muted) and — if we're still on this post —
         // bring the song back, so the music never stays paused under an idle video.
@@ -9471,8 +9517,9 @@ struct UserProfileView: View {
                 // The profile post nearest the vertical center becomes active → its video plays + loops.
                 let target = PlatformScreen.contentCenterY
                 let nearest = centers.min { abs($0.value - target) < abs($1.value - target) }
-                AudioCoordinator.shared.center(nearest?.key)
+                AudioCoordinator.shared.center(nearest?.key, container: "profile")
             }
+                .environment(\.havenFeedContainer, "profile")
         }
         .navigationTitle(resolvedName)
         .havenInlineNavTitle()

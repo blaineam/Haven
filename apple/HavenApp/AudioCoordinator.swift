@@ -46,9 +46,25 @@ final class AudioCoordinator: ObservableObject {
     @Published var centeredPostId: String?
 
     /// Called by the feed as the user scrolls; one post is "centered" at a time.
-    func center(_ id: String?) {
-        guard centeredPostId != id else { return }
+    /// WHICH FEED reported the centered post.
+    ///
+    /// Three separate scroll containers report into this one coordinator — the circle feed, the
+    /// profile/You feed, and ContentView's — and a TabView keeps its tabs ALIVE off screen. So a post
+    /// that appears in two of them (your own video, which is in both the circle feed and your
+    /// profile) had TWO live PostCards, both matching `centeredPostId == item.id`, both deciding they
+    /// were active. Both then built an AVPlayer for the same clip: two hardware decode sessions on
+    /// one video, playing over each other, with the coordinator holding only one of them — which is
+    /// why muting silenced one and the other kept going, and why the phone got warm on posts that
+    /// looked ordinary. Everything else about those cards was rendered twice too.
+    ///
+    /// Pairing the id with its container makes "am I the active card?" answerable — only the card
+    /// whose own feed reported the centre says yes.
+    @Published private(set) var centeredContainer: String?
+
+    func center(_ id: String?, container: String = "") {
+        guard centeredPostId != id || centeredContainer != container else { return }
         centeredPostId = id
+        centeredContainer = container
     }
 
     private var videoPlayer: AVPlayer?

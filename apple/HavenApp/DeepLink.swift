@@ -286,6 +286,13 @@ struct PostLinkView: View {
                                  onEdit: { _ in }, onUnsend: { })
                             .padding(16)
                     }
+                    // A standalone post has no scroll-centre reporter, so name its own container and
+                    // declare this post centred in it. Without this the card's `isActive` — which now
+                    // requires the centre to come from ITS OWN feed — would never be true here and the
+                    // video would silently never play. It is genuinely the active post: it is the only
+                    // thing on screen.
+                    .environment(\.havenFeedContainer, "deeplink")
+                    .onAppear { AudioCoordinator.shared.center(post.id, container: "deeplink") }
                 } else if settled {
                     // Deliberately one message for every failure mode. Saying WHICH — deleted vs. not
                     // your circle — would answer "does this post exist?" for someone who shouldn't be

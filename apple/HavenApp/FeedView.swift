@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import AVKit
 import AVFoundation
 import CoreVideo
@@ -103,6 +104,22 @@ extension EnvironmentValues {
 
 /// Counts live feed players so a doubled clip is a fact rather than a theory.
 @MainActor
+enum BodyCensus {
+    private static var n = 0
+    private static var started = false
+    static func tick() {
+        n += 1
+        if !started {
+            started = true
+            Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
+                MainActor.assumeIsolated {
+                    if n > 0 { HavenLog.sync("PostCard.body evaluated \(n)x in 5s (\(n / 5)/s)"); n = 0 }
+                }
+            }
+        }
+    }
+}
+
 enum PlayerCensus {
     private static var made: [String: Int] = [:]
     static func note(ref: String, postId: String, container: String, bag: String) {
@@ -111,6 +128,13 @@ enum PlayerCensus {
         let n = made[k]!
         HavenLog.sync("player #\(n) ref=\(ref.prefix(12)) post=\(postId.prefix(8)) container=\(container) bag=\(bag)")
     }
+}
+
+/// Temporary switches for isolating where the remaining heat comes from, flipped by rebuilding
+/// rather than at runtime so the compiler strips the disabled path entirely.
+enum HavenPerfExperiment {
+    /// Blurred backdrop behind every media page — pure GPU compositing, invisible to a CPU profile.
+    static let disableBackdropBlur = true
 }
 
 struct PostCenterKey: PreferenceKey {
@@ -192,7 +216,19 @@ final class FeedStore: ObservableObject {
     // Diagnostics surfaced in Advanced → Connection.
     @Published private(set) var internetReady = false
     @Published private(set) var nodeError: String?
-    @Published private(set) var lastSendError: String?
+    /// NOT @Published — measured at 64 of 66 store publishes in a 5-SECOND window.
+    ///
+    /// sendIroh writes this on every send, and with several targets some succeed and some fail, so
+    /// the value genuinely alternates nil -> error -> nil. Each write fired objectWillChange, which
+    /// invalidated every view observing FeedStore — the whole feed — dozens of times a second. That
+    /// is the churn behind a main thread sitting at 84% framework code (AG::Graph::propagate_dirty,
+    /// UpdateStack::update, CA commits) with no hot function of our own, and the reason the phone
+    /// stayed warm with the app merely open.
+    ///
+    /// An equality guard does not help when the value really is flip-flopping. Its ONLY reader is the
+    /// Diagnostics screen, which is a debug panel — it reads the current value when it draws, and
+    /// does not need waking the instant a send fails.
+    private(set) var lastSendError: String?
     /// Per-contact time we last received a valid frame from them — the basis for a
     /// truthful "Connected" (a live two-way link), not just "we hold their keys".
     @Published private(set) var lastHeard: [String: Date] = [:]
@@ -349,7 +385,44 @@ final class FeedStore: ObservableObject {
     private struct IncomingMedia { let tempURL: URL; let total: Int; var got: Set<Int> }
     private var incoming: [String: IncomingMedia] = [:]
 
-    private init() {}
+    /// DIAGNOSTIC: how often does this store tell SwiftUI "something changed"?
+    ///
+    /// Every objectWillChange invalidates EVERY view observing FeedStore — which is every PostCard on
+    /// screen, each a ~1,500-line body. The profile said the main thread was 84% framework
+    /// (AttributeGraph propagate_dirty / UpdateStack::update) with only 16% of samples containing any
+    /// Haven frame: the signature of something dirtying the graph constantly rather than one slow
+    /// function. This turns that inference into a number, and a rate per property.
+    private var willChangeCount = 0
+    private var willChangeSink: AnyCancellable?
+    private var propSinks = Set<AnyCancellable>()
+    private var pubBy: [String: Int] = [:]
+
+    private init() {
+        #if DEBUG
+        willChangeSink = objectWillChange.sink { [weak self] _ in
+            self?.willChangeCount += 1
+        }
+        // PER-PROPERTY attribution: which @Published is actually firing, and how often.
+        func watch<T>(_ pub: Published<T>.Publisher, _ name: String) {
+            pub.dropFirst().sink { [weak self] _ in self?.pubBy[name, default: 0] += 1 }.store(in: &propSinks)
+        }
+        watch($items, "items"); watch($lastHeard, "lastHeard"); watch($postTick, "postTick")
+        watch($reactionTick, "reactionTick"); watch($online, "online"); watch($circles, "circles")
+        watch($internetActive, "internetActive"); watch($nearbyActive, "nearbyActive")
+        watch($relayReachable, "relayReachable"); watch($internetReady, "internetReady")
+        watch($unseenCircle, "unseenCircle"); watch($unseenMessages, "unseenMessages")
+        watch($hiddenInActiveCircle, "hiddenInActive")
+        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.willChangeCount > 0 else { return }
+                let top = self.pubBy.sorted { $0.value > $1.value }.prefix(5)
+                    .map { "\($0.key)=\($0.value)" }.joined(separator: " ")
+                HavenLog.sync("FeedStore published \(self.willChangeCount)x in 5s — \(top)")
+                self.willChangeCount = 0; self.pubBy.removeAll()
+            }
+        }
+        #endif
+    }
 
     /// Initialize the real networked store once (idempotent) and bring the P2P node
     /// online. The feed works offline too; the node just enables real delivery.
@@ -4327,7 +4400,19 @@ final class FeedStore: ObservableObject {
                 do { try await node.sendToNode(nodeIdHex: t, payload: f); anyOk = true }
                 catch { lastErr = error.localizedDescription }
             }
-            await MainActor.run { self?.lastSendError = anyOk ? nil : lastErr }
+            // ONLY WRITE ON CHANGE. @Published fires objectWillChange on EVERY assignment — even
+            // nil over nil — and this runs on every iroh send: hellos, call frames, event fan-out.
+            // Each write invalidated every view observing FeedStore, which is every PostCard on
+            // screen, so ordinary network traffic was driving whole-feed SwiftUI invalidation.
+            //
+            // It fits the profile exactly: the main thread was 84% framework (AttributeGraph
+            // propagate_dirty / UpdateStack::update / CA commits) with only 16% of samples containing
+            // ANY Haven frame — the signature of something dirtying the graph rather than one slow
+            // function.
+            await MainActor.run {
+                let v = anyOk ? nil : lastErr
+                if self?.lastSendError != v { self?.lastSendError = v }
+            }
         }
     }
     /// My OWN other devices' transport ids — the live-delivery fan-out set (D16 Phase 4b).
@@ -7848,7 +7933,23 @@ struct PostCard: View {
 
     @Environment(\.havenFeedContainer) private var feedContainer
     @ObservedObject private var audio = AudioCoordinator.shared
-    @ObservedObject private var feed = FeedStore.shared
+    /// NOT @ObservedObject — deliberately.
+    ///
+    /// FeedStore publishes up to 40 TIMES PER SECOND on device (measured: "FeedStore published 204x
+    /// in 5s"), because ordinary traffic writes its @Published properties — and @Published fires on
+    /// every assignment, equal or not. Observing it here turned each of those into an invalidation of
+    /// EVERY PostCard on screen, re-evaluating a ~1,500-line body per card: measured at up to 21 body
+    /// evaluations per second while the app sat there.
+    ///
+    /// That is what the Time Profiler kept describing without naming: the main thread 84% framework
+    /// (AG::Graph::propagate_dirty, UpdateStack::update, CA commits) with only 16% of samples
+    /// containing any Haven frame — a graph being dirtied, not a slow function.
+    ///
+    /// This view does not NEED the reactivity. Of its 22 uses, all but one are actions (react, edit,
+    /// requestMedia, refresh, postStory, unsend) or reads of activeCircleId, which changes rarely.
+    /// Post CONTENT arrives through `item`, handed down by the feed — which does observe the store —
+    /// so a changed post still re-renders, now via the value rather than a global notification.
+    private var feed: FeedStore { FeedStore.shared }
     /// Observed so "Keep on this device" visibly changes state. Reading the store WITHOUT observing
     /// it meant the pin was recorded but nothing on screen moved — the menu closed and the post
     /// looked identical, so a working toggle read as a dead button.
@@ -7997,6 +8098,10 @@ struct PostCard: View {
     }
 
     var body: some View {
+        #if DEBUG
+        let _ = BodyCensus.tick()
+        #endif
+
         VStack(alignment: .leading, spacing: 12) {
             header
             // Another member reported this post → surface the circle's shared moderation signal
@@ -8508,7 +8613,11 @@ struct PostCard: View {
     /// layer draws. A blurred still is the honest trade: no second decode, and behind a 24pt blur the
     /// difference between a still and a moving copy isn't visible anyway.
     @ViewBuilder private func blurredBackdrop(_ ref: String) -> some View {
-        BlurredMediaBackdrop(ref: ref)
+        // EXPERIMENT (not for release as-is): skip the blurred backdrop to isolate GPU cost.
+        // A continuous 24pt blur behind every media page is one of the most expensive things you can
+        // ask the GPU to composite while scrolling, and GPU work is invisible to a Time Profiler —
+        // which is what six CPU traces with no hotspot and a Nominal thermal state were telling us.
+        if !HavenPerfExperiment.disableBackdropBlur { BlurredMediaBackdrop(ref: ref) }
     }
 
     /// The carousel's per-page backdrop.

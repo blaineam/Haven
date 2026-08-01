@@ -5720,7 +5720,25 @@ final class FeedStore: ObservableObject {
         originateRelayInternet(dests: dests, inner: wire)
         // HTTP live-lane: account + roster devices only (avoid flooding every historical hint).
         let liveDests = dests
-        let cids = self.circles.map(\.id)
+        // ONLY circles the destination is actually in.
+        //
+        // This passed EVERY circle, and uploadLiveCallFrames loops circles x dests x relays — so one
+        // sealed call frame became ~60 HTTP PUTs on a device in 10 circles with 6 destinations.
+        // Measured as a 110-line burst of `live-call http-put OK` in an otherwise quiet minute, and
+        // it is the largest remaining radio user after the fan-out floor landed.
+        //
+        // A PUT into a circle the destination is not a member of is waste BY DEFINITION: they cannot
+        // read that circle's mailbox, so the frame can never be ingested from it. This narrows the
+        // work without narrowing reachability — every circle that could actually carry the frame is
+        // still used, which is what makes the cross-NAT ACCEPT fallback work.
+        //
+        // Falls back to every circle if membership cannot be resolved, so an unknown roster degrades
+        // to the old behaviour rather than dropping the call's answer.
+        let me = nodeHex.lowercased()
+        let member = self.circles.map(\.id).filter { cid in
+            (social?.contactNodeIds(circleId: cid) ?? []).contains { $0.lowercased() == me }
+        }
+        let cids = member.isEmpty ? self.circles.map(\.id) : member
         Task { await SharedStore.uploadLiveCallFrames(circleIds: cids, dests: liveDests, frame: wire) }
     }
 

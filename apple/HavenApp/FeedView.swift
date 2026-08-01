@@ -101,6 +101,18 @@ extension EnvironmentValues {
     }
 }
 
+/// Counts live feed players so a doubled clip is a fact rather than a theory.
+@MainActor
+enum PlayerCensus {
+    private static var made: [String: Int] = [:]
+    static func note(ref: String, postId: String, container: String, bag: String) {
+        let k = "\(ref)|\(postId)"
+        made[k, default: 0] += 1
+        let n = made[k]!
+        HavenLog.sync("player #\(n) ref=\(ref.prefix(12)) post=\(postId.prefix(8)) container=\(container) bag=\(bag)")
+    }
+}
+
 struct PostCenterKey: PreferenceKey {
     static var defaultValue: [String: CGFloat] = [:]
     static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
@@ -2696,7 +2708,24 @@ final class FeedStore: ObservableObject {
                 // a scroll (media backfill, a poster landing, a periodic tick) usually produces an identical
                 // list; assigning it anyway re-diffs the LazyVStack and nudged the scroll offset — the
                 // "position jumps around before settling" on fast flings.
-                if self.items != filtered { self.items = filtered }
+                // DEDUPE BY ID before publishing.
+                //
+                // The feed's ForEach is keyed `id: \.id`. A duplicate id makes SwiftUI build the row
+                // TWICE, and two live PostCards for one post each own their own `players` dict — so
+                // the same clip gets two AVPlayers, two hardware decode sessions, audio playing over
+                // itself slightly offset (the "static sounding" doubling), and a mute toggle that can
+                // only ever reach one of them. It also doubles that post's layout and image decode,
+                // which is heat with no CPU hotspot — matching a phone that stays warm in AIRPLANE
+                // MODE.
+                //
+                // Logged when it fires, because a duplicate id coming out of the engine's feed() is
+                // itself a bug worth chasing upstream; this keeps the UI honest meanwhile.
+                var seenPostIds = Set<String>()
+                let deduped = filtered.filter { seenPostIds.insert($0.id).inserted }
+                if deduped.count != filtered.count {
+                    HavenLog.sync("feed: DROPPED \(filtered.count - deduped.count) duplicate post id(s) of \(filtered.count)")
+                }
+                if self.items != deduped { self.items = deduped }
                 if self.hiddenInActiveCircle != hiddenHere { self.hiddenInActiveCircle = hiddenHere }
                 self.sensitiveCache.removeAll()   // a refresh may have ingested new SensitiveFlag events
                 self.reportsCache.removeAll()     // …and new Report events
@@ -7845,8 +7874,29 @@ struct PostCard: View {
     /// Set when the backup indicator is tapped — "which relays actually hold this?"
     @State private var showBackupDetail = false
     @State private var zoomTarget: ZoomTarget?
-    @State private var players: [String: AVPlayer] = [:]
-    @State private var playerObservers: [String: NSObjectProtocol] = [:]   // loop observers, removed on teardown
+    /// A REFERENCE-TYPE cache, deliberately — this is the fix for videos playing twice.
+    ///
+    /// These were `@State` dictionaries, and `playerFor` writes to them. But `playerFor` is called
+    /// FROM `body` (the media page needs a player to hand to GestureVideoPlayer), so that write was a
+    /// @State mutation DURING view evaluation. SwiftUI does not honour it for the pass in flight, so
+    /// the next evaluation still saw an empty dict, missed the cache, and built a SECOND AVPlayer for
+    /// the same clip. The first stayed alive — its loop observer retains it — and kept decoding.
+    ///
+    /// Measured, not deduced: an instrumented run logged `player #1` and `player #2` for EVERY video,
+    /// identical ref, identical post, identical container. Two hardware decode sessions per clip,
+    /// audio playing over itself slightly offset (the "static sounding" doubling), and a mute toggle
+    /// that could only ever reach the one the coordinator knew about. It is also 2x decode on every
+    /// video in the feed — heat with no CPU hotspot, and heat that survives AIRPLANE MODE.
+    ///
+    /// Mutating a class's contents is not a @State write, so the cache now actually caches.
+    @MainActor final class PlayerBag {
+        /// Identity of this CARD INSTANCE's cache. Two creations for one clip with DIFFERENT bag ids
+        /// means two live PostCards; the same id would mean the cache itself is failing.
+        let id = UUID().uuidString.prefix(4)
+        var players: [String: AVPlayer] = [:]
+        var observers: [String: NSObjectProtocol] = [:]   // loop observers, removed on teardown
+    }
+    @State private var bag = PlayerBag()
     @State private var showReactionPicker = false
     @State private var editCommentId: String?
     @State private var editCommentText = ""
@@ -7895,7 +7945,7 @@ struct PostCard: View {
     private var primaryVideoPlayer: AVPlayer? {
         let media = realMedia
         guard media.count == 1, let ref = media.first, isVideo(ref) else { return nil }
-        return players[ref]
+        return bag.players[ref]
     }
     /// A post that is exactly one video — the GestureVideoPlayer owns all of its gestures.
     private var isSingleVideoPost: Bool {
@@ -8712,7 +8762,7 @@ private struct KillHorizontalScroller: NSViewRepresentable {
     }
 
     private func playerFor(_ ref: String, _ url: URL) -> AVPlayer {
-        if let p = players[ref] { return p }
+        if let p = bag.players[ref] { return p }
         let p = AVPlayer(url: url)
         // VOLUME FROM THE SHARED STATE, not a hardcoded 0.
         //
@@ -8728,6 +8778,10 @@ private struct KillHorizontalScroller: NSViewRepresentable {
         // did this (`p.volume = soundOn ? 1 : 0`); the feed did not.
         p.volume = AudioCoordinator.shared.videoUnmuted ? 1 : 0
         p.actionAtItemEnd = .none
+        // DIAGNOSTIC: every player creation, with the post and ref it belongs to. Audio is doubling
+        // with only ONE visible video, so something builds a second AVPlayer for the same clip; this
+        // says exactly what and how many. Counting creations beats reasoning about the view tree.
+        PlayerCensus.note(ref: ref, postId: item.id, container: feedContainer, bag: String(bag.id))
         // When the clip ends, loop it (muted) and — if we're still on this post —
         // bring the song back, so the music never stays paused under an idle video.
         let postId = item.id
@@ -8746,9 +8800,27 @@ private struct KillHorizontalScroller: NSViewRepresentable {
                 }
             }
         }
+        // CACHE SYNCHRONOUSLY — this is the doubling bug.
+        //
+        // These two writes were inside `DispatchQueue.main.async`, so playerFor RETURNED BEFORE the
+        // cache was populated. Any further evaluation in the same pass hit `bag.players[ref] == nil`,
+        // missed, and built a SECOND AVPlayer for the same clip. Instrumented runs logged `player #1`
+        // and `player #2` for every video with an IDENTICAL bag id — one card, one cache, two
+        // players — which is the audio playing over itself slightly offset ("static sounding"), the
+        // mute toggle reaching only the player the coordinator knew about, and 2x hardware decode on
+        // every video in the feed. That last part is heat with no CPU hotspot, and heat that survives
+        // airplane mode.
+        //
+        // The deferral was needed when these were @State dictionaries: writing them mid-body is a
+        // "Modifying state during view update" violation. `bag` is a reference type now, so mutating
+        // its contents is not a state write and can happen immediately — which is the whole point of
+        // having moved it.
+        //
+        // playVisibleVideo() STAYS deferred: it touches AudioCoordinator and @State, so it must not
+        // run inside a view evaluation.
+        bag.players[ref] = p
+        bag.observers[ref] = token
         DispatchQueue.main.async {
-            players[ref] = p
-            playerObservers[ref] = token
             if isActive { playVisibleVideo() }
         }
         return p
@@ -8770,16 +8842,16 @@ private struct KillHorizontalScroller: NSViewRepresentable {
         }
     }
 
-    private func pauseVideos() { players.values.forEach { $0.pause() } }
+    private func pauseVideos() { bag.players.values.forEach { $0.pause() } }
 
     /// Fully release this card's video players when it scrolls off-screen — pause, replace each item with
     /// nothing (frees the decode pipeline), remove the loop observers, and drop the dicts. Without this an
     /// off-screen card kept buffering video forever; combined with the leaked observers it ran to ~100 GB.
     private func teardownPlayers() {
-        for (_, token) in playerObservers { NotificationCenter.default.removeObserver(token) }
-        for (_, p) in players { p.pause(); p.replaceCurrentItem(with: nil) }
-        playerObservers.removeAll()
-        players.removeAll()
+        for (_, token) in bag.observers { NotificationCenter.default.removeObserver(token) }
+        for (_, p) in bag.players { p.pause(); p.replaceCurrentItem(with: nil) }
+        bag.observers.removeAll()
+        bag.players.removeAll()
     }
 
     private func playVisibleVideo() {
@@ -8792,7 +8864,7 @@ private struct KillHorizontalScroller: NSViewRepresentable {
         // Super data saver: never autoplay *unless* the user explicitly tapped play on this ref
         // (poster → download → pending). Keep a clip they already started; pause everything else.
         if SettingsStore.shared.superDataSaver {
-            for (ref, player) in players {
+            for (ref, player) in bag.players {
                 let isVisible = ref == visibleRef
                 if isVisible, dataSaverPendingPlay.contains(ref) {
                     startDataSaverPlayback(ref, player)
@@ -8813,7 +8885,7 @@ private struct KillHorizontalScroller: NSViewRepresentable {
         // session once, off the main thread, and skip entirely when it's already set up.
         if let visibleRef, isVideo(visibleRef) { ensureHavenPlaybackSession() }
         #endif
-        for (ref, player) in players {
+        for (ref, player) in bag.players {
             if ref == visibleRef && isVideo(ref) {
                 player.seek(to: .zero)
                 player.play()

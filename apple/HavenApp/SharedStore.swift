@@ -86,18 +86,30 @@ final class MediaBackupQueue {
         } else {
             priorityPending = []
         }
+        reindexPending()   // a restored queue must answer hasPending before the first save()
     }
     private func save() {
+        reindexPending()
         // In-flight jobs lead their lane on disk: a kill mid-pass relaunches with them queued first.
         if let d = try? JSONEncoder().encode(inFlightLo + pending) { UserDefaults.standard.set(d, forKey: key) }
         if let d = try? JSONEncoder().encode(inFlightHi + priorityPending) { UserDefaults.standard.set(d, forKey: hiKey) }
     }
 
-    /// Whether a specific blob is still waiting to reach a relay (drives the post upload indicator).
-    func hasPending(_ ref: String) -> Bool {
-        inFlightHi.contains { $0.ref == ref } || inFlightLo.contains { $0.ref == ref }
-            || pending.contains { $0.ref == ref } || priorityPending.contains { $0.ref == ref }
+    /// Refs present in ANY of the four collections — an O(1) answer for `hasPending`.
+    ///
+    /// This is read from a view body: the feed's upload-state cluster asks it per blob inside a
+    /// `TimelineView(.periodic(by: 1.0))`. The old shape scanned all four arrays linearly, and
+    /// `pending` is bounded at 10,000, so a screen of your own posts could burn tens of thousands of
+    /// comparisons per second on the main thread — for an answer that changes only when the queue
+    /// does. Rebuilt wherever the collections are assigned; `save()` is the single choke point every
+    /// mutation already passes through, so it re-derives there too.
+    private var pendingRefs: Set<String> = []
+    private func reindexPending() {
+        pendingRefs = Set((inFlightHi + inFlightLo + pending + priorityPending).map(\.ref))
     }
+
+    /// Whether a specific blob is still waiting to reach a relay (drives the post upload indicator).
+    func hasPending(_ ref: String) -> Bool { pendingRefs.contains(ref) }
 
     /// `priority`: a just-authored event's media — drained before any backfill backlog. Callers
     /// enqueue in the media list's order (thumbs/posters ride before the video), which the lane
@@ -172,6 +184,7 @@ final class MediaBackupQueue {
             pending.removeAll { loTaken.contains("\($0.ref)|\($0.cid)") }
             inFlightHi = hiWork
             inFlightLo = loWork
+            reindexPending()   // taken off the lanes but still pending — the indicator must agree
             var failedHi: [Job] = []
             var failedLo: [Job] = []
             for (job, isPriority) in hiWork.map({ ($0, true) }) + loWork.map({ ($0, false) }) {
@@ -252,9 +265,33 @@ final class MediaBackupQueue {
 enum MediaBackupLedger {
     private static let defaultsKey = "haven.media.backedUp"
     private static var set: Set<String> = Set(UserDefaults.standard.stringArray(forKey: defaultsKey) ?? [])
-    static func has(_ dest: String, _ ref: String) -> Bool { set.contains("\(dest)|\(ref)") }
+
+    /// ref → destinations holding it. A DERIVED INDEX over `set` (which stays the source of truth and
+    /// the on-disk shape), rebuilt on load and kept in step by mark/forgetDest.
+    ///
+    /// Every lookup here used to be `set.contains { $0.hasSuffix("|\(ref)") }` — a linear scan of up
+    /// to 20,000 strings, each doing a suffix comparison. That is fine once; it is not fine from a
+    /// view body. The feed's upload-state cluster calls hasAnyRemote + hasAny PER BLOB inside a
+    /// `TimelineView(.periodic(by: 1.0))`, so on a screen of your own posts the app was running tens
+    /// of thousands of string comparisons every second, on the main thread, forever — including when
+    /// everything was long since uploaded and nothing could possibly change. That is the choppy feed
+    /// scrolling and a warm phone sitting idle.
+    private static var byRef: [String: Set<String>] = Self.index(set)
+
+    private static func index(_ entries: Set<String>) -> [String: Set<String>] {
+        var out: [String: Set<String>] = [:]
+        for e in entries {
+            guard let bar = e.firstIndex(of: "|") else { continue }
+            let dest = String(e[e.startIndex..<bar])
+            let ref = String(e[e.index(after: bar)...])
+            out[ref, default: []].insert(dest)
+        }
+        return out
+    }
+
+    static func has(_ dest: String, _ ref: String) -> Bool { byRef[ref]?.contains(dest) ?? false }
     /// Confirmed on ANY destination (relay node or s3), INCLUDING our own in-process relay.
-    static func hasAny(_ ref: String) -> Bool { set.contains { $0.hasSuffix("|\(ref)") } }
+    static func hasAny(_ ref: String) -> Bool { !(byRef[ref]?.isEmpty ?? true) }
 
     /// Confirmed somewhere a DIFFERENT DEVICE can read it — what "backed up" should have meant.
     ///
@@ -269,34 +306,34 @@ enum MediaBackupLedger {
     /// Our own relay is excluded even though it may be reachable by others (LAN, or a public URL),
     /// because we cannot tell from here — and the honest failure is to under-claim, not over-claim.
     static func hasAnyRemote(_ ref: String, ownRelayHex: String) -> Bool {
-        set.contains { entry in
-            guard entry.hasSuffix("|\(ref)") else { return false }
-            let dest = String(entry.dropLast(ref.count + 1))
-            return dest != ownRelayHex
-        }
+        guard let dests = byRef[ref] else { return false }
+        return dests.contains { $0 != ownRelayHex }
     }
     /// Every destination confirmed to hold `ref`.
     ///
     /// The ledger has always known this — it is keyed `dest|ref` — but nothing ever showed it, so
     /// "is my post actually anywhere?" could only be answered by reading logs. That question came up
     /// while debugging a delivery failure where the tick was green and no friend could fetch a thing.
-    static func destinations(for ref: String) -> [String] {
-        set.compactMap { entry in
-            guard entry.hasSuffix("|\(ref)") else { return nil }
-            return String(entry.dropLast(ref.count + 1))
-        }
-    }
+    static func destinations(for ref: String) -> [String] { Array(byRef[ref] ?? []) }
 
     static func mark(_ dest: String, _ ref: String) {
         guard set.insert("\(dest)|\(ref)").inserted else { return }
-        if set.count > 20_000 { set = Set(set.suffix(20_000)) }
+        if set.count > 20_000 {
+            set = Set(set.suffix(20_000))
+            byRef = index(set)                      // the trim can drop anything — reindex wholesale
+        } else {
+            byRef[ref, default: []].insert(dest)
+        }
         UserDefaults.standard.set(Array(set), forKey: defaultsKey)
     }
     /// Forget a destination's confirmations (e.g. a relay was wiped/forgotten) so we re-mirror to it.
     static func forgetDest(_ dest: String) {
         let before = set.count
         set = set.filter { !$0.hasPrefix("\(dest)|") }
-        if set.count != before { UserDefaults.standard.set(Array(set), forKey: defaultsKey) }
+        if set.count != before {
+            byRef = index(set)
+            UserDefaults.standard.set(Array(set), forKey: defaultsKey)
+        }
     }
 }
 

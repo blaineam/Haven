@@ -45,6 +45,32 @@ takes this fix as 1.2.3, desktop's authoring half is called out as still open.
   Apple-only: Android drains through a coroutine `Channel` rather than a self-re-arming timer holding
   a wake assertion, so it has no equivalent loop.
 
+- **The feed recomputed upload state every second, forever, on the main thread.** Reported as a warm
+  phone plus "scrolling the You and Circle feeds is a fair bit choppy — obviously some infinite loop
+  eating CPU". It was, and it was in the UI rather than the network layer.
+
+  Each of YOUR OWN media posts renders an upload-state cluster inside
+  `TimelineView(.periodic(by: 1.0))`. That ticks once a second per visible cell, forever — including
+  for posts uploaded weeks ago whose answer cannot change. On the You feed every cell is yours, so
+  the app never stopped. And each tick called, per blob:
+
+  - `MediaBackupLedger.hasAnyRemote` / `hasAny` — implemented as `set.contains { $0.hasSuffix("|ref") }`,
+    a linear scan of up to **20,000** strings doing suffix comparisons;
+  - `MediaBackupQueue.hasPending` — **four** array scans, `pending` bounded at **10,000**.
+
+  Tens of thousands of string comparisons per second, on the thread drawing the feed. That is both
+  the heat while idle and the stutter while scrolling — each frame competed with it.
+
+  Three fixes: the ledger keeps a derived `ref → dests` index (the `dest|ref` set stays the source of
+  truth and the on-disk shape) making every lookup O(1); the queue keeps a `Set` of pending refs,
+  re-derived at `save()` — the one choke point every mutation already passes through; and a post
+  already confirmed on a relay someone else can read drops to an hourly tick, because a
+  content-addressed blob's verdict cannot be revoked. Posts still in flight keep the 1s cadence the
+  progress ring was built for.
+
+  Found while the phone was unavailable for Instruments — it needs to be unlocked and on USB for
+  xctrace to attach, and this was reachable by reading the render path instead.
+
 ### Fixed — Apple and Android
 
 - **A video story arrived as a spinner that never finished.** Reported straight after the fix above

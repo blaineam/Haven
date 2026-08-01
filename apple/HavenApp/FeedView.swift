@@ -8682,7 +8682,25 @@ private struct KillHorizontalScroller: NSViewRepresentable {
                 // The whole cluster is one tap target: every state below is a partial answer to
                 // "where is this?", and the sheet is the full one — including which relays hold
                 // nothing, which no icon can express.
-                TimelineView(.periodic(from: .now, by: 1.0)) { _ in
+                // TICK ONLY WHILE SOMETHING CAN CHANGE.
+                //
+                // This cluster re-rendered every second for every one of YOUR OWN media posts on
+                // screen — forever, including posts uploaded months ago where the answer is fixed.
+                // On the You feed every cell is yours, so the app never stopped recomputing upload
+                // state on the main thread: a warm phone sitting idle, and a feed that stutters
+                // while scrolling because each frame competes with this work.
+                //
+                // A post confirmed on a relay someone else can read is DONE — content-addressed
+                // blobs never change, so that verdict cannot be revoked. Those fall back to an
+                // hourly tick (a timer that effectively never fires) instead of a per-second one.
+                // Anything still in flight keeps the 1s cadence, which is the case the ring and the
+                // percentage were built for.
+                let settledOwnRelay = RelayHost.shared.serving ? RelayHost.shared.nodeId : ""
+                let settledBlobs = item.media.filter { !MediaStore.isSynthetic($0) }
+                let settled = !settledBlobs.isEmpty && settledBlobs.allSatisfy {
+                    MediaBackupLedger.hasAnyRemote($0, ownRelayHex: settledOwnRelay)
+                }
+                TimelineView(.periodic(from: .now, by: settled ? 3600 : 1.0)) { _ in
                     let blobs = item.media.filter { !MediaStore.isSynthetic($0) }
                     let circleId = feed.activeCircleId
                     let hasRelay = !RelayMailboxStore.shared.relays(forCircle: circleId).isEmpty

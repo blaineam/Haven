@@ -73,21 +73,19 @@ takes this fix as 1.2.3, desktop's authoring half is called out as still open.
 
 ### Fixed — calls
 
-- **A call showed connected and carried no audio.** Reported on a call to a family member. This one
-  was self-inflicted: the ICE change earlier in this release treated a configured fabric as proof
-  media had a route, so a circle whose relay announces no usable TURN got no public STUN at all.
-  Host candidates alone cannot pair two NATs. That commit's own message described this failure —
-  "calls that 'connected' with zero media" — and took the risk anyway.
+- **Public STUN is for users with NO Haven relay — full stop.** A circle that runs its own relay
+  never hands its callers' addresses to a third party during ICE, even when that relay announces no
+  TURN of its own; the relay's path proxy serves the WebRTC hairpin and media rides that.
 
-  Reverted on Apple, Android and desktop together: public STUN is the fallback whenever no
-  **publicly reachable** TURN exists, fabric or not. A circle running a real TURN still never
-  touches a third party, which was always the larger share of the privacy win. The hairpin does
-  work — the same session shows it carrying a different call — but it is a likely rescue, not a
-  guaranteed one, and a call you cannot hear is not a private call, it is a broken one.
+  Recorded honestly, because this rule was reverted and restored inside one release: a call came up
+  connected-with-no-audio and it was attributed to this rule, since it matches the documented field
+  failure the old unconditional fallback was written for. But the same build in the same session
+  also placed a call that connected and carried audio over the hairpin, so the rule cannot be the
+  whole explanation. **That call remains undiagnosed** and wants a capture from both ends.
 
-  The tests moved with it deliberately: they had been pinning the broken rule, and now assert the
-  fallback survives **with** a fabric present. Re-narrowing this needs proof the hairpin has
-  established, not an assumption that it will.
+  What this makes load-bearing is the hairpin: with a fabric and no usable TURN it is the media
+  path, not a rescue. Making it establish reliably is the work — not weakening the privacy rule to
+  paper over it.
 
 - **The speakerphone toggle did nothing, in either direction.** The audio session is configured
   `.playAndRecord` with `.defaultToSpeaker`, and under that option `overrideOutputAudioPort(.none)`

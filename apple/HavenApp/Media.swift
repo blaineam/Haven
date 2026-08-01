@@ -307,12 +307,28 @@ final class MediaStore: ObservableObject {
 
     /// The on-disk media directory. `nonisolated` so the orphan sweep (which walks the whole dir with
     /// FileManager only) can run off the main actor without hopping through the shared instance.
-    nonisolated static var storageDir: URL {
+    /// COMPUTED ONCE. This was a `var`, so every access re-ran `FileManager.urls(for:in:)`,
+    /// `createDirectory(...)` AND `setAttributes(...)` — two filesystem WRITE syscalls, on the
+    /// calling thread, every time anyone asked where media lives.
+    ///
+    /// `fileURL(_:)` reads it, and `PostCard.body` calls `fileURL`/`hasLocalFile`/`storagePath` per
+    /// media ref while rendering. So scrolling the feed issued createDirectory + setAttributes for
+    /// every media ref on every body evaluation, on the main thread. A Time Profiler trace of a warm
+    /// phone puts `MediaStore.dir`/`storageDir` at ~1400 samples directly under `PostCard.body`,
+    /// alongside `fileURL` at 864 — the largest identifiable block of Haven's own code in the trace,
+    /// and the reason the back of the phone got hot while browsing.
+    ///
+    /// The old comment justified the repetition as "re-applied each access so an already-existing
+    /// dir gets upgraded too". Once per process launch achieves that upgrade just as well: the
+    /// protection class is a property of the directory, not of the caller, and nothing removes it
+    /// between accesses. `static let` is lazy and thread-safe, so the first caller still pays for
+    /// the create + upgrade and every later caller pays nothing.
+    nonisolated static let storageDir: URL = {
         let d = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("haven-media", isDirectory: true)
         // Protect media at rest to match the in-transit E2EE: files created here inherit
         // "until first user authentication" (so the NSE/background can still read), not the weaker
-        // process default. Re-applied each access so an already-existing dir gets upgraded too.
+        // process default.
         #if os(iOS)
         try? FileManager.default.createDirectory(
             at: d, withIntermediateDirectories: true,
@@ -323,7 +339,7 @@ final class MediaStore: ObservableObject {
         try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
         #endif
         return d
-    }
+    }()
     private var dir: URL { Self.storageDir }
     private func fileURL(_ ref: String) -> URL? {
         guard let kind = MediaKind(ref: ref) else { return nil }

@@ -8672,6 +8672,25 @@ private struct PostCarouselDots: View {
     return 4.0 / 3.0
     }
 
+/// The "Keep on this device" pin toggle, as its own view.
+///
+/// It observes PinnedMediaStore ITSELF. PostCard used to, for these two lines alone — so pinning any
+/// media anywhere invalidated every visible card, re-evaluating a ~1,600-line body to redraw one
+/// menu label. The original comment ("through the OBSERVED store, so toggling re-renders the card")
+/// had the right instinct and the wrong scope: what must re-render is the BUTTON.
+private struct KeepOnDeviceButton: View {
+    let ref: String
+    @ObservedObject private var pinned = PinnedMediaStore.shared
+
+    var body: some View {
+        let isPinned = pinned.isPinned(ref)
+        Button { pinned.togglePin([ref]) } label: {
+            Label(isPinned ? "Stop keeping on this device" : "Keep on this device",
+                  systemImage: isPinned ? "pin.slash.fill" : "pin")
+        }
+    }
+}
+
 struct PostCard: View {
     let item: FeedItemFfi
     let friendName: String
@@ -8709,7 +8728,6 @@ struct PostCard: View {
     /// Observed so "Keep on this device" visibly changes state. Reading the store WITHOUT observing
     /// it meant the pin was recorded but nothing on screen moved — the menu closed and the post
     /// looked identical, so a working toggle read as a dead button.
-    @ObservedObject private var pinned = PinnedMediaStore.shared
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var hSizeClass
     private var isPortraitPhone: Bool { hSizeClass == .compact }
@@ -9511,15 +9529,6 @@ private struct KillHorizontalScroller: NSViewRepresentable {
 
     /// "Keep on this device" toggle — pins/unpins this ref in the device-local retention set so no
     /// cleanup (orphan sweep, age/size limit, or the cleanup screen) ever removes its bytes.
-    @ViewBuilder private func keepOnDeviceButton(_ ref: String) -> some View {
-        // Through the OBSERVED store, so toggling re-renders the card (and its pin badge) rather
-        // than silently recording a pin nothing on screen reflects.
-        let isPinned = pinned.isPinned(ref)
-        Button { pinned.togglePin([ref]) } label: {
-            Label(isPinned ? "Stop keeping on this device" : "Keep on this device",
-                  systemImage: isPinned ? "pin.slash.fill" : "pin")
-        }
-    }
 
     private func playerFor(_ ref: String, _ url: URL) -> AVPlayer {
         if let p = bag.players[ref] { return p }
@@ -9678,6 +9687,8 @@ private struct KillHorizontalScroller: NSViewRepresentable {
         postLetterboxes(ref, in: containerAspect)
     }
     private func shareURL(_ ref: String) -> URL? { postShareURL(ref) }
+
+    private func keepOnDeviceButton(_ ref: String) -> some View { KeepOnDeviceButton(ref: ref) }
 
     private var header: some View {
         PostHeader(item: item, friendName: friendName, authorName: authorName,

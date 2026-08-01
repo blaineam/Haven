@@ -71,6 +71,57 @@ takes this fix as 1.2.3, desktop's authoring half is called out as still open.
   Found while the phone was unavailable for Instruments — it needs to be unlocked and on USB for
   xctrace to attach, and this was reachable by reading the render path instead.
 
+### Fixed — calls
+
+- **A call showed connected and carried no audio.** Reported on a call to a family member. This one
+  was self-inflicted: the ICE change earlier in this release treated a configured fabric as proof
+  media had a route, so a circle whose relay announces no usable TURN got no public STUN at all.
+  Host candidates alone cannot pair two NATs. That commit's own message described this failure —
+  "calls that 'connected' with zero media" — and took the risk anyway.
+
+  Reverted on Apple, Android and desktop together: public STUN is the fallback whenever no
+  **publicly reachable** TURN exists, fabric or not. A circle running a real TURN still never
+  touches a third party, which was always the larger share of the privacy win. The hairpin does
+  work — the same session shows it carrying a different call — but it is a likely rescue, not a
+  guaranteed one, and a call you cannot hear is not a private call, it is a broken one.
+
+  The tests moved with it deliberately: they had been pinning the broken rule, and now assert the
+  fallback survives **with** a fabric present. Re-narrowing this needs proof the hairpin has
+  established, not an assumption that it will.
+
+- **The speakerphone toggle did nothing, in either direction.** The audio session is configured
+  `.playAndRecord` with `.defaultToSpeaker`, and under that option `overrideOutputAudioPort(.none)`
+  does not mean earpiece — it means *the default*, which is the speaker. Turning speakerphone off
+  therefore left the route on the speaker, and `syncSpeakerState` then read `.builtInSpeaker` back
+  off the route and flipped the flag returned. The category now moves with the override. The
+  audio-recovery path had the mirror bug: it reasserted `.defaultToSpeaker` unconditionally, putting
+  an earpiece call back on the speaker mid-call.
+
+### Fixed — battery and responsiveness (Apple)
+
+Measured on a real iPhone with `devicectl --console`, 60s steady-state windows, before and after:
+**~300 log lines/min → 31**, and `putHello` drops **~180/min → 2.9**.
+
+- **The media-backup drain still spun after 1.2.2's fix.** That fix honoured the backoff but assumed
+  `backup()` records a stall on every failure. Three paths return `false` without one — most
+  commonly `guard dests.count >= 2` when the local plaintext is gone, which is a device with a
+  single relay, the ordinary case. Such a ref never gets a window, so every pass retook it and
+  re-armed 2s later, holding a `UIApplication` assertion. Now recorded at the drain itself, where
+  `ok == false` means "reached no destination" by definition, plus two short gaps (5s, 20s) before
+  the long ones so a transient blip still recovers fast.
+- **The feed recomputed upload state every second, forever, on the main thread.** Each of your own
+  media posts renders its cluster inside `TimelineView(.periodic(by: 1.0))` — ticking for posts
+  uploaded weeks ago whose answer cannot change. Per tick, per blob, it called ledger lookups
+  implemented as a linear scan of up to 20,000 strings and a queue check doing four array scans
+  bounded at 10,000. That is the choppy scrolling and the warm idle phone. The ledger and queue now
+  answer in O(1), and a post confirmed on a relay someone else can read drops to an hourly tick.
+- **The contact fan-out ran every 1.7 seconds.** `startSyncTimer`'s 30s heartbeat and 60s due-gate
+  govern the timer only; a dozen event-driven callers bypass it. A floor in `syncWithContacts`
+  itself fixes it wherever the trigger lives, with user-visible work (invites, new members) still
+  greeting immediately.
+- **One call frame became ~60 HTTP PUTs.** The live-call lane was handed every circle; a PUT into a
+  circle the destination is not in cannot be read by them. Scoped to member circles.
+
 ### Fixed — Apple and Android
 
 - **A video story arrived as a spinner that never finished.** Reported straight after the fix above

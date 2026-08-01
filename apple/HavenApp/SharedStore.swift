@@ -2423,7 +2423,9 @@ enum SharedStore {
     /// unlock everything else. (Mailbox keys are content hashes, so "newest first" is not
     /// derivable from the key; control-first is the useful half.)
     static let mailboxFetchCap = 200
-    private static func controlKeyRank(_ key: String) -> Int {
+    /// `nonisolated`: pure string inspection, no state. It is called from the off-main key filter in
+    /// pollMailbox, which is where the main thread was losing 4.4% of its samples to key parsing.
+    nonisolated private static func controlKeyRank(_ key: String) -> Int {
         if key.contains("/__hello__/") { return 0 }
         if key.contains("/__relay__/") { return 1 }
         return 2
@@ -2611,11 +2613,27 @@ enum SharedStore {
                                 // in-call 2s poll, and GETting them here just re-fetched frames that
                                 // then failed receive() forever. Same for hello slots addressed to
                                 // other ids (theirs to claim). Control-plane first, capped batch.
-                                var fresh = keys.filter {
-                                    !seenContains($0) && !$0.contains("/__live__/")
-                                        && helloKeyClaimable($0, myIds: myHelloIds)
-                                }
-                                fresh.sort { controlKeyRank($0) < controlKeyRank($1) }
+                                // OFF-MAIN, like the hosted path a few lines up already does.
+                                //
+                                // This filter+sort is pure STRING work over every key a relay lists —
+                                // seenContains does set lookups on full key strings, helloKeyClaimable
+                                // splits and prefix-matches, controlKeyRank scans for markers. Cheap
+                                // per key, thousands of keys, and it ran on the MAIN ACTOR every poll
+                                // because SharedStore is a @MainActor enum.
+                                //
+                                // A Time Profiler run attributed 4.4% of ALL main-thread samples to
+                                // pullMailbox, every one of them under pollMailbox, and the leaves were
+                                // String._uncheckedFromUTF8 / Substring.subscript / _allASCII /
+                                // KeyPath._projectReadOnly — this loop, not crypto and not rendering.
+                                // It is also why the main thread never reached idle: polls never stop.
+                                var fresh = await Task.detached(priority: .utility) { () -> [String] in
+                                    var f = keys.filter {
+                                        !seenContains($0) && !$0.contains("/__live__/")
+                                            && helloKeyClaimable($0, myIds: myHelloIds)
+                                    }
+                                    f.sort { controlKeyRank($0) < controlKeyRank($1) }
+                                    return f
+                                }.value
                                 let deferred = max(0, fresh.count - mailboxFetchCap)
                                 if deferred > 0 { fresh = Array(fresh.prefix(mailboxFetchCap)) }
                                 noteBacklog(node, cid, keys: keys.count, fresh: fresh.count, deferred: deferred)
@@ -2657,11 +2675,16 @@ enum SharedStore {
                     FeedStore.shared.refreshRelayInterfaceIfNeeded(node)
                     // Same shape as the HTTP path: skip unclaimed live-call frames + other ids'
                     // hello slots, control first, cap.
-                    var fresh = keys.filter {
-                        !seenContains($0) && !$0.contains("/__live__/")
-                            && helloKeyClaimable($0, myIds: myHelloIds)
-                    }
-                    fresh.sort { controlKeyRank($0) < controlKeyRank($1) }
+                    // Off-main for the same reason as the HTTP path above: string work over every
+                    // listed key, on the main actor, on every poll.
+                    let fresh = await Task.detached(priority: .utility) { () -> [String] in
+                        var f = keys.filter {
+                            !seenContains($0) && !$0.contains("/__live__/")
+                                && helloKeyClaimable($0, myIds: myHelloIds)
+                        }
+                        f.sort { controlKeyRank($0) < controlKeyRank($1) }
+                        return f
+                    }.value
                     noteBacklog(node, cid, keys: keys.count, fresh: min(fresh.count, mailboxFetchCap),
                                 deferred: max(0, fresh.count - mailboxFetchCap))
                     for key in fresh.prefix(mailboxFetchCap) {

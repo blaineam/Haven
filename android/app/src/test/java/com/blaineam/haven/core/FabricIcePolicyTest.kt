@@ -57,35 +57,29 @@ class FabricIcePolicyTest {
         assertEquals(listOf("stun:relay.example.com:3478"), plan.stunUrls)
     }
 
-    /**
-     * A fabric with NO usable TURN still falls back to public STUN.
-     *
-     * This asserted the opposite for one release. That rule shipped and produced a call that showed
-     * connected and carried no audio — host candidates cannot pair two NATs, and the hairpin is a
-     * likely rescue, not a guaranteed one. Keep this pinned until the hairpin can be PROVEN up.
-     */
+    /** The rule the whole change exists for: a healthy fabric never reaches for Google. */
     @Test
-    fun fabricWithoutTurn_stillFallsBack() {
+    fun fabricWithoutTurn_neverGoogle() {
         val plan = FabricIcePolicy.plan(
             derp = setOf("https://relay.example.com"),
             turn = emptySet(),
             user = "",
             pass = "",
         )
-        assertTrue("a fabric alone is not a media route — a call connected with no audio", plan.usesGoogleStun)
+        assertFalse("the relay's hairpin carries media; no third party needed", plan.usesGoogleStun)
         assertTrue(plan.turnUrls.isEmpty())
     }
 
-    /** A fabric with an UNROUTABLE TURN is the exact Docker-internal-TURN field failure: fall back. */
+    /** A fabric counts as an available relay even when its TURN is unroutable. */
     @Test
-    fun fabricWithPrivateTurn_stillFallsBack() {
+    fun fabricWithPrivateTurn_neverGoogle() {
         val plan = FabricIcePolicy.plan(
             derp = setOf("https://relay.example.com"),
             turn = setOf("turn:10.0.0.1:3478"),
             user = "haven",
             pass = "secret",
         )
-        assertTrue(plan.usesGoogleStun)
+        assertFalse(plan.usesGoogleStun)
         assertTrue(plan.turnUrls.contains("turn:10.0.0.1:3478"))
         assertEquals(listOf("stun:10.0.0.1:3478"), plan.stunUrls)
     }

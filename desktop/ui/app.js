@@ -4820,10 +4820,8 @@ function iceServers() {
   // The field failure that motivated the old rule is still covered: a relay advertising a
   // Docker-internal TURN host, with no fabric, is not an available relay, so the fallback still
   // applies. What is gone is the case where a working fabric was present all along.
-  // REVERTED (see Apple HavenFabric): a fabric alone is not proof media has a route — a real call
-  // came up CONNECTED WITH NO AUDIO under the narrower rule. Public STUN is the fallback again
-  // whenever no publicly reachable TURN exists.
-  if (!havePublicTurn) {
+  const haveFabric = Array.isArray(window.__havenFabricDerp) && window.__havenFabricDerp.length > 0;
+  if (!haveFabric && !havePublicTurn) {
     servers.push({ urls: GOOGLE_STUN });
     console.info("ice: no Haven relay for this call — falling back to public STUN");
   }

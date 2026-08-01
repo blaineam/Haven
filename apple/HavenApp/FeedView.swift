@@ -7175,6 +7175,7 @@ struct FeedView: View {
     @State private var showFilesImporter = false   // pick media from the Files app (iOS/iPadOS)
     @State private var showFilePicker = false      // macOS file browser (NSOpenPanel)
     @State private var showMediaPicker = false
+    @State private var showAudioRecorder = false
     @State private var showCamera = false
     @State private var showSongPicker = false
     @State private var showLocationPicker = false
@@ -7973,6 +7974,80 @@ private struct PostReactionsRow: View {
     }
 }
 
+/// The "Add a reply…" composer for one post: attachments, text field, send.
+///
+/// Extracted from PostCard. It owns everything it needs — draft text, staged attachments, the two
+/// sheet flags and the focus state — none of which any other part of the card read. As @State on a
+/// ~1,600-line view, TYPING A CHARACTER re-evaluated the whole card body; now it re-evaluates a text
+/// field. The keyboard-avoidance callback still reports upward, because the feed (not the card) owns
+/// the scroll proxy that lifts the post.
+private struct PostCommentField: View {
+    let onSubmit: (String, [String]) -> Void
+    var onFocus: ((Bool) -> Void)?
+
+    @State private var text = ""
+    @State private var media: [String] = []
+    @State private var showMediaPicker = false
+    @State private var showAudioRecorder = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(spacing: 6) {
+            if !media.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) { ForEach(media, id: \.self) { attachChip($0) } }
+                }
+            }
+            HStack(spacing: 8) {
+                Menu {
+                    Button { showMediaPicker = true } label: { Label("Photo or Video", systemImage: "photo") }
+                    Button { showAudioRecorder = true } label: { Label("Audio reply", systemImage: "mic") }
+                } label: { Image(systemName: "paperclip").foregroundStyle(.secondary) }
+                .menuIndicator(.hidden)   // no macOS disclosure chevron next to the paperclip
+                #if os(macOS)
+                .menuStyle(.borderlessButton).fixedSize()
+                #endif
+                TextField("Add a reply…", text: $text, axis: .vertical)
+                    .lineLimit(1...5)
+                    .textFieldStyle(.plain)   // drop the macOS system focus ring — matches iOS
+                    .font(.caption).padding(.horizontal, 12).padding(.vertical, 8)
+                    .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .focused($focused)
+                    // Report focus up so the feed lifts this post above the keyboard AND hides the
+                    // "Share something" composer (which otherwise floats over the comment).
+                    .onChange(of: focused) { _, f in onFocus?(f) }
+                Button { send() } label: {
+                    Image(systemName: "arrow.up.circle.fill").imageScale(.large).foregroundStyle(HavenTheme.pink)
+                }
+                .buttonStyle(PressableStyle())
+            }
+        }
+        .sheet(isPresented: $showMediaPicker) { MediaPicker { refs in media.append(contentsOf: refs) }.macSheetFrame() }
+        .sheet(isPresented: $showAudioRecorder) { AudioRecorderView { ref in media.append(ref) }.macSheetFrame() }
+    }
+
+    private func attachChip(_ ref: String) -> some View {
+        let m = MediaStore.shared.item(ref)
+        return ZStack(alignment: .topTrailing) {
+            Group {
+                if let img = m?.image { Image(platformImage: img).resizable().scaledToFill() }
+                else { Image(systemName: "waveform").frame(maxWidth: .infinity, maxHeight: .infinity).background(HavenTheme.brandHorizontal.opacity(0.25)) }
+            }
+            .frame(width: 44, height: 44).clipShape(RoundedRectangle(cornerRadius: 8))
+            Button { media.removeAll { $0 == ref } } label: {
+                Image(systemName: "xmark.circle.fill").foregroundStyle(.white).background(Circle().fill(.black.opacity(0.5)))
+            }
+        }
+    }
+
+    private func send() {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty || !media.isEmpty else { return }
+        onSubmit(t, media)
+        text = ""; media = []
+    }
+}
+
 struct PostCard: View {
     let item: FeedItemFfi
     let friendName: String
@@ -8022,10 +8097,6 @@ struct PostCard: View {
     /// layouts (iPad / landscape / macOS) so you can see all of it at once.
     private var singleMediaMaxHeight: CGFloat { isPortraitPhone ? 680 : 460 }
     @State private var showAllComments = false
-    @State private var commentText = ""
-    @State private var commentMedia: [String] = []
-    @State private var showCommentMediaPicker = false
-    @State private var showAudioRecorder = false
     @State private var showEdit = false
     @State private var showReport = false
     @State private var linkCopied = false
@@ -8059,7 +8130,6 @@ struct PostCard: View {
     @State private var editCommentText = ""
     @State private var editCommentMedia: [String] = []
     @State private var commentReactTarget: CommentReactTarget?
-    @FocusState private var commentFieldFocused: Bool
 
     struct CommentReactTarget: Identifiable { let id: String }
     @State private var currentPage = 0
@@ -9498,63 +9568,7 @@ private struct KillHorizontalScroller: NSViewRepresentable {
     }
 
     private var commentField: some View {
-        VStack(spacing: 6) {
-            if !commentMedia.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) { ForEach(commentMedia, id: \.self) { commentAttachChip($0) } }
-                }
-            }
-            HStack(spacing: 8) {
-                Menu {
-                    Button { showCommentMediaPicker = true } label: { Label("Photo or Video", systemImage: "photo") }
-                    Button { showAudioRecorder = true } label: { Label("Audio reply", systemImage: "mic") }
-                } label: { Image(systemName: "paperclip").foregroundStyle(.secondary) }
-                .menuIndicator(.hidden)   // no macOS disclosure chevron next to the paperclip
-                #if os(macOS)
-                .menuStyle(.borderlessButton).fixedSize()
-                #endif
-                TextField("Add a reply…", text: $commentText, axis: .vertical)
-                    .lineLimit(1...5)
-                    .textFieldStyle(.plain)   // drop the macOS system focus ring — matches iOS
-                    .font(.caption).padding(.horizontal, 12).padding(.vertical, 8)
-                    .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .focused($commentFieldFocused)
-                    // Report focus up so the feed lifts this post above the keyboard AND hides the
-                    // "Share something" composer (which otherwise floats over the comment). The
-                    // keyboard dismisses by dragging the feed (scrollDismissesKeyboard) — no toolbar
-                    // Done, which was duplicating once per visible post.
-                    .onChange(of: commentFieldFocused) { _, focused in
-                        onCommentFocus?(focused)
-                    }
-                Button { sendComment() } label: {
-                    Image(systemName: "arrow.up.circle.fill").imageScale(.large).foregroundStyle(HavenTheme.pink)
-                }
-                .buttonStyle(PressableStyle())
-            }
-        }
-        .sheet(isPresented: $showCommentMediaPicker) { MediaPicker { refs in commentMedia.append(contentsOf: refs) }.macSheetFrame() }
-        .sheet(isPresented: $showAudioRecorder) { AudioRecorderView { ref in commentMedia.append(ref) }.macSheetFrame() }
-    }
-
-    private func commentAttachChip(_ ref: String) -> some View {
-        let m = MediaStore.shared.item(ref)
-        return ZStack(alignment: .topTrailing) {
-            Group {
-                if let img = m?.image { Image(platformImage: img).resizable().scaledToFill() }
-                else { Image(systemName: "waveform").frame(maxWidth: .infinity, maxHeight: .infinity).background(HavenTheme.brandHorizontal.opacity(0.25)) }
-            }
-            .frame(width: 44, height: 44).clipShape(RoundedRectangle(cornerRadius: 8))
-            Button { commentMedia.removeAll { $0 == ref } } label: {
-                Image(systemName: "xmark.circle.fill").foregroundStyle(.white).background(Circle().fill(.black.opacity(0.5)))
-            }
-        }
-    }
-
-    private func sendComment() {
-        let t = commentText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty || !commentMedia.isEmpty else { return }
-        onComment(t, commentMedia)
-        commentText = ""; commentMedia = []
+        PostCommentField(onSubmit: onComment, onFocus: onCommentFocus)
     }
 }
 

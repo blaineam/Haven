@@ -71,6 +71,44 @@ takes this fix as 1.2.3, desktop's authoring half is called out as still open.
   Found while the phone was unavailable for Instruments — it needs to be unlocked and on USB for
   xctrace to attach, and this was reachable by reading the render path instead.
 
+### Fixed — Apple (feed heat and audio)
+
+Measured on a real iPhone with a device log, before and after, rather than reasoned about.
+
+- **Every feed video was decoded TWICE.** `playerFor` cached the player it built inside
+  `DispatchQueue.main.async`, so it returned BEFORE the cache was populated; the next evaluation in
+  the same pass missed and built a second `AVPlayer` for the same clip. Both stayed alive, so every
+  video ran two hardware decode sessions of the same file microseconds apart — audio playing over
+  itself ("static sounding"), a mute toggle that could only reach one of them, and 2x decode per
+  video. Hardware decode is not CPU time, which is why six Time Profiler runs showed no hotspot while
+  the phone got hot. Instrumented: `player #1`/`player #2` for every clip with an identical cache id;
+  after, 17 creations and zero duplicates.
+- **`FeedStore` published up to 44 times a second.** `lastSendError` accounted for 64 of 66 publishes
+  in a 5-second window: `sendIroh` writes it on every send, and with several targets some succeed and
+  some fail, so it genuinely alternates nil → error → nil. Every write invalidated every view
+  observing the store — the whole feed. It is a debug-panel value and is no longer `@Published`.
+  Idle invalidations went from 44/s to 0.4/s, and idle card body evaluations from 21/s to ~0.3/s.
+- **Mailbox key parsing ran on the main thread.** `pollMailbox` filters and sorts every key a relay
+  lists, and `SharedStore` is a `@MainActor` enum, so thousands of string operations landed on the
+  render thread on every poll — 4.4% of all main-thread samples, and the reason it never reached
+  idle. The hosted-relay path already did this off-main; the HTTP and iroh paths now match it.
+- **The contact fan-out ran every 1.7 seconds** against a due-gate meant for 60s, because a dozen
+  event-driven callers bypassed the timer. A floor in `syncWithContacts` fixed it wherever the
+  trigger lives: ~300 log lines/min → 31.
+- **A video's audio could start in the background**, and a rebuilt player could start silent while
+  the speaker icon read unmuted. Both came from the same shift (players are now built when a card
+  reaches the centre): the coordinator now owns a per-post player registry and decides audibility in
+  one place.
+- **Your own reaction count was pink text on a pink capsule** and vanished into it.
+
+### Changed — Apple (PostCard)
+
+- **PostCard was 1,629 lines; it is 407.** Eleven components came out — header, media, reactions,
+  comments, comment field, mute button, pin button, masonry tile, placeholder, carousel dots, file
+  page — each owning the state it uses. Three of four global stores are off the card entirely, and
+  the media (player cache, carousel page, measured width) is a child view, so paging a carousel no
+  longer re-renders a header and a comment list.
+
 ### Fixed — calls
 
 - **Public STUN is for users with NO Haven relay — full stop.** A circle that runs its own relay

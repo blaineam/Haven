@@ -8841,7 +8841,7 @@ struct PostCard: View {
         let hasVideo = item.media.contains(where: isVideo)
         // Make sure this post is the active audio source first, so the toggle acts on it.
         if (hasVideo || item.music != nil), audio.activePostId != item.id {
-            audio.start(postId: item.id, track: item.music, video: primaryVideoPlayer, muteVideo: item.muteVideo, immediateMusic: true)
+            audio.start(postId: item.id, track: item.music, video: nil, muteVideo: item.muteVideo, immediateMusic: true)
         }
         if hasVideo {
             // Tapping a video toggles *its own* sound (same as the speaker button) — overriding
@@ -9504,7 +9504,7 @@ private struct KillHorizontalScroller: NSViewRepresentable {
     /// The speaker chip over a video page — plus that page's Save/Share menu.
     @ViewBuilder private func muteButton(_ ref: String) -> some View {
         Button {
-            if audio.activePostId != item.id { audio.start(postId: item.id, track: item.music, video: primaryVideoPlayer, muteVideo: item.muteVideo, immediateMusic: true) }
+            if audio.activePostId != item.id { audio.start(postId: item.id, track: item.music, video: nil, muteVideo: item.muteVideo, immediateMusic: true) }
             audio.toggleVideoAudio()
         } label: {
             Image(systemName: audio.activePostId == item.id && audio.videoUnmuted ? "speaker.wave.2.fill" : "speaker.slash.fill")
@@ -9599,6 +9599,9 @@ private struct KillHorizontalScroller: NSViewRepresentable {
         // run inside a view evaluation.
         bag.players[ref] = p
         bag.observers[ref] = token
+        // Tell the coordinator which player belongs to this post, so anything that activates the
+        // post's audio (tap-to-mute, the speaker chip) no longer has to carry a player reference.
+        AudioCoordinator.shared.registerVideo(p, for: item.id)
         DispatchQueue.main.async {
             if isActive { playVisibleVideo() }
         }
@@ -9611,7 +9614,7 @@ private struct KillHorizontalScroller: NSViewRepresentable {
         if isActive {
             // Super data saver: no autoplay of attached music either — only the poster still loads.
             let track = SettingsStore.shared.superDataSaver ? nil : item.music
-            audio.start(postId: item.id, track: track, video: primaryVideoPlayer, muteVideo: item.muteVideo)
+            audio.start(postId: item.id, track: track, video: nil, muteVideo: item.muteVideo)
             if !SettingsStore.shared.superDataSaver {
                 audio.ensureMusicPlaying()   // resume the song if a video had paused it
             }
@@ -9631,6 +9634,7 @@ private struct KillHorizontalScroller: NSViewRepresentable {
         for (_, p) in bag.players { p.pause(); p.replaceCurrentItem(with: nil) }
         bag.observers.removeAll()
         bag.players.removeAll()
+        AudioCoordinator.shared.registerVideo(nil, for: item.id)
     }
 
     private func playVisibleVideo() {

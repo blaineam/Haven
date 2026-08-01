@@ -68,6 +68,24 @@ final class AudioCoordinator: ObservableObject {
     }
 
     private var videoPlayer: AVPlayer?
+    /// The live player for each post, registered by the view that BUILDS it.
+    ///
+    /// `start(postId:track:video:)` used to require its caller to hand over an AVPlayer, which meant
+    /// only the view owning the player cache could activate a post's audio. That coupling is what
+    /// kept the media block welded into PostCard: move the cache out, and the card's tap-to-mute can
+    /// no longer supply a player — passing nil compiles and silently breaks unmuting, because start
+    /// would clear the reference.
+    ///
+    /// So the coordinator keeps its own map. Whoever builds a player registers it; callers that do
+    /// not have one pass nil and the coordinator finds it.
+    private var videoByPost: [String: AVPlayer] = [:]
+
+    /// Register (or clear, with nil) the player for a post. Called by the media view on creation and
+    /// on teardown, so the map never outlives the players it points at.
+    func registerVideo(_ player: AVPlayer?, for postId: String) {
+        if let player { videoByPost[postId] = player } else { videoByPost.removeValue(forKey: postId) }
+        if activePostId == postId { videoPlayer = player }
+    }
     private var activeTrack: TrackRefFfi?   // the active post's song, so unmute can (re)start it
     private var fadeTimer: Timer?
     /// A scroll-driven song start deferred until the feed settles on this post. Queuing a system-music
@@ -101,7 +119,8 @@ final class AudioCoordinator: ObservableObject {
         if activePostId == postId { return }
         stop()
         activePostId = postId
-        videoPlayer = video
+        // Fall back to the registered player when the caller has none — see videoByPost.
+        videoPlayer = video ?? videoByPost[postId]
         activeTrack = track
         // Play the video's own audio only when there's no song, the author left it unmuted, the app
         // isn't globally silenced, AND the viewer's GLOBAL video-sound toggle is on. The global flag is

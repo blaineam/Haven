@@ -81,9 +81,9 @@
             <span class="pill"><span class="ic"></span>Linux</span>
           </div>
           <p class="hero-note">
-            <b>Launch sale — $4.99 through Sept&nbsp;30</b> (then $9.99, once). On the App&nbsp;Store for
-            iPhone, iPad &amp; Mac and live on the Microsoft&nbsp;Store for Windows — no subscription, no
-            ads, no tracking. Android is coming to Google&nbsp;Play; Linux is a free download today.
+            <b>$9.99, once.</b> Now on the App&nbsp;Store for iPhone, iPad &amp; Mac, on
+            Google&nbsp;Play for Android and on the Microsoft&nbsp;Store for Windows — no subscription,
+            no ads, no tracking. Linux is a free download today.
             <a class="inline" href="#pricing">Why paid?</a>
           </p>
         </div>
@@ -391,19 +391,12 @@
       <div class="callout reveal" style="margin-top:18px">
         <b>Also shipping, out in the open:</b> the next generation of Haven's group encryption —
         forward secrecy and post-compromise security, on our <b>own post-quantum cryptography</b>
-        (MLS-style, not a classical off-the-shelf standard). It's <b>enabled in this release for
-        circles with a verified owner</b> — every circle you make from now on, whose id is bound to
-        whoever created it. <b>Circles you already have don't switch over by themselves:</b> nothing
-        recorded who created them, and an owner can't be added afterwards in a way everyone else could
-        trust, so they keep the encryption they already have — which still cuts off someone you
-        remove. To carry an older circle across, whoever made it <b>offers an upgrade</b> and
-        <b>each member taps once to follow it</b>; we show you who's asking, because that's a
-        judgement only a person can make. Even on a circle with an owner it turns on only
-        <b>once everyone's devices have updated and joined</b> — until then a
+        (MLS-style, not a classical off-the-shelf standard). It's <b>enabled in this release</b> and
+        turns on <b>per circle once everyone's devices have updated and joined</b> — until then a
         circle stays on the existing key path, and a device that falls behind reverts within one sync,
         so no one is ever stranded. It only ever changes <i>which key</i> seals your content, never
         <i>whether</i> it's encrypted. We ran our own adversarial audit first — no critical or high
-        findings — but that's our homework, not an outside review; an independent
+        findings, two mediums fixed — but that's our homework, not an outside review; an independent
         cryptographer's review is <b>planned</b>. Read the
         <a class="inline" href="docs/">design docs</a>.
       </div>
@@ -474,14 +467,14 @@ haven-relay run --link "haven-relay://circle#…"</code></pre>
   <section class="section tight" id="pricing">
     <div class="container">
       <div class="card reveal" style="max-width:820px;margin:0 auto;padding:clamp(28px,5vw,44px) clamp(22px,4vw,40px)">
-        <span class="eyebrow">Launch sale · $4.99 through Sept 30 · then $9.99</span>
+        <span class="eyebrow">$9.99 · one-time · yours</span>
         <h2 style="font-size:clamp(24px,4vw,34px)">You're the customer, not the product.</h2>
         <p class="muted" style="font-size:17px;margin-top:14px">
-          Haven is a <b>one-time purchase</b> on the App&nbsp;Store and the Microsoft&nbsp;Store —
-          <b>50% off at $4.99 through September&nbsp;30</b>, then $9.99. Buy it once, own it, no
-          subscription and no monthly cost, ever. <b>Linux is a free download</b>
-          from the latest GitHub release; <b>Windows is live on the Microsoft&nbsp;Store</b> and
-          <b>Android</b> is coming to Google&nbsp;Play. Same one-time price wherever it lands.
+          Haven is a <b>one-time $9.99 purchase</b> on the App&nbsp;Store, Google&nbsp;Play and the
+          Microsoft&nbsp;Store — buy it once, own it, no subscription and no monthly cost, ever.
+          <b>Linux is a free download</b> from the latest GitHub release; <b>Android is live on
+          Google&nbsp;Play</b> and <b>Windows is live on the Microsoft&nbsp;Store</b>. Same one-time
+          price wherever you get it.
         </p>
         <p class="muted" style="font-size:17px;margin-top:14px">
           That price is the whole business model. When you pay for the app, your privacy is the
@@ -507,8 +500,8 @@ haven-relay run --link "haven-relay://circle#…"</code></pre>
 
   <!-- ── Final CTA ── -->
   <!-- ════════════════════════════════════════════════════════════════════
-       DOWNLOAD — Apple ships on the App Store; Windows is live on the Microsoft
-       Store; Android is coming to Google Play; Linux, Steam Deck and the relay
+       DOWNLOAD — Apple ships on the App Store; Android is live on Google Play;
+       Windows is live on the Microsoft Store; Linux, Steam Deck and the relay
        pull live from the latest GitHub release. See the note below the grid.
   ═════════════════════════════════════════════════════════════════════ -->
   <section class="section" id="download">
@@ -516,7 +509,7 @@ haven-relay run --link "haven-relay://circle#…"</code></pre>
       <div class="center reveal">
         <span class="eyebrow">Now on the App&nbsp;Store</span>
         <h2 style="font-size:clamp(26px,4.5vw,40px)">Get <span class="h-grad">Haven</span> on every screen</h2>
-        <p class="lead">iPhone, iPad &amp; Mac on the App&nbsp;Store; Windows on the Microsoft&nbsp;Store; Android coming to Google&nbsp;Play; Linux and Steam&nbsp;Deck straight from the latest release; a tiny relay for a Pi or server.</p>
+        <p class="lead">iPhone, iPad &amp; Mac on the App&nbsp;Store; Android on Google&nbsp;Play; Windows on the Microsoft&nbsp;Store; Linux and Steam&nbsp;Deck straight from the latest release; a tiny relay for a Pi or server.</p>
       </div>
 
       <!-- Device lineup — the one place the non-Apple platforms get their own art. The iPhone
@@ -553,7 +546,7 @@ haven-relay run --link "haven-relay://circle#…"</code></pre>
         <p class="muted center" id="download-loading">Loading the latest release…</p>
       </div>
       <p class="muted small center" style="margin-top:16px">
-        Windows is live on the Microsoft&nbsp;Store; Android is coming to Google&nbsp;Play.
+        Android is live on Google&nbsp;Play; Windows is live on the Microsoft&nbsp;Store.
         The Linux desktop, Steam&nbsp;Deck &amp; relay builds come from the
         <a class="inline" id="download-release-link" href="https://github.com/blaineam/haven/releases/latest" rel="noopener">latest GitHub release</a>
         — real installers, not a preview.
@@ -627,11 +620,11 @@ var DOWNLOADS = {
   // App Store product URL — live since 1.0.0; 1.0.4 is the current public build (iOS + macOS).
   APP_STORE_URL: "https://apps.apple.com/app/id6782147901",
   MAC_APP_STORE_URL: "https://apps.apple.com/app/id6782147901",
-  // Android: store-only now. The GUI app is no longer attached to GitHub releases — it ships
-  // through Google Play. The listing is IN REVIEW (closed testing) and not publicly listed yet,
-  // so the store URL 404s for anyone who isn't a tester. Deliberately "" until it goes public:
-  // the card then shows an honest "Coming soon to Google Play" state instead of a dead link.
-  PLAY_BETA_URL: "",         /* TODO: paste the Google Play listing URL when it goes public */
+  // Android: store-only. The GUI app is no longer attached to GitHub releases — it ships
+  // through Google Play, where it is now LIVE. The listing URL below wins wherever an Android
+  // download is offered (hero button + Android card). Empty it again only if the listing is
+  // ever pulled — the card then falls back to an honest "coming soon" instead of a dead link.
+  PLAY_BETA_URL: "https://play.google.com/store/apps/details?id=com.blaineam.haven",
   // Windows: store-only now. The GUI installers are no longer attached to GitHub releases — the
   // app ships through the Microsoft Store, where it is now LIVE. The store URL below wins wherever
   // a Windows download is offered (hero button + Windows card).
@@ -642,24 +635,8 @@ var DOWNLOADS = {
 };
 
 /* ──────────────────────────────────────────────────────────────────────────
-   Fragment handling — BACK-COMPAT ONLY.
-
-   New links are emitted at /apps/haven/open/ (see open/index.html), which is
-   now the only path the apps claim as a Universal Link / App Link. This page
-   is marketing and must never prompt to open the app: it is full of its own
-   in-page anchors (#privacy, #security, #download, #pricing, the #main skip
-   link), and while this page was claimed, every one of those taps looked
-   like a payload and offered to launch Haven.
-
-   The handler below stays because links in the OLD shape
-   (https://wemiller.com/apps/haven/#…) are already pasted into people's chat
-   histories and must keep working forever. They no longer auto-open the app —
-   they land here, show the card, and open Haven when the button is TAPPED.
-   One extra tap, and nothing silently launches.
-
-   ⚠️ Do not re-claim this path in the AASA or the Android manifest. ⚠️
-
-   Two payloads, both of which ride in the URL fragment:
+   Fragment handling — preserved from the original landing page, now covering
+   two payloads, both of which ride in the URL fragment:
 
      #<id>.<verify>          an invite       → haven://invite#<id>.<verify>
      #p/<circle>.<post>      a shared post   → haven://p/<circle>/<post>
@@ -874,9 +851,9 @@ var DOWNLOADS = {
 
       var plat = detectPlatform();
       var rec = function (k) { return plat === k; };
-      // Android is store-only now — the APK/AAB were removed from GitHub releases and the app ships
-      // through Google Play. Link the listing when it's public; the listing is still in review, so
-      // PLAY_BETA_URL is "" and we show an honest "coming soon" rather than a dead link or a GitHub APK.
+      // Android is store-only — the APK/AAB were removed from GitHub releases and the app ships
+      // through Google Play, where it is now LIVE. PLAY_BETA_URL is set, so the card links straight
+      // to the listing; the "coming soon" branch survives only for the case where it's unset again.
       function androidCard(recommended) {
         var abtns = (PLAY_BETA_URL && PLAY_BETA_URL !== "#")
           ? [btn(PLAY_BETA_URL, "Get it on Google Play", true)]
@@ -904,13 +881,18 @@ var DOWNLOADS = {
       var winStoreFallback = DOWNLOADS.WINDOWS_STORE_URL && DOWNLOADS.WINDOWS_STORE_URL !== "#"
         ? btn(DOWNLOADS.WINDOWS_STORE_URL, "Get it from the Microsoft Store", true)
         : '<span class="muted small">Coming soon to the Microsoft Store</span>';
+      // Same store-first rule as the happy path: the release fetch has nothing to do with whether
+      // Google Play is live, so this card must read PLAY_BETA_URL rather than hardcode "coming soon".
+      var playFallback = PLAY_BETA_URL && PLAY_BETA_URL !== "#"
+        ? btn(PLAY_BETA_URL, "Get it on Google Play", true)
+        : '<span class="muted small">Coming soon to Google Play</span>';
       grid.innerHTML = iosCard() + macCard() +
         '<div class="dl-card"><h4>Windows</h4><div class="muted small">x64 &amp; Arm64 — Microsoft Store</div>' +
         '<div class="dl-btns">' + winStoreFallback + '</div></div>' +
         '<div class="dl-card"><h4>Linux · Steam Deck · relay</h4><div class="muted small">free on GitHub</div>' +
         '<div class="dl-btns">' + btn("https://github.com/" + REPO + "/releases/latest", "Browse downloads on GitHub", true) + '</div></div>' +
         '<div class="dl-card"><h4>Android</h4><div class="muted small">Google Play</div>' +
-        '<div class="dl-btns"><span class="muted small">Coming soon to Google Play</span></div></div>';
+        '<div class="dl-btns">' + playFallback + '</div></div>';
       // Release fetch failed — hero still auto-detects; store links work, desktop falls back to #download.
       wireHeroButton(null);
     });

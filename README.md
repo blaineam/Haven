@@ -62,8 +62,9 @@ offers an upgrade and each member follows it) — see
 [`CHANGELOG.md`](CHANGELOG.md))
 and **Windows is live on the Microsoft Store**
 (https://apps.microsoft.com/store/detail/9NKTFH1MF4LM).
-Android is on Google Play's **internal** track (closed testing, not yet public)
-and goes live soon; neither the Windows nor Android GUI app is on GitHub Releases
+**Android is live on Google Play**
+(https://play.google.com/store/apps/details?id=com.blaineam.haven);
+neither the Windows nor Android GUI app is on GitHub Releases
 anymore. The **Linux** installers and
 the `haven-relay` daemon still ship on GitHub Releases (free). Per the
 [channel policy](docs/RELEASING.md), each platform ships through its own store and
@@ -177,8 +178,8 @@ One Rust core (`haven-p2p`) powers every client, so new platforms are mostly UI:
 - **iOS / iPadOS** — SwiftUI + UniFFI (primary)
 - **macOS** — native AppKit-backed SwiftUI (`HavenMac` target; Mac Catalyst dropped
   2026-06-23 — see [`docs/MACOS-NATIVE-PORT.md`](docs/MACOS-NATIVE-PORT.md))
-- **Android** — native Jetpack Compose + the same core via UniFFI→Kotlin (on Google Play's
-  internal / closed-testing track)
+- **Android** — native Jetpack Compose + the same core via UniFFI→Kotlin (live on
+  [Google Play](https://play.google.com/store/apps/details?id=com.blaineam.haven))
 - **Windows / Linux** — Tauri 2 (Rust backend links the core directly; WebView2/WebKitGTK
   UI). GUI client *and* a headless circle-relay in one binary. Linux ships `.deb` / `.rpm` /
   AppImage and a sideloadable `haven.flatpak` (Steam Deck) on **GitHub Releases** for

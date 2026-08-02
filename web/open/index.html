@@ -107,8 +107,10 @@
 
 <script>
 (function () {
-  // iOS + macOS are live on the App Store; keep in sync with DOWNLOADS in ../index.html.
+  // iOS + macOS are live on the App Store, Android on Google Play; keep both in sync with
+  // DOWNLOADS in ../index.html.
   var APP_STORE_URL = "https://apps.apple.com/app/id6782147901";
+  var PLAY_STORE_URL = "https://play.google.com/store/apps/details?id=com.blaineam.haven";
   var GET_URL = "../features/";
 
   var COPY = {
@@ -174,8 +176,13 @@
     // lands here bare (a stale bookmark, a truncated paste) gets an explanation and a way on.
     var copy = link ? COPY[link.kind] : COPY.none;
 
-    var getBtn = APP_STORE_URL
-      ? '<a class="btn" href="' + APP_STORE_URL + '">Get Haven on the App Store</a>'
+    // Send people to the store that can actually serve them. An invite opened on Android used to
+    // offer the App Store, which is a dead end on that device — now that Play is live, match the UA.
+    var isAndroid = /Android/i.test(navigator.userAgent || "");
+    var storeUrl = isAndroid ? PLAY_STORE_URL : APP_STORE_URL;
+    var storeName = isAndroid ? "Google Play" : "the App Store";
+    var getBtn = storeUrl
+      ? '<a class="btn" href="' + storeUrl + '">Get Haven on ' + storeName + '</a>'
       : '<a class="btn" href="' + GET_URL + '">Don\'t have Haven? Get it here</a>';
 
     slot.innerHTML =

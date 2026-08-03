@@ -426,6 +426,24 @@ struct RootView: View {
     }
 
     private var main: some View {
+        tabs
+        #if os(iOS)
+        // The share queue may only drain once THIS exists.
+        //
+        // A share that launches Haven lands in `onOpenURL` before the tab content is composed, so
+        // the post draft was published to a FeedView with no subscriber yet and the story sheet was
+        // presented into a view still mid-launch-transition — both silently dropped. The symptom
+        // was "it only loads after I switch tabs and come back", because that re-fires the onAppear
+        // that pulls the draft. Gating on the UI being on screen fixes both without any guesswork
+        // about timing.
+        .onAppear {
+            ShareRouter.shared.uiReady = true
+            Task { await ShareRouter.shared.ingest() }
+        }
+        #endif
+    }
+
+    private var tabs: some View {
         TabView(selection: $tab) {
             FeedView(account: accountStore.account, seed: accountStore.account.secretSeed(), friendName: "Friend")
                 .id(accountStore.account.nodeIdHex())

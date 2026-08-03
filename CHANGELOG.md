@@ -102,6 +102,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   was raised as a full-screen cover over that list by an `onAppear` toggle. When the extension has
   already chosen Story, the composer *is* the sheet — no cover, no toggle, nothing behind it.
 
+- **A share that launched Haven didn't load its editor until you switched tabs and came back.**
+  The app opens on `onOpenURL`, which fires before the tab content is composed — so the post draft
+  was published to a `FeedView` that had no subscriber yet, and the story sheet was presented into a
+  view still mid-launch-transition. Both were dropped silently, and switching tabs just happened to
+  re-fire the `onAppear` that pulls the draft. The queue now drains only once the tab UI is actually
+  on screen, alongside the existing "engine must exist" gate — same rule, same reason: wait rather
+  than proceed and lose it.
+
 - **Sharing twice before opening Haven destroyed the first share.** The App Group inbox was a
   single `payload.json` with the media beside it, so the second share's manifest replaced the
   first's and the app only ever saw the last one. It's a **queue** now — one directory per share,

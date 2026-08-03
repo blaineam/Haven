@@ -29,6 +29,10 @@ final class ShareRouter: ObservableObject {
     /// sheet dismissal, draft consumption) and two overlapping drains would process the same
     /// queued share twice.
     private var draining = false
+    /// Is the tab UI actually on screen? Set by the root's TabView. Nothing may be handed to a
+    /// composer before this: a draft published to a view that isn't composed yet reaches no
+    /// subscriber, and a sheet presented mid-launch-transition is dropped by UIKit.
+    var uiReady = false
 
     /// Drain the queue. Called on `haven://share` and on every foreground.
     ///
@@ -41,10 +45,12 @@ final class ShareRouter: ObservableObject {
         // fires before the identity is configured. Draining then meant `sendMessage` hit its
         // `guard let social` and returned silently while the queue entry was deleted anyway: the
         // message was consumed and lost. Wait for the engine instead; every caller re-runs this.
-        guard FeedStore.shared.isConfigured else {
+        // Two preconditions, same treatment: the engine must exist to SEND, and the tab UI must
+        // exist to HAND ANYTHING to a composer. Either missing means wait, not proceed-and-lose.
+        guard FeedStore.shared.isConfigured, uiReady else {
             let waiting = ShareInbox.drain().count
             guard waiting > 0 else { return }
-            HavenLog.sync("share: engine not ready — \(waiting) queued, retrying")
+            HavenLog.sync("share: not ready (engine=\(FeedStore.shared.isConfigured) ui=\(uiReady)) — \(waiting) queued, retrying")
             // Don't rely on some later caller happening to run in the right order: come back for it.
             // Bounded so a device that never configures (no identity yet) doesn't spin.
             guard retriesLeft > 0 else { return }

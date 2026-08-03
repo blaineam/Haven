@@ -23,6 +23,16 @@ struct ShareComposeView: View {
     let onSend: (ShareInbox.Route, String, String) -> Void   // route, target circle id, caption
     let onCancel: () -> Void
 
+    /// SwiftUI's environment URL opener — **this is what actually launches Haven.**
+    ///
+    /// Inside a share extension it still routes through the system, so a custom scheme launches the
+    /// host app even though `extensionContext.open` is documented as share-extension-unsupported.
+    /// The catch is *when*: it has to be fired from the button action, while the extension still
+    /// owns user interaction. Doing it later — after `completeRequest`, or from a controller
+    /// callback — is too late and iOS quietly drops the request, which is why this looked
+    /// impossible. Enter Space's share extension does exactly this.
+    @Environment(\.openURL) private var openURL
+
     @State private var caption = ""
     @State private var target: String
     @State private var conversations: [SharedDestinations.Item] = []
@@ -51,26 +61,21 @@ struct ShareComposeView: View {
                     }
                 }
                 // A post or a story goes to Haven's own composer — that's where the circle picker,
-                // music and location live.
-                //
-                // The wording is deliberately "Continue in Haven", not "opens Haven". An extension
-                // is not entitled to launch its host app: we ask, and iOS often declines with no
-                // error. Promising a launch we can't guarantee is what made this feel broken —
-                // people tapped, nothing visibly happened, and the post was waiting unannounced.
-                // This says what is actually true: it's held, and Haven picks it up.
+                // music and location live. Every one of these fires `launchHaven()` first so the
+                // app is already coming to the front by the time the request completes.
                 Section {
                     handoffRow("Share as Post", systemImage: "square.and.pencil",
-                               detail: "Continue in Haven — pick a circle, add music or a location") {
+                               detail: "Opens Haven — pick a circle, add music or a location") {
+                        launchHaven()
                         onSend(.post, "", caption)
                     }
                     if attachmentCount > 0 {
                         handoffRow("Add to your Story", systemImage: "camera.viewfinder",
-                                   detail: "Continue in Haven's story editor") {
+                                   detail: "Opens Haven's story editor") {
+                            launchHaven()
                             onSend(.story, "", caption)
                         }
                     }
-                } footer: {
-                    Text("Haven opens these when you next switch to it.")
                 }
                 if conversations.isEmpty {
                     Section {
@@ -90,7 +95,7 @@ struct ShareComposeView: View {
                     Button("Cancel") { onCancel() }.tint(HavenShareTheme.pink)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Send") { onSend(.dm, target, caption) }
+                    Button("Send") { launchHaven(); onSend(.dm, target, caption) }
                         .fontWeight(.semibold)
                         .tint(HavenShareTheme.pink)
                         .disabled(target.isEmpty || !hasContent)
@@ -99,6 +104,13 @@ struct ShareComposeView: View {
             .tint(HavenShareTheme.pink)
         }
         .onAppear { conversations = SharedDestinations.read().filter(\.isDM) }
+    }
+
+    /// Ask iOS to bring Haven up. Fired from the button action ON PURPOSE — see `openURL` above;
+    /// requested any later, the launch is dropped.
+    private func launchHaven() {
+        guard let url = URL(string: "haven://share") else { return }
+        openURL(url)
     }
 
     private var attachmentStrip: some View {

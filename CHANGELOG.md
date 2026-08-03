@@ -88,11 +88,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   only copy of the message went with it. Sending now reports success, the queue keeps anything that
   wasn't delivered, and the drain waits for the engine (and retries) instead of racing it.
 
-- **Nothing launched Haven from the share sheet at all.** The launch attempt led with
-  `NSExtensionContext.open` — the supported call — and completed the extension request on the very
-  next line. `open` is asynchronous, so tearing the context down immediately meant its completion
-  never ran and the responder-chain fallback never fired. The synchronous fallback goes first again,
-  and the request is completed from the callback.
+- **Tapping a share action didn't open Haven.** A share extension *can* launch its host app — the
+  trick is SwiftUI's `@Environment(\.openURL)` fired from the button action itself, while the
+  extension still owns user interaction. Requested any later (after `completeRequest`, or from a
+  controller callback) iOS drops it silently, which is what made it look impossible. Every action
+  now asks for the launch first and commits the share second. Two backstops sit behind it:
+  `NSExtensionContext.open` (which does work for share extensions on modern iOS, docs
+  notwithstanding) and a responder-chain walk that now matches **`UIApplication` specifically** — the
+  earlier version performed `openURL:` on the first responder that merely answered the selector,
+  which isn't necessarily the app and quietly does nothing while reporting success.
 
 - **The story editor didn't reliably open, and backing out of it landed on the routing list.** It
   was raised as a full-screen cover over that list by an `onAppear` toggle. When the extension has

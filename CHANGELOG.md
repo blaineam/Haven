@@ -52,6 +52,40 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   `FileProvider` with a one-shot read grant and swept after an hour — never a world-readable path,
   and never Haven's own sealed store.
 
+### Fixed — Apple
+
+- **Tapping Haven in the share sheet looked like the sheet just closing.** The extension had no UI:
+  it extracted the attachments, tried to launch the app by walking the responder chain for an
+  `openURL:` selector, and completed. That trick isn't a supported way for an extension to open its
+  host app, and when it's refused there's no feedback at all — the sheet dismisses and nothing
+  happens until you open Haven yourself.
+
+  The extension has a **composer of its own** now: attachment thumbnails, a caption field, and a
+  destination list — conversations, circles, or your story. It still doesn't *send* (no identity, no
+  engine, seconds to live); it records the decision beside the media and Haven performs the sealed
+  send the moment it's frontmost. The difference is that the tap always opens something, and the
+  app-launch hand-off is no longer load-bearing: if iOS refuses it, the share is queued rather than
+  lost, and Haven no longer asks you a second time where content you already routed should go.
+
+  The picker reads a small snapshot of destinations the app mirrors into the App Group — names,
+  ids, and small avatars. **No message content, and no biometric-locked circles**: the extension
+  runs outside the app's Face ID gate, so a locked circle is omitted at write time rather than
+  filtered at read time.
+
+- **Haven's conversations never appeared in the share sheet's suggestion row.** The donations were
+  correct and the `NSUserActivityTypes` declaration was there, but the share extension didn't
+  declare `IntentsSupported: [INSendMessageIntent]`. Donating tells the system the conversations
+  exist; without an extension that says it can *receive* that intent, iOS has nothing to hand a
+  tapped suggestion to, so it draws no tile — silently. Nothing warns about this.
+
+- **One shared video showed up as three attachments**, one of them a document icon. The routing
+  sheet drew `refs` verbatim, and a video is three refs — the playable clip plus its poster and
+  original companions. It renders `MediaVariants.displayRefs` now, the same contract the feed uses.
+
+- **Stock iOS blue icons in Haven's own share sheet.** A `Label`'s systemImage takes the environment
+  tint inside a `List`, and a row `.tint` colours the label, not the glyph — so the icons had to be
+  tinted directly.
+
 ### Changed — Android
 
 - Shared content no longer lands silently in the Circle composer. That made every share a post in

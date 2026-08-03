@@ -670,6 +670,7 @@ final class AccountStore: ObservableObject {
         // UserDefaults sweep above — a reset that leaves them behind leaves the old account's
         // friends listed in every app's share sheet.
         ShareSuggestions.forgetAll()
+        ShareSuggestions.forgetDestinations()
         #endif
 
         // Reset the in-memory singletons too, so the LIVE UI reverts now (not just after a relaunch).

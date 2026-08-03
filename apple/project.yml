@@ -306,6 +306,8 @@ targets:
     sources:
       - path: HavenShareExtension
       - path: Shared/ShareInbox.swift
+      # The destination snapshot the composer draws its picker from (written by the app).
+      - path: Shared/SharedDestinations.swift
     info:
       path: HavenShareExtension/Info.plist
       properties:
@@ -316,6 +318,13 @@ targets:
           NSExtensionPointIdentifier: com.apple.share-services
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
           NSExtensionAttributes:
+            # THIS is what puts Haven's conversations in the share sheet's suggestion row. Donating
+            # INSendMessageIntent (ShareSuggestions.swift) only tells the system the conversations
+            # exist; without an extension that declares it can RECEIVE that intent, iOS has nothing
+            # to hand a tapped suggestion to, so it draws no tile. Donations alone are silent — they
+            # don't warn, they just never show up.
+            IntentsSupported:
+              - INSendMessageIntent
             NSExtensionActivationRule:
               NSExtensionActivationSupportsText: true
               NSExtensionActivationSupportsWebURLWithMaxCount: 1

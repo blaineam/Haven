@@ -1,22 +1,73 @@
+import AVFoundation
 import Intents
+import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-/// A no-UI share extension: it extracts the shared text / link / photo / video / document, drops it
-/// into the shared App Group inbox, opens the main app (`haven://share`), and completes. The app
-/// shows the DM / post / story routing — the extension process is too short-lived to run the P2P
-/// stack.
+/// Haven's share extension: it shows a compose screen, extracts the shared text / link / photo /
+/// video / document into the App Group inbox, records where the user wants it to go, and lets the
+/// app perform the sealed send.
+///
+/// **Why it has UI now.** It used to extract, call `openURL` through the responder chain, and
+/// complete immediately — so tapping Haven in the share sheet looked like the sheet simply closing.
+/// That trick is not a supported way for an extension to launch its host app and cannot be relied
+/// on; when it fails there is no feedback at all. Drawing the composer here means the tap always
+/// opens something, and the hand-off stops being load-bearing for the UX.
+///
+/// **Why it still doesn't send.** No identity, no engine, and seconds to live — this process cannot
+/// seal and deliver a message. What it writes is a decision; `ShareRouter.ingest` acts on it as soon
+/// as the app is frontmost. We still try to open the app so that's immediate, but if the open is
+/// refused the share is queued rather than lost, and the composer says so.
 ///
 /// When the user taps one of Haven's **conversation suggestions** in the share sheet's top row, iOS
 /// hands us the `INSendMessageIntent` we donated for that thread (see `ShareSuggestions.swift`);
-/// its `conversationIdentifier` is the `dm:` circle id, which rides along in the payload so the app
-/// opens straight into that conversation instead of asking where the content should go.
+/// its `conversationIdentifier` is the `dm:` circle id, which preselects that conversation here.
 @objc(ShareViewController)
 final class ShareViewController: UIViewController {
+    private var extracted = ShareInbox.Payload()
+    private var previews: [UIImage] = []
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .clear
-        Task { await process() }
+        Task {
+            await process()
+            presentComposer()
+        }
+    }
+
+    /// Swap the blank placeholder for the composer once the attachments are on disk. Extraction is
+    /// fast for a photo and slow for a long video, so the UI waits on it rather than showing a
+    /// picker for content that might still fail to copy.
+    private func presentComposer() {
+        let root = ShareComposeView(
+            previews: previews,
+            attachmentCount: extracted.items.filter { $0.kind != .text }.count,
+            sharedText: extracted.items.first(where: { $0.kind == .text })?.text ?? "",
+            preselected: extracted.targetCircleId.isEmpty ? nil : extracted.targetCircleId,
+            onSend: { [weak self] route, target, caption in
+                self?.finish(route: route, target: target, caption: caption)
+            },
+            onCancel: { [weak self] in
+                ShareInbox.clear()   // nothing was sent — don't leave the app a share to drain
+                self?.extensionContext?.completeRequest(returningItems: nil)
+            })
+        let host = UIHostingController(rootView: root)
+        addChild(host)
+        host.view.frame = view.bounds
+        host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(host.view)
+        host.didMove(toParent: self)
+    }
+
+    /// Commit the decision and get out of the way.
+    private func finish(route: ShareInbox.Route, target: String, caption: String) {
+        extracted.route = route
+        extracted.targetCircleId = target
+        extracted.caption = caption
+        ShareInbox.writePayload(extracted)
+        openHost()
+        extensionContext?.completeRequest(returningItems: nil)
     }
 
     private func process() async {
@@ -39,6 +90,7 @@ final class ShareViewController: UIViewController {
                             try? FileManager.default.removeItem(at: dst)
                             try? FileManager.default.copyItem(at: src, to: dst)
                             payload.items.append(.init(kind: .video, file: name))
+                            if let poster = videoPoster(dst) { addPreview(poster) }
                         }
                     }
                 } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
@@ -47,6 +99,7 @@ final class ShareViewController: UIViewController {
                         if let dst = ShareInbox.fileURL(name) {
                             try? data.write(to: dst)
                             payload.items.append(.init(kind: .image, file: name))
+                            if let thumb = UIImage(data: data) { addPreview(thumb) }
                         }
                     }
                 } else if let type = fileType(of: provider) {
@@ -64,9 +117,31 @@ final class ShareViewController: UIViewController {
                 }
             }
         }
-        ShareInbox.writePayload(payload)
-        await MainActor.run { openHost() }
-        extensionContext?.completeRequest(returningItems: nil)
+        // Held in memory, not written yet: the payload is only committed once the user taps Send.
+        // Writing here would leave the app a share to deliver even if they cancelled.
+        extracted = payload
+    }
+
+    /// Downscaled thumbnails for the composer. Capped — a 10-photo share should not hold ten
+    /// full-resolution bitmaps in an extension's small memory budget just to draw 64pt tiles.
+    private func addPreview(_ image: UIImage) {
+        guard previews.count < 10 else { return }
+        let side: CGFloat = 200
+        let scale = min(side / max(image.size.width, 1), side / max(image.size.height, 1), 1)
+        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        let small = UIGraphicsImageRenderer(size: size).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: size))
+        }
+        previews.append(small)
+    }
+
+    /// First frame of a shared clip, so a video tile shows the video rather than a grey box.
+    private func videoPoster(_ url: URL) -> UIImage? {
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 200, height: 200)
+        guard let cg = try? generator.copyCGImage(at: .zero, actualTime: nil) else { return nil }
+        return UIImage(cgImage: cg)
     }
 
     /// The `dm:` circle id behind a tapped conversation suggestion, if the share sheet started us

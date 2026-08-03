@@ -23,12 +23,20 @@ enum ShareInbox {
         /// so this is what the recipient should see on the attachment.
         var name: String = ""
     }
+    /// What the user decided in the extension. `.undecided` means the extension couldn't ask (no
+    /// destination mirror yet) and the app should raise its own routing sheet.
+    enum Route: String, Codable { case undecided, post, dm, story }
+
     struct Payload: Codable {
         var items: [Item] = []
         /// The conversation the user picked in the share sheet's suggestion row, if any — the `dm:`
-        /// circle id we donated as `INSendMessageIntent.conversationIdentifier`. The app skips the
-        /// "where should this go" step and opens straight into that thread's composer.
+        /// circle id we donated as `INSendMessageIntent.conversationIdentifier`. Also set when the
+        /// user picks a destination inside the extension.
         var targetCircleId: String = ""
+        /// Set when the extension already asked. The app then SENDS rather than asking again.
+        var route: Route = .undecided
+        /// What the user typed in the extension's composer.
+        var caption: String = ""
     }
 
     /// Absolute URL for a media file name inside the inbox (used by both sides).

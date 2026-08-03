@@ -13,6 +13,10 @@ final class ShareRouter: ObservableObject {
     /// way — see `ShareSuggestions`. When set, the sheet opens straight into that thread's composer
     /// instead of asking where the content should go.
     @Published var preselectedThread: String?
+    /// The extension chose Story — open the story composer, not the routing list.
+    @Published var openStoryDirectly = false
+    /// A caption typed in the extension, carried into whichever composer opens.
+    @Published var pendingCaption = ""
 
     /// Drain the inbox: import any media into MediaStore, stash the text, raise the sheet. Called on
     /// `haven://share` and on foreground (in case the open-URL didn't fire).
@@ -49,13 +53,59 @@ final class ShareRouter: ObservableObject {
         guard !t.isEmpty || !imported.isEmpty else { return }
         text = t
         refs = imported
+
+        // The extension already asked where this goes — send it, don't ask again. Asking twice was
+        // the whole complaint: you pick a destination in the share sheet and Haven opens a second
+        // picker for the same share.
+        if payload.route != .undecided, deliver(payload) { return }
+
         // Only honor a suggested thread that still exists on this device and isn't locked — a stale
         // donation (thread since deleted, circle since locked) falls back to the normal sheet.
         preselectedThread = validThread(payload.targetCircleId)
         present = true
     }
 
-    func dismiss() { present = false; text = ""; refs = []; preselectedThread = nil }
+    /// Act on a decision made in the extension. Returns false when it can't be honored (the circle
+    /// is gone, or is locked behind Face ID) — the caller then falls back to the in-app sheet rather
+    /// than dropping the share on the floor.
+    private func deliver(_ payload: ShareInbox.Payload) -> Bool {
+        let store = FeedStore.shared
+        let body = [payload.caption, text]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        let target = payload.targetCircleId
+        switch payload.route {
+        case .undecided:
+            return false
+        case .story:
+            // A story is not just a destination — it has an editor (caption placement, a song).
+            // Skipping straight to `postStory` here would publish something the user never got to
+            // lay out. So the extension's Story choice opens the composer, already loaded.
+            preselectedThread = nil
+            pendingCaption = body
+            openStoryDirectly = true
+            present = true
+            return true
+        case .post, .dm:
+            // A circle that vanished or got locked between the share sheet opening and Haven coming
+            // up. Rare, but the answer is to ask, not to publish somewhere unintended.
+            guard store.circles.contains(where: { $0.id == target }),
+                  !CircleSettingsStore.shared.biometricRequired(target) else { return false }
+            if payload.route == .dm {
+                store.sendMessage(to: target, body, media: refs, music: nil)
+            } else {
+                store.postScheduled(circleId: target, body: body, media: refs)
+            }
+        }
+        dismiss()
+        return true
+    }
+
+    func dismiss() {
+        present = false; text = ""; refs = []
+        preselectedThread = nil; openStoryDirectly = false; pendingCaption = ""
+    }
 
     /// `MediaStore.addFile` derives the attachment's name from the file on disk, and the inbox name
     /// is a collision-proof placeholder (`doc-0.pdf`). Put the sender's own filename back before
@@ -158,6 +208,9 @@ struct ShareRouteView: View {
                     routeList
                 }
             }
+            // The extension picked Story: open its composer straight away rather than making the
+            // user choose a destination they already chose.
+            .onAppear { if router.openStoryDirectly { showStory = true } }
             .havenFullScreenCover(isPresented: $showStory) {
                 StoryComposerView(draft: StoryDraft(refs: router.refs)) { ref, caption, track in
                     Task { @MainActor in
@@ -177,7 +230,11 @@ struct ShareRouteView: View {
                 Section("Sharing") {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
-                            ForEach(router.refs, id: \.self) { ref in
+                            // `displayRefs`, not the raw list. One shared VIDEO is three refs — the
+                            // playable clip plus its poster and original companions — and drawing
+                            // the array verbatim made a single clip look like three attachments,
+                            // one of them a document icon. Same contract the feed renders under.
+                            ForEach(MediaVariants.displayRefs(router.refs), id: \.self) { ref in
                                 ShareThumb(ref: ref)
                                     .frame(width: 70, height: 70)
                                     .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -207,16 +264,20 @@ struct ShareRouteView: View {
                     }
                 }
             }
+            // The row icons are tinted EXPLICITLY. Inside a List, a `Label`'s systemImage picks up
+            // the environment tint, which here is the system accent — so Haven's own sheet was
+            // drawing stock iOS blue glyphs next to pink everything-else. A `.tint` on the row sets
+            // the chevron/label colour, not the icon, so it has to be the icon that's coloured.
             Section {
                 NavigationLink { ShareComposeStep(mode: .post) } label: {
-                    Label("Share as Post", systemImage: "square.and.pencil")
+                    routeLabel("Share as Post", systemImage: "square.and.pencil")
                 }
                 NavigationLink { ShareComposeStep(mode: .dm) } label: {
-                    Label("Send as Direct Message", systemImage: "bubble.left.and.bubble.right.fill")
+                    routeLabel("Send as Direct Message", systemImage: "bubble.left.and.bubble.right.fill")
                 }
                 if !router.refs.isEmpty {
                     Button { showStory = true } label: {
-                        Label("Create Story", systemImage: "camera.viewfinder")
+                        routeLabel("Create Story", systemImage: "camera.viewfinder")
                     }
                     .tint(.primary)
                 }
@@ -225,7 +286,18 @@ struct ShareRouteView: View {
         .navigationTitle("Share to Haven")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) { Button("Cancel") { router.dismiss() } }
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Cancel") { router.dismiss() }.tint(HavenTheme.pink)
+            }
+        }
+    }
+
+    private func routeLabel(_ title: String, systemImage: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: systemImage)
+                .foregroundStyle(HavenTheme.pink)
+                .frame(width: 24)
+            Text(title).foregroundStyle(.primary)
         }
     }
 }

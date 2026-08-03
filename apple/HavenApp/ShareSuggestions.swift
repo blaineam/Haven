@@ -74,15 +74,53 @@ enum ShareSuggestions {
     /// the setting back on, so a fresh install (or a re-enable) doesn't have to wait for the next
     /// message before the share sheet knows anything.
     static func donateRecent() {
+        publishDestinations()   // the extension's picker, refreshed on the same beat
         guard SettingsStore.shared.shareSuggestions else { return }
         let store = FeedStore.shared
-        let ranked = store.dmCircles
-            .map(\.id)
-            .filter(eligible)
-            .map { (id: $0, at: store.messages(in: $0).map(\.createdAt).max() ?? 0) }
-            .sorted { $0.at > $1.at }
-            .prefix(maxSuggested)
-        for entry in ranked { donate(circleId: entry.id) }
+        var ranked: [(id: String, at: UInt64)] = []
+        for id in store.dmCircles.map(\.id) where eligible(id) {
+            ranked.append((id: id, at: lastActivity(id)))
+        }
+        ranked.sort { $0.at > $1.at }
+        for entry in ranked.prefix(maxSuggested) { donate(circleId: entry.id) }
+    }
+
+    private static func lastActivity(_ circleId: String) -> UInt64 {
+        let stamps: [UInt64] = FeedStore.shared.messages(in: circleId).map(\.createdAt)
+        return stamps.max() ?? 0
+    }
+
+    // MARK: - The extension's destination picker
+
+    /// Mirror the destination list into the App Group so the **share extension** can draw its own
+    /// picker (`SharedDestinations`). Independent of the suggestion setting: this isn't a system
+    /// surface holding names on its own, it's Haven's own extension reading Haven's own container,
+    /// and switching it off would leave the share sheet unable to ask where anything goes.
+    ///
+    /// Biometric-locked circles are omitted — the extension runs outside the app's Face ID gate.
+    static func publishDestinations() {
+        let store = FeedStore.shared
+        var items: [SharedDestinations.Item] = []
+        var avatars: [String: Data] = [:]
+
+        for circle in store.dmCircles where !CircleSettingsStore.shared.biometricRequired(circle.id) {
+            let name = store.dmPartnerName(circle.id)
+            var item = SharedDestinations.Item(id: circle.id, name: name, isDM: true,
+                                               lastActivity: lastActivity(circle.id))
+            if let hex = store.dmPartnerHex(circle.id),
+               let image = ContactsStore.shared.avatarImage(forNodePrefix: hex),
+               let data = image.jpegData(compressionQuality: 0.7) {
+                let file = SharedDestinations.avatarFileName(for: circle.id)
+                avatars[file] = data
+                item.avatarFile = file
+            }
+            items.append(item)
+        }
+        for circle in store.feedCircles where !CircleSettingsStore.shared.biometricRequired(circle.id) {
+            items.append(.init(id: circle.id, name: store.displayName(forCircle: circle.id),
+                               isDM: false, lastActivity: 0))
+        }
+        SharedDestinations.write(items, avatars: avatars)
     }
 
     // MARK: - Retraction
@@ -101,6 +139,10 @@ enum ShareSuggestions {
             if let error { HavenLog.sync("share-suggest wipe failed: \(error.localizedDescription)") }
         }
     }
+
+    /// A factory reset must also drop the destination mirror — otherwise the share extension keeps
+    /// offering the old account's conversations, complete with faces.
+    static func forgetDestinations() { SharedDestinations.clear() }
 
     // MARK: - Eligibility
 

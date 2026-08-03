@@ -82,6 +82,22 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   sheet drew `refs` verbatim, and a video is three refs — the playable clip plus its poster and
   original companions. It renders `MediaVariants.displayRefs` now, the same contract the feed uses.
 
+- **A direct message sent from the share sheet could vanish.** `FeedStore.sendMessage` returns
+  quietly when the engine isn't configured — which is exactly the state a *cold* launch is in when
+  `onOpenURL` fires — and the queue entry was deleted regardless of whether anything was sent. The
+  only copy of the message went with it. Sending now reports success, the queue keeps anything that
+  wasn't delivered, and the drain waits for the engine (and retries) instead of racing it.
+
+- **Nothing launched Haven from the share sheet at all.** The launch attempt led with
+  `NSExtensionContext.open` — the supported call — and completed the extension request on the very
+  next line. `open` is asynchronous, so tearing the context down immediately meant its completion
+  never ran and the responder-chain fallback never fired. The synchronous fallback goes first again,
+  and the request is completed from the callback.
+
+- **The story editor didn't reliably open, and backing out of it landed on the routing list.** It
+  was raised as a full-screen cover over that list by an `onAppear` toggle. When the extension has
+  already chosen Story, the composer *is* the sheet — no cover, no toggle, nothing behind it.
+
 - **Sharing twice before opening Haven destroyed the first share.** The App Group inbox was a
   single `payload.json` with the media beside it, so the second share's manifest replaced the
   first's and the app only ever saw the last one. It's a **queue** now — one directory per share,

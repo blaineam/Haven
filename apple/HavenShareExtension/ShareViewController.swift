@@ -71,8 +71,9 @@ final class ShareViewController: UIViewController {
         extracted.caption = caption
         ShareInbox.commit(extracted, in: shareId)
         ShareInbox.sweepAbandoned()   // tidy anything a previous cancel left mid-extraction
-        openHost()
-        extensionContext?.completeRequest(returningItems: nil)
+        openHost { [weak self] in
+            self?.extensionContext?.completeRequest(returningItems: nil)
+        }
     }
 
     private func process() async {
@@ -253,25 +254,43 @@ final class ShareViewController: UIViewController {
     /// for an object that implements `openURL:`.
     /// Ask iOS to bring Haven up so the share is delivered now instead of on the user's next launch.
     ///
-    /// `NSExtensionContext.open` is the SUPPORTED call and is tried first — the responder-chain
-    /// `openURL:` walk below it is the old trick, kept only as a fallback because it does still work
-    /// on some OS versions. Neither is guaranteed: a share extension is not entitled to launch its
-    /// host app, and when iOS declines there is no error to catch. That is exactly why the share is
-    /// committed to the queue BEFORE this is called — the send is never contingent on it.
-    private func openHost() {
-        guard let url = URL(string: "haven://share") else { return }
-        extensionContext?.open(url) { opened in
-            guard !opened else { return }
-            DispatchQueue.main.async { self.openHostViaResponderChain(url) }
+    /// **The responder-chain walk goes FIRST, synchronously, because it is the one that works here.**
+    /// A previous build led with `NSExtensionContext.open` — the supported call — and completed the
+    /// request on the very next line. `open` is asynchronous, so tearing the context down
+    /// immediately meant its completion handler never ran, the fallback never fired, and nothing
+    /// launched at all: a share that used to open Haven stopped doing anything. `open` is still
+    /// tried, but only as the backstop, and the request is completed from its callback.
+    ///
+    /// Neither route is guaranteed — a share extension is not entitled to launch its host app — so
+    /// the share is committed to the queue BEFORE any of this. Delivery never depends on it.
+    private func openHost(then done: @escaping () -> Void) {
+        guard let url = URL(string: "haven://share") else { done(); return }
+        if openHostViaResponderChain(url) { done(); return }
+        guard let context = extensionContext else { done(); return }
+        // Nothing on the chain answered — try the official call and complete only once it reports
+        // back, so we don't repeat the mistake of killing the context mid-flight.
+        var finished = false
+        context.open(url) { _ in
+            guard !finished else { return }
+            finished = true
+            DispatchQueue.main.async(execute: done)
+        }
+        // …and don't hang the sheet open forever if it never calls back.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            guard !finished else { return }
+            finished = true
+            done()
         }
     }
 
-    private func openHostViaResponderChain(_ url: URL) {
+    @discardableResult
+    private func openHostViaResponderChain(_ url: URL) -> Bool {
         let sel = NSSelectorFromString("openURL:")
         var responder: UIResponder? = self
         while let r = responder {
-            if r.responds(to: sel) { _ = r.perform(sel, with: url); return }
+            if r.responds(to: sel) { _ = r.perform(sel, with: url); return true }
             responder = r.next
         }
+        return false
     }
 }

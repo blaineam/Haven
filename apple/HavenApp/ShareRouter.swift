@@ -23,6 +23,8 @@ final class ShareRouter: ObservableObject {
     @Published var openPostComposer = false
     /// A caption typed in the extension, carried into whichever composer opens.
     @Published var pendingCaption = ""
+    /// Remaining "wait for the engine" attempts before giving up until the next foreground.
+    private var retriesLeft = 10
 
     /// Drain the queue. Called on `haven://share` and on every foreground.
     ///
@@ -31,21 +33,48 @@ final class ShareRouter: ObservableObject {
     /// many are waiting; the first one that needs the user, needs the user, so anything after it
     /// stays queued for the next pass rather than fighting over one sheet.
     func ingest() async {
+        // The engine may not be up yet — a share can arrive on a COLD launch, where `onOpenURL`
+        // fires before the identity is configured. Draining then meant `sendMessage` hit its
+        // `guard let social` and returned silently while the queue entry was deleted anyway: the
+        // message was consumed and lost. Wait for the engine instead; every caller re-runs this.
+        guard FeedStore.shared.isConfigured else {
+            let waiting = ShareInbox.drain().count
+            guard waiting > 0 else { return }
+            HavenLog.sync("share: engine not ready — \(waiting) queued, retrying")
+            // Don't rely on some later caller happening to run in the right order: come back for it.
+            // Bounded so a device that never configures (no identity yet) doesn't spin.
+            guard retriesLeft > 0 else { return }
+            retriesLeft -= 1
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            await ingest()
+            return
+        }
+        retriesLeft = 10
         ShareInbox.sweepAbandoned()
         for queued in ShareInbox.drain() {
             // A composer is already up (our sheet, or the feed's own with a handed-over draft) —
             // the rest keep until it's done rather than clobbering unsent work.
             if present || postDraft != nil { return }
-            let handled = await consume(queued)
-            ShareInbox.clear(queued.id)
-            // `consume` returning false means it raised UI; stop draining and let the user finish.
-            if !handled { return }
+            switch await consume(queued) {
+            case .done:
+                ShareInbox.clear(queued.id)
+            case .needsUser:
+                // It's on screen and the router holds the content now, so the queue entry has done
+                // its job. Stop draining and let the user finish.
+                ShareInbox.clear(queued.id)
+                return
+            case .retry:
+                // Nothing was delivered and nothing is on screen — KEEP it. Better a share that
+                // arrives late than one that quietly never arrives.
+                return
+            }
         }
     }
 
-    /// Import one share and act on it. Returns true when it was fully dealt with (sent, or nothing
-    /// usable in it) and false when it put something on screen that the user has to finish.
-    private func consume(_ queued: ShareInbox.Queued) async -> Bool {
+    private enum Outcome { case done, needsUser, retry }
+
+    /// Import one share and act on it.
+    private func consume(_ queued: ShareInbox.Queued) async -> Outcome {
         let payload = queued.payload
         var t = ""
         var imported: [String] = []
@@ -74,7 +103,8 @@ final class ShareRouter: ObservableObject {
                 }
             }
         }
-        guard !t.isEmpty || !imported.isEmpty else { return true }
+        // Nothing usable came out of it — drop it rather than retrying forever.
+        guard !t.isEmpty || !imported.isEmpty else { return .done }
         text = t
         refs = imported
 
@@ -85,17 +115,16 @@ final class ShareRouter: ObservableObject {
         // donation (thread since deleted, circle since locked) falls back to the normal sheet.
         preselectedThread = validThread(payload.targetCircleId)
         present = true
-        return false
+        return .needsUser
     }
 
     /// Act on a decision made in the extension.
     ///
-    /// Returns **true only when the share is finished** — i.e. a DM that actually went out. `post`
-    /// and `story` open Haven's own composer (that's the point: circle picker, music, location,
-    /// story layout), so they return false, which tells the drain loop to stop and let the user
-    /// finish. A DM whose thread has since vanished or been locked also returns false and falls
-    /// back to the in-app sheet rather than being dropped.
-    private func deliver(_ payload: ShareInbox.Payload) -> Bool {
+    /// `.done` ONLY when the message actually went out. `post` and `story` open Haven's own
+    /// composer (that's the point: circle picker, music, location, story layout), so they report
+    /// `.needsUser`. A send the engine refused reports `.retry` and the share stays queued —
+    /// silently eating someone's message because the engine wasn't up yet is the worst outcome here.
+    private func deliver(_ payload: ShareInbox.Payload) -> Outcome {
         let store = FeedStore.shared
         let body = [payload.caption, text]
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -104,13 +133,13 @@ final class ShareRouter: ObservableObject {
         let target = payload.targetCircleId
         switch payload.route {
         case .undecided:
-            return false
+            return .needsUser
         case .story:
             pendingCaption = body
             preselectedThread = nil
             openStoryDirectly = true
             present = true
-            return false
+            return .needsUser
         case .post:
             // Straight into the feed's own composer, with the media and caption already loaded —
             // no sheet at all, because everything a post needs (circle, music, location, schedule)
@@ -118,7 +147,7 @@ final class ShareRouter: ObservableObject {
             postDraft = PostDraft(text: body, refs: refs)
             openPostComposer = true
             text = ""; refs = []
-            return false
+            return .needsUser
         case .dm:
             // A thread that vanished or got locked between the share sheet opening and Haven coming
             // up. Rare, but the answer is to ask, not to send somewhere unintended.
@@ -126,13 +155,19 @@ final class ShareRouter: ObservableObject {
                   !CircleSettingsStore.shared.biometricRequired(target) else {
                 preselectedThread = nil
                 present = true
-                return false
+                return .needsUser
             }
-            store.sendMessage(to: target, body, media: refs, music: nil)
+            guard store.sendMessage(to: target, body, media: refs, music: nil) else {
+                // The engine refused it (not configured, or the post threw). Keep the share queued
+                // and leave nothing on screen — the next drain tries again.
+                HavenLog.sync("share: DM send refused for \(target.prefix(16)) — keeping queued")
+                text = ""; refs = []
+                return .retry
+            }
             // Sent outright — clear state so the next queued share starts clean, WITHOUT touching
             // `present` (nothing was ever shown for this one).
             text = ""; refs = []; pendingCaption = ""
-            return true
+            return .done
         }
     }
 
@@ -242,39 +277,39 @@ struct ShareRouteView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            Group {
-                // Came in from a share-sheet suggestion: the destination is already decided, so skip
-                // straight to writing the message.
-                if let thread = router.preselectedThread {
-                    ShareComposeStep(mode: .dm, preselected: thread)
-                } else {
-                    routeList
-                }
-            }
-            // The extension picked Story: open its composer straight away rather than making the
-            // user choose a destination they already chose.
-            .onAppear { if router.openStoryDirectly { showStory = true } }
-            // Backing out of the story composer used to reveal this sheet's routing list underneath
-            // — a "where should this go?" question for content whose destination was already
-            // chosen in the share sheet. When Story was the extension's choice there is nothing
-            // sensible behind it, so closing the composer closes the whole thing.
-            .onChange(of: showStory) { _, open in
-                if !open, router.openStoryDirectly { router.dismiss() }
-            }
-            .havenFullScreenCover(isPresented: $showStory) {
-                // `displayRefs`: a video is clip + poster + original, and the story composer wants
-                // the clip, not its companions.
-                StoryComposerView(draft: StoryDraft(refs: MediaVariants.displayRefs(router.refs))) { ref, caption, track in
-                    Task { @MainActor in
-                        // A long video becomes up to 5 consecutive story slides (same as the camera flow).
-                        let parts = await MediaStore.shared.splitStoryVideo(ref)
-                        for r in parts { store.postStory(media: [r], caption: caption, music: track) }
-                        showStory = false; router.dismiss()
+        // The extension already chose Story, so the composer IS this sheet — not a full-screen
+        // cover raised by an `onAppear` toggle over a routing list. That indirection is what made
+        // the editor unreliable to open and made backing out of it land on a "where should this
+        // go?" question that had already been answered in the share sheet.
+        if router.openStoryDirectly {
+            storyComposer
+        } else {
+            NavigationStack {
+                Group {
+                    // Came in from a share-sheet suggestion: the destination is already decided, so
+                    // skip straight to writing the message.
+                    if let thread = router.preselectedThread {
+                        ShareComposeStep(mode: .dm, preselected: thread)
+                    } else {
+                        routeList
                     }
-                } onDone: { showStory = false; router.dismiss() }
+                }
+                .havenFullScreenCover(isPresented: $showStory) { storyComposer }
             }
         }
+    }
+
+    /// `displayRefs`: a video is clip + poster + original, and the story composer wants the clip,
+    /// not its companions.
+    private var storyComposer: some View {
+        StoryComposerView(draft: StoryDraft(refs: MediaVariants.displayRefs(router.refs))) { ref, caption, track in
+            Task { @MainActor in
+                // A long video becomes up to 5 consecutive story slides (same as the camera flow).
+                let parts = await MediaStore.shared.splitStoryVideo(ref)
+                for r in parts { store.postStory(media: [r], caption: caption, music: track) }
+                showStory = false; router.dismiss()
+            }
+        } onDone: { showStory = false; router.dismiss() }
     }
 
     private var routeList: some View {

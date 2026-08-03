@@ -243,6 +243,10 @@ final class FeedStore: ObservableObject {
     static let shared = FeedStore()
 
     private var social: HavenSocial?
+    /// Is the engine actually up? Anything holding the only copy of something the user wants sent
+    /// must check this before handing it over — `post`/`sendMessage` return quietly when it's nil,
+    /// which reads as success to a caller that isn't looking.
+    var isConfigured: Bool { social != nil }
     private var node: HavenNode?
     /// The messaging transport node — the in-process relay ATTACHES to its endpoint (one iroh node,
     /// two ALPNs) so hosting a relay never spins up a second node (the path-churn leak).
@@ -1381,10 +1385,15 @@ final class FeedStore: ObservableObject {
 
     /// Send a DM with optional media (photos/videos/audio), a song, and optional
     /// disappearing retention (seconds; the message auto-deletes after that).
-    func sendMessage(to circleId: String, _ body: String, media rawMedia: [String], music: TrackRefFfi?, retentionSecs: UInt64? = nil) {
+    /// Returns whether the message was actually authored. Callers that hold the ONLY copy of a
+    /// message — the share-sheet queue does — must not throw it away on a silent failure: this
+    /// returns false when the engine isn't configured yet (a share arriving on a cold launch) or
+    /// the post throws, so the caller can keep it and retry.
+    @discardableResult
+    func sendMessage(to circleId: String, _ body: String, media rawMedia: [String], music: TrackRefFfi?, retentionSecs: UInt64? = nil) -> Bool {
         let media = withThumbMarkers(rawMedia)
         let ts = now()
-        guard let social, let env = try? social.post(circleId: circleId, body: body, media: media, music: music, retentionSecs: retentionSecs, story: false, muteVideo: false, createdAt: ts) else { return }
+        guard let social, let env = try? social.post(circleId: circleId, body: body, media: media, music: music, retentionSecs: retentionSecs, story: false, muteVideo: false, createdAt: ts) else { return false }
         let name = circles.first(where: { $0.id == circleId })?.name ?? "your circle"
         // The engine derives event ids internally (BLAKE3 at author time) — read back the id of the
         // message just created so the sealed banner's `p` deep-link opens THIS thread entry. Best-effort:
@@ -1404,6 +1413,7 @@ final class FeedStore: ObservableObject {
         // ranked by donation time, so this donation is what keeps that order honest.
         ShareSuggestions.donate(circleId: circleId)
         #endif
+        return true
     }
 
     /// Edit one of your own messages in a specific (DM) circle.

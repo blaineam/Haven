@@ -1,23 +1,22 @@
 import SwiftUI
 import UIKit
 
-/// The share sheet's own compose screen — caption, destination, send — drawn **inside the
-/// extension** so tapping Haven opens something instead of just dismissing.
+/// The share sheet's own compose screen — drawn **inside the extension** so tapping Haven opens
+/// something instead of just dismissing.
 ///
-/// It deliberately does no sending. The extension has no identity, no engine and seconds to live;
-/// what it produces is a decision, written to the App Group beside the media. The app performs the
-/// sealed send (`ShareRouter.ingest`) the moment it comes up — which is immediately when the
-/// extension manages to open it, and otherwise the next time the user opens Haven.
+/// **Where the line is drawn.** A direct message is finished here: it's a person and some words,
+/// and making you open the app to type them defeats the point of a share sheet. A post or a story
+/// is *not* — those have composers that own the circle picker, attached music, whether to include
+/// your location, and (for a story) the whole layout editor. Rebuilding a lesser version of that
+/// here would quietly cost you features, so those two routes carry the media into Haven's real
+/// composer instead.
 ///
-/// Destinations come from `SharedDestinations`, a snapshot the app leaves behind. If it's empty
-/// (fresh install, app never opened since the update) the view says so and falls back to handing
-/// the whole decision to the app rather than pretending there's nowhere to send.
+/// It never sends. The extension has no identity, no engine and seconds to live; what it produces is
+/// a decision written to the App Group queue beside the media. `ShareRouter` acts on it when the app
+/// is next frontmost.
 struct ShareComposeView: View {
-    /// Thumbnails for what's being shared (already extracted by the controller).
     let previews: [UIImage]
-    /// How many attachments there are in total, including ones with no thumbnail (documents).
     let attachmentCount: Int
-    /// The shared text/link, shown under the caption field.
     let sharedText: String
     /// A conversation chosen in the share sheet's suggestion row, if we were launched from one.
     let preselected: String?
@@ -26,8 +25,7 @@ struct ShareComposeView: View {
 
     @State private var caption = ""
     @State private var target: String
-    @State private var destinations: [SharedDestinations.Item] = []
-    @State private var sending = false
+    @State private var conversations: [SharedDestinations.Item] = []
 
     init(previews: [UIImage], attachmentCount: Int, sharedText: String, preselected: String?,
          onSend: @escaping (ShareInbox.Route, String, String) -> Void, onCancel: @escaping () -> Void) {
@@ -40,62 +38,40 @@ struct ShareComposeView: View {
         _target = State(initialValue: preselected ?? "")
     }
 
-    private var conversations: [SharedDestinations.Item] { destinations.filter(\.isDM) }
-    private var circles: [SharedDestinations.Item] { destinations.filter { !$0.isDM } }
-    private var chosen: SharedDestinations.Item? { destinations.first { $0.id == target } }
-    private var canSend: Bool {
-        !sending && !target.isEmpty && (attachmentCount > 0 || !sharedText.isEmpty || !caption.isEmpty)
-    }
+    private var hasContent: Bool { attachmentCount > 0 || !sharedText.isEmpty || !caption.isEmpty }
 
     var body: some View {
         NavigationStack {
             Form {
-                if !previews.isEmpty || attachmentCount > 0 {
-                    Section("Sharing") { attachmentStrip }
-                }
+                if attachmentCount > 0 { Section("Sharing") { attachmentStrip } }
                 Section {
-                    TextField("Add a caption…", text: $caption, axis: .vertical)
+                    TextField(target.isEmpty ? "Add a message…" : "Message", text: $caption, axis: .vertical)
                     if !sharedText.isEmpty {
                         Text(sharedText).font(.footnote).foregroundStyle(.secondary).lineLimit(3)
                     }
                 }
-                if destinations.isEmpty {
+                // A post or a story goes to Haven's own composer — that's where the circle picker,
+                // music and location live.
+                Section {
+                    handoffRow("Share as Post", systemImage: "square.and.pencil",
+                               detail: "Pick a circle, add music or a location") {
+                        onSend(.post, "", caption)
+                    }
+                    if attachmentCount > 0 {
+                        handoffRow("Add to your Story", systemImage: "camera.viewfinder",
+                                   detail: "Opens the story editor") {
+                            onSend(.story, "", caption)
+                        }
+                    }
+                }
+                if conversations.isEmpty {
                     Section {
-                        Text("Open Haven to choose where this goes.")
+                        Text("Open Haven once to send directly to a conversation from here.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 } else {
-                    if !conversations.isEmpty {
-                        Section("Conversations") {
-                            ForEach(conversations) { row($0) }
-                        }
-                    }
-                    if !circles.isEmpty {
-                        Section("Circles") {
-                            ForEach(circles) { row($0) }
-                        }
-                    }
-                    // A story has an editor (caption placement, a song) that belongs in the app —
-                    // this picks the destination, and Haven opens that editor with the media loaded.
-                    if attachmentCount > 0 {
-                        Section {
-                            Button {
-                                target = Self.storyTarget
-                            } label: {
-                                HStack(spacing: 10) {
-                                    Image(systemName: "camera.viewfinder")
-                                        .foregroundStyle(HavenShareTheme.pink).frame(width: 32)
-                                    Text("Your story").foregroundStyle(.primary)
-                                    Spacer()
-                                    if target == Self.storyTarget {
-                                        Image(systemName: "checkmark").foregroundStyle(HavenShareTheme.pink)
-                                    }
-                                }
-                            }
-                            .tint(.primary)
-                        } footer: {
-                            Text("Opens Haven's story editor with this ready to go.")
-                        }
+                    Section("Send to") {
+                        ForEach(conversations) { row($0) }
                     }
                 }
             }
@@ -106,19 +82,16 @@ struct ShareComposeView: View {
                     Button("Cancel") { onCancel() }.tint(HavenShareTheme.pink)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(sendLabel) { send() }
+                    Button("Send") { onSend(.dm, target, caption) }
                         .fontWeight(.semibold)
                         .tint(HavenShareTheme.pink)
-                        .disabled(!canSend && !destinations.isEmpty)
+                        .disabled(target.isEmpty || !hasContent)
                 }
             }
             .tint(HavenShareTheme.pink)
         }
-        .onAppear { destinations = SharedDestinations.read() }
+        .onAppear { conversations = SharedDestinations.read().filter(\.isDM) }
     }
-
-    /// With no mirror to pick from, the only honest button is one that hands over to the app.
-    private var sendLabel: String { destinations.isEmpty ? "Continue" : "Send" }
 
     private var attachmentStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -148,10 +121,26 @@ struct ShareComposeView: View {
         }
     }
 
+    private func handoffRow(_ title: String, systemImage: String, detail: String,
+                            _ tap: @escaping () -> Void) -> some View {
+        Button(action: tap) {
+            HStack(spacing: 12) {
+                Image(systemName: systemImage).foregroundStyle(HavenShareTheme.pink).frame(width: 24)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).foregroundStyle(.primary)
+                    Text(detail).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .tint(.primary)
+        .disabled(!hasContent)
+    }
+
     private func row(_ item: SharedDestinations.Item) -> some View {
-        Button {
-            target = item.id
-        } label: {
+        Button { target = item.id } label: {
             HStack(spacing: 10) {
                 DestinationAvatar(item: item)
                 Text(item.name).foregroundStyle(.primary)
@@ -163,23 +152,13 @@ struct ShareComposeView: View {
         }
         .tint(.primary)
     }
-
-    /// Sentinel id for the story row — not a real circle, so it never collides with one.
-    private static let storyTarget = "__haven.story__"
-
-    private func send() {
-        sending = true
-        if target == Self.storyTarget { onSend(.story, "", caption); return }
-        // No mirror → we genuinely don't know the destinations, so hand the whole decision over.
-        guard !destinations.isEmpty, let chosen else {
-            onSend(.undecided, "", caption)
-            return
-        }
-        onSend(chosen.isDM ? .dm : .post, chosen.id, caption)
-    }
 }
 
-/// A destination's face: the mirrored avatar, else a tinted monogram.
+/// A conversation's face: their photo, else the emoji they chose, else a monogram.
+///
+/// The emoji step is not decoration — it's how a good number of people are identified everywhere
+/// else in Haven, and showing them a letter here made the share sheet the one place their friends
+/// looked like strangers. Mirrors `PeerAvatar` in the app.
 private struct DestinationAvatar: View {
     let item: SharedDestinations.Item
 
@@ -189,6 +168,11 @@ private struct DestinationAvatar: View {
            let image = UIImage(data: data) {
             Image(uiImage: image).resizable().scaledToFill()
                 .frame(width: 32, height: 32).clipShape(Circle())
+        } else if !item.emoji.isEmpty {
+            Circle()
+                .fill(Color(.secondarySystemBackground))
+                .frame(width: 32, height: 32)
+                .overlay { Text(item.emoji).font(.system(size: 17)) }
         } else {
             Circle()
                 .fill(LinearGradient(colors: [HavenShareTheme.amber, HavenShareTheme.pink],

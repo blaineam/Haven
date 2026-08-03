@@ -25,6 +25,9 @@ enum SharedDestinations {
         var lastActivity: UInt64
         /// File name of a small JPEG in the mirror dir, or "" when there's no photo.
         var avatarFile: String = ""
+        /// The emoji they chose, shown when there's no photo — that's how plenty of people are
+        /// identified everywhere else in Haven, so a monogram here would be a downgrade.
+        var emoji: String = ""
     }
 
     private static var dir: URL? {

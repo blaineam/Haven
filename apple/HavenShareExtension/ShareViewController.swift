@@ -26,6 +26,8 @@ import UniformTypeIdentifiers
 final class ShareViewController: UIViewController {
     private var extracted = ShareInbox.Payload()
     private var previews: [UIImage] = []
+    /// This share's own directory in the App Group queue.
+    private var shareId = ""
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -49,8 +51,10 @@ final class ShareViewController: UIViewController {
                 self?.finish(route: route, target: target, caption: caption)
             },
             onCancel: { [weak self] in
-                ShareInbox.clear()   // nothing was sent — don't leave the app a share to drain
-                self?.extensionContext?.completeRequest(returningItems: nil)
+                guard let self else { return }
+                // Throw away only THIS share's directory — other queued shares are not ours to drop.
+                ShareInbox.discard(self.shareId)
+                self.extensionContext?.completeRequest(returningItems: nil)
             })
         let host = UIHostingController(rootView: root)
         addChild(host)
@@ -65,13 +69,14 @@ final class ShareViewController: UIViewController {
         extracted.route = route
         extracted.targetCircleId = target
         extracted.caption = caption
-        ShareInbox.writePayload(extracted)
+        ShareInbox.commit(extracted, in: shareId)
+        ShareInbox.sweepAbandoned()   // tidy anything a previous cancel left mid-extraction
         openHost()
         extensionContext?.completeRequest(returningItems: nil)
     }
 
     private func process() async {
-        ShareInbox.ensureDir()
+        shareId = ShareInbox.begin()
         var payload = ShareInbox.Payload()
         payload.targetCircleId = chosenConversationId() ?? ""
         var fileIdx = 0
@@ -86,7 +91,7 @@ final class ShareViewController: UIViewController {
                     if let src = await loadFile(provider, UTType.movie.identifier) {
                         let ext = src.pathExtension.isEmpty ? "mov" : src.pathExtension
                         let name = "vid-\(fileIdx).\(ext)"; fileIdx += 1
-                        if let dst = ShareInbox.fileURL(name) {
+                        if let dst = ShareInbox.fileURL(name, in: shareId) {
                             try? FileManager.default.removeItem(at: dst)
                             try? FileManager.default.copyItem(at: src, to: dst)
                             payload.items.append(.init(kind: .video, file: name))
@@ -96,7 +101,7 @@ final class ShareViewController: UIViewController {
                 } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
                     if let data = await loadData(provider, UTType.image.identifier) {
                         let name = "img-\(fileIdx).dat"; fileIdx += 1
-                        if let dst = ShareInbox.fileURL(name) {
+                        if let dst = ShareInbox.fileURL(name, in: shareId) {
                             try? data.write(to: dst)
                             payload.items.append(.init(kind: .image, file: name))
                             if let thumb = UIImage(data: data) { addPreview(thumb) }
@@ -189,7 +194,7 @@ final class ShareViewController: UIViewController {
         let ext = src.pathExtension
         let stored = "doc-\(index)" + (ext.isEmpty ? "" : ".\(ext)")
         index += 1
-        guard let dst = ShareInbox.fileURL(stored) else { return nil }
+        guard let dst = ShareInbox.fileURL(stored, in: shareId) else { return nil }
         try? FileManager.default.removeItem(at: dst)
         do { try FileManager.default.copyItem(at: src, to: dst) } catch { return nil }
         return .init(kind: .file, file: stored, name: original)
@@ -246,8 +251,22 @@ final class ShareViewController: UIViewController {
 
     /// Open the host app. Extensions can't touch `UIApplication.shared`, so walk the responder chain
     /// for an object that implements `openURL:`.
+    /// Ask iOS to bring Haven up so the share is delivered now instead of on the user's next launch.
+    ///
+    /// `NSExtensionContext.open` is the SUPPORTED call and is tried first — the responder-chain
+    /// `openURL:` walk below it is the old trick, kept only as a fallback because it does still work
+    /// on some OS versions. Neither is guaranteed: a share extension is not entitled to launch its
+    /// host app, and when iOS declines there is no error to catch. That is exactly why the share is
+    /// committed to the queue BEFORE this is called — the send is never contingent on it.
     private func openHost() {
         guard let url = URL(string: "haven://share") else { return }
+        extensionContext?.open(url) { opened in
+            guard !opened else { return }
+            DispatchQueue.main.async { self.openHostViaResponderChain(url) }
+        }
+    }
+
+    private func openHostViaResponderChain(_ url: URL) {
         let sel = NSSelectorFromString("openURL:")
         var responder: UIResponder? = self
         while let r = responder {

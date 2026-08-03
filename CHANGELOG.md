@@ -82,6 +82,32 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   sheet drew `refs` verbatim, and a video is three refs — the playable clip plus its poster and
   original companions. It renders `MediaVariants.displayRefs` now, the same contract the feed uses.
 
+- **Sharing twice before opening Haven destroyed the first share.** The App Group inbox was a
+  single `payload.json` with the media beside it, so the second share's manifest replaced the
+  first's and the app only ever saw the last one. It's a **queue** now — one directory per share,
+  each with its own manifest and its own media — and the app drains all of them, oldest first.
+  Anything that needs a composer stops the drain and keeps its turn instead of racing for one sheet.
+
+- **A shared post now opens Haven's real composer**, so you get the circle switcher, attached music,
+  the location toggle and scheduling — the mini form in the routing sheet had none of it. Same for a
+  story, which opens the story editor. A **direct message** is still finished in the share sheet
+  itself: it's a person and some words, and making you open the app to type them defeats the point.
+
+- **Backing out of the story editor revealed the routing list underneath** — a "where should this
+  go?" question about content whose destination was already chosen. Closing the editor now closes
+  the whole thing.
+
+- **People with an emoji instead of a photo showed as a letter** in the share extension's picker,
+  the one place in Haven that didn't honour it.
+
+- The extension now asks to open Haven via `NSExtensionContext.open` — the supported call — before
+  falling back to the old responder-chain walk. Neither is guaranteed (an extension isn't entitled
+  to launch its host app), which is why the share is committed to the queue *before* the attempt.
+
+- Conversations are also donated when you **open** a thread, not only when you send. The suggestion
+  row is ranked by donation recency, and donating on send alone under-reported the conversations you
+  read most.
+
 - **Stock iOS blue icons in Haven's own share sheet.** A `Label`'s systemImage takes the environment
   tint inside a `List`, and a row `.tint` colours the label, not the glyph — so the icons had to be
   tinted directly.

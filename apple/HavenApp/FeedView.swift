@@ -7402,6 +7402,19 @@ struct FeedView: View {
                 NewCircleView { name, members in store.createCircle(name: name, memberIds: members) }.macSheetClose()
                 #endif
             }
+            // Something shared in from another app, routed to "Share as Post" — load it into THIS
+            // composer rather than a lesser copy of it, so the circle switcher, song picker,
+            // location toggle and schedule all still apply. Appended, never assigned: re-entering
+            // the tab must not discard something half-typed.
+            #if os(iOS)
+            .onReceive(ShareRouter.shared.$postDraft.compactMap { $0 }) { draft in
+                if !draft.text.isEmpty {
+                    compose = compose.isEmpty ? draft.text : compose + "\n" + draft.text
+                }
+                attachedMedia.append(contentsOf: draft.refs)
+                ShareRouter.shared.consumePostDraft()
+            }
+            #endif
             .onAppear {
                 store.configureForCurrentIdentity()   // seeded or seedless (S4) — never boot off a throwaway seed
                 // Screenshot harness: open the full-screen story viewer for its hero shot.

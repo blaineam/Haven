@@ -500,6 +500,9 @@ struct RootView: View {
         // Share-sheet hand-off: pick DM / post / story for items shared from another app.
         #if os(iOS)
         .sheet(isPresented: $shareRouter.present) { ShareRouteView() }
+        // "Share as Post" hands the media to the FEED's composer (circle switcher, song, location),
+        // so the only thing left is to be looking at it.
+        .onReceive(shareRouter.$openPostComposer) { open in if open { tab = "circle" } }
         #endif
         .onChange(of: scenePhase) { _, phase in
             // If we booted before the keychain was readable, swap the real identity back in

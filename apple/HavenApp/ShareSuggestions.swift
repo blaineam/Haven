@@ -103,22 +103,23 @@ enum ShareSuggestions {
         var items: [SharedDestinations.Item] = []
         var avatars: [String: Data] = [:]
 
+        // DMs only. Circles are deliberately NOT mirrored: a post goes through Haven's own composer
+        // (which owns the circle picker, music and location), so the extension has no use for them
+        // and there's no reason to keep circle names in a container a second process can read.
         for circle in store.dmCircles where !CircleSettingsStore.shared.biometricRequired(circle.id) {
             let name = store.dmPartnerName(circle.id)
             var item = SharedDestinations.Item(id: circle.id, name: name, isDM: true,
                                                lastActivity: lastActivity(circle.id))
-            if let hex = store.dmPartnerHex(circle.id),
-               let image = ContactsStore.shared.avatarImage(forNodePrefix: hex),
-               let data = image.jpegData(compressionQuality: 0.7) {
-                let file = SharedDestinations.avatarFileName(for: circle.id)
-                avatars[file] = data
-                item.avatarFile = file
+            if let hex = store.dmPartnerHex(circle.id) {
+                if let image = ContactsStore.shared.avatarImage(forNodePrefix: hex),
+                   let data = image.jpegData(compressionQuality: 0.7) {
+                    let file = SharedDestinations.avatarFileName(for: circle.id)
+                    avatars[file] = data
+                    item.avatarFile = file
+                }
+                item.emoji = ContactsStore.shared.emoji(forNodePrefix: hex) ?? ""
             }
             items.append(item)
-        }
-        for circle in store.feedCircles where !CircleSettingsStore.shared.biometricRequired(circle.id) {
-            items.append(.init(id: circle.id, name: store.displayName(forCircle: circle.id),
-                               isDM: false, lastActivity: 0))
         }
         SharedDestinations.write(items, avatars: avatars)
     }

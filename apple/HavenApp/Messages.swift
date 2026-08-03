@@ -663,6 +663,13 @@ struct DMThreadView: View {
             // locked the engine while the thread painted. Pull this circle's mailbox only.
             store.markThreadRead(circleId)
             store.pollMailboxNow()
+            #if os(iOS)
+            // Opening a thread is a usage signal, and the share sheet's suggestion row is ranked by
+            // donation recency. Donating only on SEND under-reported the conversations you read most
+            // and reply to elsewhere, which is exactly the ranking that decides whether iOS gives
+            // Haven a slot at all.
+            ShareSuggestions.donate(circleId: circleId)
+            #endif
         }
         // Messages arriving WHILE the thread is open are being read — keep the watermark current
         // so backing out never leaves a stale badge for a conversation the user just watched.

@@ -15,13 +15,38 @@ final class ShareRouter: ObservableObject {
     @Published var preselectedThread: String?
     /// The extension chose Story — open the story composer, not the routing list.
     @Published var openStoryDirectly = false
+    /// The extension chose Post — hand the media to the feed's own composer, which is where the
+    /// circle switcher, the song picker and the location toggle live. Consumed once by `FeedView`.
+    struct PostDraft: Equatable { var text: String; var refs: [String] }
+    @Published var postDraft: PostDraft?
+    /// Set alongside `postDraft` so the app can switch to the circle tab.
+    @Published var openPostComposer = false
     /// A caption typed in the extension, carried into whichever composer opens.
     @Published var pendingCaption = ""
 
-    /// Drain the inbox: import any media into MediaStore, stash the text, raise the sheet. Called on
-    /// `haven://share` and on foreground (in case the open-URL didn't fire).
+    /// Drain the queue. Called on `haven://share` and on every foreground.
+    ///
+    /// **Every** queued share is processed, oldest first — not just the newest. Shares that only
+    /// need sending (a DM the extension already addressed) go out immediately and silently, however
+    /// many are waiting; the first one that needs the user, needs the user, so anything after it
+    /// stays queued for the next pass rather than fighting over one sheet.
     func ingest() async {
-        guard !present, let payload = ShareInbox.read() else { return }
+        ShareInbox.sweepAbandoned()
+        for queued in ShareInbox.drain() {
+            // A composer is already up (our sheet, or the feed's own with a handed-over draft) —
+            // the rest keep until it's done rather than clobbering unsent work.
+            if present || postDraft != nil { return }
+            let handled = await consume(queued)
+            ShareInbox.clear(queued.id)
+            // `consume` returning false means it raised UI; stop draining and let the user finish.
+            if !handled { return }
+        }
+    }
+
+    /// Import one share and act on it. Returns true when it was fully dealt with (sent, or nothing
+    /// usable in it) and false when it put something on screen that the user has to finish.
+    private func consume(_ queued: ShareInbox.Queued) async -> Bool {
+        let payload = queued.payload
         var t = ""
         var imported: [String] = []
         for item in payload.items {
@@ -29,19 +54,19 @@ final class ShareRouter: ObservableObject {
             case .text:
                 t = t.isEmpty ? item.text : t + "\n" + item.text
             case .image:
-                if let url = ShareInbox.fileURL(item.file), let data = try? Data(contentsOf: url),
+                if let url = ShareInbox.fileURL(item.file, in: queued.id), let data = try? Data(contentsOf: url),
                    let img = PlatformImage(data: data) {
                     imported.append(MediaStore.shared.addImage(img))
                 }
             case .video:
-                if let url = ShareInbox.fileURL(item.file) {
+                if let url = ShareInbox.fileURL(item.file, in: queued.id) {
                     let bundle = await MediaStore.shared.prepareVideo(url: url)
                     if !bundle.isEmpty { imported.append(contentsOf: bundle.mediaRefs) }
                 }
             case .file:
                 // A document rides as a `file_` attachment, exactly like one picked in-app. The
                 // extension already copied it into the App Group, so this reads our own container.
-                if let url = ShareInbox.fileURL(item.file) {
+                if let url = ShareInbox.fileURL(item.file, in: queued.id) {
                     let named = renamedForAttachment(url, to: item.name)
                     let ref = MediaStore.shared.addFile(url: named)
                     if named != url { try? FileManager.default.removeItem(at: named) }
@@ -49,25 +74,27 @@ final class ShareRouter: ObservableObject {
                 }
             }
         }
-        ShareInbox.clear()
-        guard !t.isEmpty || !imported.isEmpty else { return }
+        guard !t.isEmpty || !imported.isEmpty else { return true }
         text = t
         refs = imported
 
-        // The extension already asked where this goes — send it, don't ask again. Asking twice was
-        // the whole complaint: you pick a destination in the share sheet and Haven opens a second
-        // picker for the same share.
-        if payload.route != .undecided, deliver(payload) { return }
+        // The extension already asked where this goes — act on it rather than asking again.
+        if payload.route != .undecided { return deliver(payload) }
 
         // Only honor a suggested thread that still exists on this device and isn't locked — a stale
         // donation (thread since deleted, circle since locked) falls back to the normal sheet.
         preselectedThread = validThread(payload.targetCircleId)
         present = true
+        return false
     }
 
-    /// Act on a decision made in the extension. Returns false when it can't be honored (the circle
-    /// is gone, or is locked behind Face ID) — the caller then falls back to the in-app sheet rather
-    /// than dropping the share on the floor.
+    /// Act on a decision made in the extension.
+    ///
+    /// Returns **true only when the share is finished** — i.e. a DM that actually went out. `post`
+    /// and `story` open Haven's own composer (that's the point: circle picker, music, location,
+    /// story layout), so they return false, which tells the drain loop to stop and let the user
+    /// finish. A DM whose thread has since vanished or been locked also returns false and falls
+    /// back to the in-app sheet rather than being dropped.
     private func deliver(_ payload: ShareInbox.Payload) -> Bool {
         let store = FeedStore.shared
         let body = [payload.caption, text]
@@ -79,32 +106,49 @@ final class ShareRouter: ObservableObject {
         case .undecided:
             return false
         case .story:
-            // A story is not just a destination — it has an editor (caption placement, a song).
-            // Skipping straight to `postStory` here would publish something the user never got to
-            // lay out. So the extension's Story choice opens the composer, already loaded.
-            preselectedThread = nil
             pendingCaption = body
+            preselectedThread = nil
             openStoryDirectly = true
             present = true
-            return true
-        case .post, .dm:
-            // A circle that vanished or got locked between the share sheet opening and Haven coming
-            // up. Rare, but the answer is to ask, not to publish somewhere unintended.
+            return false
+        case .post:
+            // Straight into the feed's own composer, with the media and caption already loaded —
+            // no sheet at all, because everything a post needs (circle, music, location, schedule)
+            // is already attached to that composer and a second one would only be a worse copy.
+            postDraft = PostDraft(text: body, refs: refs)
+            openPostComposer = true
+            text = ""; refs = []
+            return false
+        case .dm:
+            // A thread that vanished or got locked between the share sheet opening and Haven coming
+            // up. Rare, but the answer is to ask, not to send somewhere unintended.
             guard store.circles.contains(where: { $0.id == target }),
-                  !CircleSettingsStore.shared.biometricRequired(target) else { return false }
-            if payload.route == .dm {
-                store.sendMessage(to: target, body, media: refs, music: nil)
-            } else {
-                store.postScheduled(circleId: target, body: body, media: refs)
+                  !CircleSettingsStore.shared.biometricRequired(target) else {
+                preselectedThread = nil
+                present = true
+                return false
             }
+            store.sendMessage(to: target, body, media: refs, music: nil)
+            // Sent outright — clear state so the next queued share starts clean, WITHOUT touching
+            // `present` (nothing was ever shown for this one).
+            text = ""; refs = []; pendingCaption = ""
+            return true
         }
-        dismiss()
-        return true
+    }
+
+    /// The feed composer took the draft. Clearing it releases the drain loop for whatever else is
+    /// queued behind this share.
+    func consumePostDraft() {
+        postDraft = nil
+        openPostComposer = false
+        Task { await ingest() }
     }
 
     func dismiss() {
         present = false; text = ""; refs = []
-        preselectedThread = nil; openStoryDirectly = false; pendingCaption = ""
+        preselectedThread = nil; openStoryDirectly = false; openPostComposer = false; pendingCaption = ""
+        // Anything that piled up behind this one now gets its turn.
+        Task { await ingest() }
     }
 
     /// `MediaStore.addFile` derives the attachment's name from the file on disk, and the inbox name
@@ -211,8 +255,17 @@ struct ShareRouteView: View {
             // The extension picked Story: open its composer straight away rather than making the
             // user choose a destination they already chose.
             .onAppear { if router.openStoryDirectly { showStory = true } }
+            // Backing out of the story composer used to reveal this sheet's routing list underneath
+            // — a "where should this go?" question for content whose destination was already
+            // chosen in the share sheet. When Story was the extension's choice there is nothing
+            // sensible behind it, so closing the composer closes the whole thing.
+            .onChange(of: showStory) { _, open in
+                if !open, router.openStoryDirectly { router.dismiss() }
+            }
             .havenFullScreenCover(isPresented: $showStory) {
-                StoryComposerView(draft: StoryDraft(refs: router.refs)) { ref, caption, track in
+                // `displayRefs`: a video is clip + poster + original, and the story composer wants
+                // the clip, not its companions.
+                StoryComposerView(draft: StoryDraft(refs: MediaVariants.displayRefs(router.refs))) { ref, caption, track in
                     Task { @MainActor in
                         // A long video becomes up to 5 consecutive story slides (same as the camera flow).
                         let parts = await MediaStore.shared.splitStoryVideo(ref)

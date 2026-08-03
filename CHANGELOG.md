@@ -7,6 +7,76 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.3.0] — 2026-08-02
+
+### Added — Apple + Android
+
+- **Share into Haven from anywhere, and pick who it goes to.** The share sheet now takes text,
+  links, photos, videos **and files** (PDFs, zips, .docx, audio), and asks where they should go: a
+  post in one of your circles, a story, or a conversation — a friend or a group DM.
+
+  Files are the new content type on both platforms. On Apple the extension prefers
+  `public.file-url` over `public.url`, which is the subtle part: a document shared from Files
+  conforms to both, and the URL branch had been turning a real attachment into a `file:///…` string
+  nobody could open. The document keeps the name the sender saw. On Android there's a new
+  `application/*` + `audio/*` SEND filter, and the ingest moved off the main thread — a shared file
+  can be hundreds of megabytes, and reading it on the looper is an ANR. Both platforms cap the
+  attachment at the same size, and Android checks the size *before* reading rather than after.
+
+- **Your Haven conversations now appear in the row at the top of every app's share sheet** — the
+  same place Messages, Signal and Slack put theirs. Tapping one skips the "where should this go"
+  step and opens straight into that thread's composer.
+
+  Apple donates an `INSendMessageIntent` per conversation (`ShareSuggestions.swift`); Android
+  publishes long-lived sharing shortcuts with a `<share-target>` (`ShareShortcuts.kt`). Both are
+  ranked by recency, both carry the conversation's name and avatar and **never any message
+  content**, and both are retracted when the thread is deleted, its circle is locked, or the account
+  is wiped. There's a **Settings ▸ Privacy ▸ Share sheet** switch (default on) — turning it off
+  erases what was published.
+
+  Locked circles are never suggested, on either platform. A locked circle hides that it exists,
+  which a tile bearing its name in every other app's share sheet would not — the same rule Spotlight
+  indexing already followed.
+
+- **Android can open a file someone sent you.** It could receive a `file_` attachment and show a
+  tile for it, and that was the end of the road — no way to read it, save it, or pass it anywhere.
+  A document now has a real page in the feed and in DMs: name, size, **Open**, **Share**, and a
+  Download when the bytes aren't on the device yet.
+
+  A `file_` blob is a ZIP, always — the ref carries no filename or type on the wire, so the real
+  name only survives inside an archive. Android has no built-in zip viewer, so handing it the
+  wrapper would be a dead end for the ordinary one-document case; a single-entry archive is
+  unwrapped and the *document* is what gets handed over. Entry names are treated as hostile
+  (`../` in a zip entry is the classic path-traversal, and this one is written to disk), so only
+  the basename is ever used. The decrypted copy is staged in a cache directory served by a
+  `FileProvider` with a one-shot read grant and swept after an hour — never a world-readable path,
+  and never Haven's own sealed store.
+
+### Changed — Android
+
+- Shared content no longer lands silently in the Circle composer. That made every share a post in
+  whatever circle happened to be active, with no way to send it to one person; it now goes through
+  the routing sheet, matching Apple.
+
+### Changed — release process
+
+- **The tag now decides the channel, on both stores.** A `vX.Y.Z-rc.N` tag is a release candidate
+  and reaches testers only — Play `internal` + closed `alpha`, TestFlight internal via Xcode Cloud —
+  and **never production**, not via the `PLAY_TRACK` variable, not via a manual `play_track` input.
+  A plain `vX.Y.Z` tag ships: Play `production`, and a new `apple-store.yml` creates the App Store
+  version, attaches the build, sets the release notes and submits for review.
+
+  Promoting a candidate is tagging the same commit again without the suffix, so the build testers
+  used is the build that ships. Previously *every* tag defaulted to Play `internal` and the Apple
+  submission was a by-hand step from a laptop, which made shipping a finished release something
+  somebody had to remember rather than something the tag said.
+
+  `Scripts/asc-new-version.mjs` gained `--build latest --wait <minutes>` for this: Xcode Cloud
+  assigns the build number from its own counter minutes after the push, so nothing on the tagging
+  side can predict it — the submit polls App Store Connect for the newest VALID build of that
+  version instead of guessing, and fails loudly rather than attaching the wrong one. It also reads
+  the signing key from `ASC_API_PRIVATE_KEY` so CI never writes a `.p8` to disk.
+
 ## [1.2.3] — 2026-07-31
 
 Apple's 1.2.2 never shipped — it was still in review when this was found, so it is re-cut as 1.2.3

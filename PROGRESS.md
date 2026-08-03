@@ -6,6 +6,33 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest wave (built, batched for next upload)
+- **Share into Haven from anywhere, and pick who it goes to (2026-08-02, 1.3.0, iPhone + Android)** —
+  the share sheet now takes text, links, photos, videos **and files** (PDFs, zips, .docx, audio), and
+  asks where they go: a post in one of your circles, a story, or a conversation — a friend or a group
+  DM. Files are the new content type. On Apple the ordering is the whole trick: a document shared
+  from Files conforms to *both* `public.file-url` and `public.url`, and the URL branch had been
+  turning a real attachment into a `file:///…` string nobody could open. On Android ingest moved off
+  the main thread and the size is checked before the read, because a shared file can be hundreds of
+  megabytes and reading one on the looper is an ANR.
+
+  And **your conversations now appear in the row at the top of every app's share sheet**, where
+  Messages, Signal and Slack put theirs — tap one and you skip straight to that thread's composer.
+  Apple donates an `INSendMessageIntent` per conversation, Android publishes sharing shortcuts. Both
+  carry the name and photo and **never any message content**, both are retracted when the thread is
+  deleted or its circle is locked, and there's a switch (Settings ▸ Privacy ▸ Share sheet) that
+  erases what was published. A locked circle is never suggested — it hides that it exists, which a
+  tile bearing its name in every other app's share sheet would not.
+
+  Android can now **open** a file it receives, too — name, size, Open, Share, and a Download when
+  the bytes aren't local yet. It could always receive one and show a tile; that was the end of the
+  road. Still open: macOS has no share extension (it needs its own target) and desktop has no OS
+  share sheet to register into.
+- **An rc now means something (2026-08-02, 1.3.0, release process)** — the tag decides the channel
+  on both stores. `v1.3.0-rc.1` reaches testers only (Play internal + closed testing, TestFlight
+  internal via Xcode Cloud) and can't reach production even if a variable or a manual input asks
+  for it; plain `v1.3.0` ships to Play production and opens the App Store submission automatically.
+  Promoting is tagging the same commit without the suffix, so testers used the exact build that
+  ships.
 - **"Media was put back" woke people who never asked (2026-07-31, 1.2.2, all platforms)** — reported
   as a couple of overnight notifications for media the user had not requested, with the fair question
   "is that actually fixed already, or a stale one from a broken build?" Neither: 1.2.1 silenced this

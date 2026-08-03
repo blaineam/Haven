@@ -75,6 +75,11 @@ targets:
         # to the plist (commit 1177c8d) silently vanished on every `xcodegen generate`.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        # Required for the donated INSendMessageIntent interactions that put Haven conversations in
+        # the share sheet's suggestion row (ShareSuggestions.swift). Without this declaration the
+        # donations are accepted but the system never draws a tile for them.
+        NSUserActivityTypes:
+          - INSendMessageIntent
         UILaunchScreen: {}
         # Required by the Mac App Store (ignored on iOS). Haven is a social network.
         LSApplicationCategoryType: public.app-category.social-networking
@@ -119,7 +124,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "1.2.3"
+        MARKETING_VERSION: "1.3.0"
         CURRENT_PROJECT_VERSION: "367"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         ENABLE_USER_SCRIPT_SANDBOXING: YES
@@ -208,7 +213,7 @@ targets:
         PRODUCT_NAME: Haven
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "1.2.3"
+        MARKETING_VERSION: "1.3.0"
         CURRENT_PROJECT_VERSION: "367"
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         # OFF so the embed/codesign script can write into the .app and invoke /usr/bin/codesign
@@ -253,7 +258,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith.NotificationService
         PRODUCT_MODULE_NAME: HavenNotificationService
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "1.2.3"
+        MARKETING_VERSION: "1.3.0"
         CURRENT_PROJECT_VERSION: "367"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         ENABLE_USER_SCRIPT_SANDBOXING: YES
@@ -285,7 +290,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith.Broadcast
         PRODUCT_MODULE_NAME: HavenBroadcast
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "1.2.3"
+        MARKETING_VERSION: "1.3.0"
         CURRENT_PROJECT_VERSION: "367"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         ENABLE_USER_SCRIPT_SANDBOXING: YES
@@ -316,12 +321,17 @@ targets:
               NSExtensionActivationSupportsWebURLWithMaxCount: 1
               NSExtensionActivationSupportsImageWithMaxCount: 10
               NSExtensionActivationSupportsMovieWithMaxCount: 5
+              # Documents: PDFs, zips, .docx, anything the source app vends as a file. Both keys —
+              # `File` covers items shared as file URLs (Files.app), `Attachments` covers the ones
+              # vended as generic data (Mail, Notes).
+              NSExtensionActivationSupportsFileWithMaxCount: 10
+              NSExtensionActivationSupportsAttachmentsWithMaxCount: 10
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith.ShareExtension
         PRODUCT_MODULE_NAME: HavenShareExtension
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "1.2.3"
+        MARKETING_VERSION: "1.3.0"
         CURRENT_PROJECT_VERSION: "367"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         ENABLE_USER_SCRIPT_SANDBOXING: YES
@@ -401,7 +411,7 @@ targets:
         # iOS app's Haven.app; the user-facing name is still "Haven" via CFBundleDisplayName.
         PRODUCT_NAME: HavenWatch
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "1.2.3"
+        MARKETING_VERSION: "1.3.0"
         # Keep in lock-step with the host iOS app's build number (Apple requires an embedded
         # watch app to share the companion's version/build).
         CURRENT_PROJECT_VERSION: "367"

@@ -138,6 +138,14 @@ private fun MainScaffold() {
     val stagedDm by com.blaineam.haven.core.DmDrafts.openThread
     LaunchedEffect(stagedDm) { if (stagedDm != null) tab = Tab.Messages }
 
+    // Content shared into Haven from another app (text, a link, photos, a document) → raise the
+    // routing sheet, which asks whether it should be a post, a story, or a message and to whom.
+    // Latched here rather than consumed inside the sheet, so a second share arriving mid-flow merges
+    // into the pending one instead of racing the composition (same rule as the invite inbox above).
+    val sharedIn = com.blaineam.haven.core.ShareInbox.pending
+    var shareRoute by remember { mutableStateOf<com.blaineam.haven.core.ShareInbox.Payload?>(null) }
+    LaunchedEffect(sharedIn) { if (sharedIn != null) shareRoute = sharedIn }
+
     // Bring the transport up once we're past onboarding; re-sync on resume. In demo mode the
     // RootScreen LaunchedEffect already did init/seed, and `haven_no_net` keeps the node offline.
     LaunchedEffect(Unit) {
@@ -168,6 +176,10 @@ private fun MainScaffold() {
                     HavenNet.bumpActivity()   // back to foreground → snap sync cadence tight
                     HavenNet.isForeground = true; HavenNet.syncWithContacts(); HavenNet.requestMissingMedia()
                     com.blaineam.haven.core.ScheduledStore.fireDue()   // post anything now due
+                    // Republish the share sheet's Direct Share row. Messages that arrived while
+                    // Haven was closed are exactly the ones the user is most likely to reply to,
+                    // and nothing reorders the row on their behalf until we come back.
+                    com.blaineam.haven.core.ShareShortcuts.refresh(context)
                 }
                 Lifecycle.Event.ON_PAUSE -> {
                     HavenNet.isForeground = false
@@ -290,6 +302,9 @@ private fun MainScaffold() {
     androidx.activity.compose.BackHandler(enabled = showConnect) { showConnect = false }
     androidx.activity.compose.BackHandler(enabled = showActivity) { showActivity = false }
     androidx.activity.compose.BackHandler(enabled = openPost != null) { openPost = null }
+    androidx.activity.compose.BackHandler(enabled = shareRoute != null) {
+        com.blaineam.haven.core.ShareInbox.clear(); shareRoute = null
+    }
 
     // Connect sheet (full-screen slide-up).
     AnimatedVisibility(
@@ -326,6 +341,23 @@ private fun MainScaffold() {
         val shown = remember { mutableStateOf(postSheet) }
         if (postSheet != null) shown.value = postSheet
         shown.value?.let { PostLinkScreen(it.circleId, it.postId, onDone = { openPost = null }) }
+    }
+
+    // Share routing sheet (same slide-up as Connect). Latched like the post sheet so it survives
+    // the exit animation instead of blanking mid-slide.
+    val shareSheet = shareRoute
+    AnimatedVisibility(
+        visible = shareSheet != null,
+        enter = slideInVertically { it },
+        exit = slideOutVertically { it },
+    ) {
+        val shown = remember { mutableStateOf(shareSheet) }
+        if (shareSheet != null) shown.value = shareSheet
+        shown.value?.let { payload ->
+            ShareRouteSheet(payload = payload, onDone = {
+                com.blaineam.haven.core.ShareInbox.clear(); shareRoute = null
+            })
+        }
     }
 
     // Call overlay (incoming ring / in-call mesh grid) sits above everything.

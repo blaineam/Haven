@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Share targets for Haven's conversations.
+
+  ShareShortcuts.kt pushes one long-lived dynamic shortcut per recent DM thread, each tagged with
+  the category below. This file is what tells the system those shortcuts can RECEIVE a share, which
+  is what puts them in the Direct Share row at the top of every app's share sheet. Without it the
+  shortcuts still exist (launcher long-press) but never appear when sharing.
+
+  The mime types mirror MainActivity's SEND filters: text and links, photos and videos, and files.
+-->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <share-target android:targetClass="com.blaineam.haven.MainActivity">
+        <data android:mimeType="text/plain" />
+        <data android:mimeType="image/*" />
+        <data android:mimeType="video/*" />
+        <data android:mimeType="application/*" />
+        <data android:mimeType="audio/*" />
+        <category android:name="com.blaineam.haven.category.SHARE_TARGET" />
+    </share-target>
+</shortcuts>

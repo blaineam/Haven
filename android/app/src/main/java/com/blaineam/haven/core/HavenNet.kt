@@ -1777,6 +1777,9 @@ object HavenNet : InboundListener {
         if (activeCircle.value == circleId) activeCircle.value = DEFAULT_CIRCLE
         persist(); bumpCircles(); scope.launch(Dispatchers.Main) { feedVersion.value++ }
         selfSyncNudge()   // the deletion tombstone travels now, before a sibling can re-broadcast the DM
+        // No share tile for a conversation that's gone. Guarded: this can run before `init` on a
+        // sync-driven path, and `appContext` is lateinit.
+        runCatching { ShareShortcuts.remove(appContext, circleId) }
     }
 
     /** Send a text DM into a circle and deliver it to the partner. */
@@ -1796,6 +1799,9 @@ object HavenNet : InboundListener {
         afterAuthor(circleId, env,
             PushBanner.forPost(circleId, circleName(circleId), body, withThumbs, story = false, postId = postId))
         enqueueAuthoredMedia(circleId, withThumbs)   // priority lane, thumbs first
+        // Sending into a thread is what makes it "recent" — republish so the Direct Share row is
+        // ordered by the conversations the user is actually in.
+        runCatching { ShareShortcuts.refresh(appContext) }
     }
 
     /**

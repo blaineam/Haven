@@ -665,6 +665,12 @@ final class AccountStore: ObservableObject {
         for key in d.dictionaryRepresentation().keys where key.hasPrefix("haven.") { d.removeObject(forKey: key) }
         SharedLockedCircles.write([])
         _ = SharedInbox.drain()
+        #if os(iOS)
+        // Conversation names we donated to the system's share-sheet suggestions live OUTSIDE the
+        // UserDefaults sweep above — a reset that leaves them behind leaves the old account's
+        // friends listed in every app's share sheet.
+        ShareSuggestions.forgetAll()
+        #endif
 
         // Reset the in-memory singletons too, so the LIVE UI reverts now (not just after a relaunch).
         ConnectionsStore.shared.wipe()

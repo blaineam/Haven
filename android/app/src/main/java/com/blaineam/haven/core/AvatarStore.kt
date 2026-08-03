@@ -55,6 +55,17 @@ object AvatarStore {
         }
     }
 
+    /** The raw decoded avatar for a full id or short prefix — for the platform APIs that want a
+     *  real [android.graphics.Bitmap] rather than Compose's ImageBitmap (sharing shortcuts, the
+     *  Direct Share row). Not cached: these callers ask once per refresh, not per frame. */
+    fun bitmap(idOrShort: String): android.graphics.Bitmap? {
+        val key = keyFor(idOrShort) ?: return null
+        return runCatching {
+            val bytes = Base64.decode(avatars.getString(key, ""), Base64.DEFAULT)
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        }.getOrNull()
+    }
+
     /** The stored emoji for a full id or short prefix (empty if none). */
     fun emoji(idOrShort: String): String {
         if (!ready) return ""

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  What Haven's FileProvider is allowed to serve. Deliberately ONE directory: the staging area
+  `core/FileAttachments.kt` writes an unwrapped attachment into before handing it to another app.
+
+  Nothing else is listed on purpose. Haven's media is sealed at rest in `filesDir`, and exposing
+  that tree — even read-only, even behind a grant — would let any app that receives one URI walk to
+  blobs it was never handed. The staging copy is disposable and swept after an hour.
+-->
+<paths>
+    <cache-path name="shared-files" path="shared-files/" />
+</paths>

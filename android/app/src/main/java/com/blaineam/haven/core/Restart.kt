@@ -23,6 +23,9 @@ fun startOver(context: Context) {
     // Persistent side stores the engine/profile reset didn't cover — clear them too so nothing from the
     // old identity survives the wipe (in-memory state is gone via the hard process restart below).
     runCatching { AvatarStore.clear() }
+    // Conversations we published to the system's Direct Share row live OUTSIDE our prefs and files —
+    // a wipe that leaves them behind leaves the old account's friends listed in every app's share sheet.
+    runCatching { ShareShortcuts.removeAll(context) }
     runCatching { CircleLock.reset() }
     runCatching { RelayNudge.reset() }
     runCatching { CircleRemovals.clear() }

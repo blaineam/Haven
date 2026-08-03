@@ -12,14 +12,24 @@ enum ShareInbox {
             .appendingPathComponent("ShareInbox", isDirectory: true)
     }
 
-    /// One shared item: inline text/link, or a media file (image/video) by name within the inbox dir.
+    /// One shared item: inline text/link, or a media file (image/video/document) by name within the
+    /// inbox dir.
     struct Item: Codable {
-        enum Kind: String, Codable { case text, image, video }
+        enum Kind: String, Codable { case text, image, video, file }
         var kind: Kind
         var text: String = ""     // for .text
-        var file: String = ""     // for .image / .video — file name within the inbox dir
+        var file: String = ""     // for .image / .video / .file — file name within the inbox dir
+        /// The name the source app gave the document, for `.file` — the inbox name is uniquified,
+        /// so this is what the recipient should see on the attachment.
+        var name: String = ""
     }
-    struct Payload: Codable { var items: [Item] = [] }
+    struct Payload: Codable {
+        var items: [Item] = []
+        /// The conversation the user picked in the share sheet's suggestion row, if any — the `dm:`
+        /// circle id we donated as `INSendMessageIntent.conversationIdentifier`. The app skips the
+        /// "where should this go" step and opens straight into that thread's composer.
+        var targetCircleId: String = ""
+    }
 
     /// Absolute URL for a media file name inside the inbox (used by both sides).
     static func fileURL(_ name: String) -> URL? { dir?.appendingPathComponent(name) }

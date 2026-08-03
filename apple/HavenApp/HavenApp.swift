@@ -508,6 +508,10 @@ struct RootView: View {
                 accountStore.reloadIfTemporary()
                 #if os(iOS)
                 Task { await ShareRouter.shared.ingest() }   // foreground fallback if open-URL didn't fire
+                // Refresh the share sheet's conversation suggestions. Messages that arrived while
+                // Haven was closed are exactly the ones the user is most likely to reply to, and
+                // nothing donates on their behalf until we come back.
+                ShareSuggestions.donateRecent()
                 #endif
             }
         }

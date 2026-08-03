@@ -7,6 +7,11 @@ import androidx.activity.enableEdgeToEdge
 import androidx.fragment.app.FragmentActivity
 import android.net.Uri
 import androidx.core.content.IntentCompat
+import androidx.core.content.pm.ShortcutManagerCompat
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.blaineam.haven.core.DeepLink
 import com.blaineam.haven.core.DemoEnv
 import com.blaineam.haven.core.HavenNet
@@ -253,28 +258,109 @@ class MainActivity : FragmentActivity() {
                 }
             }
             Intent.ACTION_SEND -> {
-                if (intent.type?.startsWith("text") == true) {
-                    ShareInbox.offer(intent.getStringExtra(Intent.EXTRA_TEXT))
-                } else {
-                    IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
-                        ?.let { ingestSharedMedia(listOf(it)) }
-                }
+                // A share can carry BOTH a stream and text (a photo with a caption, a document with
+                // a link) — take whichever parts are there instead of treating them as exclusive.
+                val stream = IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
+                ingestShare(intent, listOfNotNull(stream))
             }
             Intent.ACTION_SEND_MULTIPLE -> {
-                IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
-                    ?.let { ingestSharedMedia(it) }
+                val streams = IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
+                ingestShare(intent, streams ?: emptyList())
             }
         }
     }
 
-    /** Stage shared content-URIs into LocalMedia (we hold temporary read grants for the intent's
-     *  life, so copy the bytes now) and hand the refs to the composer. */
-    private fun ingestSharedMedia(uris: List<Uri>) {
-        val cid = HavenNet.activeCircle.value
-        val refs = uris.flatMap { uri ->
-            if (isVideoUri(this, uri)) LocalMedia.prepareVideo(this, uri, cid).mediaRefs
-            else loadAndDownscale(this, uri)?.let { listOf(LocalMedia.store(cid, it)) } ?: emptyList()
+    /**
+     * Stage a share: copy every shared content-URI into [LocalMedia] and hand the whole thing to
+     * [ShareInbox], which raises the routing sheet.
+     *
+     * Off the main thread on purpose. We hold read grants only for the life of the intent, so the
+     * bytes must be copied now — but "now" can mean a full MediaCodec transcode of a video or a
+     * multi-hundred-megabyte file read, and doing that on the looper is an ANR. The text and the
+     * chosen conversation are offered immediately so the sheet opens right away; the media refs
+     * follow and merge into the same pending share.
+     */
+    private fun ingestShare(intent: Intent, uris: List<Uri>) {
+        // A Direct Share tap names the conversation the user picked — the shortcut id IS the dm:
+        // circle id we published (see ShareShortcuts).
+        val target = intent.getStringExtra(ShortcutManagerCompat.EXTRA_SHORTCUT_ID)
+            ?.takeIf { it.startsWith("dm:") }
+        val text = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim().orEmpty()
+        ShareInbox.offer(ShareInbox.Payload(text = text, targetCircleId = target))
+        if (uris.isEmpty()) return
+        lifecycleScope.launch(Dispatchers.IO) {
+            val cid = HavenNet.activeCircle.value
+            val refs = uris.flatMap { uri -> stage(uri, cid) }
+            if (refs.isNotEmpty()) withContext(Dispatchers.Main) {
+                ShareInbox.offer(ShareInbox.Payload(media = refs, targetCircleId = target))
+            }
         }
-        ShareInbox.offerMedia(refs)
+    }
+
+    /** One shared URI → media refs. Photos downscale, videos transcode, and anything else becomes a
+     *  `file_` attachment so a PDF or a spreadsheet arrives intact. */
+    private fun stage(uri: Uri, circleId: String): List<String> = runCatching {
+        if (isVideoUri(this, uri)) return@runCatching LocalMedia.prepareVideo(this, uri, circleId).mediaRefs
+        val mime = contentResolver.getType(uri).orEmpty()
+        if (mime.startsWith("image/")) {
+            loadAndDownscale(this, uri)?.let { return@runCatching listOf(LocalMedia.store(circleId, it)) }
+        }
+        // Not something we can render — send it as a document.
+        //
+        // Checked BEFORE reading, not after: `storeFile` seals from a ByteArray, so the file has to
+        // fit in the heap twice over, and a phone that reads a 400 MB attachment just to discover it
+        // is too big has already died doing it. `maxInMemoryBytes` is the same quarter-heap budget
+        // the decrypt path uses; the absolute ceiling matches Apple's `FileArchive.maxSourceBytes`
+        // so neither platform can post an attachment the other refuses to open.
+        val cap = minOf(MAX_SHARED_FILE_BYTES, LocalMedia.maxInMemoryBytes())
+        val size = sizeOf(uri)
+        if (size > cap) return@runCatching emptyList()
+        val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            ?: return@runCatching emptyList()
+        if (bytes.size > cap) return@runCatching emptyList()   // unknown size up front (size < 0)
+        // An archive is already in the right shape — don't nest it in a second one (Apple's
+        // `MediaStore.addFile` makes the same exception).
+        val isZip = mime == "application/zip" || displayName(uri).endsWith(".zip", ignoreCase = true)
+        listOf(LocalMedia.storeFile(circleId, if (isZip) bytes else zipped(displayName(uri), bytes)))
+    }.getOrDefault(emptyList())
+
+    /**
+     * Wrap a shared document in a ZIP, the way Apple's `MediaStore.addFile` does.
+     *
+     * A `file_` ref carries no filename or type on the wire, so every client writes it out with a
+     * `.zip` extension — an Apple recipient of a bare PDF would save `something.zip` that isn't a
+     * zip and wouldn't open anywhere. Wrapping keeps the original name and extension INSIDE the
+     * archive, which is the only place they survive the trip.
+     */
+    private fun zipped(name: String, bytes: ByteArray): ByteArray {
+        val out = java.io.ByteArrayOutputStream(bytes.size + 512)
+        java.util.zip.ZipOutputStream(out).use { zip ->
+            zip.putNextEntry(java.util.zip.ZipEntry(name))
+            zip.write(bytes)
+            zip.closeEntry()
+        }
+        return out.toByteArray()
+    }
+
+    /** The filename the source app gave a shared document, or a neutral fallback. */
+    private fun displayName(uri: Uri): String {
+        val queried = runCatching {
+            contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+        }.getOrNull()
+        return (queried ?: uri.lastPathSegment.orEmpty())
+            .substringAfterLast('/')
+            .trim()
+            .ifBlank { "attachment" }
+    }
+
+    /** Declared byte size of a content URI, or -1 when the provider won't say. */
+    private fun sizeOf(uri: Uri): Long = runCatching {
+        contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1L
+    }.getOrDefault(-1L)
+
+    private companion object {
+        /** 512 MB — the same ceiling Apple's `FileArchive.maxSourceBytes` enforces. */
+        const val MAX_SHARED_FILE_BYTES = 512L * 1024 * 1024
     }
 }

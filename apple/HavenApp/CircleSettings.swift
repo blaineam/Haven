@@ -126,6 +126,11 @@ final class CircleSettingsStore: ObservableObject {
         // A circle that just became locked must drop out of Spotlight immediately.
         if on, spotlightEnabled(circleId) { SpotlightIndex.clearCircle(circleId) }
         if !on, spotlightEnabled(circleId) { SpotlightIndex.reindexCircle(circleId) }
+        #if os(iOS)
+        // …and out of the share sheet's suggestion row, for the same reason: a locked circle hides
+        // that it exists, which a tile bearing its name in every other app's share sheet would not.
+        if on { ShareSuggestions.forget(circleId: circleId) } else { ShareSuggestions.donate(circleId: circleId) }
+        #endif
         BiometricGate.shared.relock(circleId)
     }
 

@@ -12,7 +12,8 @@ import org.json.JSONObject
  * itself lives in [HavenCore] / the Keystore.
  */
 class ProfileStore private constructor(context: Context) {
-    private val prefs = context.applicationContext.getSharedPreferences("haven.profile", Context.MODE_PRIVATE)
+    private val appContext = context.applicationContext
+    private val prefs = appContext.getSharedPreferences("haven.profile", Context.MODE_PRIVATE)
 
     var onboarded by mutableStateOf(prefs.getBoolean(KEY_ONBOARDED, false))
         private set
@@ -56,6 +57,23 @@ class ProfileStore private constructor(context: Context) {
     var sendOriginal: Boolean
         get() = _sendOriginal.value
         set(v) { _sendOriginal.value = v; prefs.edit().putBoolean(KEY_SEND_ORIGINAL, v).apply() }
+
+    /**
+     * Offer your Haven conversations in the Direct Share row at the top of every app's share sheet
+     * (iOS `SettingsStore.shareSuggestions`). DEVICE-LOCAL and default ON, but genuinely optional:
+     * turning it on means the system's shortcut service holds each conversation's name and avatar so
+     * it can draw that row before Haven is running. Nothing leaves the device and no message content
+     * is published — but it is still a name outside Haven's own storage, so it gets a switch, and
+     * turning it off retracts what we published. See [ShareShortcuts].
+     */
+    private val _shareSuggestions = mutableStateOf(prefs.getBoolean(KEY_SHARE_SUGGEST, true))
+    var shareSuggestions: Boolean
+        get() = _shareSuggestions.value
+        set(v) {
+            _shareSuggestions.value = v
+            prefs.edit().putBoolean(KEY_SHARE_SUGGEST, v).apply()
+            if (v) ShareShortcuts.refresh(appContext) else ShareShortcuts.removeAll(appContext)
+        }
 
     /**
      * Notification preview detail: "full" | "private" | "minimal" (iOS SharedNotificationPrivacy).
@@ -239,6 +257,7 @@ class ProfileStore private constructor(context: Context) {
         private const val KEY_VIDEO_SOUND = "videoSoundOn"
         private const val KEY_DATA_SAVER = "superDataSaver"
         private const val KEY_SEND_ORIGINAL = "sendOriginal"
+        private const val KEY_SHARE_SUGGEST = "shareSuggestions"
         private const val KEY_NOTIF_DETAIL = "notificationDetail"
         private const val KEY_FIELD_TS = "profileFieldTs"
         private const val KEY_SETTING_TS = "settingTs"

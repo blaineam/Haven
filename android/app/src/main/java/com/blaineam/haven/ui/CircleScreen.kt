@@ -127,21 +127,10 @@ fun CircleScreen(onAddFriend: () -> Unit) {
     val pendingMedia = remember { androidx.compose.runtime.mutableStateListOf<String>() }
     var pendingMusic by remember { mutableStateOf<uniffi.haven_ffi.TrackRefFfi?>(null) }
     var showMusicDialog by remember { mutableStateOf(false) }
-    // A link shared into Haven from another app prefills the composer.
-    val sharedText = com.blaineam.haven.core.ShareInbox.pending
-    LaunchedEffect(sharedText) {
-        if (!sharedText.isNullOrBlank()) {
-            draft = if (draft.isBlank()) sharedText else "$draft $sharedText"
-            com.blaineam.haven.core.ShareInbox.take()
-        }
-    }
-    // Photos/videos shared in from another app attach to the next post.
-    val sharedMedia = com.blaineam.haven.core.ShareInbox.pendingMedia
-    LaunchedEffect(sharedMedia) {
-        if (sharedMedia.isNotEmpty()) {
-            pendingMedia.addAll(com.blaineam.haven.core.ShareInbox.takeMedia())
-        }
-    }
+    // Content shared into Haven from another app no longer lands here. It used to silently prefill
+    // this composer, which meant a share always became a post in whatever circle happened to be
+    // active — there was no way to send it to one person. RootScreen now raises ShareRouteSheet,
+    // which asks where it should go (post / story / conversation) and sends it from there.
     val profile = remember { com.blaineam.haven.core.ProfileStore.get(context) }
     val version by HavenNet.feedVersion          // recompose when the feed changes
     val circlesVersion by HavenNet.circlesVersion
@@ -1323,6 +1312,10 @@ private fun ImageBitmap.downscaled(maxDim: Int): ImageBitmap {
  */
 @Composable
 private fun MediaPage(circleId: String, ref: String, containerAspect: Float?, playing: Boolean, onOpen: () -> Unit) {
+    // A document isn't media — there is nothing to decode, letterbox or autoplay, and everything
+    // below assumes there is. It gets its own page, the same way Apple's pager hands a `file_` ref
+    // to PostFileAttachmentPage.
+    if (LocalMedia.isFile(ref)) { FileAttachmentPage(circleId, ref); return }
     val aspect = rememberAspect(circleId, ref)
     val isVideo = LocalMedia.isVideo(ref)
     val dataSaver = runCatching {
@@ -1482,6 +1475,81 @@ fun MediaGallery(circleId: String, refs: List<String>, videoActive: Boolean = fa
     }
 }
 
+/**
+ * A received document, in the feed and in DMs — Apple's `PostFileAttachmentPage` counterpart.
+ *
+ * "Open" stages a decrypted copy and hands it to whatever app on the device handles the type;
+ * "Share" passes it to another app to keep. Both need the blob to be on THIS device, so a
+ * not-yet-downloaded attachment offers to fetch it instead of failing at the tap.
+ */
+@Composable
+private fun FileAttachmentPage(circleId: String, ref: String) {
+    val context = LocalContext.current
+    val feedTick = com.blaineam.haven.core.HavenNet.feedVersion.value
+    val here = remember(ref, feedTick) { LocalMedia.has(ref) }
+    val downloading = com.blaineam.haven.core.HavenNet.downloadingMedia.contains(ref)
+    // The name lives INSIDE the archive, so reading it means a decrypt — off the main thread, once.
+    val name by androidx.compose.runtime.produceState("File attachment", ref, circleId, here) {
+        value = if (!here) "File attachment" else kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            com.blaineam.haven.core.FileAttachments.displayName(context, circleId, ref)
+        }
+    }
+    val size = remember(ref, feedTick) { LocalMedia.sizeOf(ref) }
+    var failed by remember(ref) { mutableStateOf(false) }
+
+    Box(Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)).background(HavenTheme.card),
+        contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally,
+               modifier = Modifier.padding(horizontal = 20.dp)) {
+            Icon(Icons.Filled.InsertDriveFile, null, tint = HavenTheme.pink, modifier = Modifier.size(44.dp))
+            Spacer(Modifier.height(8.dp))
+            Text(name, color = HavenTheme.textPrimary, fontSize = 15.sp,
+                 maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+            if (size > 0) {
+                Text(android.text.format.Formatter.formatShortFileSize(context, size),
+                     color = HavenTheme.textSecondary, fontSize = 12.sp)
+            }
+            Spacer(Modifier.height(12.dp))
+            if (!here) {
+                PillAction(if (downloading) "Getting it…" else "Download", enabled = !downloading) {
+                    com.blaineam.haven.core.HavenNet.downloadEvicted(ref)
+                }
+            } else {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    PillAction("Open") {
+                        failed = !com.blaineam.haven.core.FileAttachments.open(context, circleId, ref)
+                    }
+                    PillAction("Share", filled = false) {
+                        failed = !com.blaineam.haven.core.FileAttachments.share(context, circleId, ref)
+                    }
+                }
+            }
+            if (failed) {
+                Spacer(Modifier.height(6.dp))
+                Text("Couldn't open that file.", color = HavenTheme.textSecondary, fontSize = 12.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun PillAction(label: String, filled: Boolean = true, enabled: Boolean = true, onClick: () -> Unit) {
+    Text(
+        label,
+        color = when {
+            !enabled -> HavenTheme.textSecondary
+            filled -> Color.White
+            else -> HavenTheme.pink
+        },
+        fontSize = 14.sp,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.clip(RoundedCornerShape(20.dp))
+            .background(if (filled && enabled) HavenTheme.pink else HavenTheme.background)
+            .clickable(enabled = enabled) { onClick() }
+            .padding(horizontal = 18.dp, vertical = 9.dp),
+    )
+}
+
 /** Full-screen media viewer: swipe between items, tap/back to close. */
 @Composable
 fun MediaViewer(circleId: String, refs: List<String>, startIndex: Int, onClose: () -> Unit) {
@@ -1577,6 +1645,7 @@ fun MediaViewer(circleId: String, refs: List<String>, startIndex: Int, onClose: 
 /** Feed-circle switcher: tap the title for a dropdown of your circles + "New circle". */
 @Composable
 private fun CircleSwitcher(activeId: String, circlesVersion: Int, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
     var menu by remember { mutableStateOf(false) }
     var showCreate by remember { mutableStateOf(false) }
     var showManage by remember { mutableStateOf(false) }
@@ -1610,7 +1679,7 @@ private fun CircleSwitcher(activeId: String, circlesVersion: Int, modifier: Modi
             val locked = com.blaineam.haven.core.CircleLock.isLocked(activeId)
             androidx.compose.material3.DropdownMenuItem(
                 text = { Text(if (locked) "🔓 Unlock this circle" else "🔒 Lock this circle", color = HavenTheme.textPrimary) },
-                onClick = { com.blaineam.haven.core.CircleLock.setLocked(activeId, !locked); menu = false },
+                onClick = { com.blaineam.haven.core.CircleLock.setLocked(context, activeId, !locked); menu = false },
             )
             val anyHidden = com.blaineam.haven.core.HiddenStore.hidden.size
             val showingHidden by com.blaineam.haven.core.HiddenStore.showHidden

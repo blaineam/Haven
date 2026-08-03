@@ -5,36 +5,49 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 
 /**
- * Holds text shared into Haven from another app (e.g. a YouTube or web link via the system share
- * sheet). The composer picks it up and prefills the draft, then clears it.
+ * Content shared into Haven from another app via the system share sheet — text, links, photos,
+ * videos, and documents. [RootScreen] raises the share routing sheet on this, which is where the
+ * user chooses a post, a story, or a conversation (Apple `ShareRouter` parity).
+ *
+ * The media/file refs are already staged into [LocalMedia] by the time they land here: an
+ * `EXTRA_STREAM` content URI is only readable for the life of the intent, so MainActivity copies
+ * the bytes out before anything else can look at them.
  */
 object ShareInbox {
-    var pending by mutableStateOf<String?>(null)
+    /**
+     * One share, ready to route.
+     *
+     * [targetCircleId] is set only when the user tapped one of Haven's conversations in the share
+     * sheet's Direct Share row — it's the `dm:` circle id we published as a sharing shortcut (see
+     * [ShareShortcuts]), and it means the destination is already chosen.
+     */
+    data class Payload(
+        val text: String = "",
+        val media: List<String> = emptyList(),
+        val targetCircleId: String? = null,
+    ) {
+        val isEmpty: Boolean get() = text.isBlank() && media.isEmpty()
+    }
+
+    var pending by mutableStateOf<Payload?>(null)
         private set
-    // Media refs (already staged into LocalMedia) shared in from another app — the composer attaches
-    // them to the next post.
-    var pendingMedia by mutableStateOf<List<String>>(emptyList())
-        private set
 
-    fun offer(text: String?) {
-        if (!text.isNullOrBlank()) pending = text.trim()
+    /** MainActivity hands over a complete share. Merges into anything not yet consumed, so a share
+     *  that arrives while the sheet is still open adds to it rather than replacing it. */
+    fun offer(payload: Payload) {
+        if (payload.isEmpty && payload.targetCircleId == null) return
+        val prior = pending
+        pending = if (prior == null) payload else Payload(
+            text = listOf(prior.text, payload.text).filter { it.isNotBlank() }.joinToString("\n"),
+            media = prior.media + payload.media,
+            targetCircleId = payload.targetCircleId ?: prior.targetCircleId,
+        )
     }
 
-    fun offerMedia(refs: List<String>) {
-        if (refs.isNotEmpty()) pendingMedia = pendingMedia + refs
-    }
+    fun consume(): Payload? = pending.also { pending = null }
 
-    fun take(): String? {
-        val t = pending
-        pending = null
-        return t
-    }
-
-    fun takeMedia(): List<String> {
-        val m = pendingMedia
-        pendingMedia = emptyList()
-        return m
-    }
+    /** Drop an un-consumed share (the routing sheet was cancelled). */
+    fun clear() { pending = null }
 }
 
 /// A haven:// (or https invite-page) link the app was OPENED with — parity with iOS's

@@ -188,6 +188,17 @@ fun SettingsScreen(onBack: () -> Unit) {
                         Text(label, color = HavenTheme.textPrimary, fontSize = 14.sp)
                     }
                 }
+                Spacer(Modifier.height(8.dp))
+                Text("Share sheet", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Puts your recent Haven conversations in the row at the top of any app's share " +
+                        "sheet, so a photo or link is two taps from being sent. Android keeps the name " +
+                        "and photo on this device to draw that row; turning this off erases them. " +
+                        "Locked circles are never suggested.",
+                    color = HavenTheme.textSecondary, fontSize = 12.sp,
+                )
+                SettingSwitch("Suggest conversations", profile.shareSuggestions) { profile.shareSuggestions = it }
             }
             }  // end Privacy
 

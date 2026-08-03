@@ -1399,6 +1399,11 @@ final class FeedStore: ObservableObject {
             Task { await SharedStore.publishDeviceRoster(social: social) }
             if RelayHost.shared.serving { reannounceOwnRelay() }
         }
+        #if os(iOS)
+        // Sending into a thread is what makes it "recent" — the share sheet's suggestion row is
+        // ranked by donation time, so this donation is what keeps that order honest.
+        ShareSuggestions.donate(circleId: circleId)
+        #endif
     }
 
     /// Edit one of your own messages in a specific (DM) circle.
@@ -1428,6 +1433,9 @@ final class FeedStore: ObservableObject {
         social.leaveCircle(id: circleId)
         persist(); refreshCircles(); refresh()
         nudgeSelfSyncSoon()   // the deletion tombstone reaches my other devices in seconds
+        #if os(iOS)
+        ShareSuggestions.forget(circleId: circleId)   // no tile for a conversation that no longer exists
+        #endif
         HavenLog.sync("DELETE-DM \(circleId.prefix(24))")
     }
 

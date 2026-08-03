@@ -113,7 +113,40 @@
                 <data android:mimeType="image/*" />
                 <data android:mimeType="video/*" />
             </intent-filter>
+            <!-- Share a FILE (PDF, zip, .docx, audio…) into Haven — it rides as a `file_`
+                 attachment, exactly like one picked in-app. Deliberately NOT `*/*`: that also
+                 matches text/plain, and an activity matching two filters for one shared link can
+                 show up twice in the chooser. `text/*` is left out for the same reason — a shared
+                 link or snippet is already served by the text/plain filter above. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/*" />
+                <data android:mimeType="audio/*" />
+            </intent-filter>
+            <!-- Sharing shortcuts: the conversations Haven publishes (ShareShortcuts.kt) so its DMs
+                 appear in the Direct Share row at the top of every app's share sheet, the way
+                 Signal's and Messages' do. The <share-target> in this resource is what lets the
+                 system match a share to those shortcuts. -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
         </activity>
+
+        <!-- Handing a received file attachment to whatever app can open it. Haven's media is sealed
+             at rest and lives in private storage, so opening one means staging a decrypted copy in
+             our own cache and granting the receiving app a one-shot read on it — never a world- or
+             group-readable path. See core/FileAttachments.kt. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <service
             android:name=".core.ConnectionService"

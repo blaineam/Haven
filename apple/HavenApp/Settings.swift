@@ -42,6 +42,20 @@ final class SettingsStore: ObservableObject {
     @Published var notificationDetail: SharedNotificationPrivacy.Detail {
         didSet { SharedNotificationPrivacy.detail = notificationDetail }
     }
+    /// Offer your Haven conversations in the system share sheet's suggestion row (iOS), the way
+    /// Messages and Signal do. DEVICE-LOCAL and default ON, but genuinely optional: turning it on
+    /// means iOS keeps the conversation's name and avatar in its on-device suggestions store so it
+    /// can draw that row before Haven is running. Nothing leaves the device, and nothing about the
+    /// messages themselves is donated — but it is still a name outside Haven's own storage, so it
+    /// gets a switch and turning it off erases what we donated.
+    @Published var shareSuggestions: Bool {
+        didSet {
+            d.set(shareSuggestions, forKey: kShareSuggest)
+            #if os(iOS)
+            if shareSuggestions { ShareSuggestions.donateRecent() } else { ShareSuggestions.forgetAll() }
+            #endif
+        }
+    }
     /// Auto-delete posts older than this many days (0 = keep forever).
     @Published var retentionDays: Int { didSet { d.set(retentionDays, forKey: kRet); stamp(kRet) } }
 
@@ -113,6 +127,7 @@ final class SettingsStore: ObservableObject {
     private let kLocMaxDays = "haven.localMediaMaxDays"
     private let kLocMaxGB = "haven.localMediaMaxGB"
     private let kKeepAwake = "haven.relay.keepAwake"
+    private let kShareSuggest = "haven.shareSuggestions"
 
     private init() {
         saveToPhotos = d.object(forKey: kSave) as? Bool ?? true   // default ON
@@ -124,6 +139,7 @@ final class SettingsStore: ObservableObject {
         #endif
         sendOriginal = d.object(forKey: kSendOriginal) as? Bool ?? false
         notificationDetail = SharedNotificationPrivacy.detail
+        shareSuggestions = d.object(forKey: kShareSuggest) as? Bool ?? true   // default ON
         retentionDays = d.object(forKey: kRet) as? Int ?? 0       // default forever
         keepMyPosts = d.object(forKey: kKeepMine) as? Bool ?? true   // default: always keep my own archive
         #if os(macOS)
@@ -265,6 +281,15 @@ struct SettingsView: View {
                     Text(SharedNotificationPrivacy.footer(settings.notificationDetail)
                           + " Also follows iOS Settings → Notifications → Show Previews.")
                 }
+                #if os(iOS)
+                Section {
+                    Toggle("Suggest conversations", isOn: $settings.shareSuggestions)
+                        .tint(HavenTheme.pink)
+                } header: { Text("Share sheet") }
+                footer: {
+                    Text("Puts your recent Haven conversations in the row at the top of any app's share sheet, so a photo or link is two taps from being sent. iOS keeps the name and photo on this device to draw that row; turning this off erases them. Locked circles are never suggested.")
+                }
+                #endif
                 Section {
                     Picker("Auto-delete old posts", selection: $settings.retentionDays) {
                         Text("Off").tag(0)

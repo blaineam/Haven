@@ -28,12 +28,16 @@ object CircleLock {
     fun isLocked(circleId: String): Boolean = ready && locked().contains(circleId)
     fun needsUnlock(circleId: String): Boolean = isLocked(circleId) && !unlocked.contains(circleId)
 
-    fun setLocked(circleId: String, on: Boolean) {
+    fun setLocked(context: Context, circleId: String, on: Boolean) {
         if (!ready) return
         val s = locked()
         if (on) s.add(circleId) else { s.remove(circleId); unlocked.add(circleId) }
         prefs.edit().putStringSet("locked", s).apply()
         version.value++
+        // A circle that just became locked must drop out of the share sheet's Direct Share row for
+        // the same reason it drops out of search: a locked circle hides that it exists, which a tile
+        // bearing its name in every other app's share sheet would not.
+        if (on) ShareShortcuts.remove(context, circleId) else ShareShortcuts.refresh(context)
     }
 
     fun markUnlocked(circleId: String) { unlocked.add(circleId); version.value++ }

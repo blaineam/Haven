@@ -32,39 +32,17 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 Launch sale — 50% off through September 30: $4.99, then $9.99. A private, end‑to‑end encrypted home for your closest people. No ads, no tracking, peer‑to‑peer.
 
 ## whats_new
-1.2.0 — your photos and videos show up.
+1.3.0 — share into Haven from anywhere.
 
-Photos and video
-• Media from friends now loads reliably. Anything that couldn't be opened is repaired automatically: your device notices, asks for a fresh copy, and the picture appears — instead of a grey tile that never resolved.
-• Media you were sent before joining a circle now opens too. Previously the words arrived and the pictures never did.
-• Photos and videos take about a third of the space and data they used to, on every device.
-
-Calls
-• Switching to another app during a call no longer mutes you to everyone else.
-• Turning your camera on mid-call sends real video instead of a black square, and an audio-only call no longer holds the camera open.
-
-Everything else
-• If you and a friend had removed each other, either of you can now ask to reconnect. Before, neither request could get through.
-• Adding a friend keeps trying until they answer, so requests sent over mobile data reach people who never used to receive them.
+• Share sheet: send photos, videos, links, text and files to Haven from any app. Pick a circle for a post, open the story editor, or send straight to a conversation without leaving the share sheet.
+• Your recent conversations now appear in the row at the top of any app's share sheet, so a photo is two taps from being sent. Locked circles never appear there.
+• Files arrive intact — PDFs, zips, documents — and can be opened on the other side.
 
 ## whats_new_previous
-1.1.5 — calls that connect, and stay connected.
+1.2.2 — a quieter night.
 
-Calls
-• Calls now complete between iPhone, Mac, Android and Windows even when a direct connection isn't possible. The relay fallback works for the first time, so calls go through on networks where they used to fail without explanation.
-• Mute, answer, decline and hang up respond the first time you tap them.
-• Calls start audio-only — turn your camera on whenever you like, instantly.
-• Fixed calls ending on their own moments after connecting, and a hang-up from an earlier call ending a new one.
-• Fixed the screen never sleeping again after a call had finished.
+• Media that repairs itself no longer notifies you. Haven quietly re-fetches photos and videos a relay has swept, and it used to announce every one — for media you'd never asked about. Now only a repair you personally asked for says so. The picture still just appears.
 
-Photos and video
-• Media in direct messages now arrives instead of sitting on a spinner. Small items no longer wait behind large videos.
-• Video thumbnails appear as soon as a post does, rather than being rebuilt on your device.
-
-Everything else
-• "Start over" now fully resets this device, including its identity. A half-reset could leave you unable to call or receive media.
-• Adding someone to a circle now says plainly that they'll see the circle's history. The old "new posts only" option couldn't be honoured, so it's gone.
-• Conversations open at the newest message.
 ## marketing_url
 https://wemiller.com/apps/haven/
 

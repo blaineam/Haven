@@ -1,4 +1,4 @@
-1.2.1 — three fixes from testers:
-• Media that repairs itself no longer sends you a notification about it. The photo just appears, which is what you wanted.
-• Taps on the call screen no longer pass through to whatever is behind it. The same fix covers stories and other full-screen views.
-• Fixed the keyboard covering part of what you were typing on the profile and add-friend screens.
+1.3.0 — share into Haven from anywhere.
+• Send photos, videos, links, text and files to Haven from any app. Pick a circle for a post, open the story editor, or send straight to a conversation.
+• Recent conversations appear in the share sheet's Direct Share row, so a photo is two taps from being sent. Locked circles never appear there.
+• Files arrive intact — PDFs, zips, documents — and can be opened on the other side.

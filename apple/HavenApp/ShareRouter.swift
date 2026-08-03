@@ -93,6 +93,16 @@ private struct ShareThumb: View {
     }
 }
 
+/// Newest message time in a thread, for recency ordering. A plain function with a written-out
+/// return type: both call sites sort on it, and inlining it made the surrounding expression large
+/// enough to trip the type-checker's budget on some Xcode versions.
+private enum ShareRouteRanking {
+    @MainActor static func lastActivity(_ circleId: String) -> UInt64 {
+        let stamps: [UInt64] = FeedStore.shared.messages(in: circleId).map(\.createdAt)
+        return stamps.max() ?? 0
+    }
+}
+
 /// One tappable conversation in the sheet's "Recent" strip.
 private struct RecentThreadTile: View {
     let circleId: String
@@ -118,15 +128,23 @@ struct ShareRouteView: View {
 
     /// Unlocked DM threads, most recently active first — the same order the Messages list uses, and
     /// the in-app echo of the share sheet's own suggestion row.
+    ///
+    /// Written as statements with explicit types rather than one chained expression. The chain
+    /// version (`.map` into an anonymous tuple, then `.filter`/`.sorted`/`.prefix`/`.map` over it)
+    /// type-checked on some Xcode versions and blew the solver's budget on others — Xcode Cloud
+    /// failed the iOS archive on it while a local Debug *and* Release build passed. Naming the
+    /// intermediates costs nothing and takes the whole class of failure off the table.
     private var recentThreads: [String] {
-        store.dmCircles
+        let unlocked: [String] = store.dmCircles
             .map(\.id)
             .filter { !CircleSettingsStore.shared.biometricRequired($0) }
-            .map { (id: $0, at: store.messages(in: $0).map(\.createdAt).max() ?? 0) }
-            .filter { $0.at > 0 }
-            .sorted { $0.at > $1.at }
-            .prefix(8)
-            .map(\.id)
+        var active: [(id: String, at: UInt64)] = []
+        for id in unlocked {
+            let at = ShareRouteRanking.lastActivity(id)
+            if at > 0 { active.append((id: id, at: at)) }
+        }
+        active.sort { $0.at > $1.at }
+        return active.prefix(8).map(\.id)
     }
 
     var body: some View {
@@ -235,10 +253,12 @@ private struct ShareComposeStep: View {
 
     /// Existing unlocked threads, most recent first.
     private var threads: [String] {
-        store.dmCircles
+        var ids: [String] = store.dmCircles
             .map(\.id)
             .filter { !CircleSettingsStore.shared.biometricRequired($0) }
-            .sorted { (store.messages(in: $0).map(\.createdAt).max() ?? 0) > (store.messages(in: $1).map(\.createdAt).max() ?? 0) }
+        // Same reason as `recentThreads` above: kept as a statement, not folded into the chain.
+        ids.sort { ShareRouteRanking.lastActivity($0) > ShareRouteRanking.lastActivity($1) }
+        return ids
     }
     /// People you haven't started a thread with — so the picker isn't two rows for the same person.
     private var contactsWithoutThread: [Contact] {

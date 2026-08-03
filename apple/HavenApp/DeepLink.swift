@@ -269,8 +269,16 @@ struct PostLinkView: View {
     private var post: FeedItemFfi? {
         // Retention-free lookup — see FeedStore.post(_:in:). Tapping a notification is an explicit
         // request for THIS post; a "hide older than N days" display preference must not turn it
-        // into "unavailable" for something the feed is still showing.
+        // into "unavailable" for something the feed is still showing. The same lookup resolves an
+        // id that names a COMMENT to the post carrying it.
         store.post(postId, in: circleId)
+    }
+
+    /// Non-nil when the link named a comment rather than the post itself — a reaction on, or a reply
+    /// to, a comment of mine. The post opens with that comment shown and marked.
+    private var linkedCommentId: String? {
+        guard let post, post.id != postId else { return nil }
+        return postId
     }
 
     var body: some View {
@@ -283,7 +291,9 @@ struct PostLinkView: View {
                                  onReact: { e in store.reactMessage(in: circleId, post.id, e) },
                                  onUnreact: { e in store.unreactMessage(in: circleId, post.id, e) },
                                  onComment: { b, m in store.commentMessage(in: circleId, post.id, b, m) },
-                                 onEdit: { _ in }, onUnsend: { })
+                                 onEdit: { _ in }, onUnsend: { },
+                                 expandAllComments: linkedCommentId != nil,
+                                 highlightCommentId: linkedCommentId)
                             .padding(16)
                     }
                     // A standalone post has no scroll-centre reporter, so name its own container and

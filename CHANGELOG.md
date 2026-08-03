@@ -7,6 +7,24 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.3.1] — 2026-08-03
+
+### Fixed — Apple + Android + Desktop
+
+- **"Post unavailable" for every activity row about a comment.** Reacting to (or replying to) a
+  comment is ordinary — the core's `react`/`comment` work on ANY event id — so those rows and their
+  push notifications carry the **comment's** id as their tap target. But a comment is not a top-level
+  feed item: it lives inside its parent post. Every deep-link screen looked the target up with
+  `feed(circle).first { $0.id == target }`, matched nothing, and reported the one failure message it
+  has for deleted / not-yours / not-synced. The post was sitting right there in the feed the whole
+  time.
+
+  All three clients now resolve an id that names a comment **up to the post that carries it**
+  (`FeedStore.post`, `PostLinkScreen`, `openPostLink`) — which also fixes the same tap arriving from
+  a notification, since every entry point funnels through that one lookup. The linked comment is
+  shown (never hidden behind "show all N comments") and tinted, because landing on a post with a
+  dozen comments doesn't answer *which* one was reacted to.
+
 ## [1.3.0] — 2026-08-02
 
 ### Added — Apple + Android

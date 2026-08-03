@@ -43,10 +43,14 @@ fun PostLinkScreen(circleId: String, postId: String, onDone: () -> Unit) {
     val version by HavenNet.feedVersion
     // Looked up UNFILTERED, unlike the feed: the user asked for this exact post, so a hidden one
     // still resolves and an unsent one resolves to its tombstone rather than a bare "not found".
+    // An id that names a COMMENT resolves to the post that CARRIES it (iOS `FeedStore.post`). Comments
+    // are not top-level feed items, so reacting to or replying to one produced an activity row and a
+    // push whose target matched nothing here — every one of those taps said "post not found".
     val post = remember(version, circleId, postId) {
         runCatching {
-            HavenNet.engine.feed(circleId, nowMs(), CircleSettings.retentionSecs(circleId))
-                .firstOrNull { it.id == postId }
+            val items = HavenNet.engine.feed(circleId, nowMs(), CircleSettings.retentionSecs(circleId))
+            items.firstOrNull { it.id == postId }
+                ?: items.firstOrNull { item -> item.comments.any { it.id == postId } }
         }.getOrNull()
     }
     val reports = remember(version, circleId, postId) {
@@ -72,7 +76,12 @@ fun PostLinkScreen(circleId: String, postId: String, onDone: () -> Unit) {
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    item { PostCard(post, circleId, reports) }
+                    // When the link named a comment, mark it — the post alone doesn't answer "which
+                    // comment did they react to?" on a thread with a dozen of them.
+                    item {
+                        PostCard(post, circleId, reports,
+                            highlightCommentId = if (post.id == postId) null else postId)
+                    }
                 }
             } else {
                 // Not in the circle, unsent, or simply not synced to this device yet — all of which

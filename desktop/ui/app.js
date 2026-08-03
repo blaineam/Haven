@@ -689,10 +689,14 @@ async function openPostLink(circleId, postId) {
   state.activeDm = null;
   state.focusPost = null;
   const items = await invoke("feed", { circleId }).catch(() => []);
-  const it = items.find((i) => i.id === postId);
+  // An id that names a COMMENT resolves to the post that CARRIES it (Apple `FeedStore.post`, Android
+  // `PostLinkScreen`). Comments are not top-level feed items, so a reaction on / reply to one — which
+  // the core allows on any event id — produced an activity row and a push that matched nothing here.
+  const it = items.find((i) => i.id === postId)
+    || items.find((i) => (i.comments || []).some((c) => c.id === postId));
   if (it && !it.unsent && !it.story) {
-    if (Hidden.has(postId)) Hidden.showHidden = true;   // opening a link is an explicit ask — don't hide it
-    state.focusPost = postId;
+    if (Hidden.has(it.id)) Hidden.showHidden = true;   // opening a link is an explicit ask — don't hide it
+    state.focusPost = it.id;
   }
   switchView("circle");   // land them in the right circle either way — but never pretend we found the post
   if (!it) toast("That post hasn't reached this device yet, or it isn't in this circle.");

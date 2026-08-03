@@ -117,6 +117,21 @@ Two deliberate consequences:
   able to ask. It waits ~1.5s before saying so, because the story and its source post can sync in either
   order.
 
+### A post id in a link may name a COMMENT
+
+`react`/`comment` in the core target **any event id**, so a reaction on (or a reply to) a comment
+produces an activity row and a push whose `p` is the **comment's** id — and comments are not
+top-level feed items, they live inside their parent. Resolution therefore has two steps, and every
+client does both (`FeedStore.post` on Apple, `PostLinkScreen` on Android, `openPostLink` on desktop):
+
+1. the item whose `id` matches, else
+2. the item that **carries** a comment with that id.
+
+Doing it in the lookup rather than at each call site is deliberate: activity rows, notification taps,
+story embeds and pasted web links all funnel through it, so they cannot disagree. The linked comment
+is then shown (never collapsed behind "show all N comments") and marked. Fixing it at the link-BUILD
+end instead would have been strictly worse — every row and push already in the wild would stay broken.
+
 ## Which pages open the app
 
 **Exactly one: `/apps/haven/open/`.** Everything else on the site — the marketing home page,

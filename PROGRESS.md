@@ -6,6 +6,15 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest wave (built, batched for next upload)
+- **Activity rows about a comment open the post again (2026-08-03, 1.3.1, every client)** — a
+  reaction or a reply on one of YOUR comments produced an activity row (and a push) whose tap target
+  is the *comment's* id. A comment isn't a top-level feed item — it lives inside its parent — so the
+  lookup behind every deep link matched nothing and the tap landed on "Post unavailable" for a post
+  sitting right there in the feed. All three clients now resolve a comment id up to the post that
+  carries it, in the ONE lookup every entry point shares (activity row, notification, story embed,
+  pasted link), so rows and pushes already in the wild are fixed too. The linked comment is shown —
+  never collapsed behind "show all N comments" — and tinted, because a post with a dozen comments
+  doesn't tell you which one they reacted to.
 - **Share into Haven from anywhere, and pick who it goes to (2026-08-02, 1.3.0, iPhone + Android)** —
   the share sheet now takes text, links, photos, videos **and files** (PDFs, zips, .docx, audio), and
   asks where they go: a post in one of your circles, a story, or a conversation — a friend or a group

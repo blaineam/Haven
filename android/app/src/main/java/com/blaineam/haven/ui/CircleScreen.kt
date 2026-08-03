@@ -2073,6 +2073,9 @@ fun PostCard(
     reports: List<uniffi.haven_ffi.ReportFfi> = emptyList(),
     // The feed passes true for the ONE centred card; single-post screens default to no autoplay.
     videoActive: Boolean = false,
+    // A comment this card was opened FOR (a deep link about a reaction or reply on it) — tinted so
+    // the thing the notification announced is findable. iOS `PostCard.highlightCommentId`.
+    highlightCommentId: String? = null,
 ) {
     val context = LocalContext.current
     // Encoding a comment attachment must leave the main thread — see MediaProcessing.
@@ -2446,7 +2449,15 @@ fun PostCard(
         if (item.comments.isNotEmpty()) {
             Spacer(Modifier.height(8.dp))
             item.comments.forEach { c ->
-                Column(Modifier.padding(vertical = 2.dp)) {
+                val linkedTo = c.id == highlightCommentId
+                Column(
+                    if (linkedTo) {
+                        Modifier.padding(vertical = 2.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(HavenTheme.pink.copy(alpha = 0.12f))
+                            .padding(6.dp)
+                    } else Modifier.padding(vertical = 2.dp)
+                ) {
                     // Tap-and-hold a comment to react to it (parity with iOS).
                     Row(Modifier.combinedClickable(onClick = {},
                         onLongClick = { commentPicker = if (commentPicker == c.id) null else c.id })) {

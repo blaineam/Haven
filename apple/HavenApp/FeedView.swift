@@ -1349,9 +1349,17 @@ final class FeedStore: ObservableObject {
     /// "Post unavailable" for a post sitting right there in the feed the moment you dismissed the
     /// sheet. The feed itself reads with `viewerRetentionSecs: nil`; a tap is an explicit request
     /// for one specific post, so it must too.
+    ///
+    /// An id that names a COMMENT resolves to the post that CARRIES it. Comments are not top-level
+    /// feed items — they live inside their parent — so an id pointing at one matched nothing here and
+    /// the tap landed on "Post unavailable". That is not a rare corner: the core's `react`/`comment`
+    /// work on ANY event id, so reacting to (or replying to) a comment produces an activity row and a
+    /// push whose target IS the comment. Resolving it up to the parent is the honest answer to "show
+    /// me this" — the comment is right there in the post, which is the context it only makes sense in.
     func post(_ postId: String, in circleId: String) -> FeedItemFfi? {
-        social?.feed(circleId: circleId, nowMs: now(), viewerRetentionSecs: nil)
-            .first { $0.id == postId }
+        let items = social?.feed(circleId: circleId, nowMs: now(), viewerRetentionSecs: nil) ?? []
+        return items.first { $0.id == postId }
+            ?? items.first { $0.comments.contains { $0.id == postId } }
     }
 
     func messages(in circleId: String) -> [FeedItemFfi] {
@@ -8431,6 +8439,9 @@ struct PostCommentsList: View {
     let item: FeedItemFfi
     let friendName: String
     let expandAllComments: Bool
+    /// The comment a deep link named (see `PostCard.highlightCommentId`) — tinted, never hidden
+    /// behind "show all".
+    var highlightCommentId: String? = nil
     let onReact: (String) -> Void
     let onUnreact: (String) -> Void
     let onComment: (String, [String]) -> Void
@@ -8448,8 +8459,14 @@ struct PostCommentsList: View {
     }
 
     var body: some View {
-        // Inline we show at most 3; the "show all" sheet shows every comment.
-        let shown = expandAllComments ? item.comments : Array(item.comments.prefix(3))
+        // Inline we show at most 3; the "show all" sheet shows every comment. A comment the caller
+        // opened this post FOR is always among them — landing on the post but not the comment the
+        // notification named would be its own small failure.
+        var shown = expandAllComments ? item.comments : Array(item.comments.prefix(3))
+        if let h = highlightCommentId, !shown.contains(where: { $0.id == h }),
+           let linked = item.comments.first(where: { $0.id == h }) {
+            shown.append(linked)
+        }
         return VStack(alignment: .leading, spacing: 10) {
             ForEach(shown, id: \.id) { c in commentRow(c) }
             if !expandAllComments && item.comments.count > 3 {
@@ -8493,6 +8510,15 @@ struct PostCommentsList: View {
                 }
                 if !c.unsent && !c.media.isEmpty { commentMediaRow(c.media) }
                 if !c.unsent { commentReactionsRow(c) }
+            }
+        }
+        .padding(highlightCommentId == c.id ? 6 : 0)
+        .background {
+            if highlightCommentId == c.id {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(HavenTheme.pink.opacity(0.12))
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(HavenTheme.pink.opacity(0.35)))
             }
         }
         .contextMenu {
@@ -8839,6 +8865,9 @@ struct PostCard: View {
     /// When true (the "show all comments" sheet) every comment is shown; otherwise the inline
     /// list is capped at 3 with a "show all" control.
     var expandAllComments = false
+    /// A comment this card was opened FOR — a notification/activity row about a reaction or reply on
+    /// it. Tinted so the thing that was announced is findable in a long thread.
+    var highlightCommentId: String? = nil
     /// Called when the "Add a reply…" field gains focus so the enclosing scroll view (which owns
     /// the ScrollViewReader proxy) can lift this post above the keyboard.
     var onCommentFocus: ((Bool) -> Void)? = nil
@@ -9014,6 +9043,7 @@ struct PostCard: View {
                 if !item.comments.isEmpty {
                     PostCommentsList(item: item, friendName: friendName,
                                      expandAllComments: expandAllComments,
+                                     highlightCommentId: highlightCommentId,
                                      onReact: onReact, onUnreact: onUnreact, onComment: onComment,
                                      onEdit: onEdit, onUnsend: onUnsend,
                                      onEditComment: { c in

@@ -74,9 +74,9 @@ final class ShareRouter: ObservableObject {
         // behind it. Without this a single missed draft wedged the queue permanently.
         if postDraft != nil { openPostComposer = true }
         for queued in queue {
-            // A composer is already up (our sheet, or the feed's own with a handed-over draft) —
-            // the rest keep until it's done rather than clobbering unsent work.
-            if present || postDraft != nil { return }
+            // A composer is already up (our sheet, the story editor, or the feed's own with a
+            // handed-over draft) — the rest keep until it's done rather than clobbering unsent work.
+            if present || postDraft != nil || openStoryDirectly { return }
             switch await consume(queued) {
             case .done:
                 ShareInbox.clear(queued.id)
@@ -157,11 +157,14 @@ final class ShareRouter: ObservableObject {
         case .undecided:
             return .needsUser
         case .story:
+            // A full-screen cover on the ROOT, not a sheet — the same way every other story in the
+            // app opens. Routing it through the share sheet meant presenting a full-screen editor
+            // inside a sheet that was itself being presented, which is fragile at launch and left
+            // the routing list sitting behind it.
             pendingCaption = body
             preselectedThread = nil
             openStoryDirectly = true
-            present = true
-            HavenLog.sync("share: story → composer with \(refs.count) ref(s)")
+            HavenLog.sync("share: story → editor with \(refs.count) ref(s)")
             return .needsUser
         case .post:
             // Straight into the feed's own composer, with the media and caption already loaded —
@@ -195,12 +198,21 @@ final class ShareRouter: ObservableObject {
         }
     }
 
-    /// The feed composer took the draft. Clearing it releases the drain loop for whatever else is
-    /// queued behind this share.
-    func consumePostDraft() {
+    /// Hand the pending post draft to whoever asks, exactly once.
+    ///
+    /// **Atomic take, and never called from inside the publish.** `@Published` emits in `willSet`,
+    /// so a subscriber that clears the property from its `onReceive` closure is writing DURING the
+    /// original assignment — the outer `postDraft = draft` then completes and puts the value
+    /// straight back. The draft therefore never cleared: it was re-applied on every `onAppear`
+    /// (duplicate attachments, media "coming back" after a tab switch) and, because the drain
+    /// refuses to run while one is pending, it wedged every later share — which is why stories
+    /// stopped opening at all. Callers must defer to the next runloop turn; see `FeedView`.
+    func takePostDraft() -> PostDraft? {
+        guard let draft = postDraft else { return nil }
         postDraft = nil
         openPostComposer = false
-        Task { await ingest() }
+        Task { await ingest() }   // release whatever queued up behind it
+        return draft
     }
 
     func dismiss() {
@@ -256,6 +268,29 @@ private enum ShareRouteRanking {
     }
 }
 
+/// The story editor for something shared in from another app.
+///
+/// Presented as a full-screen cover on the ROOT view, exactly like every other story in Haven —
+/// not nested inside the routing sheet. Nesting a full-screen editor inside a sheet that is itself
+/// being presented at launch is fragile, and it left the routing list sitting behind it so backing
+/// out asked "where should this go?" about a destination already chosen in the share sheet.
+struct ShareStoryComposer: View {
+    @ObservedObject private var router = ShareRouter.shared
+    @ObservedObject private var store = FeedStore.shared
+
+    var body: some View {
+        // `displayRefs`: a video is clip + poster + original, and the editor wants the clip.
+        StoryComposerView(draft: StoryDraft(refs: MediaVariants.displayRefs(router.refs))) { ref, caption, track in
+            Task { @MainActor in
+                // A long video becomes up to 5 consecutive story slides (same as the camera flow).
+                let parts = await MediaStore.shared.splitStoryVideo(ref)
+                for r in parts { store.postStory(media: [r], caption: caption, music: track) }
+                router.dismiss()
+            }
+        } onDone: { router.dismiss() }
+    }
+}
+
 /// One tappable conversation in the sheet's "Recent" strip.
 private struct RecentThreadTile: View {
     let circleId: String
@@ -301,39 +336,18 @@ struct ShareRouteView: View {
     }
 
     var body: some View {
-        // The extension already chose Story, so the composer IS this sheet — not a full-screen
-        // cover raised by an `onAppear` toggle over a routing list. That indirection is what made
-        // the editor unreliable to open and made backing out of it land on a "where should this
-        // go?" question that had already been answered in the share sheet.
-        if router.openStoryDirectly {
-            storyComposer
-        } else {
-            NavigationStack {
-                Group {
-                    // Came in from a share-sheet suggestion: the destination is already decided, so
-                    // skip straight to writing the message.
-                    if let thread = router.preselectedThread {
-                        ShareComposeStep(mode: .dm, preselected: thread)
-                    } else {
-                        routeList
-                    }
+        NavigationStack {
+            Group {
+                // Came in from a share-sheet suggestion: the destination is already decided, so
+                // skip straight to writing the message.
+                if let thread = router.preselectedThread {
+                    ShareComposeStep(mode: .dm, preselected: thread)
+                } else {
+                    routeList
                 }
-                .havenFullScreenCover(isPresented: $showStory) { storyComposer }
             }
+            .havenFullScreenCover(isPresented: $showStory) { ShareStoryComposer() }
         }
-    }
-
-    /// `displayRefs`: a video is clip + poster + original, and the story composer wants the clip,
-    /// not its companions.
-    private var storyComposer: some View {
-        StoryComposerView(draft: StoryDraft(refs: MediaVariants.displayRefs(router.refs))) { ref, caption, track in
-            Task { @MainActor in
-                // A long video becomes up to 5 consecutive story slides (same as the camera flow).
-                let parts = await MediaStore.shared.splitStoryVideo(ref)
-                for r in parts { store.postStory(media: [r], caption: caption, music: track) }
-                showStory = false; router.dismiss()
-            }
-        } onDone: { showStory = false; router.dismiss() }
     }
 
     private var routeList: some View {

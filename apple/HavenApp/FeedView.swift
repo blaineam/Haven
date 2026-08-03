@@ -7276,12 +7276,17 @@ struct FeedView: View {
     /// Load a share routed to "Share as Post" into THIS composer — the one that owns the circle
     /// switcher, the song picker, the location toggle and scheduling. Appended, never assigned, so
     /// it can't discard something half-typed.
-    private func takeSharedPost(_ draft: ShareRouter.PostDraft) {
+    ///
+    /// Deliberately a PULL (`takePostDraft`), and deliberately never called straight from the
+    /// publisher — see that method for why clearing during the publish silently put the draft back.
+    /// Refs are de-duplicated because both entry points (the publisher and `onAppear`) can fire for
+    /// one share, which is what attached the same photo twice.
+    private func applySharedPostDraft() {
+        guard let draft = ShareRouter.shared.takePostDraft() else { return }
         if !draft.text.isEmpty {
             compose = compose.isEmpty ? draft.text : compose + "\n" + draft.text
         }
-        attachedMedia.append(contentsOf: draft.refs)
-        ShareRouter.shared.consumePostDraft()
+        attachedMedia.append(contentsOf: draft.refs.filter { !attachedMedia.contains($0) })
     }
     #endif
 
@@ -7430,7 +7435,11 @@ struct FeedView: View {
             // location toggle and schedule all still apply. Appended, never assigned: re-entering
             // the tab must not discard something half-typed.
             #if os(iOS)
-            .onReceive(ShareRouter.shared.$postDraft.compactMap { $0 }) { draft in takeSharedPost(draft) }
+            // Next runloop turn, NOT inline: this fires from `@Published`'s willSet, and taking the
+            // draft there writes into the middle of the very assignment that published it.
+            .onReceive(ShareRouter.shared.$postDraft) { _ in
+                DispatchQueue.main.async { applySharedPostDraft() }
+            }
             #endif
             .onAppear {
                 #if os(iOS)
@@ -7438,12 +7447,10 @@ struct FeedView: View {
                 //
                 // TabView builds a tab's content the first time that tab is shown, so a share
                 // routed to "Share as Post" while the Circle tab had never been opened published
-                // `postDraft` to nobody — `onReceive` needs a live subscriber. The draft then sat
-                // there, and because the drain refuses to run while one is pending, EVERY later
-                // share queued up behind it and nothing worked again. Same trap, same fix as the
-                // DM hand-off in Messages.swift: the value is durable, so also look for one on the
-                // way in.
-                if let draft = ShareRouter.shared.postDraft { takeSharedPost(draft) }
+                // `postDraft` to nobody — `onReceive` needs a live subscriber. The draft is
+                // durable, so also look for one on the way in. Both paths are safe to run: the
+                // take is atomic and the refs de-duplicate.
+                applySharedPostDraft()
                 #endif
                 store.configureForCurrentIdentity()   // seeded or seedless (S4) — never boot off a throwaway seed
                 // Screenshot harness: open the full-screen story viewer for its hero shot.

@@ -523,6 +523,10 @@ struct RootView: View {
         .sheet(isPresented: $shareRouter.present, onDismiss: { shareRouter.dismiss() }) {
             ShareRouteView()
         }
+        // "Add to your Story" from the share sheet — a full-screen editor on the root, the same way
+        // every other story opens. It used to live inside the routing sheet, which meant presenting
+        // a full-screen cover from a sheet that was itself appearing at launch.
+        .havenFullScreenCover(isPresented: $shareRouter.openStoryDirectly) { ShareStoryComposer() }
         // "Share as Post" hands the media to the FEED's composer (circle switcher, song, location),
         // so the only thing left is to be looking at it.
         .onReceive(shareRouter.$openPostComposer) { open in if open { tab = "circle" } }

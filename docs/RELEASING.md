@@ -13,7 +13,11 @@ Haven is **one product** that happens to be compiled for six places (iPhone, iPa
 Android, Windows, Linux) out of **one core**. A feature lands in `core/` and ships everywhere
 at once; the CHANGELOG has one entry for it, not six. So it gets one version number.
 
-**Plain semver `X.Y.Z`. No `-beta`, no `-rc`, no `-alpha` suffixes.**
+**Plain semver `X.Y.Z`, plus one permitted pre-release suffix: `-rc.N`.** No `-beta`, no
+`-alpha`, no build metadata. `-rc.N` earns its exception by being a *channel*, not a version
+universe: `v1.3.0-rc.1` and `v1.3.0` are the same code and the same `MARKETING_VERSION`, and the
+suffix only says who is allowed to see it (see [Cutting a release](#cutting-a-release)). The
+`-beta` line is what created two version universes, and it stays gone.
 
 ### Why the Apple number wins
 
@@ -94,7 +98,7 @@ store** and the GitHub Release *is* their distribution point.
 
 | Platform | Proper channel | On the GitHub Release? |
 |---|---|---|
-| iPhone · iPad · Mac | **App Store** | No — never was (built by `rocket`, not CI) |
+| iPhone · iPad · Mac | **App Store** (TestFlight via Xcode Cloud, review via `apple-store.yml`) | No — never was |
 | Android | **Google Play** | No (once Play is public) — *stopgap until then* |
 | Windows | **Microsoft Store** (live) | No — [live on the Store](https://apps.microsoft.com/store/detail/9NKTFH1MF4LM) |
 | Linux desktop GUI | *(no store)* → GitHub Release | **Yes** — `.deb` / `.rpm` / AppImage / `haven.flatpak` |
@@ -153,20 +157,36 @@ whatever assets they were published with; the switch only affects future release
 
 ## Cutting a release
 
+Releases go out in **two hops: candidate, then promote.** Testers get the exact build that ships.
+
 1. **Land the work.** Update `CHANGELOG.md` (one entry, all platforms).
 2. **Set the version.** Bump `MARKETING_VERSION` in `apple/project.yml` (all targets — they
    must agree; the gate rejects the file if they don't).
-3. **Apple** — cut the build (see `_shared/rocket`), submit for review.
-4. **Tag** — the same number, with a `v`:
+3. **Push to `main`.** Xcode Cloud builds it and ships it to **TestFlight internal** on its own —
+   no tag needed.
+4. **Tag a candidate** and let people use it:
    ```bash
-   git tag v1.0.5 && git push origin v1.0.5
+   git tag v1.3.0-rc.1 && git push origin v1.3.0-rc.1
    ```
-5. CI does the rest. `release.yml` → relay binaries + `.deb`s, desktop installers, Flatpak
-   bundle + pinned manifest, the GitHub Release, and the AUR push. `android.yml` → APKs, AAB,
-   and the Play internal-track upload. Both are gated: absent secrets skip cleanly instead of
-   failing. Per the **channel policy above**, the GitHub Release carries Linux + relay; the paid
-   Windows/Android builds are attached only as a stopgap until their stores go public (see the
-   `PUBLISH_*_TO_GH` toggles).
+   → Play **internal + closed (alpha)** testing. **Nothing goes to production, on either store** —
+   the rc guard forces it, and it can't be overridden by a repo variable or a manual input.
+5. **Promote** when the candidate holds up — tag the *same commit* without the suffix:
+   ```bash
+   git tag v1.3.0 && git push origin v1.3.0
+   ```
+   → Play **production**, and `apple-store.yml` creates the App Store version, attaches whatever
+   build Xcode Cloud produced (`--build latest --wait`), sets "What's New" and submits for review.
+
+Everything else rides the same tag. `release.yml` → relay binaries + `.deb`s, desktop installers,
+Flatpak bundle + pinned manifest, the GitHub Release, and the AUR push. `android.yml` → APKs, AAB,
+and the Play upload. All of it is gated: absent secrets skip cleanly instead of failing. Per the
+**channel policy above**, the GitHub Release carries Linux + relay; the paid Windows/Android builds
+are attached only as a stopgap until their stores go public (see the `PUBLISH_*_TO_GH` toggles).
+
+> **Nothing forces the two-hop.** Tagging `v1.3.0` directly still works and ships straight to
+> production on both stores — it just skips the step where somebody else finds the problem first.
+
+See `docs/STORE-AUTOPUBLISH.md` for the full track table and the overrides.
 
 **Dry run:** `workflow_dispatch` on `release.yml` builds everything without publishing. Off a
 branch with no input it builds whatever `MARKETING_VERSION` currently says.
@@ -185,7 +205,8 @@ rather than letting a relay-only line accumulate.
 
 `release.yml`'s `meta` job is the enforcement point. It fails the release if:
 
-- the tag isn't a plain `vX.Y.Z` (so the `-beta` scheme can't come back by muscle memory), or
+- the tag isn't `vX.Y.Z` or `vX.Y.Z-rc.N` (so the `-beta` scheme can't come back by muscle
+  memory — `-rc.N` is the only pre-release suffix that passes), or
 - the tag doesn't match `apple/project.yml` `MARKETING_VERSION` (so the two universes can't
   drift apart again), or
 - `apple/project.yml`'s targets disagree with each other about `MARKETING_VERSION`.

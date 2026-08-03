@@ -9,8 +9,16 @@
  *   Scripts/asc-new-version.mjs --platform MAC_OS --version 1.0.1 --build 178 \
  *       --notes-file whatsnew.txt --submit
  *
- * Auth: env ASC_API_KEY_ID / ASC_API_ISSUER_ID (falls back to ~/.rocket/config.json),
- * key at ~/.appstoreconnect/private_keys/AuthKey_<KEY_ID>.p8.
+ * `--build latest` attaches the newest VALID build of `--version` instead of naming a number,
+ * and `--wait <minutes>` keeps looking while one processes. That pair is what lets CI submit
+ * without knowing the build number: Xcode Cloud picks it (from its own run counter) minutes
+ * after the tag is pushed, so nothing on the tagging side can predict it.
+ *
+ *   Scripts/asc-new-version.mjs --platform IOS --version 1.3.0 --build latest --wait 60 --submit
+ *
+ * Auth: env ASC_API_KEY_ID / ASC_API_ISSUER_ID (falls back to ~/.rocket/config.json), key from
+ * env ASC_API_PRIVATE_KEY (the .p8's contents — for CI) else
+ * ~/.appstoreconnect/private_keys/AuthKey_<KEY_ID>.p8.
  */
 import { readFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
@@ -30,12 +38,14 @@ function parseArgs(argv) {
 			case '--platform': a.platform = argv[++i]; break;
 			case '--version': a.version = argv[++i]; break;
 			case '--build': a.build = argv[++i]; break;
+			case '--wait': a.waitMinutes = Number(argv[++i]); break;
 			case '--notes-file': a.notesFile = argv[++i]; break;
 			case '--submit': a.submit = true; break;
 			default: die(`unknown arg ${argv[i]}`);
 		}
 	}
 	if (!a.version) die('--version required');
+	if (a.waitMinutes !== undefined && !Number.isFinite(a.waitMinutes)) die('--wait wants minutes');
 	return a;
 }
 
@@ -46,8 +56,12 @@ function creds() {
 		if (existsSync(cfg)) { const j = JSON.parse(readFileSync(cfg, 'utf8')); keyId = keyId || j.ascKeyId; issuer = issuer || j.ascIssuerId; }
 	}
 	if (!keyId || !issuer) die('No ASC creds');
+	// CI has no home directory to drop a .p8 into, and writing one to the runner's disk just to
+	// read it back is a secret on disk for no reason — take the key material straight from the env.
+	const inline = process.env.ASC_API_PRIVATE_KEY;
+	if (inline && inline.includes('BEGIN')) return { keyId, issuer, p8Pem: inline };
 	const p8 = join(homedir(), '.appstoreconnect/private_keys', `AuthKey_${keyId}.p8`);
-	if (!existsSync(p8)) die(`Missing ${p8}`);
+	if (!existsSync(p8)) die(`Missing ${p8} (and no ASC_API_PRIVATE_KEY in the environment)`);
 	return { keyId, issuer, p8Pem: readFileSync(p8, 'utf8') };
 }
 function makeToken({ keyId, issuer, p8Pem }) {
@@ -70,6 +84,42 @@ async function api(token, method, path, body) {
 }
 
 const EDITABLE = new Set(['PREPARE_FOR_SUBMISSION', 'DEVELOPER_REJECTED', 'REJECTED', 'METADATA_REJECTED', 'INVALID_BINARY']);
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * The build to attach.
+ *
+ * `--build <n>` names one. `--build latest` takes the newest VALID build of THIS marketing version
+ * — note `filter[version]` on /v1/builds is the build NUMBER, so the marketing version is matched
+ * through `preReleaseVersion.version`; filtering on the wrong one silently finds nothing.
+ *
+ * With `--wait`, keep looking. A freshly uploaded build sits in PROCESSING for a few minutes, and a
+ * CI job that runs the moment a tag is pushed will nearly always get there first — "not VALID yet"
+ * is the expected first answer, not an error.
+ */
+async function resolveBuild(token, appId, args) {
+	const wantLatest = String(args.build).toLowerCase() === 'latest';
+	const query = wantLatest
+		? `/v1/builds?filter[app]=${appId}&filter[preReleaseVersion.version]=${encodeURIComponent(args.version)}` +
+		  `&filter[preReleaseVersion.platform]=${args.platform}&sort=-uploadedDate&limit=10`
+		: `/v1/builds?filter[app]=${appId}&filter[version]=${encodeURIComponent(args.build)}` +
+		  `&filter[preReleaseVersion.platform]=${args.platform}&sort=-uploadedDate&limit=5`;
+	const deadline = Date.now() + (args.waitMinutes ?? 0) * 60_000;
+	let seen = 'none';
+	for (;;) {
+		const builds = (await api(token, 'GET', query)).data || [];
+		const valid = builds.find((b) => b.attributes.processingState === 'VALID');
+		if (valid) return valid;
+		seen = builds.map((b) => `${b.attributes.version}:${b.attributes.processingState}`).join(', ') || 'none';
+		if (Date.now() >= deadline) break;
+		console.log(`• Waiting for a VALID ${args.platform} build of ${args.version} (saw: ${seen})…`);
+		await sleep(60_000);
+	}
+	die(wantLatest
+		? `No VALID ${args.platform} build of ${args.version} — states: ${seen}`
+		: `Build ${args.build} (${args.platform}) not VALID yet — states: ${seen}`);
+}
 
 async function main() {
 	const args = parseArgs(process.argv);
@@ -110,11 +160,9 @@ async function main() {
 
 	// Attach the build (must be VALID).
 	if (args.build) {
-		const builds = (await api(token, 'GET', `/v1/builds?filter[app]=${app.id}&filter[version]=${args.build}&filter[preReleaseVersion.platform]=${args.platform}&sort=-uploadedDate&limit=5`)).data || [];
-		const build = builds.find((b) => b.attributes.processingState === 'VALID');
-		if (!build) die(`Build ${args.build} (${args.platform}) not VALID yet — states: ${builds.map((b) => b.attributes.processingState).join(', ') || 'none'}`);
+		const build = await resolveBuild(token, app.id, args);
 		await api(token, 'PATCH', `/v1/appStoreVersions/${version.id}/relationships/build`, { data: { type: 'builds', id: build.id } });
-		console.log(`• Attached build ${args.build} (${build.id})`);
+		console.log(`• Attached build ${build.attributes.version} (${build.id})`);
 	}
 
 	if (!args.submit) { console.log('• (not submitting — pass --submit)'); return; }

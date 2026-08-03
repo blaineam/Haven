@@ -38,30 +38,84 @@ does the rest. Both run in the same job.)
 > Google caps the "what's new" note at **500 characters per language**. `changelogs/default.txt` is
 > kept under that; a longer note makes the upload step warn (it's non-fatal) rather than publish.
 
-### Track promotion — how you say "go to production"
+### The tag decides the channel
 
-**The safe default is `internal`.** A routine `v*` tag with nothing else configured *always* ships
-to the internal track — it can never accidentally hit production. Promotion is a deliberate act, one
-of two ways:
+**A release candidate goes to testers. A release goes live.** That is the whole policy, and the
+`-rc.N` suffix on the tag is what says which one this is — on *both* stores, so an rc can't be live
+on one platform and in testing on the other.
 
-1. **One-off, per-release (recommended for prod):** Actions ▸ **android** ▸ *Run workflow* ▸ set
-   **`play_track`** to `beta` or `production` (and optionally **`play_rollout`** to e.g. `0.1` for a
-   10 % staged rollout). This rebuilds the current version and uploads it to that track *once*. A tag
-   never reads these inputs, so this can't leak into routine releases.
-2. **Standing, for every tag:** set the repo variable **`PLAY_TRACK`** (Settings ▸ Secrets and
-   variables ▸ Actions ▸ Variables) to `alpha`/`beta`/`production`. *Every* subsequent tag then
-   targets that track — persistent and deliberate. Optionally set **`PLAY_USER_FRACTION`** (e.g.
-   `0.1`) for a standing staged rollout. Unset both to return to the safe `internal` default.
+| Tag | Google Play | Apple |
+|---|---|---|
+| `v1.3.0-rc.1` | `internal` **and** `alpha` (closed testing) | TestFlight internal, via Xcode Cloud |
+| `v1.3.0` | `production` | App Store review, via `apple-store.yml` |
+
+Promoting an rc is just tagging the same commit again without the suffix. Nothing is rebuilt from
+different source; the number that was in testers' hands is the number that ships.
+
+**The rc guard overrides everything, including you.** An rc tag is forced to `internal` even if
+`PLAY_TRACK` or a manual `play_track` input asked for `production`, `beta` or `alpha`. Asking for
+production while tagging a release *candidate* is a contradiction, and the safe reading of a
+contradiction is "testers only". The same gate is the first thing `apple-store.yml` checks — an rc
+tag never opens an App Store submission at all.
+
+Two overrides remain, for the off-schedule cases (neither can defeat the rc guard):
+
+1. **One-off:** Actions ▸ **android** ▸ *Run workflow* ▸ set **`play_track`** (and optionally
+   **`play_rollout`** to e.g. `0.1` for a 10 % staged rollout). This re-uploads the *current*
+   version to that track once. A tag never reads these inputs.
+2. **Standing:** set the repo variable **`PLAY_TRACK`** (Settings ▸ Secrets and variables ▸ Actions
+   ▸ Variables). *Every* subsequent tag is then pinned to that track instead of choosing its own.
+   Optionally set **`PLAY_USER_FRACTION`** for a standing staged rollout. Unset both to return to
+   "the tag decides".
 
 Resolution precedence (implemented in the *"Resolve Play version + track"* step):
 
 ```
-workflow_dispatch play_track input   →   PLAY_TRACK variable   →   "internal"   (safe default)
+workflow_dispatch play_track   →   PLAY_TRACK variable   →   the tag's own channel (rc ? internal : production)
+                                                             …then the rc guard, which nothing overrides
 ```
 
 A rollout fraction below `1.0` flips the release to `status=inProgress` (Play staged rollout); blank
-or `1.0` publishes fully live (`status=completed`). With no variable set and no dispatch inputs, the
-resolved target is exactly the pre-existing behaviour: **`track=internal, status=completed`.**
+or `1.0` publishes fully live (`status=completed`).
+
+---
+
+## Apple (iOS + macOS → `.github/workflows/apple-store.yml`)
+
+Apple's pipeline is split between two systems, and it helps to know which does what:
+
+| Step | Who | When |
+|---|---|---|
+| Build + upload to TestFlight **internal** | **Xcode Cloud** | every push to `main` |
+| Create the App Store version, attach the build, set "What's New", submit for review | **`apple-store.yml`** | a plain `v*` tag only |
+
+So testers are served by Xcode Cloud with no tag at all — which is why an rc tag has nothing to do
+on Apple, and the workflow's first step is to notice the `-rc.` and stop.
+
+The build number can't be known in advance (Xcode Cloud assigns it from its own counter, minutes
+after the push), so the submit doesn't try to guess: `Scripts/asc-new-version.mjs --build latest
+--wait 60` polls App Store Connect for the newest **VALID** build of that marketing version and
+attaches whatever XCC produced. If none appears within the window the job fails loudly rather than
+submitting something else.
+
+Release notes come from the *same* file Play's do
+(`android/fastlane/metadata/android/en-US/changelogs/default.txt`), so the two stores can't describe
+the same release differently.
+
+### Secrets
+
+| Secret | What |
+|---|---|
+| `ASC_API_KEY_ID` | App Store Connect API key id |
+| `ASC_API_ISSUER_ID` | its issuer id |
+| `ASC_API_PRIVATE_KEY` | the `.p8` contents, verbatim (`-----BEGIN PRIVATE KEY-----` …) |
+
+Missing any of them and the job skips with a notice; the release still stands and can be submitted
+by hand with the same script. The key needs the **App Manager** role — Developer can't create an
+App Store version or open a review submission.
+
+> Apple still owns the parts no API can do: export compliance answers that aren't already declared
+> in the plist, a first submission of a brand-new app, and anything review comes back asking for.
 
 ### One-time manual setup (you must do this by hand)
 

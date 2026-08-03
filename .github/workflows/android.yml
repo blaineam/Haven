@@ -46,13 +46,13 @@ on:
       - ".github/workflows/android.yml"
   workflow_dispatch:
     inputs:
-      # ── Deliberate Play-track promotion (see docs/STORE-AUTOPUBLISH.md "Promoting to production").
-      # A routine `v*` tag NEVER reads these — it ships to `internal` (or the repo variable
-      # PLAY_TRACK, if you set one). Production is reached only by running this workflow by hand and
-      # picking `production` here, OR by deliberately setting the PLAY_TRACK repo variable. The
-      # DEFAULT below is `internal`, so a manual run you forget to configure is still safe.
+      # ── Manual Play-track override (see docs/STORE-AUTOPUBLISH.md "Promoting to production").
+      # A `v*` tag NEVER reads these — the TAG decides its channel: `-rc.N` goes to testers,
+      # a plain tag goes to production. This is for the off-schedule case: re-uploading the current
+      # version to a different track, or a staged rollout. The DEFAULT is `internal`, so a manual
+      # run you forget to configure can't publish anything publicly.
       play_track:
-        description: "Google Play track to publish to (deliberate promotion; tags ignore this)"
+        description: "Google Play track to publish to (manual override; tags decide their own)"
         required: false
         default: internal
         type: choice
@@ -154,11 +154,11 @@ jobs:
           fi
 
       # ── Resolve the Play target (version name + track + rollout) ──────────────────────────────
-      # PROMOTION POLICY (mandatory safe default): a routine `v*` tag publishes to `internal` unless
-      # the repo variable PLAY_TRACK overrides it; a manual workflow_dispatch may pick any track via
-      # the play_track input. Precedence: dispatch input > PLAY_TRACK variable > "internal".
-      #   • Routine tag, no variable set        → internal            (never accidentally prod)
-      #   • Routine tag (no dispatch input, no PLAY_TRACK) → internal AND alpha, both, every time
+      # PROMOTION POLICY — THE TAG DECIDES THE CHANNEL. `vX.Y.Z-rc.N` is a release candidate and
+      # goes to testers only; `vX.Y.Z` is a release and goes live. Precedence:
+      # dispatch input > PLAY_TRACK variable > the tag's own channel.
+      #   • rc tag    `v1.3.0-rc.1`  → internal AND alpha (testers), NEVER production
+      #   • plain tag `v1.3.0`       → production
       #   • workflow_dispatch play_track=alpha   → alpha  (CLOSED testing — this is the closed track)
       #   • workflow_dispatch play_track=beta     → beta   (OPEN testing — public opt-in link)
       #
@@ -168,8 +168,10 @@ jobs:
       # `Precondition check failed` — which reads like a broken credential rather than the wrong
       # destination. Closed testers live on ALPHA.
       #   • workflow_dispatch play_track=production (+ play_rollout)  → staged/full production
-      #   • PLAY_TRACK=production variable set    → every tag then targets production (deliberate,
-      #                                             persistent — the Console-free "always ship prod")
+      #   • PLAY_TRACK set                        → pins EVERY tag to that track, overriding the
+      #                                             tag's own channel (except the rc guard, which
+      #                                             nothing overrides). Unset it to go back to
+      #                                             "the tag decides".
       # A rollout fraction < 1.0 switches the release to status=inProgress (Play staged rollout);
       # blank or 1.0 means a fully-live release (status=completed). See docs/STORE-AUTOPUBLISH.md.
       - name: Resolve Play version + track
@@ -193,25 +195,38 @@ jobs:
           else
             VN="$(grep -m1 -E 'MARKETING_VERSION:' apple/project.yml | sed -E 's/.*"([^"]+)".*/\1/')"
           fi
-          # track: dispatch input > repo variable > safe default (internal)
+          # Is this a release CANDIDATE? `vX.Y.Z-rc.N` is the only pre-release shape release.yml
+          # accepts, and it is the whole basis of the channel split below.
+          case "$REF_NAME" in
+            *-rc.*) IS_RC=1 ;;
+            *)      IS_RC=0 ;;
+          esac
+          # track: dispatch input > repo variable > THE TAG'S OWN CHANNEL.
+          #
+          #   rc tag      → internal   (testers try it first; nothing public sees it)
+          #   plain tag   → production (an ordinary release ships)
+          #
+          # The default used to be `internal` for everything, which made shipping a finished release
+          # a second, manual act somebody had to remember. The tag already says which kind of build
+          # this is — `-rc.N` or not — so it may as well be the thing that decides.
           if [ "$EVENT" = "workflow_dispatch" ] && [ -n "${IN_TRACK:-}" ]; then
             TRACK="$IN_TRACK"
           elif [ -n "${VAR_TRACK:-}" ]; then
             TRACK="$VAR_TRACK"
+          elif [ "$IS_RC" = "1" ]; then
+            TRACK="internal"
           else
+            TRACK="production"
+          fi
+          # rc GUARD: an rc may ship to a PRE-RELEASE track, but must NEVER reach Play PRODUCTION —
+          # not via PLAY_TRACK, not via a dispatch input, not via the default above. This is the one
+          # rule in here that overrides an explicit human choice, deliberately: asking for
+          # production while tagging an rc is a contradiction, and the safe reading is "internal".
+          # Beta/alpha are downgraded too — an rc goes to OUR testers, not to an open opt-in track.
+          if [ "$IS_RC" = "1" ] && [ "$TRACK" != "internal" ]; then
+            echo "::notice::rc tag $REF_NAME → Play track $TRACK→internal (an rc never publishes past internal testers)."
             TRACK="internal"
           fi
-          # rc GUARD: a `vX.Y.Z-rc.N` tag is a release CANDIDATE — it may ship to a PRE-RELEASE
-          # track (internal) for QA, but must NEVER reach Play PRODUCTION, even if PLAY_TRACK or a
-          # dispatch input asked for it. Downgrade production→internal on any rc tag. See docs/QA.md.
-          case "$REF_NAME" in
-            *-rc.*)
-              if [ "$TRACK" = "production" ]; then
-                echo "::notice::rc tag $REF_NAME → Play track production→internal (rc never publishes to production)."
-                TRACK="internal"
-              fi
-              ;;
-          esac
           # rollout fraction: dispatch input > repo variable > none
           if [ "$EVENT" = "workflow_dispatch" ] && [ -n "${IN_ROLLOUT:-}" ]; then
             FRAC="$IN_ROLLOUT"
@@ -224,12 +239,16 @@ jobs:
           else
             STATUS="completed"; USERFRACTION=""
           fi
-          # COMPANION TRACK: a routine release goes to internal AND closed testing, not one or the
+          # COMPANION TRACK: a PRE-RELEASE goes to internal AND closed testing, not one or the
           # other. `internal` is the fast lane for our own devices; `alpha` is Play's CLOSED track,
           # where the actual testers are. Shipping to only one meant testers either got nothing or
           # had to be served by a second, manual dispatch — and two runs racing the same versionCode
           # is exactly how v1.1.4-rc.23's AAB failed to land (run 30019665798). Doing both in ONE
           # run, sequentially, removes that race.
+          #
+          # `production` has no companion (the case below only pairs internal⇄alpha), which is what
+          # an ordinary release wants: it goes live, and the testing tracks are already carrying the
+          # rc it was promoted from.
           #
           # An EXPLICIT dispatch choice stays single-track: asking for production means production,
           # not production plus a surprise. Same for an explicit PLAY_TRACK variable.

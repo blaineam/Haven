@@ -1,0 +1,173 @@
+name: apple-store
+
+# Submit a tagged release to the App Store — the Apple half of the channel policy that
+# `android.yml` implements for Google Play.
+#
+# ── THE SPLIT ──────────────────────────────────────────────────────────────────────────────
+# The TAG decides where a build goes, on both platforms:
+#
+#   v1.3.0-rc.1  (release candidate)  → testers only.  TestFlight internal (Xcode Cloud) +
+#                                       Play internal/alpha. THIS WORKFLOW DOES NOTHING.
+#   v1.3.0       (release)            → production.     App Store review (this workflow) +
+#                                       Play production.
+#
+# So an rc reaches every tester on both platforms and reaches nobody else, and promoting it is
+# just tagging the same commit without the `-rc.N`.
+#
+# ── WHAT ALREADY HAPPENS WITHOUT THIS FILE ─────────────────────────────────────────────────
+# Xcode Cloud builds every push to `main` and ships it to TestFlight INTERNAL testers on its
+# own. That is the rc path in full — there is nothing to add for an rc, which is exactly why
+# this workflow's first act is to stop when the tag has `-rc.` in it.
+#
+# What XCC does NOT do is create the App Store version, attach the build, set the release
+# notes and submit for review. That was a by-hand step (`Scripts/asc-new-version.mjs`, run
+# from a laptop). This runs the same script from CI, on a plain tag, for both platforms.
+#
+# ── ORDERING ───────────────────────────────────────────────────────────────────────────────
+# The build has to EXIST before it can be attached, and Xcode Cloud starts when the commit is
+# pushed — typically minutes before it finishes processing in App Store Connect. So the tag
+# push does not race it: `--build latest --wait` polls for the newest VALID build of this
+# version. If XCC hasn't produced one within the window, the job fails loudly rather than
+# submitting the wrong thing.
+#
+# ── SECRETS ────────────────────────────────────────────────────────────────────────────────
+#   ASC_API_KEY_ID       App Store Connect API key id
+#   ASC_API_ISSUER_ID    its issuer id
+#   ASC_API_PRIVATE_KEY  the .p8 contents, verbatim (BEGIN PRIVATE KEY … END PRIVATE KEY)
+# Missing any of them and the job skips with a notice — the release still stands, it just
+# needs the by-hand submit.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Marketing version to submit (blank = read apple/project.yml)"
+        required: false
+        default: ""
+      platforms:
+        description: "Which App Store platforms to submit"
+        required: false
+        default: both
+        type: choice
+        options: [both, ios, macos]
+      submit:
+        description: "Actually submit for review (off = create/attach only, a dry run)"
+        required: false
+        default: true
+        type: boolean
+
+# Never let two submissions race the same App Store version — ASC answers the second one with a
+# state error that reads like a broken key.
+concurrency:
+  group: apple-store-submit
+  cancel-in-progress: false
+
+jobs:
+  submit:
+    name: App Store submit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # ── The rc gate ───────────────────────────────────────────────────────────────────────
+      # An rc is already with the testers (TestFlight internal, via Xcode Cloud) and must never
+      # reach App Store review. Decided here, once, before anything touches ASC.
+      - name: Resolve version + channel
+        id: cfg
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          IN_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${IN_VERSION:-}" ]; then
+            VN="$IN_VERSION"
+          elif [ "$REF_TYPE" = "tag" ]; then
+            VN="${REF_NAME#v}"
+          else
+            # Same single source of truth release.yml's meta-gate enforces the tag against.
+            VN="$(grep -m1 -E 'MARKETING_VERSION:' apple/project.yml | sed -E 's/.*"([^"]+)".*/\1/')"
+          fi
+          case "$VN" in
+            *-rc.*)
+              echo "::notice::$REF_NAME is a release candidate — TestFlight internal only (Xcode Cloud already shipped it). No App Store submission."
+              echo "go=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "go=true" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+          echo "version=$VN" >> "$GITHUB_OUTPUT"
+
+      - name: Check App Store Connect credentials
+        id: creds
+        if: steps.cfg.outputs.go == 'true'
+        env:
+          KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ISSUER: ${{ secrets.ASC_API_ISSUER_ID }}
+          P8: ${{ secrets.ASC_API_PRIVATE_KEY }}
+        run: |
+          if [ -n "$KEY_ID" ] && [ -n "$ISSUER" ] && [ -n "$P8" ]; then
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No ASC_API_* secrets — skipping the App Store submission (submit by hand with Scripts/asc-new-version.mjs)."
+          fi
+
+      # "What's New" comes from the same file Play's release notes do, so the two stores can't
+      # describe the same release differently. Apple's limit is 4000 characters, far above
+      # Play's 500, so no truncation is needed here.
+      - name: Prepare release notes
+        id: notes
+        if: steps.cfg.outputs.go == 'true' && steps.creds.outputs.have == 'true'
+        run: |
+          set -euo pipefail
+          src="android/fastlane/metadata/android/en-US/changelogs/default.txt"
+          out="$RUNNER_TEMP/whatsnew.txt"
+          if [ -f "$src" ]; then cp "$src" "$out"; else printf 'Fixes and improvements.\n' > "$out"; fi
+          echo "file=$out" >> "$GITHUB_OUTPUT"
+
+      # One invocation per platform. iOS first: it's the one with users waiting, and if the Mac
+      # build is still processing there's no reason to hold the iPhone submission behind it.
+      - name: Submit iOS
+        if: >-
+          steps.cfg.outputs.go == 'true' && steps.creds.outputs.have == 'true'
+          && github.event.inputs.platforms != 'macos'
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_PRIVATE_KEY: ${{ secrets.ASC_API_PRIVATE_KEY }}
+        run: |
+          node Scripts/asc-new-version.mjs \
+            --platform IOS \
+            --version "${{ steps.cfg.outputs.version }}" \
+            --build latest --wait 60 \
+            --notes-file "${{ steps.notes.outputs.file }}" \
+            ${{ github.event.inputs.submit == 'false' && ' ' || '--submit' }}
+
+      # Non-fatal: a Mac build that hasn't landed shouldn't retroactively fail a successful iOS
+      # submission. It surfaces as a red step inside a green-enough run, and re-running just this
+      # workflow (workflow_dispatch, platforms=macos) picks up where it left off — the script is
+      # idempotent and re-finds the editable version.
+      - name: Submit macOS
+        if: >-
+          steps.cfg.outputs.go == 'true' && steps.creds.outputs.have == 'true'
+          && github.event.inputs.platforms != 'ios'
+        continue-on-error: true
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_PRIVATE_KEY: ${{ secrets.ASC_API_PRIVATE_KEY }}
+        run: |
+          node Scripts/asc-new-version.mjs \
+            --platform MAC_OS \
+            --version "${{ steps.cfg.outputs.version }}" \
+            --build latest --wait 60 \
+            --notes-file "${{ steps.notes.outputs.file }}" \
+            ${{ github.event.inputs.submit == 'false' && ' ' || '--submit' }}

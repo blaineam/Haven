@@ -25,6 +25,10 @@ final class ShareRouter: ObservableObject {
     @Published var pendingCaption = ""
     /// Remaining "wait for the engine" attempts before giving up until the next foreground.
     private var retriesLeft = 10
+    /// Reentrancy guard. `ingest` is kicked from five places (open-URL, foreground, onAppear,
+    /// sheet dismissal, draft consumption) and two overlapping drains would process the same
+    /// queued share twice.
+    private var draining = false
 
     /// Drain the queue. Called on `haven://share` and on every foreground.
     ///
@@ -50,8 +54,20 @@ final class ShareRouter: ObservableObject {
             return
         }
         retriesLeft = 10
+        guard !draining else { return }
+        draining = true
+        defer { draining = false }
         ShareInbox.sweepAbandoned()
-        for queued in ShareInbox.drain() {
+        let queue = ShareInbox.drain()
+        if !queue.isEmpty {
+            HavenLog.sync("share: draining \(queue.count) (present=\(present) draft=\(postDraft != nil))")
+        }
+        // A pending post draft blocks the drain, so it must never be able to sit there unclaimed.
+        // If one is still here, re-assert the tab switch: FeedView takes it the moment it appears
+        // (it also checks on `onAppear`, not just via the publisher), which unblocks everything
+        // behind it. Without this a single missed draft wedged the queue permanently.
+        if postDraft != nil { openPostComposer = true }
+        for queued in queue {
             // A composer is already up (our sheet, or the feed's own with a handed-over draft) —
             // the rest keep until it's done rather than clobbering unsent work.
             if present || postDraft != nil { return }
@@ -139,6 +155,7 @@ final class ShareRouter: ObservableObject {
             preselectedThread = nil
             openStoryDirectly = true
             present = true
+            HavenLog.sync("share: story → composer with \(refs.count) ref(s)")
             return .needsUser
         case .post:
             // Straight into the feed's own composer, with the media and caption already loaded —
@@ -146,6 +163,7 @@ final class ShareRouter: ObservableObject {
             // is already attached to that composer and a second one would only be a worse copy.
             postDraft = PostDraft(text: body, refs: refs)
             openPostComposer = true
+            HavenLog.sync("share: post → feed composer with \(refs.count) ref(s)")
             text = ""; refs = []
             return .needsUser
         case .dm:

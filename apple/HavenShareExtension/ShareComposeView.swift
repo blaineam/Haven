@@ -52,17 +52,25 @@ struct ShareComposeView: View {
                 }
                 // A post or a story goes to Haven's own composer — that's where the circle picker,
                 // music and location live.
+                //
+                // The wording is deliberately "Continue in Haven", not "opens Haven". An extension
+                // is not entitled to launch its host app: we ask, and iOS often declines with no
+                // error. Promising a launch we can't guarantee is what made this feel broken —
+                // people tapped, nothing visibly happened, and the post was waiting unannounced.
+                // This says what is actually true: it's held, and Haven picks it up.
                 Section {
                     handoffRow("Share as Post", systemImage: "square.and.pencil",
-                               detail: "Pick a circle, add music or a location") {
+                               detail: "Continue in Haven — pick a circle, add music or a location") {
                         onSend(.post, "", caption)
                     }
                     if attachmentCount > 0 {
                         handoffRow("Add to your Story", systemImage: "camera.viewfinder",
-                                   detail: "Opens the story editor") {
+                                   detail: "Continue in Haven's story editor") {
                             onSend(.story, "", caption)
                         }
                     }
+                } footer: {
+                    Text("Haven opens these when you next switch to it.")
                 }
                 if conversations.isEmpty {
                     Section {

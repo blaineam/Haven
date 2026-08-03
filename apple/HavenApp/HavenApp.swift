@@ -499,7 +499,12 @@ struct RootView: View {
         }
         // Share-sheet hand-off: pick DM / post / story for items shared from another app.
         #if os(iOS)
-        .sheet(isPresented: $shareRouter.present) { ShareRouteView() }
+        // `onDismiss` matters: swiping the sheet away flips `present` back to false but would leave
+        // the router still holding that share's media and route, and the next drain would then
+        // reopen the sheet showing the OLD content. Resetting on dismissal keeps the queue moving.
+        .sheet(isPresented: $shareRouter.present, onDismiss: { shareRouter.dismiss() }) {
+            ShareRouteView()
+        }
         // "Share as Post" hands the media to the FEED's composer (circle switcher, song, location),
         // so the only thing left is to be looking at it.
         .onReceive(shareRouter.$openPostComposer) { open in if open { tab = "circle" } }

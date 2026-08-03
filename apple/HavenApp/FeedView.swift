@@ -7272,6 +7272,19 @@ struct FeedView: View {
         #endif
     }
 
+    #if os(iOS)
+    /// Load a share routed to "Share as Post" into THIS composer — the one that owns the circle
+    /// switcher, the song picker, the location toggle and scheduling. Appended, never assigned, so
+    /// it can't discard something half-typed.
+    private func takeSharedPost(_ draft: ShareRouter.PostDraft) {
+        if !draft.text.isEmpty {
+            compose = compose.isEmpty ? draft.text : compose + "\n" + draft.text
+        }
+        attachedMedia.append(contentsOf: draft.refs)
+        ShareRouter.shared.consumePostDraft()
+    }
+    #endif
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -7417,15 +7430,21 @@ struct FeedView: View {
             // location toggle and schedule all still apply. Appended, never assigned: re-entering
             // the tab must not discard something half-typed.
             #if os(iOS)
-            .onReceive(ShareRouter.shared.$postDraft.compactMap { $0 }) { draft in
-                if !draft.text.isEmpty {
-                    compose = compose.isEmpty ? draft.text : compose + "\n" + draft.text
-                }
-                attachedMedia.append(contentsOf: draft.refs)
-                ShareRouter.shared.consumePostDraft()
-            }
+            .onReceive(ShareRouter.shared.$postDraft.compactMap { $0 }) { draft in takeSharedPost(draft) }
             #endif
             .onAppear {
+                #if os(iOS)
+                // A draft that arrived BEFORE this view existed.
+                //
+                // TabView builds a tab's content the first time that tab is shown, so a share
+                // routed to "Share as Post" while the Circle tab had never been opened published
+                // `postDraft` to nobody — `onReceive` needs a live subscriber. The draft then sat
+                // there, and because the drain refuses to run while one is pending, EVERY later
+                // share queued up behind it and nothing worked again. Same trap, same fix as the
+                // DM hand-off in Messages.swift: the value is durable, so also look for one on the
+                // way in.
+                if let draft = ShareRouter.shared.postDraft { takeSharedPost(draft) }
+                #endif
                 store.configureForCurrentIdentity()   // seeded or seedless (S4) — never boot off a throwaway seed
                 // Screenshot harness: open the full-screen story viewer for its hero shot.
                 // The feed rebuild is async now, so RETRY until the demo stories are published

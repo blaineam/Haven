@@ -98,7 +98,7 @@ store** and the GitHub Release *is* their distribution point.
 
 | Platform | Proper channel | On the GitHub Release? |
 |---|---|---|
-| iPhone · iPad · Mac | **App Store** (TestFlight via Xcode Cloud, review via `apple-store.yml`) | No — never was |
+| iPhone · iPad · Mac | **App Store** (TestFlight via Xcode Cloud; review submitted by hand) | No — never was |
 | Android | **Google Play** | No (once Play is public) — *stopgap until then* |
 | Windows | **Microsoft Store** (live) | No — [live on the Store](https://apps.microsoft.com/store/detail/9NKTFH1MF4LM) |
 | Linux desktop GUI | *(no store)* → GitHub Release | **Yes** — `.deb` / `.rpm` / AppImage / `haven.flatpak` |
@@ -174,8 +174,17 @@ Releases go out in **two hops: candidate, then promote.** Testers get the exact 
    ```bash
    git tag v1.3.0 && git push origin v1.3.0
    ```
-   → Play **production**, and `apple-store.yml` creates the App Store version, attaches whatever
-   build Xcode Cloud produced (`--build latest --wait`), sets "What's New" and submits for review.
+   → Play **production**.
+6. **Apple** — submit by hand, because shipping to the App Store is a decision, not a side effect
+   of a tag (an App Store version can't be reused, rewound, or un-submitted):
+   ```bash
+   Scripts/asc-new-version.mjs --platform IOS    --version 1.3.0 --build latest --wait 30 \
+       --notes-file whatsnew.txt --submit
+   Scripts/asc-new-version.mjs --platform MAC_OS --version 1.3.0 --build latest --wait 30 \
+       --notes-file whatsnew.txt --submit
+   ```
+   `--build latest` attaches whatever Xcode Cloud produced, so you don't have to look the build
+   number up first.
 
 Everything else rides the same tag. `release.yml` → relay binaries + `.deb`s, desktop installers,
 Flatpak bundle + pinned manifest, the GitHub Release, and the AUR push. `android.yml` → APKs, AAB,

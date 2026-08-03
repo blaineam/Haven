@@ -60,22 +60,22 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed — release process
 
-- **The tag now decides the channel, on both stores.** A `vX.Y.Z-rc.N` tag is a release candidate
-  and reaches testers only — Play `internal` + closed `alpha`, TestFlight internal via Xcode Cloud —
-  and **never production**, not via the `PLAY_TRACK` variable, not via a manual `play_track` input.
-  A plain `vX.Y.Z` tag ships: Play `production`, and a new `apple-store.yml` creates the App Store
-  version, attaches the build, sets the release notes and submits for review.
+- **The tag now decides the Play track.** A `vX.Y.Z-rc.N` tag is a release candidate and reaches
+  testers only — `internal` + closed `alpha` — and **never production**, not via the `PLAY_TRACK`
+  variable, not via a manual `play_track` input. A plain `vX.Y.Z` tag goes straight to
+  `production`. Previously *every* tag defaulted to `internal`, so shipping a finished release was
+  a manual dispatch somebody had to remember rather than something the tag said.
 
-  Promoting a candidate is tagging the same commit again without the suffix, so the build testers
-  used is the build that ships. Previously *every* tag defaulted to Play `internal` and the Apple
-  submission was a by-hand step from a laptop, which made shipping a finished release something
-  somebody had to remember rather than something the tag said.
+  Apple's rc channel needs no tag at all: Xcode Cloud already ships every push to `main` to
+  TestFlight internal. Submitting to the App Store stays a **deliberate, by-hand step** — an App
+  Store version can't be reused, rewound or un-submitted, so it should not be a side effect of a
+  tag. Promoting a candidate is tagging the same commit without the suffix, so the build testers
+  used is the build that ships.
 
-  `Scripts/asc-new-version.mjs` gained `--build latest --wait <minutes>` for this: Xcode Cloud
-  assigns the build number from its own counter minutes after the push, so nothing on the tagging
-  side can predict it — the submit polls App Store Connect for the newest VALID build of that
-  version instead of guessing, and fails loudly rather than attaching the wrong one. It also reads
-  the signing key from `ASC_API_PRIVATE_KEY` so CI never writes a `.p8` to disk.
+- `Scripts/asc-new-version.mjs --build latest --wait <minutes>` attaches the newest VALID build of
+  a version instead of naming a number. Xcode Cloud assigns build numbers from its own run counter,
+  so submitting an XCC build meant looking the number up in App Store Connect first — and hitting a
+  build still in PROCESSING meant an error rather than a wait.
 
 ## [1.2.3] — 2026-07-31
 

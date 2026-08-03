@@ -46,8 +46,8 @@ on one platform and in testing on the other.
 
 | Tag | Google Play | Apple |
 |---|---|---|
-| `v1.3.0-rc.1` | `internal` **and** `alpha` (closed testing) | TestFlight internal, via Xcode Cloud |
-| `v1.3.0` | `production` | App Store review, via `apple-store.yml` |
+| `v1.3.0-rc.1` | `internal` **and** `alpha` (closed testing) | TestFlight internal (Xcode Cloud, off the push — not the tag) |
+| `v1.3.0` | `production` | *(nothing automatic — you submit)* |
 
 Promoting an rc is just tagging the same commit again without the suffix. Nothing is rebuilt from
 different source; the number that was in testers' hands is the number that ships.
@@ -55,8 +55,9 @@ different source; the number that was in testers' hands is the number that ships
 **The rc guard overrides everything, including you.** An rc tag is forced to `internal` even if
 `PLAY_TRACK` or a manual `play_track` input asked for `production`, `beta` or `alpha`. Asking for
 production while tagging a release *candidate* is a contradiction, and the safe reading of a
-contradiction is "testers only". The same gate is the first thing `apple-store.yml` checks — an rc
-tag never opens an App Store submission at all.
+contradiction is "testers only".
+
+**Apple's production step is deliberately NOT automated** — see below.
 
 Two overrides remain, for the off-schedule cases (neither can defeat the rc guard):
 
@@ -80,42 +81,40 @@ or `1.0` publishes fully live (`status=completed`).
 
 ---
 
-## Apple (iOS + macOS → `.github/workflows/apple-store.yml`)
+## Apple (iOS + macOS)
 
-Apple's pipeline is split between two systems, and it helps to know which does what:
+**Nothing on the CI side ships Haven to the App Store, and that is on purpose.** Apple's half is:
 
 | Step | Who | When |
 |---|---|---|
-| Build + upload to TestFlight **internal** | **Xcode Cloud** | every push to `main` |
-| Create the App Store version, attach the build, set "What's New", submit for review | **`apple-store.yml`** | a plain `v*` tag only |
+| Build + upload to TestFlight **internal** | **Xcode Cloud** | every push to `main` — no tag involved |
+| Create the App Store version, attach the build, submit for review | **you** | when you decide to ship |
 
-So testers are served by Xcode Cloud with no tag at all — which is why an rc tag has nothing to do
-on Apple, and the workflow's first step is to notice the `-rc.` and stop.
+That covers the rc channel completely: testers get every push to `main` automatically, so a `-rc.N`
+tag has nothing to do on Apple at all. It exists to tell **Play** where to put the build.
 
-The build number can't be known in advance (Xcode Cloud assigns it from its own counter, minutes
-after the push), so the submit doesn't try to guess: `Scripts/asc-new-version.mjs --build latest
---wait 60` polls App Store Connect for the newest **VALID** build of that marketing version and
-attaches whatever XCC produced. If none appears within the window the job fails loudly rather than
-submitting something else.
+Submitting stays a decision, not a side effect of a tag. An App Store version can't be reused,
+rewound, or un-submitted, and review is slow enough that a mistaken submission costs days — unlike
+Play, where a bad track assignment is a two-minute fix. Whatever you gain by making it automatic,
+you pay for the first time a tag goes out that you didn't mean to ship.
 
-Release notes come from the *same* file Play's do
-(`android/fastlane/metadata/android/en-US/changelogs/default.txt`), so the two stores can't describe
-the same release differently.
+To submit, from your machine:
 
-### Secrets
+```bash
+Scripts/asc-new-version.mjs --platform IOS --version 1.3.0 --build latest --wait 30 \
+    --notes-file whatsnew.txt --submit
+Scripts/asc-new-version.mjs --platform MAC_OS --version 1.3.0 --build latest --wait 30 \
+    --notes-file whatsnew.txt --submit
+```
 
-| Secret | What |
-|---|---|
-| `ASC_API_KEY_ID` | App Store Connect API key id |
-| `ASC_API_ISSUER_ID` | its issuer id |
-| `ASC_API_PRIVATE_KEY` | the `.p8` contents, verbatim (`-----BEGIN PRIVATE KEY-----` …) |
+`--build latest` is there because Xcode Cloud assigns the build number from its own run counter, so
+you'd otherwise have to go look it up in App Store Connect first; `--wait` sits through the few
+minutes a fresh upload spends in PROCESSING instead of failing. The script is idempotent — it
+re-finds an editable version of the same number, so re-running after a hiccup is safe.
 
-Missing any of them and the job skips with a notice; the release still stands and can be submitted
-by hand with the same script. The key needs the **App Manager** role — Developer can't create an
-App Store version or open a review submission.
-
-> Apple still owns the parts no API can do: export compliance answers that aren't already declared
-> in the plist, a first submission of a brand-new app, and anything review comes back asking for.
+Auth comes from `~/.rocket/config.json` (or `ASC_API_KEY_ID` / `ASC_API_ISSUER_ID`) plus the `.p8`
+in `~/.appstoreconnect/private_keys/`. The key needs the **App Manager** role — Developer can't
+create an App Store version or open a review submission.
 
 ### One-time manual setup (you must do this by hand)
 

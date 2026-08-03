@@ -27,12 +27,13 @@ Updated continuously. (Times in your local day.)
   the bytes aren't local yet. It could always receive one and show a tile; that was the end of the
   road. Still open: macOS has no share extension (it needs its own target) and desktop has no OS
   share sheet to register into.
-- **An rc now means something (2026-08-02, 1.3.0, release process)** — the tag decides the channel
-  on both stores. `v1.3.0-rc.1` reaches testers only (Play internal + closed testing, TestFlight
-  internal via Xcode Cloud) and can't reach production even if a variable or a manual input asks
-  for it; plain `v1.3.0` ships to Play production and opens the App Store submission automatically.
-  Promoting is tagging the same commit without the suffix, so testers used the exact build that
-  ships.
+- **An rc now means something (2026-08-02, 1.3.0, release process)** — the tag decides the Play
+  track. `v1.3.0-rc.1` reaches testers only (Play internal + closed testing; Apple's testers are
+  already served by Xcode Cloud off the push) and can't reach production even if a repo variable or
+  a manual input asks for it. Plain `v1.3.0` ships straight to Play production. Promoting is
+  tagging the same commit without the suffix, so testers used the exact build that ships. The App
+  Store submission stays a deliberate by-hand step — an App Store version can't be reused, rewound
+  or un-submitted, so it isn't something a tag should trigger.
 - **"Media was put back" woke people who never asked (2026-07-31, 1.2.2, all platforms)** — reported
   as a couple of overnight notifications for media the user had not requested, with the fair question
   "is that actually fixed already, or a stale one from a broken build?" Neither: 1.2.1 silenced this

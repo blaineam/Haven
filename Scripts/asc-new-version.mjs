@@ -9,16 +9,15 @@
  *   Scripts/asc-new-version.mjs --platform MAC_OS --version 1.0.1 --build 178 \
  *       --notes-file whatsnew.txt --submit
  *
- * `--build latest` attaches the newest VALID build of `--version` instead of naming a number,
- * and `--wait <minutes>` keeps looking while one processes. That pair is what lets CI submit
- * without knowing the build number: Xcode Cloud picks it (from its own run counter) minutes
- * after the tag is pushed, so nothing on the tagging side can predict it.
+ * `--build latest` attaches the newest VALID build of `--version` instead of naming a number, and
+ * `--wait <minutes>` keeps looking while one processes. Use it when submitting an Xcode Cloud
+ * build: XCC assigns the number from its own run counter, so you'd otherwise have to go look it
+ * up in App Store Connect first — and if it's still processing, this waits instead of failing.
  *
- *   Scripts/asc-new-version.mjs --platform IOS --version 1.3.0 --build latest --wait 60 --submit
+ *   Scripts/asc-new-version.mjs --platform IOS --version 1.3.0 --build latest --wait 30 --submit
  *
- * Auth: env ASC_API_KEY_ID / ASC_API_ISSUER_ID (falls back to ~/.rocket/config.json), key from
- * env ASC_API_PRIVATE_KEY (the .p8's contents — for CI) else
- * ~/.appstoreconnect/private_keys/AuthKey_<KEY_ID>.p8.
+ * Auth: env ASC_API_KEY_ID / ASC_API_ISSUER_ID (falls back to ~/.rocket/config.json),
+ * key at ~/.appstoreconnect/private_keys/AuthKey_<KEY_ID>.p8.
  */
 import { readFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
@@ -56,12 +55,8 @@ function creds() {
 		if (existsSync(cfg)) { const j = JSON.parse(readFileSync(cfg, 'utf8')); keyId = keyId || j.ascKeyId; issuer = issuer || j.ascIssuerId; }
 	}
 	if (!keyId || !issuer) die('No ASC creds');
-	// CI has no home directory to drop a .p8 into, and writing one to the runner's disk just to
-	// read it back is a secret on disk for no reason — take the key material straight from the env.
-	const inline = process.env.ASC_API_PRIVATE_KEY;
-	if (inline && inline.includes('BEGIN')) return { keyId, issuer, p8Pem: inline };
 	const p8 = join(homedir(), '.appstoreconnect/private_keys', `AuthKey_${keyId}.p8`);
-	if (!existsSync(p8)) die(`Missing ${p8} (and no ASC_API_PRIVATE_KEY in the environment)`);
+	if (!existsSync(p8)) die(`Missing ${p8}`);
 	return { keyId, issuer, p8Pem: readFileSync(p8, 'utf8') };
 }
 function makeToken({ keyId, issuer, p8Pem }) {
@@ -94,9 +89,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * — note `filter[version]` on /v1/builds is the build NUMBER, so the marketing version is matched
  * through `preReleaseVersion.version`; filtering on the wrong one silently finds nothing.
  *
- * With `--wait`, keep looking. A freshly uploaded build sits in PROCESSING for a few minutes, and a
- * CI job that runs the moment a tag is pushed will nearly always get there first — "not VALID yet"
- * is the expected first answer, not an error.
+ * With `--wait`, keep looking. A freshly uploaded build sits in PROCESSING for a few minutes, so
+ * "not VALID yet" is the expected first answer right after an Xcode Cloud run, not an error.
  */
 async function resolveBuild(token, appId, args) {
 	const wantLatest = String(args.build).toLowerCase() === 'latest';

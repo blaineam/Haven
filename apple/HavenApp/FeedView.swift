@@ -196,6 +196,9 @@ final class FeedStore: ObservableObject {
     @Published private(set) var relayReachable = false  // the circle's relay accepted our last upload
     func markRelay(_ ok: Bool) { if relayReachable != ok { relayReachable = ok } }
     @Published private(set) var postTick = 0
+    /// Increments only after a post is successfully sealed and broadcast. This
+    /// is the app's completed, valuable outcome — the thing Haven exists to do.
+    @Published private(set) var publishedPostCount = 0
     @Published private(set) var reactionTick = 0
     @Published private(set) var online = false
     /// True once we've actually exchanged a frame with a contact over that path —
@@ -3014,7 +3017,7 @@ final class FeedStore: ObservableObject {
         // (exact tap route on the recipient). Best-effort — nil keeps the legacy circle route.
         let postId = social.lastAuthoredEventId(circleId: cid, createdAt: ts)
         broadcastEvent(cid, env, banner: .forPost(circleId: cid, circleName: name, body: body, media: media, story: story, postId: postId))
-        postTick += 1; refresh()
+        postTick += 1; publishedPostCount += 1; refresh()
         enqueueAuthoredMedia(media, circleId: cid, social: social)
         if !media.isEmpty {
             Task { await SharedStore.publishDeviceRoster(social: social) }

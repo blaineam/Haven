@@ -1,4 +1,5 @@
 import SwiftUI
+import MillerKit
 #if canImport(UIKit)
 import UIKit
 #else
@@ -190,6 +191,8 @@ final class HavenAppDelegate: NSObject, NSApplicationDelegate {
 
 @main
 struct HavenApp: App {
+    // .utility gates: 10 launches / 7 days / 3 published posts.
+    @StateObject private var rating = RatingManager(gates: .utility)
     @Environment(\.scenePhase) private var scenePhase
     #if os(macOS)
     @NSApplicationDelegateAdaptor(HavenAppDelegate.self) private var appDelegate
@@ -272,6 +275,15 @@ struct HavenApp: App {
 
     @ViewBuilder private var mainRoot: some View {
         RootView()
+            .environmentObject(rating)
+            .task { rating.recordLaunch() }
+            // A published post is the completed outcome Haven exists for. The
+            // counter only advances past FeedStore.post's success guard, so a
+            // failed seal can never count or trigger the ask.
+            .onChange(of: FeedStore.shared.publishedPostCount) { _, _ in
+                rating.recordSignificantAction()
+            }
+            .requestReviewAfterSuccess(rating, when: FeedStore.shared.publishedPostCount > 0)
             .onAppear {
                 #if os(macOS)
                 // Screenshot harness: force a 1440×900pt window (Retina 2× = 2880×1800 — the exact

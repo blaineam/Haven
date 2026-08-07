@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Entitlements for the DIRECT-DOWNLOAD (Developer ID + notarized) macOS build.
+	  Same as Haven.macOS.entitlements MINUS the two entitlements that require a managed
+	  provisioning profile (which complicates unattended CI signing):
+	    • aps-environment        — APNs push; the direct .dmg has no push (no NSE on macOS anyway).
+	    • keychain-access-groups — the SHARED group exists only to feed the iOS NSE; on macOS the
+	                               app uses its own default keychain, so the group isn't needed.
+	    • associated-domains     — Universal Links. The direct .dmg opens web links via the
+	                               `haven://` scheme instead (the landing page falls back to it),
+	                               so the profile-bound entitlement isn't worth the CI cost.
+	  The App Store build (rocket) keeps the full Haven.macOS.entitlements.
+	-->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+	<key>com.apple.security.device.camera</key>
+	<true/>
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+	<key>com.apple.security.personal-information.photos-library</key>
+	<true/>
+</dict>
+</plist>

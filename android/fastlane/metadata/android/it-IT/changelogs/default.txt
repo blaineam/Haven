@@ -1,0 +1,3 @@
+1.3.1 — attività che ti porta dove dice.
+
+• Toccando una riga dell'attività o una notifica su una reazione o una risposta a un tuo commento si apre ora il post a cui appartiene, con quel commento evidenziato. Prima compariva "Post non disponibile" per un post che si trovava proprio lì nel tuo feed.

@@ -1,0 +1,3 @@
+1.3.1: la actividad te lleva justo donde dice.
+
+• Al tocar una fila de actividad o una notificación sobre una reacción o respuesta a uno de tus comentarios, ahora se abre la publicación correspondiente con ese comentario destacado. Antes aparecía «Publicación no disponible» aunque la publicación estuviera ahí mismo, en tu feed.

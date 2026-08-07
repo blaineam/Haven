@@ -1,0 +1,15 @@
+Haven é uma rede social privada para as pessoas que realmente importam. Sem anúncios. Sem rastreamento. Sem algoritmo decidindo o que você vê. Sem servidor de empresa guardando suas memórias.
+
+Tudo o que você compartilha é criptografado de ponta a ponta com criptografia híbrida pós-quântica e viaja direto entre os seus dispositivos — pela internet ou por Bluetooth e Wi‑Fi quando vocês estão juntos, sem conexão. Nem nós conseguimos ler.
+
+• Círculos privados — compartilhe com a família e os amigos próximos em círculos separados, só por convite
+• Publicações, fotos, vídeos e stories — com câmera moderna, legendas fáceis e uma música
+• Mensagens diretas e em grupo — com nome de quem enviou, horário e confirmação de entrega, além de mensagens secretas agendadas e protegidas contra print
+• Chamadas de voz e vídeo em grupo — individuais e em grupo, com compartilhamento de tela, ponto a ponto, sem servidor de chamadas no meio
+• Todos os seus dispositivos em sincronia — comece no iPhone e continue no iPad ou no Mac; suas publicações e mensagens acompanham você
+• Publicações temporárias — você decide quanto tempo cada coisa fica no ar
+• Compartilhamento por perto — funciona sem internet nenhuma, de um celular para o outro
+• Use o seu próprio armazenamento — mantenha suas memórias vivas no seu bucket S3 ou em um relay que você mesmo administra
+• Sem conta, sem telefone, sem e‑mail — sua identidade vive só no seu dispositivo
+
+Haven é uma fortaleza para quem você ama. Foi feito para que ninguém — nem anunciantes, nem corretores de dados, nem quem criou o app — consiga se colocar entre você e o seu círculo.

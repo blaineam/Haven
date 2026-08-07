@@ -1,0 +1,3 @@
+1.3.1 — atividade que leva você aonde diz que leva.
+
+• Tocar em uma linha de atividade ou em uma notificação sobre uma reação ou resposta a um dos seus comentários agora abre a publicação em que ele está, com aquele comentário destacado. Antes aparecia "Publicação indisponível" para uma publicação que estava ali mesmo, no seu feed.

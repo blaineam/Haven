@@ -8,35 +8,35 @@
 Haven 〇
 
 ## subtitle
-Cerchie private e crittografate
+Cerchie private e cifrate
 
 ## description
-Haven è un social network privato per le persone che contano davvero. Niente pubblicità. Nessun tracciamento. Nessun algoritmo che decide cosa vedi. Nessun server aziendale che custodisce i tuoi ricordi.
+Haven è un social network privato per le persone che contano davvero. Nessuna pubblicità. Nessun tracciamento. Nessun algoritmo che decide cosa vedi. Nessun server aziendale che conserva i tuoi ricordi.
 
 Tutto ciò che condividi è cifrato end-to-end con crittografia ibrida post-quantistica e viaggia direttamente tra i tuoi dispositivi — via internet, oppure via Bluetooth e Wi‑Fi quando siete insieme offline. Nemmeno noi possiamo leggerlo.
 
-• Cerchie private — condividi con la famiglia e gli amici più stretti in cerchie separate, solo su invito
-• Post, foto, video e storie — con una fotocamera moderna, didascalie immediate e una canzone
-• Messaggi diretti e di gruppo — con nome del mittente, orari e conferme di consegna, più messaggi segreti programmabili e protetti dagli screenshot
-• Chiamate vocali e video di gruppo — 1:1 e di gruppo, con condivisione dello schermo, peer-to-peer, senza alcun server nel mezzo
-• Tutti i tuoi dispositivi sincronizzati — inizi su iPhone, prosegui su iPad o Mac; i tuoi post e messaggi ti seguono
-• Post effimeri — decidi tu quanto a lungo restano
-• Condivisione nelle vicinanze — funziona anche senza alcuna connessione, da telefono a telefono
-• Usa il tuo spazio di archiviazione — conserva i ricordi sul tuo bucket S3 o su un relay gestito da te
+• Cerchie private — condividi con la famiglia e gli amici più cari in cerchie separate, solo su invito
+• Post, foto, video e storie — con una fotocamera moderna, didascalie facili e una canzone
+• Messaggi diretti e di gruppo — con nome del mittente, orari e conferme di consegna, più messaggi segreti programmati e protetti dagli screenshot
+• Chiamate vocali e video di gruppo — 1:1 e di gruppo, con condivisione dello schermo, peer-to-peer, senza server di chiamata nel mezzo
+• Tutti i tuoi dispositivi sincronizzati — inizia su iPhone, continua su iPad o Mac; i tuoi post e messaggi ti seguono
+• Post a scomparsa — decidi tu quanto restano
+• Condivisione nelle vicinanze — funziona senza alcuna connessione, da telefono a telefono
+• Il tuo spazio di archiviazione — conserva i ricordi sul tuo bucket S3 o su un relay gestito da te
 • Nessun account, nessun numero di telefono, nessuna email — la tua identità vive solo sul tuo dispositivo
 
-Haven è una roccaforte per le persone a cui vuoi bene. È costruito perché nessuno — né inserzionisti, né data broker, né chi lo ha creato — possa mettersi tra te e la tua cerchia.
+Haven è un rifugio sicuro per le persone che ami. È costruito perché nessuno — né inserzionisti, né broker di dati, né chi lo ha creato — possa mettersi tra te e la tua cerchia.
 
 ## keywords
-privato,crittografato,famiglia,amici,messaggi sicuri,chat offline,chiamate,niente pubblicità,cerchia
+privato,crittografato,famiglia,amici,messaggi sicuri,offline,chiamate,senza pubblicità,quantum
 
 ## promotional_text
-Offerta lancio — 50% di sconto fino al 30 settembre: 4,99 $, poi 9,99 $. Uno spazio privato e cifrato end‑to‑end per i tuoi affetti. Zero pubblicità, zero tracciamento, peer‑to‑peer.
+Offerta lancio — 50% fino al 30 settembre: 4,99 $, poi 9,99 $. Casa privata e crittografata end‑to‑end per i tuoi cari. Niente pubblicità né tracciamento, peer‑to‑peer.
 
 ## whats_new
-1.3.1 — l'attività ti porta dove dice.
+1.3.1 — attività che ti porta dove dice.
 
-• Toccando una riga dell'attività o una notifica su una reazione o una risposta a un tuo commento si apre ora il post corrispondente, con quel commento evidenziato. Prima compariva "Post non disponibile" per un post che era lì, nel tuo feed.
+• Toccando una riga dell'attività o una notifica su una reazione o una risposta a un tuo commento si apre ora il post a cui appartiene, con quel commento evidenziato. Prima compariva "Post non disponibile" per un post che si trovava proprio lì nel tuo feed.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

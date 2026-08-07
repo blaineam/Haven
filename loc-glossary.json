@@ -1,0 +1,16 @@
+{
+  "_comment": "Haven's localization rules. excludeLocales is a compliance constraint, not a preference.",
+  "excludeLocales": ["fr-FR", "zh-Hans"],
+  "excludeReason": "post-quantum crypto export compliance — Haven can't ship into France or China, so a translated listing would advertise it to storefronts it isn't available in",
+  "neverTranslate": ["Haven", "Circle", "Relay", "Kyber", "Dilithium"],
+  "prefer": {
+    "circle": {
+      "de-DE": "Kreis",
+      "es-ES": "círculo",
+      "it": "cerchia",
+      "ja": "サークル",
+      "ko": "서클",
+      "pt-BR": "círculo"
+    }
+  }
+}

@@ -6,6 +6,9 @@ options:
   createIntermediateGroups: true
 
 packages:
+  # Shared feedback / rating / "other apps" kit (Libraries/MillerKit).
+  MillerKit:
+    path: ../../Libraries/MillerKit
   # Prebuilt WebRTC binary (libwebrtc) for reliable E2EE audio/video calls. Signaling rides
   # Haven's own sealed channel; media is DTLS-SRTP peer-to-peer.
   WebRTC:
@@ -42,6 +45,7 @@ targets:
       - path: WatchShared
       - path: Generated/haven_ffi.swift
     dependencies:
+      - package: MillerKit
       - framework: HavenFFI.xcframework
         embed: false
       # iroh's network-discovery deps (netdev, hickory DNS, system_configuration)
@@ -162,6 +166,7 @@ targets:
       - path: Shared
       - path: Generated/haven_ffi.swift
     dependencies:
+      - package: MillerKit
       - framework: HavenFFI.xcframework
         embed: false
       - sdk: SystemConfiguration.framework
@@ -398,6 +403,8 @@ targets:
   # holds NO iroh node and links NEITHER HavenFFI NOR WebRTC. Embedded in the iOS Haven app.
   HavenWatch:
     type: application
+    dependencies:
+      - package: MillerKit
     platform: watchOS
     deploymentTarget: "10.0"
     sources:

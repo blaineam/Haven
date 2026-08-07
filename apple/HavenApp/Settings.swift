@@ -1,4 +1,5 @@
 import SwiftUI
+import MillerKit
 import Photos
 #if canImport(UIKit)
 import UIKit
@@ -412,6 +413,9 @@ struct SettingsView: View {
                 } footer: {
                     Text("Technical details, your identity, and starting over.")
                 }
+
+                SupportSection(app: .haven)
+                LoveThisAppSection(app: .haven)
             }
             .formStyle(.grouped)   // grouped sections (not macOS right-aligned columns)
             .scrollContentBackground(.hidden)

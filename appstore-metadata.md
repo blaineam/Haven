@@ -32,9 +32,13 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 Launch sale — 50% off through September 30: $4.99, then $9.99. A private, end‑to‑end encrypted home for your closest people. No ads, no tracking, peer‑to‑peer.
 
 ## whats_new
-1.3.1 — activity that takes you where it says.
+1.4.0 — Haven in your language.
 
-• Tapping an activity row or notification about a reaction or reply on one of your comments now opens the post it's on, with that comment marked. It used to say "Post unavailable" for a post that was sitting right there in your feed.
+• Full localization in six languages: Japanese, German, Spanish, Korean, Portuguese (Brazil), and Italian — the whole app, across iPhone, iPad, and Mac.
+• New Feedback & Support: contact the developer directly from Settings, and a gentle in-app way to leave a rating.
+• Activity rows and notifications about reactions or replies on your comments now open the post they belong to, with the comment highlighted.
+• Media reliability: fixed a case where a large chunked file could become permanently unreachable.
+• Cross-platform polish and reliability improvements throughout.
 
 ## whats_new_previous
 1.3.0 — share into Haven from anywhere.

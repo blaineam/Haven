@@ -4,6 +4,10 @@ options:
   deploymentTarget:
     iOS: "17.0"
   createIntermediateGroups: true
+  # In-app localization: English develops; the shipped locale set is exactly
+  # ja/de/es/ko/pt-BR/it (loc-glossary.json excludes fr-FR and zh-Hans —
+  # export compliance, not preference).
+  developmentLanguage: en
 
 packages:
   # Shared feedback / rating / "other apps" kit (Libraries/MillerKit).
@@ -21,6 +25,10 @@ settings:
     DEVELOPMENT_TEAM: "8ZVSPZYSVF"
     CODE_SIGN_STYLE: Automatic
     TARGETED_DEVICE_FAMILY: "1,2"
+    # Emit localizable strings from bare SwiftUI Text("…")/Label("…") literals so
+    # `xcodebuild -exportLocalizations` sees them and Localizable.xcstrings can
+    # serve the ja/de/es/ko/pt-BR/it translations at runtime.
+    SWIFT_EMIT_LOC_STRINGS: YES
 
 targets:
   # iOS/iPadOS app. macOS now ships from the native `HavenMac` target (Mac Catalyst dropped

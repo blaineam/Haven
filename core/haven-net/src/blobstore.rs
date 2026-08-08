@@ -1039,6 +1039,24 @@ impl BlobServer {
 /// media only under the operator's own limits), and a pulled file keeps the peer's idle
 /// age (see [`keys_to_pull`] / [`backdate`]) — that pair is what stops mesh sync from
 /// resurrecting GC'd entries forever.
+/// Chunk count declared by a `HVCHUNK1` chunk manifest, or None for a plain unchunked blob.
+///
+/// Deliberately a byte scan rather than a JSON parse: the body is written by exactly one producer
+/// (`SharedStore.makeManifest`) as `{"v":1,"chunks":<n>,"total":<n>,"sizes":[…]}`, and a store-layer
+/// integrity check should not need a serde dependency to read one integer. Anything that doesn't
+/// match is treated as "not a manifest", which is the safe direction — it stores the blob as-is.
+fn manifest_chunks(blob: &[u8]) -> Option<usize> {
+    let rest = blob.strip_prefix(b"HVCHUNK1\n")?;
+    let needle = b"\"chunks\":";
+    let at = rest.windows(needle.len()).position(|w| w == needle)? + needle.len();
+    let digits: String = rest[at..]
+        .iter()
+        .take_while(|b| b.is_ascii_digit())
+        .map(|b| *b as char)
+        .collect();
+    digits.parse::<usize>().ok().filter(|n| *n > 0)
+}
+
 pub(crate) async fn pull_missing_from_peer(
     root: &Path,
     client: &BlobClient,
@@ -1067,7 +1085,19 @@ pub(crate) async fn pull_missing_from_peer(
             if k.starts_with("haven/mailbox/") {
                 0
             } else if k.starts_with("haven/media/") {
-                2
+                // Chunk WINDOWS before MANIFESTS. These are unrelated keys to this loop, and
+                // `haven/media/<ref>` sorts lexicographically before `haven/media/<ref>.p/0`, so the
+                // ~100-byte manifest was always pulled first and the 8 MiB windows came after — the
+                // ones most likely to be cut off by the per-pass cap or to fail outright over a
+                // cross-NAT dial. The reliable outcome was a manifest promising N chunks over a store
+                // holding fewer, which readers stall on forever and the author's backup probe reads
+                // as a finished upload. Windows first, and the manifest only once they are all here
+                // (see the completeness gate in the pull loop below).
+                if k.contains(".p/") {
+                    2
+                } else {
+                    3
+                }
             } else {
                 1
             }
@@ -1082,6 +1112,24 @@ pub(crate) async fn pull_missing_from_peer(
         let Ok(Some(blob)) = client.get(&key).await else { continue };
         if blob.is_empty() {
             continue;
+        }
+        // A chunked blob's manifest is only useful once its windows are local. Storing one over a
+        // partial chunk set is worse than storing nothing: readers treat a manifest as authoritative,
+        // resume at the first absent window and fail there identically on every retry until the post
+        // gives up as "no longer available" — and the AUTHOR's backup probe, which asks only whether
+        // the manifest key exists, then reports the upload as safely landed and never re-sends the
+        // missing windows. Windows are ranked ahead of manifests above so they arrive first; this is
+        // the guarantee behind that preference. A skipped manifest costs nothing — a later pass takes
+        // it once its chunks are here.
+        if let Some(n) = manifest_chunks(&blob) {
+            let complete = (0..n).all(|i| {
+                safe_path(root, &format!("{key}.p/{i}"))
+                    .map(|p| p.is_file())
+                    .unwrap_or(false)
+            });
+            if !complete {
+                continue;
+            }
         }
         if let Some(parent) = local.parent() {
             std::fs::create_dir_all(parent).ok();
@@ -2590,6 +2638,36 @@ mod tests {
         assert!(local_has(&dir, "haven/media/fresh"));
         assert!(local_has(&dir, "haven/mailbox/fam/live"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_chunks_reads_the_declared_window_count() {
+        // Exactly what SharedStore.makeManifest writes, including the real field order.
+        let real = b"HVCHUNK1\n{\"v\":1,\"chunks\":5,\"total\":40342326,\"sizes\":[8388608]}";
+        assert_eq!(manifest_chunks(real), Some(5));
+        assert_eq!(manifest_chunks(b"HVCHUNK1\n{\"chunks\":137}"), Some(137));
+        // Anything that isn't a manifest is stored as-is — the safe direction.
+        assert_eq!(manifest_chunks(b"\x00\x01\x02 sealed bytes"), None);
+        assert_eq!(manifest_chunks(b"HVCHUNK1\n{\"v\":1}"), None, "no chunks field");
+        assert_eq!(manifest_chunks(b"HVCHUNK1\n{\"chunks\":0}"), None, "0 is not a chunked blob");
+    }
+
+    #[test]
+    fn mesh_sync_ranks_chunk_windows_ahead_of_their_manifest() {
+        // The ordering that stops a manifest landing before the windows it promises. Plain
+        // lexicographic order puts `<ref>` before `<ref>.p/0`, which is exactly backwards.
+        let rank = |k: &str| {
+            if k.starts_with("haven/mailbox/") {
+                0
+            } else if k.starts_with("haven/media/") {
+                if k.contains(".p/") { 2 } else { 3 }
+            } else {
+                1
+            }
+        };
+        assert!(rank("haven/media/vid_a.p/0") < rank("haven/media/vid_a"));
+        assert!(rank("haven/mailbox/fam/e1") < rank("haven/media/vid_a.p/0"));
+        assert!("haven/media/vid_a" < "haven/media/vid_a.p/0", "the order the rank has to override");
     }
 
     #[test]

@@ -7,6 +7,69 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed — Apple + Android + Desktop + relay core
+
+- **A large video could get permanently stuck at "No longer available", with the original sitting on
+  your other device.** A chunked blob is 8 MB windows at `haven/media/<ref>.p/<i>` under a tiny
+  `HVCHUNK1` manifest at `haven/media/<ref>`, and four separate places treated the manifest as if it
+  were the blob. Together they made an incomplete relay copy permanent and undetectable:
+
+  - The **backup probe** asked only whether the manifest key existed. A manifest over a partial chunk
+    set therefore read as a finished upload, went into the write-once backup ledger, and was never
+    looked at again — so the author's device reported the post as safely backed up while nobody could
+    fetch it. It now verifies the final window too, and re-uploads when it doesn't check out.
+  - The **own-relay upload discarded its own failure**: `localPut` returns a `Bool` that was thrown
+    away, and the caller's `try?` swallowed thrown errors before marking the ledger regardless. A
+    window that never landed let the loop run on and write the manifest anyway. A failed window now
+    stops the upload before the manifest is written and is not recorded as backed up.
+  - **Restore pinned the manifest's source** and pulled every window from it, so a source holding a
+    manifest but not all of its chunks was a dead end even with a sibling relay holding the complete
+    blob — it was never asked. Missing windows now fall through every reachable relay/bucket, and a
+    window that is absent *everywhere* is reported as an incomplete stored copy (repaired in place if
+    this device holds the plaintext) instead of retrying the same hole forever.
+  - **Relay mesh replication** pulled a manifest and its windows as unrelated keys, in lexicographic
+    order — which puts `<ref>` *before* `<ref>.p/0`, so the 100-byte manifest reliably landed and the
+    8 MB windows were what got cut off by the per-pass cap. Windows now rank ahead of manifests, and a
+    manifest whose windows aren't local is skipped until they are.
+
+  The probe fix, the ledger invalidation and the own-device ask land on all three clients. Android and
+  desktop already failed over to the next relay when a reassembly stalled, so only Apple needed the
+  per-chunk source fallback; the mesh-replication fix is in `haven-net`, so every relay gets it —
+  including standalone Linux/Docker ones.
+
+- **Your own media could only move between your own devices over the local network.** The media ask
+  (frames 3/33) fanned out over iroh to *contacts* only, and your own devices are not contacts — they
+  live in the account's device roster. The own-device *serve* was likewise nearby-only, while the
+  friend path has always mirrored each chunk over iroh as well. So one of your devices could hold a
+  video the other needed, both online, and no transport connected them off a shared LAN. Both lanes
+  now include your own devices, and a nearby rate-limit no longer abandons a transfer that iroh is
+  carrying successfully.
+
+- **"Notify me when it's back" did nothing for your own posts.** `requestMediaWhenAvailable` treated
+  "I authored this" as "no peer is needed" — true of the account, false of the device. On a device
+  holding no plaintext (a post made on your phone, viewed on your Mac) it logged and gave up. It now
+  asks your other devices, which is exactly who has it.
+
+- **A peer asking us directly for media we hold now re-checks our backup.** That ask means a relay
+  failed to serve them, which is the only signal in the system that a stored copy has gone bad — and
+  nothing listened to it. Throttled to once an hour per ref, and a probe rather than a forced
+  re-upload: it re-sends only what a destination actually turns out to lack.
+
+- **Some posts drew no blurred backdrop, apparently at random.** `BlurredMediaBackdrop` loaded once
+  via `.task(id: ref)` and, on failure, left itself unloaded "so a later run retries" — but `ref`
+  never changes and the view observes nothing, so there was no later run. Both ordinary failures are
+  transient (bytes not on disk yet; a video poster that hasn't been cut), so any card built before its
+  media arrived kept a flat black letterbox for the life of that card. It now retries on a widening
+  backoff for ~2 minutes, ending as soon as the card scrolls away.
+
+- **Videos pillarboxed on a wide window when they could have filled it.** The single-media page height
+  was capped at a flat 460pt on anything but a portrait phone. At the ~820pt of card width a normal
+  Mac window gives, that page is 1.78:1 — so every clip narrower than that (3:2, 4:3, 1:1) was fitted
+  by height and drew blurred pillars either side. The cap is now a minimum page *aspect*, which is
+  width-independent: 4:3 and 3:2 fill the card, and only genuinely tall media letterboxes.
+
 ## [1.3.1] — 2026-08-03
 
 ### Fixed — Apple + Android + Desktop

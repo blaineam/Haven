@@ -1248,6 +1248,19 @@ object HavenNet : InboundListener {
                                   manual: Boolean = false) {
         val authorHex = idHexFor(authorShort)
         if (authorHex == null) {
+            // MINE, AND THIS DEVICE HAS NO COPY. `idHexFor` cannot resolve me — I am not my own
+            // contact — so a post I authored on ANOTHER of my devices landed here and gave up, every
+            // time, including behind the "Notify me when it's back" button. "My own media needs
+            // nobody's permission" is true of the ACCOUNT and false of the DEVICE: the device that
+            // holds it is the one to ask. (Apple parity: `requestMediaWhenAvailable`.)
+            val mine = authorShort.isEmpty() || social.myNodeHex().startsWith(authorShort, ignoreCase = true)
+            if (mine && !LocalMedia.has(ref)) {
+                Log.i(TAG, "media-wanted ${ref.take(10)}: MINE but no plaintext here — asking my other devices")
+                MediaWantedStore.add(ref, manualAsk = manual)
+                val ask = nodeIdHex.toByteArray(Charsets.UTF_8) + ref.toByteArray(Charsets.UTF_8)
+                liveDeliverToMyDevices(Wire.MEDIA_REQ, ask)
+                return
+            }
             Log.i(TAG, "media-wanted ${ref.take(10)}: author not resolvable — cannot ask")
             return
         }
@@ -3087,6 +3100,8 @@ object HavenNet : InboundListener {
         afterAuthor(circleId, env,
             PushBanner.forPost(circleId, circleName(circleId), body, withThumbs, story = false, postId = postId))
         enqueueAuthoredMedia(circleId, withThumbs)   // serialized priority lane: thumbs → posters → blobs
+        // A post the engine accepted is Haven's one "significant action" for the rating gates.
+        com.blaineam.haven.support.RatingManager.recordSignificantAction(appContext)
         // "Save my posts to Photos" (per-circle override, falling back to the app-wide default).
         if (media.isNotEmpty() && CircleSettings.saveOwn(circleId))
             scope.launch { media.forEach { MediaSaver.autoSave(appContext, it) } }
@@ -5023,6 +5038,31 @@ object HavenNet : InboundListener {
             .put("sizes", org.json.JSONArray(sizes))
         return manifestMagic + json.toString().toByteArray(Charsets.UTF_8)
     }
+    /**
+     * True when a destination holds a COMPLETE copy of [ref] — every chunk, not merely the manifest.
+     *
+     * A probe that asks only "is `haven/media/<ref>` there?" cannot tell a finished upload from a
+     * manifest stranded over a partial chunk set, and answering yes to the second is PERMANENT: the
+     * ref goes into the backup ledger ([markBackedUp]), no later pass revisits it, and the missing
+     * windows are never sent again. Readers then stall on the same absent chunk on every retry until
+     * the post gives up as "no longer available", while this device goes on showing it as safely
+     * backed up. Field case (Apple, 2026-08-07): a 5-chunk video whose relay copy held chunks 0–2,
+     * stuck for days with the original sitting on the author's other device.
+     *
+     * [head] is whatever the destination returned for the manifest key; null = it holds nothing. A
+     * non-manifest head means a small unchunked blob, whose presence IS completeness.
+     *
+     * Otherwise probe the LAST window only. An upload that dies partway leaves a TAIL of missing
+     * chunks, so one probe catches that whole class at O(1) instead of N round-trips against a
+     * 137-window video. Mirror of iOS `SharedStore.holdsCompleteBlob`; the relay-side guarantee that
+     * mesh replication never CREATES a mid-blob hole lives in `haven-net::pull_missing_from_peer`.
+     */
+    private suspend fun holdsCompleteBlob(ref: String, head: ByteArray?, has: suspend (String) -> Boolean): Boolean {
+        if (head == null) return false
+        val chunks = parseManifest(head) ?: return true
+        return has(mediaChunkKey(ref, chunks - 1))
+    }
+
     /** If [blob] is a chunk manifest, return its chunk count; else null (legacy/small single blob). */
     private fun parseManifest(blob: ByteArray): Int? {
         if (blob.size <= manifestMagic.size) return null
@@ -5605,9 +5645,18 @@ object HavenNet : InboundListener {
                 // Skip refs whose relay copy was found and could not be opened (acceptFetchedBlob):
                 // re-fetching them just re-downloads the same unopenable bytes; only the author's
                 // re-seal fixes them, and the set is dropped on restart so a repair is picked up.
+                // [unopenableMedia] is deliberately NOT a gate here — it gates the RELAY half of the
+                // fetch instead (see [enqueueRestore] below). The flag means "the stored copy we
+                // downloaded could not be decrypted", which is a statement about a relay blob and
+                // nothing else. Excluding the ref from the scan also silenced the PEER ask, which
+                // travels a different lane under a different key (the account-derived own-media key)
+                // and is frequently the one that works — so a relay copy sealed to a recipient set
+                // we're not in would kill an own-device transfer that was actively succeeding,
+                // mid-flight, with nothing left to re-ask. (Apple hit exactly that: a peer transfer
+                // died at 823/1231 chunks the instant a relay copy failed to open.)
                 fun consider(ref: String) {
                     if (LocalMedia.isSynthetic(ref) || LocalMedia.has(ref) ||
-                        EvictedMediaStore.contains(ref) || unopenableMedia.contains(ref)) return
+                        EvictedMediaStore.contains(ref)) return
                     val prior = missing[ref]
                     if (prior == null || (fresh && !prior.second)) missing[ref] = c.id to fresh
                 }
@@ -5688,7 +5737,10 @@ object HavenNet : InboundListener {
                     fastReq[ref] = (st.first + 1) to (nowMs + FAST_STEPS[st.first])
                     if (fastReq.size > 500) fastReq.keys.retainAll(missing.keys)
                 }
-                enqueueRestore(circleId, ref)
+                // The relay half only for refs whose stored copy opened (or was never tried): re-pulling
+                // a blob we already know we cannot decrypt repairs nothing and costs a full download
+                // each sweep. The peer ask below always goes out — see `consider`.
+                if (!unopenableMedia.contains(ref)) enqueueRestore(circleId, ref)
                 requestedRefs.add(ref)
                 val payload = myHex.toByteArray(Charsets.UTF_8) + ref.toByteArray(Charsets.UTF_8)
                 askForMedia(ref, payload, contacts.map { it.idHex })
@@ -5697,8 +5749,21 @@ object HavenNet : InboundListener {
             // SERIALIZED RESTORE: the relay fetch loads a FULL blob into RAM, so it goes through the
             // single media-transfer queue (one blob at a time) instead of one concurrent coroutine per
             // missing ref — which used to pull the whole library into memory at once and OOM-crash.
-            enqueueRestore(circleId, ref)
-            val stale = (mediaReqAt[ref]?.let { nowMs - it > 300_000 } ?: true)
+            if (!unopenableMedia.contains(ref)) enqueueRestore(circleId, ref)
+            // AN ACTIVE PEER TRANSFER GETS A FASTER HEARTBEAT THAN THE 5-MINUTE COOLDOWN.
+            //
+            // That cooldown is sized for a ref nobody is sending: don't nag. A partial that is still
+            // GROWING is the opposite case — the bytes are arriving, but a serve is ONE pass over the
+            // file and then it ends, so the remainder only moves if we ask again. At five minutes a
+            // large video crawls, and a pass that ends near the tail looks stopped entirely. (Apple:
+            // a transfer sat at 1101/1231 with the sender online and holding the rest, because nothing
+            // re-asked.) [askForMedia] upgrades to frame 33, so each heartbeat costs the sender only
+            // the windows we still lack.
+            val inFlight = synchronized(incomingLock) {
+                incomingMedia[ref]?.let { it.got.isNotEmpty() && it.got.size < it.total } ?: false
+            }
+            val cooldown = if (inFlight) 10_000L else 300_000L
+            val stale = (mediaReqAt[ref]?.let { nowMs - it > cooldown } ?: true)
             val allowDirect = stale && directBudget > 0
             if (!allowDirect) continue
             // Peer re-request (tiny frame, no blob in RAM) stays direct but throttled/budgeted so we
@@ -6063,6 +6128,22 @@ object HavenNet : InboundListener {
             runCatching { appContext.getSharedPreferences("haven.mediabackup", Context.MODE_PRIVATE).edit().putStringSet("done", HashSet(backedUp)).apply() }
         }
     }
+    /**
+     * Forget every confirmation for ONE ref, so the next pass re-probes every destination instead of
+     * trusting a verdict that has since turned out to be wrong.
+     *
+     * The ledger is otherwise write-once, which is right while a stored blob is immutable AND
+     * complete — and wrong the moment one isn't. A relay copy missing chunks is never re-examined, so
+     * it stays broken forever while this device keeps reporting the post as safely backed up. The
+     * complement of [forgetBackedUp], which drops a whole destination rather than one ref.
+     */
+    private fun forgetBackedUpRef(ref: String) {
+        ensureLedger()
+        if (backedUp.removeAll { it.endsWith("|$ref") }) {
+            runCatching { appContext.getSharedPreferences("haven.mediabackup", Context.MODE_PRIVATE).edit().putStringSet("done", HashSet(backedUp)).apply() }
+        }
+    }
+
     /** Forget a relay's upload confirmations (it was forgotten/erased) so we re-mirror if it returns. */
     private fun forgetBackedUp(node: String) {
         ensureLedger()
@@ -6138,16 +6219,30 @@ object HavenNet : InboundListener {
             if (nodeHex.startsWith("s3:")) {
                 val cfg = StorageStore.s3Config(appContext) ?: continue
                 if (force) { uploadS3.add(nodeHex to cfg); continue }   // overwrite, no probe
-                runCatching { uniffi.haven_ffi.s3Get(cfg, key) }.onSuccess {
-                    if (it != null) { markRelaySeen(nodeHex); markBackedUp(nodeHex, ref); landed = true }
-                    else uploadS3.add(nodeHex to cfg)
+                runCatching { uniffi.haven_ffi.s3Get(cfg, key) }.onSuccess { head ->
+                    // COMPLETE, not merely present — see holdsCompleteBlob.
+                    val complete = holdsCompleteBlob(ref, head) { k ->
+                        runCatching { uniffi.haven_ffi.s3Get(cfg, k) }.getOrNull() != null
+                    }
+                    if (complete) { markRelaySeen(nodeHex); markBackedUp(nodeHex, ref); landed = true }
+                    else {
+                        if (head != null) Log.i("MediaSync", "probe ref=${ref.take(12)} s3: manifest present but chunks INCOMPLETE — re-uploading")
+                        uploadS3.add(nodeHex to cfg)
+                    }
                 }
                 continue
             }
             // Our OWN hosted relay: the local store answers instantly (never dial/HTTP ourselves).
             if (hostedHex != null && nodeHex == hostedHex) {
-                if (force || relayHost?.localGet(key) == null) uploadLocal.add(nodeHex)
-                else { markBackedUp(nodeHex, ref); landed = true }
+                // COMPLETE, not merely present — see holdsCompleteBlob. localHas answers the chunk
+                // probes from the store index rather than reading an 8 MB window per question.
+                val head = if (force) null else relayHost?.localGet(key)
+                if (head != null && holdsCompleteBlob(ref, head) { k -> relayHost?.localHas(k) == true }) {
+                    markBackedUp(nodeHex, ref); landed = true
+                } else {
+                    if (head != null) Log.i("MediaSync", "probe ref=${ref.take(12)} own-relay: manifest present but chunks INCOMPLETE — re-uploading")
+                    uploadLocal.add(nodeHex)
+                }
                 continue
             }
             // Relay HTTP interface — a reachable relay is authoritative (the iroh path serves the
@@ -6166,8 +6261,18 @@ object HavenNet : InboundListener {
                         // strand our media on a relay that would happily store it once authorized.
                         if (r.exceptionOrNull() is RelayForbidden) { noteRefused(nodeHex, "media probe"); continue }
                         if (r.isFailure) { markHttpUrlBad(base); continue }
-                        if (r.getOrNull() != null) { markRelaySeen(nodeHex); markBackedUp(nodeHex, ref); landed = true }
-                        else uploadHttp.add(nodeHex to entry)
+                        // COMPLETE, not merely present — see holdsCompleteBlob. The extra GET of the
+                        // final window is paid at most once per (ref, relay): a copy that checks out
+                        // goes into the ledger and is never probed again.
+                        val head = r.getOrNull()
+                        val complete = holdsCompleteBlob(ref, head) { k ->
+                            relayHttpGet(base, entry.httpToken, k).getOrNull() != null
+                        }
+                        if (complete) { markRelaySeen(nodeHex); markBackedUp(nodeHex, ref); landed = true }
+                        else {
+                            if (head != null) Log.i("MediaSync", "probe ref=${ref.take(12)} relay=${nodeHex.take(8)}: manifest present but chunks INCOMPLETE — re-uploading")
+                            uploadHttp.add(nodeHex to entry)
+                        }
                         resolved = true
                         break
                     }
@@ -6176,9 +6281,20 @@ object HavenNet : InboundListener {
             }
             val client = relayClientFor(nodeHex) ?: continue   // honors backoff — skip WITHOUT reading
             if (force) { uploadDial.add(nodeHex to client); continue }
-            runCatching { client.has(key) }.onSuccess {
-                if (it) { markRelayOk(nodeHex); markBackedUp(nodeHex, ref); landed = true }
-                else uploadDial.add(nodeHex to client)
+            runCatching {
+                if (client.has(key)) {
+                    markRelayOk(nodeHex)
+                    // COMPLETE, not merely present — see holdsCompleteBlob. `has` carries no bytes,
+                    // so the manifest is only fetched once chunk 0 proves the blob is chunked (and
+                    // the manifest key therefore tiny rather than a whole media file).
+                    val head = if (client.has(mediaChunkKey(ref, 0))) client.get(key) else ByteArray(0)
+                    if (holdsCompleteBlob(ref, head) { k -> client.has(k) }) {
+                        markBackedUp(nodeHex, ref); landed = true
+                    } else {
+                        Log.i("MediaSync", "probe ref=${ref.take(12)} relay=${nodeHex.take(8)}: manifest present but chunks INCOMPLETE — re-uploading")
+                        uploadDial.add(nodeHex to client)
+                    }
+                } else uploadDial.add(nodeHex to client)
             }.onFailure { relayFailed(nodeHex) }
         }
         if (uploadS3.isEmpty() && uploadLocal.isEmpty() && uploadHttp.isEmpty() && uploadDial.isEmpty()) return landed
@@ -6744,16 +6860,40 @@ object HavenNet : InboundListener {
         return File(restorePartsDir(), "$safe.part")
     }
     private fun restoreMetaFile(ref: String): File = File(restorePartFile(ref).path + ".meta")
-    /** Leading chunks already in the .part file (0 = no valid partial for this chunk count). */
-    private fun loadRestorePart(ref: String, chunks: Int): Int = runCatching {
+    /**
+     * Identity of the exact sealed bytes a manifest describes.
+     *
+     * Two seals of the SAME media are not byte-identical — the envelope carries per-recipient key
+     * material and a fresh nonce — and their chunk COUNT is normally identical, so the count cannot
+     * tell them apart. A partial built from one seal must never be continued from another: the result
+     * reassembles to a plausible length and decrypts to nothing. (Observed on Apple: windows 0-2 from
+     * one relay's seal plus 3-4 from another's produced 40,352,062 bytes against a manifest declaring
+     * 40,342,326, and failed to open for every circle.) The manifest encodes the per-window sizes and
+     * the total, so hashing it distinguishes the seals. Mirror of iOS `SharedStore.manifestFingerprint`
+     * and desktop `manifest_fingerprint`.
+     */
+    private fun manifestFingerprint(head: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(head)
+            .joinToString("") { "%02x".format(it) }.take(16)
+
+    /**
+     * Leading chunks of THIS seal already in the .part file. [fp] is what makes that "of this seal"
+     * rather than merely "of something with the same number of windows" — see [manifestFingerprint].
+     * A sidecar written by an older build carries no fingerprint and so fails the match and restarts,
+     * which is the safe direction.
+     */
+    private fun loadRestorePart(ref: String, chunks: Int, fp: String): Int = runCatching {
         val meta = restoreMetaFile(ref).takeIf { it.exists() }?.readText()?.trim() ?: return 0
-        val (c, got) = meta.split(':').let { it.getOrNull(0)?.toIntOrNull() to it.getOrNull(1)?.toIntOrNull() }
-        if (c != chunks || got == null || got <= 0 || got > chunks) return 0
+        val parts = meta.split(':')
+        val c = parts.getOrNull(0)?.toIntOrNull()
+        val got = parts.getOrNull(1)?.toIntOrNull()
+        val recordedFp = parts.getOrNull(2) ?: ""
+        if (c != chunks || recordedFp != fp || got == null || got <= 0 || got > chunks) return 0
         if (!restorePartFile(ref).exists()) return 0
         got
     }.getOrDefault(0)
-    private fun saveRestorePart(ref: String, chunks: Int, got: Int) {
-        runCatching { restoreMetaFile(ref).writeText("$chunks:$got") }
+    private fun saveRestorePart(ref: String, chunks: Int, got: Int, fp: String) {
+        runCatching { restoreMetaFile(ref).writeText("$chunks:$got:$fp") }
     }
     private fun clearRestorePart(ref: String) {
         runCatching { restorePartFile(ref).delete() }
@@ -6784,8 +6924,12 @@ object HavenNet : InboundListener {
         val count = parseManifest(head)
         if (count == null) { LocalMedia.writeRawSealed(ref, head); return true }
         sweepRestorePartsOnce()
+        // Every window of this reassembly must come from ONE seal — see [manifestFingerprint]. The
+        // caller retries against the NEXT relay's own head on failure, and a fingerprint mismatch
+        // restarts the partial rather than silently splicing two envelopes together.
+        val fp = manifestFingerprint(head)
         val part = restorePartFile(ref)
-        var have = loadRestorePart(ref, count)
+        var have = loadRestorePart(ref, count, fp)
         if (have == 0) {
             // No (valid) partial — start fresh.
             runCatching { part.delete() }
@@ -6802,7 +6946,7 @@ object HavenNet : InboundListener {
                 return false
             }
             have = i + 1
-            saveRestorePart(ref, count, have)
+            saveRestorePart(ref, count, have, fp)
             noteRestoreProgress(ref, have, count)   // honest i/n for the placeholder
         }
         clearRestoreProgress(ref)
@@ -6812,6 +6956,45 @@ object HavenNet : InboundListener {
         return ok
     }
 
+    /** Refs whose relay backup a direct ask has already prompted us to re-check. */
+    private val backupReverifiedAt = LinkedHashMap<String, Long>()
+
+    /**
+     * A peer asked us DIRECTLY for a blob we hold — meaning they could not fetch it from any relay we
+     * share. That is the only signal in the system that a STORED copy has gone bad, and until now
+     * nothing listened to it: the backup ledger is write-once, so a relay copy that is missing chunks
+     * stays missing forever while this device goes on showing the post as safely backed up.
+     *
+     * Throttled to once an hour per ref — an unreachable peer re-asks on a timer, and a re-verify must
+     * never become a re-upload storm. Deliberately NOT `force`: this is a probe, and it re-uploads
+     * only the windows a destination actually turns out to lack (see [holdsCompleteBlob]).
+     * Apple parity: `FeedStore.reverifyBackupAfterDirectAsk`.
+     */
+    private fun reverifyBackupAfterDirectAsk(ref: String) {
+        if (LocalMedia.isSynthetic(ref)) return
+        // `System.currentTimeMillis()`, not `nowMs()` — the latter is ULong (it feeds the FFI's
+        // timestamps); this is a plain wall-clock throttle, like `mediaServedAt`.
+        val now = System.currentTimeMillis()
+        synchronized(backupReverifiedAt) {
+            val at = backupReverifiedAt[ref]
+            if (at != null && now - at < 3_600_000L) return
+            backupReverifiedAt[ref] = now
+            while (backupReverifiedAt.size > 2_000) {
+                val it = backupReverifiedAt.iterator(); it.next(); it.remove()
+            }
+        }
+        val circleId = runCatching {
+            social.circles().firstOrNull { c ->
+                social.feed(c.id, nowMs(), null).any { item ->
+                    item.media.contains(ref) || item.comments.any { it.media.contains(ref) }
+                }
+            }?.id
+        }.getOrNull() ?: return
+        forgetBackedUpRef(ref)   // the verdict we're re-testing
+        Log.i("MediaSync", "media REQ ${ref.take(10)}: asked directly for media we backed up — re-probing its relay copies")
+        enqueueBackup(circleId, ref)
+    }
+
     /** Frame 3: [hex64 requester][ref]. If we hold the bytes, stream them back as sealed chunks. */
     private fun handleMediaRequest(body: ByteArray) {
         if (body.size <= 64) return
@@ -6819,6 +7002,9 @@ object HavenNet : InboundListener {
         if (requester.length != 64) return
         val ref = String(body.copyOfRange(64, body.size), Charsets.UTF_8)
         if (ref.isEmpty() || !LocalMedia.has(ref)) return
+        // They had to come to US for bytes we already backed up — so no relay served them. That is a
+        // signal about our own backup, not just a request to answer.
+        reverifyBackupAfterDirectAsk(ref)
         // Rate-limit: a waiting requester re-asks every cycle, so without this we re-served the same blobs
         // hundreds of times and flooded the send queue so nothing drained. One serve per ref per 25s.
         if (!shouldServeNearby(ref)) return
@@ -7012,11 +7198,18 @@ object HavenNet : InboundListener {
             if (e == null || e.got.isEmpty() || e.total <= 0) null
             else MediaResume.encode(myHex, ref, e.total, e.got)
         }
+        // MY OWN DEVICES GET THE ASK TOO. [targets] is the contact list, and my own devices are not
+        // contacts — they live in the account's device roster. Without this a phone and a desktop on
+        // the same account could each be holding what the other needs, both online, with no lane
+        // between them: the fetch just kept "asking peers" that could never answer. (Apple parity:
+        // `FeedStore.askForMedia`.)
         if (resume == null) {
             for (idHex in targets) sendFrame(Wire.MEDIA_REQ, plainPayload, idHex)
+            liveDeliverToMyDevices(Wire.MEDIA_REQ, plainPayload)
             return
         }
         for (idHex in targets) sendFrame(Wire.MEDIA_RESUME_REQ, resume, idHex)
+        liveDeliverToMyDevices(Wire.MEDIA_RESUME_REQ, resume)
         val before = synchronized(incomingLock) {
             if (!resumeFallbackPending.add(ref)) return
             incomingMedia[ref]?.got?.size ?: 0
@@ -7028,6 +7221,7 @@ object HavenNet : InboundListener {
             if (synchronized(incomingLock) { incomingMedia[ref]?.got?.size ?: 0 } != before) return@launch
             Log.i("MediaSync", "resume ref=${ref.take(12)}: no answer to frame 33 — falling back to a full request")
             for (idHex in targets) sendFrame(Wire.MEDIA_REQ, plainPayload, idHex)
+            liveDeliverToMyDevices(Wire.MEDIA_REQ, plainPayload)
         }
     }
 

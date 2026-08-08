@@ -326,6 +326,20 @@ enum MediaBackupLedger {
         }
         UserDefaults.standard.set(Array(set), forKey: defaultsKey)
     }
+    /// Forget every confirmation for ONE ref, so the next pass re-probes every destination instead of
+    /// trusting a verdict that has since turned out to be wrong.
+    ///
+    /// The ledger is otherwise write-once, which is right while a stored blob is immutable AND
+    /// complete — and wrong the moment one isn't. A relay copy missing chunks is never re-examined,
+    /// so it stays broken forever while this device keeps reporting the post as safely backed up.
+    /// The complement of `forgetDest`, which drops a whole destination rather than one ref.
+    static func forget(_ ref: String) {
+        guard !(byRef[ref]?.isEmpty ?? true) else { return }
+        set = set.filter { !$0.hasSuffix("|\(ref)") }
+        byRef[ref] = nil
+        UserDefaults.standard.set(Array(set), forKey: defaultsKey)
+    }
+
     /// Forget a destination's confirmations (e.g. a relay was wiped/forgotten) so we re-mirror to it.
     static func forgetDest(_ dest: String) {
         let before = set.count
@@ -515,6 +529,33 @@ enum SharedStore {
         return n
     }
 
+    /// True when a destination holds a COMPLETE copy of `ref` — every chunk, not merely the manifest.
+    ///
+    /// A probe that asks only "is `haven/media/<ref>` there?" cannot tell a finished upload from a
+    /// manifest stranded over a partial chunk set, and answering yes to the second is PERMANENT: the
+    /// ref goes into `MediaBackupLedger`, no later pass revisits it, and the missing windows are never
+    /// sent again. Readers are then stuck for good — `restore` resumes at the first absent chunk,
+    /// fails on it, keeps the partial, and does the identical thing on every retry until the fetch
+    /// backoff gives up and the post settles on "No longer available". Field case: a 5-chunk video
+    /// whose relay copy held chunks 0–2, retried for days, while the author's device showed it as
+    /// safely backed up.
+    ///
+    /// `head` is whatever the destination returned for the manifest key; nil = it has nothing. A
+    /// non-manifest head means a small unchunked blob, whose presence IS completeness.
+    ///
+    /// Otherwise probe the LAST window only. An upload that dies partway leaves a TAIL of missing
+    /// chunks, so one probe catches that whole class at O(1) rather than spending N round-trips
+    /// against a 137-window video. It cannot catch a hole in the MIDDLE — that shape came from mesh
+    /// replication pulling a manifest ahead of its chunks, which is fixed at the source (chunks now
+    /// rank ahead of manifests, and a manifest whose chunks didn't arrive is dropped), and `restore`
+    /// now falls through to other relays for any chunk a source lacks.
+    private static func holdsCompleteBlob(_ ref: String, head: Data?,
+                                          has: (String) async -> Bool) async -> Bool {
+        guard let head else { return false }
+        guard let chunks = parseManifest(head), chunks > 0 else { return true }
+        return await has(chunkKey(ref, chunks - 1))
+    }
+
     // MARK: - Resumable chunked restore (.part bookkeeping)
     //
     // A chunked relay download used to be all-or-nothing: any chunk miss threw the temp file away,
@@ -533,19 +574,25 @@ enum SharedStore {
         let safe = SHA256.hash(data: Data(ref.utf8)).map { String(format: "%02x", $0) }.joined().prefix(32)
         return restorePartsDir.appendingPathComponent("\(safe).part")
     }
-    private struct RestorePartMeta: Codable { let chunks: Int; var got: Int }
+    /// `fp` identifies the exact sealed bytes the partial was built from — see `manifestFingerprint`.
+    /// Optional so a partial written by an older build (which recorded no fingerprint) simply fails
+    /// the match and restarts, which is the safe direction: continuing it could splice two seals.
+    private struct RestorePartMeta: Codable { let chunks: Int; var got: Int; var fp: String? }
     nonisolated private static func restoreMetaURL(_ ref: String) -> URL {
         restorePartURL(ref).appendingPathExtension("meta")
     }
-    private static func loadRestorePart(_ ref: String, chunks: Int) -> Int {
+    /// How many leading windows of THIS seal are already on disk. The `fp` check is what makes that
+    /// "of this seal" rather than merely "of something with the same number of windows" — two seals of
+    /// one file normally agree on chunk count, so the count alone let a partial cross seals silently.
+    private static func loadRestorePart(_ ref: String, chunks: Int, fp: String) -> Int {
         guard let d = try? Data(contentsOf: restoreMetaURL(ref)),
               let m = try? JSONDecoder().decode(RestorePartMeta.self, from: d),
-              m.chunks == chunks, m.got > 0, m.got <= chunks,
+              m.chunks == chunks, m.fp == fp, m.got > 0, m.got <= chunks,
               FileManager.default.fileExists(atPath: restorePartURL(ref).path) else { return 0 }
         return m.got
     }
-    private static func saveRestorePart(_ ref: String, chunks: Int, got: Int) {
-        if let d = try? JSONEncoder().encode(RestorePartMeta(chunks: chunks, got: got)) {
+    private static func saveRestorePart(_ ref: String, chunks: Int, got: Int, fp: String) {
+        if let d = try? JSONEncoder().encode(RestorePartMeta(chunks: chunks, got: got, fp: fp)) {
             try? d.write(to: restoreMetaURL(ref), options: .atomic)
         }
     }
@@ -829,7 +876,22 @@ enum SharedStore {
                 // your entire media library into RAM on the main thread every two minutes. That is the
                 // "my Mac became unresponsive after I enabled the relay" report: not the relay serving
                 // peers, but the host's own backup check. localHas answers from the index.
-                if !force, RelayHost.shared.localHas(key(ref)) { MediaBackupLedger.mark(node, ref); landed = true }
+                //
+                // COMPLETE, not merely present — see `holdsCompleteBlob`. `localGet` is only reached
+                // once chunk 0 is known to exist, i.e. once the manifest key is known to be a ~100-byte
+                // manifest rather than a whole media file: reading a full blob here is precisely the
+                // trap `localHas` was introduced to avoid.
+                if !force, RelayHost.shared.localHas(key(ref)) {
+                    let head: Data? = RelayHost.shared.localHas(chunkKey(ref, 0))
+                        ? RelayHost.shared.localGet(key(ref))
+                        : Data()   // not chunked → presence is completeness
+                    if await holdsCompleteBlob(ref, head: head, has: { RelayHost.shared.localHas($0) }) {
+                        MediaBackupLedger.mark(node, ref); landed = true
+                    } else {
+                        HavenLog.sync("backup probe ref=\(ref.prefix(12)) own-relay: manifest present but chunks INCOMPLETE — re-uploading")
+                        uploads.append((node, .ownRelay))
+                    }
+                }
                 else { uploads.append((node, .ownRelay)) }
                 continue
             }
@@ -847,10 +909,20 @@ enum SharedStore {
                 for base in http.urls where !httpUrlBad(base) {
                     switch await httpGet(base, http.token, key(ref)) {
                     case .success(let existing):
-                        if existing != nil {
+                        // Complete, not merely present — see `holdsCompleteBlob`. The extra probe is
+                        // one GET of the final window, paid at most once per (ref, relay): a blob that
+                        // checks out is marked in the ledger and never probed again.
+                        let complete = await holdsCompleteBlob(ref, head: existing) { k in
+                            if case .success(let d) = await httpGet(base, http.token, k), let d, !d.isEmpty { return true }
+                            return false
+                        }
+                        if complete {
                             RelayMailboxStore.shared.markSeen(node)
                             MediaBackupLedger.mark(node, ref); landed = true
                         } else {
+                            if existing != nil {
+                                HavenLog.sync("backup probe ref=\(ref.prefix(12)) relay=\(node.prefix(8)): manifest present but chunks INCOMPLETE — re-uploading")
+                            }
                             uploads.append((node, .http(base: base, token: http.token)))
                         }
                         resolved = true
@@ -880,7 +952,18 @@ enum SharedStore {
                 do {
                     if try await c.has(key: key(ref)) {
                         RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
-                        MediaBackupLedger.mark(node, ref); landed = true
+                        // Complete, not merely present — see `holdsCompleteBlob`. `has` carries no
+                        // bytes, so the manifest is only GET-ed once chunk 0 proves the blob is
+                        // chunked (and therefore that the manifest key is tiny).
+                        let head: Data? = try await c.has(key: chunkKey(ref, 0))
+                            ? await c.get(key: key(ref))
+                            : Data()
+                        if await holdsCompleteBlob(ref, head: head, has: { (try? await c.has(key: $0)) ?? false }) {
+                            MediaBackupLedger.mark(node, ref); landed = true
+                        } else {
+                            HavenLog.sync("backup probe ref=\(ref.prefix(12)) relay=\(node.prefix(8)): manifest present but chunks INCOMPLETE — re-uploading")
+                            uploads.append((node, .dial(c)))
+                        }
                     } else {
                         RelayHealth.shared.recordSuccess(node)   // it answered — it just lacks it
                         uploads.append((node, .dial(c)))
@@ -979,10 +1062,27 @@ enum SharedStore {
             switch route {
             case .ownRelay:
                 // Our OWN hosted relay: store directly in the local mailbox (no iroh self-dial).
-                try? await putMediaFile(ref: ref, dest: node, sealedURL: sealedURL, size: sealedSize,
-                                        sealFp: sealFp, force: force,
-                                        exists: { RelayHost.shared.localHas($0) }) { _ = RelayHost.shared.localPut($0, $1) }
-                MediaBackupLedger.mark(node, ref); landed = true
+                //
+                // The put's failure is HONOURED — both halves of that used to be thrown away, and a
+                // chunked upload cannot survive it. `localPut` returns false when the store write
+                // fails, and `_ =` discarded it, so `putMediaFile`'s window loop carried on past a
+                // window that never landed and then wrote the manifest at the end regardless. That
+                // leaves a manifest promising N chunks over a store holding fewer — and because every
+                // later probe asks only whether the MANIFEST is there, the upload is then considered
+                // done forever and the missing windows are never re-sent. The outer `try?` + the
+                // unconditional `mark` below completed the trap: even a thrown failure was recorded as
+                // a successful backup. A window that doesn't land must stop the upload BEFORE the
+                // manifest is written, and must not be marked as landed.
+                do {
+                    try await putMediaFile(ref: ref, dest: node, sealedURL: sealedURL, size: sealedSize,
+                                           sealFp: sealFp, force: force,
+                                           exists: { RelayHost.shared.localHas($0) }) { k, d in
+                        guard RelayHost.shared.localPut(k, d) else { throw URLError(.cannotWriteToFile) }
+                    }
+                    MediaBackupLedger.mark(node, ref); landed = true
+                } catch {
+                    HavenLog.sync("backup own-relay put FAIL ref=\(ref): \(error.localizedDescription) — NOT marked as landed; retrying next pass")
+                }
             case .http(let base, let token):
                 do {
                     try await putMediaFile(
@@ -1379,6 +1479,102 @@ enum SharedStore {
         case s3(S3Client)                          // shared/owner bucket
         case http(String, String)                  // relay plain-HTTP interface (base url, token)
     }
+    /// Every source that could serve this circle's media keys, in the same priority order the
+    /// manifest search uses. Built only when a chunk MISSES, so the happy path never pays for it.
+    private static func mediaSources(circleIds: [String]) async -> [MediaSource] {
+        var out: [MediaSource] = []
+        if RelayHost.shared.serving,
+           circleIds.contains(where: { relayNodes($0).contains(RelayHost.shared.nodeId) }) {
+            out.append(.ownRelay)
+        }
+        var httpSeen = Set<String>()
+        for cid in circleIds {
+            for node in mediaDests(cid) where httpSeen.insert(node).inserted {
+                if RelayHost.shared.serving, node == RelayHost.shared.nodeId { continue }
+                if let http = RelayMailboxStore.shared.httpInterface(node),
+                   let base = http.urls.first(where: { !httpUrlBad($0) }) {
+                    out.append(.http(base, http.token))
+                }
+            }
+        }
+        if let s3 = circleIds.compactMap({ mediaS3(for: $0) }).first { out.append(.s3(s3)) }
+        var dialSeen = Set<String>()
+        for cid in circleIds {
+            for node in mediaDests(cid) where dialSeen.insert(node).inserted {
+                if RelayHost.shared.serving, node == RelayHost.shared.nodeId { continue }
+                if let c = await RelayClients.client(node) { out.append(.relay(c, node)) }
+            }
+        }
+        return out
+    }
+
+    /// Fetch one chunk, falling through EVERY reachable relay/bucket rather than only the source that
+    /// happened to serve the manifest.
+    ///
+    /// `restore` used to pin the manifest's source and pull every window from it, so a source holding
+    /// a manifest but not all of its chunks was a permanent dead end — even with a sibling relay in
+    /// the same circle holding the complete blob, because it was never asked. That is the shape of the
+    /// "my own video never loads on my Mac" report: the Mac's own hosted relay held the manifest and
+    /// chunks 0–2 of 5, and being checked FIRST it won the source race on every single attempt.
+    /// Reassemble one chunked blob from a SINGLE source, streaming each window to a persistent .part
+    /// file (bounded RAM: one 8 MB window at a time). Returns the sealed bytes, or nil if this source
+    /// cannot complete it — in which case the partial is kept so a later attempt against the SAME
+    /// seal resumes rather than restarting a multi-hundred-MB pull.
+    ///
+    /// Every window comes from `source`, and the partial is stamped with `head`'s fingerprint. Both
+    /// halves of that matter: see the cross-seal note in `restore`.
+    private static func reassemble(ref: String, head: Data, source: MediaSource, src: String) async -> Data? {
+        guard let chunkCount = parseManifest(head) else { return nil }
+        sweepRestorePartsOnce()
+        let fp = manifestFingerprint(head)
+        let temp = restorePartURL(ref)
+        var have = loadRestorePart(ref, chunks: chunkCount, fp: fp)
+        if have == 0 {
+            // No partial, or one built from DIFFERENT bytes — start fresh either way.
+            try? FileManager.default.removeItem(at: temp)
+            FileManager.default.createFile(atPath: temp.path, contents: nil)
+        } else {
+            HavenLog.relay("media restore \(ref.prefix(12)): resuming at chunk \(have)/\(chunkCount) via \(src)")
+        }
+        guard let handle = try? FileHandle(forWritingTo: temp) else {
+            clearRestorePart(ref)
+            HavenLog.relay("media restore \(ref.prefix(12)): temp-open FAIL"); return nil
+        }
+        var ok = true
+        do { try handle.seekToEnd() } catch { ok = false }
+        if ok {
+            for i in have..<chunkCount {
+                guard let part = await fetch(source, chunkKey(ref, i)), !part.isEmpty else { ok = false; break }
+                do { try handle.write(contentsOf: part) } catch { ok = false; break }
+                have = i + 1
+                saveRestorePart(ref, chunks: chunkCount, got: have, fp: fp)
+                // Honest progress for the placeholder: i/n while a chunked blob reassembles.
+                FeedStore.shared.noteRestoreProgress(ref, done: have, total: chunkCount)
+            }
+        }
+        try? handle.close()
+        FeedStore.shared.clearRestoreProgress(ref)
+        guard ok else {
+            // KEEP the partial + sidecar — a later attempt against this same seal resumes from `have`.
+            HavenLog.relay("media restore \(ref.prefix(12)): reassemble STALLED at \(have)/\(chunkCount) via \(src) — partial kept for resume")
+            return nil
+        }
+        let bytes = try? Data(contentsOf: temp)
+        clearRestorePart(ref)
+        return bytes
+    }
+
+    /// Identity of the exact sealed bytes a manifest describes.
+    ///
+    /// Two seals of the SAME media are not byte-identical (per-recipient key material plus a fresh
+    /// nonce), and their chunk COUNT is usually identical — so the count cannot tell them apart, and
+    /// a partial built from one must never be continued from the other. The manifest encodes the
+    /// per-window sizes and the total, so hashing it distinguishes them. Mirror of
+    /// `MediaUploadPlan.sealFingerprint` on the download side.
+    private static func manifestFingerprint(_ head: Data) -> String {
+        String(SHA256.hash(data: head).map { String(format: "%02x", $0) }.joined().prefix(16))
+    }
+
     /// Fetch one key's bytes from a source (nil = miss).
     private static func fetch(_ src: MediaSource, _ key: String) async -> Data? {
         switch src {
@@ -1741,44 +1937,64 @@ enum SharedStore {
         // sealed blob (legacy/small). RESUMABLE: chunks append in order and the sidecar records how
         // many landed, so a retry after a mid-download failure fetches only the missing chunks
         // (mirror of the frame-33 peer resume) instead of restarting a multi-hundred-MB pull.
-        let sealed: Data?
-        if let chunkCount = parseManifest(head) {
-            sweepRestorePartsOnce()
-            let temp = restorePartURL(ref)
-            var have = loadRestorePart(ref, chunks: chunkCount)
-            if have == 0 {
-                // No (valid) partial — start fresh.
-                try? FileManager.default.removeItem(at: temp)
-                FileManager.default.createFile(atPath: temp.path, contents: nil)
-            }
-            guard let handle = try? FileHandle(forWritingTo: temp) else {
-                clearRestorePart(ref)
-                HavenLog.relay("media restore \(ref.prefix(12)): temp-open FAIL"); return nil
-            }
-            var ok = true
-            do { try handle.seekToEnd() } catch { ok = false }
-            if have > 0 {
-                HavenLog.relay("media restore \(ref.prefix(12)): resuming at chunk \(have)/\(chunkCount)")
-            }
-            if ok {
-                for i in have..<chunkCount {
-                    guard let part = await fetch(source, chunkKey(ref, i)) else { ok = false; break }
-                    do { try handle.write(contentsOf: part) } catch { ok = false; break }
-                    have = i + 1
-                    saveRestorePart(ref, chunks: chunkCount, got: have)
-                    // Honest progress for the placeholder: i/n while a chunked blob reassembles.
-                    FeedStore.shared.noteRestoreProgress(ref, done: have, total: chunkCount)
+        var sealed: Data?
+        if parseManifest(head) != nil {
+            // EVERY WINDOW FROM ONE SOURCE'S SEAL — never a mix.
+            //
+            // Sealing is not byte-stable: the envelope carries per-recipient key material and a fresh
+            // nonce, so two relays that each hold a complete copy of this ref generally hold DIFFERENT
+            // bytes under the same content-addressed key. Splicing windows across them yields a blob
+            // that reassembles to a plausible length and decrypts to nothing — the exact trap
+            // `MediaUploadPlan` guards on the upload side. (Observed here: windows 0–2 from one seal
+            // plus 3–4 from another produced 40,352,062 bytes against a manifest declaring
+            // 40,342,326, and "found … but OPEN FAILED for all 10 circles".)
+            //
+            // So the fallback is per SOURCE, not per window: if the source that served the manifest
+            // cannot finish, start over against another source's OWN manifest. The partial is keyed to
+            // the manifest's fingerprint (see `RestorePartMeta.fp`), so switching sources discards a
+            // partial built from different bytes instead of silently continuing it — which is what the
+            // old chunk-count-only check allowed, since two seals of one file usually have the SAME
+            // chunk count.
+            var attempts: [(source: MediaSource, head: Data, label: String)] = [(source, head, src)]
+            var altsLoaded = false
+            var i = 0
+            while i < attempts.count {
+                let attempt = attempts[i]; i += 1
+                if let bytes = await reassemble(ref: ref, head: attempt.head, source: attempt.source,
+                                                src: attempt.label) {
+                    sealed = bytes
+                    break
+                }
+                guard !altsLoaded else { continue }
+                altsLoaded = true
+                for alt in await mediaSources(circleIds: circleIds) {
+                    guard let altHead = await fetch(alt, key(ref)), parseManifest(altHead) != nil else { continue }
+                    attempts.append((alt, altHead, "alt"))
+                }
+                if attempts.count > 1 {
+                    HavenLog.relay("media restore \(ref.prefix(12)): \(attempt.label) can't complete it — trying \(attempts.count - 1) other source(s), each from its OWN seal")
                 }
             }
-            try? handle.close()
-            FeedStore.shared.clearRestoreProgress(ref)
-            guard ok else {
-                // KEEP the partial + sidecar — the next attempt resumes from `have`.
-                HavenLog.relay("media restore \(ref.prefix(12)): chunked reassemble STALLED at \(have)/\(chunkCount) via \(src) — partial kept for resume")
+            guard sealed != nil else {
+                // No source could hand us a complete copy of its own. That is not a slow link: the
+                // stored copies are incomplete, and retrying will fail identically forever — which is
+                // how a post ends up "No longer available" while its author still holds the original.
+                HavenLog.relay("media restore \(ref.prefix(12)): no source holds a COMPLETE copy — the stored copies are incomplete, not in flight")
+                if MediaStore.shared.hasLocalFile(ref), let cid = circleIds.first {
+                    // We hold the plaintext, so we can put the missing windows back. A forced backup
+                    // bypasses the ledger (which believes this landed) and re-uploads every window —
+                    // the same remedy the present-but-undecryptable case below uses.
+                    HavenLog.relay("media restore \(ref.prefix(12)): we hold the plaintext — re-uploading to replace the incomplete copy")
+                    Task { @MainActor in _ = await SharedStore.backup(ref: ref, circleId: cid, social: social, force: true, reseal: true) }
+                } else {
+                    // Only a device holding the original can repair this. Tell the UI the truth: we
+                    // are waiting on the sender to put it (all) up — a different thing from
+                    // "downloading" and from "gone", and the state that offers the ask-the-author
+                    // affordance.
+                    FeedStore.shared.noteMediaMissingOnRelays(ref)
+                }
                 return nil
             }
-            sealed = try? Data(contentsOf: temp)   // read the reassembled sealed blob to open it
-            clearRestorePart(ref)
         } else {
             sealed = head
         }

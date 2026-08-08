@@ -98,6 +98,10 @@ struct DynState {
     /// already held. iOS `MediaBackupLedger` / Android `backedUp` parity.
     media_backed_up: HashSet<String>,
     media_backed_up_dirty: bool,
+    /// Refs whose relay backup a DIRECT peer ask has already prompted us to re-check, and when.
+    /// In-session only and throttled to once an hour per ref — see
+    /// [`Engine::reverify_backup_after_direct_ask`].
+    backup_reverified_at: HashMap<String, u64>,
     /// Refs whose stored copy on every relay was FOUND but could not be opened — the bytes are bad,
     /// not missing (see `accept_fetched_blob`). Deliberately in-session only: a restart, or an author
     /// who re-seals and overwrites the blob, both deserve another attempt. Its whole job is to stop
@@ -7078,6 +7082,23 @@ impl Engine {
 
     /// Forget a destination's media confirmations (relay forgotten/erased) so we re-mirror to it
     /// if it ever comes back. iOS `MediaBackupLedger.forgetDest` parity.
+    /// Forget every confirmation for ONE ref, so the next pass re-probes every destination instead of
+    /// trusting a verdict that has since turned out to be wrong.
+    ///
+    /// The ledger is otherwise write-once, which is right while a stored blob is immutable AND
+    /// complete — and wrong the moment one isn't. A relay copy missing chunks is never re-examined, so
+    /// it stays broken forever while this device keeps reporting the post as safely backed up. The
+    /// complement of [`Self::forget_media_backed_up`], which drops a whole destination.
+    fn forget_media_backed_up_ref(&self, reference: &str) {
+        let mut st = self.dyn_state.lock().unwrap();
+        let before = st.media_backed_up.len();
+        let suffix = format!("|{reference}");
+        st.media_backed_up.retain(|k| !k.ends_with(&suffix));
+        if st.media_backed_up.len() != before {
+            st.media_backed_up_dirty = true;
+        }
+    }
+
     fn forget_media_backed_up(&self, dest: &str) {
         let mut st = self.dyn_state.lock().unwrap();
         let before = st.media_backed_up.len();
@@ -8100,6 +8121,27 @@ impl Engine {
         if n > 0 { Some(n) } else { None }
     }
 
+    /// Which key proves a destination holds a COMPLETE copy of `reference`, given whatever it returned
+    /// for the manifest key. `None` = the presence of `head` alone is proof (a small, unchunked blob);
+    /// `Some(key)` = that key must be present too.
+    ///
+    /// A probe that asks only "is `haven/media/<ref>` there?" cannot tell a finished upload from a
+    /// manifest stranded over a partial chunk set, and answering yes to the second is PERMANENT: the
+    /// ref goes into the backup ledger, no later pass revisits it, and the missing windows are never
+    /// sent again. Readers then stall on the same absent chunk on every retry until the post gives up
+    /// as "no longer available", while this device keeps reporting it as safely backed up. Field case
+    /// (Apple, 2026-08-07): a 5-chunk video whose relay copy held chunks 0–2, stuck for days with the
+    /// original sitting on the author's other device.
+    ///
+    /// The LAST window is the one to check: an upload that dies partway leaves a TAIL of missing
+    /// chunks, so one probe catches that whole class at O(1) rather than N round-trips against a
+    /// 137-window video. Mirrors iOS `SharedStore.holdsCompleteBlob` and Android `holdsCompleteBlob`;
+    /// the guarantee that mesh replication never CREATES a mid-blob hole lives in
+    /// `haven-net::pull_missing_from_peer`.
+    fn completeness_probe_key(reference: &str, head: &[u8]) -> Option<String> {
+        Self::parse_manifest(head).map(|n| Self::media_chunk_key(reference, n - 1))
+    }
+
     /// A symmetric key derived from the ACCOUNT seed — every one of the user's own devices derives the
     /// identical key, so own-device media chunks sealed with it always open on a sibling. KEM-sealing to
     /// your own account doesn't decap reliably (the engine's per-device identity makes it fail), which is
@@ -8188,14 +8230,14 @@ impl Engine {
                     }
                 }
                 for r in item.media {
-                    if !LocalMedia::is_synthetic(&r) && !self.media.has(&r) && !self.evicted_contains(&r) && !unopenable.contains(&r) && !missing.iter().any(|(rr, _, _)| rr == &r) {
+                    if !LocalMedia::is_synthetic(&r) && !self.media.has(&r) && !self.evicted_contains(&r) && !missing.iter().any(|(rr, _, _)| rr == &r) {
                         missing.push((r, c.id.clone(), fresh));
                     }
                 }
                 for cm in item.comments {
                     let cm_fresh = now.saturating_sub(cm.created_at) < FRESH_WINDOW_MS;
                     for r in cm.media {
-                        if !LocalMedia::is_synthetic(&r) && !self.media.has(&r) && !self.evicted_contains(&r) && !unopenable.contains(&r) && !missing.iter().any(|(rr, _, _)| rr == &r) {
+                        if !LocalMedia::is_synthetic(&r) && !self.media.has(&r) && !self.evicted_contains(&r) && !missing.iter().any(|(rr, _, _)| rr == &r) {
                             missing.push((r, c.id.clone(), cm_fresh));
                         }
                     }
@@ -8262,7 +8304,21 @@ impl Engine {
                         false
                     }
                 } else {
-                    let stale = st.media_req_at.get(&reference).map(|&t| now - t > 300_000).unwrap_or(true);
+                    // AN ACTIVE PEER TRANSFER GETS A FASTER HEARTBEAT THAN THE 5-MINUTE COOLDOWN.
+                    //
+                    // That cooldown is sized for a ref nobody is sending: don't nag. A partial that is
+                    // still GROWING is the opposite case — the bytes are arriving, but a serve is ONE
+                    // pass over the file and then it ends, so the remainder only moves if we ask again.
+                    // At five minutes a large video crawls, and if a pass ends near the tail it can
+                    // look stopped entirely. (Apple: a transfer sat at 1101/1231 with the sender online
+                    // and holding the rest, because nothing re-asked.) `ask_for_media` upgrades to
+                    // frame 33, so each heartbeat costs the sender only the windows we still lack.
+                    let in_flight = st
+                        .reassembly
+                        .progress(&reference)
+                        .is_some_and(|held| held > 0);
+                    let cooldown: u64 = if in_flight { 10_000 } else { 300_000 };
+                    let stale = st.media_req_at.get(&reference).map(|&t| now - t > cooldown).unwrap_or(true);
                     if stale && direct_budget > 0 {
                         st.media_req_at.insert(reference.clone(), now);
                         direct_budget -= 1;
@@ -8274,9 +8330,18 @@ impl Engine {
             };
             let me = self.clone();
             let my_hex = my_hex.clone();
+            let skip_relay = unopenable.contains(&reference);
             tauri::async_runtime::spawn(async move {
                 // ALWAYS try the circle's mailbox (relay/S3) first — content-addressed + idempotent, no flood.
-                if me.fetch_media_healing(&circle_id, &reference).await {
+                //
+                // Except for a ref whose stored copy we already downloaded and could not decrypt:
+                // re-pulling it repairs nothing and costs a full download every sweep. That flag used
+                // to gate the whole SCAN, which also silenced the peer ask below — and the peer lane
+                // carries different bytes under a different key, so it is frequently the one that can
+                // still succeed. (Apple hit exactly that: an own-device transfer died mid-flight at
+                // 823/1231 chunks the instant a relay copy failed to open, with nothing left to
+                // re-ask.) Gate the relay half only.
+                if !skip_relay && me.fetch_media_healing(&circle_id, &reference).await {
                     me.emit_changed();
                     return;
                 }
@@ -8289,11 +8354,17 @@ impl Engine {
                 me.dyn_state.lock().unwrap().requested_refs.insert(reference.clone());
                 let mut payload = my_hex.clone().into_bytes();
                 payload.extend_from_slice(reference.as_bytes());
-                // NOTE: we deliberately do NOT add our own account node id as a request target here. iroh
-                // publishes this device's endpoint under the shared account id, so dialing it is a self-dial,
-                // which sends iroh's QUIC path-discovery into an unbounded loop (the multi-GB leak the
-                // RelayClient guard already prevents). Own-device media converges via the relay backfill
-                // (each device mirrors its own media to the relays a sibling reads) — the reliable path.
+                // NOTE: we deliberately do NOT add our own ACCOUNT node id as a request target here.
+                // iroh publishes this device's endpoint under the shared account id, so dialing it is a
+                // self-dial, which sends iroh's QUIC path-discovery into an unbounded loop (the multi-GB
+                // leak the RelayClient guard already prevents).
+                //
+                // Sibling DEVICE ids are a different matter and `ask_for_media` now sends to them (see
+                // `live_deliver_to_my_devices`, which excludes both the account id and this device). The
+                // old claim here — that own-device media converges via the relay backfill, "the reliable
+                // path" — does not survive contact: a relay copy can be incomplete, or sealed to a
+                // recipient set a sibling isn't in, and then the backfill converges on nothing at all
+                // while the device holding the original sits idle a metre away.
                 let ids: Vec<String> = me.prefs.lock().unwrap().contacts.iter().map(|c| c.id_hex.clone()).collect();
                 // A partial we already hold upgrades this to frame 33, so an interrupted transfer
                 // finishes on its missing chunks instead of re-sending everything each sweep.
@@ -8603,7 +8674,18 @@ impl Engine {
                 s3_needs = true;
             } else if !self.media_backed_up_has("s3", reference) {
                 match s3.get(&key).await {
-                    Ok(Some(_)) => { self.mark_media_backed_up("s3", reference); landed = true; }
+                    Ok(Some(head)) => {
+                        // COMPLETE, not merely present — see `completeness_probe_key`.
+                        let complete = match Self::completeness_probe_key(reference, &head) {
+                            None => true,
+                            Some(k) => matches!(s3.get(&k).await, Ok(Some(_))),
+                        };
+                        if complete { self.mark_media_backed_up("s3", reference); landed = true; }
+                        else {
+                            log::info!("backup probe ref={reference} s3: manifest present but chunks INCOMPLETE — re-uploading");
+                            s3_needs = true;
+                        }
+                    }
                     Ok(None) => s3_needs = true,
                     Err(_) => {} // bucket unreachable — don't read the blob on its behalf
                 }
@@ -8631,10 +8713,23 @@ impl Engine {
                     let mut resolved = false;
                     for base in urls.iter().filter(|u| !self.http_url_bad(u)) {
                         match self.http_get(base, &token, &key).await {
-                            Ok(Some(_)) => {
+                            Ok(Some(head)) => {
                                 self.mark_relay_ok(&node_hex);
-                                self.mark_media_backed_up(&node_hex, reference);
-                                landed = true;
+                                // COMPLETE, not merely present — see `completeness_probe_key`. The
+                                // extra GET of the final window is paid at most once per (ref, relay):
+                                // a copy that checks out goes into the ledger and is never re-probed.
+                                let complete = match Self::completeness_probe_key(reference, &head) {
+                                    None => true,
+                                    Some(k) => matches!(self.http_get(base, &token, &k).await, Ok(Some(_))),
+                                };
+                                if complete {
+                                    self.mark_media_backed_up(&node_hex, reference);
+                                    landed = true;
+                                } else {
+                                    log::info!("backup probe ref={reference} relay={}: manifest present but chunks INCOMPLETE — re-uploading",
+                                               &node_hex[..8.min(node_hex.len())]);
+                                    http_uploads.push((node_hex.clone(), base.clone(), token.clone()));
+                                }
                                 resolved = true;
                             }
                             Ok(None) => {
@@ -8663,8 +8758,30 @@ impl Engine {
                     match client.has(key.clone()).await {
                         Ok(true) => {
                             self.mark_relay_ok(&node_hex);
-                            self.mark_media_backed_up(&node_hex, reference);
-                            landed = true;
+                            // COMPLETE, not merely present — see `completeness_probe_key`. `has`
+                            // carries no bytes, so the manifest is only fetched once chunk 0 proves
+                            // the blob is chunked (and its manifest key therefore tiny rather than a
+                            // whole media file).
+                            let chunked = client
+                                .has(Self::media_chunk_key(reference, 0))
+                                .await
+                                .unwrap_or(false);
+                            let head = if chunked { client.get(key.clone()).await } else { None };
+                            let probe = head
+                                .as_deref()
+                                .and_then(|h| Self::completeness_probe_key(reference, h));
+                            let complete = match probe {
+                                None => true,
+                                Some(k) => client.has(k).await.unwrap_or(false),
+                            };
+                            if complete {
+                                self.mark_media_backed_up(&node_hex, reference);
+                                landed = true;
+                            } else {
+                                log::info!("backup probe ref={reference} relay={}: manifest present but chunks INCOMPLETE — re-uploading",
+                                           &node_hex[..8.min(node_hex.len())]);
+                                dial_uploads.push((node_hex.clone(), client.clone()));
+                            }
                         }
                         Ok(false) => {
                             self.mark_relay_ok(&node_hex);   // it answered — it just lacks it
@@ -8872,7 +8989,27 @@ impl Engine {
     }
 
     /// How many leading chunks of `reference` are already on disk (0 = no valid partial).
-    fn restore_resume_load(&self, reference: &str, chunks: usize) -> usize {
+    /// Identity of the exact sealed bytes a manifest describes.
+    ///
+    /// Two seals of the SAME media are not byte-identical — the envelope carries per-recipient key
+    /// material and a fresh nonce — and their chunk COUNT is normally identical, so the count cannot
+    /// tell them apart. A partial built from one seal must never be continued from another: the
+    /// result reassembles to a plausible length and decrypts to nothing. (Observed on Apple: windows
+    /// 0–2 from one relay's seal plus 3–4 from another's produced 40,352,062 bytes against a manifest
+    /// declaring 40,342,326, and failed to open for every circle.) The manifest encodes the per-window
+    /// sizes and the total, so hashing it distinguishes the seals. Mirror of iOS
+    /// `SharedStore.manifestFingerprint`.
+    fn manifest_fingerprint(head: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        let d = Sha256::digest(head);
+        d.iter().take(8).map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// How many leading windows of THIS seal are already on disk. `fp` is what makes that "of this
+    /// seal" rather than merely "of something with the same number of windows" — see
+    /// [`Self::manifest_fingerprint`]. A sidecar written by an older build carries no fingerprint and
+    /// therefore fails the match and restarts, which is the safe direction.
+    fn restore_resume_load(&self, reference: &str, chunks: usize, fp: &str) -> usize {
         let part = self.media.sealed_part_path(reference);
         let Ok(txt) = std::fs::read_to_string(Self::restore_meta_path(&part)) else { return 0 };
         let mut it = txt.split_whitespace();
@@ -8882,16 +9019,17 @@ impl Engine {
         ) else {
             return 0;
         };
-        if c == chunks && g > 0 && g <= chunks && part.exists() {
+        let recorded_fp = it.next().unwrap_or("");
+        if c == chunks && recorded_fp == fp && g > 0 && g <= chunks && part.exists() {
             g
         } else {
             0
         }
     }
 
-    fn restore_resume_save(&self, reference: &str, chunks: usize, got: usize) {
+    fn restore_resume_save(&self, reference: &str, chunks: usize, got: usize, fp: &str) {
         let part = self.media.sealed_part_path(reference);
-        let _ = std::fs::write(Self::restore_meta_path(&part), format!("{chunks} {got}"));
+        let _ = std::fs::write(Self::restore_meta_path(&part), format!("{chunks} {got} {fp}"));
     }
 
     fn restore_resume_clear(&self, reference: &str) {
@@ -8901,8 +9039,8 @@ impl Engine {
 
     /// Open (or start) the resumable part file for `reference` given the manifest's chunk count.
     /// Returns (part path, chunks already held).
-    fn restore_resume_open(&self, reference: &str, chunks: usize) -> (std::path::PathBuf, usize) {
-        let have = self.restore_resume_load(reference, chunks);
+    fn restore_resume_open(&self, reference: &str, chunks: usize, fp: &str) -> (std::path::PathBuf, usize) {
+        let have = self.restore_resume_load(reference, chunks, fp);
         if have == 0 {
             (self.media.new_sealed_part(reference), 0)
         } else {
@@ -8921,12 +9059,13 @@ impl Engine {
         if let Some(s3) = self.s3_client().await {
             if let Ok(Some(head)) = s3.get(&key).await {
                 if let Some(count) = Self::parse_manifest(&head) {
-                    let (part, have) = self.restore_resume_open(reference, count);
+                    let fp = Self::manifest_fingerprint(&head);
+                    let (part, have) = self.restore_resume_open(reference, count, &fp);
                     let mut ok = true;
                     for i in have..count {
                         match s3.get(&Self::media_chunk_key(reference, i)).await {
                             Ok(Some(chunk)) if self.media.append_sealed_part(&part, &chunk) => {
-                                self.restore_resume_save(reference, count, i + 1);
+                                self.restore_resume_save(reference, count, i + 1, &fp);
                             }
                             _ => { ok = false; break; }
                         }
@@ -8965,12 +9104,13 @@ impl Engine {
                         Ok(None) => { http_miss = true; break; } // reachable, doesn't hold it
                         Ok(Some(head)) => {
                             if let Some(count) = Self::parse_manifest(&head) {
-                                let (part, have) = self.restore_resume_open(reference, count);
+                    let fp = Self::manifest_fingerprint(&head);
+                                let (part, have) = self.restore_resume_open(reference, count, &fp);
                                 let mut ok = true;
                                 for i in have..count {
                                     match self.http_get(base, &token, &Self::media_chunk_key(reference, i)).await {
                                         Ok(Some(chunk)) if self.media.append_sealed_part(&part, &chunk) => {
-                                            self.restore_resume_save(reference, count, i + 1);
+                                            self.restore_resume_save(reference, count, i + 1, &fp);
                                         }
                                         _ => { ok = false; break; }
                                     }
@@ -8998,14 +9138,15 @@ impl Engine {
             if let Some(client) = self.relay_client_for(&node_hex).await {
                 if let Some(head) = client.get(key.clone()).await {
                     if let Some(count) = Self::parse_manifest(&head) {
+                    let fp = Self::manifest_fingerprint(&head);
                         // Stream each chunk to the resumable part file on disk — never the whole
                         // blob in RAM, never chunk 0 again after a stall.
-                        let (part, have) = self.restore_resume_open(reference, count);
+                        let (part, have) = self.restore_resume_open(reference, count, &fp);
                         let mut ok = true;
                         for i in have..count {
                             match client.get(Self::media_chunk_key(reference, i)).await {
                                 Some(chunk) if self.media.append_sealed_part(&part, &chunk) => {
-                                    self.restore_resume_save(reference, count, i + 1);
+                                    self.restore_resume_save(reference, count, i + 1, &fp);
                                 }
                                 _ => { ok = false; break; }
                             }
@@ -9131,11 +9272,17 @@ impl Engine {
     /// bounded to ONE pending task per ref — never one per incoming request, or a peer could make us
     /// spawn tasks by re-asking.
     fn ask_for_media(self: &Arc<Self>, reference: &str, my_hex: &str, plain: Vec<u8>, targets: Vec<String>) {
+        // MY OWN DEVICES GET THE ASK TOO. `targets` is the contact list, and my own devices are not
+        // contacts — they live in the account's device roster. Without this a desktop and a phone on
+        // the same account could each be holding what the other needs, both online, with no lane
+        // between them: the fetch just kept "asking peers" that could never answer. (Apple parity:
+        // `FeedStore.askForMedia`; Android: `askForMedia`.)
         let hint = self.dyn_state.lock().unwrap().reassembly.resume_hint(reference);
         let Some((total, got)) = hint else {
             for id_hex in &targets {
                 self.send_frame(wire::MEDIA_REQ, &plain, id_hex);
             }
+            self.live_deliver_to_my_devices(wire::MEDIA_REQ, &plain);
             return;
         };
         let before = got.len() as u32;
@@ -9149,6 +9296,7 @@ impl Engine {
         for id_hex in &targets {
             self.send_frame(wire::MEDIA_RESUME_REQ, &resume, id_hex);
         }
+        self.live_deliver_to_my_devices(wire::MEDIA_RESUME_REQ, &resume);
         if !self.dyn_state.lock().unwrap().resume_fallback.insert(reference.to_string()) {
             return; // a fallback for this ref is already armed
         }
@@ -9171,6 +9319,7 @@ impl Engine {
             for id_hex in &targets {
                 me.send_frame(wire::MEDIA_REQ, &plain, id_hex);
             }
+            me.live_deliver_to_my_devices(wire::MEDIA_REQ, &plain);
         });
     }
 
@@ -9186,9 +9335,58 @@ impl Engine {
         if reference.is_empty() || !self.media.has(&reference) {
             return;
         }
+        // They had to come to US for bytes we already backed up — so no relay served them. That is a
+        // signal about our own backup, not just a request to answer.
+        self.reverify_backup_after_direct_ask(&reference).await;
         let Some(bytes) = self.media.load_any_circle(&self.social, &reference) else { return };
         // Frame 3 means "send everything" and always has — see `wire::MEDIA_RESUME_REQ`.
         self.serve_chunks_once(&reference, &requester, &bytes, None).await;
+    }
+
+    /// A peer asked us DIRECTLY for a blob we hold — meaning they could not fetch it from any relay we
+    /// share. That is the only signal in the system that a STORED copy has gone bad, and until now
+    /// nothing listened to it: the backup ledger is write-once, so a relay copy that is missing chunks
+    /// stays missing forever while this device goes on showing the post as safely backed up.
+    ///
+    /// Throttled to once an hour per ref — an unreachable peer re-asks on a timer, and a re-verify
+    /// must never become a re-upload storm. Deliberately not a FORCED backup: this is a probe, and it
+    /// re-uploads only the windows a destination actually turns out to lack (see
+    /// [`Self::completeness_probe_key`]). Apple parity: `FeedStore.reverifyBackupAfterDirectAsk`;
+    /// Android: `reverifyBackupAfterDirectAsk`.
+    async fn reverify_backup_after_direct_ask(self: &Arc<Self>, reference: &str) {
+        const INTERVAL_MS: u64 = 3_600_000;
+        let now = now_ms();
+        {
+            let mut st = self.dyn_state.lock().unwrap();
+            if let Some(at) = st.backup_reverified_at.get(reference) {
+                if now.saturating_sub(*at) < INTERVAL_MS {
+                    return;
+                }
+            }
+            st.backup_reverified_at.insert(reference.to_string(), now);
+            if st.backup_reverified_at.len() > 2_000 {
+                st.backup_reverified_at.clear();
+            }
+        }
+        // The circle whose feed references this blob — the one whose relays should hold its bytes.
+        let mut circle_id: Option<String> = None;
+        'outer: for c in self.social.circles() {
+            for item in self.social.feed(c.id.clone(), now_ms(), None) {
+                let hit = item.media.iter().any(|m| m == reference)
+                    || item.comments.iter().any(|cm| cm.media.iter().any(|m| m == reference));
+                if hit {
+                    circle_id = Some(c.id.clone());
+                    break 'outer;
+                }
+            }
+        }
+        let Some(circle_id) = circle_id else { return };
+        self.forget_media_backed_up_ref(reference); // the verdict we're re-testing
+        log::info!(
+            "media REQ {}: asked directly for media we backed up — re-probing its relay copies",
+            &reference[..reference.len().min(10)]
+        );
+        self.upload_media(&circle_id, reference).await;
     }
 
     /// Frame 33 — a RESUME request carrying a bitmap of what the requester already holds, so the

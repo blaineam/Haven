@@ -73,7 +73,25 @@ struct PostMediaView: View {
     #endif
 
 
-    var singleMediaMaxHeight: CGFloat { isPortraitPhone ? 680 : 460 }
+    /// How tall a full-width media page may get, expressed as the page's MINIMUM ASPECT rather than
+    /// a point height — which is the whole point of it.
+    ///
+    /// The cap used to be a flat 460pt on anything that wasn't a portrait phone, and an absolute
+    /// height does not survive a wide window. At the ~820pt of card width a normal Mac window gives,
+    /// a 460pt page is 1.78:1 — so EVERY clip narrower than that (3:2, 4:3, 1:1) was fitted by its
+    /// HEIGHT and drew blurred pillars either side while there was width going spare. A 4:3 video
+    /// rendered 613pt wide inside an 820pt page: 103pt of blur down each edge, for nothing. The
+    /// phone never showed it because 360/1.33 = 270pt never reaches ITS 680 cap, so the defect
+    /// scaled in with the window and read as "sometimes".
+    ///
+    /// As an aspect the rule is width-independent: the page is as tall as the media needs until it
+    /// would be taller than this, so only genuinely tall media letterboxes. 4:3 → fills the width.
+    var minPageAspect: CGFloat { isPortraitPhone ? 0.8 : 1.1 }
+
+    /// A hard ceiling on top of `minPageAspect`, because the aspect rule alone scales without bound:
+    /// on a maximised 1600pt window a 4:3 clip would ask for a 1200pt page and one post would fill
+    /// more than a screen. Generous enough that a normal window never reaches it.
+    var singleMediaMaxHeight: CGFloat { isPortraitPhone ? 680 : 820 }
 
     @MainActor final class PlayerBag {
         /// Identity of this CARD INSTANCE's cache. Two creations for one clip with DIFFERENT bag ids
@@ -100,9 +118,12 @@ struct PostMediaView: View {
         MediaVariants.displayRefs(item.media).filter { SharedLocation.parse($0) == nil }
     }
 
+    /// `max(aspect, minPageAspect)`, NOT the raw aspect: a page is allowed to be as tall as the media
+    /// wants right up to the point where it would be taller than `minPageAspect` — so anything wider
+    /// than that fills the card edge to edge and never pillarboxes. See `minPageAspect`.
     func pageHeight(_ aspect: CGFloat) -> CGFloat {
         guard mediaWidth > 0 else { return singleMediaMaxHeight }
-        return min(singleMediaMaxHeight, mediaWidth / aspect)
+        return min(singleMediaMaxHeight, mediaWidth / max(aspect, minPageAspect))
     }
 
     func pageAspect(_ aspect: CGFloat) -> CGFloat {
@@ -624,14 +645,39 @@ struct BlurredMediaBackdrop: View {
             // surface (the "background blur is just black on my iPhone" report). The front tile
             // never broke because FeedImage keeps its decode's return value; now the backdrop is
             // exactly as pressure-proof.
-            let decoded = await MediaStore.shared.thumbnailAsync(ref, maxDimension: 200)
-            guard !Task.isCancelled else { return }
-            img = Self.cachedSource(ref) ?? decoded
-            // Decode failed outright (e.g. a video poster not generated yet): leave loadedRef nil
-            // so a later .task re-run retries instead of pinning an empty backdrop.
-            loadedRef = img == nil ? nil : ref
+            //
+            // RETRY UNTIL IT LANDS. This used to be a single attempt that, on failure, left
+            // `loadedRef` nil "so a later .task re-run retries" — a promise nothing kept. `.task(id:)`
+            // fires on appear and when its id changes, `ref` never changes, and this view observes
+            // nothing, so there was no later run. Meanwhile the two ordinary ways to fail are both
+            // TRANSIENT: `thumbnailAsync` returns nil the moment the bytes aren't on disk yet, and a
+            // video's poster generation can fail outright when VideoToolbox is out of decode sessions.
+            // So any card built before its media arrived drew a flat letterbox — the card's pure-black
+            // dark-mode surface — for the life of that card instance, and scrolling it off-screen and
+            // back (which rebuilds it in the LazyVStack, re-running this) was the only repair. That is
+            // the "some posts have no background blur" report, and why it looked random: it depended
+            // purely on whether the bytes beat the card.
+            //
+            // A widening delay, bounded. Each round is a cache peek plus one decode attempt, and only
+            // for cards that have NO backdrop — a card that already drew one returned above. When the
+            // card scrolls away the task is cancelled and the loop ends with it.
+            for attempt in 0..<Self.loadRetryDelays.count {
+                let decoded = await MediaStore.shared.thumbnailAsync(ref, maxDimension: 200)
+                guard !Task.isCancelled else { return }
+                if let found = Self.cachedSource(ref) ?? decoded {
+                    img = found; loadedRef = ref
+                    return
+                }
+                // Nothing to blur YET. Wait and ask again — the media is very likely still downloading.
+                try? await Task.sleep(for: .seconds(Self.loadRetryDelays[attempt]))
+                guard !Task.isCancelled else { return }
+            }
         }
     }
+
+    /// Backoff between backdrop load attempts, in seconds. Runs ~2 minutes in total and then stops:
+    /// past that the media is not "still arriving", and a card the user scrolls back to starts over.
+    private static let loadRetryDelays: [Double] = [1, 2, 3, 5, 8, 12, 20, 30, 40]
 
     /// The bitmap to blur. Falls back through sizes because the 64px thumb ALONE is not dependable: it
     /// lives in an NSCache that evicts under pressure (the backdrop would vanish from a post that had

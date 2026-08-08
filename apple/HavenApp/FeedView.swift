@@ -170,7 +170,15 @@ enum MediaFetchBackoff {
         return nowMs() >= e.due
     }
     /// True once every round has been spent — the caller moves the ref to `unavailableMedia`.
-    static func exhausted(_ ref: String) -> Bool { (map[ref]?.n ?? 0) > steps.count }
+    ///
+    /// `>=`, not `>`. `n` counts attempts MADE, and `recordAttempt` applies `steps[min(n-1, last)]`,
+    /// so at `n == steps.count` all four gaps have been used and the ladder is finished — which is
+    /// exactly what the schedule above says ("90s → 5m → 30m → 6h, then parked"). `>` demanded a
+    /// FIFTH attempt before parking, and that attempt can only happen after the 6h gap elapses. The
+    /// effect was a six-hour dead zone per ref: too spent to be due, not spent enough to count as
+    /// exhausted, so nothing retried it and nothing offered it the end state either. A stuck video
+    /// sat in that window with a fix for it already shipped and unreachable.
+    static func exhausted(_ ref: String) -> Bool { (map[ref]?.n ?? 0) >= steps.count }
     /// Record an attempt (grows the gap by one step).
     static func recordAttempt(_ ref: String) {
         let n = (map[ref]?.n ?? 0) + 1
@@ -5633,7 +5641,24 @@ final class FeedStore: ObservableObject {
         // CURRENT recipient set, which is exactly what the request would have asked a peer to do.
         if authorShort.isEmpty || myNodeHex.lowercased().hasPrefix(authorShort.lowercased()) {
             guard let social, MediaStore.shared.has(ref) else {
-                HavenLog.sync("media-wanted \(ref.prefix(10)): mine but no plaintext — cannot re-seal")
+                // NO PLAINTEXT ON *THIS* DEVICE — which on a multi-device account is not the same as
+                // "there is nothing to ask for". It means asking the device that does have it.
+                //
+                // This used to log and give up, on the reasoning above that my own media needs
+                // nobody's permission. True of the ACCOUNT, false of the DEVICE: a post made on the
+                // phone leaves the Mac holding no bytes at all, so every ask for it died right here —
+                // including the one behind "Notify me when it's back", which therefore did nothing
+                // whatsoever on the one platform where the media was actually missing. The ask is the
+                // ordinary frame-3 media request, which now reaches my own devices (see askForMedia)
+                // and, on arrival, also prompts them to re-check the relay copy
+                // (`reverifyBackupAfterDirectAsk`) — so a stored copy that went bad gets repaired at
+                // the source rather than just streamed peer-to-peer this once.
+                HavenLog.sync("media-wanted \(ref.prefix(10)): MINE but no plaintext here — asking my other devices")
+                MediaWantedStore.shared.add(ref, manual: manual)
+                mediaReqCircle[ref] = circleId
+                var ask = Data(myNodeHex.utf8); ask.append(Data(ref.utf8))
+                liveDeliverToMyDevices(3, ask)
+                nearbyBroadcast(3, ask)
                 return
             }
             HavenLog.sync("media-wanted \(ref.prefix(10)): MINE — re-sealing locally, no peer needed")
@@ -6085,6 +6110,13 @@ final class FeedStore: ObservableObject {
     private static let fastSteps: [UInt64] = [5_000, 10_000, 20_000, 45_000, 90_000]
     private var fastReq: [String: (n: Int, due: UInt64)] = [:]
     private var fastMediaTimer: Timer?
+    /// Refs whose spent backoff has already been given its one free attempt this launch, and how many
+    /// such attempts are left overall — see the `exhausted` branch in `requestMissingMedia`.
+    private var retriedExhaustedThisLaunch: Set<String> = []
+    private var exhaustedRetryBudget = 24
+    /// Last resume ask per ref with a live, growing partial — the heartbeat that keeps a peer transfer
+    /// moving once the sender's one-pass serve ends. See the in-flight branch in `requestMissingMedia`.
+    private var resumeAskAt: [String: UInt64] = [:]
     private var thumbReqAt: [String: UInt64] = [:]   // thumbs: plain 90s throttle, no lanes
     private var lastMediaScanMs: UInt64 = 0
     /// Rotating pointer over non-active circles — one extra circle scanned per pass (bounded),
@@ -6134,8 +6166,16 @@ final class FeedStore: ObservableObject {
             let candidates: [String] = dataSaver
                 ? MediaVariants.dataSaverPrefetchRefs(item.media)
                 : item.media
+            // NOTE: `unopenableMedia` is deliberately NOT a gate here — it gates the RELAY half of
+            // `fetch` instead. The flag means "the stored copy we downloaded could not be decrypted",
+            // which is a statement about a relay blob and nothing else. Excluding the ref from the
+            // scan also silenced the PEER ask, which travels a different lane under a different key
+            // (the account-derived own-media key) and is frequently the one that works — so a relay
+            // copy sealed to a recipient set we're not in would kill an own-device transfer that was
+            // actively succeeding, mid-flight, and nothing ever re-asked. Observed exactly that: a
+            // peer transfer died at 823/1231 chunks the moment a relay copy failed to open.
             for ref in candidates where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref)
-                && !EvictedMediaStore.shared.contains(ref) && !unopenableMedia.contains(ref) {
+                && !EvictedMediaStore.shared.contains(ref) {
                 if missing[ref] == nil || fresh { missing[ref] = (circleId, fresh) }
             }
             // Thumb companions prefetch for EVERY post regardless of lane/data saver — ≤32KB by
@@ -6194,6 +6234,14 @@ final class FeedStore: ObservableObject {
             var payload = Data(myHex.utf8)          // 64-byte requester id
             payload.append(Data(ref.utf8))
             let directAsk = { self.askForMedia(ref: ref, myHex: myHex, plain: payload) }
+            // The relay's copy is present and undecryptable: re-pulling it repairs nothing and costs a
+            // full download every sweep — that is what this flag is for. It bounds the RELAY half
+            // only. The peer ask still goes out, because it carries different bytes under a different
+            // key and is exactly the lane that can still succeed here.
+            if unopenableMedia.contains(ref) {
+                directAsk()
+                return
+            }
             if hasMailbox {
                 downloadingMedia.insert(ref)   // honest placeholder: an AUTO restore IS a download
                 Task { @MainActor in
@@ -6244,10 +6292,59 @@ final class FeedStore: ObservableObject {
             var budget = ThermalPolicy.mediaBudget(12)
             for (ref, info) in missing where !info.fresh {
                 guard budget > 0 else { break }
+                // AN ACTIVE PEER TRANSFER OUTRANKS THE RELAY BACKOFF.
+                //
+                // The ladder below is about RELAY fetches — how long to wait before re-asking a store
+                // that hasn't got the bytes. A partial that is still GROWING is the opposite case: the
+                // bytes are arriving. But a serve is one pass over the file and then it ends, so the
+                // remainder only moves if we send another resume ask — and the backoff (or the
+                // one-attempt-per-launch rule below it) silences exactly that. Observed: an own-device
+                // transfer climbed 823 → 889 → 1101 of 1231 chunks and then stopped dead, with the
+                // sender online and holding the rest, because nothing was left to ask again.
+                //
+                // Throttled per ref so this is a heartbeat, not a flood; `askForMedia` sends frame 33
+                // with our bitmap, so each ask costs the sender only the windows we still lack.
+                if let partial = incoming[ref], !partial.got.isEmpty, partial.got.count < partial.total {
+                    let last = resumeAskAt[ref] ?? 0
+                    guard nowMs &- last >= 10_000 else { continue }
+                    resumeAskAt[ref] = nowMs
+                    if resumeAskAt.count > 500 { resumeAskAt = resumeAskAt.filter { missing[$0.key] != nil } }
+                    budget -= 1
+                    // It is visibly arriving — don't leave the card claiming it never will.
+                    unavailableMedia.remove(ref)
+                    HavenLog.net("media resume ref=\(ref.prefix(10)): \(partial.got.count)/\(partial.total) held — re-asking for the rest")
+                    var payload = Data(myHex.utf8); payload.append(Data(ref.utf8))
+                    askForMedia(ref: ref, myHex: myHex, plain: payload)
+                    continue
+                }
                 if MediaFetchBackoff.exhausted(ref) {
                     // Every round spent → the honest end state (placeholder offers Retry and
                     // Ask-for-it-back; a tap or fresh ingest clears the backoff and starts over).
-                    unavailableMedia.insert(ref)
+                    //
+                    // ONE FRESH ATTEMPT PER LAUNCH before parking it again. The schedule is persisted
+                    // on purpose — resetting it on every open was a steady heat source — but the
+                    // consequence was that a ref which spent its rounds was never tried again by
+                    // ANYTHING: not a new app version, not a relay coming back, not a different
+                    // network, not the author re-uploading. "It will never load" was literally true,
+                    // and only a manual tap could change it. That is also how a bug fixed in the code
+                    // stays invisible in the field: the repaired fetch path is gated shut upstream and
+                    // never runs. (Found exactly that way — a stuck video sat at n=4 while the fix for
+                    // it shipped underneath, untouched.)
+                    //
+                    // Bounded twice over: once per ref per launch (the set), and a small per-launch
+                    // budget so a library full of long-dead refs can't turn a cold start into a fetch
+                    // storm. The persisted schedule is deliberately NOT cleared — this is one extra
+                    // attempt, not a restart of the ladder.
+                    guard exhaustedRetryBudget > 0, retriedExhaustedThisLaunch.insert(ref).inserted else {
+                        unavailableMedia.insert(ref)
+                        continue
+                    }
+                    exhaustedRetryBudget -= 1
+                    budget -= 1
+                    HavenLog.relay("MEDIA-FETCH ref=\(ref.prefix(10)): rounds spent — one fresh attempt for this launch")
+                    // `unavailableMedia` is left alone: if this attempt works `mediaArrived` clears it,
+                    // and if it doesn't the placeholder never flickered out of its honest state.
+                    fetch(ref, circleId: info.circleId)
                     continue
                 }
                 guard MediaFetchBackoff.due(ref) else { continue }
@@ -6274,6 +6371,9 @@ final class FeedStore: ObservableObject {
         let haveLocal = MediaStore.shared.storagePath(for: ref).map { FileManager.default.fileExists(atPath: $0.path) } ?? false
         HavenLog.net("media REQ ref=\(ref.prefix(12)) have=\(haveLocal) from=\(requesterHex.prefix(8))")
         if let url = MediaStore.shared.storagePath(for: ref), FileManager.default.fileExists(atPath: url.path) {
+            // They had to come to US for bytes we already backed up — so a relay didn't serve them.
+            // That is a signal about our own backup, not just a request to answer. See below.
+            reverifyBackupAfterDirectAsk(ref)
             if servingNow.contains("\(ref)|\(requesterHex)") {
                 HavenLog.net("media REQ ref=\(ref.prefix(12)) — already streaming to \(requesterHex.prefix(8)), ignoring")
             } else if shouldServeNearby(ref, requester: requesterHex) {
@@ -6292,6 +6392,50 @@ final class FeedStore: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Refs whose relay backup a direct ask has already prompted us to re-check.
+    private var backupReverifiedAt: [String: UInt64] = [:]
+    /// Once an hour per ref. A peer that still can't fetch re-asks on a timer, and a re-verify must
+    /// never be allowed to become a re-upload storm.
+    private static let backupReverifyIntervalMs: UInt64 = 3_600_000
+
+    /// A peer asked us DIRECTLY for a blob we hold — meaning they could not fetch it from any relay
+    /// we share. That is the only signal in the system that a STORED copy has gone bad, and until now
+    /// nothing listened to it.
+    ///
+    /// `MediaBackupLedger` is write-once: a ref confirmed on a relay is never probed again. Right
+    /// while a stored blob is immutable and complete; wrong the moment one isn't. A relay copy that
+    /// is missing chunks stays missing forever — every reader stalls on the same absent window, and
+    /// this device goes on showing the post with a confident "backed up" tick. Re-probing on a direct
+    /// ask closes that loop with a signal that is cheap, rare, and exactly correlated with the failure.
+    ///
+    /// Deliberately NOT `force`: this is a probe. It re-uploads only the windows a destination turns
+    /// out to actually lack (see `holdsCompleteBlob`), and does nothing when every copy checks out.
+    @MainActor private func reverifyBackupAfterDirectAsk(_ ref: String) {
+        guard let social, !MediaStore.isSynthetic(ref) else { return }
+        let nowMs = now()
+        if let at = backupReverifiedAt[ref], nowMs &- at < Self.backupReverifyIntervalMs { return }
+        backupReverifiedAt[ref] = nowMs
+        if backupReverifiedAt.count > 2000 { backupReverifiedAt.removeAll() }
+        guard let cid = circleId(holding: ref) else { return }
+        MediaBackupLedger.forget(ref)   // the verdict we're re-testing
+        HavenLog.sync("media REQ \(ref.prefix(10)): asked directly for media we backed up — re-probing its relay copies")
+        Task { @MainActor in _ = await SharedStore.backup(ref: ref, circleId: cid, social: social) }
+    }
+
+    /// The circle whose feed references `ref` — the one whose relays are supposed to hold its bytes.
+    /// Only ever reached behind the hourly throttle above, so the feed walk is not a hot path.
+    private func circleId(holding ref: String) -> String? {
+        if let cid = mediaReqCircle[ref] { return cid }
+        guard let social else { return nil }
+        for c in circles {
+            for item in social.feed(circleId: c.id, nowMs: now(), viewerRetentionSecs: nil) {
+                if item.media.contains(ref) { return c.id }
+                if item.comments.contains(where: { $0.media.contains(ref) }) { return c.id }
+            }
+        }
+        return nil
     }
 
     /// Frame 33 — a RESUME request: `[requesterHex 64][u16 refLen][ref][u32 total][bitmap]`.
@@ -6361,14 +6505,23 @@ final class FeedStore: ObservableObject {
     /// An un-upgraded peer drops frame 33 on the floor and says nothing, so silence is the only signal
     /// we get. One bounded task per ref (never more — a peer re-requesting can't pile these up), and
     /// it does nothing at all if chunks did start arriving.
+    ///
+    /// MY OWN DEVICES GET THE ASK TOO. This used to fan out over iroh to `ContactsStore.contacts`
+    /// and nothing else — and your own phone is not a contact, it lives in the account's device
+    /// roster. So the only lane that ever carried an own-device media ask was the nearby (Multipeer)
+    /// mesh, which needs both devices on the same LAN and actually peered. When it isn't, a video
+    /// your phone is holding right there is unreachable from your Mac for as long as both sit open,
+    /// with no diagnosis anywhere: the fetch just kept "asking peers" that could never answer.
     @MainActor private func askForMedia(ref: String, myHex: String, plain: Data) {
         guard let resume = resumeAsk(ref: ref, myHex: myHex) else {
             nearbyBroadcast(3, plain)
             for contact in ContactsStore.shared.contacts { sendIroh(3, plain, to: contact.idHex) }
+            liveDeliverToMyDevices(3, plain)
             return
         }
         nearbyBroadcast(33, resume)
         for contact in ContactsStore.shared.contacts { sendIroh(33, resume, to: contact.idHex) }
+        liveDeliverToMyDevices(33, resume)
         guard resumeFallbackPending.insert(ref).inserted else { return }
         let before = incoming[ref]?.got.count ?? 0
         Task { @MainActor [weak self] in
@@ -6379,6 +6532,7 @@ final class FeedStore: ObservableObject {
             HavenLog.net("media RESUME ref=\(ref.prefix(12)): no answer to frame 33 — falling back to a full request")
             self.nearbyBroadcast(3, plain)
             for contact in ContactsStore.shared.contacts { self.sendIroh(3, plain, to: contact.idHex) }
+            self.liveDeliverToMyDevices(3, plain)
         }
     }
 
@@ -6476,6 +6630,22 @@ final class FeedStore: ObservableObject {
             // NearbyTransport is not Sendable; broadcast/backlog APIs are used from this exclusive
             // utility queue only for the duration of the serve (same process, serialized by us).
             nonisolated(unsafe) let mesh = nearby
+            // MY OWN DEVICES ALSO GET THE BYTES OVER IROH. This serve was nearby-ONLY while the
+            // friend path below has always mirrored each chunk to `node.sendToNode` — so own-device
+            // media had exactly one transport, the local Multipeer mesh, and off that LAN there was
+            // no way at all for one of your devices to hand a blob to another. Combined with the ask
+            // never reaching a sibling over iroh (see `askForMedia`), your own media between your own
+            // devices was strictly LAN-only, which is not how any other frame in this app behaves.
+            let ownTargets = myOtherDeviceTargets()
+            // BOUNDED in-flight iroh sends. This loop runs on a plain dispatch queue and cannot await,
+            // so each chunk's send is a detached Task — and without a gate a 1,231-chunk video spawns
+            // 1,231 of them as fast as the file reads, with no backpressure whatsoever. The link then
+            // drops what it can't keep up with, `try?` swallows every failure, and the transfer simply
+            // stops partway with nothing logged. (Observed: a serve that died at 823/1,231.) The
+            // semaphore turns the loop's own pace into the link's pace: it blocks once four sends are
+            // outstanding, which is the backpressure the nearby lane already gets from
+            // `broadcastWaiting`.
+            let irohGate = DispatchSemaphore(value: 4)
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 defer {
                     try? handle.close()
@@ -6488,11 +6658,27 @@ final class FeedStore: ObservableObject {
                     if chunk.isEmpty { break }
                     guard let sealed = try? AES.GCM.seal(chunk, using: ownKey).combined else { break }
                     let frame = Self.chunkFrame(refData: refData, index: index, total: total, sealed: sealed)
+                    let out = Data([5]) + frame
+                    // Every sibling, over iroh, alongside the mesh broadcast. The chunk is sealed with
+                    // the ACCOUNT-derived key, so only this user's own devices can open it however it
+                    // travelled — the two lanes carry identical bytes and whichever arrives first wins
+                    // at reassembly (chunks are content-addressed and idempotent).
+                    if let node, !ownTargets.isEmpty {
+                        irohGate.wait()
+                        Task.detached {
+                            defer { irohGate.signal() }
+                            for t in ownTargets { try? await node.sendToNode(nodeIdHex: t, payload: out) }
+                        }
+                    }
                     // Wait for rate tokens — do NOT abort mid-video after one miss (photos fit the
                     // burst; multi‑MB videos did not and left partial reassemblies).
-                    if mesh?.broadcastWaiting(Data([5]) + frame, class: .bulk, maxWaitMs: 8_000) != true {
-                        HavenLog.net("media serve ref=\(ref.prefix(12)): rate-limit give-up at chunk \(index)/\(total)")
-                        break
+                    //
+                    // A mesh give-up no longer ends the serve when iroh is carrying it too: with no
+                    // peer on the nearby mesh at all, `broadcastWaiting` fails on chunk 0 and the old
+                    // `break` abandoned the whole transfer — including the iroh copy that was working.
+                    if mesh?.broadcastWaiting(out, class: .bulk, maxWaitMs: 8_000) != true {
+                        HavenLog.net("media serve ref=\(ref.prefix(12)): nearby rate-limit at chunk \(index)/\(total)")
+                        if ownTargets.isEmpty { break }
                     }
                     // Soft backpressure: pause if Multipeer backlog is high, but keep going.
                     if mesh?.sendBacklogHigh == true {
